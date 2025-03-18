@@ -12,7 +12,7 @@ setup(
         'pylatexenc',
         'sentence_transformers',
         'tabulate',
-        'flash_attn==2.7.3',
+        'flash_attn==2.7.4.post1',
     ],
     classifiers=[
         'Programming Language :: Python :: 3',
