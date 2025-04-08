@@ -5,7 +5,7 @@ from rllm.tools.tool_base import Tool, ToolOutput
 
 TAVILY_EXTRACT_ENDPOINT = "https://api.tavily.com/extract"
 # https://docs.tavily.com/api-reference/endpoint/extract#body-extract-depth
-API_KEY = "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"
+API_KEY = ""
 
 class TavilyTool(Tool):
     """A tool for extracting data from websites."""

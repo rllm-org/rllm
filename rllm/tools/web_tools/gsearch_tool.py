@@ -8,8 +8,8 @@ DEFAULT_SEARCH_ENGINE_TIMEOUT = 5
 GOOGLE_SEARCH_ENDPOINT = "https://customsearch.googleapis.com/customsearch/v1"
 
 # Must enter secret key and engine id https://programmablesearchengine.google.com/controlpanel/all
-SECRET_KEY = "AIzaSyA1_YocnfEeQ2K1xCvydDktKpk1uE0rXsA"
-ENGINE_ID = "04fd2a07df5174d1a"
+SECRET_KEY = ""
+ENGINE_ID = ""
 
 class GoogleSearchTool(Tool):
     """A tool for searching google."""

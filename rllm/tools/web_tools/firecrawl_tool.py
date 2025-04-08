@@ -10,7 +10,7 @@ except ImportError as e:
 
 from rllm.tools.tool_base import Tool, ToolOutput
 
-FIRECRAWL_API = "fc-d8febd83305d4e3c9381fe043ade5cef"
+FIRECRAWL_API = ""
 TIMEOUT = 10
 
 class FirecrawlTool(Tool):
