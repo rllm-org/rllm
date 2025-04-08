@@ -4,7 +4,7 @@ set -x
 ulimit -n 1048576 
 # Warning: Export VLLM_ATTENTION_BACKEND on every machine before starting Ray cluster.
 # vLLM without XFORMERS will results in CUDA errors.
-export VLLM_ATTENTION_BACKEND=FLASH_ATTN
+export VLLM_ATTENTION_BACKEND=XFORMERS
 export VLLM_ENGINE_ITERATION_TIMEOUT_S=1000000000
 
 # Parse command line arguments
@@ -72,5 +72,4 @@ python3 -m verl.trainer.main_ppo_async \
     trainer.save_freq=10 \
     trainer.test_freq=10 \
     trainer.default_hdfs_dir=null \
-    trainer.remove_previous_ckpt_in_save=False \
     trainer.total_epochs=30 "${@:1}"

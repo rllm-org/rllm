@@ -96,7 +96,7 @@ def main(config):
         total_samples = len(dataset)
         # real_batch_size = data.batch['input_ids'].shape[0]
         config_batch_size = config.data.batch_size
-        dp_size = wg.world_size // config.rollout.tensor_model_parallel_size
+        dp_size = wg.world_size
         num_batch = (total_samples // config_batch_size) + 1
         output_lst = []  # We'll reshape at the end
 

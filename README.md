@@ -117,12 +117,12 @@ We welcome the community to try out different models, context legnths, and RL pa
 
 Our evaluation scripts automatically runs many replicas of vLLM. To run our evaluation scripts, run:
 ```bash
-./scripts/eval/eval_model.sh --model [CHECKPOINT_PATH] --datasets [DATASET1] [DATASET2] --output-dir [OUTPUT_DIR]
+./scripts/eval/eval_model.sh --model [CHECKPOINT_PATH] --datasets [DATASET1] [DATASET2] --output-dir [OUTPUT_DIR] --n [N_PASSES] --tp [TENSOR_PARALLEL_SIZE] --max-length [MAX_CONTEXT_LENGTH]
 ```
 
-To run our Deepcoder/Deepscaler evaluation, see `scripts/eval/README.md`.
+To replicate our Deepcoder/Deepscaler evaluation, see `scripts/eval/README.md`.
 
-## Results
+## Results ✅
 
 ### DeepCoder
 
@@ -130,15 +130,15 @@ We evaluate `Deepcoder-14B-Preview` on LiveCodeBench (LCB), Codeforces, and Huma
 
 | **Model** | LCB (8/1/24-2/1/25) | Codeforces Rating | Codeforces Percentile | HumanEval+ Pass@1 | AIME 2024 |
 | --- | --- | --- | --- | --- | --- |
-| **DeepCoder-14B-Preview (ours)** | ***60.6*** | ***1936*** | ***95.3*** | ***92.6*** | **73.8** |
+| **DeepCoder-14B-Preview (ours)** | ***60.6*** | ***1936*** | ***95.3*** | ***92.6*** | ***73.8*** |
 | **DeepSeek-R1-Distill-Qwen-14B** | 53.0 | 1791 | 92.7 | 92.0 | 69.7 |
 | **O1-2024-12-17 (Low)** | 59.5 | **1991** | **96.1** | 90.8 | **74.4** |
 | **O3-Mini-2025-1-31 (Low)** | **60.9** | 1918 | 94.9 | 92.6 | 60.0 |
 | **O1-Preview** | 42.7 | 1658 | 88.5 | 89 | 40.0 |
 | **Deepseek-R1** | 62.8 | 1948 | 95.4 | 92.6 | 79.8 |
 | **Llama-4-Behemoth** | 49.4 | - | - | - | - |
-| **DeepCoder-1.5B-Preview** | 25.1 | 963 | 28.5 | 73.0 |
-| **Deepseek-R1-Distill-Qwen-1.5B** | 16.9 | 615 | 1.9 | 58.3 |
+| **DeepCoder-1.5B-Preview** | 25.1 | 963 | 28.5 | 73.0 | 43.1 |
+| **Deepseek-R1-Distill-Qwen-1.5B** | 16.9 | 615 | 1.9 | 58.3 | 28.8 |
 
 ### DeepScaler
 
