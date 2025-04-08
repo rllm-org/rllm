@@ -68,7 +68,7 @@ pip install -e .
 ### Data
 Our raw training data is in `rllm/data/[train|test]/[code|math]/`, along with preprocessing scripts in `rllm/data/preprocess`. To convert the raw data into Parquet files for training, run:
 
-```python
+```bash
 # Download datasets from GDrive, populates rllm/data/[train|test]/[math|code]/*.json
 python scripts/data/download_datasets.py
 
