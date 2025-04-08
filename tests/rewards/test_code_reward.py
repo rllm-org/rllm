@@ -419,7 +419,7 @@ def test_longest_subsequence_empty_list():
 
 if __name__ == "__main__":
     test_reward_code_contests()
-    # test_reward_leetcode()
+    test_reward_leetcode()
     test_reward_taco()
     test_reward_codeforces()
     test_reward_livecodebench()
