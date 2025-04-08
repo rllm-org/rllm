@@ -32,6 +32,8 @@ setup(
         'e2b_code_interpreter',
         'firecrawl',
         'wandb',
+        'together',
+        'openai',
     ],
     classifiers=[
         'Programming Language :: Python :: 3',

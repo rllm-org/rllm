@@ -27,6 +27,8 @@ class RewardConfig:
     # Bonus reward for calling tools.
     toolcall_bonus: float = 0.5
 
+    # Toggle for using Together Code Interpreter
+    use_together_code_interpreter: bool = False
 
 class RewardType(Enum):
     """

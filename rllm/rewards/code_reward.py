@@ -8,9 +8,9 @@ import multiprocessing
 import re
 import time
 from multiprocessing import Manager
-from typing import List, Dict, Union
+from typing import List, Dict, Union, Any
 import random
-import ast 
+import ast
 
 #from rllm.rewards.code_utils.code_contests import run_test as code_contests_run_test
 from rllm.rewards.code_utils.livecodebench import run_test as lcb_run_test
@@ -20,6 +20,8 @@ from rllm.rewards.code_utils.humanevalplus import run_test as humanevalplus_run_
 from rllm.rewards.code_utils.taco import run_test as taco_run_test
 from rllm.rewards.code_utils.firejail_exec import code_exec_firejail as lc_code_exec
 from rllm.rewards.code_utils.kodcode import code_exec as kod_code_exec
+from rllm.tools.code_tools.together_tool import TogetherCodeTool
+from rllm.tools.code_tools.code_tool import CodeTool
 from rllm.rewards.reward_types import RewardConfig, RewardFn, RewardInput, RewardOutput, RewardType
 
 
@@ -152,7 +154,7 @@ def postprocess_lcb_sample(sample):
     return sample
 
 # https://huggingface.co/datasets/PrimeIntellect/verifiable-coding-problems
-def primeintellect_check_correctness(tests, code):
+def primeintellect_check_correctness(tests, code, use_tci=False):
     if isinstance(tests, str):
         try:
             tests =  ast.literal_eval(tests)
@@ -172,6 +174,11 @@ def primeintellect_check_correctness(tests, code):
     }
     if fn_name:
         tests['fn_name'] = fn_name
+
+    if use_tci:
+        codetool = TogetherCodeTool()
+        return codetool_check_correctness(tests, code, codetool, is_taco_format=True)
+
     return check_correctness(tests, code, taco_run_test)
 
 def lcb_check_correctness_v2(sample, generation, timeout=6, debug=False):
@@ -277,6 +284,56 @@ def humanevalplus_check_correctness(test: str, code: str, timeout_per_test: int 
         print(f"Error in code execution: {output}")
     return succ
 
+def taco_to_lcb_format(tests):
+    """
+    Given a dictionary with keys "inputs" and "outputs", returns a list of test cases.
+    Each test case is a dictionary with keys "input" and "output". If the lists are unequal,
+    missing entries are filled by reusing the first element of the shorter list.
+    
+    Args:
+        data (dict): A dictionary with keys "inputs" and "outputs", each mapped to a list of strings.
+    
+    Returns:
+        list of dict: A list where each element is a dict with keys "input" and "output".
+    """
+    inputs = tests.get("inputs", [])
+    outputs = tests.get("outputs", [])
+    
+    # Determine the number of test cases to create.
+    n = max(len(inputs), len(outputs))
+    
+    test_cases = []
+    for i in range(n):
+        # Use the first element as a fallback if the list is shorter than n.
+        inp = inputs[i] if i < len(inputs) else (inputs[0] if inputs else "")
+        out = outputs[i] if i < len(outputs) else (outputs[0] if outputs else "")
+        test_cases.append({"input": inp, "output": out})
+    
+    return test_cases
+
+def codetool_check_correctness(tests: Any, code: str, codetool: CodeTool, is_taco_format=True, timeout=30) -> bool:
+    from rllm.tools.utils import stdin_test_code_wrapper, call_based_test_code_wrapper
+
+    fn_name = None
+    call_based = False
+
+    if isinstance(tests, dict) and "fn_name" in tests:
+        call_based = True
+        fn_name = tests.get("fn_name", None)
+    
+    new_tests = taco_to_lcb_format(tests) if is_taco_format and not fn_name else tests
+
+    if call_based:
+        test_wrapped_code = call_based_test_code_wrapper(code, new_tests)
+    else:
+        test_wrapped_code = stdin_test_code_wrapper(code, new_tests)
+
+    tool_response = codetool(code=test_wrapped_code, timeout=timeout)
+    if tool_response.error:
+        print(f"Error in code execution: {tool_response.error}")
+        return False
+    return True
+
 class RewardCodeFn(RewardFn):
     """
     Reward function for evaluating code dataset answers.
@@ -304,21 +361,24 @@ class RewardCodeFn(RewardFn):
             # print("No code found in model response")
             return RewardOutput(reward=self.config.format_error_reward, is_correct=False)
 
+        if self.config.use_together_code_interpreter:
+            codetool = TogetherCodeTool()
+
         # Tests: List[Dictionary] - Codeforces, LiveCodeBench
         # Tests: Dictionary[Lists] - CodeContests, Taco/Apps
         is_correct = False
         if dataset_name in ["taco", "apps", "code_contests"]:
-            test_fn = taco_run_test
-            is_correct = check_correctness(tests, model_code, test_fn)
-        elif dataset_name == "codeforces":
-            test_fn = codeforces_run_test
-            is_correct = check_correctness(tests, model_code, test_fn)
+            if self.config.use_together_code_interpreter:
+                is_correct = codetool_check_correctness(tests, model_code, codetool, is_taco_format=True)
+            else:
+                test_fn = taco_run_test
+                is_correct = check_correctness(tests, model_code, test_fn)
         elif dataset_name == "leetcode":
             is_correct = leetcode_check_correctness(tests, model_code)
-        elif dataset_name == "livecodebench":
+        elif dataset_name in ["livecodebench", "codeforces"]:
             is_correct = lcb_check_correctness_v2(tests, model_code, debug=False)
         elif dataset_name == "primeintellect":
-            is_correct = primeintellect_check_correctness(tests, model_code)
+                is_correct = primeintellect_check_correctness(tests, model_code, self.config.use_together_code_interpreter)
         elif dataset_name == "kodcode":
             is_correct = kodcode_check_correctness(tests, model_code)
         elif dataset_name == "humanevalplus":
@@ -335,7 +395,7 @@ class RewardCodeFn(RewardFn):
             return RewardOutput(reward=self.config.incorrect_reward, is_correct=False)
 
 def rllm_reward_fn_code(data_source: str, llm_solution: str, ground_truth: Dict, **kwargs):
-    """Evaluate code solutions against ground truth ansters
+    """Evaluate code solutions against ground truth answers
     
     This function creates a reward function to evaluate code solutions by pass the test_case from groun_truth. It can optionally use a language model
     for more sophisticated answer validation.
