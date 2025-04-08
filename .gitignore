@@ -177,4 +177,24 @@ cython_debug/
 **/outputs/
 **/wandb/
 **/checkpoints/
-data/*
+
+# Ignore parquet files.
+data/* 
+
+rllm/data/preprocess/*.json
+rllm/data/preprocess/code/*.json
+rllm/data/preprocess/math/*.json
+tmp/
+
+# Ignore debug logs and run result logs
+logs/
+
+# Ignore the big datasets
+rllm/data/test/code/taco.json
+rllm/data/train/code/taco.json
+rllm/data/train/math/olympiad.json
+rllm/data/test/code/livecodebench.json
+rllm/data/train/code/livecodebench.json
+rllm/data/train/code/kodcode.json
+rllm/data/train/code/primeintellect.json
+rllm/data/train/code/primeintellect_dedupe.json

@@ -13,8 +13,8 @@ import pandas as pd
 from verl.utils.hdfs_io import copy, makedirs
 from verl.utils.reward_score.math import last_boxed_only_string, remove_boxed
 
-from deepscaler.data.utils import load_dataset
-from deepscaler.data.dataset_types import TrainDataset, TestDataset
+from rllm.data.utils import load_dataset
+from rllm.data.dataset_types import TrainDataset, TestDataset
 
 
 def extract_solution(solution_str: str) -> str:
@@ -38,9 +38,12 @@ def make_map_fn(split: str):
     Returns:
         Function that processes individual dataset examples
     """
-    def process_fn(example: Dict[str, Any], idx: int) -> Optional[Dict[str, Any]]:
+    def process_fn(example: Dict[str, Any], idx: int, instruction: str = None) -> Optional[Dict[str, Any]]:
         question = example.pop('problem')
-        instruction = "Let's think step by step and output the final answer within \\boxed{}."
+        
+        if instruction is None:
+            instruction = "Let's think step by step and output the final answer within \\boxed{}."
+        
         question = f"{question} {instruction}"
         answer = example.pop('answer')
 
@@ -66,7 +69,7 @@ def make_map_fn(split: str):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Process datasets for DeepScaler training')
-    parser.add_argument('--local_dir', default=os.path.expanduser('~/deepscaler/data'),
+    parser.add_argument('--local_dir', default=os.path.expanduser('~/rllm/data'),
                        help='Local directory to save processed datasets')
     parser.add_argument('--hdfs_dir', default=None,
                        help='Optional HDFS directory to copy datasets to')
@@ -76,12 +79,12 @@ if __name__ == '__main__':
     hdfs_dir = args.hdfs_dir
     
     # Make local directory if it doesn't exist
-    makedirs(local_dir)
+    makedirs(local_dir, exist_ok=True)
 
     # Initialize datasets
-    train_datasets = [TrainDataset.DEEPSCALER]
+    train_datasets = [TrainDataset.Math.DEEPSCALER_7B]
     train_dataset = load_dataset(train_datasets[0])
-    test_datasets = [TestDataset.AIME, TestDataset.AMC, TestDataset.MATH, TestDataset.MINERVA, TestDataset.OLYMPIAD_BENCH]
+    test_datasets = [TestDataset.Math.AIME, TestDataset.Math.AMC, TestDataset.Math.MATH, TestDataset.Math.MINERVA, TestDataset.Math.OLYMPIAD_BENCH]
     
     test_datasets_data = [load_dataset(d) for d in test_datasets]
 
