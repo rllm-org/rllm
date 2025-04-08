@@ -11,8 +11,8 @@
 
 <div align="center">
 
-[![Github](https://img.shields.io/badge/DeepScaleR-000000?style=for-the-badge&logo=github&logoColor=000&logoColor=white)](https://github.com/agentica-project/rllm)
-[![Website](https://img.shields.io/badge/Notion-%23000000.svg?style=for-the-badge&logo=notion&logoColor=white)](https://pretty-radio-b75.notion.site/DeepScaleR-Surpassing-O1-Preview-with-a-1-5B-Model-by-Scaling-RL-19681902c1468005bed8ca303013a4e2) 
+[![Github](https://img.shields.io/badge/RLLM-000000?style=for-the-badge&logo=github&logoColor=000&logoColor=white)](https://github.com/agentica-project/rllm)
+[![Website](https://img.shields.io/badge/Site-%23000000.svg?style=for-the-badge&logo=semanticweb&logoColor=white)](https://www.agentica-project.com) 
 [![Twitter](https://img.shields.io/badge/Agentica-white?style=for-the-badge&logo=X&logoColor=000&color=000&labelColor=white)](https://x.com/Agentica_)
 [![Hugging Face Collection](https://img.shields.io/badge/Agentica-fcd022?style=for-the-badge&logo=huggingface&logoColor=000&labelColor)](https://huggingface.co/agentica-org)
 
@@ -25,12 +25,13 @@
 
 rLLM is an open-source project to fully democratize reinforcement learning (RL) for LLMs and reproduce DeepSeek R1 and OpenAI O1/O3 at scale on real tasks. For all releases, we open source all our efforts here-including training scripts (including hyperparameters), models, systems, dataset, and logs. 
 
-## Releases  📰
-
+<div align="center">
 <img src="figures/deepcoder.png" width="60%" />
 
 <sub>*Figure 1: DeepCoder's LiveCodeBench (LCB) score as training progresses. At step 180, context length is extended to 32K. The best 32K checkpoint is used for inference-time scaling to 64K, achieving 60.6% LCB—matching o3-mini's performance. For more details, see our [blog post](https://pretty-radio-b75.notion.site/DeepCoder-A-Fully-Open-Source-14B-Coder-at-O3-mini-Level-1cf81902c14680b3bee5eb349a512a51).*</sub>
+</div>
 
+## Releases  📰
 
 <strong>[2025/04/08]</strong> We release `DeepCoder-14B-Preview`, a 14B model that achieves an impressive **60.6%** Pass@1 accuracy on LiveCodeBench (+8% improvement), matching the performance of `o3-mini-2025-01-031 (Low)` and `o1-2024-12-17`. As part of this release, we open-source:
 - ⬆️ An In-Depth Blog Post on our [Training Recipe and Insights](https://pretty-radio-b75.notion.site/DeepScaleR-Surpassing-O1-Preview-with-a-1-5B-Model-by-Scaling-RL-19681902c1468005bed8ca303013a4e2)
@@ -39,11 +40,6 @@ rLLM is an open-source project to fully democratize reinforcement learning (RL) 
 - 📄 [Training Scripts](https://github.com/agentica-project/rllm/tree/main/scripts/deepcoder/train)—Exact hyperparameters we used to achieve `o3-mini` performance.
 - 📈 [Wandb Training Logs](https://wandb.ai/mluo/deepcoder)—All training runs and ablations.
 - 🔎 [Evaluation Logs](https://drive.google.com/file/d/1tr_xXvCJnjU0tLO7DNtFL85GIr3aGYln/view?usp=sharing)—LiveCodeBench and Codeforces logs for DeepCoder.
-
-
-<img src="figures/deepscaler.png" width="60%" />
-
-<sub>*Figure 1: DeepScaleR 1.5B model's Pass@1 accuracy on AIME2024 as RL training progresses. At step 1040 and 1520, the context length is extended to 16K and 24K. For more details, see our [blog post](https://pretty-radio-b75.notion.site/DeepScaleR-Surpassing-O1-Preview-with-a-1-5B-Model-by-Scaling-RL-19681902c1468005bed8ca303013a4e2).*</sub>
 
 <strong>[2025/02/10]</strong> We release `DeepScaleR-1.5B-Preview`, a 1.5B model that surpasses O1-Preview and achieves <strong>43.1% Pass@1</strong> on AIME. We achieve this by iteratively scaling Deepseek's GRPO algorithm from 8K→16K->24K context length for thinking. As part of this release, we open-source:
 
@@ -59,7 +55,11 @@ rLLM is an open-source project to fully democratize reinforcement learning (RL) 
 ## Getting Started 🎯
 ### Installation
 ```bash
-# Recommend Python 3.10.
+# Installing Python 3.10 Environment.
+conda create -n rllm python=3.10 -y
+conda activate rllm
+
+# Installing RLLM dependencies.
 cd rllm
 pip install -e ./verl
 pip install -e .
@@ -111,7 +111,7 @@ ray start --address=[RAY_ADDRESS]
 # Run 16K or 24K context length training
 ./scripts/[deepscaler|deepcoder]/train/[file].sh --model [CHECKPOINT_PATH]
 ```
-We welcome the community to try out different models, context legnths, and RL parameters in our provided training scripts!
+We welcome the community to try out different models, context lengths, and RL parameters in our provided training scripts!
 
 ## Evaluation
 
@@ -155,11 +155,20 @@ We report Pass@1 accuracy averaged over 16 samples for each problem. Notably, ou
 | <strong>DeepScaleR-1.5B-Preview</strong> | <strong>43.1</strong> | <strong>87.8</strong> | <strong>73.6</strong> | 30.2 | <strong>50.0</strong> | <strong>57.0</strong> |
 | O1-Preview | 40.0 | 81.4 | - | - | - | - |
 
+We also show the validation curve during training:
+
+
+<div align="center">
+  <img src="figures/deepscaler.png" width="60%" />
+
+  <sub>*Figure 1: DeepScaleR 1.5B model's Pass@1 accuracy on AIME2024 as RL training progresses. At step 1040 and 1520, the context length is extended to 16K and 24K. For more details, see our [blog post](https://pretty-radio-b75.notion.site/DeepScaleR-Surpassing-O1-Preview-with-a-1-5B-Model-by-Scaling-RL-19681902c1468005bed8ca303013a4e2) .*</sub>
+</div>
+
 ## Acknowledgements
 
 - Our training experiments are powered by our heavily modified fork of [verl](https://github.com/volcengine/verl), an open-source RLHF library.
 - Our model is trained on top of [`DeepSeek-R1-Distill-Qwen-1.5B`](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B) and [`DeepSeek-R1-Distill-Qwen-14B`](https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-14B).
-- Our work is done as part of  [Berkeley Sky Computing Lab](https://skycomputing.berkeley.edu/) and [Berkeley AI Research](https://bair.berkeley.edu/).
+- Our work is done as part of  [Berkeley Sky Computing Lab](https://skycomputing.berkeley.edu/), [Berkeley AI Research](https://bair.berkeley.edu/), and a successful collaboration with Together AI.
 
 
 ## Citation
