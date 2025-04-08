@@ -113,7 +113,7 @@ if __name__ == '__main__':
     # Save training dataset
     print("train data size:", len(train_data))
     train_df = pd.DataFrame(train_data)
-    train_df.to_parquet(os.path.join(local_dir, 'train.parquet'))
+    train_df.to_parquet(os.path.join(local_dir, 'deepscaler_train.parquet'))
 
     # Optionally copy to HDFS
     if hdfs_dir is not None:

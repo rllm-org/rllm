@@ -31,6 +31,7 @@ setup(
         'vertexai',
         'e2b_code_interpreter',
         'firecrawl',
+        'wandb',
     ],
     classifiers=[
         'Programming Language :: Python :: 3',
