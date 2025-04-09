@@ -71,20 +71,18 @@ class TogetherCodeTool(CodeTool):
             stdout = ""
             stderr = ""
             output = ""
+            error = None
             
             for output_item in response.data.outputs:
                 if output_item.type == "stdout":
                     stdout += output_item.data + "\n"
                 elif output_item.type == "stderr":
                     stderr += output_item.data + "\n"
+                elif output_item.type == "error":
+                    error = output_item.data
+                    stderr += output_item.data + "\n"
                 else:
                     output += str(output_item.data) + "\n"
-            
-            # Handle errors
-            error = None
-            if response.data.errors:
-                error = str(response.data.errors)
-                stderr += error + "\n"
             
             # Return formatted output
             return CodeToolOutput(
@@ -116,4 +114,27 @@ class TogetherCodeTool(CodeTool):
 
 if __name__ == "__main__":
     tool = TogetherCodeTool()
-    print(tool("print('Hello, world!')"))
+    code = """
+import sys
+from io import StringIO
+# Save the original stdin
+original_stdin = sys.stdin
+
+# Create a StringIO object with some test data
+fake_input = StringIO("This is line 1\\n")
+
+# Replace sys.stdin with our StringIO object
+sys.stdin = fake_input
+
+input = lambda : sys.stdin.readline().strip()
+
+# Now any code that reads from stdin will read from our StringIO
+print("Reading from fake stdin:")
+line = input()
+print(f"Read line: {line}")
+
+# Restore the original stdin
+sys.stdin = original_stdin
+print("Stdin restored to original")
+"""
+    print(tool(code))

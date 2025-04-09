@@ -96,3 +96,66 @@ def is_same_tree(p: Optional[TreeNode], q: Optional[TreeNode]) -> bool:
         return False
     return p.val == q.val and is_same_tree(p.left, q.left) and is_same_tree(p.right, q.right)
 """
+
+TOGETHER_IMPORTS = """
+from itertools import accumulate, chain, combinations, count, permutations, product, groupby, islice, repeat
+from copy import deepcopy
+from string import ascii_lowercase, ascii_uppercase
+from math import floor, log2, log10, sqrt, comb, gcd, ceil, inf, isqrt, factorial, atan2, pi
+from collections import defaultdict, deque, Counter
+from bisect import bisect, bisect_left, bisect_right, insort
+from heapq import heappush, heappop, heapify, merge, nlargest, nsmallest, heapreplace
+from functools import reduce, lru_cache, cmp_to_key, partial
+from random import randrange, shuffle
+from operator import itemgetter, sub, xor, or_
+from re import search as re_search  # Assuming 're' refers to a regex search
+from os.path import commonprefix
+from typing import List, Tuple, Dict, Set, Optional, Union, Any, Callable, Iterable, Iterator, Generator, Deque
+import copy
+import string
+import math
+import collections
+import bisect
+import heapq
+import functools
+import random
+import itertools
+import operator
+import re
+import datetime
+from time import time
+from math import log, prod  # 'log' and 'prod' are functions in the math module
+from collections import deque, defaultdict, Counter, OrderedDict
+from itertools import accumulate, permutations, combinations, product, groupby, islice, chain, repeat, zip_longest, cycle
+from functools import lru_cache, reduce, partial
+from operator import iand
+import sys
+import io, os
+"""
+
+def taco_to_lcb_format(tests):
+    """
+    Given a dictionary with keys "inputs" and "outputs", returns a list of test cases.
+    Each test case is a dictionary with keys "input" and "output". If the lists are unequal,
+    missing entries are filled by reusing the first element of the shorter list.
+    
+    Args:
+        data (dict): A dictionary with keys "inputs" and "outputs", each mapped to a list of strings.
+    
+    Returns:
+        list of dict: A list where each element is a dict with keys "input" and "output".
+    """
+    inputs = tests.get("inputs", [])
+    outputs = tests.get("outputs", [])
+    
+    # Determine the number of test cases to create.
+    n = max(len(inputs), len(outputs))
+    
+    test_cases = []
+    for i in range(n):
+        # Use the first element as a fallback if the list is shorter than n.
+        inp = inputs[i] if i < len(inputs) else (inputs[0] if inputs else "")
+        out = outputs[i] if i < len(outputs) else (outputs[0] if outputs else "")
+        test_cases.append({"input": inp, "output": out})
+    
+    return test_cases
