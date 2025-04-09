@@ -132,3 +132,30 @@ from operator import iand
 import sys
 import io, os
 """
+
+def taco_to_lcb_format(tests):
+    """
+    Given a dictionary with keys "inputs" and "outputs", returns a list of test cases.
+    Each test case is a dictionary with keys "input" and "output". If the lists are unequal,
+    missing entries are filled by reusing the first element of the shorter list.
+    
+    Args:
+        data (dict): A dictionary with keys "inputs" and "outputs", each mapped to a list of strings.
+    
+    Returns:
+        list of dict: A list where each element is a dict with keys "input" and "output".
+    """
+    inputs = tests.get("inputs", [])
+    outputs = tests.get("outputs", [])
+    
+    # Determine the number of test cases to create.
+    n = max(len(inputs), len(outputs))
+    
+    test_cases = []
+    for i in range(n):
+        # Use the first element as a fallback if the list is shorter than n.
+        inp = inputs[i] if i < len(inputs) else (inputs[0] if inputs else "")
+        out = outputs[i] if i < len(outputs) else (outputs[0] if outputs else "")
+        test_cases.append({"input": inp, "output": out})
+    
+    return test_cases
