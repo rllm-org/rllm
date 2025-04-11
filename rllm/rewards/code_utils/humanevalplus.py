@@ -4,8 +4,6 @@ import subprocess
 import faulthandler
 from tempfile import TemporaryDirectory
 import platform
-import sys
-import logging
 
 from rllm.rewards.code_utils.utils import BASE_IMPORTS
 
@@ -41,69 +39,6 @@ def get_num_test_cases(test_code):
     return input_count
 
 
-def extract_imports(code_string: str) -> set[str]:
-    """Parses Python code and extracts top-level module names from imports."""
-    modules = set()
-    try:
-        parsed = ast.parse(code_string)
-        for node in ast.walk(parsed):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    # Get the base module name (e.g., 'os' from 'os.path')
-                    module_name = alias.name.split('.')[0]
-                    if module_name:
-                         modules.add(module_name)
-            elif isinstance(node, ast.ImportFrom):
-                # Handle relative imports (level > 0) vs absolute (level == 0)
-                if node.level == 0 and node.module:
-                    # Get the base module name
-                    module_name = node.module.split('.')[0]
-                    if module_name:
-                        modules.add(module_name)
-    except SyntaxError as e:
-        logging.error(f"Syntax error while parsing code for imports: {e}")
-        # Decide if you want to raise an error or return an empty set
-        # return set() # Or raise e
-    return modules
-
-def install_packages(packages: set[str], env) -> tuple[bool, str]:
-    """Attempts to install a set of packages using pip."""
-    if not packages:
-        return True, "No packages to install."
-
-    # Get the python executable used to run this script to ensure pip installs for it
-    python_executable = sys.executable or "python3" # Fallback to python3
-
-    command = [python_executable, "-m", "pip", "install"] + list(packages)
-    logging.info(f"Attempting to install packages: {' '.join(packages)}")
-    try:
-        result = subprocess.run(
-            command,
-            check=False, # Don't throw exception on non-zero exit
-            capture_output=True, # Capture stdout/stderr
-            env=env,
-            text=True # Decode output as text
-        )
-
-        if result.returncode == 0:
-            logging.info(f"Successfully installed or verified packages: {', '.join(packages)}")
-            logging.debug(f"Pip install STDOUT:\n{result.stdout}")
-            return True, f"Successfully installed/verified: {', '.join(packages)}"
-        else:
-            error_message = f"Failed to install packages: {', '.join(packages)}.\nPip STDERR:\n{result.stderr}\nPip STDOUT:\n{result.stdout}"
-            # logging.error(error_message)
-            return False, error_message
-            
-    except FileNotFoundError:
-         error_message = f"Error: '{python_executable}' or 'pip' command not found. Make sure Python and pip are installed and in the system's PATH."
-         logging.error(error_message)
-         return False, error_message
-    except Exception as e:
-        error_message = f"An unexpected error occurred during pip install: {e}"
-        logging.error(error_message)
-        return False, error_message
-
-
 def run_test(code, test: str = None, timeout=_DEFAULT_TIMEOUT_SECONDS):
     env = os.environ.copy()
     
@@ -111,20 +46,10 @@ def run_test(code, test: str = None, timeout=_DEFAULT_TIMEOUT_SECONDS):
     def preexec_fn():
         reliability_guard()
 
+
     if not test:
         raise ValueError("No test provided.")
-    import pdb; pdb.set_trace()
-    combined_code_for_imports = f"{code}\n{test}"
-    required_modules = extract_imports(combined_code_for_imports)
 
-    stdlib_modules = set(sys.stdlib_module_names)
-    modules_to_install = required_modules - stdlib_modules
-
-    if modules_to_install:
-        success, message = install_packages(modules_to_install, env)
-        # if not success:
-        #     return False, f"Dependency installation failed: {message}"
-    
     code_to_run = f"""
 {BASE_IMPORTS}
 
@@ -154,6 +79,7 @@ def run_test(code, test: str = None, timeout=_DEFAULT_TIMEOUT_SECONDS):
                 preexec_fn=preexec_fn,
                 timeout=timeout
             )
+            
             stderr = result.stderr.decode().strip()
             stdout = result.stdout.decode()
             if result.returncode == 0:
@@ -244,93 +170,3 @@ def reliability_guard(maximum_memory_bytes=None):
     sys.modules["resource"] = None
     sys.modules["psutil"] = None
     sys.modules["tkinter"] = None
-
-    # --- Example Usage ---
-if __name__ == '__main__':
-    # Example code that requires an external library (numpy)
-    sample_code = """
-import numpy as np
-
-def solve():
-    a = np.array([1, 2, 3])
-    b = np.array([4, 5, 6])
-    print(f"Numpy dot product: {np.dot(a, b)}")
-    return np.dot(a, b)
-"""
-
-    # Example test code
-    sample_test = """
-inputs = [1] # Dummy inputs for get_num_test_cases
-results = [32] # Expected result
-
-# Actual test execution
-output = solve()
-assert output == results[0], f"Test Failed: Expected {results[0]}, Got {output}"
-print("Test Passed!")
-
-# Example of using a standard library included in BASE_IMPORTS
-import math
-print(f"Ceiling of 2.3: {math.ceil(2.3)}")
-"""
-
-    # Example code with a non-existent module import
-    failing_code = """
-import non_existent_module
-
-def solve():
-    print("This won't run")
-"""
-
-    # --- Test Case 1: Successful run with pip install ---
-    print("--- Running Test Case 1 (Requires numpy) ---")
-    # Ensure numpy is potentially *not* installed before running this test
-    # You might manually run: python3 -m pip uninstall numpy -y
-    success, output = run_test(sample_code, sample_test)
-    print(f"Success: {success}")
-    print(f"Output:\n{output}")
-    print("-" * 20)
-
-    # --- Test Case 2: Run again (numpy should be installed now) ---
-    print("--- Running Test Case 2 (Numpy already installed) ---")
-    success, output = run_test(sample_code, sample_test)
-    print(f"Success: {success}")
-    print(f"Output:\n{output}")
-    print("-" * 20)
-
-    # --- Test Case 3: Failing install ---
-    print("--- Running Test Case 3 (Requires non-existent module) ---")
-    success, output = run_test(failing_code, "print('Test for failing code')")
-    print(f"Success: {success}")
-    print(f"Output:\n{output}")
-    print("-" * 20)
-
-     # --- Test Case 4: No external imports ---
-    print("--- Running Test Case 4 (No external imports) ---")
-    simple_code = "def solve():\n  return 2 + 2"
-    simple_test = "assert solve() == 4\nprint('Simple test passed!')"
-    success, output = run_test(simple_code, simple_test)
-    print(f"Success: {success}")
-    print(f"Output:\n{output}")
-    print("-" * 20)
-
-    # --- Test Case 5: Test get_num_test_cases ---
-    print("--- Running Test Case 5 (get_num_test_cases) ---")
-    test_code_example = """
-inputs = [
-    (1, 2),
-    (3, 4),
-    (5, 6)
-]
-results = [3, 7, 11]
-"""
-    num_cases = get_num_test_cases(test_code_example)
-    print(f"Number of test cases detected: {num_cases}") # Should be 3
-    print("-" * 20)
-
-    test_code_malformed = """
-inputs = [1, 2,
-results = [3, 4]
-"""
-    num_cases = get_num_test_cases(test_code_malformed)
-    print(f"Number of test cases detected (malformed): {num_cases}") # Should show syntax error
-    print("-" * 20)
