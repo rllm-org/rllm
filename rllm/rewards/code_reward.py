@@ -16,6 +16,7 @@ import ast
 from rllm.rewards.code_utils.livecodebench import run_test as lcb_run_test
 from rllm.rewards.code_utils.codeforces import run_test as codeforces_run_test
 #from rllm.rewards.code_utils.swebench import swebench_check_correctness
+from rllm.rewards.code_utils.bigcodebench import untrusted_check as bigcodebench_run_test
 from rllm.rewards.code_utils.humanevalplus import run_test as humanevalplus_run_test, get_num_test_cases
 from rllm.rewards.code_utils.taco import run_test as taco_run_test
 from rllm.rewards.code_utils.firejail_exec import code_exec_firejail as lc_code_exec
@@ -277,6 +278,16 @@ def humanevalplus_check_correctness(test: str, code: str, timeout_per_test: int 
         print(f"Error in code execution: {output}")
     return succ
 
+def bigcodebench_check_correctness(tests: List[Dict[str, str]], code: str) -> bool:
+
+    succ, details = bigcodebench_run_test(
+        code,
+        tests,
+    )
+    if not succ:
+        print(f"Error in code execution: {details}")
+    return succ
+
 class RewardCodeFn(RewardFn):
     """
     Reward function for evaluating code dataset answers.
@@ -321,8 +332,10 @@ class RewardCodeFn(RewardFn):
             is_correct = primeintellect_check_correctness(tests, model_code)
         elif dataset_name == "kodcode":
             is_correct = kodcode_check_correctness(tests, model_code)
-        elif dataset_name in ["humanevalplus", "bigcodebench"]:
+        elif dataset_name == "humanevalplus":
             is_correct = humanevalplus_check_correctness(tests, model_code)
+        elif dataset_name == "bigcodebench":
+            is_correct = bigcodebench_check_correctness(tests, model_code)
         else:
             is_correct = check_correctness(tests, model_code, test_fn)
 
