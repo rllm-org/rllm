@@ -46,6 +46,7 @@ class TestDataset:
         LIVECODEBENCH = "LIVECODEBENCH"
         LEETCODE = "LEETCODE"
         HUMANEVALPLUS = "HUMANEVALPLUS"
+        BIGCODEBENCH = "BIGCODEBENCH"
 
 
 Dataset = Union[TrainDataset, TestDataset]

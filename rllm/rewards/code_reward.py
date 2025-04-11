@@ -321,7 +321,7 @@ class RewardCodeFn(RewardFn):
             is_correct = primeintellect_check_correctness(tests, model_code)
         elif dataset_name == "kodcode":
             is_correct = kodcode_check_correctness(tests, model_code)
-        elif dataset_name == "humanevalplus":
+        elif dataset_name in ["humanevalplus", "bigcodebench"]:
             is_correct = humanevalplus_check_correctness(tests, model_code)
         else:
             is_correct = check_correctness(tests, model_code, test_fn)

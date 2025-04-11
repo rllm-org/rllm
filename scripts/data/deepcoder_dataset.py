@@ -88,7 +88,7 @@ if __name__ == '__main__':
 
     #Initialize datasets
     train_datasets = [TrainDataset.Code.PRIMEINTELLECT, TrainDataset.Code.TACO, TrainDataset.Code.LIVECODEBENCH]
-    test_datasets = [TestDataset.Code.LIVECODEBENCH, TestDataset.Code.CODEFORCES, TestDataset.Code.HUMANEVALPLUS]
+    test_datasets = [TestDataset.Code.LIVECODEBENCH, TestDataset.Code.CODEFORCES, TestDataset.Code.HUMANEVALPLUS, TestDataset.Code.BIGCODEBENCH]
     
     test_datasets_data = [load_dataset(d) for d in test_datasets]
     train_dataset_data = [load_dataset(d) for d in train_datasets]
