@@ -1,4 +1,6 @@
-# https://github.com/bigcode-project/bigcodebench/tree/main/bigcodebench/eval
+# Install this requirements txt file to run the tests:
+# https://github.com/bigcode-project/bigcodebench/blob/main/Requirements/requirements-eval.txt
+# Citation: https://github.com/bigcode-project/bigcodebench/tree/main/bigcodebench/eval
 
 import itertools
 import multiprocessing

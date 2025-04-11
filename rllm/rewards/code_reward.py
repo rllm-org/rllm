@@ -279,11 +279,12 @@ def humanevalplus_check_correctness(test: str, code: str, timeout_per_test: int 
     return succ
 
 def bigcodebench_check_correctness(tests: List[Dict[str, str]], code: str) -> bool:
-
+    code = clean_code_main_block(code)
     succ, details = bigcodebench_run_test(
         code,
         tests,
     )
+    print(succ, details)
     if not succ:
         print(f"Error in code execution: {details}")
     return succ

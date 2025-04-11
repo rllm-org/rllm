@@ -4,13 +4,15 @@ import time
 from typing import List
 
 import torch
-import vertexai
+try:
+    import vertexai
+    from google.cloud.aiplatform_v1beta1.types.content import SafetySetting
+    from vertexai.generative_models import GenerationConfig, GenerativeModel, HarmBlockThreshold, HarmCategory
+except ImportError:
+    print("VertexAI is not installed, skipping...")
+    vertexai = None
 import openai
-
-from google.cloud.aiplatform_v1beta1.types.content import SafetySetting
 from sentence_transformers import SentenceTransformer, util
-from vertexai.generative_models import GenerationConfig, GenerativeModel, HarmBlockThreshold, HarmCategory
-
 
 from rllm.globals import GCP_PROJECT_ID, GCP_LOCATION, GEMINI_MODEL, OAI_RM_MODEL
 

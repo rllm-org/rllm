@@ -35,7 +35,9 @@ class RLRewardFn(RewardFn):
         )
 
 def rllm_reward_fn(data_source: str, llm_solution: str, ground_truth: Union[str, List[str]], extra_info={}, **kwargs):
-    if data_source in ["apps", "taco", "code_contests", "codeforces", "livecodebench", "kodcode", "leetcode", "primeintellect", "humanevalplus", "bigcodebench"]:
+    if data_source in ["apps", "taco", "code_contests", "codeforces", \
+                       "livecodebench", "kodcode", "leetcode", "primeintellect", \
+                       "humanevalplus", "bigcodebench"]:
         try:
             ground_truth = json.loads(ground_truth)
         except json.JSONDecodeError:

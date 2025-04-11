@@ -32,6 +32,7 @@ setup(
         'e2b_code_interpreter',
         'firecrawl',
         'wandb',
+        "matplotlib",
     ],
     classifiers=[
         'Programming Language :: Python :: 3',
