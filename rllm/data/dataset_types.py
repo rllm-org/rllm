@@ -67,6 +67,7 @@ class DatasetConfig:
     dataloader_batch_size: int = 8
 
     def __post_init__(self):
+        # @note : if the self.datasets is a string it goes through both if cases (not that problematic).
         # Handle single string input
         if isinstance(self.datasets, str):
             self.datasets = [self.datasets]
@@ -75,6 +76,7 @@ class DatasetConfig:
         if isinstance(self.datasets[0], str):
             converted_datasets = []
             for dataset_name in self.datasets:
+                # !critical : the comment bellow doesn't match the code created (missing code).
                 # Try to match with TrainDataset first, then TestDataset
                 try:
                     dataset = TrainDataset(dataset_name)
