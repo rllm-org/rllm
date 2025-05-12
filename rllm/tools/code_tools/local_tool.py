@@ -63,7 +63,8 @@ class PythonInterpreter(CodeTool):
         """
         try:
             # Submit the job to the process pool and wait for its result
-            future = self.pool.submit(self._execute_in_subprocess, code, timeout)
+            future = self.pool.submit(PythonInterpreter._execute_in_subprocess, code, timeout, self.name)
+
             return future.result(timeout=timeout)
         except Exception as e:
             return CodeToolOutput(
@@ -104,7 +105,8 @@ class PythonInterpreter(CodeTool):
             except Exception as e:
                 raise RuntimeError(f"Failed to install required packages: {str(e)}")
 
-    def _execute_in_subprocess(self, code: str, timeout: int = 10) -> CodeToolOutput:
+    @staticmethod
+    def _execute_in_subprocess(code: str, timeout: int = 10, name: str = "local_python") -> CodeToolOutput:
         """Execute code in a separate process with resource limits."""
         # First check and install requirements
         PythonInterpreter._check_requirements()
@@ -164,17 +166,17 @@ print(json.dumps(output))
                 try:
                     result_dict = json.loads(result.stdout.strip())
                     return CodeToolOutput(
-                        name=self.name,
+                        name=name,
                         stdout=result_dict['stdout'],
                         stderr=result_dict['stderr'],
                         output=result_dict['result']
                     )
                 except json.JSONDecodeError:
-                    return CodeToolOutput(name=self.name, stderr=f'Error parsing output: {result.stdout}\n{result.stderr}',)
+                    return CodeToolOutput(name=name, stderr=f'Error parsing output: {result.stdout}\n{result.stderr}',)
             except subprocess.TimeoutExpired:
-                return CodeToolOutput(name=self.name, stderr=f'Execution timed out after {timeout} seconds',)
+                return CodeToolOutput(name=name, stderr=f'Execution timed out after {timeout} seconds',)
             except Exception as e:
-                return CodeToolOutput(name=self.name, error=f"{type(e).__name__} - {str(e)}\n{traceback.format_exc()}",)
+                return CodeToolOutput(name=name, error=f"{type(e).__name__} - {str(e)}\n{traceback.format_exc()}",)
             finally:
                 os.unlink(f.name)
 
