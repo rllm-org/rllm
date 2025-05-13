@@ -67,6 +67,7 @@ def difficulty_fn(idx, entry):
 
 def batch_difficulty(dataset: str, split: str):
 
+    # !critical : the two if cases do not work because the TrainDataset and TestDataset classes are not iterable.
     # Figure out if we need a TrainDataset or TestDataset
     if split == "train":
         dataset_enum = TrainDataset[dataset.upper()]

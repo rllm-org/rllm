@@ -78,6 +78,7 @@ class RewardInput:
     }
     """
 
+# !critical : this class in never used.
 @dataclass(slots=True, kw_only=True)
 class LiveCodebenchInput:
     """Data structure for input required to calculate rewards.
