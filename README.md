@@ -54,15 +54,22 @@ rLLM is an open-source project to fully democratize reinforcement learning (RL) 
 
 ## Getting Started 🎯
 ### Installation
-```bash
-# Installing Python 3.10 Environment.
-conda create -n rllm python=3.10 -y
-conda activate rllm
 
-# Installing RLLM dependencies.
+First, make sure [uv](https://docs.astral.sh/uv/getting-started/installation/) is installed.
+
+Then, clone the repository and install dependencies with `uv`:
+
+```bash
+git clone git@github.com:agentica-project/rllm.git
 cd rllm
-pip install -e ./verl
-pip install -e .
+uv sync --extra build
+uv sync --extra build --extra compile
+```
+
+Next, log into wandb:
+
+```bash
+uv run wandb login
 ```
 
 ### Data
@@ -70,10 +77,10 @@ Our raw training data is in `rllm/data/[train|test]/[code|math]/`, along with pr
 
 ```bash
 # Download datasets from GDrive, populates rllm/data/[train|test]/[math|code]/*.json
-python scripts/data/download_datasets.py
+uv run scripts/data/download_datasets.py
 
 # Generate parquet files for Deepcoder/DeepscaleR in data/*.parquet
-python scripts/data/[deepcoder|deepscaler]_dataset.py
+uv run scripts/data/[deepcoder|deepscaler]_dataset.py
 ```
 
 ### Training Scripts
