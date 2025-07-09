@@ -9,7 +9,7 @@ export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 # Find the directory where rllm package is located
 RLLM_DIR=$(python3 -c "import rllm; import os; print(os.path.dirname(os.path.dirname(rllm.__file__)))")
 
-python3 -m examples.math_tool.train_math_with_tool \
+python3 -m train_math_with_tool \
     algorithm.adv_estimator=grpo \
     data.train_batch_size=32 \
     data.val_batch_size=500 \
