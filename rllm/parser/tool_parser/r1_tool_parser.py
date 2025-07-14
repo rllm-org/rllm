@@ -14,7 +14,7 @@ class R1ToolParser(ToolParser):
             model (str): Model name for tokenizer (optional)
             tokenizer: Pre-initialized tokenizer (optional)
         """
-        self.tool_calls_begin = "<｜tool▁call▁begin｜>"
+        self.tool_calls_begin = "<｜tool▁calls▁begin｜>"
         self.tool_calls_end = "<｜tool▁calls▁end｜>"
         self.tool_call_begin = "<｜tool▁call▁begin｜>"
         self.tool_call_end = "<｜tool▁call▁end｜>"
