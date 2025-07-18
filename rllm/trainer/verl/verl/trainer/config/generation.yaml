@@ -1,0 +1,57 @@
+trainer:
+  nnodes: 1
+  n_gpus_per_node: 8
+
+data:
+  path: ~/data/rlhf/math/test.parquet
+  prompt_key: prompt
+  response_key: responses
+  data_source_key: data_source
+  reward_model_key: reward_model
+  output_path: ./
+
+model:
+  path: agentica-org/DeepScaleR-1.5B-Preview
+  external_lib: null
+
+rollout:
+  name: vllm
+  # Compute reward while generating is broken for eval.
+  mode: sync # sync: LLM, async: AsyncLLM
+  temperature: 0.6
+  top_k: -1 # 0 for hf rollout, -1 for vllm rollout
+  top_p: 0.95
+  prompt_length: 2048
+  response_length: 32768
+  # for vllm rollout
+  dtype: bfloat16 # should align with FSDP
+  gpu_memory_utilization: 0.9
+  ignore_eos: False
+  enforce_eager: False
+  free_cache_engine: False
+  load_format: dummy_dtensor
+  tensor_model_parallel_size: 1
+  max_num_batched_tokens: 8192
+  max_model_len: null
+  max_num_seqs: 1024
+  log_prob_micro_batch_size: null # will be deprecated, use log_prob_micro_batch_size_per_gpu
+  log_prob_micro_batch_size_per_gpu: 8
+  # for fire vllm rollout
+  use_fire_sampling: False # enable FIRE https://arxiv.org/abs/2410.21236
+  # for hf rollout
+  do_sample: True
+  # This must be set to one for eval script to work.
+  n: 1
+  # Set this for n samples for validation.
+  n_val: 4
+  enable_chunked_prefill: True
+  disable_log_stats: True
+
+actor:
+  strategy: fsdp  # This is for backward-compatibility
+  ulysses_sequence_parallel_size: 1 # sp size
+  fsdp_config:
+    fsdp_size: -1
+
+ray_init:
+  num_cpus: null # `None` means using all CPUs, which might cause hang if limited in systems like SLURM. Please set to a number allowed then.
