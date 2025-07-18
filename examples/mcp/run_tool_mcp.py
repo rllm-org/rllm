@@ -25,7 +25,7 @@ async def main():
     os.environ["TAVILY_API_KEY"] = tavily_api_key
 
     n_parallel_agents = 4
-    model_name = "Qwen/Qwen3-4B"
+    model_name = "internlm/internlm2_5-1_8b-chat"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     mcp_server_command = "npx"

@@ -21,7 +21,7 @@ if __name__ == "__main__":
 
     os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
-    model_name = "agentica-org/DeepSWE-Preview"
+    model_name = "internlm/internlm2_5-1_8b-chat"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     sampling_params = {"temperature": 1, "model": model_name}
 

@@ -71,7 +71,7 @@ class ChatTemplateParser:
             elif "qwen" in model_name or "r2e" in model_name or "deepswe" in model_name or "qwen" in tokenizer_cls:
                 print(f"Using QwenChatTemplateParser for {tokenizer.name_or_path}")
                 return QwenChatTemplateParser(tokenizer, disable_thinking=disable_thinking)
-            elif "llama" in model_name:
+            elif "llama" in model_name or "internlm" in model_name:
                 print(f"Using LlamaChatTemplateParser for {tokenizer.name_or_path}")
                 return LlamaChatTemplateParser(tokenizer)
 

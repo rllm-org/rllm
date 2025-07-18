@@ -16,7 +16,7 @@ if __name__ == "__main__":
 
     n_parallel_agents = 64
 
-    model_name = "agentica-org/DeepScaleR-1.5B-Preview"
+    model_name = "internlm/internlm2_5-1_8b-chat"
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 

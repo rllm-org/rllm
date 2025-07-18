@@ -22,7 +22,6 @@ dependencies = [
     "torch>=2.7",
     "transformers",
     "accelerate",
-    "flash-attn>=2.8.0.post2",
     "sentence-transformers",
     "torchmetrics",
 

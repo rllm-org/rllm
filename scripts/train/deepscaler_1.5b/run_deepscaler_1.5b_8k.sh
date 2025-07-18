@@ -20,7 +20,7 @@ done
 
 # Set default model path if not provided
 if [ -z "$MODEL_PATH" ]; then
-    MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+    MODEL_PATH="internlm/internlm2_5-1_8b-chat"
 fi
 
 # Train over a single node, 8 A100-80GB GPUs.

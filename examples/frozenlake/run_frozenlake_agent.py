@@ -29,7 +29,7 @@ if __name__ == "__main__":
 
     n_parallel_agents = 256
 
-    model_name = "Qwen/Qwen3-4B"
+    model_name = "internlm/internlm2_5-1_8b-chat"
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 

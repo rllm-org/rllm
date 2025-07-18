@@ -33,7 +33,7 @@ async def generate_trajectories(tasks) -> list[Trajectory]:
     from rllm.rewards.reward_fn import math_reward_fn
 
     os.environ["TOKENIZERS_PARALLELISM"] = "true"
-    model_name = "agentica-org/DeepScaleR-1.5B-Preview"
+    model_name = "internlm/internlm2_5-1_8b-chat"
 
     engine = AsyncAgentExecutionEngine(
         agent_class=MathAgent,
