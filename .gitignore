@@ -135,6 +135,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+rllm_env/
 
 # Spyder project settings
 .spyderproject
