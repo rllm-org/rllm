@@ -28,5 +28,3 @@ async def strands_session_factory(*, system_prompt: str, tools, **kw) -> Strands
     agent = kw.get("agent")
     model_provider = kw.get("model")
     return StrandsSession(agent, model_provider)
-
-

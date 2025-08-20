@@ -14,8 +14,9 @@ if REPO_ROOT not in sys.path:
 from rllm.engine.rollout_engine import RolloutEngine
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.workflows.strands_workflow import StrandsWorkflow
-from strands_tools.browser import LocalChromiumBrowser
+from rllm.integrations.strands_session import make_session_factory
 from strands_tools import http_request, file_read, calculator, python_repl
+from strands_tools.browser import LocalChromiumBrowser
 
 
 async def main() -> None:
@@ -45,26 +46,22 @@ async def main() -> None:
         sampling_params={"model": model_id},
     )
 
-    async def session_factory(**kw):
-        # Placeholder: wire your own session factory or adapter here
-        # return await strands_session_factory(**kw)
-        class _NoopSession:
-            async def step(self, user_msg: str):
-                if False:
-                    yield {"type": "Stop", "final_text": ""}
+    browser = LocalChromiumBrowser()
 
-            async def close(self):
-                return None
 
-        return _NoopSession()
+    # Real Strands session factory (requires `strands` installed)
+    session_factory = make_session_factory(
+        default_tools=[browser.browser, http_request, file_read, calculator, python_repl],
+        default_system_prompt="You are a helpful agent that uses tools when beneficial.",
+    )
 
     awe = AgentWorkflowEngine(
         workflow_cls=StrandsWorkflow,
         workflow_args={
             "strands_session_factory": session_factory,
-            "system_prompt": "加州最古老的扑克室是什么？",
-            "tools": [LocalChromiumBrowser(), http_request, file_read, calculator, python_repl],
-            "max_steps": 8,
+            "system_prompt": "You are a helpful agent that uses tools when beneficial. Use the tools to answer the question.",
+            "tools": [browser.browser, http_request, file_read, calculator, python_repl],
+            "max_steps": 30,
             "reward_fn": None,
         },
         rollout_engine=rollout,
@@ -73,7 +70,7 @@ async def main() -> None:
         retry_limit=1,
     )
 
-    tasks = ["Example question 1"]
+    tasks = ["加州最古老的扑克室是什么？"]
     ids = ["ep-0"]
     episodes = await awe.execute_tasks(tasks, task_ids=ids, workflow_id="strands-example")
     print("done:", [ep.id for ep in episodes])

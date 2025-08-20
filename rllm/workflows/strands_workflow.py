@@ -1,11 +1,42 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.engine.rollout_engine import RolloutEngine
 from rllm.workflows.workflow import TerminationReason, Workflow
+
+
+def _extract_textish(x: Any) -> str:
+    """Extract plain text from possibly nested delta/data structures."""
+    if x is None:
+        return ""
+    if isinstance(x, str):
+        return x
+    if isinstance(x, dict):
+        if "text" in x:
+            return _extract_textish(x["text"])
+        if "delta" in x:
+            return _extract_textish(x["delta"])
+        if "data" in x:
+            return _extract_textish(x["data"])
+        if str(x.get("type", "")).endswith(".delta") and "text" in x:
+            return _extract_textish(x["text"])
+        return ""
+    if isinstance(x, (list, tuple)):
+        return "".join(_extract_textish(y) for y in x)
+    return str(x)
+
+
+def _stringify(obj: Any, limit: int = 800) -> str:
+    """Stringify objects defensively, truncating to a safe length."""
+    try:
+        s = json.dumps(obj, ensure_ascii=False) if isinstance(obj, (dict, list)) else str(obj)
+    except Exception:
+        s = str(obj)
+    return s[:limit]
 
 
 @dataclass
@@ -62,16 +93,116 @@ class StrandsWorkflow(Workflow):
             {"role": "user", "content": task_text},
         ]
 
-        # Minimal single-turn generation so users can see a reply
+        trajectory = Trajectory(steps=[], reward=0.0)
+
+        # Prefer streaming from a Strands session when the factory is provided; otherwise do a single-turn generation
+        if self.session_factory is not None:
+            assistant_buffer = ""
+            last_text = None
+            steps = 0
+            term_reason = TerminationReason.ENV_DONE
+
+            # Open session and stream events
+            session = await self.session_factory(system_prompt=self.system_prompt, tools=self.tools)
+            try:
+                # Support either .step(task_text) or .stream(task_text)
+                if hasattr(session, "step"):
+                    stream_iter = session.step(task_text)
+                elif hasattr(session, "stream"):
+                    stream_iter = session.stream(task_text)
+                else:
+                    raise RuntimeError("Strands session must define .step() or .stream()")
+
+                async for ev in stream_iter:
+                    # Normalize type string from event
+                    if isinstance(ev, dict):
+                        typ = (ev.get("type") or ev.get("event") or "").lower()
+                    else:
+                        typ = (getattr(ev, "type", None) or getattr(ev, "event", "") or "").lower()
+
+                    if typ in ("textdelta", "text_delta", "delta", "data"):
+                        txt = _extract_textish(
+                            (ev.get("text") if isinstance(ev, dict) else getattr(ev, "text", None))
+                            or (ev.get("delta") if isinstance(ev, dict) else getattr(ev, "delta", None))
+                            or (ev.get("data") if isinstance(ev, dict) else getattr(ev, "data", None))
+                            or ev
+                        )
+                        if txt and txt != last_text:
+                            print(f"========= TextDelta: {txt[:160]} ==========")
+                            assistant_buffer += txt
+                            last_text = txt
+
+                    elif typ in ("tooluse", "tool_use", "current_tool_use"):
+                        tu = (ev.get("current_tool_use") if isinstance(ev, dict) else None) or ev
+                        args = (tu.get("input") if isinstance(tu, dict) else getattr(tu, "input", {})) or {}
+                        if not args:
+                            # ignore scaffold/placeholder toolUse events
+                            continue
+                        if assistant_buffer:
+                            chat.append({"role": "assistant", "content": assistant_buffer})
+                            assistant_buffer = ""
+                        name = (tu.get("name") if isinstance(tu, dict) else getattr(tu, "name", None)) or "unknown_tool"
+                        tuid = (
+                            (tu.get("toolUseId") if isinstance(tu, dict) else getattr(tu, "toolUseId", None))
+                            or (tu.get("id") if isinstance(tu, dict) else getattr(tu, "id", None))
+                            or ""
+                        )
+                        chat.append({"role": "assistant", "content": f"[toolUse id={tuid}] {name} { _stringify(args) }"})
+
+                    elif typ in ("toolresult", "tool_result"):
+                        tuid = (
+                            (ev.get("toolUseId") if isinstance(ev, dict) else getattr(ev, "toolUseId", None))
+                            or (ev.get("tool_use_id") if isinstance(ev, dict) else getattr(ev, "tool_use_id", None))
+                            or ""
+                        )
+                        status = (ev.get("status") if isinstance(ev, dict) else getattr(ev, "status", None)) or "success"
+                        content = ev.get("content") if isinstance(ev, dict) else getattr(ev, "content", None)
+                        chat.append({"role": "user", "content": f"[toolResult id={tuid} status={status}] { _stringify(content) }"})
+                        step = Step(chat_completions=list(chat), reward=None)
+                        trajectory.steps.append(step)
+                        steps += 1
+                        if steps >= self.max_steps:
+                            term_reason = TerminationReason.MAX_STEPS
+                            break
+
+                    elif typ in ("stop",):
+                        final_text = (
+                            (ev.get("final_text") if isinstance(ev, dict) else getattr(ev, "final_text", None))
+                            or _extract_textish((ev.get("result") if isinstance(ev, dict) else getattr(ev, "result", None)))
+                            or assistant_buffer
+                        )
+                        if final_text:
+                            chat.append({"role": "assistant", "content": final_text})
+                            assistant_buffer = ""
+                        if not trajectory.steps or trajectory.steps[-1].chat_completions != chat:
+                            trajectory.steps.append(Step(chat_completions=list(chat), reward=None))
+                        break
+
+                episode = Episode(
+                    id=uid,
+                    task=task,
+                    trajectories=[("solver", trajectory)],
+                    is_correct=None,
+                    metrics={"num_steps": len(trajectory.steps)},
+                )
+                episode.termination_reason = term_reason
+                return episode
+
+            finally:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
+
+        # Fallback: minimal single-turn generation so users can see a reply
         try:
+            print("========= Fallback ==========")
             assistant_text = await self.rollout_engine.get_model_response(chat)
             if isinstance(assistant_text, str) and assistant_text:
                 chat.append({"role": "assistant", "content": assistant_text})
         except Exception:
-            # Keep silent on generation failures in skeleton
             pass
 
-        trajectory = Trajectory(steps=[], reward=0.0)
         trajectory.steps.append(Step(chat_completions=list(chat)))
 
         # Optionally compute a terminal reward via reward_fn
