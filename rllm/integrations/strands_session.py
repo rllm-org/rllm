@@ -1,15 +1,66 @@
 from __future__ import annotations
 
 import os
+import json
+from datetime import datetime
+from pathlib import Path
+# Disable OpenTelemetry before importing strands to avoid context detach noise
+os.environ.setdefault("OTEL_SDK_DISABLED", "true")
+os.environ.setdefault("OTEL_TRACES_EXPORTER", "none")
+os.environ.setdefault("OTEL_METRICS_EXPORTER", "none")
+os.environ.setdefault("OTEL_LOGS_EXPORTER", "none")
+os.environ.setdefault("OTEL_PYTHON_LOG_LEVEL", "ERROR")
 from typing import Any, AsyncIterator, Dict, Iterable, Optional
 from dotenv import load_dotenv, find_dotenv
+from rllm.integrations.tools_safety import wrap_tool
 
 try:
     from strands import Agent
     from strands.models.openai import OpenAIModel
+    from strands.agent.conversation_manager.sliding_window_conversation_manager import (
+        SlidingWindowConversationManager,
+    )
 except Exception:  # pragma: no cover - allow import-time flexibility
     Agent = None  # type: ignore
     OpenAIModel = None  # type: ignore
+    SlidingWindowConversationManager = None  # type: ignore
+def _enable_openai_request_logging() -> None:
+    """
+    Always-on monkeypatch to append exact OpenAI chat.completions request payloads
+    into a JSONL log file. Best-effort, no-op if SDK surface differs.
+    """
+    try:
+        from openai.resources.chat.completions import AsyncCompletions as _AsyncCompletions  # type: ignore
+
+        # Avoid double-wrapping
+        if getattr(_AsyncCompletions.create, "__rllm_logging_wrapped__", False):  # type: ignore[attr-defined]
+            return
+
+        original_create = _AsyncCompletions.create  # type: ignore[attr-defined]
+
+        log_dir = Path(os.path.join(os.getcwd(), "repl_state", "logs"))
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "strands_openai_requests.jsonl"
+
+        async def create_wrapper(self, *args, **kwargs):  # type: ignore[no-redef]
+            try:
+                record = {
+                    "ts": datetime.utcnow().isoformat() + "Z",
+                    "request": kwargs,
+                }
+                with log_file.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(record, ensure_ascii=False))
+                    f.write("\n")
+            except Exception:
+                pass
+            return await original_create(self, *args, **kwargs)  # type: ignore[misc]
+
+        create_wrapper.__rllm_logging_wrapped__ = True  # type: ignore[attr-defined]
+        _AsyncCompletions.create = create_wrapper  # type: ignore[assignment]
+    except Exception:
+        # Do not fail if the SDK shape changes
+        return
+
 
 
 def _resolve_strands_model_from_env():
@@ -134,11 +185,25 @@ class StrandsSession:
     def __init__(self, tools: Optional[list] = None, system_prompt: Optional[str] = None):
         if Agent is None:
             raise ImportError("strands Agent is not available. Please install strands.")
+        # Enable logging before model/client init so we capture all requests
+        _enable_openai_request_logging()
         model = _resolve_strands_model_from_env()
+        safe_tools = []
+        for t in (tools or []):
+            # Wrap plain callables; leave non-callable tool specs as-is
+            if callable(t):
+                safe_tools.append(wrap_tool(t))
+            else:
+                safe_tools.append(t)
         self._agent = Agent(
             model=model,
-            tools=tools or [],
+            tools=safe_tools,
             system_prompt=system_prompt,
+            conversation_manager=(
+                SlidingWindowConversationManager(window_size=12, should_truncate_results=True)
+                if SlidingWindowConversationManager is not None
+                else None
+            ),
             callback_handler=None,
         )
 

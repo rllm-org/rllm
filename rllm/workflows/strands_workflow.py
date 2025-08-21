@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional
 
@@ -37,6 +38,30 @@ def _stringify(obj: Any, limit: int = 800) -> str:
     except Exception:
         s = str(obj)
     return s[:limit]
+
+
+def _summarize_observation(content: Any, max_preview_chars: int = 800) -> Any:
+    """
+    Produce a lightweight observation object suitable for logging and RL.
+
+    - If content is small (string length or small JSON), return it directly
+    - Otherwise return a compact dict with a preview
+    """
+    try:
+        # Strings: return truncated string
+        if isinstance(content, str):
+            return content[:max_preview_chars]
+        # JSON-like: measure by string size
+        if isinstance(content, (dict, list)):
+            s = _stringify(content, limit=max_preview_chars)
+            # If stringified content already fits in preview, return original JSON
+            if len(s) < max_preview_chars:
+                return content
+            return {"type": "tool.result.truncated", "preview": s}
+        # Fallback: stringify other types
+        return _stringify(content, limit=max_preview_chars)
+    except Exception:
+        return _stringify(content, limit=max_preview_chars)
 
 
 @dataclass
@@ -101,6 +126,15 @@ class StrandsWorkflow(Workflow):
             last_text = None
             steps = 0
             term_reason = TerminationReason.ENV_DONE
+            seen_tool_use_ids: set[str] = set()
+            verbose = str(os.getenv("RLLM_STRANDS_VERBOSE", "1")).lower() not in ("0", "false", "no")
+            # Pretty log helpers
+            def _log(line: str = "", end: str = "\n") -> None:
+                if verbose:
+                    print(f"========= _log: {line} ==========")
+                    print(line, end=end, flush=True)
+            def _h(line: str) -> None:
+                _log(f"[STRANDS] {line}")
 
             # Open session and stream events
             session = await self.session_factory(system_prompt=self.system_prompt, tools=self.tools)
@@ -128,8 +162,9 @@ class StrandsWorkflow(Workflow):
                             or ev
                         )
                         if txt and txt != last_text:
-                            print(f"========= TextDelta: {txt[:160]} ==========")
                             assistant_buffer += txt
+                            # Stream assistant tokens as they arrive (single line)
+                            _log(txt, end="")
                             last_text = txt
 
                     elif typ in ("tooluse", "tool_use", "current_tool_use"):
@@ -139,6 +174,8 @@ class StrandsWorkflow(Workflow):
                             # ignore scaffold/placeholder toolUse events
                             continue
                         if assistant_buffer:
+                            # End the streaming line before logging tool use
+                            _log()
                             chat.append({"role": "assistant", "content": assistant_buffer})
                             assistant_buffer = ""
                         name = (tu.get("name") if isinstance(tu, dict) else getattr(tu, "name", None)) or "unknown_tool"
@@ -147,7 +184,21 @@ class StrandsWorkflow(Workflow):
                             or (tu.get("id") if isinstance(tu, dict) else getattr(tu, "id", None))
                             or ""
                         )
+                        # emit only first meaningful toolUse per id
+                        if tuid in seen_tool_use_ids:
+                            continue
+                        seen_tool_use_ids.add(tuid)
+                        _h(f"toolUse id={tuid} name={name} args={_stringify(args)}")
                         chat.append({"role": "assistant", "content": f"[toolUse id={tuid}] {name} { _stringify(args) }"})
+                        # Add a structured step for this toolUse
+                        action = {
+                            "type": "tool_use",
+                            "name": name,
+                            "args": args,
+                            "tool_use_id": tuid,
+                        }
+                        step = Step(chat_completions=list(chat), action=action, observation=None, reward=None)
+                        trajectory.steps.append(step)
 
                     elif typ in ("toolresult", "tool_result"):
                         tuid = (
@@ -157,8 +208,11 @@ class StrandsWorkflow(Workflow):
                         )
                         status = (ev.get("status") if isinstance(ev, dict) else getattr(ev, "status", None)) or "success"
                         content = ev.get("content") if isinstance(ev, dict) else getattr(ev, "content", None)
+                        _h(f"toolResult id={tuid} status={status}")
                         chat.append({"role": "user", "content": f"[toolResult id={tuid} status={status}] { _stringify(content) }"})
-                        step = Step(chat_completions=list(chat), reward=None)
+                        action = {"type": "tool_result", "tool_use_id": tuid, "status": status}
+                        observation = _summarize_observation(content)
+                        step = Step(chat_completions=list(chat), action=action, observation=observation, reward=None)
                         trajectory.steps.append(step)
                         steps += 1
                         if steps >= self.max_steps:
@@ -171,11 +225,14 @@ class StrandsWorkflow(Workflow):
                             or _extract_textish((ev.get("result") if isinstance(ev, dict) else getattr(ev, "result", None)))
                             or assistant_buffer
                         )
+                        # Ensure we end the line for readability
+                        _log()
                         if final_text:
                             chat.append({"role": "assistant", "content": final_text})
                             assistant_buffer = ""
                         if not trajectory.steps or trajectory.steps[-1].chat_completions != chat:
-                            trajectory.steps.append(Step(chat_completions=list(chat), reward=None))
+                            action = {"type": "final", "text": final_text or ""}
+                            trajectory.steps.append(Step(chat_completions=list(chat), action=action, reward=None, done=True))
                         break
 
                 episode = Episode(

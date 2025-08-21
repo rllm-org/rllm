@@ -11,6 +11,18 @@ REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+# Silence OTEL SDK - no effect
+import os, logging
+
+os.environ.setdefault("OTEL_SDK_DISABLED", "true")   # disable OTEL SDK
+os.environ.setdefault("OTEL_TRACES_EXPORTER", "none")
+os.environ.setdefault("OTEL_METRICS_EXPORTER", "none")
+os.environ.setdefault("OTEL_LOGS_EXPORTER", "none")
+os.environ.setdefault("OTEL_PYTHON_LOG_LEVEL", "ERROR")
+
+logging.getLogger("opentelemetry").setLevel(logging.ERROR)
+
+
 from rllm.engine.rollout_engine import RolloutEngine
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.workflows.strands_workflow import StrandsWorkflow
@@ -22,7 +34,7 @@ from strands_tools.browser import LocalChromiumBrowser
 async def main() -> None:
     load_dotenv(find_dotenv())
 
-    tokenizer_model = os.getenv("TOKENIZER_MODEL", "Qwen/Qwen3-4B")
+    tokenizer_model = os.getenv("TOKENIZER_MODEL", None)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_model)
 
     together_api_key = os.getenv("TOGETHER_AI_API_KEY")
@@ -59,7 +71,22 @@ async def main() -> None:
         workflow_cls=StrandsWorkflow,
         workflow_args={
             "strands_session_factory": session_factory,
-            "system_prompt": "You are a helpful agent that uses tools when beneficial. Use the tools to answer the question.",
+            "system_prompt": """
+            You are a research agent. Always ground answers in tool-based evidence. Do not guess. Use the registered tools via function calls. Do not simulate tool calls in plain text. Cite sources by returning the URL/title in your final answer.            
+            
+            Tool selection rules:
+            - browser: general navigation and reading.
+            - First action: init_session with a kebab-case session_name (e.g., "research-1"); reuse it.
+            - After navigate: usually read with get_text  (e.g., selectors "body", "main", "h1,h2,h3", "p"), if you need to interact, use click items or type things. Avoid looping the same read on a page.
+            - If you are stucked by Captcha, use https://duckduckgo.com to do the search instead.
+            - http_request: prefer for structured/fast sources (GitHub/Wikipedia/USGS APIs or light HTML).
+            - file_read: open local/remote files (PDF/CSV/text). For PDFs, extract essential text snippets.
+            - calculator: arithmetic/unit conversions; for complex code use python_repl.
+
+            Answer policy:
+            - Only output final_answer after at least one Observation supports it (prefer two). Keep answers concise.
+            - If the current approach fails twice, change strategy (different query/tool) rather than repeating the same navigate/get_text.
+""",
             "tools": [browser.browser, http_request, file_read, calculator, python_repl],
             "max_steps": 30,
             "reward_fn": None,

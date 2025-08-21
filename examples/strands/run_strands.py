@@ -5,6 +5,8 @@ from transformers import AutoTokenizer
 from rllm.engine.rollout.openai_engine import OpenAIEngine
 from rllm.integrations.strands import RLLMModel, StrandsAgent
 
+os.environ.setdefault("OTEL_SDK_DISABLED", "true")   # disable OTEL SDK
+
 
 async def run_strands_agent(rollout_engine):
     """Example using StrandsAgent with trajectory tracking."""
