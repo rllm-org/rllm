@@ -12,7 +12,7 @@ os.environ.setdefault("OTEL_LOGS_EXPORTER", "none")
 os.environ.setdefault("OTEL_PYTHON_LOG_LEVEL", "ERROR")
 from typing import Any, AsyncIterator, Dict, Iterable, Optional
 from dotenv import load_dotenv, find_dotenv
-from rllm.integrations.tools_safety import wrap_tool
+import logging
 
 try:
     from strands import Agent
@@ -24,6 +24,30 @@ except Exception:  # pragma: no cover - allow import-time flexibility
     Agent = None  # type: ignore
     OpenAIModel = None  # type: ignore
     SlidingWindowConversationManager = None  # type: ignore
+
+# Reduce noisy OTEL and asyncio logs
+logging.getLogger("opentelemetry").setLevel(logging.CRITICAL)
+logging.getLogger("opentelemetry.context").setLevel(logging.CRITICAL)
+logging.getLogger("opentelemetry.trace").setLevel(logging.CRITICAL)
+logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+
+# Defensive monkeypatch to swallow OTEL detach errors caused by generator exits
+try:  # pragma: no cover
+    from opentelemetry import context as _otel_context  # type: ignore
+
+    _orig_detach = getattr(_otel_context, "detach", None)
+
+    def _safe_detach(token):  # type: ignore[no-redef]
+        try:
+            if _orig_detach is not None:
+                return _orig_detach(token)
+        except Exception:
+            return None
+
+    if _orig_detach is not None:
+        _otel_context.detach = _safe_detach  # type: ignore[assignment]
+except Exception:
+    pass
 def _enable_openai_request_logging() -> None:
     """
     Always-on monkeypatch to append exact OpenAI chat.completions request payloads
@@ -51,6 +75,8 @@ def _enable_openai_request_logging() -> None:
                 with log_file.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(record, ensure_ascii=False))
                     f.write("\n")
+                if os.getenv("RLLM_DEBUG_JSONL", "0") not in ("0", "false", "no"):
+                    print("[RLLM-DEBUG] wrote JSONL: strands_openai_requests.jsonl")
             except Exception:
                 pass
             return await original_create(self, *args, **kwargs)  # type: ignore[misc]
@@ -188,13 +214,8 @@ class StrandsSession:
         # Enable logging before model/client init so we capture all requests
         _enable_openai_request_logging()
         model = _resolve_strands_model_from_env()
-        safe_tools = []
-        for t in (tools or []):
-            # Wrap plain callables; leave non-callable tool specs as-is
-            if callable(t):
-                safe_tools.append(wrap_tool(t))
-            else:
-                safe_tools.append(t)
+        # Pass tools through untouched so Strands can recognize @tool-decorated callables
+        safe_tools = list(tools or [])
         self._agent = Agent(
             model=model,
             tools=safe_tools,

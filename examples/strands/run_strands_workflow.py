@@ -7,9 +7,15 @@ from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 from transformers import AutoTokenizer
 
+# Ensure repo root is on sys.path before importing rllm modules
 REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
+
+from rllm.tools.web_tools import FirecrawlTool
+from rllm.tools.web_tools.gsearch_tool import GoogleSearchTool
+
+from strands import tool
 
 # Silence OTEL SDK - no effect
 import os, logging
@@ -58,12 +64,47 @@ async def main() -> None:
         sampling_params={"model": model_id},
     )
 
-    browser = LocalChromiumBrowser()
+    # Optional browser tool (graceful fallback if runtime not installed)
+    try:
+        browser = LocalChromiumBrowser()
+        browser_tool = browser.browser
+    except Exception as e:
+        logging.warning(f"Browser disabled: {e}")
+        browser = None
+        browser_tool = None
+
+    # Strands-compliant tools using @tool decorator (Example of how to use rllm tools in SRTANDS)
+    @tool(name="firecrawl", description="Fetch page content as markdown + links")
+    async def firecrawl(url: str) -> dict:
+        try:
+            fc = FirecrawlTool()
+            res = await fc(url=url, use_async=True)
+            if res.error:
+                return {"status": "error", "content": [{"text": res.error}]}
+            return {"status": "success", "content": [{"json": res.output}]}
+        except Exception as e:
+            return {"status": "error", "content": [{"text": str(e)}]}
+
+    @tool(name="gsearch", description="Search Google and return top results with snippets")
+    def gsearch(query: str) -> dict:
+        try:
+            gs = GoogleSearchTool()
+            r = gs(query=query)
+            if r.error:
+                return {"status": "error", "content": [{"text": r.error}]}
+            return {"status": "success", "content": [{"json": r.output}]}
+        except Exception as e:
+            return {"status": "error", "content": [{"text": str(e)}]}
 
 
     # Real Strands session factory (requires `strands` installed)
+    # Single source of truth: define tools once and pass only via workflow args. gsearch is not used in this example.
+    tools = [firecrawl, http_request, file_read, calculator, python_repl]
+    if browser_tool:
+        tools.insert(1, browser_tool)
+
     session_factory = make_session_factory(
-        default_tools=[browser.browser, http_request, file_read, calculator, python_repl],
+        default_tools=[],
         default_system_prompt="You are a helpful agent that uses tools when beneficial.",
     )
 
@@ -75,20 +116,18 @@ async def main() -> None:
             You are a research agent. Always ground answers in tool-based evidence. Do not guess. Use the registered tools via function calls. Do not simulate tool calls in plain text. Cite sources by returning the URL/title in your final answer.            
             
             Tool selection rules:
-            - browser: general navigation and reading.
-            - First action: init_session with a kebab-case session_name (e.g., "research-1"); reuse it.
-            - After navigate: usually read with get_text  (e.g., selectors "body", "main", "h1,h2,h3", "p"), if you need to interact, use click items or type things. Avoid looping the same read on a page.
-            - If you are stucked by Captcha, use https://duckduckgo.com to do the search instead.
-            - http_request: prefer for structured/fast sources (GitHub/Wikipedia/USGS APIs or light HTML).
+            - firecrawl: preferred for fetching page content; returns markdown + links (low tokens).
+            - browser: use for web search and interactive flows. For search, navigate to DuckDuckGo with the query (e.g., https://duckduckgo.com/?q=<query>), then read result titles/snippets. Also use for dynamic pages.
+            - http_request: prefer only for structured/fast APIs (GitHub/Wikipedia/USGS) or light HTML.
             - file_read: open local/remote files (PDF/CSV/text). For PDFs, extract essential text snippets.
             - calculator: arithmetic/unit conversions; for complex code use python_repl.
 
             Answer policy:
             - Only output final_answer after at least one Observation supports it (prefer two). Keep answers concise.
-            - If the current approach fails twice, change strategy (different query/tool) rather than repeating the same navigate/get_text.
+            - If the current approach fails twice, change strategy (different search terms/tool) rather than repeating the same navigate/get_text.
 """,
-            "tools": [browser.browser, http_request, file_read, calculator, python_repl],
-            "max_steps": 30,
+            "tools": tools,
+            "max_steps": 10,
             "reward_fn": None,
         },
         rollout_engine=rollout,
@@ -97,7 +136,7 @@ async def main() -> None:
         retry_limit=1,
     )
 
-    tasks = ["加州最古老的扑克室是什么？"]
+    tasks = ["Who won the recent Tennis Grand Slam?", "What is the GDP of Shenzhen vs Shanghai most recently?"]
     ids = ["ep-0"]
     episodes = await awe.execute_tasks(tasks, task_ids=ids, workflow_id="strands-example")
     print("done:", [ep.id for ep in episodes])
@@ -110,9 +149,8 @@ async def main() -> None:
                 if last.get("role") == "assistant":
                     print("assistant:", last.get("content"))
 
-    # Print the whole episode(s) JSON and save to file
+    # Prepare the whole episode(s) JSON and save to file (no terminal print)
     episodes_json = [ep.to_dict() for ep in episodes]
-    print(json.dumps(episodes_json, ensure_ascii=False, indent=2))
 
     out_dir = Path(__file__).resolve().parent / "outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -120,9 +158,56 @@ async def main() -> None:
     with out_path.open("w", encoding="utf-8") as f:
         json.dump(episodes_json, f, ensure_ascii=False, indent=2)
     print(f"saved: {out_path}")
+    awe.shutdown()
+    print("shutdown")
 
+    # Diagnostics: show lingering threads and asyncio tasks; try to close HTTP client
+    try:
+        import threading
+        # Enumerate active threads after shutdown (use non-deprecated daemon flag)
+        active_threads = [(t.name, t.daemon, t.ident) for t in threading.enumerate()]
+        print("active_threads:", active_threads)
+    except Exception:
+        pass
+
+    try:
+        loop = asyncio.get_running_loop()
+        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+        if pending:
+            print("pending_asyncio_tasks:", [repr(t) for t in pending])
+    except Exception:
+        pass
+
+    # Close OpenAI/Together HTTP client if present to release network resources
+    try:
+        import inspect
+        client = getattr(rollout, "client", None)
+        if client is not None:
+            close_fn = getattr(client, "aclose", None) or getattr(client, "close", None)
+            if close_fn is not None:
+                if inspect.iscoroutinefunction(close_fn):
+                    await close_fn()
+                else:
+                    result = close_fn()
+                    if inspect.iscoroutine(result):
+                        await result
+            print("rollout_client_closed")
+    except Exception as e:
+        print("rollout_client_close_error:", e)
+
+    # Close LocalChromiumBrowser explicitly (minimal, use provided helpers)
+    try:
+        if hasattr(browser, 'browser') and callable(getattr(browser, 'browser')):
+            # Use the browser method with close action
+            close_action = {"action": {"type": "close", "session_name": "main-session"}}
+            browser.browser(close_action)
+        elif hasattr(browser, 'quit'):
+            browser.quit()
+    except Exception as e:
+        print(f"Error closing browser: {e}")
+    
+    # Force exit the program
+    os._exit(0)
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-

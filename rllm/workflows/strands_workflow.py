@@ -128,13 +128,20 @@ class StrandsWorkflow(Workflow):
             term_reason = TerminationReason.ENV_DONE
             seen_tool_use_ids: set[str] = set()
             verbose = str(os.getenv("RLLM_STRANDS_VERBOSE", "1")).lower() not in ("0", "false", "no")
+            # Track latest observed args per tool use id for streaming logs and RL storage
+            tool_args_by_id: Dict[str, str] = {}
+            tool_args_raw_by_id: Dict[str, Any] = {}
+            tool_step_index_by_id: Dict[str, int] = {}
+            tool_args_snapshot_by_id: Dict[str, str] = {}
+            tool_args_printed_len_by_id: Dict[str, int] = {}
+            tool_result_completed_ids: set[str] = set()
             # Pretty log helpers
             def _log(line: str = "", end: str = "\n") -> None:
                 if verbose:
-                    print(f"========= _log: {line} ==========")
                     print(line, end=end, flush=True)
             def _h(line: str) -> None:
                 _log(f"[STRANDS] {line}")
+            debug_events = str(os.getenv("RLLM_DEBUG_EVENTS", "0")).lower() not in ("0", "false", "no")
 
             # Open session and stream events
             session = await self.session_factory(system_prompt=self.system_prompt, tools=self.tools)
@@ -155,6 +162,8 @@ class StrandsWorkflow(Workflow):
                         typ = (getattr(ev, "type", None) or getattr(ev, "event", "") or "").lower()
 
                     if typ in ("textdelta", "text_delta", "delta", "data"):
+                        if debug_events:
+                            _h(f"event=TextDelta raw={_stringify(ev)[:200]}")
                         txt = _extract_textish(
                             (ev.get("text") if isinstance(ev, dict) else getattr(ev, "text", None))
                             or (ev.get("delta") if isinstance(ev, dict) else getattr(ev, "delta", None))
@@ -168,11 +177,15 @@ class StrandsWorkflow(Workflow):
                             last_text = txt
 
                     elif typ in ("tooluse", "tool_use", "current_tool_use"):
+                        if debug_events:
+                            _h(f"event=ToolUse raw={_stringify(ev)[:200]}")
                         tu = (ev.get("current_tool_use") if isinstance(ev, dict) else None) or ev
-                        args = (tu.get("input") if isinstance(tu, dict) else getattr(tu, "input", {})) or {}
-                        if not args:
-                            # ignore scaffold/placeholder toolUse events
-                            continue
+                        args = (tu.get("input") if isinstance(tu, dict) else getattr(tu, "input", {}))
+                        # Normalize snapshot string for streaming display (handle dict or partial string)
+                        if isinstance(args, (dict, list)):
+                            args_str = json.dumps(args, ensure_ascii=False)
+                        else:
+                            args_str = _stringify(args)
                         if assistant_buffer:
                             # End the streaming line before logging tool use
                             _log()
@@ -184,23 +197,30 @@ class StrandsWorkflow(Workflow):
                             or (tu.get("id") if isinstance(tu, dict) else getattr(tu, "id", None))
                             or ""
                         )
-                        # emit only first meaningful toolUse per id
-                        if tuid in seen_tool_use_ids:
-                            continue
-                        seen_tool_use_ids.add(tuid)
-                        _h(f"toolUse id={tuid} name={name} args={_stringify(args)}")
-                        chat.append({"role": "assistant", "content": f"[toolUse id={tuid}] {name} { _stringify(args) }"})
-                        # Add a structured step for this toolUse
-                        action = {
-                            "type": "tool_use",
-                            "name": name,
-                            "args": args,
-                            "tool_use_id": tuid,
-                        }
-                        step = Step(chat_completions=list(chat), action=action, observation=None, reward=None)
-                        trajectory.steps.append(step)
+                        tool_args_by_id[tuid] = args_str
+                        tool_args_raw_by_id[tuid] = args
+                        # Create a single action step per toolUse id and print a single buffering header
+                        if tuid not in seen_tool_use_ids:
+                            seen_tool_use_ids.add(tuid)
+                            _h(f"toolUse id={tuid} name={name} (buffering args)")
+                            chat.append({"role": "assistant", "content": f"[toolUse id={tuid}] {name} { args_str }"})
+                            action = {
+                                "type": "tool_use",
+                                "name": name,
+                                "args": args,
+                                "tool_use_id": tuid,
+                            }
+                            step = Step(chat_completions=list(chat), action=action, observation=None, reward=None)
+                            trajectory.steps.append(step)
+                            tool_step_index_by_id[tuid] = len(trajectory.steps) - 1
+                            tool_args_snapshot_by_id[tuid] = ""
+                            tool_args_printed_len_by_id[tuid] = 0
+                        # Buffer snapshot only; do not print arg tokens incrementally
+                        tool_args_snapshot_by_id[tuid] = args_str
 
                     elif typ in ("toolresult", "tool_result"):
+                        if debug_events:
+                            _h(f"event=ToolResult raw={_stringify(ev)[:200]}")
                         tuid = (
                             (ev.get("toolUseId") if isinstance(ev, dict) else getattr(ev, "toolUseId", None))
                             or (ev.get("tool_use_id") if isinstance(ev, dict) else getattr(ev, "tool_use_id", None))
@@ -208,7 +228,29 @@ class StrandsWorkflow(Workflow):
                         )
                         status = (ev.get("status") if isinstance(ev, dict) else getattr(ev, "status", None)) or "success"
                         content = ev.get("content") if isinstance(ev, dict) else getattr(ev, "content", None)
+                        # Print consolidated toolUse summary with final args, then the result status
+                        # Emit final args once here to avoid noisy incremental logs
+                        final_args_str = tool_args_by_id.get(tuid, "")
+                        _h(f"toolUse id={tuid} name={tuid and (trajectory.steps[tool_step_index_by_id[tuid]].action.get('name') if tool_step_index_by_id.get(tuid) is not None else name)} final_args={final_args_str}")
                         _h(f"toolResult id={tuid} status={status}")
+                        tool_result_completed_ids.add(tuid)
+                        # Update the previously created tool_use step with final args for RL consumers
+                        try:
+                            idx = tool_step_index_by_id.get(tuid)
+                            if idx is not None and 0 <= idx < len(trajectory.steps):
+                                use_step = trajectory.steps[idx]
+                                # Update action args with the latest raw args
+                                final_args_raw = tool_args_raw_by_id.get(tuid)
+                                if final_args_raw is not None:
+                                    use_step.action["args"] = final_args_raw
+                                # Update ALL steps' assistant toolUse message content to reflect final args
+                                for s in trajectory.steps:
+                                    for msg in s.chat_completions:
+                                        if msg.get("role") == "assistant" and isinstance(msg.get("content"), str) and msg["content"].startswith(f"[toolUse id={tuid}]"):
+                                            tool_name_token = (msg['content'].split('] ', 1)[1].split(' ', 1)[0] if '] ' in msg['content'] else 'tool')
+                                            msg["content"] = f"[toolUse id={tuid}] { tool_name_token } { final_args_str }"
+                        except Exception:
+                            pass
                         chat.append({"role": "user", "content": f"[toolResult id={tuid} status={status}] { _stringify(content) }"})
                         action = {"type": "tool_result", "tool_use_id": tuid, "status": status}
                         observation = _summarize_observation(content)
@@ -220,6 +262,40 @@ class StrandsWorkflow(Workflow):
                             break
 
                     elif typ in ("stop",):
+                        if debug_events:
+                            _h(f"event=Stop raw={_stringify(ev)[:200]}")
+                        # Flush any toolUse entries that never emitted a ToolResult
+                        try:
+                            pending_ids = [pid for pid in seen_tool_use_ids if pid not in tool_result_completed_ids]
+                            for pid in pending_ids:
+                                final_args_str = tool_args_snapshot_by_id.get(pid) or tool_args_by_id.get(pid, "")
+                                if final_args_str:
+                                    tool_name = None
+                                    idx = tool_step_index_by_id.get(pid)
+                                    if idx is not None and 0 <= idx < len(trajectory.steps):
+                                        tool_name = trajectory.steps[idx].action.get("name")
+                                    _h(f"toolUse id={pid} name={tool_name or 'tool'} final_args={final_args_str}")
+                                    # Update the step with best-effort final args
+                                    try:
+                                        if idx is not None and 0 <= idx < len(trajectory.steps):
+                                            use_step = trajectory.steps[idx]
+                                            raw = tool_args_raw_by_id.get(pid)
+                                            if raw is None and isinstance(final_args_str, str) and final_args_str:
+                                                try:
+                                                    raw = json.loads(final_args_str)
+                                                except Exception:
+                                                    raw = final_args_str
+                                            use_step.action["args"] = raw
+                                        # Also update ALL steps' assistant toolUse message content to reflect final args
+                                        for s in trajectory.steps:
+                                            for msg in s.chat_completions:
+                                                if msg.get("role") == "assistant" and isinstance(msg.get("content"), str) and msg["content"].startswith(f"[toolUse id={pid}]"):
+                                                    tool_name_token = (msg['content'].split('] ', 1)[1].split(' ', 1)[0] if '] ' in msg['content'] else 'tool')
+                                                    msg["content"] = f"[toolUse id={pid}] { tool_name_token } { final_args_str }"
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
                         final_text = (
                             (ev.get("final_text") if isinstance(ev, dict) else getattr(ev, "final_text", None))
                             or _extract_textish((ev.get("result") if isinstance(ev, dict) else getattr(ev, "result", None)))
