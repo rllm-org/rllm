@@ -206,7 +206,7 @@ class Workflow(ABC):
                 continue
             attr_value = getattr(self, attr_name)
             if isinstance(attr_value, BaseEnv) and hasattr(attr_value, "reset"):
-                return attr_value.reset(task=task)
+                return attr_value.reset(task=task, uid=uid)
 
         print(f"No environments found to resetin {self.__class__.__name__}")
 

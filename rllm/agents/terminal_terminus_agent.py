@@ -1,10 +1,3 @@
-"""
-Terminal-Bench agent integration for rLLM.
-
-This module provides the TerminalTerminusAgent class which serves as a thin
-interface between rLLM's AgentExecutionEngine and Terminal-Bench environments.
-"""
-
 from typing import Any, Dict, List, Optional
 import copy
 
@@ -12,33 +5,32 @@ from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 
 
 class TerminalTerminusAgent(BaseAgent):
-    """
-    Agent for Terminal-Bench integration.
-    
-    Provides minimal interface between rLLM's AgentExecutionEngine
-    and Terminal-Bench environment. All Terminal-Bench specific logic
-    is handled by TerminalTerminusEnv.
+    """Thin agent wrapper; environment handles Terminal-Bench specifics.
+
+    Maintains a simple alternating chat message history and mirrors raw
+    model responses to ``Action`` objects consumed by the environment.
     """
     
     def __init__(self, **kwargs):
+        """Initialize internal state."""
         self.reset()
         
     def update_from_env(
-        self, 
-        observation: Any, 
-        reward: float, 
-        done: bool, 
-        info: Dict[str, Any], 
-        **kwargs
-    ):
-        """
-        Update agent state from environment observation.
-        
+        self,
+        observation: Any,
+        reward: float,
+        done: bool,
+        info: Dict[str, Any],
+        **kwargs,
+    ) -> None:
+        """Update agent state from an environment transition.
+
         Args:
-            observation: Dict containing prompt from environment
-            reward: Reward signal from environment
-            done: Episode termination flag
-            info: Additional metadata
+            observation: Latest observation dict from the environment.
+            reward: Scalar reward from the previous action.
+            done: Whether the episode has terminated.
+            info: Auxiliary environment info.
+            **kwargs: Unused; reserved for extensions.
         """
         if self._trajectory.steps:
             prior_step = self._trajectory.steps[-1]
@@ -51,41 +43,44 @@ class TerminalTerminusAgent(BaseAgent):
         self.cur_step = Step(observation=observation)
       
     def update_from_model(self, response: str, **kwargs) -> Action:
-        """
-        Update agent state from model response.
-        
+        """Record model response and produce an action.
+
         Args:
-            response: Raw model response (JSON command batch)
-            
+            response: Raw assistant text.
+            **kwargs: Unused; reserved for extensions.
+
         Returns:
-            Action containing the raw response for environment processing
+            Action: Action object whose ``action`` is the raw response.
         """
         self._trajectory.steps.append(self.cur_step)
         
-        # Update Trajectory
         cur_step = self._trajectory.steps[-1]
         cur_step.model_response = response
         cur_step.action = response
         
-        # Update Chat Completions
         self.messages.append({"role": "assistant", "content": response})
         cur_step.chat_completions = copy.deepcopy(self.messages)
         self.step += 1
         return Action(action=response)
     
     def get_current_state(self) -> Optional[Step]:
+        """Return the most recent step in the trajectory.
+
+        Returns:
+            Optional[Step]: Last step if available.
+        """
         assert self._trajectory.steps, "Trajectory should not be empty when get_current_state is called."
         return self._trajectory.steps[-1]
     
-    def reset(self):
+    def reset(self) -> None:
+        """Reset message history and trajectory."""
         self._trajectory = Trajectory()
-        # Terminus has no system prompt
         self.messages = []
         self.step = 0
 
-    
     @property
     def chat_completions(self) -> List[Dict[str, str]]:
+        """OpenAI-style message history consumed by the rollout engine."""
         return self.messages
     
     @property

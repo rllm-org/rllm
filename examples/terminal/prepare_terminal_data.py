@@ -1,15 +1,5 @@
-"""
-Prepare and register Terminal-Bench datasets for rLLM.
-
-This mirrors the structure of examples/swe/prepare_swe_data.py but sources
-tasks via the Terminal-Bench registry (no local registry path required).
-
-Requires: pip install terminal-bench
-"""
-
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import yaml
@@ -22,21 +12,21 @@ def load_terminal_bench_dataset(
     task_ids: Optional[List[str]] = None,
     n_tasks: Optional[int] = None,
     cache_path: Optional[Path] = None,
-    local_registry_path: Optional[Path] = None
+    local_registry_path: Optional[Path] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Load Terminal-Bench dataset and convert to rLLM task format.
-    
+    """Load Terminal-Bench dataset and convert to minimal rLLM task dicts.
+
     Args:
-        dataset_name: Name of Terminal-Bench dataset
-        dataset_version: Version of dataset to load
-        task_ids: Specific task IDs to load
-        n_tasks: Maximum number of tasks to load
-        cache_path: Custom cache directory
-        local_registry_path: Optional local registry.json path to use instead of remote
-        
+        dataset_name: Dataset registry name.
+        dataset_version: Concrete version or "head".
+        task_ids: Optional subset of task IDs to include.
+        n_tasks: Optional cap on number of tasks.
+        cache_path: Optional path for dataset cache.
+        local_registry_path: Optional path to a local registry.
+
     Returns:
-        List of task dictionaries for rLLM consumption
+        List[Dict[str, Any]]: Each dict includes ``task_path``, ``task_id``,
+        and ``instruction``.
     """
     dataset = Dataset(
         name=dataset_name,
@@ -54,11 +44,6 @@ def load_terminal_bench_dataset(
             "task_path": str(task_path),
             "task_id": task_path.name,
             "instruction": task_config["instruction"],
-            "parser": task_config.get("parser", "pytest"),
-            "max_agent_timeout_sec": task_config.get("max_agent_timeout_sec", 1800),
-            "max_test_timeout_sec": task_config.get("max_test_timeout_sec", 120),
-            "disable_asciinema": task_config.get("disable_asciinema", False),
-            "run_tests_in_same_shell": task_config.get("run_tests_in_same_shell", False),
         }
         tasks.append(task_dict)
 
@@ -66,7 +51,18 @@ def load_terminal_bench_dataset(
 
 
 def load_task_config(task_path: Path) -> Dict[str, Any]:
-    """Load and validate task configuration from task.yaml file."""
+    """Load and validate task configuration from task.yaml file.
+
+    Args:
+        task_path: Path to a Terminal-Bench task directory.
+
+    Returns:
+        Dict[str, Any]: Parsed YAML mapping.
+
+    Raises:
+        FileNotFoundError: If ``task.yaml`` is missing.
+        ValueError: If required fields are missing.
+    """
     task_yaml_path = task_path / "task.yaml"
     
     if not task_yaml_path.exists():
@@ -82,17 +78,3 @@ def load_task_config(task_path: Path) -> Dict[str, Any]:
             raise ValueError(f"Missing required field '{field}' in {task_yaml_path}")
     
     return config
-
-if __name__ == "__main__":
-    tasks = load_terminal_bench_dataset(
-        dataset_name="terminal-bench-core",
-        dataset_version="0.1.1",  # or "head" for latest
-    )
-
-    print("\nSummary:")
-    print(f"Num tasks: {len(tasks)}")
-    if len(tasks) > 0:
-        print("Sample entry:")
-        print(json.dumps(tasks[0], indent=2))
-
-

@@ -1,41 +1,38 @@
-"""
-Terminal-Bench environment integration for rLLM.
-
-This module provides the TerminalTerminusEnv class which bridges Terminal-Bench's
-task execution framework with rLLM's reinforcement learning infrastructure.
-"""
-
 import json
-import asyncio
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Tuple, Optional
-import time
-import subprocess
+from typing import Any, Dict, Tuple
 
 from rllm.environments.base.base_env import BaseEnv
+from rllm.integrations.terminal_terminus_1 import RLLMTerminus as Terminus
 
-# Terminal-Bench imports
 from terminal_bench.terminal.terminal import Terminal
 from terminal_bench.terminal.docker_compose_manager import DockerComposeManager
-from rllm.integrations.terminal_terminus_1 import RLLMTerminus as Terminus
-from terminal_bench.agents.terminus_1 import CommandBatchResponse, Command
-from terminal_bench.agents.failure_mode import FailureMode
+from terminal_bench.agents.terminus_1 import CommandBatchResponse
 from terminal_bench.parsers.parser_factory import ParserFactory
 from terminal_bench.parsers.base_parser import UnitTestStatus
 from terminal_bench.handlers.trial_handler import TrialHandler
-from terminal_bench.handlers.asciinema_handler import AsciinemaHandler
 from pydantic import ValidationError
-from terminal_bench.llms.lite_llm import LiteLLM
-
 
 class TerminalTerminusEnv(BaseEnv):
-	"""
-	Environment for Terminal-Bench tasks using Terminus agent logic.
-	
-	Handles Docker container management, tmux sessions, command execution,
-	and test evaluation while providing a clean synchronous interface to rLLM's 
-	AgentExecutionEngine.
+	"""Environment bridging rLLM and Terminal-Bench's Terminus agent.
+
+	Manages Docker/tmux Terminal-Bench sessions, builds prompts, executes
+	command batches, and runs unit tests to compute rewards.
+
+	Args:
+		model_name: LLM model identifier used by Terminus.
+		api_base: Optional base URL for the LLM API.
+		task_path: Path to the Terminal-Bench task directory.
+		instruction: Natural language instruction for the task.
+		task_id: Identifier for the task instance.
+		task: Optional task dictionary overriding individual parameters.
+		max_episodes: Maximum number of steps before forced evaluation.
+		cleanup: Whether to remove Docker artifacts on shutdown.
+		no_rebuild: Skip Docker image rebuilds if True.
+		logging_dir: Optional directory for logs and markers.
+		max_test_timeout_sec: Maximum time to wait for tests to complete.
+		**kwargs: Reserved for future configuration.
 	"""
 	
 	def __init__(
@@ -50,28 +47,10 @@ class TerminalTerminusEnv(BaseEnv):
 		cleanup: bool = True,
 		no_rebuild: bool = False,
 		logging_dir: str = None,
-		enable_token_tracking: bool = True,
-		max_agent_timeout_sec: int = 1800,
 		max_test_timeout_sec: int = 120,
 		**kwargs
 	):
-		"""
-		Initialize Terminal-Bench environment.
-		
-		Args:
-			task_path: Path to task directory (or None if using task dict)
-			instruction: Task instruction text (or None if using task dict)
-			task_id: Unique task identifier
-			task: Task dictionary with task_path, instruction, task_id (optional)
-			model_name: LLM model name for Terminus agent
-			max_episodes: Maximum interaction episodes
-			cleanup: Whether to cleanup containers after execution
-			no_rebuild: Skip Docker image rebuilding
-			logging_dir: Directory for agent logs
-			enable_token_tracking: Track token usage for RL training
-			max_agent_timeout_sec: Maximum timeout for agent actions.
-			max_test_timeout_sec: Maximum timeout for test execution.
-		"""
+		"""Initialize Terminal-Bench environment."""
 		# Handle both task dictionary and individual parameters
 		if task is not None:
 			self.task = task
@@ -91,8 +70,6 @@ class TerminalTerminusEnv(BaseEnv):
 		self.cleanup = cleanup
 		self.no_rebuild = no_rebuild
 		self.logging_dir = Path(logging_dir) if logging_dir else None
-		self.enable_token_tracking = enable_token_tracking
-		self.max_agent_timeout_sec = max_agent_timeout_sec
 		self.max_test_timeout_sec = max_test_timeout_sec
 		
 		# Task configuration (may be provided later via reset(task=...))
@@ -100,7 +77,7 @@ class TerminalTerminusEnv(BaseEnv):
 		self.instruction = instruction
 		self.task_id = task_id
 		
-		# Generate unique session ID for container isolation
+		# Unique session ID
 		self.session_id = f"{self.task_id}_{uuid.uuid4().hex[:8]}"
 		
 		# Terminal-Bench components (initialized in reset)
@@ -114,97 +91,76 @@ class TerminalTerminusEnv(BaseEnv):
 		self.current_episode = 0
 		self.is_initialized = False
 		
-		# Token tracking
-		self.total_input_tokens = 0
-		self.total_output_tokens = 0
-		self.episode_tokens = []
-		
 	def reset(self, task: Dict[str, Any] | None = None, uid: str | None = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+		"""Reset environment and return initial observation.
+
+		Args:
+			task: Optional task dictionary with ``task_path``, ``instruction``, ``task_id``.
+			uid: Rollout identifier to namespace logs and sessions.
+
+		Returns:
+			Tuple[Dict[str, Any], Dict[str, Any]]: Initial observation and info.
 		"""
-		Reset environment and return initial observation.
-		"""
-		# Update task if provided (for MultiTurnWorkflow compatibility)
 		if task is not None:
 			self.task = task
 			self.task_path = Path(task.get("task_path"))
 			self.instruction = task.get("instruction")
 			self.task_id = task.get("task_id", "unknown")
-			# Regenerate session id for isolation per reset
 			self.session_id = f"{self.task_id}_{uuid.uuid4().hex[:8]}"
 
-		# Validate task_path is set
 		if not self.task_path:
 			raise ValueError("TerminalTerminusEnv.reset requires a task with 'task_path'")
 
-		# Initialize trial handler for task management
-		# Always provide an output path to avoid environment variable issues
+		# Initialize trial handler
 		output_path = self.logging_dir or Path("/tmp/rllm_terminal_bench_logs")
 		output_path.mkdir(parents=True, exist_ok=True)
-		
 		self.trial_handler = TrialHandler(
 			trial_name=f"{self.task_id}.{uid}.rllm-run",
 			input_path=self.task_path,
 			output_path=output_path
 		)
 		
-		# Initialize parser for test result evaluation and propagate per-task timeouts
 		task_config = self.trial_handler.task
 		self.parser = ParserFactory.get_parser(task_config.parser_name)
-		
-		self.max_agent_timeout_sec = task_config.max_agent_timeout_sec
 		self.max_test_timeout_sec = task_config.max_test_timeout_sec
-
-		# Initialize terminal synchronously
 		self._initialize_terminal_sync()
-		
-		# Initialize Terminus agent
 		self.terminus_agent = Terminus(
 			model_name=self.model_name,
 			max_episodes=self.max_episodes,
 			api_base=self.api_base
 		)
-		
-		# Build initial prompt
 		initial_prompt = self._build_initial_prompt_sync()
 		
-		# Reset episode and token counters
 		self.current_episode = 0
-		self.total_input_tokens = 0
-		self.total_output_tokens = 0
-		self.episode_tokens = []
 		self.is_initialized = True
-
-		# Initialize a LiteLLM instance for exact token counting parity
-		self._token_llm = LiteLLM(model_name=self.model_name)
 
 		observation = {
 			"prompt": initial_prompt,
 			"type": "initial"
 		}
-		
 		info = {
 			"task_id": self.task_id,
 			"episode": self.current_episode,
 			"max_episodes": self.max_episodes,
 			"instruction": self.instruction
 		}
-		
-		print(f"observation: {observation}")
-		print(f"info: {info}")
-		
 		return observation, info
 
 	def step(self, action) -> Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
-		"""
-		Execute agent action and return environment response.
+		"""Execute agent action and return environment response.
+
+		Args:
+			action: Raw string or object with ``action`` attribute containing the
+				JSON command batch produced by the agent.
+
+		Returns:
+			Tuple[observation, reward, done, info].
 		"""
 		
-		print(f"action: {action}")
-
 		if not self.is_initialized:
 			raise RuntimeError("Environment not initialized. Call reset() first.")
 		
-		# Ensure action is a raw JSON string (extract from Action-like object if provided)
+		# Ensure action is a raw JSON string
 		if isinstance(action, str):
 			action_str = action
 		elif hasattr(action, "action"):
@@ -212,60 +168,38 @@ class TerminalTerminusEnv(BaseEnv):
 		else:
 			action_str = str(action)
 
-		# Track output tokens (exact, matching TB semantics)
-		if self.enable_token_tracking:
-			self.total_output_tokens += self._token_llm.count_tokens([
-				{"role": "assistant", "content": action_str}
-			])
-			
-		
 		# Parse model response into command batch
 		try:
 			parsed_response = CommandBatchResponse.model_validate_json(action_str)
 		except (json.JSONDecodeError, ValidationError) as e:
-			observation, reward, done, info = self._handle_parse_error_sync(str(e))
-			# If we are done due to episode cap, run tests like TB harness does
-			if done:
-				reward, _terminated = self._evaluate_completion_sync()
-				observation = {"prompt": "", "type": "terminal"}
-				info["is_task_complete"] = False
-			return observation, reward, done, info
+			# End trajectory if we can't parse the response
+			reward, _ = self._evaluate_completion_sync()
+			observation = {"prompt": "", "type": "terminal"}
+			info = {
+				"task_id": self.task_id,
+				"episode": self.current_episode,
+				"parse_error": True,
+				"error_message": str(e),
+				"is_task_complete": False
+			}
+			return observation, reward, True, info
 		
-		# Record interaction for debugging
 		self._record_asciinema_marker_sync(parsed_response.model_dump_json())
-		
-		# Execute commands in terminal
-		timeout_occurred, terminal_output = self._execute_commands_sync(
+		timeout_occurred, terminal_output = self._execute_commands(
 			parsed_response.commands
 		)
 		
-		# Determine whether to run tests now
-		truncated = self._check_episode_limit()
-		should_run_tests = parsed_response.is_task_complete or truncated
-
+		# Determine whether to run tests now (on "done" or max episodes)
+		should_run_tests = parsed_response.is_task_complete or self._check_episode_limit()
 		if should_run_tests:
-			reward, terminated = self._evaluate_completion_sync()
+			reward, _ = self._evaluate_completion_sync()
 			done = True
 		else:
 			reward = 0.0
-			terminated = False
 			done = False
 		
-		# Increment episode counter
+
 		self.current_episode += 1
-		
-		# Track input tokens for next prompt (exact, matching TB semantics)
-		if self.enable_token_tracking and not done:
-			self.total_input_tokens += self._token_llm.count_tokens([
-				{"role": "user", "content": terminal_output}
-			])
-		
-		# Store episode token counts
-		self.episode_tokens.append({
-			"episode": self.current_episode,
-			"input_tokens": self.total_input_tokens,
-			"output_tokens": self.total_output_tokens
-		})
 		
 		# Prepare next observation
 		if done:
@@ -275,31 +209,27 @@ class TerminalTerminusEnv(BaseEnv):
 				"prompt": terminal_output,
 				"type": "timeout" if timeout_occurred else "continuation"
 			}
-		
 		info = {
 			"task_id": self.task_id,
 			"episode": self.current_episode,
 			"max_episodes": self.max_episodes,
 			"timeout_occurred": timeout_occurred,
-			"is_task_complete": parsed_response.is_task_complete,
-			"total_input_tokens": self.total_input_tokens,
-			"total_output_tokens": self.total_output_tokens,
-			"episode_tokens": self.episode_tokens[-1] if self.episode_tokens else None
+			"is_task_complete": parsed_response.is_task_complete
 		}
-		
 		return observation, reward, done, info
 
 	def close(self):
-		"""
-		Clean up terminal and container resources.
-		"""
-		# Rely on Terminal.stop() -> DockerComposeManager.stop() to perform cleanup
+		"""Clean up terminal and container resources."""
 		if self.terminal:
 			self.terminal.stop()
-		
+
 	@staticmethod
 	def from_dict(env_args: Dict[str, Any]) -> "TerminalTerminusEnv":
-		"""Create environment instance from dictionary configuration."""
+		"""Create environment instance from dictionary configuration.
+
+		If top-level task keys are present (``task_path``, ``instruction``,
+		``task_id``), they are collected into a nested ``task`` dict.
+		"""
 		# Handle case where task data is passed at the top level
 		if "task_path" in env_args and "instruction" in env_args and "task_id" in env_args:
 			# Create task dict from individual parameters
@@ -310,17 +240,12 @@ class TerminalTerminusEnv(BaseEnv):
 			}
 			env_args["task"] = task
 		return TerminalTerminusEnv(**env_args)
-	 
+
 	@staticmethod
 	def is_multithread_safe() -> bool:
-		"""
-		Terminal-Bench environment is thread-safe using unique session IDs.
-		Each environment instance gets isolated Docker containers.
-		"""
+		"""Thread-safe via per-instance isolated containers."""
 		return True
-	 
-	# Private synchronous helper methods
-	 
+
 	def _initialize_terminal_sync(self):
 		"""Initialize Docker container and tmux session synchronously."""
 		# Create terminal interface
@@ -354,34 +279,32 @@ class TerminalTerminusEnv(BaseEnv):
 			terminal_state
 		)
 
-	def _execute_commands_sync(self, commands) -> Tuple[bool, str]:
+	def _execute_commands(self, commands) -> Tuple[bool, str]:
 		"""Execute command batch synchronously."""
-		# Cap timeout
-		for command in commands:
-			command.timeout_sec = min(command.timeout_sec, self.max_agent_timeout_sec)
 		return self.terminus_agent.execute_commands(commands, self.session)
 	 
 	def _record_asciinema_marker_sync(self, marker_text: str):
 		"""Record interaction marker for debugging synchronously."""
-		if hasattr(self.session, 'get_asciinema_timestamp'):
+		if self.logging_dir and hasattr(self.session, 'get_asciinema_timestamp'):
 			current_timestamp = self.session.get_asciinema_timestamp()
-			# Log marker with timestamp
-			if self.logging_dir:
-				marker_file = self.logging_dir / f"{self.task_id}_markers.jsonl"
-				with open(marker_file, 'a') as f:
-					json.dump({
-						"timestamp": current_timestamp,
-						"episode": self.current_episode,
-						"marker": marker_text
-					}, f)
-					f.write('\n')
+			marker_file = self.logging_dir / f"{self.task_id}_markers.jsonl"
+			with open(marker_file, 'a') as f:
+				json.dump({
+					"timestamp": current_timestamp,
+					"episode": self.current_episode,
+					"marker": marker_text
+				}, f)
+				f.write('\n')
 	 
 	def _evaluate_completion_sync(self) -> Tuple[float, bool]:
-		"""
-		Evaluate task completion by running tests synchronously.
-		
+		"""Evaluate task completion by running tests synchronously.
+
+		Copies test artifacts into the container, executes the task's test script,
+		parses the results, and returns a binary reward.
+
 		Returns:
-			Tuple of (reward, done) where reward is 1.0 for success, 0.0 for failure
+			Tuple[float, bool]: ``(reward, done)`` where reward is 1.0 if all tests
+			pass, else 0.0; ``done`` is always True.
 		"""
 		# Ensure test artifacts are copied into the container under /tests
 		paths = [self.trial_handler.task_paths.run_tests_path]
@@ -423,44 +346,10 @@ class TerminalTerminusEnv(BaseEnv):
 			else:
 				reward = 0.0
 
-		except Exception as e:
-			print(f"Test execution failed: {e}")
+		except Exception:
 			reward = 0.0
 
-		return reward, True  # Always done after evaluation
-	 
-	def _handle_parse_error_sync(self, error_msg: str) -> Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
-		"""Handle JSON parsing errors from model response."""
-		# Format error as continuation prompt so agent can recover
-		error_prompt = (
-			f"Error parsing your response: {error_msg}\n\n"
-			f"Please provide a valid JSON response following this schema:\n"
-			f"{self.terminus_agent._response_schema}\n\n"
-			f"Remember to include all required fields: state_analysis, explanation, commands, and is_task_complete."
-		)
-		
-		observation = {"prompt": error_prompt, "type": "error"}
-		
-		reward = 0.0
-		self.current_episode += 1  # Count this as an episode
-		done = self._check_episode_limit()
-
-		# Track input tokens for the error prompt (exact parity)
-		if self.enable_token_tracking and not done:
-			self.total_input_tokens += self._token_llm.count_tokens([
-				{"role": "user", "content": error_prompt}
-			])
-		
-		info = {
-			"task_id": self.task_id,
-			"episode": self.current_episode,
-			"parse_error": True,
-			"error_message": error_msg,
-			"total_input_tokens": self.total_input_tokens,
-			"total_output_tokens": self.total_output_tokens
-		}
-		
-		return observation, reward, done, info
+		return reward, True
 
 	def _check_episode_limit(self) -> bool:
 		"""Check if episode limit reached."""
