@@ -2,7 +2,7 @@ import asyncio
 import os
 
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
-from rllm.engine.rollout.terminal_litellm_engine import TerminalLiteLLMEngine
+from rllm.integrations.terminal_terminus_1 import TerminalLiteLLMEngine
 from rllm.workflows.terminal_workflow import TerminalWorkflow
 from rllm.agents.terminal_terminus_agent import TerminalTerminusAgent
 from rllm.environments.terminal.terminal_terminus import TerminalTerminusEnv
