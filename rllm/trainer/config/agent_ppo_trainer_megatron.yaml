@@ -53,9 +53,19 @@ actor_rollout_ref:
 # Megatron strategy for critic
 critic:
   strategy: megatron
+  model:
+    path: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B  # Model path for critic
+    tokenizer_path: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B  # Tokenizer path for critic
+    trust_remote_code: False  # Whether to trust remote code when loading model
+    external_lib: null  # External library for custom models
+    override_config: {}  # Override model configuration
   ppo_mini_batch_size: 64  # Mini batch size for critic
   ppo_micro_batch_size_per_gpu: 1  # Correct field name for critic
   rollout_n: 1  # Number of rollouts (default to 1 for critic)
+  optim:
+    lr: 1e-5  # Learning rate for critic optimizer
+    weight_decay: 0.1  # Weight decay for critic optimizer
+    optim_cls: adam  # Optimizer class (adam, sgd, etc.)
   megatron:
     tensor_model_parallel_size: 1
     pipeline_model_parallel_size: 1
