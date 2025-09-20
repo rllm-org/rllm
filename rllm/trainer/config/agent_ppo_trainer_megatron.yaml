@@ -35,6 +35,7 @@ actor_rollout_ref:
       sequence_parallel: True
       use_distributed_optimizer: True
       seed: 42
+      use_mbridge: False  # Memory bridge for communication optimization
 
   # Megatron strategy for reference model
   ref:
@@ -47,6 +48,7 @@ actor_rollout_ref:
       expert_model_parallel_size: 1
       context_parallel_size: 1  # Added missing field
       param_offload: True  # Save memory
+      use_mbridge: False  # Memory bridge for communication optimization
 
 # Megatron strategy for critic
 critic:
@@ -64,6 +66,7 @@ critic:
     seed: 42  # Added missing seed field
     param_offload: False  # Whether to offload parameters to CPU
     optimizer_offload: False  # Whether to offload optimizer states to CPU
+    use_mbridge: False  # Memory bridge for communication optimization
 
 # Include rLLM agent configuration
 data:
