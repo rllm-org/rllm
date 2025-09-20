@@ -1,5 +1,13 @@
 #!/bin/bash
 # Megatron training script for DeepScaler with DatasetRegistry
+set -x
+
+# vLLM environment variables for optimal performance
+export VLLM_ATTENTION_BACKEND=FLASH_ATTN
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:False"
+export VLLM_USE_V1=1
+export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 
 # Model configuration
 MODEL_PATH=deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B  # DeepScaler model
@@ -19,10 +27,12 @@ PP=1  # Pipeline Parallel
 EP=1  # Expert Parallel (increase for MoE models)
 
 # Run DeepScaler training with Megatron
-# Uses DatasetRegistry - no need to specify data paths
+# Override strategy parameters directly instead of using config-name
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-4,5} \
-python -m rllm.examples.deepscaler.train_deepscaler_megatron \
-    --config-name agent_ppo_trainer_megatron \
+python -m examples.deepscaler.train_deepscaler_megatron \
+    actor_rollout_ref.actor.strategy=megatron \
+    actor_rollout_ref.ref.strategy=megatron \
+    critic.strategy=megatron \
     trainer.nnodes=$NNODES \
     trainer.n_gpus_per_node=$GPUS_PER_NODE \
     actor_rollout_ref.model.path=$MODEL_PATH \

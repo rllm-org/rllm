@@ -1,22 +1,37 @@
-# Minimal Megatron configuration for agent PPO training
+# Megatron configuration for agent PPO training
+# This config extends agent_ppo_trainer with Megatron-specific settings
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
 
 defaults:
-  - agent_ppo_trainer
+  - ppo_trainer  # Load base ppo_trainer directly from VERL
   - _self_
 
-# Just change strategy to megatron
+# Override with agent-specific settings
 actor_rollout_ref:
+  rollout:
+    mode: async # only async is supported
+    agent:
+      num_workers: 0 # we bypass the agent loop
+    val_kwargs:
+      do_sample: True # if do_sample is False, temperature is overridden to 0.0
+
+  # Megatron strategy for actor
   actor:
     strategy: megatron
     megatron:
       # Basic parallelism (adjust based on your GPU count)
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
-
-      # For MoE models only (set > 1 if using MOE)
       expert_model_parallel_size: 1
       expert_tensor_parallel_size: null
+      sequence_parallel: True
+      use_distributed_optimizer: True
+      seed: 42
 
+  # Megatron strategy for reference model
   ref:
     strategy: megatron
     megatron:
@@ -25,9 +40,53 @@ actor_rollout_ref:
       expert_model_parallel_size: 1
       param_offload: True  # Save memory
 
+# Megatron strategy for critic
 critic:
   strategy: megatron
   megatron:
     tensor_model_parallel_size: 1
     pipeline_model_parallel_size: 1
     expert_model_parallel_size: 1
+
+# Include rLLM agent configuration
+data:
+  gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
+
+rllm:
+  agent:
+    name: miniwobagent
+    max_steps: 20
+    trajectory_timeout: null
+    overlong_filter: False
+    agent_args: {}
+    engine_args: {}
+  env:
+    name: custom
+    env_args: {}
+  workflow:
+    use_workflow: False
+    name: single_turn_workflow
+    workflow_args:
+      max_prompt_length: ${data.max_prompt_length}
+      max_response_length: ${data.max_response_length}
+      timeout: 1e6
+      gamma: 0.0 # no discounting
+      reward_bonus_coeff: 0.0 # no reward shaping
+      accumulate_response_length: null
+    n_parallel_tasks: 256
+    retry_limit: 3
+  disable_thinking: False
+  mask_truncated_samples: False
+  stepwise_advantage:
+    enable: False
+    mode: broadcast # [broadcast, per_step]
+    normalize_by_steps: False
+  compact_filtering:
+    enable: False
+    mask_max_prompt_length_exceeded: True
+    mask_max_response_length_exceeded: True
+    mask_max_turns_exceeded: True
+    mask_timeout: True
+  rejection_sample:
+    enable: False
+    multiplier: 1
