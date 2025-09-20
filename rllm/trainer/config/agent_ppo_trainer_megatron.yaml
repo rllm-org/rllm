@@ -1,0 +1,33 @@
+# Minimal Megatron configuration for agent PPO training
+
+defaults:
+  - agent_ppo_trainer
+  - _self_
+
+# Just change strategy to megatron
+actor_rollout_ref:
+  actor:
+    strategy: megatron
+    megatron:
+      # Basic parallelism (adjust based on your GPU count)
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+
+      # For MoE models only (set > 1 if using MOE)
+      expert_model_parallel_size: 1
+      expert_tensor_parallel_size: null
+
+  ref:
+    strategy: megatron
+    megatron:
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      param_offload: True  # Save memory
+
+critic:
+  strategy: megatron
+  megatron:
+    tensor_model_parallel_size: 1
+    pipeline_model_parallel_size: 1
+    expert_model_parallel_size: 1
