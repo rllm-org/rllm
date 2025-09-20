@@ -19,7 +19,7 @@ def main(config):
         agent_args={},
         env_args=env_args,
         env_class=SingleTurnEnvironment,
-        config=config,
+        config=confibg,
         train_dataset=train_dataset,
         val_dataset=test_dataset,
     )
