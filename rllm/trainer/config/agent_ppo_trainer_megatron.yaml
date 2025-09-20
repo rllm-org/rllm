@@ -13,6 +13,7 @@ defaults:
 actor_rollout_ref:
   rollout:
     mode: async # only async is supported
+    log_prob_micro_batch_size_per_gpu: 1  # Added missing rollout micro batch size
     agent:
       num_workers: 0 # we bypass the agent loop
     val_kwargs:
@@ -37,6 +38,7 @@ actor_rollout_ref:
   # Megatron strategy for reference model
   ref:
     strategy: megatron
+    log_prob_micro_batch_size_per_gpu: 1  # Added for reference model
     megatron:
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
