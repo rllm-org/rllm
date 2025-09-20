@@ -11,12 +11,24 @@ defaults:
 
 # Override with agent-specific settings
 actor_rollout_ref:
+  # Set micro batch sizes for megatron
+  actor:
+    ppo_micro_batch_size_per_gpu: 1  # Required for megatron
+
   rollout:
     mode: async # only async is supported
+    log_prob_micro_batch_size_per_gpu: 1  # Required for rollout
     agent:
       num_workers: 0 # we bypass the agent loop
     val_kwargs:
       do_sample: True # if do_sample is False, temperature is overridden to 0.0
+
+  ref:
+    log_prob_micro_batch_size_per_gpu: 1  # Required for reference model
+
+# Critic micro batch size
+critic:
+  ppo_micro_batch_size_per_gpu: 1  # Required for megatron critic
 
 # Include rLLM agent configuration
 data:
