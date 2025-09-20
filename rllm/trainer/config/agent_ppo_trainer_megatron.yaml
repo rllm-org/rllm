@@ -11,6 +11,10 @@ defaults:
 
 # Override with agent-specific settings
 actor_rollout_ref:
+  # Override the default model path from ppo_megatron_trainer
+  model:
+    path: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B  # Use this model instead of ~/models/deepseek-llm-7b-chat
+
   # Set micro batch sizes for megatron
   actor:
     ppo_micro_batch_size_per_gpu: 1  # Required for megatron
@@ -26,9 +30,12 @@ actor_rollout_ref:
   ref:
     log_prob_micro_batch_size_per_gpu: 1  # Required for reference model
 
-# Critic micro batch size
+# Critic configuration
 critic:
   ppo_micro_batch_size_per_gpu: 1  # Required for megatron critic
+  model:
+    path: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B  # Use same model as actor
+    tokenizer_path: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B  # Tokenizer path
 
 # Include rLLM agent configuration
 data:
