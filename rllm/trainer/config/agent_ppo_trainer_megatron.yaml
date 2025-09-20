@@ -22,12 +22,13 @@ actor_rollout_ref:
   # Megatron strategy for actor
   actor:
     strategy: megatron
-    ppo_micro_batch_size_per_gpu: 1  
+    ppo_micro_batch_size_per_gpu: 1
     ppo_mini_batch_size: 64  # Mini batch size for PPO
     megatron:
       # Basic parallelism (adjust based on your GPU count)
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
+      virtual_pipeline_model_parallel_size: null  # Virtual pipeline stages
       expert_model_parallel_size: 1
       expert_tensor_parallel_size: null
       context_parallel_size: 1  # Added missing field
@@ -42,6 +43,7 @@ actor_rollout_ref:
     megatron:
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
+      virtual_pipeline_model_parallel_size: null  # Virtual pipeline stages
       expert_model_parallel_size: 1
       context_parallel_size: 1  # Added missing field
       param_offload: True  # Save memory
@@ -54,6 +56,7 @@ critic:
   megatron:
     tensor_model_parallel_size: 1
     pipeline_model_parallel_size: 1
+    virtual_pipeline_model_parallel_size: null  # Virtual pipeline stages
     expert_model_parallel_size: 1
     context_parallel_size: 1  # Added missing field
 
