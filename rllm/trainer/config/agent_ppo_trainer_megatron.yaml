@@ -49,6 +49,7 @@ actor_rollout_ref:
 # Megatron strategy for critic
 critic:
   strategy: megatron
+  micro_batch_size_per_gpu: 1  # Added missing critic micro batch size
   megatron:
     tensor_model_parallel_size: 1
     pipeline_model_parallel_size: 1
