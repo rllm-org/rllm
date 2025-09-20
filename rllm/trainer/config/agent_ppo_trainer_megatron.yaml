@@ -53,13 +53,17 @@ critic:
   strategy: megatron
   ppo_mini_batch_size: 64  # Mini batch size for critic
   ppo_micro_batch_size_per_gpu: 1  # Correct field name for critic
+  rollout_n: 1  # Number of rollouts (default to 1 for critic)
   megatron:
     tensor_model_parallel_size: 1
     pipeline_model_parallel_size: 1
     virtual_pipeline_model_parallel_size: null  # Virtual pipeline stages
     expert_model_parallel_size: 1
+    expert_tensor_parallel_size: null  # Added missing field
     context_parallel_size: 1  # Added missing field
     seed: 42  # Added missing seed field
+    param_offload: False  # Whether to offload parameters to CPU
+    optimizer_offload: False  # Whether to offload optimizer states to CPU
 
 # Include rLLM agent configuration
 data:
