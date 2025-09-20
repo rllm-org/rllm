@@ -59,6 +59,7 @@ critic:
     virtual_pipeline_model_parallel_size: null  # Virtual pipeline stages
     expert_model_parallel_size: 1
     context_parallel_size: 1  # Added missing field
+    seed: 42  # Added missing seed field
 
 # Include rLLM agent configuration
 data:
