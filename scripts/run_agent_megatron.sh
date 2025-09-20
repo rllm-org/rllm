@@ -8,7 +8,6 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:False"
 export VLLM_USE_V1=1
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
-export PYTHONPATH=/home/ubuntu/test/rllm/Megatron-LM:$PYTHONPATH
 
 # Model configuration
 MODEL_PATH=deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B  # DeepScaler model
