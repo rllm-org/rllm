@@ -14,14 +14,21 @@ actor_rollout_ref:
   # Override the default model path from ppo_megatron_trainer
   model:
     path: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B  # Use this model instead of ~/models/deepseek-llm-7b-chat
+    enable_gradient_checkpointing: True  # Save GPU memory by recomputing activations
 
   # Set micro batch sizes for megatron
   actor:
     ppo_micro_batch_size_per_gpu: 1  # Required for megatron
+    megatron:
+      param_offload: True  # Offload parameters to CPU to save GPU memory
+      grad_offload: False  # Keep gradients on GPU for speed
+      optimizer_offload: False  # Keep optimizer on GPU
 
   rollout:
     mode: async # only async is supported
     log_prob_micro_batch_size_per_gpu: 1  # Required for rollout
+    max_model_len: 4096  # Reduce max sequence length to save memory (default is often 8192+)
+    gpu_memory_utilization: 0.8  # Use only 80% of GPU memory for safety
     agent:
       num_workers: 0 # we bypass the agent loop
     val_kwargs:
@@ -29,6 +36,8 @@ actor_rollout_ref:
 
   ref:
     log_prob_micro_batch_size_per_gpu: 1  # Required for reference model
+    megatron:
+      param_offload: True  # Offload reference model to CPU (not used during training)
 
 # Critic configuration
 critic:
@@ -36,6 +45,17 @@ critic:
   model:
     path: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B  # Use same model as actor
     tokenizer_path: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B  # Tokenizer path
+    enable_gradient_checkpointing: True  # Save memory for critic
+  megatron:
+    param_offload: False  # Keep critic on GPU for training
+    optimizer_offload: True  # Offload optimizer states to save memory
+
+# Data configuration - reduce batch sizes
+data:
+  gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
+  train_batch_size: 16  # Reduce from default (often 128) to save memory
+  max_prompt_length: 1024  # Reduce max prompt length
+  max_response_length: 2048  # Reduce max response length
 
 # Include rLLM agent configuration
 data:
