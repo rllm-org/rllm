@@ -28,8 +28,8 @@ actor_rollout_ref:
   rollout:
     mode: async # only async is supported
     log_prob_micro_batch_size_per_gpu: 1  # Required for rollout
-    max_model_len: 512  # Drastically reduced for testing
-    gpu_memory_utilization: 0.3  # Only use 30% of GPU memory
+    max_model_len: 32  # Drastically reduced for testing
+    gpu_memory_utilization: 0.01  # Only use 30% of GPU memory
     agent:
       num_workers: 0 # we bypass the agent loop
     val_kwargs:
