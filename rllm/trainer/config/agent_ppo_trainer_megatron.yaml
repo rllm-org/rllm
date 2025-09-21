@@ -32,8 +32,8 @@ actor_rollout_ref:
   rollout:
     mode: async # only async is supported
     log_prob_micro_batch_size_per_gpu: 1  # Required for rollout
-    max_model_len: 64  # Reduced to save memory
-    max_num_batched_tokens: 64  # Reduced to save memory
+    max_model_len: 1024  # Total context for prompts + responses
+    max_num_batched_tokens: 1024  # Match max_model_len
     gpu_memory_utilization: 0.1  # 10% of GPU memory for vLLM (~8 GiB per GPU)
     enforce_eager: True  # Disable CUDA graphs completely
     max_num_seqs: 1  # Process only 1 sequence at a time
@@ -64,8 +64,8 @@ critic:
 data:
   gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
   train_batch_size: 1  # With 2 GPUs and TP=2, DP=1 so minimum is 1
-  max_prompt_length: 32  # Reduced to save memory
-  max_response_length: 32  # Reduced to save memory
+  max_prompt_length: 512  # Increased to handle actual prompts
+  max_response_length: 512  # Increased for reasonable responses
 
 # Include rLLM agent configuration
 
