@@ -10,7 +10,7 @@ export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 
 # Model configuration
-MODEL_PATH=deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B  # DeepScaler model
+MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"  # DeepScaler model
 
 # GPU selection (optional - comment out to use all GPUs)
 # export CUDA_VISIBLE_DEVICES=4,5  # Use only GPU 4 and 5
