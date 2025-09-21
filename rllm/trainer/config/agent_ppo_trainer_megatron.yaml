@@ -73,7 +73,7 @@ rllm:
   agent:
     name: testagent
     max_steps: 20
-    trajectory_timeout: nullch
+    trajectory_timeout: null
     overlong_filter: False
     agent_args: {}
     engine_args: {}
