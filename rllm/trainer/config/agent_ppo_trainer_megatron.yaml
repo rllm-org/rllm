@@ -58,8 +58,6 @@ data:
   max_response_length: 2048  # Reduce max response length
 
 # Include rLLM agent configuration
-data:
-  gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
 
 rllm:
   agent:
