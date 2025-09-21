@@ -19,7 +19,7 @@ actor_rollout_ref:
   # Set micro batch sizes for megatron
   actor:
     ppo_micro_batch_size_per_gpu: 1  
-    ppo_mini_batch_size: 2  # Must match train_batch_size for DP=2
+    ppo_mini_batch_size: 1  # With DP=1, minimum is 1
     megatron:
       param_offload: True  # Offload parameters to CPU to save GPU memory
       grad_offload: True  # Also offload gradients to save more memory
@@ -30,7 +30,7 @@ actor_rollout_ref:
     log_prob_micro_batch_size_per_gpu: 1  # Required for rollout
     max_model_len: 64  # Reduced to save memory
     max_num_batched_tokens: 64  # Reduced to save memory
-    gpu_memory_utilization: 0.01  # 1% of GPU memory for vLLM (~0.8 GiB per GPU)
+    gpu_memory_utilization: 0.1  # 10% of GPU memory for vLLM (~8 GiB per GPU)
     enforce_eager: True  # Disable CUDA graphs completely
     max_num_seqs: 1  # Process only 1 sequence at a time
     # tensor_model_parallel_size set via bash script (TP=2)
@@ -47,7 +47,7 @@ actor_rollout_ref:
 # Critic configuration
 critic:
   ppo_micro_batch_size_per_gpu: 1  # Absolute minimum per GPU
-  ppo_mini_batch_size: 2  # Must match train_batch_size for DP=2
+  ppo_mini_batch_size: 1  # With DP=1, minimum is 1
   model:
     path: Qwen/Qwen2.5-0.5B-Instruct  # Smallest supported model (500M params)
     tokenizer_path: Qwen/Qwen2.5-0.5B-Instruct  # Qwen tokenizer
@@ -59,7 +59,7 @@ critic:
 # Data configuration - reduce batch sizes
 data:
   gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
-  train_batch_size: 2  # Minimum for DP=2 (each data parallel rank needs at least 1 sample)
+  train_batch_size: 1  # With 2 GPUs and TP=2, DP=1 so minimum is 1
   max_prompt_length: 32  # Reduced to save memory
   max_response_length: 32  # Reduced to save memory
 
