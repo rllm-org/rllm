@@ -30,7 +30,7 @@ GPUS_PER_NODE=4  # Use 4 GPUs to distribute memory load
 # Parallelism settings
 TP=2  # Tensor parallelism across 2 GPUs (14 attention heads / 2 = 7)
 PP=2  # Pipeline parallel across 2 stages for better memory distribution
-nEP=1  # Expert Parallel (increase for MoE models)
+EP=1  # Expert Parallel (increase for MoE models)
 
 # Run DeepScaler training with Megatron
 # Override strategy parameters directly instead of using config-name
