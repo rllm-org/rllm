@@ -18,7 +18,7 @@ actor_rollout_ref:
 
   # Set micro batch sizes for megatron
   actor:
-    ppo_micro_batch_size_per_gpu: 1  # Absolute minimum per GPU
+    ppo_micro_batch_size_per_gpu: 1  
     ppo_mini_batch_size: 2  # Must match train_batch_size for DP=2
     megatron:
       param_offload: True  # Offload parameters to CPU to save GPU memory
