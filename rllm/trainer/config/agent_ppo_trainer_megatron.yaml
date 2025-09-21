@@ -13,7 +13,7 @@ defaults:
 actor_rollout_ref:
   # Override the default model path from ppo_megatron_trainer
   model:
-    path: gpt2  # Use tiny GPT-2 (124M) for testing to avoid OOM
+    path: Qwen/Qwen2.5-0.5B-Instruct  # Smallest supported model (500M params)
     enable_gradient_checkpointing: True  # Save GPU memory by recomputing activations
 
   # Set micro batch sizes for megatron
@@ -45,8 +45,8 @@ critic:
   ppo_micro_batch_size_per_gpu: 1  # Absolute minimum per GPU
   ppo_mini_batch_size: 1  # Absolute minimum to match actor
   model:
-    path: gpt2  # Use tiny GPT-2 (124M) for testing
-    tokenizer_path: gpt2  # GPT-2 tokenizer
+    path: Qwen/Qwen2.5-0.5B-Instruct  # Smallest supported model (500M params)
+    tokenizer_path: Qwen/Qwen2.5-0.5B-Instruct  # Qwen tokenizer
     enable_gradient_checkpointing: True  # Save memory for critic
   megatron:
     param_offload: True  # Also offload critic params to save memory

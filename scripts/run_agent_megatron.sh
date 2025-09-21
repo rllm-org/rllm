@@ -15,7 +15,8 @@ export TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"  # Optimize for specific GPU archi
 
 # Model configuration
 # MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"  # Original DeepScaler model (1.5B params)
-MODEL_PATH="gpt2"  # Using tiny GPT-2 (124M params) for testing to avoid OOM
+# MODEL_PATH="gpt2"  # GPT-2 not supported by Megatron
+MODEL_PATH="Qwen/Qwen2.5-0.5B-Instruct"  # Smallest supported model (500M params)
 
 # GPU selection (optional - comment out to use all GPUs)
 # export CUDA_VISIBLE_DEVICES=4,5  # Use only GPU 4 and 5
