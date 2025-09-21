@@ -18,8 +18,8 @@ actor_rollout_ref:
 
   # Set micro batch sizes for megatron
   actor:
-    ppo_micro_batch_size_per_gpu: 1  # Required for megatron
-    ppo_mini_batch_size: 4  # Reduced to save memory
+    ppo_micro_batch_size_per_gpu: 1  # Absolute minimum per GPU
+    ppo_mini_batch_size: 1  # Absolute minimum for PPO updates
     megatron:
       param_offload: True  # Offload parameters to CPU to save GPU memory
       grad_offload: True  # Also offload gradients to save more memory
@@ -42,8 +42,8 @@ actor_rollout_ref:
 
 # Critic configuration
 critic:
-  ppo_micro_batch_size_per_gpu: 1  # Required for megatron critic
-  ppo_mini_batch_size: 4  # Match actor's mini batch size
+  ppo_micro_batch_size_per_gpu: 1  # Absolute minimum per GPU
+  ppo_mini_batch_size: 1  # Absolute minimum to match actor
   model:
     path: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B  # Use same model as actor
     tokenizer_path: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B  # Tokenizer path
@@ -55,7 +55,7 @@ critic:
 # Data configuration - reduce batch sizes
 data:
   gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
-  train_batch_size: 4  # Minimal batch size to match ppo_mini_batch_size
+  train_batch_size: 1  # Absolute minimum (must be >= ppo_mini_batch_size which is now 1)
   max_prompt_length: 32  # Drastically reduced
   max_response_length: 32  # Drastically reduced
 
@@ -63,7 +63,7 @@ data:
 
 rllm:
   agent:
-    name: miniwobagent
+    name: testagent
     max_steps: 20
     trajectory_timeout: null
     overlong_filter: False
