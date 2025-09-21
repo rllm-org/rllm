@@ -25,16 +25,16 @@ MODEL_PATH="Qwen/Qwen2.5-0.5B-Instruct"  # Smallest supported model (500M params
 
 # GPU configuration
 NNODES=1
-GPUS_PER_NODE=1  # Single GPU for small GPT-2 model
+GPUS_PER_NODE=4  # Use 4 GPUs to distribute memory load
 
 # Parallelism settings
-TP=1  # No tensor parallelism needed for small models
+TP=4  # Tensor parallelism across 4 GPUs to reduce memory per GPU
 PP=1  # Pipeline Parallel
 EP=1  # Expert Parallel (increase for MoE models)
 
 # Run DeepScaler training with Megatron
 # Override strategy parameters directly instead of using config-name
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-4} \  # Use single GPU 4 by default
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-4,5,6,7} \  # Use GPUs 4-7 by default
 python -m examples.deepscaler.train_deepscaler_megatron \
     actor_rollout_ref.actor.strategy=megatron \
     actor_rollout_ref.ref.strategy=megatron \
