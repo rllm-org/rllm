@@ -9,6 +9,10 @@ defaults:
   - ppo_megatron_trainer  # Load base ppo_megatron_trainer which has proper megatron configs
   - _self_
 
+# Override trainer settings to disable wandb
+trainer:
+  logger: ['console']  # Only console logging, no wandb
+
 # Override with agent-specific settings
 actor_rollout_ref:
   # Override the default model path from ppo_megatron_trainer

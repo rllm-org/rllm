@@ -34,7 +34,7 @@ EP=1  # Expert Parallel (increase for MoE models)
 
 # Run DeepScaler training with Megatron
 # Override strategy parameters directly instead of using config-name
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1} \  # Use GPUs 0-1 by default (2 GPUs)
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1w} \  # Use GPUs 0-1 by default (2 GPUs)
 python -m examples.deepscaler.train_deepscaler_megatron \
     actor_rollout_ref.actor.strategy=megatron \
     actor_rollout_ref.ref.strategy=megatron \
