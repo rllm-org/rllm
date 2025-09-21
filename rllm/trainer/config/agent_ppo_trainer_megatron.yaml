@@ -56,8 +56,8 @@ critic:
 data:
   gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
   train_batch_size: 4  # Minimal batch size to match ppo_mini_batch_size
-  max_prompt_length: 256  # Drastically reduced
-  max_response_length: 256  # Drastically reduced
+  max_prompt_length: 32  # Drastically reduced
+  max_response_length: 32  # Drastically reduced
 
 # Include rLLM agent configuration
 
