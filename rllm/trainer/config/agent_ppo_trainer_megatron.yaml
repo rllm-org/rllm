@@ -19,17 +19,17 @@ actor_rollout_ref:
   # Set micro batch sizes for megatron
   actor:
     ppo_micro_batch_size_per_gpu: 1  # Required for megatron
-    ppo_mini_batch_size: 8  # Small batch for testing, must be <= train_batch_size
+    ppo_mini_batch_size: 4  # Reduced to save memory
     megatron:
       param_offload: True  # Offload parameters to CPU to save GPU memory
-      grad_offload: False  # Keep gradients on GPU for speed
-      optimizer_offload: False  # Keep optimizer on GPU
+      grad_offload: True  # Also offload gradients to save more memory
+      optimizer_offload: True  # Offload optimizer to save significant memory
 
   rollout:
     mode: async # only async is supported
     log_prob_micro_batch_size_per_gpu: 1  # Required for rollout
-    max_model_len: 4096  # Reduce max sequence length to save memory (default is often 8192+)
-    gpu_memory_utilization: 0.8  # Use only 80% of GPU memory for safety
+    max_model_len: 512  # Drastically reduced for testing
+    gpu_memory_utilization: 0.3  # Only use 30% of GPU memory
     agent:
       num_workers: 0 # we bypass the agent loop
     val_kwargs:
@@ -43,20 +43,21 @@ actor_rollout_ref:
 # Critic configuration
 critic:
   ppo_micro_batch_size_per_gpu: 1  # Required for megatron critic
+  ppo_mini_batch_size: 4  # Match actor's mini batch size
   model:
     path: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B  # Use same model as actor
     tokenizer_path: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B  # Tokenizer path
     enable_gradient_checkpointing: True  # Save memory for critic
   megatron:
-    param_offload: False  # Keep critic on GPU for training
+    param_offload: True  # Also offload critic params to save memory
     optimizer_offload: True  # Offload optimizer states to save memory
 
 # Data configuration - reduce batch sizes
 data:
   gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
-  train_batch_size: 32  # Small batch for testing, must be >= ppo_mini_batch_size (8)
-  max_prompt_length: 1024  # Reduce max prompt length
-  max_response_length: 2048  # Reduce max response length
+  train_batch_size: 4  # Minimal batch size to match ppo_mini_batch_size
+  max_prompt_length: 256  # Drastically reduced
+  max_response_length: 256  # Drastically reduced
 
 # Include rLLM agent configuration
 
