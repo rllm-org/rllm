@@ -4,10 +4,14 @@ set -x
 
 # vLLM environment variables for optimal performance
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
-export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:False"
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"  # Changed to True to avoid memory fragmentation
 export VLLM_USE_V1=1
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
+
+# Additional memory optimization settings
+export CUDA_LAUNCH_BLOCKING=0  # Allow async CUDA operations
+export TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"  # Optimize for specific GPU architectures
 
 # Model configuration
 MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"  # DeepScaler model
