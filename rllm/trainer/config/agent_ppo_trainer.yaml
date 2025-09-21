@@ -19,7 +19,7 @@ data:
 
 rllm:
   agent:
-    name: miniwobagent
+    name: math_agent
     max_steps: 20
     trajectory_timeout: null
     overlong_filter: False

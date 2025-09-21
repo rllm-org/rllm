@@ -66,12 +66,19 @@ data:
   train_batch_size: 1  # With 2 GPUs and TP=2, DP=1 so minimum is 1
   max_prompt_length: 512  # Increased to handle actual prompts
   max_response_length: 512  # Increased for reasonable responses
+  # Option 1: Direct parquet file paths (if you have local files)
+  # train_files: ["/path/to/your/train.parquet"]
+  # val_files: ["/path/to/your/test.parquet"]
+
+  # Option 2: HuggingFace datasets (will be downloaded and cached)
+  # Note: You'll need to run prepare_math_data.py first to register these
+  # Or modify the trainer to load directly from HuggingFace
 
 # Include rLLM agent configuration
 
 rllm:
   agent:
-    name: testagent
+    name: miniwobagent  # Use the original miniwob agent
     max_steps: 20
     trajectory_timeout: null
     overlong_filter: False
