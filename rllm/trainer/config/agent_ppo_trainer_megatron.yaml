@@ -13,7 +13,7 @@ defaults:
 actor_rollout_ref:
   # Override the default model path from ppo_megatron_trainer
   model:
-    path: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B  # Use this model instead of ~/models/deepseek-llm-7b-chat
+    path: gpt2  # Use tiny GPT-2 (124M) for testing to avoid OOM
     enable_gradient_checkpointing: True  # Save GPU memory by recomputing activations
 
   # Set micro batch sizes for megatron
@@ -45,8 +45,8 @@ critic:
   ppo_micro_batch_size_per_gpu: 1  # Absolute minimum per GPU
   ppo_mini_batch_size: 1  # Absolute minimum to match actor
   model:
-    path: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B  # Use same model as actor
-    tokenizer_path: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B  # Tokenizer path
+    path: gpt2  # Use tiny GPT-2 (124M) for testing
+    tokenizer_path: gpt2  # GPT-2 tokenizer
     enable_gradient_checkpointing: True  # Save memory for critic
   megatron:
     param_offload: True  # Also offload critic params to save memory
@@ -65,7 +65,7 @@ rllm:
   agent:
     name: testagent
     max_steps: 20
-    trajectory_timeout: null
+    trajectory_timeout: nullch
     overlong_filter: False
     agent_args: {}
     engine_args: {}

@@ -14,7 +14,8 @@ export CUDA_LAUNCH_BLOCKING=0  # Allow async CUDA operations
 export TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"  # Optimize for specific GPU architectures
 
 # Model configuration
-MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"  # DeepScaler model
+# MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"  # Original DeepScaler model (1.5B params)
+MODEL_PATH="gpt2"  # Using tiny GPT-2 (124M params) for testing to avoid OOM
 
 # GPU selection (optional - comment out to use all GPUs)
 # export CUDA_VISIBLE_DEVICES=4,5  # Use only GPU 4 and 5
@@ -23,16 +24,16 @@ MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"  # DeepScaler model
 
 # GPU configuration
 NNODES=1
-GPUS_PER_NODE=2  # Adjust based on CUDA_VISIBLE_DEVICES if set
+GPUS_PER_NODE=1  # Single GPU for small GPT-2 model
 
 # Parallelism settings
-TP=2  # Tensor Parallel
+TP=1  # No tensor parallelism needed for small models
 PP=1  # Pipeline Parallel
 EP=1  # Expert Parallel (increase for MoE models)
 
 # Run DeepScaler training with Megatron
 # Override strategy parameters directly instead of using config-name
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-4,5} \
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-4} \  # Use single GPU 4 by default
 python -m examples.deepscaler.train_deepscaler_megatron \
     actor_rollout_ref.actor.strategy=megatron \
     actor_rollout_ref.ref.strategy=megatron \
