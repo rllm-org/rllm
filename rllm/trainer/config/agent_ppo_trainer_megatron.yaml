@@ -57,7 +57,8 @@ data:
   train_batch_size: 32  # Small batch for testing, must be >= ppo_mini_batch_size (8)
   max_prompt_length: 1024  # Reduce max prompt length
   max_response_length: 2048  # Reduce max response length
-t# Include rLLM agent configuration
+
+# Include rLLM agent configuration
 
 rllm:
   agent:
