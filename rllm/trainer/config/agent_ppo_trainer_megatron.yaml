@@ -30,7 +30,7 @@ actor_rollout_ref:
     log_prob_micro_batch_size_per_gpu: 1  # Required for rollout
     max_model_len: 256  # Increased for 4 GPUs
     max_num_batched_tokens: 256  # Set as requested
-    gpu_memory_utilization: 0.035  # 3.5% of GPU memory for vLLM (~2.77 GiB per GPU)
+    gpu_memory_utilization: 0.030  # 3.5% of GPU memory for vLLM (~2.77 GiB per GPU)
     enforce_eager: True  # Disable CUDA graphs completely
     max_num_seqs: 1  # Process only 1 sequence at a time
     # tensor_model_parallel_size set via bash script (TP=2)
