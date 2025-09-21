@@ -29,6 +29,7 @@ actor_rollout_ref:
     mode: async # only async is supported
     log_prob_micro_batch_size_per_gpu: 1  # Required for rollout
     max_model_len: 8  # Absolute minimum - just 8 tokens
+    max_num_batched_tokens: 8  # Match max_model_len to avoid warning
     gpu_memory_utilization: 0.001  # Only use 0.1% of GPU memory (~80MB on 80GB GPU)
     enforce_eager: True  # Disable CUDA graphs completely
     max_num_seqs: 1  # Process only 1 sequence at a time

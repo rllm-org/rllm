@@ -4,7 +4,7 @@ set -x
 
 # vLLM environment variables for optimal performance
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
-export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"  # Changed to True to avoid memory fragmentation
+# export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"  # Disabled - incompatible with vLLM memory pool
 export VLLM_USE_V1=1
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
