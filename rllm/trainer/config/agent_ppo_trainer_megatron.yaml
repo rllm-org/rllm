@@ -28,8 +28,10 @@ actor_rollout_ref:
   rollout:
     mode: async # only async is supported
     log_prob_micro_batch_size_per_gpu: 1  # Required for rollout
-    max_model_len: 32  # Drastically reduced for testing
-    gpu_memory_utilization: 0.01  # Only use 30% of GPU memory
+    max_model_len: 8  # Absolute minimum - just 8 tokens
+    gpu_memory_utilization: 0.001  # Only use 0.1% of GPU memory (~80MB on 80GB GPU)
+    enforce_eager: True  # Disable CUDA graphs completely
+    max_num_seqs: 1  # Process only 1 sequence at a time
     agent:
       num_workers: 0 # we bypass the agent loop
     val_kwargs:
@@ -56,8 +58,8 @@ critic:
 data:
   gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
   train_batch_size: 1  # Absolute minimum (must be >= ppo_mini_batch_size which is now 1)
-  max_prompt_length: 32  # Drastically reduced
-  max_response_length: 32  # Drastically reduced
+  max_prompt_length: 4  # Just 4 tokens
+  max_response_length: 4  # Just 4 tokens
 
 # Include rLLM agent configuration
 
