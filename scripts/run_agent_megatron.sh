@@ -28,8 +28,9 @@ NNODES=1
 GPUS_PER_NODE=4  # Use 4 GPUs to distribute memory load
 
 # Parallelism settings
-TP=4  # Tensor parallelism across 4 GPUs to reduce memory per GPU
-PP=1  # Pipeline Parallel
+TP=2  # Tensor parallelism across 2 GPUs (14 attention heads / 2 = 7)
+PP=2  # Pipeline parallel across 2 stages for better memory distribution
+# DP (data parallel) = total_gpus / (TP * PP) = 4 / (2 * 2) = 1
 EP=1  # Expert Parallel (increase for MoE models)
 
 # Run DeepScaler training with Megatron

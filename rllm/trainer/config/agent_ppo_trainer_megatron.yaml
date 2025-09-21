@@ -33,7 +33,7 @@ actor_rollout_ref:
     gpu_memory_utilization: 0.1  # 10% of GPU memory for vLLM
     enforce_eager: True  # Disable CUDA graphs completely
     max_num_seqs: 1  # Process only 1 sequence at a time
-    tensor_model_parallel_size: 4  # Distribute vLLM across 4 GPUs
+    # tensor_model_parallel_size set via bash script (TP=2)
     agent:
       num_workers: 0 # we bypass the agent loop
     val_kwargs:
