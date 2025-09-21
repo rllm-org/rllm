@@ -19,6 +19,7 @@ actor_rollout_ref:
   # Set micro batch sizes for megatron
   actor:
     ppo_micro_batch_size_per_gpu: 1  # Required for megatron
+    ppo_mini_batch_size: 8  # Small batch for testing, must be <= train_batch_size
     megatron:
       param_offload: True  # Offload parameters to CPU to save GPU memory
       grad_offload: False  # Keep gradients on GPU for speed
@@ -53,11 +54,10 @@ critic:
 # Data configuration - reduce batch sizes
 data:
   gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
-  train_batch_size: 16  # Reduce from default (often 128) to save memory
+  train_batch_size: 32  # Small batch for testing, must be >= ppo_mini_batch_size (8)
   max_prompt_length: 1024  # Reduce max prompt length
   max_response_length: 2048  # Reduce max response length
-
-# Include rLLM agent configuration
+t# Include rLLM agent configuration
 
 rllm:
   agent:
