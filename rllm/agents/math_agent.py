@@ -35,10 +35,12 @@ class MathAgent(BaseAgent):
             print("--------------------------------")
             print("OBSERVATION:")
             print(observation)
-            print("--------------------------------")
+            print("++++++++++++++++++++++++++++++++")
             print("QUESTION:" + observation.get("question"))
+            print("++++++++++++++++++++++++++++++++")
             print("--------------------------------")
             print("--------------------------------")
+
             formatted_observation = observation["question"]
         elif isinstance(observation, str):
             formatted_observation = observation
