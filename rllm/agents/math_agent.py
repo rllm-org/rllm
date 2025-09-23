@@ -31,7 +31,7 @@ class MathAgent(BaseAgent):
 
         # This is a new observation, create a new step
         if isinstance(observation, dict):
-            print(observation)
+            print(observation.get("question"))
             formatted_observation = observation["question"]
         elif isinstance(observation, str):
             formatted_observation = observation
