@@ -9,76 +9,63 @@ defaults:
   - ppo_megatron_trainer  # Load base ppo_megatron_trainer which has proper megatron configs
   - _self_
 
-# Override trainer settings to disable wandb
 trainer:
-  logger: ['console']  # Only console logging, no wandb
+  logger: ['console']  # Only console logging, no wandb for now
 
-# Override with agent-specific settings
 actor_rollout_ref:
-  # Override the default model path from ppo_megatron_trainer
   model:
-    path: Qwen/Qwen2.5-0.5B-Instruct  # Smallest supported model (500M params)
-    enable_gradient_checkpointing: True  # Save GPU memory by recomputing activations
+    path: Qwen/Qwen2.5-0.5B-Instruct 
+    enable_gradient_checkpointing: True  
 
-  # Set micro batch sizes for megatron
   actor:
     ppo_micro_batch_size_per_gpu: 1  
-    ppo_mini_batch_size: 1  # With DP=1, minimum is 1
+    ppo_mini_batch_size: 1  
     megatron:
-      param_offload: True  # Offload parameters to CPU to save GPU memory
-      grad_offload: True  # Also offload gradients to save more memory
-      optimizer_offload: True  # Offload optimizer to save significant memory
+      param_offload: True  
+      grad_offload: True  
+      optimizer_offload: True  
 
   rollout:
-    mode: async # only async is supported
-    log_prob_micro_batch_size_per_gpu: 1  # Required for rollout
-    max_model_len: 1024  # Total context for prompts + responses
-    max_num_batched_tokens: 1024  # Match max_model_len
-    gpu_memory_utilization: 0.1  # 10% of GPU memory for vLLM (~8 GiB per GPU)
-    enforce_eager: True  # Disable CUDA graphs completely
-    max_num_seqs: 1  # Process only 1 sequence at a time
-    # tensor_model_parallel_size set via bash script (TP=2)
+    mode: async 
+    log_prob_micro_batch_size_per_gpu: 1  
+    max_model_len: 1024  
+    max_num_batched_tokens: 1024  
+    gpu_memory_utilization: 0.1  
+    enforce_eager: True  
+    max_num_seqs: 1  
+    
     agent:
-      num_workers: 0 # we bypass the agent loop
+      num_workers: 0  
     val_kwargs:
-      do_sample: True # if do_sample is False, temperature is overridden to 0.0
+      do_sample: True 
 
   ref:
-    log_prob_micro_batch_size_per_gpu: 1  # Required for reference model
+    log_prob_micro_batch_size_per_gpu: 1  
     megatron:
-      param_offload: True  # Offload reference model to CPU (not used during training)
+      param_offload: True 
 
 # Critic configuration
 critic:
-  ppo_micro_batch_size_per_gpu: 1  # Absolute minimum per GPU
-  ppo_mini_batch_size: 1  # With DP=1, minimum is 1
+  ppo_micro_batch_size_per_gpu: 1 
+  ppo_mini_batch_size: 1 
   model:
-    path: Qwen/Qwen2.5-0.5B-Instruct  # Smallest supported model (500M params)
-    tokenizer_path: Qwen/Qwen2.5-0.5B-Instruct  # Qwen tokenizer
-    enable_gradient_checkpointing: True  # Save memory for critic
+    path: Qwen/Qwen2.5-0.5B-Instruct 
+    tokenizer_path: Qwen/Qwen2.5-0.5B-Instruct  
+    enable_gradient_checkpointing: True 
   megatron:
-    param_offload: True  # Also offload critic params to save memory
-    optimizer_offload: True  # Offload optimizer states to save memory
+    param_offload: True  
+    optimizer_offload: True  
 
-# Data configuration - reduce batch sizes
 data:
   gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
-  train_batch_size: 1  # With 2 GPUs and TP=2, DP=1 so minimum is 1
-  max_prompt_length: 512  # Increased to handle actual prompts
-  max_response_length: 512  # Increased for reasonable responses
-  # Option 1: Direct parquet file paths (if you have local files)
-  # train_files: ["/path/to/your/train.parquet"]
-  # val_files: ["/path/to/your/test.parquet"]
-
-  # Option 2: HuggingFace datasets (will be downloaded and cached)
-  # Note: You'll need to run prepare_math_data.py first to register these
-  # Or modify the trainer to load directly from HuggingFace
+  train_batch_size: 1  
+  max_prompt_length: 512  
+  max_response_length: 512  
 
 # Include rLLM agent configuration
-
 rllm:
   agent:
-    name: miniwobagent  # Use the original miniwob agent
+    name: math_agent  
     max_steps: 20
     trajectory_timeout: null
     overlong_filter: False
@@ -94,8 +81,8 @@ rllm:
       max_prompt_length: ${data.max_prompt_length}
       max_response_length: ${data.max_response_length}
       timeout: 1e6
-      gamma: 0.0 # no discounting
-      reward_bonus_coeff: 0.0 # no reward shaping
+      gamma: 0.0 
+      reward_bonus_coeff: 0.0 
       accumulate_response_length: null
     n_parallel_tasks: 256
     retry_limit: 3
@@ -103,7 +90,7 @@ rllm:
   mask_truncated_samples: False
   stepwise_advantage:
     enable: False
-    mode: broadcast # [broadcast, per_step]
+    mode: broadcast 
     normalize_by_steps: False
   compact_filtering:
     enable: False

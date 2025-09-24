@@ -1,47 +1,29 @@
 #!/bin/bash
-# Megatron training script for DeepScaler with DatasetRegistry
 set -x
 
-# vLLM environment variables for optimal performance
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
-# export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"  # Disabled - incompatible with vLLM memory pool
 export VLLM_USE_V1=1
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 
-# Additional memory optimization settings
-export CUDA_LAUNCH_BLOCKING=0  # Allow async CUDA operations
-export TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"  # Optimize for specific GPU architectures
+MODEL_PATH="Qwen/Qwen2.5-0.5B-Instruct" 
 
-# Model configuration
-# MODEL_PATH="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"  # Original DeepScaler model (1.5B params)
-# MODEL_PATH="gpt2"  # GPT-2 not supported by Megatron
-MODEL_PATH="Qwen/Qwen2.5-0.5B-Instruct"  # Smallest supported model (500M params)
-
-# GPU selection (optional - comment out to use all GPUs)
-# export CUDA_VISIBLE_DEVICES=4,5  # Use only GPU 4 and 5
-# export CUDA_VISIBLE_DEVICES=0,1,2,3  # Use first 4 GPUs
-# export CUDA_VISIBLE_DEVICES=4,5,6,7  # Use last 4 GPUs
+# GPU selection (using GPU 4 here)
+export CUDA_VISIBLE_DEVICES=4
 
 # GPU configuration
 NNODES=1
-GPUS_PER_NODE=2  # Use 2 GPUs - must match CUDA_VISIBLE_DEVICES count
+GPUS_PER_NODE=1 
 
 # Parallelism settings
-TP=2  # Tensor parallelism across 2 GPUs (14 attention heads / 2 = 7)
-PP=1  # No pipeline parallelism to reduce memory overhead
-EP=1  # Expert Parallel (increase for MoE models)
+TP=1  # Tensor parallelism 
+PP=1  # Pipeline parallelism 
+EP=1  # Expert Parallel (EP > 1 for MoE models)
 
 # Run DeepScaler training with Megatron
-# Override strategy parameters directly instead of using config-name
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1w} \  # Use GPUs 0-1 by default (2 GPUs)
 python -m examples.deepscaler.train_deepscaler_megatron \
-    actor_rollout_ref.actor.strategy=megatron \
-    actor_rollout_ref.ref.strategy=megatron \
-    critic.strategy=megatron \
     trainer.nnodes=$NNODES \
     trainer.n_gpus_per_node=$GPUS_PER_NODE \
-    actor_rollout_ref.model.path=$MODEL_PATH \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=$TP \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=$PP \
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=$EP \
