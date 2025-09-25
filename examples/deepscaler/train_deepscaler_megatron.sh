@@ -63,7 +63,7 @@ python -m examples.deepscaler.train_deepscaler_megatron \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='rllm-agent' \
-    trainer.experiment_name='deepscaler-1.5b-24k' \
+    trainer.experiment_name='deepscaler-1.5b-megatron' \
     trainer.val_before_train=True \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
