@@ -201,9 +201,9 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                     termination_counts.update(termination_reasons)
 
                     # If no valid samples remain, skip this batch and get a new one
-                    if len(drop_uids) == len(unique_uids):
-                        print("No valid samples remain, skipping batch")
-                        continue
+                    # if len(drop_uids) == len(unique_uids):
+                    #     print("No valid samples remain, skipping batch")
+                    #     continue
 
                     if not self.config.rllm.rejection_sample.enable:
                         batch = new_batch

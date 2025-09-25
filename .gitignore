@@ -194,4 +194,11 @@ rllm/data/train/
 rllm/data/datasets/
 rllm/registry/
 
-markdowns/
+# Coding assistant local rules ignore
+.cursor/rules/*
+CLAUDE.md
+
+# Strands outputs ignore
+examples/strands_outputs/*
+strands_outputs/*
+examples/strands/strands_outputs/*

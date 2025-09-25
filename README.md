@@ -43,15 +43,19 @@ rLLM is an open-source framework for post-training language agents via reinforce
 ### Installation
 
 ```bash
-# Clone the repository
+# Clone the repository and switch to v0.2
 git clone --recurse-submodules https://github.com/rllm-org/rllm.git
 cd rllm
+git switch v0.2
+
+# Make sure submodules match v0.2
+git submodule update --init --recursive
 
 # Create a conda environment
-conda create -n rllm python=3.10
+conda create -n rllm python=3.10 -y
 conda activate rllm
 
-# Install verl
+# Install verl (version pinned by v0.2 branch)
 bash verl/scripts/install_vllm_sglang_mcore.sh
 pip install --no-deps -e ./verl
 

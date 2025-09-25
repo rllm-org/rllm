@@ -53,12 +53,15 @@ class AgentWorkflowEngine:
             await self.initialize_pool()
 
         if task_ids is not None:
+            # Ensure we generate one episode_id per task. If a single base id is
+            # provided (common case), reuse it and suffix with incremental counters.
             counters = defaultdict(int)
             episode_ids = []
-            for task_id in task_ids:
-                episode_id = f"{task_id}_{counters[task_id]}"
+            for i in range(len(tasks)):
+                base_id = task_ids[0] if len(task_ids) == 1 else task_ids[i % len(task_ids)]
+                episode_id = f"{base_id}_{counters[base_id]}"
                 episode_ids.append(episode_id)
-                counters[task_id] += 1
+                counters[base_id] += 1
         else:
             episode_ids = [str(uuid.uuid4()) for _ in tasks]
 
@@ -154,7 +157,7 @@ class AgentWorkflowEngine:
                     for step_idx, step in enumerate(trajectory.steps):
                         chat_completions = step.chat_completions
 
-                        prompt = self.rollout_engine.chat_parser.parse(chat_completions[:-1], is_first_msg=True, add_generation_prompt=False)
+                        prompt = self.rollout_engine.chat_parser.parse(chat_completions[:-1], is_first_msg=True, add_generation_prompt=True)
                         prompt = torch.tensor(self.rollout_engine.tokenizer.encode(prompt, add_special_tokens=False), dtype=torch.long)
                         prompts.append(prompt)
 

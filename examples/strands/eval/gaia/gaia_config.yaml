@@ -1,0 +1,77 @@
+# Gaia Dataset Evaluation Configuration
+
+# Dataset settings
+dataset:
+  path: "rllm/data/train/web/gaia.json"
+  max_samples: null # null for all samples, or specify a number
+
+# Model settings
+model:
+  provider: "together" # "together" or "openai"
+  model_name: "Qwen/Qwen2.5-7B-Instruct-Turbo" # for Together AI
+  # model_name: "gpt-4o"  # for OpenAI
+
+# Sampling parameters
+sampling:
+  temperature: 0.7
+  top_p: 0.95
+  max_tokens: 512
+
+# Evaluation settings
+evaluation:
+  output_dir: "outputs/gaia_eval"
+  save_trajectories: true
+  save_intermediate_results: true
+
+# Tools configuration
+tools:
+  enabled:
+    - "google_search"
+    - "calculator"
+    - "http_request"
+    - "file_read"
+    - "python_repl"
+
+  google_search:
+    max_results: 5
+    timeout: 30
+
+  calculator:
+    precision: 4
+
+  http_request:
+    timeout: 30
+    max_retries: 3
+
+  file_read:
+    max_file_size: "10MB"
+    supported_formats: ["txt", "json", "csv", "py", "md"]
+
+  python_repl:
+    timeout: 60
+    max_output_length: 1000
+
+# System prompt customization
+system_prompt: |
+  You are an expert agent solving web-based tasks from the Gaia dataset. 
+  These tasks often require searching for current information, analyzing data, 
+  and providing accurate answers. Use the available tools when needed:
+  - calculator: for mathematical calculations
+  - http_request: for API calls and web requests
+  - file_read: for reading and analyzing files
+  - python_repl: for executing Python code
+  - google_search: for current information and web searches
+  
+  Always provide clear, well-reasoned answers based on the information you find. 
+  Prefer google_search first for information queries.
+
+# Metrics thresholds
+metrics:
+  f1_threshold: 0.5 # Consider correct if F1 > this threshold
+  exact_match_bonus: true # Give bonus for exact matches
+
+# Logging
+logging:
+  level: "INFO"
+  save_logs: true
+  log_file: "gaia_eval.log"
