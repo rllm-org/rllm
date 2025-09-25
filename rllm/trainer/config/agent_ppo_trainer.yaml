@@ -8,11 +8,11 @@ defaults:
 
 actor_rollout_ref:
   rollout:
-    mode: async # only async is supported
+    mode: async 
     agent:
-      num_workers: 0 # we bypass the agent loop
+      num_workers: 0 
     val_kwargs:
-      do_sample: True # if do_sample is False, temperature is overridden to 0.0
+      do_sample: True 
 
 data:
   gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
