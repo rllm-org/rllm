@@ -9,63 +9,20 @@ defaults:
   - ppo_megatron_trainer  # Load base ppo_megatron_trainer which has proper megatron configs
   - _self_
 
-trainer:
-  logger: ['console']  # Only console logging, no wandb for now
-
 actor_rollout_ref:
-  model:
-    path: Qwen/Qwen2.5-0.5B-Instruct 
-    enable_gradient_checkpointing: True  
-
-  actor:
-    ppo_micro_batch_size_per_gpu: 1  
-    ppo_mini_batch_size: 1  
-    megatron:
-      param_offload: True  
-      grad_offload: True  
-      optimizer_offload: True  
-
   rollout:
-    mode: async 
-    log_prob_micro_batch_size_per_gpu: 1  
-    max_model_len: 1024  
-    max_num_batched_tokens: 1024  
-    gpu_memory_utilization: 0.1  
-    enforce_eager: True  
-    max_num_seqs: 1  
-    
+    mode: async # only async is supported
     agent:
-      num_workers: 0  
+      num_workers: 0 # we bypass the agent loop
     val_kwargs:
-      do_sample: True 
-
-  ref:
-    log_prob_micro_batch_size_per_gpu: 1  
-    megatron:
-      param_offload: True 
-
-# Critic configuration
-critic:
-  ppo_micro_batch_size_per_gpu: 1 
-  ppo_mini_batch_size: 1 
-  model:
-    path: Qwen/Qwen2.5-0.5B-Instruct 
-    tokenizer_path: Qwen/Qwen2.5-0.5B-Instruct  
-    enable_gradient_checkpointing: True 
-  megatron:
-    param_offload: True  
-    optimizer_offload: True  
+      do_sample: True # if do_sample is False, temperature is overridden to 0.0
 
 data:
   gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
-  train_batch_size: 1  
-  max_prompt_length: 512  
-  max_response_length: 512  
 
-# Include rLLM agent configuration
 rllm:
   agent:
-    name: math_agent  
+    name: math_agent
     max_steps: 20
     trajectory_timeout: null
     overlong_filter: False
@@ -81,16 +38,16 @@ rllm:
       max_prompt_length: ${data.max_prompt_length}
       max_response_length: ${data.max_response_length}
       timeout: 1e6
-      gamma: 0.0 
-      reward_bonus_coeff: 0.0 
-      accumulate_response_length: null
+      gamma: 0.0 # no discounting
+      reward_bonus_coeff: 0.0 # no reward shaping
+      accumulate_response_length: null # defaults to not rllm.stepwise_advantage.enable
     n_parallel_tasks: 256
     retry_limit: 3
   disable_thinking: False
   mask_truncated_samples: False
   stepwise_advantage:
     enable: False
-    mode: broadcast 
+    mode: broadcast # [broadcast, per_step]
     normalize_by_steps: False
   compact_filtering:
     enable: False
