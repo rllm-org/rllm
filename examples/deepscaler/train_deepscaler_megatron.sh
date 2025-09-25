@@ -27,7 +27,6 @@ python -m examples.deepscaler.train_deepscaler_megatron \
     actor_rollout_ref.model.path=$MODEL_PATH \
     actor_rollout_ref.hybrid_engine=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
     actor_rollout_ref.actor.ppo_mini_batch_size=64 \
     actor_rollout_ref.actor.use_kl_loss=False \
@@ -38,7 +37,9 @@ python -m examples.deepscaler.train_deepscaler_megatron \
     actor_rollout_ref.actor.megatron.grad_offload=True \
     actor_rollout_ref.actor.megatron.optimizer_offload=True \
     actor_rollout_ref.ref.megatron.param_offload=True \
-    actor_rollout_ref.model.enable_gradient_checkpointing=True \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
+    critic.ppo_micro_batch_size_per_gpu=1 \
+    critic.ppo_mini_batch_size=1 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.mode="async" \
     actor_rollout_ref.rollout.enforce_eager=False \
