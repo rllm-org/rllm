@@ -6,7 +6,7 @@ export VLLM_USE_V1=1
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 
-MODEL_PATH="Qwen/Qwen2.5-0.5B-Instruct" 
+MODEL_PATH=deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
 
 # GPU selection (using GPU 4 here)
 export CUDA_VISIBLE_DEVICES=4

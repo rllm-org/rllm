@@ -1,4 +1,4 @@
-oohydra:
+hydra:
   searchpath:
     - pkg://verl.trainer.config
 
