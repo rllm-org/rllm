@@ -19,7 +19,6 @@ class SingleTurnWorkflow(Workflow):
         response = await self.rollout_engine.get_model_response(messages)
         reward_result = self.reward_function(task, response)
 
-
         trajectory = Trajectory()
         trajectory.steps.append(
             Step(
