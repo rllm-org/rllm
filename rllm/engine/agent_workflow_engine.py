@@ -114,8 +114,8 @@ class AgentWorkflowEngine:
 
     def _transform_results_for_verl(self, episodes: list[Episode], task_ids: np.ndarray) -> "DataProto":
         # Local import to keep verl optional
-        from verl import DataProto  # type: ignore
-        from verl.utils.torch_functional import pad_sequence_to_length  # type: ignore
+        from verl import DataProto
+        from verl.utils.torch_functional import pad_sequence_to_length
 
         prompts = []
         responses = []
