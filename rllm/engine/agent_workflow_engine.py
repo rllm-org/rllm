@@ -3,6 +3,7 @@ import logging
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -11,8 +12,10 @@ from tqdm import tqdm
 from rllm.agents.agent import Episode
 from rllm.engine.rollout.rollout_engine import RolloutEngine
 from rllm.workflows.workflow import TerminationReason, Workflow
-from verl import DataProto
-from verl.utils.torch_functional import pad_sequence_to_length
+
+# Avoid hard dependency on verl at import time; only for typing
+if TYPE_CHECKING:
+    from verl import DataProto
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +101,7 @@ class AgentWorkflowEngine:
 
         return results
 
-    async def execute_tasks_verl(self, batch: DataProto, workflow_id: str | None = None, **kwargs) -> DataProto:
+    async def execute_tasks_verl(self, batch: "DataProto", workflow_id: str | None = None, **kwargs) -> "DataProto":
         self.rollout_engine.wake_up()
         if batch.meta_info.get("validate", False):
             self.rollout_engine.validate = True
@@ -109,7 +112,11 @@ class AgentWorkflowEngine:
         self.rollout_engine.sleep()
         return self._transform_results_for_verl(results, task_ids)
 
-    def _transform_results_for_verl(self, episodes: list[Episode], task_ids: np.ndarray) -> DataProto:
+    def _transform_results_for_verl(self, episodes: list[Episode], task_ids: np.ndarray) -> "DataProto":
+        # Local import to keep verl optional
+        from verl import DataProto  # type: ignore
+        from verl.utils.torch_functional import pad_sequence_to_length  # type: ignore
+
         prompts = []
         responses = []
         traj_rewards = []

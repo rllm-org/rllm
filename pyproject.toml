@@ -74,6 +74,10 @@ dependencies = [
     "PyYAML",
     "pydantic",
 
+    # Inference backends
+    "vllm",
+    "sglang",
+
     # Development and testing
     "pytest",
     "pre-commit",
