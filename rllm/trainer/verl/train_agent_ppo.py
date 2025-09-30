@@ -89,11 +89,20 @@ class TaskRunner:
 
         # Instantiate the tokenizer and processor.
         from verl.utils import hf_tokenizer
+        from verl.utils.tokenizer import hf_processor
 
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
-        # Used for multimodal LLM, could be None
-        # processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+
+        # Enable processor for multimodal models
+        processor = None
+        if config.get("multimodal", {}).get("enable", False):
+            try:
+                processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+                print(f"Multimodal processor loaded: {type(processor)}")
+            except Exception as e:
+                print(f"Failed to load multimodal processor: {e}")
+                print("Falling back to text-only training")
 
         # Define worker classes based on the actor strategy.
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
@@ -192,6 +201,7 @@ class TaskRunner:
             trainer = AgentPPOTrainer(
                 config=config,
                 tokenizer=tokenizer,
+                processor=processor,
                 role_worker_mapping=role_worker_mapping,
                 resource_pool_manager=resource_pool_manager,
                 ray_worker_group_cls=ray_worker_group_cls,

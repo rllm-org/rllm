@@ -37,7 +37,17 @@ class SingleTurnEnvironment(MultiTurnEnvironment):
         """
         reward_output = self.reward_fn(task_info=task, action=action)
 
-        return reward_output.reward, {}
+        metadata = getattr(reward_output, "metadata", {}) or {}
+        data_source = None
+        if isinstance(task, dict):
+            data_source = task.get("data_source")
+        if metadata and (data_source == "hiyouga/geometry3k" or metadata.get("data_source") == "hiyouga/geometry3k"):
+            print(f"DEBUG: GEO3K reward metadata -> {metadata}")
+
+        # For single-turn environments, preserve the original task for next observation
+        # This ensures multimodal data (like images) is maintained
+        next_obs = task if isinstance(task, dict) else {}
+        return reward_output.reward, next_obs
 
     @staticmethod
     def from_dict(env_args: dict) -> "SingleTurnEnvironment":

@@ -61,7 +61,9 @@ class MultiTurnEnvironment(BaseEnv, ABC):
         # Check if we've reached the maximum number of turns
         if self.current_turn >= self.max_turns:
             self.done = True
-            return {}, reward, self.done, self.task
+            # For multimodal tasks, preserve task info even when done
+            final_obs = self.task if isinstance(self.task, dict) else {}
+            return final_obs, reward, self.done, self.task
 
         return next_obs, reward, self.done, self.task
 

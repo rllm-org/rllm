@@ -15,6 +15,7 @@ import torch
 from omegaconf import OmegaConf
 
 from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
+from rllm.parser import ChatTemplateParser
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
 from verl.trainer.ppo.core_algos import agg_loss
@@ -47,12 +48,109 @@ class AgentPPOTrainer(RayPPOTrainer):
         agent_class=None,
         env_args=None,
         agent_args=None,
+        processor=None,
     ):
-        super().__init__(config=config, tokenizer=tokenizer, role_worker_mapping=role_worker_mapping, resource_pool_manager=resource_pool_manager, ray_worker_group_cls=ray_worker_group_cls, reward_fn=reward_fn, val_reward_fn=val_reward_fn)
+        super().__init__(config=config, tokenizer=tokenizer, processor=processor, role_worker_mapping=role_worker_mapping, resource_pool_manager=resource_pool_manager, ray_worker_group_cls=ray_worker_group_cls, reward_fn=reward_fn, val_reward_fn=val_reward_fn)
         self.env_class = env_class
         self.agent_class = agent_class
         self.env_args = env_args or {}
         self.agent_args = agent_args or {}
+        self.processor = processor
+        disable_thinking = False
+        if hasattr(self.config, "rllm") and hasattr(self.config.rllm, "disable_thinking"):
+            disable_thinking = bool(self.config.rllm.disable_thinking)
+        self.chat_parser = ChatTemplateParser.get_parser(self.tokenizer, disable_thinking=disable_thinking)
+        self._mm_debug_prints = 0
+
+    def _dump_multimodal_debug(self, stage: str, data_proto: DataProto, max_prints: int = 6) -> None:
+        """Best-effort logging of multimodal payloads for debugging."""
+        if self._mm_debug_prints >= max_prints:
+            return
+
+        self._mm_debug_prints += 1
+
+        try:
+            batch_size = len(data_proto)
+        except Exception:  # noqa: BLE001
+            batch_size = "unknown"
+
+        print("\n[MM DEBUG] stage=", stage, " batch_size=", batch_size)
+        try:
+            print("  non_tensor_keys=", list(data_proto.non_tensor_batch.keys()))
+        except Exception as exc:  # noqa: BLE001
+            print(f"  failed to list non_tensor_keys: {exc}")
+
+        # Inspect first element when available
+        try:
+            if len(data_proto) == 0:
+                return
+        except Exception:  # noqa: BLE001
+            return
+
+        try:
+            sample = data_proto[0]
+        except Exception as exc:  # noqa: BLE001
+            print(f"  failed to fetch sample: {exc}")
+            return
+
+        sample_non_tensor = getattr(sample, "non_tensor_batch", {}) or {}
+        sample_batch = getattr(sample, "batch", None)
+
+        mm_data = sample_non_tensor.get("multi_modal_data")
+        mm_inputs = sample_non_tensor.get("multi_modal_inputs")
+        raw_prompt_text = sample_non_tensor.get("raw_prompt_text")
+
+        if raw_prompt_text:
+            print("  raw_prompt_text_head=", raw_prompt_text[:160])
+
+        if isinstance(mm_data, dict):
+            print("  multi_modal_data keys=", list(mm_data.keys()))
+            for key, value in mm_data.items():
+                if isinstance(value, list):
+                    print(f"    {key}: list(len={len(value)})")
+                else:
+                    print(f"    {key}: type={type(value)}")
+        else:
+            print("  multi_modal_data type=", type(mm_data))
+
+        if isinstance(mm_inputs, dict) and mm_inputs:
+            print("  multi_modal_inputs summary:")
+            for key, value in mm_inputs.items():
+                try:
+                    if torch.is_tensor(value):
+                        print(f"    {key}: tensor shape={tuple(value.shape)} dtype={value.dtype}")
+                        flat = value.flatten()
+                        preview = flat[: min(10, flat.shape[0])].tolist()
+                        print(f"      sample[{key}]: {preview}")
+                    elif isinstance(value, list) and value and torch.is_tensor(value[0]):
+                        shapes = [tuple(v.shape) for v in value]
+                        print(f"    {key}: list[tensor] shapes={shapes}")
+                        flat = value[0].flatten()
+                        preview = flat[: min(10, flat.shape[0])].tolist()
+                        print(f"      sample[{key}[0]]: {preview}")
+                    else:
+                        print(f"    {key}: type={type(value)}")
+                except Exception as exc:  # noqa: BLE001
+                    print(f"    {key}: failed to inspect ({exc})")
+        else:
+            print("  multi_modal_inputs type=", type(mm_inputs))
+
+        if sample_batch is not None:
+            try:
+                prompts_tensor = data_proto.batch["prompts"][0]
+                prompt_ids = prompts_tensor.tolist() if hasattr(prompts_tensor, "tolist") else []
+                decoded_prompt = self.tokenizer.decode([pid for pid in prompt_ids if pid != self.tokenizer.pad_token_id])
+                tokens_head = prompt_ids[:64]
+                try:
+                    token_strs = self.tokenizer.convert_ids_to_tokens(tokens_head)
+                except Exception:  # noqa: BLE001
+                    token_strs = "<convert_failed>"
+                print("  prompt_token_ids_head=", tokens_head)
+                print("  prompt_token_strs_head=", token_strs)
+                print("  decoded_prompt_head=", decoded_prompt[:160])
+            except Exception as exc:  # noqa: BLE001
+                print(f"  failed to decode prompt tokens: {exc}")
+
 
         assert self.config.actor_rollout_ref.hybrid_engine, "Only hybrid engine is supported"
         assert self.config.actor_rollout_ref.rollout.mode == "async", "Only async rollout mode is supported"
@@ -70,6 +168,7 @@ class AgentPPOTrainer(RayPPOTrainer):
             config=self.config,
             engine_name="verl",
             tokenizer=self.tokenizer,
+            processor=self.processor,
             model_path=self.config.actor_rollout_ref.model.path,
             max_steps=self.config.rllm.agent.max_steps,
             max_response_length=self.config.data.max_response_length,
@@ -164,7 +263,17 @@ class AgentPPOTrainer(RayPPOTrainer):
                 metrics = {}
                 timing_raw = {}
 
-                batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"])
+                non_tensor_keys_to_pop = [
+                    "raw_prompt",
+                    "raw_prompt_text",
+                    "raw_prompt_ids",
+                    "multi_modal_data",
+                    "multi_modal_inputs",
+                ]
+                batch.pop(
+                    batch_keys=["input_ids", "attention_mask", "position_ids"],
+                    non_tensor_batch_keys=[key for key in non_tensor_keys_to_pop if key in batch.non_tensor_batch],
+                )
 
                 with marked_timer("step", timing_raw):
                     self.init_envs_and_agents(batch)
@@ -177,10 +286,12 @@ class AgentPPOTrainer(RayPPOTrainer):
                         final_gen_batch_output.meta_info.pop("repeat_counts", None)  # no longer needed after this
                         # batch needs to be padded to divisor of world size, we will pad with everything masked out
                         batch = batch.union(final_gen_batch_output)
+                        self._dump_multimodal_debug("train_union_steps", batch)
                         batch = self._pad_dataproto_to_world_size(batch=batch)
                     else:
                         final_gen_batch_output, generate_metrics = self.generate_agent_trajectory(timing_raw=timing_raw, meta_info=batch.meta_info)
                         batch = batch.union(final_gen_batch_output)
+                        self._dump_multimodal_debug("train_union_traj", batch)
                         metrics.update(generate_metrics)
 
                     # compute values
@@ -463,7 +574,17 @@ class AgentPPOTrainer(RayPPOTrainer):
             test_batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(test_batch.batch))], dtype=object)
             n_val_samples = self.config.actor_rollout_ref.rollout.val_kwargs.n
             test_batch = test_batch.repeat(repeat_times=n_val_samples, interleave=True)
-            test_batch.pop(["input_ids", "attention_mask", "position_ids"])  # these are not needed for environment based interaction
+            non_tensor_keys_to_pop = [
+                "raw_prompt",
+                "raw_prompt_text",
+                "raw_prompt_ids",
+                "multi_modal_data",
+                "multi_modal_inputs",
+            ]
+            test_batch.pop(
+                ["input_ids", "attention_mask", "position_ids"],
+                non_tensor_batch_keys=[key for key in non_tensor_keys_to_pop if key in test_batch.non_tensor_batch],
+            )  # remove tensors and multimodal caches before agent rollout
             test_batch.meta_info = {
                 "eos_token_id": self.tokenizer.eos_token_id,
                 "pad_token_id": self.tokenizer.pad_token_id,
@@ -483,6 +604,7 @@ class AgentPPOTrainer(RayPPOTrainer):
                 test_output_gen_batch, _ = self.generate_agent_trajectory(meta_info=test_batch.meta_info)
 
             test_batch = test_batch.union(test_output_gen_batch)
+            self._dump_multimodal_debug("validate_union", test_batch)
 
             reward_tensor = test_batch.batch["token_level_scores"]
 
@@ -605,8 +727,23 @@ class AgentPPOTrainer(RayPPOTrainer):
         all_masks_list = []
         traj_scores = []
         chat_completions = []
+        raw_prompt_texts = []
+        raw_prompt_ids_list = []
+        multi_modal_data_list = []
+        multi_modal_inputs_list = []
         traj_metrics = []
         metrics = {}
+
+        def _move_to_cpu(obj):
+            if torch.is_tensor(obj):
+                return obj.detach().cpu()
+            if isinstance(obj, dict):
+                return {k: _move_to_cpu(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_move_to_cpu(v) for v in obj]
+            if isinstance(obj, tuple):
+                return tuple(_move_to_cpu(v) for v in obj)
+            return obj
 
         for traj in trajectories:
             prompt_tokens = traj["prompt_tokens"]
@@ -618,6 +755,69 @@ class AgentPPOTrainer(RayPPOTrainer):
             all_masks_list.append(traj["response_masks"])
             traj_scores.append(traj["trajectory_reward"])
             chat_completions.append(traj["chat_completions"])
+            prompt_messages = traj.get("prompt_messages") or traj.get("chat_completions") or []
+            multimodal_messages = traj.get("multimodal_messages") or []
+
+            multi_modal_data = traj.get("multi_modal_data")
+            if not isinstance(multi_modal_data, dict):
+                multi_modal_data = {}
+            else:
+                multi_modal_data = dict(multi_modal_data)
+
+            raw_prompt_text = None
+            raw_prompt_ids = None
+            multi_modal_inputs = {}
+
+            if self.processor is not None and multimodal_messages:
+                try:
+                    raw_prompt_text = self.processor.apply_chat_template(
+                        multimodal_messages,
+                        add_generation_prompt=True,
+                        tokenize=False,
+                    )
+
+                    images = multi_modal_data.get("image") if multi_modal_data else None
+                    if isinstance(images, list) and len(images) == 0:
+                        images = None
+                    videos = multi_modal_data.get("video") if multi_modal_data else None
+                    if isinstance(videos, list) and len(videos) == 0:
+                        videos = None
+
+                    model_inputs = self.processor(
+                        text=[raw_prompt_text],
+                        images=images,
+                        videos=videos,
+                        return_tensors="pt",
+                    )
+                    raw_prompt_ids = model_inputs["input_ids"][0].tolist()
+                    multi_modal_inputs = {
+                        key: _move_to_cpu(value)
+                        for key, value in model_inputs.items()
+                        if key not in {"input_ids", "attention_mask"}
+                    }
+                except Exception as exc:  # noqa: BLE001
+                    print(f"Warning: failed to build multimodal inputs: {exc}")
+                    raw_prompt_text = None
+                    raw_prompt_ids = None
+                    multi_modal_inputs = {}
+
+            if raw_prompt_text is None and prompt_messages:
+                try:
+                    raw_prompt_text = self.chat_parser.parse(
+                        prompt_messages,
+                        add_generation_prompt=True,
+                        is_first_msg=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    raw_prompt_text = None
+
+            if raw_prompt_ids is None:
+                raw_prompt_ids = prompt_tokens.tolist()
+
+            raw_prompt_texts.append(raw_prompt_text)
+            raw_prompt_ids_list.append(raw_prompt_ids)
+            multi_modal_data_list.append(_move_to_cpu(multi_modal_data))
+            multi_modal_inputs_list.append(_move_to_cpu(multi_modal_inputs))
             traj_metrics.append(traj["metrics"])
 
         # Flatten traj_metrics into a dict of lists
@@ -693,9 +893,20 @@ class AgentPPOTrainer(RayPPOTrainer):
             "response_mask": traj_mask,
         }
 
-        self.visualize_trajectory(DataProto.from_dict(tensors=tensor_batch))
+        non_tensor_batch = {
+            "raw_prompt": np.array(raw_prompt_texts, dtype=object),
+            "raw_prompt_text": np.array(raw_prompt_texts, dtype=object),
+            "raw_prompt_ids": np.array(raw_prompt_ids_list, dtype=object),
+            "multi_modal_data": np.array(multi_modal_data_list, dtype=object),
+            "multi_modal_inputs": np.array(multi_modal_inputs_list, dtype=object),
+        }
 
-        return DataProto.from_dict(tensors=tensor_batch), metrics
+        traj_dataproto = DataProto.from_dict(tensors=tensor_batch, non_tensors=non_tensor_batch)
+
+        self.visualize_trajectory(traj_dataproto)
+        self._dump_multimodal_debug("transform_trajectory", traj_dataproto)
+
+        return traj_dataproto, metrics
 
     def visualize_trajectory(self, tensor_batch, sample_idx=0, max_samples=1, mask_key="response_mask"):
         """
@@ -927,6 +1138,7 @@ class AgentPPOTrainer(RayPPOTrainer):
             sample_indices = np.random.choice(last_step_indices, size=min(2, len(last_step_indices)), replace=False)
             for idx in sample_indices:
                 self.visualize_trajectory(result, sample_idx=idx, max_samples=1)
+        self._dump_multimodal_debug("transform_steps", result)
         return result
 
     def _stepwise_advantage_broadcast(self, last_step_batch, other_step_batch):
@@ -1002,3 +1214,12 @@ class AgentPPOTrainer(RayPPOTrainer):
             batch.non_tensor_batch["is_pad_step"][idx] = True
 
         return batch
+
+    def shutdown(self):
+        """Gracefully release resources used by the async agent execution engine."""
+        engine = getattr(self, "agent_execution_engine", None)
+        if engine is not None and hasattr(engine, "shutdown"):
+            try:
+                engine.shutdown()
+            except Exception as exc:  # noqa: BLE001
+                print(f"Warning: failed to shutdown agent execution engine: {exc}")

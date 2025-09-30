@@ -1,8 +1,9 @@
-"""
-This module contains the RewardMathFn class, which evaluates mathematical answers
-and assigns rewards based on their correctness. It utilizes a language model to
-validate answers when necessary.
-"""
+"""Reward helpers for math-style tasks, including GEO3K multimodal problems."""
+
+from rllm.agents.agent import Action
+from pathlib import Path
+from datetime import datetime
+import re
 
 from rllm.globals import THOUGHT_DELIMITER_END
 from rllm.rewards.math_utils.utils import extract_answer, grade_answer_mathd, grade_answer_sympy
@@ -41,10 +42,93 @@ class RewardMathFn:
         # problem = task_info.get("problem", "")
         model_response = action
 
-        # Handle None or empty response
-        if model_response is None or model_response == "":
+        # Extract raw text when an Action wrapper is provided
+        if isinstance(model_response, Action):
+            model_response = model_response.action
+
+        # Normalize response into a string for downstream processing
+        if model_response is None:
             print("DEBUG: Empty or None response")
             return RewardOutput(reward=self.config.format_error_reward, is_correct=False)
+
+        if not isinstance(model_response, str):
+            model_response = str(model_response)
+
+        model_response = model_response.strip()
+
+        # Handle empty response after stripping whitespace
+        if model_response == "":
+            print("DEBUG: Empty or None response")
+            return RewardOutput(reward=self.config.format_error_reward, is_correct=False)
+
+        data_source = task_info.get("data_source")
+
+        if data_source == "hiyouga/geometry3k":
+            model_response = self._normalize_geo3k_response(model_response)
+            geo3k_reward = None
+            try:
+                from verl.utils.reward_score import geo3k as geo3k_reward  # type: ignore
+            except ImportError:
+                try:
+                    from verl.verl.utils.reward_score import geo3k as geo3k_reward  # type: ignore
+                except ImportError:
+                    module_path = Path(__file__).resolve().parents[2] / "verl" / "verl" / "utils" / "reward_score" / "geo3k.py"
+                    if module_path.exists():
+                        import importlib.util
+
+                        spec = importlib.util.spec_from_file_location("rllm_vendor_verl_geo3k", module_path)
+                        if spec and spec.loader:
+                            geo3k_module = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(geo3k_module)
+                            geo3k_reward = geo3k_module  # type: ignore
+            if geo3k_reward is None:
+                print("DEBUG: Failed to import geo3k reward module: module not found")
+                return RewardOutput(reward=self.config.unk_error_reward, is_correct=False)
+
+            ground_truths = task_info.get("ground_truth")
+            if ground_truths is None:
+                return RewardOutput(reward=self.config.unk_error_reward, is_correct=False)
+
+            if isinstance(ground_truths, (list, tuple, set)):
+                gt_list = [str(gt) for gt in ground_truths]
+            else:
+                gt_list = [str(ground_truths)]
+
+            format_score = geo3k_reward.format_reward(model_response)
+            accuracy_scores = [geo3k_reward.acc_reward(model_response, gt) for gt in gt_list]
+            score_candidates = [geo3k_reward.compute_score(model_response, gt) for gt in gt_list]
+
+            reward = float(max(score_candidates)) if score_candidates else self.config.unk_error_reward
+            max_accuracy = max(accuracy_scores, default=0.0)
+
+            if format_score < 1.0:
+                print("DEBUG: GEO3K format violation detected; response missing required structure")
+            if max_accuracy == 0.0:
+                print("DEBUG: GEO3K accuracy check failed for all ground truths")
+
+            if format_score < 1.0:
+                debug_limit = 50
+                counter = getattr(self, "_geo3k_debug_logged", 0)
+                if counter < debug_limit:
+                    debug_path = Path("outputs/debug_geo3k_responses.log")
+                    debug_path.parent.mkdir(parents=True, exist_ok=True)
+                    with debug_path.open("a", encoding="utf-8") as fp:
+                        fp.write("\n" + "=" * 80 + "\n")
+                        fp.write(f"{datetime.now().isoformat()} | format={format_score:.3f} | max_acc={max_accuracy:.3f}\n")
+                        fp.write("Model response:\n")
+                        fp.write(model_response + "\n")
+                        fp.write("Ground truths:\n")
+                        for gt in gt_list:
+                            fp.write(str(gt) + "\n")
+                    self._geo3k_debug_logged = counter + 1
+
+            metadata = {
+                "data_source": data_source,
+                "geo3k_accuracy_scores": accuracy_scores,
+                "geo3k_format_reward": format_score,
+            }
+
+            return RewardOutput(reward=reward, metadata=metadata, is_correct=bool(max_accuracy))
 
         # Extract solution.
         if THOUGHT_DELIMITER_END in model_response:
@@ -92,6 +176,33 @@ class RewardMathFn:
                 return RewardOutput(reward=reward, is_correct=True)
 
         return RewardOutput(reward=self.config.incorrect_reward, is_correct=False)
+
+    @staticmethod
+    def _normalize_geo3k_response(model_response: str) -> str:
+        response = model_response
+
+        final_answer_pattern = re.compile(r"Final answer\s*:\s*\\boxed\{.*?\}", re.DOTALL)
+        match = final_answer_pattern.search(response)
+        if not match:
+            return response
+
+        final_start = match.start()
+        prefix = response[:final_start]
+        suffix = response[final_start:]
+
+        has_think = "<think>" in prefix
+        has_think_end = "</think>" in prefix
+
+        if has_think and not has_think_end:
+            prefix = prefix + "</think>\n"
+        elif not has_think:
+            cleaned_prefix = prefix.strip()
+            if cleaned_prefix:
+                prefix = f"<think>{cleaned_prefix}</think>\n"
+            else:
+                prefix = "<think></think>\n"
+
+        return prefix + suffix
 
 
 def rllm_reward_fn_math(data_source: str, llm_solution: str, ground_truth: str | list[str], extra_info=None, **kwargs):
