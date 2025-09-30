@@ -48,7 +48,9 @@ class DeepResearchWorkflow(Workflow):
 
         # Create the DeepResearch agent
         self.agent = MultiTurnReactAgent(
-            rollout_engine=rollout_engine, tools=self.tools
+            rollout_engine=rollout_engine,
+            tools=self.tools,
+            system_prompt=self.system_prompt,
         )
 
         # Note: We don't register the agent since DeepResearch handles its own trajectory

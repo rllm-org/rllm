@@ -243,87 +243,190 @@ Key information extracted:
 
 
 class PythonInterpreterTool(DeepResearchTool):
-    """Tool for executing Python code safely."""
+    """Tool for executing Python code safely.
+
+    Enhanced version inspired by Tongyi's PythonInterpreter with:
+    - Better error handling
+    - Timeout support
+    - More comprehensive output capture
+    """
 
     def __init__(self):
         super().__init__(
             name="PythonInterpreter",
             description="Execute Python code for calculations and data analysis",
         )
+        self.timeout = 50  # Match Tongyi's default timeout
 
-    async def call(self, code: str, **kwargs) -> str:
+    async def call(self, code: str, timeout: int = None, **kwargs) -> str:
         """
-        Execute Python code.
+        Execute Python code with enhanced safety and error handling.
+
+        Inspired by Tongyi's implementation with improvements for:
+        - Timeout handling
+        - Better error messages
+        - More comprehensive output capture
 
         Args:
             code: Python code to execute
+            timeout: Execution timeout in seconds (default: 50)
 
         Returns:
             Execution result as string
         """
-        try:
-            # Simple and safe Python execution
-            # In production, this should use a sandboxed environment
+        timeout = timeout or self.timeout
 
-            # Basic safety check - reject dangerous operations
-            dangerous_keywords = [
+        try:
+            # Enhanced safety check - reject dangerous operations
+            dangerous_patterns = [
                 "import os",
                 "import subprocess",
+                "import sys",
                 "exec",
                 "eval",
                 "__import__",
+                "open(",
+                "file(",
+                "input(",
+                "raw_input(",
+                "compile(",
+                "globals(",
+                "locals(",
+                "vars(",
             ]
-            for keyword in dangerous_keywords:
-                if keyword in code:
-                    return f"Error: Dangerous operation '{keyword}' not allowed"
 
-            # Create a restricted execution environment
+            code_lower = code.lower()
+            for pattern in dangerous_patterns:
+                if pattern in code_lower:
+                    return f"[Security Error] Dangerous operation '{pattern}' not allowed for safety reasons."
+
+            # Enhanced execution environment matching Tongyi's capabilities
+            import io
+            import sys
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError
+
+            # More comprehensive allowed modules
             allowed_modules = {
                 "math": __import__("math"),
                 "datetime": __import__("datetime"),
                 "json": __import__("json"),
                 "random": __import__("random"),
+                "re": __import__("re"),
+                "collections": __import__("collections"),
+                "itertools": __import__("itertools"),
+                "statistics": __import__("statistics"),
             }
 
-            # Execute code with restricted globals
-            local_vars = {}
-            global_vars = {
-                "__builtins__": {
-                    "print": print,
-                    "len": len,
-                    "str": str,
-                    "int": int,
-                    "float": float,
-                    "list": list,
-                    "dict": dict,
-                }
-            }
-            global_vars.update(allowed_modules)
+            # Try to add numpy and pandas if available (like Tongyi)
+            try:
+                import numpy as np
 
-            # Capture output
-            import io
-            import sys
-
-            old_stdout = sys.stdout
-            sys.stdout = buffer = io.StringIO()
+                allowed_modules["numpy"] = np
+                allowed_modules["np"] = np
+            except ImportError:
+                pass
 
             try:
-                exec(code, global_vars, local_vars)
-                output = buffer.getvalue()
-            finally:
-                sys.stdout = old_stdout
+                import pandas as pd
 
-            # Return output or result
-            if output:
-                return f"Output:\n{output}"
-            elif local_vars:
-                # If no print output, show variables
-                return f"Variables: {local_vars}"
-            else:
-                return "Code executed successfully (no output)"
+                allowed_modules["pandas"] = pd
+                allowed_modules["pd"] = pd
+            except ImportError:
+                pass
+
+            # Enhanced restricted globals
+            restricted_builtins = {
+                "abs": abs,
+                "all": all,
+                "any": any,
+                "bin": bin,
+                "bool": bool,
+                "chr": chr,
+                "dict": dict,
+                "enumerate": enumerate,
+                "filter": filter,
+                "float": float,
+                "hex": hex,
+                "int": int,
+                "len": len,
+                "list": list,
+                "map": map,
+                "max": max,
+                "min": min,
+                "oct": oct,
+                "ord": ord,
+                "pow": pow,
+                "print": print,
+                "range": range,
+                "reversed": reversed,
+                "round": round,
+                "set": set,
+                "slice": slice,
+                "sorted": sorted,
+                "str": str,
+                "sum": sum,
+                "tuple": tuple,
+                "type": type,
+                "zip": zip,
+            }
+
+            global_vars = {"__builtins__": restricted_builtins}
+            global_vars.update(allowed_modules)
+
+            local_vars = {}
+
+            # Enhanced output capture
+            old_stdout = sys.stdout
+            old_stderr = sys.stderr
+            stdout_buffer = io.StringIO()
+            stderr_buffer = io.StringIO()
+
+            def execute_with_timeout():
+                try:
+                    sys.stdout = stdout_buffer
+                    sys.stderr = stderr_buffer
+                    exec(code, global_vars, local_vars)
+                    return True
+                except Exception as e:
+                    stderr_buffer.write(f"Execution error: {e}")
+                    return False
+                finally:
+                    sys.stdout = old_stdout
+                    sys.stderr = old_stderr
+
+            # Execute with timeout (similar to Tongyi's approach)
+            with ThreadPoolExecutor() as executor:
+                try:
+                    future = executor.submit(execute_with_timeout)
+                    future.result(timeout=timeout)
+
+                    stdout_content = stdout_buffer.getvalue()
+                    stderr_content = stderr_buffer.getvalue()
+
+                    # Format output like Tongyi
+                    if stderr_content:
+                        return f"[Execution Error]\n{stderr_content}"
+                    elif stdout_content:
+                        return f"[Execution Output]\n{stdout_content.rstrip()}"
+                    elif local_vars:
+                        # Show meaningful variables (filter out internals)
+                        meaningful_vars = {
+                            k: v
+                            for k, v in local_vars.items()
+                            if not k.startswith("_") and k not in allowed_modules
+                        }
+                        if meaningful_vars:
+                            return f"[Variables]\n{meaningful_vars}"
+                        else:
+                            return "[Success] Code executed successfully (no output)"
+                    else:
+                        return "[Success] Code executed successfully (no output)"
+
+                except TimeoutError:
+                    return f"[Timeout Error] Code execution exceeded {timeout} seconds timeout"
 
         except Exception as e:
-            return f"Python execution error: {e}"
+            return f"[System Error] Python execution failed: {e}"
 
 
 # Tool registry for easy access
