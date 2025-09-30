@@ -1,440 +1,580 @@
 """
-DeepResearch Tools - Simplified implementations for rLLM integration
+DeepResearch Tools - Production-ready implementations
 
-These are simplified versions of the original DeepResearch tools, adapted to work
-with our rLLM workflow while maintaining the core functionality for research tasks.
+This module provides tool implementations for the DeepResearch agent, with real
+functionality ported from Tongyi's original implementations where possible.
 """
 
-import asyncio
 import os
+import json
+import http.client
+from abc import ABC, abstractmethod
 
-import requests
 
-
-class DeepResearchTool:
-    """Base class for DeepResearch tools."""
+class DeepResearchTool(ABC):
+    """Base class for all DeepResearch tools."""
 
     def __init__(self, name: str, description: str):
         self.name = name
         self.description = description
 
+    @abstractmethod
     async def call(self, **kwargs) -> str:
-        """Call the tool with given arguments."""
-        raise NotImplementedError("Subclasses must implement call method")
+        """Execute the tool with given arguments."""
+        pass
 
 
 class SearchTool(DeepResearchTool):
-    """Web search tool for finding current information."""
+    """Web search tool using Serper API (ported from Tongyi)."""
 
     def __init__(self):
         super().__init__(
-            name="Search", description="Search the web for current information and news"
+            name="Search",
+            description="Performs web searches using Google via Serper API",
         )
 
-    async def call(self, query: str, **kwargs) -> str:
+    def contains_chinese(self, text: str) -> bool:
+        """Check if text contains Chinese characters."""
+        return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+    async def call(self, query: str | list, **kwargs) -> str:
         """
-        Perform web search.
+        Search the web using Serper API.
 
         Args:
-            query: Search query string
+            query: Search query string or list of queries
 
         Returns:
-            Search results as formatted string
+            Formatted search results
         """
-        try:
-            return await self._search_with_serper(query)
-        except Exception as e:
-            return f"Search error: {e}. Please try with a different query."
+        api_key = os.getenv("SERPER_API_KEY")
+        if not api_key:
+            return f"""[Search - API Key Required]
 
-    async def _search_with_serper(self, query: str) -> str:
-        """Use Serper API for web search (adapted from original DeepResearch)."""
+To enable real web search:
+1. Get a free API key from https://serper.dev
+2. Add to your .env file: SERPER_API_KEY=your_key_here
 
-        # Check for API key
-        serper_key = os.getenv("SERPER_KEY_ID") or os.getenv("SERPER_API_KEY")
-        if not serper_key:
-            return f"""Search results for "{query}":
+Placeholder results for '{query}'..."""
 
-[No Serper API key configured]
-To enable real web search, set SERPER_KEY_ID or SERPER_API_KEY in your .env file.
-Get your free API key from: https://serper.dev/
+        # Handle single query or list
+        queries = [query] if isinstance(query, str) else query
+        all_results = []
 
-Basic information for query "{query}":
-- This would normally return current web search results
-- Configure the API key for actual search functionality"""
-
-        def contains_chinese_basic(text: str) -> bool:
-            return any("\u4e00" <= char <= "\u9fff" for char in text)
-
-        # Prepare request payload
-        if contains_chinese_basic(query):
-            payload = {"q": query, "location": "China", "gl": "cn", "hl": "zh-cn"}
-        else:
-            payload = {"q": query, "location": "United States", "gl": "us", "hl": "en"}
-
-        headers = {"X-API-KEY": serper_key, "Content-Type": "application/json"}
-
-        # Use requests instead of http.client for easier async handling
-        url = "https://google.serper.dev/search"
-
-        # Retry logic
-        for attempt in range(3):
+        for q in queries:
             try:
-                response = requests.post(url, json=payload, headers=headers, timeout=10)
-                response.raise_for_status()
-                results = response.json()
-                break
-            except Exception:
-                if attempt == 2:
-                    return f"Search timeout for '{query}'. Please try again later."
-                await asyncio.sleep(1)  # Wait before retry
-                continue
+                conn = http.client.HTTPSConnection("google.serper.dev")
 
-        try:
-            if "organic" not in results:
-                return (
-                    f"No search results found for '{query}'. Try a more general query."
-                )
-
-            web_snippets = []
-            idx = 0
-
-            for page in results["organic"]:
-                idx += 1
-                date_published = ""
-                if "date" in page:
-                    date_published = "\nDate published: " + page["date"]
-
-                source = ""
-                if "source" in page:
-                    source = "\nSource: " + page["source"]
-
-                snippet = ""
-                if "snippet" in page:
-                    snippet = "\n" + page["snippet"]
-
-                formatted_result = f"{idx}. [{page['title']}]({page['link']}){date_published}{source}\n{snippet}"
-                formatted_result = formatted_result.replace(
-                    "Your browser can't play this video.", ""
-                )
-                web_snippets.append(formatted_result)
-
-            content = (
-                f"A Google search for '{query}' found {len(web_snippets)} results:\n\n## Web Results\n"
-                + "\n\n".join(web_snippets)
-            )
-            return content
-
-        except Exception as e:
-            return f"Error processing search results for '{query}': {e}"
-
-
-class FileParserTool(DeepResearchTool):
-    """Tool for parsing and analyzing files."""
-
-    def __init__(self):
-        super().__init__(
-            name="FileParser",
-            description="Parse and analyze files (PDF, DOCX, TXT, CSV, etc.)",
-        )
-
-    async def call(self, files: list, **kwargs) -> str:
-        """
-        Parse files and extract content.
-
-        Args:
-            files: List of file paths to parse
-
-        Returns:
-            Parsed content as string
-        """
-        try:
-            results = []
-            for file_path in files:
-                if os.path.exists(file_path):
-                    try:
-                        # Simple text file reading - can be enhanced with specific parsers
-                        with open(file_path, encoding="utf-8", errors="ignore") as f:
-                            content = f.read()[:5000]  # Limit content size
-                            results.append(
-                                f"File: {file_path}\nContent:\n{content}\n---"
-                            )
-                    except Exception as e:
-                        results.append(f"File: {file_path}\nError: {e}\n---")
+                # Localize for Chinese queries
+                if self.contains_chinese(q):
+                    payload = json.dumps(
+                        {"q": q, "location": "China", "gl": "cn", "hl": "zh-cn"}
+                    )
                 else:
-                    results.append(f"File: {file_path}\nError: File not found\n---")
+                    payload = json.dumps(
+                        {"q": q, "location": "United States", "gl": "us", "hl": "en"}
+                    )
 
-            return "\n".join(results) if results else "No files processed"
+                headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
 
-        except Exception as e:
-            return f"File parsing error: {e}"
+                # Retry logic
+                for i in range(5):
+                    try:
+                        conn.request("POST", "/search", payload, headers)
+                        res = conn.getresponse()
+                        break
+                    except Exception:
+                        if i == 4:
+                            all_results.append(f"Google search timeout for '{q}'")
+                            continue
+
+                data = res.read()
+                results = json.loads(data.decode("utf-8"))
+
+                if "organic" not in results:
+                    all_results.append(f"No results found for '{q}'")
+                    continue
+
+                web_snippets = []
+                for idx, page in enumerate(results.get("organic", [])[:10], 1):
+                    date_published = f"\nDate: {page['date']}" if "date" in page else ""
+                    source = f"\nSource: {page['source']}" if "source" in page else ""
+                    snippet = f"\n{page['snippet']}" if "snippet" in page else ""
+
+                    entry = f"{idx}. [{page.get('title', 'Untitled')}]({page.get('link', '')}){date_published}{source}{snippet}"
+                    web_snippets.append(entry)
+
+                content = (
+                    f"Google search for '{q}' found {len(web_snippets)} results:\n\n"
+                    + "\n\n".join(web_snippets)
+                )
+                all_results.append(content)
+
+            except Exception as e:
+                all_results.append(f"Search error for '{q}': {e}")
+
+        return (
+            "\n=======\n".join(all_results) if len(all_results) > 1 else all_results[0]
+        )
 
 
 class ScholarTool(DeepResearchTool):
-    """Academic search tool for scholarly information."""
+    """Google Scholar search using Serper API (ported from Tongyi)."""
 
     def __init__(self):
         super().__init__(
             name="Scholar",
-            description="Search for academic papers and scholarly information",
+            description="Search Google Scholar for academic papers",
         )
 
-    async def call(self, query: str, **kwargs) -> str:
+    async def call(self, query: str | list, **kwargs) -> str:
         """
-        Search for academic papers.
+        Search Google Scholar using Serper API.
 
         Args:
-            query: Academic search query
+            query: Search query string or list of queries
 
         Returns:
-            Academic search results as string
+            Academic search results
         """
-        try:
-            return f"""Academic search results for "{query}":
+        api_key = os.getenv("SERPER_API_KEY")
+        if not api_key:
+            return """[Scholar - API Key Required]
 
-[Placeholder academic search results]
-1. Paper Title 1 - Authors et al. (2024)
-   Abstract: Academic paper about {query}...
+To enable Google Scholar search, configure SERPER_API_KEY in your .env file."""
 
-2. Paper Title 2 - Authors et al. (2023)
-   Abstract: Research on {query}...
+        queries = [query] if isinstance(query, str) else query
+        all_results = []
 
-3. Paper Title 3 - Authors et al. (2022)
-   Abstract: Study of {query}...
+        for q in queries:
+            try:
+                conn = http.client.HTTPSConnection("google.serper.dev")
+                payload = json.dumps({"q": q, "type": "scholar", "num": 10})
+                headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
 
-Note: This is a placeholder implementation. In production, this would connect to
-academic databases like Google Scholar, arXiv, or DBLP for real results."""
+                conn.request("POST", "/scholar", payload, headers)
+                res = conn.getresponse()
+                data = res.read()
+                results = json.loads(data.decode("utf-8"))
 
-        except Exception as e:
-            return f"Scholar search error: {e}"
+                if "organic" not in results:
+                    all_results.append(f"No scholar results for '{q}'")
+                    continue
+
+                papers = []
+                for idx, paper in enumerate(results.get("organic", [])[:10], 1):
+                    title = paper.get("title", "Untitled")
+                    link = paper.get("link", "")
+                    snippet = paper.get("snippet", "")
+                    publication = paper.get("publication", "")
+                    year = paper.get("year", "")
+                    cited_by = paper.get("citedBy", {}).get("value", 0)
+
+                    entry = f"{idx}. [{title}]({link})"
+                    if publication:
+                        entry += f"\n   Publication: {publication}"
+                    if year:
+                        entry += f" ({year})"
+                    if cited_by:
+                        entry += f"\n   Cited by: {cited_by}"
+                    if snippet:
+                        entry += f"\n   {snippet}"
+
+                    papers.append(entry)
+
+                result_text = f"Google Scholar search for '{q}':\n\n" + "\n\n".join(
+                    papers
+                )
+                all_results.append(result_text)
+
+            except Exception as e:
+                all_results.append(f"Scholar search error for '{q}': {e}")
+
+        return (
+            "\n=======\n".join(all_results) if len(all_results) > 1 else all_results[0]
+        )
 
 
 class VisitTool(DeepResearchTool):
-    """Tool for visiting and analyzing web pages."""
+    """Web page visiting with content extraction."""
 
     def __init__(self):
-        super().__init__(name="Visit", description="Visit and analyze web pages")
+        super().__init__(
+            name="Visit",
+            description="Visit and extract content from web pages",
+        )
 
-    async def call(self, url: str, **kwargs) -> str:
+    async def call(self, url: str | list, goal: str = "", **kwargs) -> str:
         """
-        Visit a URL and extract content.
+        Visit web pages and extract content.
 
         Args:
-            url: URL to visit
+            url: URL string or list of URLs
+            goal: Optional goal for the visit
 
         Returns:
-            Page content as string
+            Extracted webpage content
         """
         try:
-            # Placeholder implementation - in production would use requests/selenium
-            return f"""Visited: {url}
+            import requests
+            from bs4 import BeautifulSoup
+        except ImportError:
+            return """[Visit Tool - Dependencies Required]
 
-[Placeholder web page content]
-Title: Sample Page Title
-Content: This is placeholder content from the visited page {url}.
-In a real implementation, this would fetch and parse the actual webpage content.
+To enable webpage visiting:
+pip install requests beautifulsoup4
 
-Key information extracted:
-- Main topic: Related to the search query
-- Important facts: Placeholder facts from the page
-- Links: Placeholder related links"""
+Then the tool will fetch and parse webpage content."""
 
-        except Exception as e:
-            return f"Visit error: {e}"
+        import re
+        from urllib.parse import urlparse
+
+        urls = [url] if isinstance(url, str) else url
+        all_results = []
+
+        for target_url in urls[:5]:  # Limit to 5 URLs
+            try:
+                # Validate and normalize URL
+                parsed = urlparse(target_url)
+                if not parsed.scheme:
+                    target_url = f"https://{target_url}"
+
+                # Fetch webpage
+                headers = {"User-Agent": "Mozilla/5.0 (compatible; DeepResearch/1.0)"}
+                response = requests.get(target_url, headers=headers, timeout=10)
+                response.raise_for_status()
+
+                # Parse HTML
+                soup = BeautifulSoup(response.text, "html.parser")
+
+                # Remove unwanted elements
+                for element in soup(
+                    ["script", "style", "nav", "footer", "header", "aside"]
+                ):
+                    element.decompose()
+
+                # Extract title
+                title = soup.title.string if soup.title else "No Title"
+
+                # Extract main content
+                content = ""
+                for selector in ["main", "article", ".content", "#content", ".post"]:
+                    element = soup.select_one(selector)
+                    if element:
+                        content = element.get_text(separator="\n", strip=True)
+                        break
+
+                if not content:
+                    body = soup.find("body")
+                    if body:
+                        content = body.get_text(separator="\n", strip=True)
+
+                # Clean up text
+                content = re.sub(r"\n{3,}", "\n\n", content)
+                content = re.sub(r" {2,}", " ", content)
+
+                # Limit length
+                if len(content) > 5000:
+                    content = content[:5000] + "\n[Content truncated...]"
+
+                # Format result
+                result = f"[Webpage: {target_url}]\nTitle: {title}"
+                if goal:
+                    result += f"\nGoal: {goal}"
+                result += f"\n\nContent:\n{content}"
+
+                all_results.append(result)
+
+            except Exception as e:
+                all_results.append(f"[Error visiting {target_url}]: {e}")
+
+        return "\n\n=======\n\n".join(all_results)
+
+
+class FileParserTool(DeepResearchTool):
+    """Enhanced file parsing for multiple formats."""
+
+    def __init__(self):
+        super().__init__(
+            name="FileParser",
+            description="Parse files: TXT, JSON, CSV, PDF, DOCX, etc.",
+        )
+
+    async def call(self, files: str | list, **kwargs) -> str:
+        """
+        Parse files and extract content.
+
+        Args:
+            files: File path string or list of paths
+
+        Returns:
+            Extracted file content
+        """
+        import csv
+        from pathlib import Path
+
+        file_paths = [files] if isinstance(files, str) else files
+        all_results = []
+
+        for file_path in file_paths[:10]:  # Limit to 10 files
+            if not os.path.exists(file_path):
+                all_results.append(f"Error: File not found at {file_path}")
+                continue
+
+            try:
+                file_ext = Path(file_path).suffix.lower()
+                file_name = os.path.basename(file_path)
+                file_size = os.path.getsize(file_path)
+
+                content = ""
+
+                # Text files
+                if file_ext in [
+                    ".txt",
+                    ".md",
+                    ".log",
+                    ".py",
+                    ".js",
+                    ".java",
+                    ".cpp",
+                    ".c",
+                    ".h",
+                ]:
+                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                        content = f.read()
+
+                # JSON files
+                elif file_ext == ".json":
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        content = json.dumps(data, indent=2, ensure_ascii=False)
+
+                # CSV files
+                elif file_ext == ".csv":
+                    rows = []
+                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                        reader = csv.reader(f)
+                        for i, row in enumerate(reader):
+                            if i >= 100:
+                                rows.append("[... truncated ...]")
+                                break
+                            rows.append(", ".join(row))
+                    content = "\n".join(rows)
+
+                # PDF files
+                elif file_ext == ".pdf":
+                    try:
+                        import PyPDF2
+
+                        with open(file_path, "rb") as f:
+                            pdf_reader = PyPDF2.PdfReader(f)
+                            pages = []
+                            for i in range(min(len(pdf_reader.pages), 10)):
+                                page = pdf_reader.pages[i]
+                                pages.append(f"Page {i + 1}:\n{page.extract_text()}")
+                            content = "\n\n".join(pages)
+                    except ImportError:
+                        content = "[PDF parsing requires: pip install PyPDF2]"
+
+                # Word documents
+                elif file_ext in [".docx", ".doc"]:
+                    try:
+                        from docx import Document
+
+                        doc = Document(file_path)
+                        paragraphs = []
+                        for i, para in enumerate(doc.paragraphs):
+                            if i >= 100:
+                                paragraphs.append("[... truncated ...]")
+                                break
+                            if para.text.strip():
+                                paragraphs.append(para.text)
+                        content = "\n\n".join(paragraphs)
+                    except ImportError:
+                        content = "[DOCX parsing requires: pip install python-docx]"
+
+                # Default: try as text
+                else:
+                    try:
+                        with open(
+                            file_path, "r", encoding="utf-8", errors="ignore"
+                        ) as f:
+                            content = f.read()
+                    except Exception:
+                        content = f"[Cannot parse file type: {file_ext}]"
+
+                # Limit content
+                if len(content) > 10000:
+                    content = content[:10000] + "\n[Content truncated...]"
+
+                result = f"[File: {file_name}]\nType: {file_ext}\nSize: {file_size:,} bytes\n\nContent:\n{content}"
+                all_results.append(result)
+
+            except Exception as e:
+                all_results.append(f"Error parsing {file_path}: {e}")
+
+        return "\n\n=======\n\n".join(all_results)
 
 
 class PythonInterpreterTool(DeepResearchTool):
-    """Tool for executing Python code safely.
-
-    Enhanced version inspired by Tongyi's PythonInterpreter with:
-    - Better error handling
-    - Timeout support
-    - More comprehensive output capture
-    """
+    """Safe Python code execution (from existing implementation)."""
 
     def __init__(self):
         super().__init__(
             name="PythonInterpreter",
-            description="Execute Python code for calculations and data analysis",
+            description="Execute Python code for calculations and analysis",
         )
-        self.timeout = 50  # Match Tongyi's default timeout
+        self.timeout = 50
 
     async def call(self, code: str, timeout: int = None, **kwargs) -> str:
-        """
-        Execute Python code with enhanced safety and error handling.
-
-        Inspired by Tongyi's implementation with improvements for:
-        - Timeout handling
-        - Better error messages
-        - More comprehensive output capture
-
-        Args:
-            code: Python code to execute
-            timeout: Execution timeout in seconds (default: 50)
-
-        Returns:
-            Execution result as string
-        """
+        """Execute Python code safely with timeout."""
         timeout = timeout or self.timeout
 
+        # Security checks
+        dangerous_patterns = [
+            "import os",
+            "import subprocess",
+            "import sys",
+            "exec",
+            "eval",
+            "__import__",
+            "open(",
+            "file(",
+        ]
+
+        code_lower = code.lower()
+        for pattern in dangerous_patterns:
+            if pattern in code_lower:
+                return f"[Security Error] '{pattern}' not allowed"
+
+        import io
+        import sys
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError
+
+        # Setup safe environment
+        allowed_modules = {
+            "math": __import__("math"),
+            "datetime": __import__("datetime"),
+            "json": __import__("json"),
+            "random": __import__("random"),
+            "re": __import__("re"),
+            "collections": __import__("collections"),
+            "itertools": __import__("itertools"),
+            "statistics": __import__("statistics"),
+        }
+
+        # Add numpy/pandas if available
         try:
-            # Enhanced safety check - reject dangerous operations
-            dangerous_patterns = [
-                "import os",
-                "import subprocess",
-                "import sys",
-                "exec",
-                "eval",
-                "__import__",
-                "open(",
-                "file(",
-                "input(",
-                "raw_input(",
-                "compile(",
-                "globals(",
-                "locals(",
-                "vars(",
-            ]
+            import numpy as np
 
-            code_lower = code.lower()
-            for pattern in dangerous_patterns:
-                if pattern in code_lower:
-                    return f"[Security Error] Dangerous operation '{pattern}' not allowed for safety reasons."
+            allowed_modules["numpy"] = np
+            allowed_modules["np"] = np
+        except ImportError:
+            pass
 
-            # Enhanced execution environment matching Tongyi's capabilities
-            import io
-            import sys
-            from concurrent.futures import ThreadPoolExecutor, TimeoutError
+        try:
+            import pandas as pd
 
-            # More comprehensive allowed modules
-            allowed_modules = {
-                "math": __import__("math"),
-                "datetime": __import__("datetime"),
-                "json": __import__("json"),
-                "random": __import__("random"),
-                "re": __import__("re"),
-                "collections": __import__("collections"),
-                "itertools": __import__("itertools"),
-                "statistics": __import__("statistics"),
-            }
+            allowed_modules["pandas"] = pd
+            allowed_modules["pd"] = pd
+        except ImportError:
+            pass
 
-            # Try to add numpy and pandas if available (like Tongyi)
+        # Restricted builtins
+        restricted_builtins = {
+            "abs": abs,
+            "all": all,
+            "any": any,
+            "bin": bin,
+            "bool": bool,
+            "chr": chr,
+            "dict": dict,
+            "enumerate": enumerate,
+            "filter": filter,
+            "float": float,
+            "hex": hex,
+            "int": int,
+            "len": len,
+            "list": list,
+            "map": map,
+            "max": max,
+            "min": min,
+            "oct": oct,
+            "ord": ord,
+            "pow": pow,
+            "print": print,
+            "range": range,
+            "reversed": reversed,
+            "round": round,
+            "set": set,
+            "slice": slice,
+            "sorted": sorted,
+            "str": str,
+            "sum": sum,
+            "tuple": tuple,
+            "type": type,
+            "zip": zip,
+        }
+
+        global_vars = {"__builtins__": restricted_builtins}
+        global_vars.update(allowed_modules)
+        local_vars = {}
+
+        # Capture output
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+        stdout_buffer = io.StringIO()
+        stderr_buffer = io.StringIO()
+
+        def execute_with_timeout():
             try:
-                import numpy as np
+                sys.stdout = stdout_buffer
+                sys.stderr = stderr_buffer
+                exec(code, global_vars, local_vars)
+                return True
+            except Exception as e:
+                stderr_buffer.write(f"Execution error: {e}")
+                return False
+            finally:
+                sys.stdout = old_stdout
+                sys.stderr = old_stderr
 
-                allowed_modules["numpy"] = np
-                allowed_modules["np"] = np
-            except ImportError:
-                pass
-
+        # Execute with timeout
+        with ThreadPoolExecutor() as executor:
             try:
-                import pandas as pd
+                future = executor.submit(execute_with_timeout)
+                future.result(timeout=timeout)
 
-                allowed_modules["pandas"] = pd
-                allowed_modules["pd"] = pd
-            except ImportError:
-                pass
+                stdout_content = stdout_buffer.getvalue()
+                stderr_content = stderr_buffer.getvalue()
 
-            # Enhanced restricted globals
-            restricted_builtins = {
-                "abs": abs,
-                "all": all,
-                "any": any,
-                "bin": bin,
-                "bool": bool,
-                "chr": chr,
-                "dict": dict,
-                "enumerate": enumerate,
-                "filter": filter,
-                "float": float,
-                "hex": hex,
-                "int": int,
-                "len": len,
-                "list": list,
-                "map": map,
-                "max": max,
-                "min": min,
-                "oct": oct,
-                "ord": ord,
-                "pow": pow,
-                "print": print,
-                "range": range,
-                "reversed": reversed,
-                "round": round,
-                "set": set,
-                "slice": slice,
-                "sorted": sorted,
-                "str": str,
-                "sum": sum,
-                "tuple": tuple,
-                "type": type,
-                "zip": zip,
-            }
-
-            global_vars = {"__builtins__": restricted_builtins}
-            global_vars.update(allowed_modules)
-
-            local_vars = {}
-
-            # Enhanced output capture
-            old_stdout = sys.stdout
-            old_stderr = sys.stderr
-            stdout_buffer = io.StringIO()
-            stderr_buffer = io.StringIO()
-
-            def execute_with_timeout():
-                try:
-                    sys.stdout = stdout_buffer
-                    sys.stderr = stderr_buffer
-                    exec(code, global_vars, local_vars)
-                    return True
-                except Exception as e:
-                    stderr_buffer.write(f"Execution error: {e}")
-                    return False
-                finally:
-                    sys.stdout = old_stdout
-                    sys.stderr = old_stderr
-
-            # Execute with timeout (similar to Tongyi's approach)
-            with ThreadPoolExecutor() as executor:
-                try:
-                    future = executor.submit(execute_with_timeout)
-                    future.result(timeout=timeout)
-
-                    stdout_content = stdout_buffer.getvalue()
-                    stderr_content = stderr_buffer.getvalue()
-
-                    # Format output like Tongyi
-                    if stderr_content:
-                        return f"[Execution Error]\n{stderr_content}"
-                    elif stdout_content:
-                        return f"[Execution Output]\n{stdout_content.rstrip()}"
-                    elif local_vars:
-                        # Show meaningful variables (filter out internals)
-                        meaningful_vars = {
-                            k: v
-                            for k, v in local_vars.items()
-                            if not k.startswith("_") and k not in allowed_modules
-                        }
-                        if meaningful_vars:
-                            return f"[Variables]\n{meaningful_vars}"
-                        else:
-                            return "[Success] Code executed successfully (no output)"
+                if stderr_content:
+                    return f"[Error]\n{stderr_content}"
+                elif stdout_content:
+                    return f"[Output]\n{stdout_content.rstrip()}"
+                else:
+                    meaningful_vars = {
+                        k: v
+                        for k, v in local_vars.items()
+                        if not k.startswith("_") and k not in allowed_modules
+                    }
+                    if meaningful_vars:
+                        return f"[Variables]\n{meaningful_vars}"
                     else:
-                        return "[Success] Code executed successfully (no output)"
+                        return "[Success] Code executed (no output)"
 
-                except TimeoutError:
-                    return f"[Timeout Error] Code execution exceeded {timeout} seconds timeout"
+            except TimeoutError:
+                return f"[Timeout] Execution exceeded {timeout}s"
 
-        except Exception as e:
-            return f"[System Error] Python execution failed: {e}"
+        return "[Error] Unexpected execution error"
 
 
-# Tool registry for easy access
+# Tool registry
 DEEPRESEARCH_TOOLS = {
     "Search": SearchTool(),
-    "FileParser": FileParserTool(),
     "Scholar": ScholarTool(),
     "Visit": VisitTool(),
+    "FileParser": FileParserTool(),
     "PythonInterpreter": PythonInterpreterTool(),
 }
 

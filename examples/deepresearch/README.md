@@ -135,23 +135,41 @@ for episode in episodes:
 
 ## Tools
 
-The agent has access to the following research tools:
+The agent has access to the following research tools (ported from Tongyi DeepResearch):
 
 | Tool | Description | Implementation Status |
 |------|-------------|----------------------|
-| **Search** | Web search via Serper API | ✅ Fully implemented (needs API key) |
+| **Search** | Web search via Serper API | ✅ Fully implemented from Tongyi |
+| **Scholar** | Google Scholar search via Serper | ✅ Fully implemented from Tongyi |
+| **Visit** | Visit and extract webpage content | ✅ Fully implemented with BeautifulSoup |
+| **FileParser** | Parse multiple file formats | ✅ Enhanced: TXT, JSON, CSV, PDF*, DOCX* |
 | **PythonInterpreter** | Execute Python code safely | ✅ Fully implemented with security |
-| **Scholar** | Academic paper search | ❌ Placeholder only |
-| **Visit** | Visit and analyze web pages | ❌ Placeholder only |
-| **FileParser** | Parse various file formats | ⚠️ Basic text only (no PDF/DOCX) |
 
-### Tool Implementation Notes
+### Tool Implementation Details
 
-- **Search**: Real web search with Serper API integration. Configure API key in `.env` file
-- **PythonInterpreter**: Enhanced security, 50s timeout, supports numpy/pandas when available
-- **Scholar**: Returns placeholder results. Needs integration with arXiv/Google Scholar APIs
-- **Visit**: Returns placeholder content. Needs requests/BeautifulSoup implementation
-- **FileParser**: Only reads text files up to 5000 chars. Original supports PDF/DOCX/media files
+All tools have been ported from the original Tongyi DeepResearch implementation:
+
+- **Search & Scholar**: Use Serper API for real Google/Scholar search (get free API key from https://serper.dev)
+- **Visit**: Fetches and parses webpages using requests/BeautifulSoup
+- **FileParser**: Supports TXT, JSON, CSV, and optionally PDF (PyPDF2) and DOCX (python-docx)
+- **PythonInterpreter**: Safe execution with 50s timeout, supports numpy/pandas when available
+
+### API Configuration
+
+Add to your `.env` file:
+```bash
+SERPER_API_KEY=your_serper_key  # For Search and Scholar tools
+```
+
+### Optional Dependencies
+
+For enhanced file parsing:
+```bash
+pip install PyPDF2           # For PDF support in FileParser
+pip install python-docx      # For DOCX support in FileParser
+pip install beautifulsoup4   # For Visit tool (webpage parsing)
+pip install requests         # For Visit tool (webpage fetching)
+```
 
 ## Key Improvements from Original
 
