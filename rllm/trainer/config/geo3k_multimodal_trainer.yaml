@@ -1,0 +1,288 @@
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+# Enable multimodal processing
+multimodal:
+  enable: true
+
+# Model configuration for multimodal training
+actor_rollout_ref:
+  model:
+    path: "Qwen/Qwen2.5-VL-7B-Instruct"
+    trust_remote_code: true
+    use_shm: false
+  hybrid_engine: true
+  actor:
+    strategy: fsdp
+    ppo_mini_batch_size: 64
+    ppo_micro_batch_size: null
+    ppo_micro_batch_size_per_gpu: 2
+    use_dynamic_bsz: false
+    ppo_max_token_len_per_gpu: 16384
+    clip_ratio: 0.2
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.2
+    policy_loss:
+      loss_mode: vanilla
+      clip_cov_ratio: 0.0002
+      clip_cov_lb: 1.0
+      clip_cov_ub: 5.0
+      kl_cov_ratio: 0.0002
+      ppo_kl_coef: 0.1
+    clip_ratio_c: 3.0
+    loss_agg_mode: token-mean
+    entropy_coeff: 0.01
+    use_kl_loss: false
+    use_torch_compile: true
+    kl_loss_coef: 0.001
+    kl_loss_type: low_var_kl
+    ppo_epochs: 1
+    shuffle: false
+    checkpoint:
+      save_contents:
+        - model
+        - optimizer
+        - extra
+      load_contents: ${.save_contents}
+    optim:
+      lr: 5.0e-07
+      lr_warmup_steps_ratio: 0.1
+      total_training_steps: -1
+      weight_decay: 0.01
+      lr_warmup_steps: -1
+      min_lr_ratio: 0.0
+      num_cycles: 0.5
+      warmup_style: constant
+    grad_clip: 1.0
+    ulysses_sequence_parallel_size: 1
+    entropy_from_logits_with_chunking: false
+    entropy_checkpointing: false
+    fsdp_config:
+      wrap_policy:
+        min_num_params: 0
+      param_offload: false
+      optimizer_offload: false
+      offload_policy: false
+      reshard_after_forward: true
+      fsdp_size: -1
+      forward_prefetch: false
+  ref:
+    strategy: ${actor_rollout_ref.actor.strategy}
+    use_torch_compile: ${oc.select:actor_rollout_ref.actor.use_torch_compile,true}
+    log_prob_micro_batch_size: null
+    log_prob_micro_batch_size_per_gpu: null
+    log_prob_use_dynamic_bsz: ${oc.select:actor_rollout_ref.actor.use_dynamic_bsz,false}
+    log_prob_max_token_len_per_gpu: ${oc.select:actor_rollout_ref.actor.ppo_max_token_len_per_gpu,16384}
+    fsdp_config:
+      param_offload: false
+      reshard_after_forward: true
+      forward_prefetch: false
+      wrap_policy:
+        min_num_params: 0
+    ulysses_sequence_parallel_size: ${oc.select:actor_rollout_ref.actor.ulysses_sequence_parallel_size,1}
+    entropy_from_logits_with_chunking: false
+    entropy_checkpointing: false
+  rollout:
+    name: sglang
+    mode: async
+    temperature: 1.0
+    top_k: -1
+    top_p: 1
+    prompt_length: ${oc.select:data.max_prompt_length,2048}
+    response_length: ${oc.select:data.max_response_length,2048}
+    dtype: bfloat16
+    gpu_memory_utilization: 0.85
+    ignore_eos: false
+    enforce_eager: false
+    free_cache_engine: true
+    tensor_model_parallel_size: 1
+    max_num_batched_tokens: 8192
+    max_model_len: null
+    max_num_seqs: 256
+    log_prob_micro_batch_size: null
+    log_prob_micro_batch_size_per_gpu: null
+    log_prob_use_dynamic_bsz: ${oc.select:actor_rollout_ref.actor.use_dynamic_bsz,false}
+    log_prob_max_token_len_per_gpu: ${oc.select:actor_rollout_ref.actor.ppo_max_token_len_per_gpu,16384}
+    disable_log_stats: true
+    do_sample: true
+    'n': 1
+    multi_stage_wake_up: false
+    multi_turn:
+      enable: true
+      max_assistant_turns: 5
+    agent:
+      num_workers: 0
+    val_kwargs:
+      do_sample: true
+    engine_kwargs:
+      sglang:
+        swap_space: null
+        disable_mm_preprocessor_cache: false
+
+# Critic configuration
+critic:
+  strategy: fsdp
+  use_torch_compile: true
+  critic_loss_coef: 1.0
+  value_head_mode: separate
+  use_kl_loss: false
+  kl_loss_coef: 0.001
+  kl_loss_type: low_var_kl
+  ppo_epochs: 1
+  ppo_micro_batch_size: null
+  ppo_micro_batch_size_per_gpu: 2
+  use_dynamic_bsz: false
+  ppo_max_token_len_per_gpu: 16384
+  shuffle: false
+  checkpoint:
+    save_contents:
+      - model
+      - optimizer
+      - extra
+    load_contents: ${.save_contents}
+  optim:
+    lr: 5.0e-07
+    lr_warmup_steps_ratio: 0.1
+    total_training_steps: -1
+    weight_decay: 0.01
+    lr_warmup_steps: -1
+    min_lr_ratio: 0.0
+    num_cycles: 0.5
+    warmup_style: constant
+  grad_clip: 1.0
+  ulysses_sequence_parallel_size: 1
+  entropy_from_logits_with_chunking: false
+  entropy_checkpointing: false
+  fsdp_config:
+    wrap_policy:
+      min_num_params: 0
+    param_offload: false
+    optimizer_offload: false
+    offload_policy: false
+    reshard_after_forward: true
+    fsdp_size: -1
+    forward_prefetch: false
+
+# Data configuration for multimodal training
+data:
+  max_prompt_length: 2048
+  max_response_length: 2048
+  train_batch_size: 64
+  micro_batch_size_per_gpu: 1
+  val_batch_size: 64
+  val_micro_batch_size_per_gpu: 1
+  train_files: null
+  val_files: null
+  dataset: null
+  gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
+  return_raw_chat: true
+  return_multi_modal_inputs: true
+  trust_remote_code: true
+  pad_to_length: null
+  max_epochs: 10
+  shuffle_before_pack: true
+  pack_sequences: false
+  tokenizer_chat_template: null
+  response_only_loss_mask: true
+  normalize_reward: false
+  filter_length: -1
+  max_token_len: null
+  balance_sequence_length: false
+  balance_sequence_length_mode: packed_token
+  balance_sequence_length_sequence_weight: 0.7
+  balance_sequence_length_balance_weight: 0.3
+  balance_sequence_length_max_ratio: 10.0
+  parquet_data_file_fraction: 1.0
+
+# RLLM-specific configuration
+rllm:
+  agent:
+    name: geo3k_agent
+    max_steps: 10
+    trajectory_timeout: null
+    overlong_filter: false
+    agent_args:
+      accumulate_thinking: true
+      include_images_in_completion: true
+    engine_args: {}
+  env:
+    name: math
+    env_args: {}
+  workflow:
+    use_workflow: true
+    name: multi_turn_workflow
+    workflow_args:
+      max_prompt_length: ${data.max_prompt_length}
+      max_response_length: ${data.max_response_length}
+      timeout: 1e6
+      gamma: 1.0
+      reward_bonus_coeff: 0.0
+      accumulate_response_length: true
+    n_parallel_tasks: 64
+    retry_limit: 3
+  disable_thinking: false
+  mask_truncated_samples: false
+  stepwise_advantage:
+    enable: false
+    mode: broadcast
+    normalize_by_steps: false
+  compact_filtering:
+    enable: false
+    compact_ratio: 0.8
+    compact_mode: packed_token
+  rejection_sample:
+    enable: false
+    multiplier: 4
+    reward_threshold: 0.0
+    keep_best_n: 1
+
+# Algorithm configuration
+algorithm:
+  kl_penalty: 0.05
+  kl_target: 6.0
+  gamma: 1.0
+  lam: 0.95
+  cliprange: 0.2
+  cliprange_value: 0.2
+  vf_coef: 0.5
+  entropy_bonus: 0.01
+  use_kl_in_reward: false
+  adv_estimator: gae
+  normalization:
+    advantage: true
+    value_target: false
+
+# Reward model configuration
+reward_model:
+  enable: false
+  path: null
+  trust_remote_code: true
+
+# Trainer configuration
+trainer:
+  n_gpus_per_node: 4
+  nnodes: 1
+  save_freq: 100
+  eval_freq: 50
+  logging_freq: 10
+  save_dir: ./checkpoints/geo3k_multimodal
+  project_name: geo3k_multimodal_training
+  experiment_name: ${oc.env:USER,unknown}_geo3k_${now:%Y%m%d_%H%M%S}
+  tags: ["multimodal", "geo3k", "qwen2vl"]
+  disable_fast_tokenizer: false
+  profile_steps: null
+  controller_nsight_options:
+    trace: ["cuda", "osrt", "nvtx"]
+    output: "./nsight_traces"
+    force_overwrite: true
+  use_legacy_worker_impl: auto
+
+# Ray configuration
+ray_init:
+  num_cpus: 16
+  timeline_json_file: null

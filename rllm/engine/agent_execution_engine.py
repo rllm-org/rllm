@@ -40,6 +40,7 @@ class AgentExecutionEngine:
         max_response_length=8192,
         max_prompt_length=1024,
         config=None,
+        processor=None,
         agent_class=None,
         env_class=None,
         agent_args=None,
@@ -60,6 +61,7 @@ class AgentExecutionEngine:
         self.config = config
         self.tokenizer = tokenizer
         self.engine_name = engine_name
+        self.processor = processor
         self.n_parallel_agents = n_parallel_agents
         self.overlong_filter = overlong_filter
 
@@ -111,13 +113,22 @@ class AgentExecutionEngine:
                 config=self.config,
                 rollout_manager=rollout_engine,
                 tokenizer=self.tokenizer,
+                processor=self.processor,
                 disable_thinking=self.config.rllm.disable_thinking,
             )
 
         # Create a thread pool executor for environment interactions (i.e. step, reset, close)
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
 
-    async def get_model_response(self, prompt, application_id, **kwargs) -> str:
+    async def get_model_response(
+        self,
+        messages,
+        application_id,
+        *,
+        multimodal_messages=None,
+        multimodal_data=None,
+        **kwargs,
+    ) -> str:
         """
         Compute model response asynchronously based on the engine type.
 
@@ -140,12 +151,20 @@ class AgentExecutionEngine:
         sampling_params.update(kwargs)
 
         if self.engine_name == "openai":
-            output = await self.rollout_engine.get_model_response(prompt, application_id=application_id, **sampling_params)
+            request_messages = messages
+            output = await self.rollout_engine.get_model_response(request_messages, application_id=application_id, **sampling_params)
             return output.text
         elif self.engine_name == "verl":
+            request_messages = multimodal_messages or messages
             meta_data = sampling_params.pop("meta_info", {})
             validate = meta_data.get("validate", False)
-            output = await self.rollout_engine.get_model_response(prompt, application_id=application_id, validate=validate, **sampling_params)
+            output = await self.rollout_engine.get_model_response(
+                request_messages,
+                application_id=application_id,
+                validate=validate,
+                multimodal_data=multimodal_data,
+                **sampling_params,
+            )
             return output.text
         else:
             raise NotImplementedError(f"Engine type '{self.engine_name}' not supported")
@@ -195,11 +214,17 @@ class AgentExecutionEngine:
         # Reset agent
         agent.reset()
         # Update agent internal state from environment.
+        # Extract multimodal data from observation and pass to agent
+        agent_kwargs = {}
+        if isinstance(observation, dict) and "images" in observation:
+            agent_kwargs["images"] = observation["images"]
+
         agent.update_from_env(
             observation=observation,  # Raw observation from environment
             reward=0.0,
             done=False,
             info=info,
+            **agent_kwargs,
         )
         messages = agent.chat_completions
         prompt_tokens, _ = convert_messages_to_tokens_and_masks(messages, tokenizer=self.tokenizer, parser=self.chat_parser, contains_first_msg=True, contains_generation_msg=True)
@@ -212,6 +237,21 @@ class AgentExecutionEngine:
         for step_idx in range(self.max_steps):
             # Get action from agent
             prompt_messages = agent.chat_completions.copy()
+
+            multimodal_messages = None
+            multimodal_data = None
+            if hasattr(agent, "get_multimodal_data"):
+                try:
+                    multimodal_data = agent.get_multimodal_data()
+                    has_multimodal = isinstance(multimodal_data, dict) and (
+                        multimodal_data.get("image") or multimodal_data.get("video")
+                    )
+                    if has_multimodal and hasattr(agent, "get_multimodal_conversation"):
+                        multimodal_messages = agent.get_multimodal_conversation()
+                except Exception as exc:
+                    colorful_print(f"Warning: failed to collect multimodal data: {exc}", "yellow")
+                    multimodal_messages = None
+                    multimodal_data = None
             # Max remaining tokens left for the response
             # For enforced max prompt at each step, no need to deduct here
             if not self.enforce_max_prompt_length:
@@ -229,7 +269,13 @@ class AgentExecutionEngine:
             kwargs["max_tokens"] = max_tokens
 
             start_time = time.time()
-            response = await self.get_model_response(prompt_messages, application_id, **kwargs)
+            response = await self.get_model_response(
+                prompt_messages,
+                application_id,
+                multimodal_messages=multimodal_messages,
+                multimodal_data=multimodal_data,
+                **kwargs,
+            )
             delta_time = time.time() - start_time
             llm_time += delta_time
             total_time += delta_time
@@ -267,11 +313,17 @@ class AgentExecutionEngine:
             info["cur_tokens"] = response_token_len
 
             # Update agent internal state.
+            # Extract multimodal data from next observation and pass to agent
+            next_agent_kwargs = {}
+            if isinstance(next_observation, dict) and "images" in next_observation:
+                next_agent_kwargs["images"] = next_observation["images"]
+
             agent.update_from_env(
                 observation=next_observation,
                 reward=reward,
                 done=done,
                 info=info,
+                **next_agent_kwargs,
             )
 
             cur_step = agent.get_current_state()
@@ -383,6 +435,9 @@ class AgentExecutionEngine:
                 "trajectory_reward": trajectory.reward,
                 "idx": env.idx,
                 "chat_completions": agent.chat_completions,
+                "prompt_messages": prompt_messages,
+                "multimodal_messages": multimodal_messages,
+                "multi_modal_data": multimodal_data,
                 "metrics": {
                     # Total number of steps taken in the trajectory
                     "steps": len(trajectory.steps),

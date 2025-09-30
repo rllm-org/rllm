@@ -24,6 +24,7 @@ AGENT_CLASSES = {
     "tool_agent": safe_import("rllm.agents.tool_agent", "ToolAgent"),
     "sweagent": safe_import("rllm.agents.swe_agent", "SWEAgent"),
     "math_agent": safe_import("rllm.agents.math_agent", "MathAgent"),
+    "geo3k_agent": safe_import("rllm.agents.geo3k_agent", "Geo3kAgent"),
     "code_agent": safe_import("rllm.agents.code_agent", "CompetitionCodingAgent"),
 }
 
