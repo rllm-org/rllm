@@ -12,14 +12,21 @@ from rllm.utils import compute_pass_at_k, save_trajectories
 async def main():
     os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
+    # Check API key
+    if not os.getenv("OPENAI_API_KEY"):
+        print("No OPENAI_API_KEY")
+        return
+
     n_parallel_agents = 4
 
     model_name = "gpt-4o-mini"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # Use a tokenizer with chat template (only for formatting messages and calculating token counts in the engine)
+    # Qwen2-0.5B is small and fast to download
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2-0.5B-Instruct")
 
     sampling_params = {"temperature": 0.6, "top_p": 0.95, "model": model_name}
     agent_args = {}
-    env_args = {"max_truns": 10}
+    env_args = {"max_turns": 10}
 
     # Create engine
     engine = AgentExecutionEngine(
@@ -27,6 +34,7 @@ async def main():
         agent_args=agent_args,
         env_class=AppWorldEnv,
         env_args=env_args,
+        engine_name="openai",
         tokenizer=tokenizer,
         sampling_params=sampling_params,
         rollout_engine_args={"base_url": "https://api.openai.com/v1", "api_key": os.getenv("OPENAI_API_KEY")},
@@ -38,11 +46,16 @@ async def main():
 
     tasks = load_appworld_official_tasks()
 
+    if not tasks:
+        print("No tasks loaded, exiting...")
+        return
+
     print(f"Running evaluation on {len(tasks)} AppWorld tasks...")
-    results = asyncio.run(engine.execute_tasks(tasks))
+    results = await engine.execute_tasks(tasks)
+
     # Save trajectories
     save_trajectories(results, save_dir="./trajectories/appworld", filename="trajectories.pt")
-    print(f"Pass@k: {compute_pass_at_k(results)}")
+    compute_pass_at_k(results)
 
 
 def load_appworld_official_tasks():
@@ -54,16 +67,29 @@ def load_appworld_official_tasks():
 
         appworld = AppWorld()
 
-        tasks = appworld.get_tasks(split="test", limit=10)
+        tasks = appworld.get_tasks(split="test", limit=2)
         print(f"Loaded {len(tasks)} official AppWorld tasks")
 
         for task in tasks[:3]:
             print(f"Task {task['task_id']}: {task['instruction'][:60]}")
+        return tasks
     except Exception as e:
-        print(f"Error loading AppWorld tasks: {e}")
-        tasks = []
+        print(f"Warning: Cannot load AppWorld - {e}")
+        print("Using mock tasks for testing...")
 
-    return tasks
+        # Create mock tasks
+        tasks = [
+            {
+                "task_id": "mock_001",
+                "instruction": "Find all playlists in the Spotify app and count them.",
+            },
+            {
+                "task_id": "mock_002",
+                "instruction": "Check today's calendar events.",
+            },
+        ]
+        print(f"Created {len(tasks)} mock tasks for testing")
+        return tasks
 
 
 if __name__ == "__main__":
