@@ -41,6 +41,8 @@ class AppWorldEnv(BaseEnv):
 
         # AppWorld related state
         self.appworld_shell = None  # Will be initialized in reset
+        # Each task should correspond to a unique world_id
+        self.world_id = None
 
     def reset(self):
         """
@@ -51,7 +53,25 @@ class AppWorldEnv(BaseEnv):
         self.done = False
         self.execution_history = []
 
-        # TODO: Initialize AppWorld shell
+        # Initialize AppWorld based on unique task_id
+        try:
+            from appworld import AppWorld
+
+            # get the task id
+            task_id = self.task.get("task_id") if self.task else None
+
+            if task_id:
+                self.appworld_shell = AppWorld()
+                self.world_id = self.appworld_shell.load_world(task_id)
+                print(f"Loaded AppWorld for task {task_id} with world_id {self.world_id}")
+
+                world_info = self.appworld_shell.get_world_info(self.world_id)
+                print(f"World info: {world_info}")
+            else:
+                raise ValueError("Task ID is required to initialize AppWorld shell")
+        except Exception as e:
+            self.appworld_shell = None
+            print(f"Error initializing AppWorld shell: {e}")
 
         # Build initial observation
         observation = {"instruction": self.task.get("instruction", "") if self.task else "", "available_apps": ["spotify", "gmail", "calendar", "contacts", "messages", "notes", "todo", "files", "banking"], "helper_apis": {"show_app_descriptions": "apis.api_docs.show_app_descriptions()", "show_api_descriptions": "apis.api_docs.show_api_descriptions(app_name='app')", "show_api_doc": "apis.api_docs.show_api_doc(app_name='app', api_name='api')", "complete_task": "apis.supervisor.complete_task(answer='your_answer')"}}
@@ -84,16 +104,30 @@ class AppWorldEnv(BaseEnv):
 
         # Execute Python code
         try:
-            # TODO: Execute code in the AppWorld shell
-
-            # Temporary simulated execution result
-            execution_result = {"success": True, "output": "Execution successful (simulated)", "stdout": "", "stderr": "", "return_value": None}
+            # Execute code in the AppWorld shell
+            if self.appworld_shell and self.world_id:
+                result = self.appworld_shell.execute_code(code=action, world_id=self.world_id)
+                execution_result = {
+                    "success": result.get("success", False),
+                    "output": result.get("output", ""),
+                    "stdout": result.get("stdout", ""),
+                    "stderr": result.get("stderr", ""),
+                }
+                print(f"Execution result: {execution_result}")
+            else:
+                raise ValueError("AppWorld shell or world_id is not initialized")
 
             # Check if complete_task is called
             if "complete_task" in action:
                 self.done = True
-                # TODO: Extract the parameters of complete_task as the final answer
                 execution_result["completed"] = True
+
+                # Extract the answer
+                answer = result.get("submitted_answer", "")
+                ground_truth = self.task.get("expected_answer")
+                reward = 1.0 if answer == ground_truth else 0.0
+            else:
+                reward = 0.0
 
             # Record execution history
             self.execution_history.append(
@@ -112,12 +146,7 @@ class AppWorldEnv(BaseEnv):
                 "success": execution_result.get("success", False),
             }
 
-            reward = 0.0
-            if self.done:
-                # TODO: Call the AppWorld evaluation function
-                pass
-
-            return observation, reward, self.done, {"step": self.current_turn}  # Corrected from self.current_step to self.current_turn
+            return observation, reward, self.done, {"step": self.current_turn}
 
         except Exception as e:
             # Code execution error

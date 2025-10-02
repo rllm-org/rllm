@@ -1,6 +1,6 @@
 from typing import Any
 
-from rllm.agents.agent import Action, BaseAgent, Trajectory
+from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 
 
 class AppWorldReactAgent(BaseAgent):
@@ -106,7 +106,17 @@ Remember to always check API documentation before making calls."""
         Returns:
             Action: Action (string) containing the Python code to execute
         """
-        pass
+        # Extract the Python code from the response
+        python_code = self._extract_code_from_response(response)
+
+        # Append assistant message to history
+        self.messages.append({"role": "assistant", "content": response})
+
+        # Create new step
+        new_step = Step(chat_completions=list(self.messages), action=python_code, model_response=response, observation=self.current_observation)
+        self._trajectory.steps.append(new_step)
+
+        return Action(action=python_code)
 
     def _format_initial_instruction(self, observation: dict) -> str:
         """Format initial task instruction as user message."""
@@ -141,9 +151,43 @@ Remember to always check API documentation before making calls."""
     def _extract_code_from_response(self, response: str) -> str:
         """
         Extract Python code from the model's response.
+
+        Supported formats:
+        1. ```python ... ```
+        2. Code: ...
+        3. Whole response as code (if no obvious marker)
         """
-        # TODO: Implement this method
-        pass
+        import re
+
+        # Try extracting markdown code block
+        code_block_pattern = r"```(?:python)?\s*(.*?)\s*```"
+        matches = re.findall(code_block_pattern, response, re.DOTALL)
+        if matches:
+            return matches[0].strip()
+
+        # Try finding "Code:" marker
+        if "Code:" in response or "code:" in response:
+            lines = response.split("\n")
+            code_lines = []
+            in_code_section = False
+            for line in lines:
+                if "Code:" in line or "code:" in line:
+                    in_code_section = True
+                    # If Code: has code on the same line, include it
+                    code_part = line.split(":", 1)[1].strip()
+                    if code_part:
+                        code_lines.append(code_part)
+                    continue
+                if in_code_section:
+                    # Stop if we encounter a new section (like "Thought:")
+                    if line.strip() and line.strip()[0].isupper() and ":" in line:
+                        break
+                    code_lines.append(line)
+            if code_lines:
+                return "\n".join(code_lines).strip()
+
+        # If nothing found, return the whole response (assume it's all code)
+        return response.strip()
 
     @property
     def chat_completions(self) -> list[dict[str, str]]:
