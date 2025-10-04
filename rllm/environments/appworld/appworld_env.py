@@ -1,8 +1,12 @@
 import logging
+import threading
 
 from rllm.environments.base.base_env import BaseEnv
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(filename)s:%(lineno)d] %(message)s")
+
+# AppWorld is not thread-safe, so we need to use a lock to synchronize access to the AppWorld instance
+_appworld_lock = threading.RLock()
 
 
 class AppWorldEnv(BaseEnv):
@@ -56,27 +60,28 @@ class AppWorldEnv(BaseEnv):
         self.execution_history = []
 
         # Initialize AppWorld based on unique task_id
-        try:
-            from appworld import AppWorld
+        with _appworld_lock:
+            try:
+                from appworld import AppWorld
 
-            # get the task id
-            task_id = self.task.get("task_id") if self.task else None
-            if task_id:
-                self.world = AppWorld(task_id=task_id)
-                self.world_id = task_id
+                # get the task id
+                task_id = self.task.get("task_id") if self.task else None
+                if task_id:
+                    self.world = AppWorld(task_id=task_id)
+                    self.world_id = task_id
 
-                # Get instruction from AppWorld if not provided in task
-                if not self.task.get("instruction"):
-                    self.task["instruction"] = self.world.task.instruction
+                    # Get instruction from AppWorld if not provided in task
+                    if not self.task.get("instruction"):
+                        self.task["instruction"] = self.world.task.instruction
 
-                print(f"Loaded AppWorld for task {task_id}")
-                print(f"Instruction: {self.task['instruction'][:100]}...")
-            else:
-                raise ValueError("Task ID is required to initialize AppWorld shell")
-        except Exception as e:
-            self.world = None
-            print(f"Error initializing AppWorld shell: {e}")
-            raise e
+                    print(f"Loaded AppWorld for task {task_id}")
+                    print(f"Instruction: {self.task['instruction'][:100]}...")
+                else:
+                    raise ValueError("Task ID is required to initialize AppWorld shell")
+            except Exception as e:
+                self.world = None
+                print(f"Error initializing AppWorld shell: {e}")
+                raise e
 
         # Build initial observation
         instruction = self.task.get("instruction", "") if self.task else ""
@@ -111,14 +116,16 @@ class AppWorldEnv(BaseEnv):
         # Execute Python code
         try:
             # Execute code in the AppWorld shell
+
             if self.world:
-                # Use AppWorld's execute method
-                input_str = "response=" + action
-                output = self.world.execute(input_str)
-                execution_result = {
-                    "success": True,
-                    "output": output,
-                }
+                with _appworld_lock:
+                    # Use AppWorld's execute method
+                    input_str = "response=" + action
+                    output = self.world.execute(input_str)
+                    execution_result = {
+                        "success": True,
+                        "output": output,
+                    }
             else:
                 # AppWorld not initialized - Go to mock mode
                 print(f"[Mock Mode] Simulating execution of code:\n{action[:100]}...")
@@ -134,16 +141,17 @@ class AppWorldEnv(BaseEnv):
 
                 # Evaluate the answer in the real mode
                 if self.world:
-                    # Check if task was completed successfully
-                    if self.world.task_completed():
-                        # Evaluate the submitted answer
-                        evaluation = self.world.evaluate()
-                        print(f"Evaluation: {evaluation}")
-                        reward = 1.0 if evaluation else 0.0
-                        print(f"Task completed! Reward: {reward}")
-                    else:
-                        reward = 0.0
-                        print("❌ Task completed but evaluation failed")
+                    with _appworld_lock:
+                        # Check if task was completed successfully
+                        if self.world.task_completed():
+                            # Evaluate the submitted answer
+                            evaluation = self.world.evaluate()
+                            print(f"Evaluation: {evaluation}")
+                            reward = 1.0 if evaluation else 0.0
+                            print(f"Task completed! Reward: {reward}")
+                        else:
+                            reward = 0.0
+                            print("❌ Task completed but evaluation failed")
                 else:
                     # Mock mode: Give a half reward
                     reward = 0.5
