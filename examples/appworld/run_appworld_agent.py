@@ -36,7 +36,7 @@ async def main():
 
     sampling_params = {"temperature": 0.6, "top_p": 0.95, "model": model_name}
     agent_args = {}
-    env_args = {"max_turns": 10}
+    env_args = {"max_turns": 40}
 
     # Create engine
     engine = AgentExecutionEngine(
