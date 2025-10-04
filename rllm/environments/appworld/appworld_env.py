@@ -113,50 +113,34 @@ class AppWorldEnv(BaseEnv):
         if not isinstance(action, str):
             return ({"error": f"Invalid action type: {type(action)}. Expected string (Python code)."}, 0.0, False, {"reason": "invalid_action_type"})
 
+        if not self.world:
+            return ({"error": "AppWorld not initialized"}, 0.0, False, {"reason": "appworld_not_initialized"})
+
         # Execute Python code
         try:
             # Execute code in the AppWorld shell
-
-            if self.world:
-                with _appworld_lock:
-                    # Use AppWorld's execute method
-                    output = self.world.execute(action)
-                    execution_result = {
-                        "success": True,
-                        "output": output,
-                    }
-            else:
-                # AppWorld not initialized - Go to mock mode
-                print(f"[Mock Mode] Simulating execution of code:\n{action[:100]}...")
+            with _appworld_lock:
+                output = self.world.execute(action)
                 execution_result = {
                     "success": True,
-                    "output": "[Simulated] Executed code successfully",
+                    "output": output,
                 }
 
-            # Check if complete_task is called
-            if "complete_task" in action:
-                self.done = True
-                execution_result["completed"] = True
+                # Check if complete_task is called
+                if "complete_task" in action:
+                    self.done = True
+                    execution_result["completed"] = True
 
-                # Evaluate the answer in the real mode
-                if self.world:
-                    with _appworld_lock:
-                        # Check if task was completed successfully
-                        if self.world.task_completed():
-                            # Evaluate the submitted answer
-                            evaluation = self.world.evaluate()
-                            print(f"Evaluation: {evaluation.todict()}")
-                            reward = 1.0 if evaluation and evaluation.todict()["success"] else 0.0
-                            print(f"Task completed! Reward: {reward}")
-                        else:
-                            reward = 0.0
-                            print("Task completed but evaluation failed")
-                else:
-                    # Mock mode: Give a half reward
-                    reward = 0.5
-                    print(f"[Mock Mode] Task completed (simulated reward: {reward})")
-            else:
-                reward = 0.0
+                    # Check if task was completed successfully
+                    if self.world.task_completed():
+                        # Evaluate the submitted answer
+                        evaluation = self.world.evaluate()
+                        print(f"Evaluation: {evaluation.to_dict()}")
+                        reward = 1.0 if evaluation and evaluation.todict()["success"] else 0.0
+                        print(f"Task completed! Reward: {reward}")
+                    else:
+                        reward = 0.0
+                        print("Task completed but evaluation failed")
 
             # Record execution history
             self.execution_history.append(

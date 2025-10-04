@@ -122,21 +122,7 @@ def load_appworld_official_tasks(split="dev", num_tasks=10):
         return tasks
     except Exception as e:
         print(f"Warning: Cannot load AppWorld - {e}")
-        print("Using mock tasks for testing...")
-
-        # Create mock tasks
-        tasks = [
-            {
-                "task_id": "mock_001",
-                "instruction": "Find all playlists in the Spotify app and count them.",
-            },
-            {
-                "task_id": "mock_002",
-                "instruction": "Check today's calendar events.",
-            },
-        ]
-        print(f"Created {len(tasks)} mock tasks for testing")
-        return tasks
+        raise e
 
 
 if __name__ == "__main__":
