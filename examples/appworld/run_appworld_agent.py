@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import os
 
@@ -19,7 +20,7 @@ apply_signal_patch(verbose=True)
 # ============================================================================
 
 
-async def main():
+async def main(num_tasks=10, max_turns=40, split="dev"):
     os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
     # Check API key
@@ -36,7 +37,7 @@ async def main():
 
     sampling_params = {"temperature": 0.6, "top_p": 0.95, "model": model_name}
     agent_args = {}
-    env_args = {"max_turns": 40}
+    env_args = {"max_turns": max_turns}
 
     # Create engine
     engine = AgentExecutionEngine(
@@ -51,10 +52,10 @@ async def main():
         n_parallel_agents=n_parallel_agents,
         max_response_length=16384,
         max_prompt_length=4096,
-        max_steps=40,
+        max_steps=max_turns,
     )
 
-    tasks = load_appworld_official_tasks()
+    tasks = load_appworld_official_tasks(split=split, num_tasks=num_tasks)
 
     if not tasks:
         print("No tasks loaded, exiting...")
@@ -68,7 +69,7 @@ async def main():
     compute_pass_at_k(results)
 
 
-def load_appworld_official_tasks():
+def load_appworld_official_tasks(split="dev", num_tasks=10):
     """
     Load tasks from the official AppWorld tasks.
     """
@@ -78,7 +79,7 @@ def load_appworld_official_tasks():
 
         # Use 'dev' split for development/testing
         # Available splits: 'train', 'dev', 'test_normal', 'test_challenge'
-        task_ids = load_task_ids("dev")[:10]  # Get first 10 task IDs
+        task_ids = load_task_ids(split)[:num_tasks]  # Get first 10 task IDs
 
         # Create task dictionaries with task_id
         # The AppWorldEnv will load the instruction when it initializes
@@ -118,4 +119,11 @@ def load_appworld_official_tasks():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description="Run AppWorld Agent with rLLM", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("-n", "--num-tasks", type=int, default=10, help="Number of tasks to run (use -1 for all tasks)")
+    parser.add_argument("-t", "--max-turns", type=int, default=40, help="Maximum number of turns per task")
+    parser.add_argument("-s", "--split", type=str, default="dev", choices=["train", "dev", "test_normal", "test_challenge"], help="Which split to use")
+
+    args = parser.parse_args()
+
+    asyncio.run(main(num_tasks=args.num_tasks, max_turns=args.max_turns, split=args.split))
