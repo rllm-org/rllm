@@ -1,4 +1,8 @@
+import logging
+
 from rllm.environments.base.base_env import BaseEnv
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(filename)s:%(lineno)d] %(message)s")
 
 
 class AppWorldEnv(BaseEnv):
@@ -40,9 +44,7 @@ class AppWorldEnv(BaseEnv):
         self.execution_history = []
 
         # AppWorld related state
-        self.appworld_shell = None  # Will be initialized in reset
-        # Each task should correspond to a unique world_id
-        self.world_id = None
+        self.world = None  # Will be initialized in reset
 
     def reset(self):
         """
@@ -59,22 +61,26 @@ class AppWorldEnv(BaseEnv):
 
             # get the task id
             task_id = self.task.get("task_id") if self.task else None
-
             if task_id:
-                self.appworld_shell = AppWorld()
-                self.world_id = self.appworld_shell.load_world(task_id)
-                print(f"Loaded AppWorld for task {task_id} with world_id {self.world_id}")
+                self.world = AppWorld(task_id=task_id)
+                self.world_id = task_id
 
-                world_info = self.appworld_shell.get_world_info(self.world_id)
-                print(f"World info: {world_info}")
+                # Get instruction from AppWorld if not provided in task
+                if not self.task.get("instruction"):
+                    self.task["instruction"] = self.world.task.instruction
+
+                print(f"Loaded AppWorld for task {task_id}")
+                print(f"Instruction: {self.task['instruction'][:100]}...")
             else:
                 raise ValueError("Task ID is required to initialize AppWorld shell")
         except Exception as e:
-            self.appworld_shell = None
+            self.world = None
             print(f"Error initializing AppWorld shell: {e}")
+            raise e
 
         # Build initial observation
-        observation = {"instruction": self.task.get("instruction", "") if self.task else "", "available_apps": ["spotify", "gmail", "calendar", "contacts", "messages", "notes", "todo", "files", "banking"], "helper_apis": {"show_app_descriptions": "apis.api_docs.show_app_descriptions()", "show_api_descriptions": "apis.api_docs.show_api_descriptions(app_name='app')", "show_api_doc": "apis.api_docs.show_api_doc(app_name='app', api_name='api')", "complete_task": "apis.supervisor.complete_task(answer='your_answer')"}}
+        instruction = self.task.get("instruction", "") if self.task else ""
+        observation = {"instruction": instruction, "available_apps": ["spotify", "gmail", "calendar", "contacts", "messages", "notes", "todo", "files", "banking"], "helper_apis": {"show_app_descriptions": "apis.api_docs.show_app_descriptions()", "show_api_descriptions": "apis.api_docs.show_api_descriptions(app_name='app')", "show_api_doc": "apis.api_docs.show_api_doc(app_name='app', api_name='api')", "complete_task": "apis.supervisor.complete_task(answer='your_answer')"}}
 
         return observation, {}
 
@@ -105,23 +111,20 @@ class AppWorldEnv(BaseEnv):
         # Execute Python code
         try:
             # Execute code in the AppWorld shell
-            if self.appworld_shell and self.world_id:
-                result = self.appworld_shell.execute_code(code=action, world_id=self.world_id)
+            if self.world:
+                # Use AppWorld's execute method
+                input_str = "response=" + action
+                output = self.world.execute(input_str)
                 execution_result = {
-                    "success": result.get("success", False),
-                    "output": result.get("output", ""),
-                    "stdout": result.get("stdout", ""),
-                    "stderr": result.get("stderr", ""),
+                    "success": True,
+                    "output": output,
                 }
-                print(f"Execution result: {execution_result}")
             else:
-                # AppWord not initialized - Go to mock mode
-                print(f"📝 [Mock Mode] Simulating execution of code:\n{action[:100]}...")
+                # AppWorld not initialized - Go to mock mode
+                print(f"[Mock Mode] Simulating execution of code:\n{action[:100]}...")
                 execution_result = {
                     "success": True,
                     "output": "[Simulated] Executed code successfully",
-                    "stdout": f"Mock output for: {action[:50]}...",
-                    "stderr": "",
                 }
 
             # Check if complete_task is called
@@ -130,10 +133,17 @@ class AppWorldEnv(BaseEnv):
                 execution_result["completed"] = True
 
                 # Evaluate the answer in the real mode
-                if self.appworld_shell and "result" in locals():
-                    answer = result.get("submitted_answer", "")
-                    ground_truth = self.task.get("expected_answer")
-                    reward = 1.0 if answer == ground_truth else 0.0
+                if self.world:
+                    # Check if task was completed successfully
+                    if self.world.task_completed():
+                        # Evaluate the submitted answer
+                        evaluation = self.world.evaluate()
+                        print(f"Evaluation: {evaluation}")
+                        reward = 1.0 if evaluation else 0.0
+                        print(f"Task completed! Reward: {reward}")
+                    else:
+                        reward = 0.0
+                        print("❌ Task completed but evaluation failed")
                 else:
                     # Mock mode: Give a half reward
                     reward = 0.5
@@ -171,11 +181,16 @@ class AppWorldEnv(BaseEnv):
         Create an environment instance from a dictionary.
 
         Args:
-            env_args: Dictionary containing the environment configuration
+            env_args: Dictionary containing task_id, instruction, and max_turns
 
         Returns:
             AppWorldEnv instance
         """
         task = env_args.get("task", None)
         max_turns = env_args.get("max_turns", 10)
+
+        # The rest of env_args IS the task (contains task_id, instruction, etc.)
+        # Build task dict by excluding max_turns
+        task = {k: v for k, v in env_args.items() if k != "max_turns"}
+
         return AppWorldEnv(task=task, max_turns=max_turns)
