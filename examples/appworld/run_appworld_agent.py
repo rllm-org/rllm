@@ -67,6 +67,27 @@ async def main(num_tasks=10, max_turns=40, split="dev"):
     # Save trajectories
     save_trajectories(results, save_dir="./trajectories/appworld", filename="trajectories.pt")
     compute_pass_at_k(results)
+    # Compute accuracy and show per-task results
+    print("\n" + "=" * 80)
+    print("Task Completion Results")
+    print("=" * 80)
+    n_passed = 0
+    for i, trajectory in enumerate(results, 1):
+        task_id = trajectory.task.get("task_id", f"task_{i}") if isinstance(trajectory.task, dict) else f"task_{i}"
+        reward = trajectory.reward
+        status = "PASSED" if reward >= 1.0 else "FAILED"
+
+        print(f"{i:2d}. {task_id:20s} | Reward: {reward:.2f} | {status}")
+
+        if reward >= 1.0:
+            n_passed += 1
+
+    accuracy = n_passed / num_tasks if num_tasks > 0 else 0.0
+
+    print("=" * 80)
+    print(f"Summary: {n_passed} out of {num_tasks} tasks passed")
+    print(f"Accuracy: {accuracy:.2%} ({n_passed}/{num_tasks})")
+    print("=" * 80 + "\n")
 
 
 def load_appworld_official_tasks(split="dev", num_tasks=10):
