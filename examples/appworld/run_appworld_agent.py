@@ -6,7 +6,17 @@ from transformers import AutoTokenizer
 from rllm.agents.appworld_react_agents import AppWorldReactAgent
 from rllm.engine.agent_execution_engine import AgentExecutionEngine
 from rllm.environments.appworld.appworld_env import AppWorldEnv
+
+# ============================================================================
+# Fix AppWorld multithreading issues: apply signal patch
+# ============================================================================
+from rllm.environments.appworld.signal_patch import apply_signal_patch
 from rllm.utils import compute_pass_at_k, save_trajectories
+
+# Apply patch before importing AppWorld
+# Signal can only be used in the main thread but in the async engine, the thread is not the main thread.
+apply_signal_patch(verbose=True)
+# ============================================================================
 
 
 async def main():
@@ -41,7 +51,7 @@ async def main():
         n_parallel_agents=n_parallel_agents,
         max_response_length=16384,
         max_prompt_length=4096,
-        max_steps=10,
+        max_steps=40,
     )
 
     tasks = load_appworld_official_tasks()
@@ -63,15 +73,30 @@ def load_appworld_official_tasks():
     Load tasks from the official AppWorld tasks.
     """
     try:
-        from appworld import AppWorld
+        # lazy load the appworld package
+        from appworld import AppWorld, load_task_ids
 
-        appworld = AppWorld()
+        # Use 'dev' split for development/testing
+        # Available splits: 'train', 'dev', 'test_normal', 'test_challenge'
+        task_ids = load_task_ids("dev")[:10]  # Get first 10 task IDs
 
-        tasks = appworld.get_tasks(split="test", limit=2)
-        print(f"Loaded {len(tasks)} official AppWorld tasks")
+        # Create task dictionaries with task_id
+        # The AppWorldEnv will load the instruction when it initializes
+        tasks = []
+        for task_id in task_ids:
+            # Temporarily create AppWorld instance to get instruction for display
+            try:
+                world = AppWorld(task_id=task_id)
+                instruction = world.task.instruction
+            except Exception:
+                instruction = f"Task {task_id}"
 
-        for task in tasks[:3]:
-            print(f"Task {task['task_id']}: {task['instruction'][:60]}")
+            tasks.append({"task_id": task_id, "instruction": instruction})
+
+        print(f"Loaded {len(tasks)} official AppWorld tasks from 'dev' split")
+
+        for task in tasks:
+            print(f"Task {task['task_id']}: {task['instruction'][:80]}...")
         return tasks
     except Exception as e:
         print(f"Warning: Cannot load AppWorld - {e}")
