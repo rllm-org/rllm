@@ -11,7 +11,6 @@ import asyncio
 import time
 from datetime import datetime
 
-import json5
 
 # rLLM imports
 from rllm.engine.rollout import RolloutEngine
@@ -22,11 +21,15 @@ OBS_END = "\n</tool_response>"
 MAX_LLM_CALL_PER_RUN = 100
 
 # System prompt adapted from DeepResearch
-DEEPRESEARCH_SYSTEM_PROMPT = """You are a deep research assistant. Your core function is to conduct thorough, multi-source investigations into any topic. You must handle both broad, open-domain inquiries and queries within specialized academic fields. For every request, synthesize information from credible, diverse sources to deliver a comprehensive, accurate, and objective response. When you have gathered sufficient information and are ready to provide the definitive response, you must enclose the entire final answer within <answer></answer> tags.
+DEEPRESEARCH_SYSTEM_PROMPT = """You are a deep research assistant. Your core function is to conduct thorough, multi-source investigations into any topic. You MUST use the provided tools to research and verify information before answering. Do NOT answer directly from memory - always use tools to gather current, accurate information.
+
+IMPORTANT: You are REQUIRED to use at least one tool before providing any answer. Even if you think you know the answer, you must verify it using the appropriate tools. Direct answers without tool use are not acceptable.
+
+When you have gathered sufficient information through tool use and are ready to provide the definitive response, you must enclose the entire final answer within <answer></answer> tags.
 
 # Tools
 
-You may call one or more functions to assist with the user query.
+You MUST use one or more of the following tools to research the query:
 
 You are provided with the following tools:
 - Search: for web searches to find current information
@@ -228,7 +231,11 @@ class MultiTurnReactAgent:
         termination = None
         prediction = ""
 
-        print(f"🔍 Starting DeepResearch for question: {question}")
+        # Truncate question for display
+        q_display = str(question).replace("\n", " ").strip()
+        if len(q_display) > 200:
+            q_display = q_display[:200] + "..."
+        print(f"🔍 Starting DeepResearch for question: {q_display}")
 
         while num_llm_calls_available > 0:
             # Check time limit (150 minutes)
@@ -250,6 +257,62 @@ class MultiTurnReactAgent:
             # Get model response
             content = await self.call_server(messages)
 
+            # Debug: Print raw model response to see format
+            if round == 1:
+                print(f"[DEBUG] Raw model response (first 500 chars): {content[:500]}")
+
+            # Print concise round info with truncation
+            MAX_PRINT_LENGTH = 200
+
+            # Simple truncation for all prints
+            def truncate(text, max_len=MAX_PRINT_LENGTH):
+                text = str(text).replace("\n", " ").strip()
+                # Special handling for base64 images
+                if "data:image" in text or ";base64," in text:
+                    # Find the base64 part and truncate it
+                    if "base64," in text:
+                        parts = text.split("base64,", 1)
+                        return parts[0] + "base64,[truncated]"
+                    return "[base64 image data]"
+                if len(text) > max_len:
+                    return text[:max_len] + "..."
+                return text
+
+            if "<tool_call>" in content:
+                # Extract tool name for display
+                if "python" in content.lower() and "<code>" in content:
+                    print(f"Round {round}: 🐍 Executing Python code")
+                elif '"name":' in content:
+                    try:
+                        import json5
+
+                        tool_text = content.split("<tool_call>")[1].split(
+                            "</tool_call>"
+                        )[0]
+                        tool_text = tool_text[:1000]  # Limit for parsing
+                        tool_data = json5.loads(tool_text)
+                        tool_name = tool_data.get("name", "Unknown")
+                        if "arguments" in tool_data:
+                            args_str = truncate(str(tool_data["arguments"]), 100)
+                            print(
+                                f"Round {round}: 🔧 Calling {tool_name} with args: {args_str}"
+                            )
+                        else:
+                            print(f"Round {round}: 🔧 Calling {tool_name}")
+                    except Exception:
+                        print(f"Round {round}: 🔧 Tool call")
+                else:
+                    print(f"Round {round}: 🔧 Tool call")
+            elif "<answer>" in content:
+                # Final answer
+                answer_preview = content.split("<answer>")[1].split("</answer>")[0]
+                print(
+                    f"Round {round}: ✅ Final answer: {truncate(answer_preview, 100)}"
+                )
+            else:
+                # Model reasoning
+                print(f"Round {round}: 💭 Reasoning: {truncate(content)}")
+
             # Clean up content if it contains tool_response
             if "<tool_response>" in content:
                 pos = content.find("<tool_response>")
@@ -257,14 +320,8 @@ class MultiTurnReactAgent:
 
             messages.append({"role": "assistant", "content": content.strip()})
 
-            # Check for final answer
-            if "<answer>" in content and "</answer>" in content:
-                prediction = content.split("<answer>")[1].split("</answer>")[0].strip()
-                termination = "answer"
-                print(f"✅ Final answer found: {prediction}")
-                break
-
-            # Handle tool calls
+            # Handle tool calls FIRST (before checking for answer)
+            # This allows o3 to include both tool_call and answer in same message
             if "<tool_call>" in content and "</tool_call>" in content:
                 tool_call_text = content.split("<tool_call>")[1].split("</tool_call>")[
                     0
@@ -282,25 +339,28 @@ class MultiTurnReactAgent:
                                 .strip()
                             )
                             result = await self.execute_python(code_raw)
-                            print(f"🐍 Python execution result: {result[:100]}...")
                         except Exception:
                             result = "[Python Interpreter Error]: Formatting error."
-                            print("❌ Python code formatting error")
                     else:
                         # Parse JSON tool call
                         tool_call = json5.loads(tool_call_text)
                         tool_name = tool_call.get("name", "")
                         tool_args = tool_call.get("arguments", {})
                         result = await self.custom_call_tool(tool_name, tool_args)
-                        print(f"🔧 Tool {tool_name} result: {result[:100]}...")
 
-                except Exception as e:
+                except Exception:
                     result = 'Error: Tool call is not a valid JSON. Tool call must contain a valid "name" and "arguments" field.'
-                    print(f"❌ Tool call error: {e}")
 
                 # Add tool response
                 tool_response = f"<tool_response>\n{result}\n</tool_response>"
                 messages.append({"role": "user", "content": tool_response})
+
+            # Check for final answer AFTER processing tools
+            # This allows o3 to execute tools even when it includes answer in same message
+            if "<answer>" in content and "</answer>" in content:
+                prediction = content.split("<answer>")[1].split("</answer>")[0].strip()
+                termination = "answer"
+                break
 
             # Check if we've exceeded call limit
             if num_llm_calls_available <= 0 and "<answer>" not in content:
@@ -312,10 +372,6 @@ class MultiTurnReactAgent:
             total_tokens_used = self.get_total_tokens_used()
 
             if total_tokens_used > self.max_context_tokens:
-                print(
-                    f"⚠️ Token limit exceeded: {total_tokens_used} > {self.max_context_tokens}"
-                )
-
                 # Instead of replacing the last message, add a clear instruction
                 final_instruction = {
                     "role": "user",
@@ -334,7 +390,9 @@ class MultiTurnReactAgent:
                 messages.append(final_instruction)
 
                 # Note: After truncation, we'll let the next API call handle any remaining limits
-                print("Context truncated, proceeding with final answer request")
+                print(
+                    f"Round {round + 1}: ⚠️ Context limit reached, requesting final answer"
+                )
 
                 content = await self.call_server(messages)
                 messages.append({"role": "assistant", "content": content.strip()})
@@ -386,7 +444,11 @@ class MultiTurnReactAgent:
         print(f"   Rounds: {round}")
         print(f"   Time: {result['time_taken']:.1f}s")
         print(f"   Termination: {termination}")
-        print(f"   Prediction: {prediction}")
+        # Truncate prediction for display
+        pred_display = str(prediction).replace("\n", " ").strip()
+        if len(pred_display) > 200:
+            pred_display = pred_display[:200] + "..."
+        print(f"   Prediction: {pred_display}")
 
         return result
 
@@ -468,4 +530,6 @@ class MultiTurnReactAgent:
         Returns:
             Result dictionary
         """
+        # Reset token counters for each new run
+        self.reset()
         return await self._run(question, answer, **kwargs)

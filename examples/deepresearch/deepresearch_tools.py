@@ -37,9 +37,60 @@ class SearchTool(DeepResearchTool):
         """Check if text contains Chinese characters."""
         return any("\u4e00" <= char <= "\u9fff" for char in text)
 
+    def _google_search_fallback(self, query: str | list) -> str:
+        """Use Google Custom Search API as fallback."""
+        try:
+            import requests
+
+            google_key = os.getenv("GOOGLE_SEARCH_SECRET_KEY")
+            engine_id = os.getenv("GOOGLE_SEARCH_ENGINE_ID")
+
+            queries = [query] if isinstance(query, str) else query
+            all_results = []
+
+            for q in queries:
+                params = {"key": google_key, "cx": engine_id, "q": q, "num": 10}
+
+                response = requests.get(
+                    "https://customsearch.googleapis.com/customsearch/v1",
+                    params=params,
+                    timeout=5,
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    items = data.get("items", [])
+
+                    web_snippets = []
+                    for idx, item in enumerate(items[:10], 1):
+                        title = item.get("title", "")
+                        link = item.get("link", "")
+                        snippet = item.get("snippet", "")
+                        entry = f"{idx}. [{title}]({link})\n   {snippet}"
+                        web_snippets.append(entry)
+
+                    result = (
+                        f"Google search for '{q}' found {len(web_snippets)} results:\n\n"
+                        + "\n\n".join(web_snippets)
+                    )
+                    all_results.append(result)
+                else:
+                    all_results.append(
+                        f"Google search error for '{q}': {response.status_code}"
+                    )
+
+            return (
+                "\n=======\n".join(all_results)
+                if len(all_results) > 1
+                else all_results[0]
+            )
+
+        except Exception as e:
+            return f"Google search fallback error: {e}"
+
     async def call(self, query: str | list, **kwargs) -> str:
         """
-        Search the web using Serper API.
+        Search the web using Serper API or Google Custom Search.
 
         Args:
             query: Search query string or list of queries
@@ -48,12 +99,28 @@ class SearchTool(DeepResearchTool):
             Formatted search results
         """
         api_key = os.getenv("SERPER_API_KEY")
+
+        # Try Google Custom Search as fallback if no Serper key
         if not api_key:
+            google_key = os.getenv("GOOGLE_SEARCH_SECRET_KEY")
+            google_engine_id = os.getenv("GOOGLE_SEARCH_ENGINE_ID")
+
+            if google_key and google_engine_id:
+                return self._google_search_fallback(query)
+
             return f"""[Search - API Key Required]
 
-To enable real web search:
-1. Get a free API key from https://serper.dev
-2. Add to your .env file: SERPER_API_KEY=your_key_here
+To enable real web search, use one of these options:
+
+Option 1 - Serper (Recommended, simpler):
+1. Get a free API key from https://serper.dev (2500 searches/month free)
+2. Add to .env: SERPER_API_KEY=your_key_here
+
+Option 2 - Google Custom Search:
+1. Set up at https://developers.google.com/custom-search
+2. Add to .env:
+   GOOGLE_SEARCH_SECRET_KEY=your_key
+   GOOGLE_SEARCH_ENGINE_ID=your_engine_id
 
 Placeholder results for '{query}'..."""
 
@@ -430,14 +497,17 @@ class PythonInterpreterTool(DeepResearchTool):
         """Execute Python code safely with timeout."""
         timeout = timeout or self.timeout
 
-        # Security checks
+        # Security checks - check for dangerous imports/operations
         dangerous_patterns = [
             "import os",
             "import subprocess",
             "import sys",
-            "exec",
-            "eval",
-            "__import__",
+            "from os import",
+            "from subprocess import",
+            "from sys import",
+            "exec(",
+            "eval(",
+            "compile(",
             "open(",
             "file(",
         ]
@@ -445,7 +515,7 @@ class PythonInterpreterTool(DeepResearchTool):
         code_lower = code.lower()
         for pattern in dangerous_patterns:
             if pattern in code_lower:
-                return f"[Security Error] '{pattern}' not allowed"
+                return f"[Security Error] '{pattern}' not allowed for safety reasons"
 
         import io
         import sys
@@ -480,7 +550,36 @@ class PythonInterpreterTool(DeepResearchTool):
         except ImportError:
             pass
 
-        # Restricted builtins
+        # Restricted builtins with safe import capability
+        def safe_import(name, *args, **kwargs):
+            """Allow importing only safe modules."""
+            safe_modules = [
+                "math",
+                "datetime",
+                "json",
+                "random",
+                "re",
+                "collections",
+                "itertools",
+                "statistics",
+                "numpy",
+                "pandas",
+                "scipy",
+                "scipy.linalg",  # Add scipy submodules
+                "scipy.optimize",
+                "scipy.signal",
+                "scipy.special",
+                "matplotlib",
+                "matplotlib.pyplot",
+            ]
+            # Check if the module or its parent is allowed
+            if name in safe_modules or any(
+                name.startswith(m + ".") for m in safe_modules
+            ):
+                return __import__(name, *args, **kwargs)
+            else:
+                raise ImportError(f"Module '{name}' is not allowed for safety reasons")
+
         restricted_builtins = {
             "abs": abs,
             "all": all,
@@ -514,6 +613,15 @@ class PythonInterpreterTool(DeepResearchTool):
             "tuple": tuple,
             "type": type,
             "zip": zip,
+            "__import__": safe_import,  # Allow safe imports
+            # Add exception classes for proper error handling
+            "Exception": Exception,
+            "ImportError": ImportError,
+            "ValueError": ValueError,
+            "TypeError": TypeError,
+            "KeyError": KeyError,
+            "IndexError": IndexError,
+            "AttributeError": AttributeError,
         }
 
         global_vars = {"__builtins__": restricted_builtins}

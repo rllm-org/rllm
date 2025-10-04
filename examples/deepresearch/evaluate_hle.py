@@ -77,14 +77,14 @@ Please provide your evaluation and rating."""
                 response.text if hasattr(response, "text") else str(response)
             )
 
-            # Extract rating
-            rating = 0
+            # Extract rating (handle "Rating: [[X]]" format)
+            rating = 1  # Default to 1 instead of 0
             if "[[" in judgment_text and "]]" in judgment_text:
                 try:
                     rating_text = judgment_text.split("[[")[1].split("]]")[0]
-                    rating = int(rating_text)
+                    rating = int(rating_text.strip())
                 except (IndexError, ValueError):
-                    rating = 0
+                    rating = 1  # Default to 1 if parsing fails
 
             # Consider rating >= 4 as correct for binary accuracy
             is_correct = rating >= 4
