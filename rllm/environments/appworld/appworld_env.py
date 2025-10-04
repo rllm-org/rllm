@@ -120,8 +120,7 @@ class AppWorldEnv(BaseEnv):
             if self.world:
                 with _appworld_lock:
                     # Use AppWorld's execute method
-                    input_str = "response=" + action
-                    output = self.world.execute(input_str)
+                    output = self.world.execute(action)
                     execution_result = {
                         "success": True,
                         "output": output,
@@ -146,12 +145,12 @@ class AppWorldEnv(BaseEnv):
                         if self.world.task_completed():
                             # Evaluate the submitted answer
                             evaluation = self.world.evaluate()
-                            print(f"Evaluation: {evaluation}")
-                            reward = 1.0 if evaluation else 0.0
+                            print(f"Evaluation: {evaluation.todict()}")
+                            reward = 1.0 if evaluation and evaluation.todict()["success"] else 0.0
                             print(f"Task completed! Reward: {reward}")
                         else:
                             reward = 0.0
-                            print("❌ Task completed but evaluation failed")
+                            print("Task completed but evaluation failed")
                 else:
                     # Mock mode: Give a half reward
                     reward = 0.5
