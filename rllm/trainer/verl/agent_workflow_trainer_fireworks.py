@@ -16,7 +16,9 @@ from verl.trainer.ppo.ray_trainer import (
     AdvantageEstimator,
     RayPPOTrainer,
     RayWorkerGroup,
+    ResourcePoolManager,
     Role,
+    WorkerType,
     agg_loss,
     apply_kl_penalty,
     compute_advantage,
@@ -35,6 +37,31 @@ from verl import DataProto
 
 
 class PipelineAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
+    def __init__(
+        self,
+        config,
+        tokenizer,
+        role_worker_mapping: dict[Role, WorkerType],
+        resource_pool_manager: ResourcePoolManager,
+        ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
+        reward_fn=None,
+        val_reward_fn=None,
+        workflow_class=None,
+        workflow_args=None,
+    ):
+        super().__init__(
+            config=config,
+            tokenizer=tokenizer,
+            role_worker_mapping=role_worker_mapping,
+            resource_pool_manager=resource_pool_manager,
+            ray_worker_group_cls=ray_worker_group_cls,
+            reward_fn=reward_fn,
+            val_reward_fn=val_reward_fn,
+            workflow_class=workflow_class,
+            workflow_args=workflow_args,
+        )
+        self.hybrid_engine = False
+
     def init_workers(self):
         assert not self.hybrid_engine, "Pipeline trainer does not support hybrid engine, assumes Rollout and Actor are not in the different worker group"
         """Init resource pool and worker group"""
@@ -98,7 +125,6 @@ class PipelineAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
         asyncio.run_coroutine_threadsafe(self.agent_execution_engine.initialize_pool(), self._loop).result()
 
     def _validate_config(self):
-        assert self.config.actor_rollout_ref.hybrid_engine is False, "Pipeline trainer does not support hybrid engine"
         assert self.config.actor_rollout_ref.rollout.mode == "async", "Only async rollout mode is supported"
         assert self.use_rm is False, "Reward models are not supported. Rewards should be assigned using a reward function in the workflow or environment."
 

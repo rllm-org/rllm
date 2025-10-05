@@ -7,7 +7,8 @@ export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 python3 -m examples.solver_judge.train_solver_judge_flow \
-    data.train_batch_size=64 \
+    data.train_batch_size=8 \
+    +trainer.n_training_gpus_per_node=4 \
     data.max_prompt_length=2048 \
     data.max_response_length=1024 \
     actor_rollout_ref.model.path=Qwen/Qwen3-0.6B \
@@ -16,7 +17,7 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=32768 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=64 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=8 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
@@ -61,4 +62,4 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     trainer.total_epochs=100 \
     rllm.workflow.use_workflow=True
 
-pkill -9 -f 'ray::WorkerDict' 
+pkill -9 -f 'ray::WorkerDict'

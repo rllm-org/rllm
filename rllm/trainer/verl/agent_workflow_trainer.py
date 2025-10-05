@@ -51,7 +51,6 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
 
-        self.hybrid_engine = False
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._thread.start()
