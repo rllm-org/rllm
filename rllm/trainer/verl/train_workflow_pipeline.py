@@ -130,10 +130,13 @@ class PipelineTaskRunner:
 
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 
+
+        actor_rollout_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
         # Map roles to their corresponding remote worker classes.
         role_worker_mapping = {
             Role.Actor: ray.remote(ActorRolloutRefWorker),
             Role.Rollout: ray.remote(max_concurrency=8)(rollout_worker_cls),
+            Role.ActorRollout: ray.remote(actor_rollout_cls),
         }
 
         # Define the resource pool specification.
@@ -141,14 +144,17 @@ class PipelineTaskRunner:
 
         actor_pool_id = "actor_pool"
         rollout_pool_id = "rollout_pool"
+        global_pool_id = "global_pool"
         num_training_gpus = config.trainer.n_training_gpus_per_node
         resource_pool_spec = {
             actor_pool_id: [num_training_gpus] * config.trainer.nnodes,
+            global_pool_id: [0] * config.trainer.nnodes,
             rollout_pool_id: [config.trainer.n_gpus_per_node - num_training_gpus] * config.trainer.nnodes,
         }
         mapping = {
             Role.Actor: actor_pool_id,
             Role.Rollout: rollout_pool_id,
+            Role.ActorRollout: global_pool_id,
         }
 
         # Add a reference policy worker if KL loss or KL reward is used.
