@@ -1,5 +1,6 @@
 import asyncio
 import os
+import shutil
 import threading
 import time
 import uuid
@@ -415,11 +416,12 @@ class PipelineAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 
-                    # with marked_timer("rollout_model_update", timing_raw, color="purple"):
-                    #     updated_actor_module_fsdp_ref = self.actor_wg.get_state_dict()
-                    #     if isinstance(updated_actor_module_fsdp_ref, list):
-                    #         updated_actor_module_fsdp_ref = updated_actor_module_fsdp_ref[0]
-                    #     self.rollout_wg.update_rollout_actor_module(updated_actor_module_fsdp_ref)
+                    with marked_timer("rollout_model_update", timing_raw, color="purple"):
+                        updated_actor_module_fsdp_ref = self.actor_wg.get_state_dict()
+                        if isinstance(updated_actor_module_fsdp_ref, list):
+                            updated_actor_module_fsdp_ref = updated_actor_module_fsdp_ref[0]
+
+                        save_lora_adapter("/workspace/checkpoints/staging_lora_dir", updated_actor_module_fsdp_ref)
 
                     # validate
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and self.global_steps % self.config.trainer.test_freq == 0:
@@ -482,3 +484,62 @@ class PipelineAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
                         pprint(f"Final validation metrics: {val_metrics}")
                         logger.log(data=val_metrics, step=self.global_steps)
                     return
+
+def save_lora_adapter(target_dir: str, state_dict: dict[str, torch.Tensor]):
+    """
+    Save lora adapter to safetensors.
+
+    Returns:
+        lora_path: str, the path to the lora adapter. None if no lora adapter found.
+
+    Note:
+        This function change the 'state_dict' in place.
+    """
+    lora_params_names = [name for name in state_dict.keys() if "lora_" in name]
+
+    if len(lora_params_names) == 0:
+        return None
+
+    import json
+    from typing import OrderedDict
+
+    import peft
+    from safetensors.torch import save_file
+
+    lora_params = OrderedDict()
+    target_modules = set()
+    lora_key = None
+
+    for name in lora_params_names:
+        lora_key = name.replace(".default.weight", ".weight")
+        target_modules.add(lora_key.split(".")[-3])
+        lora_params[lora_key] = state_dict.pop(name)
+
+    lora_rank = min(lora_params[lora_key].shape[0], lora_params[lora_key].shape[1])
+    peft_dict = {
+        "r": lora_rank,
+        "lora_alpha": 0,  # lora_alpha is not set. An error should be raised to inform the user to set it manually.
+        "target_modules": list(target_modules),
+    }
+    peft_config = peft.LoraConfig(**peft_dict).to_dict()
+    peft_config["task_type"] = peft_config["task_type"].value if peft_config["task_type"] else None
+    peft_config["peft_type"] = peft_config["peft_type"].value if peft_config["peft_type"] else None
+    peft_config["target_modules"] = list(peft_config["target_modules"])
+
+    lora_path = os.path.join(target_dir, "lora_adapter")
+    if os.path.exists(lora_path):
+        shutil.rmtree(lora_path)
+    os.makedirs(lora_path, exist_ok=True)
+    with open(os.path.join(lora_path, "adapter_config.json"), "w", encoding="utf-8") as f:
+        json.dump(peft_config, f, ensure_ascii=False, indent=4)
+    save_file(lora_params, os.path.join(lora_path, "adapter_model.safetensors"))
+
+    for name in list(state_dict.keys()):
+        key = (
+            name.replace("base_model.model.", "")
+            .replace(".base_layer.weight", ".weight")
+            .replace(".base_layer.bias", ".bias")
+        )
+        state_dict[key] = state_dict.pop(name)
+
+    return lora_path
