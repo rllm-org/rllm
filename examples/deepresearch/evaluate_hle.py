@@ -5,6 +5,12 @@ Adapted from original DeepResearch HLE evaluation to work with rLLM's
 DeepResearch integration and AgentWorkflowEngine.
 
 Original: https://github.com/Alibaba-NLP/DeepResearch/blob/main/evaluation/evaluate_hle_official.py
+
+Evaluation Method:
+- Uses o3-mini as judge model (aligned with Tongyi's official evaluation)
+- Binary yes/no judgment with structured output (Pydantic schema)
+- Strict matching based on [correct_answer] with small numerical tolerance
+- Final metric: accuracy (0-100%) computed as correct/total
 """
 
 import asyncio
@@ -12,11 +18,12 @@ import json
 import os
 import argparse
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Literal
 import statistics
 
 from dotenv import find_dotenv, load_dotenv
 from datasets import load_dataset
+from pydantic import BaseModel
 
 from rllm.engine.rollout import OpenAIEngine
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
@@ -24,33 +31,48 @@ from deepresearch_workflow import DeepResearchWorkflow
 from deepresearch_tools import get_all_tools
 
 
+# Pydantic schema for structured judge output (aligned with Tongyi)
+class ExtractedAnswer(BaseModel):
+    extracted_final_answer: str
+    reasoning: str
+    correct: Literal["yes", "no"]
+    confidence: int
+
+
 class HLEJudge:
-    """Judge for evaluating HLE responses using OpenAI API."""
+    """
+    Judge for evaluating HLE responses using o3-mini with structured output.
+
+    Aligned with Tongyi's official evaluation method:
+    https://github.com/Alibaba-NLP/DeepResearch/blob/main/evaluation/evaluate_hle_official.py
+    """
 
     def __init__(self, judge_engine: OpenAIEngine):
         self.judge_engine = judge_engine
-        self.judge_prompt = """Please act as an impartial judge and evaluate the quality of the response provided by an AI assistant to the user question displayed below. Your evaluation should consider correctness and helpfulness. You will be given a reference answer and the assistant's answer. You need to evaluate if the assistant's answer is correct.
+        # Tongyi's original judge prompt (binary yes/no with strict matching)
+        self.judge_prompt = """Judge whether the following [response] to [question] is correct or not based on the precise and unambiguous [correct_answer] below.
 
-Be as objective as possible. After providing your explanation, you must rate the response on a scale of 1 to 5 by strictly following this format: "[[rating]]", for example: "Rating: [[3]]".
+[question]: {question}
 
-Here are the details:
+[response]: {response}
 
-[Question]
-{question}
+Your judgement must be in the format and criteria specified below:
 
-[Reference Answer]
-{reference_answer}
+extracted_final_answer: The final exact answer extracted from the [response]. Put the extracted answer as 'None' if there is no exact, final answer to extract from the response.
 
-[Assistant's Answer]
-{assistant_answer}
+[correct_answer]: {correct_answer}
 
-Please provide your evaluation and rating."""
+reasoning: Explain why the extracted_final_answer is correct or incorrect based on [correct_answer], focusing only on if there are meaningful differences between [correct_answer] and the extracted_final_answer. Do not comment on any background to the problem, do not attempt to solve the problem, do not argue for any answer different than [correct_answer], focus only on whether the answers match.
+
+correct: Answer 'yes' if extracted_final_answer matches the [correct_answer] given above, or is within a small margin of error for numerical problems. Answer 'no' otherwise, i.e. if there if there is any inconsistency, ambiguity, non-equivalency, or if the extracted answer is incorrect.
+
+confidence: The extracted confidence score between 0% and 100% from [response]. Put 100 if there is no confidence score available."""
 
     async def judge_response(
         self, question: str, reference_answer: str, assistant_answer: str
     ) -> Dict[str, Any]:
         """
-        Judge a single response.
+        Judge a single response using structured output.
 
         Args:
             question: Original question
@@ -58,46 +80,68 @@ Please provide your evaluation and rating."""
             assistant_answer: Model's prediction
 
         Returns:
-            Dictionary with judgment results
+            Dictionary with judgment results (aligned with Tongyi format)
         """
         try:
             prompt = self.judge_prompt.format(
                 question=question,
-                reference_answer=reference_answer,
-                assistant_answer=assistant_answer,
+                correct_answer=reference_answer,
+                response=assistant_answer,
             )
+
+            # Add explicit JSON format instruction (required for OpenAI JSON mode)
+            prompt += "\n\nPlease respond in JSON format with the following fields: extracted_final_answer, reasoning, correct, confidence."
 
             messages = [{"role": "user", "content": prompt}]
 
+            # Use JSON mode for structured output (compatible with o3-mini)
             response = await self.judge_engine.get_model_response(
-                messages=messages, temperature=0.1, max_tokens=1000
+                messages=messages,
+                max_completion_tokens=8192,
+                response_format={"type": "json_object"},
             )
 
             judgment_text = (
                 response.text if hasattr(response, "text") else str(response)
             )
 
-            # Extract rating (handle "Rating: [[X]]" format)
-            rating = 1  # Default to 1 instead of 0
-            if "[[" in judgment_text and "]]" in judgment_text:
-                try:
-                    rating_text = judgment_text.split("[[")[1].split("]]")[0]
-                    rating = int(rating_text.strip())
-                except (IndexError, ValueError):
-                    rating = 1  # Default to 1 if parsing fails
+            # Parse structured JSON output
+            try:
+                judgment_data = json.loads(judgment_text)
+                extracted_answer = judgment_data.get("extracted_final_answer", "None")
+                reasoning = judgment_data.get("reasoning", "")
+                correct = judgment_data.get("correct", "no")
+                confidence = judgment_data.get("confidence", 0)
+            except json.JSONDecodeError:
+                # Fallback: try to extract from text
+                print("⚠️  Failed to parse JSON, using text fallback")
+                extracted_answer = "None"
+                reasoning = judgment_text
+                correct = "yes" if "correct: yes" in judgment_text.lower() else "no"
+                confidence = 0
 
-            # Consider rating >= 4 as correct for binary accuracy
-            is_correct = rating >= 4
+            # Binary judgment: yes/no
+            is_correct = correct.lower() == "yes"
 
             return {
-                "judgment": judgment_text,
-                "rating": rating,
+                "judgment": reasoning,
+                "extracted_answer": extracted_answer,
+                "correct": correct,
+                "confidence": confidence,
                 "is_correct": is_correct,
+                "rating": 5 if is_correct else 1,  # For compatibility with old metrics
             }
 
         except Exception as e:
             print(f"Judge error: {e}")
-            return {"judgment": f"Judge error: {e}", "rating": 0, "is_correct": False}
+            return {
+                "judgment": f"Judge error: {e}",
+                "extracted_answer": "None",
+                "correct": "no",
+                "confidence": 0,
+                "is_correct": False,
+                "rating": 0,
+            }
 
 
 async def evaluate_hle_dataset(dataset_path: str, args) -> Dict[str, Any]:
@@ -209,7 +253,7 @@ async def evaluate_hle_dataset(dataset_path: str, args) -> Dict[str, Any]:
                     file_lines = "\n".join([f"- {p}" for p in file_paths[:10]])
                     extras.append(f"Files:\n{file_lines}")
 
-                # Images
+                # Images - Store for multi-modal message construction
                 images = []
                 for key in ["images", "image"]:
                     if key in example and example[key]:
@@ -219,19 +263,25 @@ async def evaluate_hle_dataset(dataset_path: str, args) -> Dict[str, Any]:
                             else [example[key]]
                         )
                         images.extend([str(v) for v in vals])
-                if images:
-                    img_lines = "\n".join([f"- {p}" for p in images[:10]])
-                    extras.append(f"Images:\n{img_lines}")
+
+                # Store images for vision model processing
+                # Note: Images will be sent directly to vision model via multimodal messages
 
                 if extras:
                     q = f"{q}\n\nAdditional context for tools:\n" + "\n\n".join(extras)
             except Exception:
                 pass
 
-            return {
+            result = {
                 "question": str(q) if q is not None else "",
                 "answer": str(a) if a is not None else "",
             }
+
+            # Include images if present
+            if images:
+                result["_images"] = images
+
+            return result
 
         total_len = len(ds)
         limit = min(args.max_samples, total_len) if args.max_samples else total_len
@@ -239,13 +289,15 @@ async def evaluate_hle_dataset(dataset_path: str, args) -> Dict[str, Any]:
             ex = ds[idx]
             qa = extract_qa(ex)
             if qa["question"] and qa["answer"]:
-                questions.append(
-                    {
-                        "id": f"hle_{idx}",
-                        "question": qa["question"],
-                        "answer": qa["answer"],
-                    }
-                )
+                task = {
+                    "id": f"hle_{idx}",
+                    "question": qa["question"],
+                    "answer": qa["answer"],
+                }
+                # Include images if present
+                if "_images" in qa:
+                    task["_images"] = qa["_images"]
+                questions.append(task)
             else:
                 print(f"Warning: Could not extract question/answer from example {idx}")
 
@@ -340,7 +392,12 @@ async def evaluate_hle_dataset(dataset_path: str, args) -> Dict[str, Any]:
 
 
 def setup_rollout_engine(args, model_role="evaluation") -> OpenAIEngine:
-    """Setup rollout engine for evaluation or judging."""
+    """
+    Setup rollout engine for evaluation or judging.
+
+    For judge: defaults to o3-mini (aligned with Tongyi's official evaluation)
+    For evaluation: defaults to gpt-4o or Together AI model
+    """
 
     # Load environment variables
     load_dotenv(find_dotenv())
@@ -352,7 +409,10 @@ def setup_rollout_engine(args, model_role="evaluation") -> OpenAIEngine:
     if args.api_key:
         api_key = args.api_key
         base_url = args.base_url or "https://api.openai.com/v1"
-        model_name = args.model or "gpt-4"
+        if model_role == "judge":
+            model_name = args.judge_model or "o3-mini"  # Tongyi's default
+        else:
+            model_name = args.model or "gpt-4o"
     elif together_api_key and model_role == "evaluation":
         api_key = together_api_key
         base_url = args.base_url or "https://api.together.xyz/v1"
@@ -363,23 +423,41 @@ def setup_rollout_engine(args, model_role="evaluation") -> OpenAIEngine:
     elif openai_api_key:
         api_key = openai_api_key
         base_url = args.base_url or "https://api.openai.com/v1"
-        model_name = args.model or "gpt-4o"
-        print(f"🔧 Using OpenAI for {model_role}")
+        if model_role == "judge":
+            model_name = args.judge_model if hasattr(args, "judge_model") else "o3-mini"
+            print(f"🔧 Using {model_name} for {model_role} (Tongyi-aligned)")
+        else:
+            model_name = args.model or "gpt-4o"
+            print(f"🔧 Using OpenAI for {model_role}")
     else:
         raise ValueError(
             "❌ API key required. Please set OPENAI_API_KEY or TOGETHER_AI_API_KEY in .env file"
         )
+
+    # Judge uses simpler sampling params
+    if model_role == "judge":
+        # For o3-mini, directly use max_completion_tokens to avoid warnings
+        if model_name and model_name.lower().startswith("o3"):
+            sampling_params = {
+                "max_completion_tokens": 8192,
+            }
+        else:
+            sampling_params = {
+                "max_tokens": 8192,
+            }
+    else:
+        sampling_params = {
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "max_tokens": 2048,
+        }
 
     return OpenAIEngine(
         model=model_name,
         tokenizer=None,
         base_url=base_url,
         api_key=api_key,
-        sampling_params={
-            "temperature": 0.1 if model_role == "judge" else 0.6,
-            "top_p": 0.95,
-            "max_tokens": 1000 if model_role == "judge" else 2048,
-        },
+        sampling_params=sampling_params,
     )
 
 
@@ -394,9 +472,9 @@ def calculate_hle_metrics(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     judge_correct = sum(1 for r in results if r.get("is_correct", False))
     judge_accuracy = judge_correct / total
 
-    # Rating distribution
-    ratings = [r.get("rating", 0) for r in results]
-    avg_rating = statistics.mean(ratings) if ratings else 0
+    # Confidence distribution (from judge)
+    confidences = [r.get("confidence", 0) for r in results if "confidence" in r]
+    avg_confidence = statistics.mean(confidences) if confidences else 0
 
     # Termination analysis
     termination_counts = {}
@@ -408,14 +486,21 @@ def calculate_hle_metrics(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     rounds = [r.get("rounds", 0) for r in results]
     avg_rounds = statistics.mean(rounds) if rounds else 0
 
+    # Judgment distribution (yes/no)
+    correct_judgments = sum(1 for r in results if r.get("correct") == "yes")
+    incorrect_judgments = sum(1 for r in results if r.get("correct") == "no")
+
     return {
         "total_questions": total,
         "judge_accuracy": judge_accuracy,
         "judge_correct": judge_correct,
-        "average_rating": avg_rating,
+        "average_confidence": avg_confidence,
         "average_rounds": avg_rounds,
         "termination_distribution": termination_counts,
-        "rating_distribution": {f"rating_{i}": ratings.count(i) for i in range(1, 6)},
+        "judgment_distribution": {
+            "yes": correct_judgments,
+            "no": incorrect_judgments,
+        },
     }
 
 
@@ -462,7 +547,7 @@ def print_hle_summary(metrics: Dict[str, Any]):
     print("=" * 60)
     print(f"Total Questions: {metrics.get('total_questions', 0)}")
     print(f"Judge Accuracy: {metrics.get('judge_accuracy', 0):.2%}")
-    print(f"Average Rating: {metrics.get('average_rating', 0):.2f}/5.0")
+    print(f"Average Confidence: {metrics.get('average_confidence', 0):.1f}%")
     print(f"Average Rounds: {metrics.get('average_rounds', 0):.1f}")
     print(f"Evaluation Time: {metrics.get('evaluation_time', 0):.1f}s")
 
@@ -471,10 +556,10 @@ def print_hle_summary(metrics: Dict[str, Any]):
     for reason, count in term_dist.items():
         print(f"  {reason}: {count}")
 
-    print("\nRating Distribution:")
-    rating_dist = metrics.get("rating_distribution", {})
-    for rating, count in rating_dist.items():
-        print(f"  {rating}: {count}")
+    print("\nJudgment Distribution:")
+    judgment_dist = metrics.get("judgment_distribution", {})
+    for judgment, count in judgment_dist.items():
+        print(f"  {judgment}: {count}")
 
     print("=" * 60)
 
@@ -508,7 +593,14 @@ async def main():
     )
 
     # Model options
-    parser.add_argument("--model", default=None, help="Model name to use")
+    parser.add_argument(
+        "--model", default=None, help="Model name for evaluation (default: gpt-4o)"
+    )
+    parser.add_argument(
+        "--judge-model",
+        default="o3-mini",
+        help="Model name for judge (default: o3-mini, aligned with Tongyi)",
+    )
     parser.add_argument("--base-url", default=None, help="API base URL")
     parser.add_argument(
         "--api-key", default=None, help="API key (uses env vars if not provided)"

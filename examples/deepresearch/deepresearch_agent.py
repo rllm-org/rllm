@@ -198,7 +198,9 @@ class MultiTurnReactAgent:
         """
         return self.total_prompt_tokens + self.total_completion_tokens
 
-    async def _run(self, question: str, answer: str = None, **kwargs) -> dict:
+    async def _run(
+        self, question: str, answer: str = None, images: list = None, **kwargs
+    ) -> dict:
         """
         Main reasoning loop adapted from original DeepResearch.
 
@@ -211,6 +213,7 @@ class MultiTurnReactAgent:
         Args:
             question: The research question to answer
             answer: Ground truth answer (for evaluation)
+            images: List of image data URLs (base64 encoded)
 
         Returns:
             Dictionary with results including messages, prediction, and termination reason
@@ -221,9 +224,23 @@ class MultiTurnReactAgent:
         system_prompt = (
             self.system_prompt or DEEPRESEARCH_SYSTEM_PROMPT
         ) + today_date()
+
+        # Construct initial user message (multimodal if images present)
+        if images:
+            # Build multimodal message with images
+            user_content = [{"type": "text", "text": question}]
+            for image_data in images:
+                user_content.append(
+                    {"type": "image_url", "image_url": {"url": image_data}}
+                )
+            user_message = {"role": "user", "content": user_content}
+        else:
+            # Plain text message
+            user_message = {"role": "user", "content": question}
+
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question},
+            user_message,
         ]
 
         num_llm_calls_available = self.max_llm_calls

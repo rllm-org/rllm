@@ -4,6 +4,30 @@
 
 This module integrates Tongyi's DeepResearch ReAct agent into the rLLM framework, enabling evaluation on academic benchmarks like HLE (Humanity's Last Exam). The integration demonstrates how to port external agent architectures into rLLM's workflow system while maintaining compatibility with the training and evaluation infrastructure.
 
+## Source Alignment
+
+This implementation is aligned with Tongyi DeepResearch's official repository:
+**[Alibaba-NLP/DeepResearch](https://github.com/Alibaba-NLP/DeepResearch)**
+
+📊 **For detailed alignment analysis, see [ALIGNMENT_ANALYSIS.md](./ALIGNMENT_ANALYSIS.md)**
+
+### File Mapping (rLLM ↔ Tongyi Original)
+
+| rLLM File                  | Tongyi Original                                                                                                                    | Purpose                                                                      |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `deepresearch_agent.py`    | [`inference/react_agent.py`](https://github.com/Alibaba-NLP/DeepResearch/blob/main/inference/react_agent.py)                       | ReAct agent with XML-based tool calling loop                                 |
+| `deepresearch_workflow.py` | [`inference/run_multi_react.py`](https://github.com/Alibaba-NLP/DeepResearch/blob/main/inference/run_multi_react.py)               | Task orchestration and execution                                             |
+| `deepresearch_tools.py`    | [`inference/tool_*.py`](https://github.com/Alibaba-NLP/DeepResearch/tree/main/inference)                                           | Tool implementations (Search, Scholar, Visit, FileParser, PythonInterpreter) |
+| `evaluate_hle.py`          | [`evaluation/evaluate_hle_official.py`](https://github.com/Alibaba-NLP/DeepResearch/blob/main/evaluation/evaluate_hle_official.py) | HLE benchmark evaluation with o3-mini judge                                  |
+
+### Key Differences from Original
+
+- **Engine**: Uses rLLM's `OpenAIEngine` / `VerlEngine` instead of direct OpenAI client
+- **Workflow**: Wraps agent in rLLM `Workflow` for Episode/Trajectory tracking
+- **Orchestration**: Uses `AgentWorkflowEngine` for parallel execution
+- **Evaluation**: Aligned judge prompt and scoring (binary yes/no + o3-mini judge)
+- **Data Format**: Outputs rLLM `Episode` objects for training pipeline compatibility
+
 ## Architecture
 
 ```
@@ -137,13 +161,13 @@ for episode in episodes:
 
 The agent has access to the following research tools (ported from Tongyi DeepResearch):
 
-| Tool | Description | Implementation Status |
-|------|-------------|----------------------|
-| **Search** | Web search via Serper API | ✅ Fully implemented from Tongyi |
-| **Scholar** | Google Scholar search via Serper | ✅ Fully implemented from Tongyi |
-| **Visit** | Visit and extract webpage content | ✅ Fully implemented with BeautifulSoup |
-| **FileParser** | Parse multiple file formats | ✅ Enhanced: TXT, JSON, CSV, PDF*, DOCX* |
-| **PythonInterpreter** | Execute Python code safely | ✅ Fully implemented with security |
+| Tool                  | Description                       | Implementation Status                    |
+| --------------------- | --------------------------------- | ---------------------------------------- |
+| **Search**            | Web search via Serper API         | ✅ Fully implemented from Tongyi         |
+| **Scholar**           | Google Scholar search via Serper  | ✅ Fully implemented from Tongyi         |
+| **Visit**             | Visit and extract webpage content | ✅ Fully implemented with BeautifulSoup  |
+| **FileParser**        | Parse multiple file formats       | ✅ Enhanced: TXT, JSON, CSV, PDF*, DOCX* |
+| **PythonInterpreter** | Execute Python code safely        | ✅ Fully implemented with security       |
 
 ### Tool Implementation Details
 
@@ -157,6 +181,7 @@ All tools have been ported from the original Tongyi DeepResearch implementation:
 ### API Configuration
 
 Add to your `.env` file:
+
 ```bash
 SERPER_API_KEY=your_serper_key  # For Search and Scholar tools
 ```
@@ -164,6 +189,7 @@ SERPER_API_KEY=your_serper_key  # For Search and Scholar tools
 ### Optional Dependencies
 
 For enhanced file parsing:
+
 ```bash
 pip install PyPDF2           # For PDF support in FileParser
 pip install python-docx      # For DOCX support in FileParser
@@ -174,24 +200,28 @@ pip install requests         # For Visit tool (webpage fetching)
 ## Key Improvements from Original
 
 ### 1. Token Counting Fix
+
 - **Problem**: Original used mismatched tokenizers (GPT-2 for GPT-4o) causing incorrect context limits
 - **Solution**: Now uses OpenAI API's actual token statistics from response.prompt_tokens and response.completion_tokens
 - **Impact**: No more false "context exceeded" errors at 13k tokens when limit is 128k
 
 ### 2. Context Management
+
 - **Problem**: System would incorrectly truncate messages based on wrong token counts
 - **Solution**: Track actual cumulative API token consumption for accurate context management
 - **Impact**: Model can use full context window effectively
 
 ### 3. System Prompt Optimization
+
 - **Problem**: Over-constrained prompt requiring specific tags caused unnatural responses
 - **Solution**: Simplified prompt matching original Tongyi design, letting model reason naturally
 - **Impact**: Better convergence, fewer infinite loops
 
 ### 4. Parallel Execution
-- **Leverages AgentWorkflowEngine for concurrent task processing
-- **Configurable parallelism (n_parallel_tasks parameter)
-- **Automatic retry on failures
+
+- \*\*Leverages AgentWorkflowEngine for concurrent task processing
+- \*\*Configurable parallelism (n_parallel_tasks parameter)
+- \*\*Automatic retry on failures
 
 ## Evaluation Results
 
@@ -234,6 +264,7 @@ examples/deepresearch/
 To add new tools or improve existing ones:
 
 1. Implement tool in `deepresearch_tools.py` following the pattern:
+
    ```python
    class YourTool(DeepResearchTool):
        async def call(self, **kwargs) -> str:
@@ -250,6 +281,7 @@ To add new tools or improve existing ones:
 ## Related Work
 
 This integration is part of the rLLM evaluation framework initiative. See also:
+
 - `examples/strands/` - Strands agent integration
 - `rllm/agents/` - Native rLLM agents
 - `rllm/workflows/` - Workflow base classes

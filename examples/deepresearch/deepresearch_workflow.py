@@ -75,13 +75,18 @@ class DeepResearchWorkflow(Workflow):
         # Extract question and answer from task
         question = task.get("question", task.get("query", "No question provided"))
         answer = task.get("answer", "")
+        images = task.get("_images", [])  # Extract images if present
 
         print(f"🚀 Starting DeepResearch workflow for task {uid}")
         print(f"   Question: {question}")
+        if images:
+            print(f"   📷 Images: {len(images)} image(s)")
 
         try:
-            # Run the DeepResearch agent
-            result = await self.agent.run(question=question, answer=answer, **kwargs)
+            # Run the DeepResearch agent (pass images if available)
+            result = await self.agent.run(
+                question=question, answer=answer, images=images, **kwargs
+            )
 
             # Convert the result to rLLM Episode format
             episode = self._convert_to_episode(result, task, uid)
