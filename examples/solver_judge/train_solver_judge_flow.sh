@@ -11,8 +11,12 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     +trainer.n_training_gpus_per_node=4 \
     data.max_prompt_length=2048 \
     data.max_response_length=1024 \
+    actor_rollout_ref.model.lora_rank=32 \
+    actor_rollout_ref.model.lora_alpha=32 \
+    actor_rollout_ref.rollout.load_format=safetensors \
+    actor_rollout_ref.model.target_modules=all-linear \
     actor_rollout_ref.model.path=Qwen/Qwen3-0.6B \
-    actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.actor.optim.lr=3e-5 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
@@ -56,7 +60,7 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.save_freq=1000 \
+    trainer.save_freq=1 \
     trainer.test_freq=25 \
     trainer.default_hdfs_dir=null \
     trainer.total_epochs=100 \
