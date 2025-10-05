@@ -29,6 +29,7 @@ from verl.trainer.ppo.ray_trainer import (
     marked_timer,
     reduce_metrics,
 )
+from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.fireworks_engine import FireworksEngine
@@ -107,16 +108,16 @@ class PipelineAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
         # )
 
         from transformers import AutoTokenizer
-        rollout_engine = FireworksEngine(
+        fireworks_engine = FireworksEngine(
             model="accounts/fireworks/models/qwen3-30b-a3b",
             tokenizer=AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B"),
             sampling_params={"temperature": 0.6, "top_p": 0.95, "max_tokens": 2048},
         )
-
+        self.fireworks_engine = fireworks_engine
         self.agent_execution_engine = AgentWorkflowEngine(
             workflow_cls=self.workflow_class,
             workflow_args=self.workflow_args,
-            rollout_engine=rollout_engine,
+            rollout_engine=fireworks_engine,
             config=self.config,
             n_parallel_tasks=self.config.rllm.workflow.n_parallel_tasks,
             retry_limit=self.config.rllm.workflow.retry_limit,
@@ -416,13 +417,6 @@ class PipelineAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 
-                    with marked_timer("rollout_model_update", timing_raw, color="purple"):
-                        updated_actor_module_fsdp_ref = self.actor_wg.get_state_dict()
-                        if isinstance(updated_actor_module_fsdp_ref, list):
-                            updated_actor_module_fsdp_ref = updated_actor_module_fsdp_ref[0]
-
-                        save_lora_adapter("/workspace/checkpoints/staging_lora_dir", updated_actor_module_fsdp_ref)
-
                     # validate
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and self.global_steps % self.config.trainer.test_freq == 0:
                         with marked_timer("testing", timing_raw, color="green"):
@@ -432,6 +426,18 @@ class PipelineAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
                     if self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq == 0:
                         with marked_timer("save_checkpoint", timing_raw, color="green"):
                             self._save_checkpoint()
+
+                    with marked_timer("rollout_model_update", timing_raw, color="purple"):
+                        checkpoint_folder = self.config.trainer.default_local_dir  # TODO: check path
+                        if not os.path.isabs(checkpoint_folder):
+                            working_dir = os.getcwd()
+                            checkpoint_folder = os.path.join(working_dir, checkpoint_folder)
+                        global_step_folder = find_latest_ckpt_path(checkpoint_folder)
+                        actor_path = os.path.join(global_step_folder, "actor")
+                        lora_adapter_path = os.path.join(actor_path, "lora_adapter")
+
+                        print("lora_adapter_path", lora_adapter_path)
+
 
                 with marked_timer("stop_profile", timing_raw):
                     self._stop_profiling(do_profile)
@@ -484,62 +490,3 @@ class PipelineAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
                         pprint(f"Final validation metrics: {val_metrics}")
                         logger.log(data=val_metrics, step=self.global_steps)
                     return
-
-def save_lora_adapter(target_dir: str, state_dict: dict[str, torch.Tensor]):
-    """
-    Save lora adapter to safetensors.
-
-    Returns:
-        lora_path: str, the path to the lora adapter. None if no lora adapter found.
-
-    Note:
-        This function change the 'state_dict' in place.
-    """
-    lora_params_names = [name for name in state_dict.keys() if "lora_" in name]
-
-    if len(lora_params_names) == 0:
-        return None
-
-    import json
-    from typing import OrderedDict
-
-    import peft
-    from safetensors.torch import save_file
-
-    lora_params = OrderedDict()
-    target_modules = set()
-    lora_key = None
-
-    for name in lora_params_names:
-        lora_key = name.replace(".default.weight", ".weight")
-        target_modules.add(lora_key.split(".")[-3])
-        lora_params[lora_key] = state_dict.pop(name)
-
-    lora_rank = min(lora_params[lora_key].shape[0], lora_params[lora_key].shape[1])
-    peft_dict = {
-        "r": lora_rank,
-        "lora_alpha": 0,  # lora_alpha is not set. An error should be raised to inform the user to set it manually.
-        "target_modules": list(target_modules),
-    }
-    peft_config = peft.LoraConfig(**peft_dict).to_dict()
-    peft_config["task_type"] = peft_config["task_type"].value if peft_config["task_type"] else None
-    peft_config["peft_type"] = peft_config["peft_type"].value if peft_config["peft_type"] else None
-    peft_config["target_modules"] = list(peft_config["target_modules"])
-
-    lora_path = os.path.join(target_dir, "lora_adapter")
-    if os.path.exists(lora_path):
-        shutil.rmtree(lora_path)
-    os.makedirs(lora_path, exist_ok=True)
-    with open(os.path.join(lora_path, "adapter_config.json"), "w", encoding="utf-8") as f:
-        json.dump(peft_config, f, ensure_ascii=False, indent=4)
-    save_file(lora_params, os.path.join(lora_path, "adapter_model.safetensors"))
-
-    for name in list(state_dict.keys()):
-        key = (
-            name.replace("base_model.model.", "")
-            .replace(".base_layer.weight", ".weight")
-            .replace(".base_layer.bias", ".bias")
-        )
-        state_dict[key] = state_dict.pop(name)
-
-    return lora_path
