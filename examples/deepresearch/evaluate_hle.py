@@ -473,7 +473,18 @@ def calculate_hle_metrics(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     judge_accuracy = judge_correct / total
 
     # Confidence distribution (from judge)
-    confidences = [r.get("confidence", 0) for r in results if "confidence" in r]
+    confidences = []
+    for r in results:
+        if "confidence" in r:
+            try:
+                conf = (
+                    int(r["confidence"])
+                    if isinstance(r["confidence"], str)
+                    else r["confidence"]
+                )
+                confidences.append(conf)
+            except (ValueError, TypeError):
+                pass  # Skip invalid confidence values
     avg_confidence = statistics.mean(confidences) if confidences else 0
 
     # Termination analysis
