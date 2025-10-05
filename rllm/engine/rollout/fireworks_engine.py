@@ -42,4 +42,5 @@ class FireworksEngine(OpenAIEngine):
         logging.getLogger("httpx").setLevel(logging.WARNING)
 
     def update_model_weights(self, state_dict: dict):
+        print("updating fireworks deployment weights")
         pass
