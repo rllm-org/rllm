@@ -53,7 +53,7 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     trainer.logger=['console','wandb'] \
     trainer.project_name='solver-judge-workflow' \
     trainer.experiment_name='countdown-solver-judge' \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=1000 \
