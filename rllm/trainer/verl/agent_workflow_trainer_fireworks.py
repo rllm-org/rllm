@@ -38,7 +38,7 @@ from rllm.workflows.workflow import TerminationReason
 from verl import DataProto
 
 
-class PipelineAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
+class FireworksAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
     def __init__(
         self,
         config,

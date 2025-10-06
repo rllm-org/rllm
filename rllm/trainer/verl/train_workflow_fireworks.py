@@ -10,7 +10,7 @@ from verl.utils.device import is_cuda_available
 
 from rllm.trainer.env_agent_mappings import WORKFLOW_CLASS_MAPPING
 from rllm.trainer.verl.agent_workflow_trainer_fireworks import (
-    PipelineAgentWorkflowPPOTrainer,
+    FireworksAgentWorkflowPPOTrainer,
 )
 
 
@@ -173,7 +173,7 @@ class PipelineTaskRunner:
         if config.rllm.workflow.get("workflow_args") is not None:
             workflow_args.update(config.rllm.workflow.get("workflow_args"))
 
-        trainer = PipelineAgentWorkflowPPOTrainer(
+        trainer = FireworksAgentWorkflowPPOTrainer(
             config=config,
             tokenizer=tokenizer,
             role_worker_mapping=role_worker_mapping,
