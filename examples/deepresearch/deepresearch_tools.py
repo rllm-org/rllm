@@ -3,25 +3,64 @@ DeepResearch Tools - Production-ready implementations
 
 This module provides tool implementations for the DeepResearch agent, with real
 functionality ported from Tongyi's original implementations where possible.
+
+Now supports both:
+- ReAct text format (for gpt-4o, Claude, etc.)
+- OpenAI native function calling (for o3, o3-mini, etc.)
 """
 
 import os
 import json
 import http.client
 from abc import ABC, abstractmethod
+from rllm.tools.tool_base import Tool as RLLMTool
 
 
-class DeepResearchTool(ABC):
-    """Base class for all DeepResearch tools."""
+class DeepResearchTool(RLLMTool, ABC):
+    """
+    Base class for all DeepResearch tools.
 
-    def __init__(self, name: str, description: str):
-        self.name = name
-        self.description = description
+    Inherits from rLLM's Tool to support OpenAI native function calling,
+    while maintaining compatibility with ReAct text format.
+    """
+
+    def __init__(self, name: str, description: str, parameters: dict | None = None):
+        """
+        Initialize DeepResearch tool with OpenAI function calling support.
+
+        Args:
+            name: Tool name
+            description: Tool description
+            parameters: OpenAI-style parameter schema (optional)
+        """
+        # Set _json BEFORE calling super().__init__
+        # because the parent's __init__ may access self.json
+        self._json = {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": description,
+                "parameters": parameters
+                or {"type": "object", "properties": {}, "required": []},
+            },
+        }
+
+        super().__init__(name=name, description=description)
 
     @abstractmethod
     async def call(self, **kwargs) -> str:
         """Execute the tool with given arguments."""
         pass
+
+    async def async_forward(self, **kwargs):
+        """rLLM Tool interface - delegates to call()"""
+        from rllm.tools.tool_base import ToolOutput
+
+        try:
+            result = await self.call(**kwargs)
+            return ToolOutput(name=self.name, output=result)
+        except Exception as e:
+            return ToolOutput(name=self.name, error=f"{type(e).__name__} - {str(e)}")
 
 
 class SearchTool(DeepResearchTool):
@@ -31,6 +70,16 @@ class SearchTool(DeepResearchTool):
         super().__init__(
             name="Search",
             description="Performs web searches using Google via Serper API",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query string",
+                    }
+                },
+                "required": ["query"],
+            },
         )
 
     def contains_chinese(self, text: str) -> bool:
@@ -192,6 +241,16 @@ class ScholarTool(DeepResearchTool):
         super().__init__(
             name="Scholar",
             description="Search Google Scholar for academic papers",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The academic search query",
+                    }
+                },
+                "required": ["query"],
+            },
         )
 
     async def call(self, query: str | list, **kwargs) -> str:
@@ -269,6 +328,17 @@ class VisitTool(DeepResearchTool):
         super().__init__(
             name="Visit",
             description="Visit and extract content from web pages",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The URL to visit"},
+                    "goal": {
+                        "type": "string",
+                        "description": "Optional goal for the visit",
+                    },
+                },
+                "required": ["url"],
+            },
         )
 
     async def call(self, url: str | list, goal: str = "", **kwargs) -> str:
@@ -365,6 +435,16 @@ class FileParserTool(DeepResearchTool):
         super().__init__(
             name="FileParser",
             description="Parse files: TXT, JSON, CSV, PDF, DOCX, etc.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "files": {
+                        "type": "string",
+                        "description": "File path or list of file paths to parse",
+                    }
+                },
+                "required": ["files"],
+            },
         )
 
     async def call(self, files: str | list, **kwargs) -> str:
@@ -490,6 +570,13 @@ class PythonInterpreterTool(DeepResearchTool):
         super().__init__(
             name="PythonInterpreter",
             description="Execute Python code for calculations and analysis",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "Python code to execute"}
+                },
+                "required": ["code"],
+            },
         )
         self.timeout = 50
 

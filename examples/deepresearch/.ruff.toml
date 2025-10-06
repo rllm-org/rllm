@@ -1,7 +1,7 @@
 # Ruff configuration for DeepResearch
 # Exclude original reference files from linting
 exclude = [
-    "react_agent_original.py",
-    "tool_file_original.py",
-    "tool_search_original.py"
+    "original/react_agent_original.py",
+    "original/tool_file_original.py",
+    "original/tool_search_original.py"
 ]
