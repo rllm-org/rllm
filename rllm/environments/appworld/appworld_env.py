@@ -118,6 +118,7 @@ class AppWorldEnv(BaseEnv):
 
         # Execute Python code
         try:
+            reward = 0
             # Execute code in the AppWorld shell
             with _appworld_lock:
                 output = self.world.execute(action)
@@ -136,10 +137,9 @@ class AppWorldEnv(BaseEnv):
                         # Evaluate the submitted answer
                         evaluation = self.world.evaluate()
                         print(f"Evaluation: {evaluation.to_dict()}")
-                        reward = 1.0 if evaluation and evaluation.todict()["success"] else 0.0
+                        reward = 1.0 if evaluation and evaluation.to_dict()["success"] else 0.0
                         print(f"Task completed! Reward: {reward}")
                     else:
-                        reward = 0.0
                         print("Task completed but evaluation failed")
 
             # Record execution history
