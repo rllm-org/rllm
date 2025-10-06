@@ -8,10 +8,10 @@ Original: https://github.com/Alibaba-NLP/DeepResearch/blob/main/inference/react_
 """
 
 import asyncio
-import json
 import time
 from datetime import datetime
 
+import json5
 
 # rLLM imports
 from rllm.engine.rollout import RolloutEngine
@@ -22,15 +22,11 @@ OBS_END = "\n</tool_response>"
 MAX_LLM_CALL_PER_RUN = 100
 
 # System prompt adapted from DeepResearch
-DEEPRESEARCH_SYSTEM_PROMPT = """You are a deep research assistant. Your core function is to conduct thorough, multi-source investigations into any topic. You MUST use the provided tools to research and verify information before answering. Do NOT answer directly from memory - always use tools to gather current, accurate information.
-
-IMPORTANT: You are REQUIRED to use at least one tool before providing any answer. Even if you think you know the answer, you must verify it using the appropriate tools. Direct answers without tool use are not acceptable.
-
-When you have gathered sufficient information through tool use and are ready to provide the definitive response, you must enclose the entire final answer within <answer></answer> tags.
+DEEPRESEARCH_SYSTEM_PROMPT = """You are a deep research assistant. Your core function is to conduct thorough, multi-source investigations into any topic. You must handle both broad, open-domain inquiries and queries within specialized academic fields. For every request, synthesize information from credible, diverse sources to deliver a comprehensive, accurate, and objective response. When you have gathered sufficient information and are ready to provide the definitive response, you must enclose the entire final answer within <answer></answer> tags.
 
 # Tools
 
-You MUST use one or more of the following tools to research the query:
+You may call one or more functions to assist with the user query.
 
 You are provided with the following tools:
 - Search: for web searches to find current information
@@ -112,7 +108,6 @@ class MultiTurnReactAgent:
         rollout_engine: RolloutEngine,
         tools: dict = None,
         system_prompt: str | None = None,
-        use_native_function_calling: bool = True,
         **kwargs,
     ):
         """
@@ -121,19 +116,10 @@ class MultiTurnReactAgent:
         Args:
             rollout_engine: rLLM OpenAI engine for model inference
             tools: Dictionary of available tools {tool_name: tool_instance}
-            system_prompt: Optional custom system prompt
-            use_native_function_calling: Whether to use OpenAI native function calling (supports o3)
         """
         self.rollout_engine = rollout_engine
         self.tools = tools or {}
         self.system_prompt = system_prompt
-        self.use_native_function_calling = use_native_function_calling
-
-        # Convert tools to OpenAI format if using native function calling
-        if use_native_function_calling and self.tools:
-            self.openai_tools = [tool.json for tool in self.tools.values()]
-        else:
-            self.openai_tools = None
 
         # Configuration from original DeepResearch
         self.max_llm_calls = MAX_LLM_CALL_PER_RUN
@@ -143,138 +129,36 @@ class MultiTurnReactAgent:
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
 
-        # Auto-detect context limit based on model capabilities
-        # This ensures we don't hit limits too early for capable models
-        self.max_context_tokens = self._get_model_context_limit(rollout_engine)
-
-    def _get_model_context_limit(self, rollout_engine) -> int:
-        """
-        Auto-detect context limit based on model capabilities.
-        Uses LiteLLM's model info when available, falls back to conservative estimates.
-        Returns 90% of max to leave safety headroom.
-        """
-        model_name = rollout_engine.model
-
-        # Method 1: Try LiteLLM's get_model_info (most accurate)
-        try:
-            import litellm
-
-            model_info = litellm.get_model_info(model_name)
-            if model_info and "max_input_tokens" in model_info:
-                max_tokens = model_info["max_input_tokens"]
-                conservative_limit = int(max_tokens * 0.90)  # Use 90% for safety
-                if not hasattr(MultiTurnReactAgent, "_context_limit_reported"):
-                    print(
-                        f"   📏 Detected context window: {max_tokens:,} tokens (using 90% = {conservative_limit:,})"
-                    )
-                    MultiTurnReactAgent._context_limit_reported = True
-                return conservative_limit
-        except Exception:
-            # LiteLLM might not have info for all models, that's ok
-            pass
-
-        # Method 2: Try tiktoken to get model family info
-        try:
-            import tiktoken
-
-            # tiktoken.encoding_for_model will throw if model unknown
-            encoding = tiktoken.encoding_for_model(model_name)
-            # Map known encodings to context limits
-            encoding_limits = {
-                "cl100k_base": 128 * 1024,  # GPT-4, GPT-3.5-turbo-16k
-                "p50k_base": 4 * 1024,  # text-davinci-002/003
-                "r50k_base": 4 * 1024,  # GPT-3 base models
-            }
-            if encoding.name in encoding_limits:
-                max_tokens = encoding_limits[encoding.name]
-                conservative_limit = int(max_tokens * 0.90)
-                if not hasattr(MultiTurnReactAgent, "_context_limit_reported"):
-                    print(
-                        f"   📏 Inferred context from encoding '{encoding.name}': {conservative_limit:,} tokens"
-                    )
-                    MultiTurnReactAgent._context_limit_reported = True
-                return conservative_limit
-        except Exception:
-            pass
-
-        # Method 3: Pattern matching fallback (least accurate but works)
-        model_lower = model_name.lower()
-        fallback_limits = {
-            # OpenAI reasoning models
-            ("o3", "o1"): 128 * 1024,
-            # GPT-4 family
-            ("gpt-4o", "gpt-4-turbo"): 128 * 1024,
-            ("gpt-4-32k",): 32 * 1024,
-            ("gpt-4",): 8 * 1024,
-            # Claude family
-            ("claude-3-5", "claude-3.5"): 200 * 1024,
-            ("claude-3",): 200 * 1024,
-            ("claude-2",): 100 * 1024,
-            # Gemini family
-            ("gemini-1.5", "gemini-2"): 1000 * 1024,
-            ("gemini",): 32 * 1024,
-            # Qwen
-            ("qwen2", "qwen-2"): 128 * 1024,
-            ("qwen",): 32 * 1024,
-        }
-
-        for patterns, max_tokens in fallback_limits.items():
-            if any(pattern in model_lower for pattern in patterns):
-                conservative_limit = int(max_tokens * 0.90)
-                if not hasattr(MultiTurnReactAgent, "_context_limit_reported"):
-                    print(
-                        f"   📏 Pattern-matched context limit: {conservative_limit:,} tokens (90% of {max_tokens:,})"
-                    )
-                    MultiTurnReactAgent._context_limit_reported = True
-                return conservative_limit
-
-        # Method 4: Ultimate fallback
-        default_limit = 100 * 1024
-        if not hasattr(MultiTurnReactAgent, "_context_limit_reported"):
-            print(
-                f"   ⚠️  Unknown model '{model_name}', using conservative default: {default_limit:,} tokens"
-            )
-            MultiTurnReactAgent._context_limit_reported = True
-        return default_limit
+        # Use the same conservative limit as original DeepResearch
+        # This works for most modern models (GPT-4o 128k, Qwen 128k, etc.)
+        self.max_context_tokens = 108 * 1024  # 110,592 tokens, same as original
 
     def sanity_check_output(self, content: str) -> bool:
         """Check if the model output contains the expected thinking structure."""
         return "<think>" in content and "</think>" in content
 
-    async def call_server(self, messages: list[dict], max_tries: int = 10):
+    async def call_server(self, messages: list[dict], max_tries: int = 10) -> str:
         """
-        Call rLLM OpenAI engine with hybrid mode support.
-
-        Supports both:
-        - Native function calling (for o3, gpt-4-turbo)
-        - ReAct text format (for gpt-4o, Claude)
+        Call rLLM OpenAI engine (replacement for original call_server method).
 
         Args:
             messages: List of chat completion messages
             max_tries: Maximum number of retry attempts
 
         Returns:
-            ModelOutput with text and tool_calls
+            Model response text
         """
         for attempt in range(max_tries):
             try:
-                # Prepare API call parameters
-                api_params = {
-                    "messages": messages,
-                    "stop": ["\n<tool_response>", "<tool_response>"],
-                    "temperature": 0.6,
-                    "top_p": 0.95,
-                    "max_tokens": 4096,
-                    "presence_penalty": 1.1,
-                }
-
-                # Add tools parameter for native function calling
-                if self.use_native_function_calling and self.openai_tools:
-                    api_params["tools"] = self.openai_tools
-                    api_params["tool_choice"] = "auto"
-
-                # Call rLLM OpenAI Engine
-                response = await self.rollout_engine.get_model_response(**api_params)
+                # Call rLLM OpenAI Engine with DeepResearch parameters
+                response = await self.rollout_engine.get_model_response(
+                    messages=messages,
+                    stop=["\n<tool_response>", "<tool_response>"],
+                    temperature=0.6,
+                    top_p=0.95,
+                    max_tokens=4096,  # Reasonable for GPT-4o 128k context
+                    presence_penalty=1.1,
+                )
 
                 # Track actual token consumption from API
                 if hasattr(response, "prompt_tokens") and hasattr(
@@ -283,8 +167,13 @@ class MultiTurnReactAgent:
                     self.total_prompt_tokens += response.prompt_tokens
                     self.total_completion_tokens += response.completion_tokens
 
-                # Return full ModelOutput (contains both text and tool_calls)
-                return response
+                # Extract text from ModelOutput
+                content = response.text if hasattr(response, "text") else str(response)
+
+                if content and content.strip():
+                    return content.strip()
+                else:
+                    print(f"Warning: Attempt {attempt + 1} received empty response")
 
             except Exception as e:
                 print(f"Error: Attempt {attempt + 1} failed: {e}")
@@ -306,9 +195,7 @@ class MultiTurnReactAgent:
         """
         return self.total_prompt_tokens + self.total_completion_tokens
 
-    async def _run(
-        self, question: str, answer: str = None, images: list = None, **kwargs
-    ) -> dict:
+    async def _run(self, question: str, answer: str = None, **kwargs) -> dict:
         """
         Main reasoning loop adapted from original DeepResearch.
 
@@ -321,7 +208,6 @@ class MultiTurnReactAgent:
         Args:
             question: The research question to answer
             answer: Ground truth answer (for evaluation)
-            images: List of image data URLs (base64 encoded)
 
         Returns:
             Dictionary with results including messages, prediction, and termination reason
@@ -332,23 +218,9 @@ class MultiTurnReactAgent:
         system_prompt = (
             self.system_prompt or DEEPRESEARCH_SYSTEM_PROMPT
         ) + today_date()
-
-        # Construct initial user message (multimodal if images present)
-        if images:
-            # Build multimodal message with images
-            user_content = [{"type": "text", "text": question}]
-            for image_data in images:
-                user_content.append(
-                    {"type": "image_url", "image_url": {"url": image_data}}
-                )
-            user_message = {"role": "user", "content": user_content}
-        else:
-            # Plain text message
-            user_message = {"role": "user", "content": question}
-
         messages = [
             {"role": "system", "content": system_prompt},
-            user_message,
+            {"role": "user", "content": question},
         ]
 
         num_llm_calls_available = self.max_llm_calls
@@ -356,11 +228,7 @@ class MultiTurnReactAgent:
         termination = None
         prediction = ""
 
-        # Truncate question for display
-        q_display = str(question).replace("\n", " ").strip()
-        if len(q_display) > 200:
-            q_display = q_display[:200] + "..."
-        print(f"🔍 Starting DeepResearch for question: {q_display}")
+        print(f"🔍 Starting DeepResearch for question: {question}")
 
         while num_llm_calls_available > 0:
             # Check time limit (150 minutes)
@@ -379,176 +247,25 @@ class MultiTurnReactAgent:
             round += 1
             num_llm_calls_available -= 1
 
-            # Get model response (ModelOutput with text and tool_calls)
-            response = await self.call_server(messages)
-
-            # Extract text content (may be None for pure function calling)
-            content = (
-                response.text if hasattr(response, "text") and response.text else ""
-            )
-
-            # Debug: Print raw model response to see format
-            if round == 1:
-                print(f"[DEBUG] Raw model response (first 500 chars): {content[:500]}")
-                if hasattr(response, "tool_calls") and response.tool_calls:
-                    print(
-                        f"[DEBUG] Native tool_calls detected: {len(response.tool_calls)} call(s)"
-                    )
-
-            # Print concise round info with truncation
-            MAX_PRINT_LENGTH = 200
-
-            # Simple truncation for all prints
-            def truncate(text, max_len=MAX_PRINT_LENGTH):
-                text = str(text).replace("\n", " ").strip()
-                # Special handling for base64 images
-                if "data:image" in text or ";base64," in text:
-                    # Find the base64 part and truncate it
-                    if "base64," in text:
-                        parts = text.split("base64,", 1)
-                        return parts[0] + "base64,[truncated]"
-                    return "[base64 image data]"
-                if len(text) > max_len:
-                    return text[:max_len] + "..."
-                return text
-
-            if "<tool_call>" in content:
-                # Extract tool name for display
-                if "python" in content.lower() and "<code>" in content:
-                    print(f"Round {round}: 🐍 Executing Python code")
-                elif '"name":' in content:
-                    try:
-                        import json5
-
-                        tool_text = content.split("<tool_call>")[1].split(
-                            "</tool_call>"
-                        )[0]
-                        tool_text = tool_text[:1000]  # Limit for parsing
-                        tool_data = json5.loads(tool_text)
-                        tool_name = tool_data.get("name", "Unknown")
-                        if "arguments" in tool_data:
-                            args_str = truncate(str(tool_data["arguments"]), 100)
-                            print(
-                                f"Round {round}: 🔧 Calling {tool_name} with args: {args_str}"
-                            )
-                        else:
-                            print(f"Round {round}: 🔧 Calling {tool_name}")
-                    except Exception:
-                        print(f"Round {round}: 🔧 Tool call")
-                else:
-                    print(f"Round {round}: 🔧 Tool call")
-            elif "<answer>" in content:
-                # Final answer
-                answer_preview = content.split("<answer>")[1].split("</answer>")[0]
-                print(
-                    f"Round {round}: ✅ Final answer: {truncate(answer_preview, 100)}"
-                )
-            else:
-                # Model reasoning
-                print(f"Round {round}: 💭 Reasoning: {truncate(content)}")
+            # Get model response
+            content = await self.call_server(messages)
 
             # Clean up content if it contains tool_response
             if "<tool_response>" in content:
                 pos = content.find("<tool_response>")
                 content = content[:pos]
 
-            # HYBRID MODE: Handle both native tool_calls and ReAct text format
+            messages.append({"role": "assistant", "content": content.strip()})
 
-            # Priority 1: Check for native function calling (o3, gpt-4-turbo)
-            if hasattr(response, "tool_calls") and response.tool_calls:
-                # Native function calling path - build ALL messages first, then append atomically
-                tool_calls_formatted = []
-                tool_responses = []
+            # Check for final answer
+            if "<answer>" in content and "</answer>" in content:
+                prediction = content.split("<answer>")[1].split("</answer>")[0].strip()
+                termination = "answer"
+                print(f"✅ Final answer found: {prediction}")
+                break
 
-                for tool_call in response.tool_calls:
-                    try:
-                        # Extract tool info from OpenAI format
-                        tool_id = (
-                            tool_call.id if hasattr(tool_call, "id") else "unknown"
-                        )
-                        function = (
-                            tool_call.function
-                            if hasattr(tool_call, "function")
-                            else tool_call.get("function", {})
-                        )
-                        tool_name = (
-                            function.name
-                            if hasattr(function, "name")
-                            else function.get("name", "")
-                        )
-                        arguments_str = (
-                            function.arguments
-                            if hasattr(function, "arguments")
-                            else function.get("arguments", "{}")
-                        )
-
-                        # Parse arguments
-                        tool_args = (
-                            json.loads(arguments_str)
-                            if isinstance(arguments_str, str)
-                            else arguments_str
-                        )
-
-                        # Print tool call with arguments (for consistency with ReAct format)
-                        def truncate(text, max_len=100):
-                            text = str(text).replace("\n", " ").strip()
-                            if len(text) > max_len:
-                                return text[:max_len] + "..."
-                            return text
-
-                        args_str = truncate(str(tool_args), 100)
-                        print(
-                            f"Round {round}: 🔧 [Native] Calling {tool_name} with args: {args_str}"
-                        )
-
-                        # Execute tool
-                        result = await self.custom_call_tool(tool_name, tool_args)
-
-                        # Collect tool call and response (don't append yet)
-                        tool_calls_formatted.append(
-                            {
-                                "id": tool_id,
-                                "type": "function",
-                                "function": {
-                                    "name": tool_name,
-                                    "arguments": arguments_str,
-                                },
-                            }
-                        )
-                        tool_responses.append(
-                            {"role": "tool", "tool_call_id": tool_id, "content": result}
-                        )
-
-                    except Exception as e:
-                        print(f"Error processing native tool call: {e}")
-                        # On error, append error message and skip this tool call
-                        messages.append(
-                            {"role": "assistant", "content": content.strip()}
-                        )
-                        messages.append(
-                            {"role": "user", "content": f"Tool call error: {e}"}
-                        )
-                        continue
-
-                # Only append to messages if we have successful tool calls
-                if tool_calls_formatted:
-                    # Add assistant message with ALL tool calls at once
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": content
-                            or "",  # May be empty for pure function calling
-                            "tool_calls": tool_calls_formatted,
-                        }
-                    )
-                    # Add all tool responses
-                    messages.extend(tool_responses)
-
-            # Priority 2: Check for ReAct text format (gpt-4o, Claude)
-            elif "<tool_call>" in content and "</tool_call>" in content:
-                # ReAct text format path
-                messages.append({"role": "assistant", "content": content.strip()})
-
+            # Handle tool calls
+            if "<tool_call>" in content and "</tool_call>" in content:
                 tool_call_text = content.split("<tool_call>")[1].split("</tool_call>")[
                     0
                 ]
@@ -565,45 +282,40 @@ class MultiTurnReactAgent:
                                 .strip()
                             )
                             result = await self.execute_python(code_raw)
+                            print(f"🐍 Python execution result: {result[:100]}...")
                         except Exception:
                             result = "[Python Interpreter Error]: Formatting error."
+                            print("❌ Python code formatting error")
                     else:
                         # Parse JSON tool call
                         tool_call = json5.loads(tool_call_text)
                         tool_name = tool_call.get("name", "")
                         tool_args = tool_call.get("arguments", {})
                         result = await self.custom_call_tool(tool_name, tool_args)
+                        print(f"🔧 Tool {tool_name} result: {result[:100]}...")
 
-                except Exception:
+                except Exception as e:
                     result = 'Error: Tool call is not a valid JSON. Tool call must contain a valid "name" and "arguments" field.'
+                    print(f"❌ Tool call error: {e}")
 
-                # Add tool response in ReAct format
+                # Add tool response
                 tool_response = f"<tool_response>\n{result}\n</tool_response>"
                 messages.append({"role": "user", "content": tool_response})
 
-            # Priority 3: No tool call, just reasoning or answer
-            else:
-                messages.append({"role": "assistant", "content": content.strip()})
-
-            # Check for final answer AFTER processing tools
-            # This allows o3 to execute tools even when it includes answer in same message
-            if "<answer>" in content and "</answer>" in content:
-                prediction = content.split("<answer>")[1].split("</answer>")[0].strip()
-                termination = "answer"
-                break
-
             # Check if we've exceeded call limit
             if num_llm_calls_available <= 0 and "<answer>" not in content:
-                # Handle both message formats
-                if isinstance(messages[-1], dict) and "content" in messages[-1]:
-                    messages[-1]["content"] = (
-                        "Sorry, the number of llm calls exceeds the limit."
-                    )
+                messages[-1]["content"] = (
+                    "Sorry, the number of llm calls exceeds the limit."
+                )
 
             # Handle context length limit using actual API consumption
             total_tokens_used = self.get_total_tokens_used()
 
             if total_tokens_used > self.max_context_tokens:
+                print(
+                    f"⚠️ Token limit exceeded: {total_tokens_used} > {self.max_context_tokens}"
+                )
+
                 # Instead of replacing the last message, add a clear instruction
                 final_instruction = {
                     "role": "user",
@@ -622,14 +334,9 @@ class MultiTurnReactAgent:
                 messages.append(final_instruction)
 
                 # Note: After truncation, we'll let the next API call handle any remaining limits
-                print(
-                    f"Round {round + 1}: ⚠️ Context limit reached, requesting final answer"
-                )
+                print("Context truncated, proceeding with final answer request")
 
-                response = await self.call_server(messages)
-                content = (
-                    response.text if hasattr(response, "text") and response.text else ""
-                )
+                content = await self.call_server(messages)
                 messages.append({"role": "assistant", "content": content.strip()})
 
                 if "<answer>" in content and "</answer>" in content:
@@ -653,12 +360,10 @@ class MultiTurnReactAgent:
                 return result
 
         # Final validation logic from original Tongyi implementation
-        # Handle both native function calling and ReAct text format
-        last_message_content = (
-            messages[-1].get("content", "") if isinstance(messages[-1], dict) else ""
-        )
-        if last_message_content and "<answer>" in last_message_content:
-            prediction = last_message_content.split("<answer>")[1].split("</answer>")[0]
+        if "<answer>" in messages[-1]["content"]:
+            prediction = (
+                messages[-1]["content"].split("<answer>")[1].split("</answer>")[0]
+            )
             termination = "answer"
         else:
             prediction = "No answer found."
@@ -681,11 +386,7 @@ class MultiTurnReactAgent:
         print(f"   Rounds: {round}")
         print(f"   Time: {result['time_taken']:.1f}s")
         print(f"   Termination: {termination}")
-        # Truncate prediction for display
-        pred_display = str(prediction).replace("\n", " ").strip()
-        if len(pred_display) > 200:
-            pred_display = pred_display[:200] + "..."
-        print(f"   Prediction: {pred_display}")
+        print(f"   Prediction: {prediction}")
 
         return result
 
@@ -767,6 +468,4 @@ class MultiTurnReactAgent:
         Returns:
             Result dictionary
         """
-        # Reset token counters for each new run
-        self.reset()
         return await self._run(question, answer, **kwargs)

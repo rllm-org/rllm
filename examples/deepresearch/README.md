@@ -4,30 +4,6 @@
 
 This module integrates Tongyi's DeepResearch ReAct agent into the rLLM framework, enabling evaluation on academic benchmarks like HLE (Humanity's Last Exam). The integration demonstrates how to port external agent architectures into rLLM's workflow system while maintaining compatibility with the training and evaluation infrastructure.
 
-## Source Alignment
-
-This implementation is aligned with Tongyi DeepResearch's official repository:
-**[Alibaba-NLP/DeepResearch](https://github.com/Alibaba-NLP/DeepResearch)**
-
-📊 **For detailed alignment analysis, see [ALIGNMENT_ANALYSIS.md](./ALIGNMENT_ANALYSIS.md)**
-
-### File Mapping (rLLM ↔ Tongyi Original)
-
-| rLLM File                  | Tongyi Original                                                                                                                    | Purpose                                                                      |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `deepresearch_agent.py`    | [`inference/react_agent.py`](https://github.com/Alibaba-NLP/DeepResearch/blob/main/inference/react_agent.py)                       | ReAct agent with XML-based tool calling loop                                 |
-| `deepresearch_workflow.py` | [`inference/run_multi_react.py`](https://github.com/Alibaba-NLP/DeepResearch/blob/main/inference/run_multi_react.py)               | Task orchestration and execution                                             |
-| `deepresearch_tools.py`    | [`inference/tool_*.py`](https://github.com/Alibaba-NLP/DeepResearch/tree/main/inference)                                           | Tool implementations (Search, Scholar, Visit, FileParser, PythonInterpreter) |
-| `evaluate_hle.py`          | [`evaluation/evaluate_hle_official.py`](https://github.com/Alibaba-NLP/DeepResearch/blob/main/evaluation/evaluate_hle_official.py) | HLE benchmark evaluation with o3-mini judge                                  |
-
-### Key Differences from Original
-
-- **Engine**: Uses rLLM's `OpenAIEngine` / `VerlEngine` instead of direct OpenAI client
-- **Workflow**: Wraps agent in rLLM `Workflow` for Episode/Trajectory tracking
-- **Orchestration**: Uses `AgentWorkflowEngine` for parallel execution
-- **Evaluation**: Aligned judge prompt and scoring (binary yes/no + o3-mini judge)
-- **Data Format**: Outputs rLLM `Episode` objects for training pipeline compatibility
-
 ## Architecture
 
 ```
@@ -92,13 +68,6 @@ python evaluate_hle.py --model Qwen/Qwen2.5-7B-Instruct-Turbo \
 # Custom output directory
 python evaluate_hle.py --output-dir ./my_results --max-samples 20
 ```
-
-#### Hugging Face access and caching
-
-- HLE is a gated dataset. Ensure access is approved on its page and authenticate once:
-  - CLI: `hf auth login --token hf_xxx`
-  - Or set `HF_TOKEN`/`HUGGINGFACE_HUB_TOKEN`
-- `datasets.load_dataset` uses a local cache (`~/.cache/huggingface/datasets`), so it won't re-download on subsequent runs. To run fully offline, set `HF_HUB_OFFLINE=1` and `HF_DATASETS_OFFLINE=1`.
 
 ### Using DeepResearch Agent Directly
 
@@ -166,43 +135,23 @@ for episode in episodes:
 
 ## Tools
 
-The agent has access to the following research tools (ported from Tongyi DeepResearch):
+The agent has access to the following research tools:
 
-| Tool                  | Description                       | Implementation Status                    |
-| --------------------- | --------------------------------- | ---------------------------------------- |
-| **Search**            | Web search via Serper API         | ✅ Fully implemented from Tongyi         |
-| **Scholar**           | Google Scholar search via Serper  | ✅ Fully implemented from Tongyi         |
-| **Visit**             | Visit and extract webpage content | ✅ Fully implemented with BeautifulSoup  |
-| **FileParser**        | Parse multiple file formats       | ✅ Enhanced: TXT, JSON, CSV, PDF*, DOCX* |
-| **PythonInterpreter** | Execute Python code safely        | ✅ Fully implemented with security       |
+| Tool                  | Description                 | Implementation Status                |
+| --------------------- | --------------------------- | ------------------------------------ |
+| **Search**            | Web search via Serper API   | ✅ Fully implemented (needs API key) |
+| **PythonInterpreter** | Execute Python code safely  | ✅ Fully implemented with security   |
+| **Scholar**           | Academic paper search       | ❌ Placeholder only                  |
+| **Visit**             | Visit and analyze web pages | ❌ Placeholder only                  |
+| **FileParser**        | Parse various file formats  | ⚠️ Basic text only (no PDF/DOCX)     |
 
-### Tool Implementation Details
+### Tool Implementation Notes
 
-All tools have been ported from the original Tongyi DeepResearch implementation:
-
-- **Search & Scholar**: Use Serper API for real Google/Scholar search (get free API key from https://serper.dev)
-- **Visit**: Fetches and parses webpages using requests/BeautifulSoup
-- **FileParser**: Supports TXT, JSON, CSV, and optionally PDF (PyPDF2) and DOCX (python-docx)
-- **PythonInterpreter**: Safe execution with 50s timeout, supports numpy/pandas when available
-
-### API Configuration
-
-Add to your `.env` file:
-
-```bash
-SERPER_API_KEY=your_serper_key  # For Search and Scholar tools
-```
-
-### Optional Dependencies
-
-For enhanced file parsing:
-
-```bash
-pip install PyPDF2           # For PDF support in FileParser
-pip install python-docx      # For DOCX support in FileParser
-pip install beautifulsoup4   # For Visit tool (webpage parsing)
-pip install requests         # For Visit tool (webpage fetching)
-```
+- **Search**: Real web search with Serper API integration. Configure API key in `.env` file
+- **PythonInterpreter**: Enhanced security, 50s timeout, supports numpy/pandas when available
+- **Scholar**: Returns placeholder results. Needs integration with arXiv/Google Scholar APIs
+- **Visit**: Returns placeholder content. Needs requests/BeautifulSoup implementation
+- **FileParser**: Only reads text files up to 5000 chars. Original supports PDF/DOCX/media files
 
 ## Key Improvements from Original
 
