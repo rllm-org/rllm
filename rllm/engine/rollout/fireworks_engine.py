@@ -41,6 +41,25 @@ class FireworksEngine(OpenAIEngine):
         self.client = openai.AsyncOpenAI(base_url=base_url, api_key=api_key)
         logging.getLogger("httpx").setLevel(logging.WARNING)
 
-    def update_model_weights(self, state_dict: dict):
+    def update_model_weights(self, lora_adapter_path: dict):
         print("updating fireworks deployment weights")
         pass
+
+    def _upload_model(
+        self, model_name, lora_adapter_path: str, base_model: str, account_id: str
+    ):
+        upload_model_command = f"firectl create model {model_name} {lora_adapter_path} --base-model {base_model} -a {account_id}"
+        print(f"running command: {upload_model_command}")
+        upload_model_output = os.popen(upload_model_command).readlines()
+        print(upload_model_output)
+        for line in upload_model_output:
+            if line.startswith("Name: "):
+                model_name = line.split("Name: ")[-1]
+                return model_name.strip()
+
+        raise ValueError(
+            f"""
+            Error creating model: {upload_model_output}
+            Command: {upload_model_command}
+            """,
+        )
