@@ -99,7 +99,7 @@ def apply_signal_patch(verbose: bool = True):
         """
         return (0, 0)
 
-    # 应用补丁
+    # Apply the patch
     _signal_module.signal = _thread_safe_signal
     _signal_module.getsignal = _thread_safe_getsignal
     _signal_module.alarm = _thread_safe_alarm
