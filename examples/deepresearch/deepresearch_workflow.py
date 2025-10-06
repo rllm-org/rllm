@@ -79,6 +79,7 @@ class DeepResearchWorkflow(Workflow):
 
         print(f"🚀 Starting DeepResearch workflow for task {uid}")
         print(f"   Question: {question}")
+        print(f"   Model: {self.agent.rollout_engine.model}")
         if images:
             print(f"   📷 Images: {len(images)} image(s)")
 

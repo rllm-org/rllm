@@ -93,6 +93,13 @@ python evaluate_hle.py --model Qwen/Qwen2.5-7B-Instruct-Turbo \
 python evaluate_hle.py --output-dir ./my_results --max-samples 20
 ```
 
+#### Hugging Face access and caching
+
+- HLE is a gated dataset. Ensure access is approved on its page and authenticate once:
+  - CLI: `hf auth login --token hf_xxx`
+  - Or set `HF_TOKEN`/`HUGGINGFACE_HUB_TOKEN`
+- `datasets.load_dataset` uses a local cache (`~/.cache/huggingface/datasets`), so it won't re-download on subsequent runs. To run fully offline, set `HF_HUB_OFFLINE=1` and `HF_DATASETS_OFFLINE=1`.
+
 ### Using DeepResearch Agent Directly
 
 ```python
