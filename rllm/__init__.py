@@ -5,7 +5,7 @@ Main package for the rLLM framework.
 
 # Import commonly used classes
 from .agents import Action, BaseAgent, Episode, Step, Trajectory
-from .engine import AgentWorkflowEngine, OpenAIEngine, RolloutEngine, VerlEngine
+from .engine import AgentWorkflowEngine, OpenAIEngine, RolloutEngine
 
 __all__ = [
     "BaseAgent",
@@ -16,5 +16,12 @@ __all__ = [
     "AgentWorkflowEngine",
     "RolloutEngine",
     "OpenAIEngine",
-    "VerlEngine",
 ]
+
+# VerlEngine is optional; only export if verl is installed
+try:
+    from .engine import VerlEngine
+
+    __all__.append("VerlEngine")
+except Exception:
+    VerlEngine = None

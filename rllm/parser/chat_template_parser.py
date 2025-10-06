@@ -4,7 +4,7 @@ from datetime import datetime
 import requests
 import torch
 
-from .utils import PARSER_TEST_MESSAGES
+from .utils import PARSER_TEST_MESSAGES, fix_pad_token
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +13,24 @@ class ChatTemplateParser:
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
         self.assistant_token = ""
+        self.generation_prompt_ids = self._get_generation_prompt_ids(tokenizer)
+
+        # Fix pad_token if it's the same as eos_token
+        fix_pad_token(self.tokenizer)
+
+    def _get_generation_prompt_ids(self, tokenizer):
+        """Return the generation prompt tokens (ids, tokens, decoded string)."""
+        messages = [{"role": "assistant", "content": ""}]
+
+        with_prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt")
+        without_prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=False, return_tensors="pt")
+
+        with_ids = with_prompt[0].tolist()
+        without_ids = without_prompt[0].tolist()
+
+        generation_prompt_ids = with_ids[len(without_ids) :]
+
+        return generation_prompt_ids
 
     def parse(self, messages, add_generation_prompt=False, is_first_msg=False, **kwargs) -> str:
         return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt)
@@ -92,13 +110,14 @@ class ChatTemplateParser:
         assert parser.verify_equivalence(PARSER_TEST_MESSAGES), "Parser failed equivalence check"
         return parser
 
-    def tokenize_and_mask(self, messages):
+    def tokenize_and_mask(self, messages, mask_last_assistant_only=False):
         prompt_ids = []
         response_ids = []
         response_mask = []
 
         try:
             first_assistant_idx = next(i for i, msg in enumerate(messages) if msg["role"] == "assistant")
+            last_assistant_idx = max(i for i, msg in enumerate(messages) if msg["role"] == "assistant")
         except StopIteration:
             raise ValueError("No assistant message found in chat_completions") from None
 
@@ -113,8 +132,17 @@ class ChatTemplateParser:
             response_ids.extend(ids)
 
             if messages[i]["role"] == "assistant":
-                # close enough
-                response_mask.extend([1] * len(ids))
+                # For assistant messages, response_mask should be 1 for all tokens except the generation prompt, which should be 0
+                if ids[: len(self.generation_prompt_ids)] != self.generation_prompt_ids:
+                    logger.warning(f"Generation prompt mismatch for message {i}\nexpected generation_prompt_ids: {self.generation_prompt_ids}\nactual_ids: {ids[: len(self.generation_prompt_ids)]}\nexpected generation_prompt: {self.tokenizer.decode(self.generation_prompt_ids, skip_special_tokens=False)}\nactual prompt: {self.tokenizer.decode(ids[: len(self.generation_prompt_ids)], skip_special_tokens=False)}")
+
+                num_non_gen_prompt = len(ids) - len(self.generation_prompt_ids)
+
+                if mask_last_assistant_only and i != last_assistant_idx:
+                    response_mask.extend([0] * len(ids))
+                else:
+                    response_mask.extend([0] * len(self.generation_prompt_ids))
+                    response_mask.extend([1] * num_non_gen_prompt)
             else:
                 response_mask.extend([0] * len(ids))
 
@@ -128,6 +156,7 @@ class ChatTemplateParser:
 class DeepseekQwenChatTemplateParser(ChatTemplateParser):
     def __init__(self, tokenizer):
         super().__init__(tokenizer)
+
         self.bos_token = tokenizer.bos_token
         self.eos_token = tokenizer.eos_token
         self.system_token = ""

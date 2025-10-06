@@ -1,18 +1,21 @@
+# Megatron configuration for agent PPO training
+# This config extends agent_ppo_trainer with Megatron-specific settings
+
 hydra:
   searchpath:
     - pkg://verl.trainer.config
 
 defaults:
-  - ppo_trainer
+  - ppo_megatron_trainer  # Load base ppo_megatron_trainer which has proper megatron configs
   - _self_
 
 actor_rollout_ref:
   rollout:
-    mode: async 
+    mode: async # only async is supported
     agent:
-      num_workers: 0 
+      num_workers: 0 # we bypass the agent loop
     val_kwargs:
-      do_sample: True 
+      do_sample: True # if do_sample is False, temperature is overridden to 0.0
 
 data:
   gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}

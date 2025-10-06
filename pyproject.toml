@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rllm"
-version = "0.1.0"
+version = "0.2.0"
 description = "Reinforcement Learning for Language Agents"
 authors = [
     {name = "rLLM Team"}

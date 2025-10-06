@@ -9,6 +9,7 @@ from pprint import pprint
 from queue import Queue
 from threading import Thread
 
+import click
 import numpy as np
 import torch
 from omegaconf import OmegaConf
@@ -16,6 +17,7 @@ from omegaconf import OmegaConf
 from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
+from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.ray_trainer import (
     RayPPOTrainer,
     RayWorkerGroup,
@@ -303,6 +305,42 @@ class AgentPPOTrainer(RayPPOTrainer):
                         with marked_timer("old_log_prob", timing_raw):
                             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                             batch = batch.union(old_log_prob)
+
+                        # recompute old_log_probs
+                        with marked_timer("old_log_prob", timing_raw, color="blue"):
+                            old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                            entropys = old_log_prob.batch["entropys"]
+                            response_masks = batch.batch["response_mask"]
+                            loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
+                            entropy_agg = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
+                            old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
+                            metrics.update(old_log_prob_metrics)
+                            old_log_prob.batch.pop("entropys")
+                            batch = batch.union(old_log_prob)
+
+                            if "rollout_log_probs" in batch.batch.keys():
+                                # TODO: we may want to add diff of probs too.
+                                rollout_old_log_probs = batch.batch["rollout_log_probs"]
+                                actor_old_log_probs = batch.batch["old_log_probs"]
+                                attention_mask = batch.batch["attention_mask"]
+                                responses = batch.batch["responses"]
+                                response_length = responses.size(1)
+                                response_mask = attention_mask[:, -response_length:]
+
+                                rollout_probs = torch.exp(rollout_old_log_probs)
+                                actor_probs = torch.exp(actor_old_log_probs)
+                                rollout_probs_diff = torch.abs(rollout_probs - actor_probs)
+                                rollout_probs_diff = torch.masked_select(rollout_probs_diff, response_mask.bool())
+                                rollout_probs_diff_max = torch.max(rollout_probs_diff)
+                                rollout_probs_diff_mean = torch.mean(rollout_probs_diff)
+                                rollout_probs_diff_std = torch.std(rollout_probs_diff)
+                                metrics.update(
+                                    {
+                                        "training/rollout_probs_diff_max": rollout_probs_diff_max.detach().item(),
+                                        "training/rollout_probs_diff_mean": rollout_probs_diff_mean.detach().item(),
+                                        "training/rollout_probs_diff_std": rollout_probs_diff_std.detach().item(),
+                                    }
+                                )
 
                         if self.use_reference_policy:
                             # compute reference log_prob
@@ -704,6 +742,9 @@ class AgentPPOTrainer(RayPPOTrainer):
             # Then show token-by-token with masking
             colorful_print("Response with masking:", fg="yellow", bold=True)
 
+            # Collect all styled text parts first, then print as complete lines
+            current_line_parts = []
+
             for j, (token, mask) in enumerate(zip(valid_response_tokens, valid_response_mask, strict=False)):
                 token_text = self.tokenizer.decode(token)
 
@@ -713,21 +754,26 @@ class AgentPPOTrainer(RayPPOTrainer):
                 # Apply different colors based on mask and rewards
                 if mask == 0:
                     # Masked token (not used in training)
-                    colorful_print(token_text, fg="red", end="")
+                    current_line_parts.append(click.style(token_text, fg="red"))
                 elif has_reward:
                     # Token with reward
-                    colorful_print(token_text, bg="green", end="")
+                    current_line_parts.append(click.style(token_text, bg="green"))
 
-                    reward_info = ""
-                    if has_reward:
-                        reward_info += f" R:{token_level_scores[i, j].item():.2f}"
-
-                    colorful_print(reward_info, fg="magenta", end="")
+                    reward_info = f" R:{token_level_scores[i, j].item():.2f}"
+                    current_line_parts.append(click.style(reward_info, fg="magenta"))
                 else:
                     # Normal token used in training
-                    colorful_print(token_text, fg="blue", end="")
+                    current_line_parts.append(click.style(token_text, fg="blue"))
 
-            print()  # New line after all tokens
+                # Check if we hit a newline character in the token
+                if "\n" in token_text:
+                    # Print the current line and start a new one
+                    print("".join(current_line_parts), flush=True)
+                    current_line_parts = []
+
+            # Print any remaining parts
+            if current_line_parts:
+                print("".join(current_line_parts), flush=True)
 
             # Print reward summary
             total_reward = token_level_scores[i].sum().item()

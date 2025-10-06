@@ -95,6 +95,10 @@ class TaskRunner:
         # Used for multimodal LLM, could be None
         # processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
+        from rllm.parser.utils import fix_pad_token
+
+        fix_pad_token(tokenizer)
+
         # Define worker classes based on the actor strategy.
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
             assert config.critic.strategy in {"fsdp", "fsdp2"}

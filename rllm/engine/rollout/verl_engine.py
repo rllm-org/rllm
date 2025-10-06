@@ -42,7 +42,7 @@ class VerlEngine(RolloutEngine):
         max_tokens = sampling_params.pop("max_tokens", self.config.data.max_response_length)
 
         prompt = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True)
-        prompt_ids = self.tokenizer.encode(prompt)
+        prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
 
         response_ids = await self.server_manager.generate(request_id=application_id, prompt_ids=prompt_ids, sampling_params=sampling_params)
 

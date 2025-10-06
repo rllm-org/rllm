@@ -20,8 +20,8 @@ class MathAgent(BaseAgent):
     def update_from_env(self, observation: Any, reward: float, done: bool, info: dict, **kwargs):
         """Process environment feedback and update internal state."""
 
-        # If observation is None, this is a reward update for the existing step
-        if observation is None:
+        # Reward update for existing step (None OR empty dict)
+        if observation is None or (isinstance(observation, dict) and observation == {}):
             if self.trajectory.steps:
                 cur_step = self.get_current_state()
                 cur_step.reward = reward
@@ -31,6 +31,8 @@ class MathAgent(BaseAgent):
 
         # This is a new observation, create a new step
         if isinstance(observation, dict):
+            if "question" not in observation:
+                raise ValueError(f"Observation dict missing required 'question' field: {observation}")
             formatted_observation = observation["question"]
         elif isinstance(observation, str):
             formatted_observation = observation

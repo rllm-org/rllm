@@ -75,6 +75,8 @@ class Workflow(ABC):
         if traj.steps:
             self._completed_trajectories.append((name, traj))
         if reset:
+            if agent not in self._agent_registry:
+                self._agent_registry[agent] = {}
             self._agent_registry[agent]["accumulated_response_length"] = 0
             agent.reset()
 
@@ -100,8 +102,6 @@ class Workflow(ABC):
             # Check if attribute is a BaseAgent instance and trajectory not already in completed trajectories
             if isinstance(attr_value, BaseAgent) and hasattr(attr_value, "trajectory") and attr_value.trajectory not in completed_trajectory_objects and len(attr_value.trajectory.steps) > 0:
                 episode.trajectories.append((attr_name, attr_value.trajectory))
-
-        assert len(episode.trajectories) > 0, "No trajectories found in the workflow"
 
         # Deep copy all trajectories to prevent modifications to the original objects
         episode.trajectories = [(name, deepcopy(trajectory)) for name, trajectory in episode.trajectories]
@@ -152,7 +152,7 @@ class Workflow(ABC):
             metrics[name].append(traj.reward)
         episode.metrics = {f"{k}_acc": float(np.mean(v)) for k, v in metrics.items()}
 
-    def postprocess_episode(self, episode: Episode, termination_reason: TerminationReason = None) -> Episode:
+    def postprocess_episode(self, episode: Episode, termination_reason: TerminationReason = None, error: dict = None) -> Episode:
         """Collect and process the trajectories"""
         assert episode is not None, "Remember to call collect_trajectories() before postprocessing the episode"
 
@@ -228,9 +228,9 @@ class Workflow(ABC):
         """Get the model response for the given messages"""
 
         if agent not in self._agent_registry:
-            raise ValueError(f"Agent {agent} is not registered with the workflow. Please call register_agent() during initialization.")
-
-        rollout_engine = self._agent_registry[agent]["rollout_engine"]
+            rollout_engine = self.rollout_engine
+        else:
+            rollout_engine = self._agent_registry[agent]["rollout_engine"]
 
         messages = messages or agent.chat_completions
 

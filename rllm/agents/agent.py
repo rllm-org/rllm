@@ -40,6 +40,21 @@ class Trajectory:
             "reward": float(self.reward),
         }
 
+    def is_cumulative(self) -> bool:
+        """
+        Returns True if for every step after the first, its chat_completions is an exact superset
+        of the previous step's chat_completions (i.e., the previous chat_completions is a prefix).
+        """
+        prev = None
+        for step in self.steps:
+            if prev is not None:
+                prev_cc = prev.chat_completions
+                curr_cc = step.chat_completions
+                if not (len(curr_cc) >= len(prev_cc) and curr_cc[: len(prev_cc)] == prev_cc):
+                    return False
+            prev = step
+        return True
+
 
 @dataclass
 class Episode:
@@ -49,6 +64,7 @@ class Episode:
     is_correct: bool = False
     trajectories: list[tuple[str, Trajectory]] = field(default_factory=list)  # [(agent_name, Trajectory), ...]
     metrics: dict = field(default_factory=dict)
+    meta: dict = field(default_factory=dict)
 
     def to_dict(self):
         return {
@@ -58,6 +74,7 @@ class Episode:
             "is_correct": bool(self.is_correct),
             "trajectories": [(agent_name, trajectory.to_dict()) for agent_name, trajectory in self.trajectories],
             "metrics": self.metrics,
+            "meta": self.meta,
         }
 
 
@@ -72,7 +89,6 @@ class BaseAgent(ABC):
         """Converts agent's internal state into a Trajectory object."""
         return Trajectory()
 
-    @abstractmethod
     def update_from_env(self, observation: Any, reward: float, done: bool, info: dict, **kwargs):
         """
         Updates the agent's internal state after an environment step.
@@ -83,9 +99,8 @@ class BaseAgent(ABC):
             done (bool): Whether the episode has ended due to termination.
             info (dict): Additional metadata from the environment.
         """
-        raise NotImplementedError("Subclasses must implement this method")
+        raise NotImplementedError("Subclasses must implement this method if using AgentExecutionEngine")
 
-    @abstractmethod
     def update_from_model(self, response: str, **kwargs) -> Action:
         """
         Updates the agent's internal state after the model generates a response.
@@ -96,7 +111,7 @@ class BaseAgent(ABC):
         Returns:
             None
         """
-        raise NotImplementedError("Subclasses must implement this method")
+        raise NotImplementedError("Subclasses must implement this method if using AgentExecutionEngine")
 
     @abstractmethod
     def reset(self):

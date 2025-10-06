@@ -169,6 +169,7 @@ class SolverJudgeWorkflow(Workflow):
                     reward=reward_result.reward,
                 )
             )
+            solver_trajectories[i].reward = reward_result.reward
 
         # Step 2: Judge selects the best solution
         verification_result = await self.judge.select_best_solution(problem, solutions)
@@ -182,6 +183,8 @@ class SolverJudgeWorkflow(Workflow):
             reward_result = self.reward_function(task, selected_solution)
             final_step.reward = reward_result.reward
             final_step.info = {**(final_step.info or {}), **reward_result.metadata}
+
+            self.judge.trajectory.reward = reward_result.reward
 
             # Set correctness on the episode
             is_correct = reward_result.is_correct

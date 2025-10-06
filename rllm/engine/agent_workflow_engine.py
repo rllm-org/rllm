@@ -1,7 +1,9 @@
 import asyncio
+import logging
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -10,8 +12,12 @@ from tqdm import tqdm
 from rllm.agents.agent import Episode
 from rllm.engine.rollout.rollout_engine import RolloutEngine
 from rllm.workflows.workflow import TerminationReason, Workflow
-from verl import DataProto
-from verl.utils.torch_functional import pad_sequence_to_length
+
+# Avoid hard dependency on verl at import time; only for typing
+if TYPE_CHECKING:
+    from verl import DataProto
+
+logger = logging.getLogger(__name__)
 
 
 class AgentWorkflowEngine:
@@ -74,7 +80,7 @@ class AgentWorkflowEngine:
                         episode = await workflow.run_with_termination_handling(task=task, uid=uid, **kwargs)
                         return episode
                     except Exception as e:
-                        print(f"Rollout {uid} failed on attempt {retry_attempt}/{self.retry_limit}: {e}")
+                        logger.warning(f"Rollout {uid} failed on attempt {retry_attempt}/{self.retry_limit}: {e}")
                         if retry_attempt == self.retry_limit:
                             raise Exception(f"Rollout {uid} failed permanently.") from e
                         continue
@@ -95,7 +101,7 @@ class AgentWorkflowEngine:
 
         return results
 
-    async def execute_tasks_verl(self, batch: DataProto, workflow_id: str | None = None, **kwargs) -> DataProto:
+    async def execute_tasks_verl(self, batch: "DataProto", workflow_id: str | None = None, **kwargs) -> "DataProto":
         self.rollout_engine.wake_up()
         if batch.meta_info.get("validate", False):
             self.rollout_engine.validate = True
@@ -106,7 +112,11 @@ class AgentWorkflowEngine:
         self.rollout_engine.sleep()
         return self._transform_results_for_verl(results, task_ids)
 
-    def _transform_results_for_verl(self, episodes: list[Episode], task_ids: np.ndarray) -> DataProto:
+    def _transform_results_for_verl(self, episodes: list[Episode], task_ids: np.ndarray) -> "DataProto":
+        # Local import to keep verl optional
+        from verl import DataProto
+        from verl.utils.torch_functional import pad_sequence_to_length
+
         prompts = []
         responses = []
         traj_rewards = []
@@ -129,7 +139,7 @@ class AgentWorkflowEngine:
                 # termination hits before an agent finishes it's first step
                 # (e.g., the initial prompt exceeds max_prompt_length or a timeout occurs)
                 # we delete the episode from the batch by setting repeat_counts to 0
-                print(f"Episode {episode.id} has no valid trajectories, dropping it from the batch")
+                logger.info(f"Episode {episode.id} has no valid trajectories, dropping it from the batch")
                 repeat_counts.append(0)  # deletes corresponding entry from the batch
                 continue
 
@@ -139,38 +149,39 @@ class AgentWorkflowEngine:
                 trajectory_id = f"{task_ids[i]}_{name}"  # unique trajectory identifier e.g., 1234567890_solver
 
                 if len(trajectory.steps) == 0:
-                    print(f"Trajectory {trajectory_id} has no steps, skipping")
+                    logger.info(f"Trajectory {trajectory_id} has no steps, skipping")
                     continue
 
-                if not self.config.rllm.stepwise_advantage.enable:  # either single step or accumulated context
-                    chat_completions = trajectory.steps[-1].chat_completions
-                    prompt, response, mask = self.rollout_engine.chat_parser.tokenize_and_mask(chat_completions)
+                if not self.config.rllm.stepwise_advantage.enable:
+                    if not trajectory.is_cumulative():
+                        logger.warning(f"Warning: Trajectory {trajectory_id} is not cumulative, but stepwise mode is not enabled. There could be a token mismatch during trajectory generation.")
 
+                    chat_completions = trajectory.steps[-1].chat_completions
+
+                    prompt, response, mask = self.rollout_engine.chat_parser.tokenize_and_mask(chat_completions, mask_last_assistant_only=False)
                     prompts.append(prompt)
                     responses.append(response)
                     traj_mask.append(mask)
-
                     step_rewards.append(trajectory.reward)
                     step_ids.append(trajectory_id)
 
-                else:  # self.config.rllm.stepwise_advantage.enable is True
+                    n_steps = 1
+                else:
                     for step_idx, step in enumerate(trajectory.steps):
                         chat_completions = step.chat_completions
+                        prompt, response, mask = self.rollout_engine.chat_parser.tokenize_and_mask(chat_completions, mask_last_assistant_only=True)
 
-                        prompt = self.rollout_engine.chat_parser.parse(chat_completions[:-1], is_first_msg=True, add_generation_prompt=False)
-                        prompt = torch.tensor(self.rollout_engine.tokenizer.encode(prompt, add_special_tokens=False), dtype=torch.long)
                         prompts.append(prompt)
-
-                        response = self.rollout_engine.chat_parser.parse(chat_completions[-1:], is_first_msg=False, add_generation_prompt=False)
-                        response = torch.tensor(self.rollout_engine.tokenizer.encode(response, add_special_tokens=False), dtype=torch.long)
                         responses.append(response)
+                        traj_mask.append(mask)
 
                         step_rewards.append(step.reward)
 
                         step_id = f"{trajectory_id}_step{step_idx}"  # unique step identifier e.g., 1234567890_solver_step0
                         step_ids.append(step_id)
 
-                n_steps = len(trajectory.steps) if self.config.rllm.stepwise_advantage.enable else 1
+                    n_steps = len(trajectory.steps)
+
                 trajectory_ids.extend([trajectory_id] * n_steps)
                 step_nums.extend([n_steps] * n_steps)
                 traj_rewards.extend([trajectory.reward] * n_steps)
@@ -205,12 +216,10 @@ class AgentWorkflowEngine:
         input_ids = torch.concat([prompts_batch, response_batch], dim=1)
         attention_mask = torch.where(input_ids != self.rollout_engine.tokenizer.pad_token_id, 1, 0)
         position_ids = (torch.cumsum(attention_mask, dim=1) - 1) * attention_mask
-        if not traj_mask:  # i.e. self.config.rllm.stepwise_advantage.enable is True
-            traj_mask = torch.where(response_batch != self.rollout_engine.tokenizer.pad_token_id, 1, 0)
-        else:
-            traj_mask = torch.nn.utils.rnn.pad_sequence(traj_mask, batch_first=True, padding_value=0)
-            traj_mask = pad_sequence_to_length(traj_mask, max_response_length, 0, left_pad=False)
-            traj_mask = traj_mask[:, :max_response_length]  # truncate if necessary
+
+        traj_mask = torch.nn.utils.rnn.pad_sequence(traj_mask, batch_first=True, padding_value=0)
+        traj_mask = pad_sequence_to_length(traj_mask, max_response_length, 0, left_pad=False)
+        traj_mask = traj_mask[:, :max_response_length]  # truncate if necessary
 
         # Place all rewards to last response token of the last_step response
         traj_rewards_batch = torch.zeros_like(response_batch, dtype=torch.float32)

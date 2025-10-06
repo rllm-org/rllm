@@ -201,9 +201,9 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                     termination_counts.update(termination_reasons)
 
                     # If no valid samples remain, skip this batch and get a new one
-                    if len(drop_uids) == len(unique_uids):
-                        print("No valid samples remain, skipping batch")
-                        continue
+                    # if len(drop_uids) == len(unique_uids):
+                    #     print("No valid samples remain, skipping batch")
+                    #     continue
 
                     if not self.config.rllm.rejection_sample.enable:
                         batch = new_batch
@@ -260,6 +260,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         # then we just pad the batch size to a multiple of world size
                         batch = self._pad_dataproto_to_world_size(batch=batch)
 
+                    # recompute old_log_probs
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                         entropys = old_log_prob.batch["entropys"]
@@ -270,6 +271,30 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         metrics.update(old_log_prob_metrics)
                         old_log_prob.batch.pop("entropys")
                         batch = batch.union(old_log_prob)
+
+                        if "rollout_log_probs" in batch.batch.keys():
+                            # TODO: we may want to add diff of probs too.
+                            rollout_old_log_probs = batch.batch["rollout_log_probs"]
+                            actor_old_log_probs = batch.batch["old_log_probs"]
+                            attention_mask = batch.batch["attention_mask"]
+                            responses = batch.batch["responses"]
+                            response_length = responses.size(1)
+                            response_mask = attention_mask[:, -response_length:]
+
+                            rollout_probs = torch.exp(rollout_old_log_probs)
+                            actor_probs = torch.exp(actor_old_log_probs)
+                            rollout_probs_diff = torch.abs(rollout_probs - actor_probs)
+                            rollout_probs_diff = torch.masked_select(rollout_probs_diff, response_mask.bool())
+                            rollout_probs_diff_max = torch.max(rollout_probs_diff)
+                            rollout_probs_diff_mean = torch.mean(rollout_probs_diff)
+                            rollout_probs_diff_std = torch.std(rollout_probs_diff)
+                            metrics.update(
+                                {
+                                    "training/rollout_probs_diff_max": rollout_probs_diff_max.detach().item(),
+                                    "training/rollout_probs_diff_mean": rollout_probs_diff_mean.detach().item(),
+                                    "training/rollout_probs_diff_std": rollout_probs_diff_std.detach().item(),
+                                }
+                            )
 
                     if self.use_reference_policy:
                         # compute reference log_prob
@@ -378,6 +403,16 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                     if self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq == 0:
                         with marked_timer("save_checkpoint", timing_raw, color="green"):
                             self._save_checkpoint()
+
+                    # Visualize some sample trajectories
+                    if batch is not None and len(batch) > 0:
+                        # Randomly select a few samples to visualize
+                        batch_size = len(batch)
+                        num_samples = min(2, batch_size)  # Visualize up to 2 samples
+                        if num_samples > 0:
+                            sample_indices = np.random.choice(batch_size, size=num_samples, replace=False)
+                            for idx in sample_indices:
+                                self.visualize_trajectory_last_step(batch, sample_idx=idx, max_samples=1)
 
                 with marked_timer("stop_profile", timing_raw):
                     self._stop_profiling(do_profile)
@@ -635,7 +670,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         prompts = tensor_batch.batch["prompts"]
         responses = tensor_batch.batch["responses"]
         mask = tensor_batch.batch.get("response_mask")
-        token_level_scores = tensor_batch.batch.get("step_rewards" if self.config.algorithm.stepwise_advantage.enable and self.config.algorithm.stepwise_advantage.mode == "per_step" else "traj_rewards")
+        token_level_scores = tensor_batch.batch.get("step_rewards" if self.config.rllm.stepwise_advantage.enable and self.config.rllm.stepwise_advantage.mode == "per_step" else "traj_rewards")
 
         # Optional meta to print outcome
         is_correct = tensor_batch.non_tensor_batch.get("is_correct", None)
@@ -673,24 +708,45 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
             resp_mask = mask[i] if mask is not None else (resp_tokens != self.tokenizer.pad_token_id)
             rewards = token_level_scores[i] if token_level_scores is not None else None
 
-            # Walk tokens and colorize
+            # Build the response text with proper formatting
+            response_parts = []
+            reward_info = []
+
             for j, tok_id in enumerate(resp_tokens.tolist()):
                 if tok_id == self.tokenizer.pad_token_id:
                     continue
 
                 tok = self.tokenizer.decode([tok_id])
+                # Replace newlines and other whitespace to keep everything on one line
+                tok = tok.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
                 used = bool(resp_mask[j].item()) if hasattr(resp_mask[j], "item") else bool(resp_mask[j])
                 has_reward = False
+                r = 0.0
                 if rewards is not None:
                     # The engine places reward on the last valid response token
                     r = float(rewards[j].item()) if hasattr(rewards[j], "item") else float(rewards[j])
                     has_reward = abs(r) > 1e-9
 
                 if not used:
-                    colorful_print(tok, fg="black", end="")
+                    response_parts.append(("unused", tok))
                 elif has_reward:
-                    colorful_print(tok, bg="green", end="")  # reward token
-                    colorful_print(f" R:{r:.2f}", fg="magenta", end="")
+                    response_parts.append(("reward", tok))
+                    reward_info.append(f"R:{r:.2f}")
                 else:
-                    colorful_print(tok, fg="blue", end="")  # normal training token
-            print()
+                    response_parts.append(("normal", tok))
+
+            # Print the response in one go to avoid line breaks
+            for part_type, tok in response_parts:
+                if part_type == "unused":
+                    colorful_print(tok, fg="black", end="")
+                elif part_type == "reward":
+                    colorful_print(tok, bg="green", end="")
+                else:
+                    colorful_print(tok, fg="blue", end="")
+
+            # Print reward info on a separate line if any rewards exist
+            if reward_info:
+                colorful_print(f" [{', '.join(reward_info)}]", fg="magenta")
+            else:
+                print()  # Just add newline

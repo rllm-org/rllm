@@ -12,4 +12,4 @@ Utilities for parsing and managing chat templates, including support for differe
 - Handle different conversation structures
 - Support for custom template parsing
 
-::: rllm.parser.chat_template.parser
+::: rllm.parser.chat_template_parser
