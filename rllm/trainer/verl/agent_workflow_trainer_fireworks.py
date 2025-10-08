@@ -11,7 +11,6 @@ from queue import Queue
 import numpy as np
 import torch
 from omegaconf import OmegaConf
-from verl.experimental.agent_loop import AgentLoopManager
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import (
     AdvantageEstimator,
@@ -152,8 +151,6 @@ class FireworksAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
         self._load_checkpoint()
 
         # perform validation before training
-        import time
-
         start_time = time.time()
         if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
             val_metrics = self._validate_agent()

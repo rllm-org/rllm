@@ -10,10 +10,10 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 from verl.protocol import pad_dataproto_to_divisor
+from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import (
     AdvantageEstimator,
     RayPPOTrainer,
-    RayWorkerGroup,
     ResourcePoolManager,
     Role,
     WorkerType,
@@ -26,6 +26,7 @@ from verl.trainer.ppo.ray_trainer import (
     marked_timer,
     reduce_metrics,
 )
+from verl.utils.tracking import Tracking
 
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
@@ -98,8 +99,6 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         """
         The training loop of PPO. Adapted to train the underlying model of agent.
         """
-        from verl.utils.tracking import Tracking
-
         logger = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
