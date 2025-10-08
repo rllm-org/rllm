@@ -9,13 +9,13 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 python3 -m examples.solver_judge.train_solver_judge_flow \
     data.train_batch_size=4 \
     +trainer.n_training_gpus_per_node=4 \
-    data.max_prompt_length=2048 \
-    data.max_response_length=1024 \
+    data.max_prompt_length=4096 \
+    data.max_response_length=4096 \
     actor_rollout_ref.model.lora_rank=32 \
     actor_rollout_ref.model.lora_alpha=32 \
     actor_rollout_ref.rollout.load_format=safetensors \
     actor_rollout_ref.model.target_modules=all-linear \
-    actor_rollout_ref.model.path=Qwen/Qwen3-32B \
+    actor_rollout_ref.model.path=Qwen/Qwen2.5-14B-Instruct \
     actor_rollout_ref.actor.optim.lr=3e-5 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
@@ -56,7 +56,7 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='solver-judge-workflow' \
-    trainer.experiment_name='countdown-solver-judge-30b' \
+    trainer.experiment_name='countdown-solver-judge-14b' \
     trainer.max_actor_ckpt_to_keep=2 \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node=4 \
@@ -66,7 +66,7 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     trainer.default_hdfs_dir=null \
     trainer.total_epochs=100 \
     rllm.workflow.use_workflow=True \
-    fireworks.deployment_id=test-hot-reload-qwen-32b-1 \
-    fireworks.model_id_prefix=test-qwen-32b-solver-judge
+    fireworks.deployment_id=test-hot-reload-qwen-14b-1 \
+    fireworks.model_id_prefix=test-qwen-14b-solver-judge
 
 pkill -9 -f 'ray::WorkerDict'
