@@ -38,7 +38,7 @@ class FireworksEngine(OpenAIEngine):
         assert list_model_response.total_size == 1, f"Expected only one model under deployment {formatted_deployment_id}"
         deployed_model = list_model_response.deployed_models[0]
         model_name = deployed_model.name
-        assert deployed_model.state == SyncDeployedModel.STATE.DEPLOYED, f"Expected {model_name} in state DEPLOYED"
+        assert deployed_model.state == SyncDeployedModel.DEPLOYED, f"Expected {model_name} in state DEPLOYED"
 
         super().__init__(
             model=model_name,
