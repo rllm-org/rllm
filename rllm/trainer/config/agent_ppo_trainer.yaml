@@ -8,11 +8,11 @@ defaults:
 
 actor_rollout_ref:
   rollout:
-    mode: async 
+    mode: async
     agent:
-      num_workers: 0 
+      num_workers: 0
     val_kwargs:
-      do_sample: True 
+      do_sample: True
 
 data:
   gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
@@ -55,3 +55,7 @@ rllm:
   rejection_sample:
     enable: False
     multiplier: 1
+
+fireworks:
+  deployment_id: null
+  model_id_prefix: test-model

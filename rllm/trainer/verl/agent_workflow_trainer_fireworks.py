@@ -62,6 +62,7 @@ class FireworksAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
             workflow_class=workflow_class,
             workflow_args=workflow_args,
         )
+        self.tokenizer = tokenizer
         self.hybrid_engine = False
 
     def init_workers(self):
@@ -94,23 +95,13 @@ class FireworksAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
         self.resource_pool_to_cls[rollout_resource_pool]["rollout"] = rollout_cls
 
         self.actor_wg = RayWorkerGroup(resource_pool=actor_resource_pool, ray_cls_with_init=actor_cls)
-        # self.rollout_wg = RayWorkerGroup(resource_pool=rollout_resource_pool, ray_cls_with_init=rollout_cls)
 
         self.actor_wg.init_model()
         self.actor_rollout_wg = self.actor_wg # for compatibility
 
-        # self.rollout_wg.init_model()
-        # self.rollout_wg.tp_size = self.config.actor_rollout_ref.rollout.get("tensor_model_parallel_size", 1)
-
-        # self.async_rollout_manager = AgentLoopManager(
-        #     config=self.config,
-        #     worker_group=self.rollout_wg,
-        # )
-
-        from transformers import AutoTokenizer
         fireworks_engine = FireworksEngine(
-            model="accounts/fireworks/models/qwen3-30b-a3b",
-            tokenizer=AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B"),
+            tokenizer=self.tokenizer,
+            deployment_id=self.config.fireworks.deployment_id,
             sampling_params={"temperature": 0.6, "top_p": 0.95, "max_tokens": 2048},
         )
         self.fireworks_engine = fireworks_engine
@@ -436,7 +427,11 @@ class FireworksAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
                         actor_path = os.path.join(global_step_folder, "actor")
                         lora_adapter_path = os.path.join(actor_path, "lora_adapter")
 
-                        print("lora_adapter_path", lora_adapter_path)
+                        fireworks_model_id_prefix = self.config.fireworks.model_id_prefix
+                        self.fireworks_engine.update_model_weights(
+                            fireworks_model_id=f"{fireworks_model_id_prefix}-{self.global_steps}",
+                            lora_adapter_path=lora_adapter_path,
+                        )
 
 
                 with marked_timer("stop_profile", timing_raw):
