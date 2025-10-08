@@ -55,7 +55,7 @@ class FireworksEngine(OpenAIEngine):
         self._upload_lora(fireworks_model_id, lora_adapter_path, self._base_model, self._account_id)
         self._hot_load_lora(fireworks_model_id, self._deployment_id, self._account_id)
 
-        self.model = f"{self._account_id}/{self._model_id}#{self._account_id}/{self._deployment}"
+        self.model = f"{self._account_id}/{fireworks_model_id}#{self._account_id}/{self._deployment_id}"
         asyncio.run(self._probe_deployment(self.model))
 
     def _upload_lora(
