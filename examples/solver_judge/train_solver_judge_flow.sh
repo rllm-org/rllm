@@ -56,7 +56,7 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='solver-judge-workflow' \
-    trainer.experiment_name='countdown-solver-judge' \
+    trainer.experiment_name='countdown-solver-judge-30b' \
     trainer.max_actor_ckpt_to_keep=2 \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node=8 \
