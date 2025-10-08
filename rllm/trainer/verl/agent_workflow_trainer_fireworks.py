@@ -65,8 +65,8 @@ class FireworksAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
         self.hybrid_engine = False
 
     def init_workers(self):
-        assert not self.hybrid_engine, "Pipeline trainer does not support hybrid engine, assumes Rollout and Actor are not in the different worker group"
         """Init resource pool and worker group"""
+        assert not self.hybrid_engine, "Pipeline trainer does not support hybrid engine, assumes Rollout and Actor are not in the different worker group"
         self.resource_pool_manager.create_resource_pool()
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
