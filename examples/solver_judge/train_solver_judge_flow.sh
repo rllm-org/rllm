@@ -5,10 +5,10 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:False"
 export VLLM_USE_V1=1
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 python3 -m examples.solver_judge.train_solver_judge_flow \
     data.train_batch_size=8 \
-    +trainer.n_training_gpus_per_node=6 \
+    +trainer.n_training_gpus_per_node=8 \
     data.max_prompt_length=2048 \
     data.max_response_length=1024 \
     actor_rollout_ref.model.lora_rank=32 \
@@ -59,7 +59,7 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     trainer.experiment_name='countdown-solver-judge-30b' \
     trainer.max_actor_ckpt_to_keep=2 \
     trainer.val_before_train=False \
-    trainer.n_gpus_per_node=6 \
+    trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=1 \
     trainer.test_freq=25 \
