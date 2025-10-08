@@ -15,7 +15,6 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import (
     AdvantageEstimator,
     RayPPOTrainer,
-    RayWorkerGroup,
     ResourcePoolManager,
     Role,
     WorkerType,
@@ -29,6 +28,7 @@ from verl.trainer.ppo.ray_trainer import (
     reduce_metrics,
 )
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
+from verl.utils.tracking import Tracking
 
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.fireworks_engine import FireworksEngine
@@ -136,7 +136,6 @@ class FireworksAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
         """
         The training loop of PPO. Adapted to train the underlying model of agent.
         """
-        from verl.utils.tracking import Tracking
 
         logger = Tracking(
             project_name=self.config.trainer.project_name,
