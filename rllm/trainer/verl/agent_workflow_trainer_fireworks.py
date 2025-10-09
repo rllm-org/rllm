@@ -15,6 +15,7 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import (
     AdvantageEstimator,
     RayPPOTrainer,
+    RayWorkerGroup,
     ResourcePoolManager,
     Role,
     WorkerType,
@@ -114,22 +115,6 @@ class FireworksAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
 
         # init workflow workers
         asyncio.run_coroutine_threadsafe(self.agent_execution_engine.initialize_pool(), self._loop).result()
-
-    def _validate_config(self):
-        assert self.config.actor_rollout_ref.rollout.mode == "async", "Only async rollout mode is supported"
-        assert self.use_rm is False, "Reward models are not supported. Rewards should be assigned using a reward function in the workflow or environment."
-
-        if self.config.rllm.stepwise_advantage.enable:
-            self.config.rllm.workflow.workflow_args.accumulate_response_length = False
-            print("Using step-level advantage, max_prompt_length and max_response_length will be applied step-wise")
-        else:
-            self.config.rllm.workflow.workflow_args.accumulate_response_length = True
-            print("Using trajectory-level advantage, max_prompt_length and max_response_length will be applied trajectory-wise")
-
-        if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
-            raise NotImplementedError("REMAX is not supported yet")
-
-        RayPPOTrainer._validate_config(self)
 
     def fit_agent(self):
         """

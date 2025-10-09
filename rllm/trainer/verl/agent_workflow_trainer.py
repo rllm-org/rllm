@@ -9,11 +9,16 @@ from pprint import pprint
 import numpy as np
 import torch
 from omegaconf import OmegaConf
+
+from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
+from rllm.engine.rollout.verl_engine import VerlEngine
+from rllm.workflows.workflow import TerminationReason
+from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
-from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import (
     AdvantageEstimator,
     RayPPOTrainer,
+    RayWorkerGroup,
     ResourcePoolManager,
     Role,
     WorkerType,
@@ -26,12 +31,6 @@ from verl.trainer.ppo.ray_trainer import (
     marked_timer,
     reduce_metrics,
 )
-from verl.utils.tracking import Tracking
-
-from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
-from rllm.engine.rollout.verl_engine import VerlEngine
-from rllm.workflows.workflow import TerminationReason
-from verl import DataProto
 
 
 class AgentWorkflowPPOTrainer(RayPPOTrainer):
@@ -99,6 +98,8 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         """
         The training loop of PPO. Adapted to train the underlying model of agent.
         """
+        from verl.utils.tracking import Tracking
+
         logger = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
@@ -615,7 +616,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         else:
             if self.actor_wg.world_size != 0:
                 world_sizes.append(self.actor_wg.world_size)
-            if hasattr(self, "rollout_wg") and self.rollout_wg.world_size != 0:
+            if self.rollout_wg.world_size != 0:
                 world_sizes.append(self.rollout_wg.world_size)
         if not world_sizes:
             return batch
