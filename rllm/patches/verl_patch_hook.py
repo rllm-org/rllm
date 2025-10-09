@@ -103,9 +103,18 @@ def _patch_vllm_rollout_spmd(target_module: str):
 
         if getattr(instance, "lora_kwargs", None):
             lora_kwargs = {k: v for k, v in instance.lora_kwargs.items() if k != "enable_lora"}
+            # Fix: for vLLM, the smallest `max_lora_rank` is 8, and allowed values are (8, 16, 32, 64, 128, 256, 320, 512)
+            # verl mistakenly set `max_lora_rank = config.lora_rank`,this prevents us from using very small lora_rank (e.g. 1). 
+            vllm_max_lora_ranks = [8, 16, 32, 64, 128, 256, 320, 512]
+            lora_rank = lora_kwargs["max_lora_rank"]
+
+            max_lora_idx = 0
+            while max_lora_idx < len(vllm_max_lora_ranks) and vllm_max_lora_ranks[max_lora_idx] < lora_rank:
+                max_lora_idx += 1
+
+            lora_kwargs["max_lora_rank"] = vllm_max_lora_ranks[max_lora_idx]
             lora_config = LoRAConfig(**lora_kwargs)
-            model_config = instance.vllm_config.model_config
-            lora_config.verify_with_model_config(model_config)
+            lora_config.verify_with_model_config(instance.vllm_config.model_config)
             instance.vllm_config.lora_config = lora_config
 
         instance.inference_engine = WorkerWrapperBase(vllm_config=instance.vllm_config)
