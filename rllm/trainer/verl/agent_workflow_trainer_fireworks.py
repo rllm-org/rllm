@@ -61,7 +61,6 @@ class FireworksAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
             workflow_class=workflow_class,
             workflow_args=workflow_args,
         )
-        self.tokenizer = tokenizer
         self.hybrid_engine = False
 
     def init_workers(self):
