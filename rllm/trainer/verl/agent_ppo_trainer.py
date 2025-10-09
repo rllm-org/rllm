@@ -13,9 +13,6 @@ import click
 import numpy as np
 import torch
 from omegaconf import OmegaConf
-
-from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
-from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
 from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.ray_trainer import (
@@ -31,6 +28,9 @@ from verl.trainer.ppo.ray_trainer import (
     marked_timer,
     reduce_metrics,
 )
+
+from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
+from verl import DataProto
 
 
 class AgentPPOTrainer(RayPPOTrainer):
@@ -985,7 +985,7 @@ class AgentPPOTrainer(RayPPOTrainer):
         else:
             if self.actor_wg.world_size != 0:
                 world_sizes.append(self.actor_wg.world_size)
-            if self.rollout_wg.world_size != 0:
+            if hasattr(self, "rollout_wg") and self.rollout_wg.world_size != 0:
                 world_sizes.append(self.rollout_wg.world_size)
         if not world_sizes:
             return batch
