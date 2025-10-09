@@ -86,7 +86,18 @@ class AppWorldEnv(BaseEnv):
 
         # Build initial observation
         instruction = self.task.get("instruction", "") if self.task else ""
-        observation = {"instruction": instruction, "available_apps": ["spotify", "gmail", "calendar", "contacts", "messages", "notes", "todo", "files", "banking"], "helper_apis": {"show_app_descriptions": "apis.api_docs.show_app_descriptions()", "show_api_descriptions": "apis.api_docs.show_api_descriptions(app_name='app')", "show_api_doc": "apis.api_docs.show_api_doc(app_name='app', api_name='api')", "complete_task": "apis.supervisor.complete_task(answer='your_answer')"}}
+
+        # Extract user information from AppWorld
+        user_info = {}
+        if self.world and hasattr(self.world, "task") and hasattr(self.world.task, "supervisor"):
+            main_user = self.world.task.supervisor
+            user_info = {"first_name": main_user.first_name if hasattr(main_user, "first_name") else "User", "last_name": main_user.last_name if hasattr(main_user, "last_name") else "Test", "email": main_user.email if hasattr(main_user, "email") else "user@example.com", "phone_number": main_user.phone_number if hasattr(main_user, "phone_number") else "+1234567890"}
+            print(f"User info: {user_info}")
+        else:
+            # Default user info if not available
+            user_info = {"first_name": "User", "last_name": "Test", "email": "user@example.com", "phone_number": "+1234567890"}
+
+        observation = {"instruction": instruction, "user_info": user_info, "available_apps": ["spotify", "gmail", "calendar", "contacts", "messages", "notes", "todo", "files", "banking"], "helper_apis": {"show_app_descriptions": "apis.api_docs.show_app_descriptions()", "show_api_descriptions": "apis.api_docs.show_api_descriptions(app_name='app')", "show_api_doc": "apis.api_docs.show_api_doc(app_name='app', api_name='api')", "complete_task": "apis.supervisor.complete_task(answer='your_answer')"}}
 
         return observation, {}
 

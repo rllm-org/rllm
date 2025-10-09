@@ -1,5 +1,7 @@
 from typing import Any
 
+from jinja2 import Template
+
 from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 
 # logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(filename)s:%(lineno)d] %(message)s")
@@ -369,13 +371,18 @@ Task: {{ input_str }}"""
         self._trajectory = Trajectory()
         self.messages: list[dict[str, Any]] = []
         self.current_observation = None
-        self.reset()
+        self.task_instruction = None
+        self.user_info = None
+        self.initialized = False
 
     def reset(self):
         """Reset the agent's state for a new task."""
         self._trajectory = Trajectory()
-        self.messages = [{"role": "system", "content": self.SYSTEM_PROMPT}]
+        self.messages = []
         self.current_observation = None
+        self.task_instruction = None
+        self.user_info = None
+        self.initialized = False
 
     def update_from_env(self, observation: Any, reward: float, done: bool, info: dict, **kwargs):
         """
@@ -390,14 +397,17 @@ Task: {{ input_str }}"""
         # Update current observation
         self.current_observation = observation
 
-        # Build user message based on observation type
+        # Initialize system prompt on first observation (when we receive the task)
+        if not self.initialized and isinstance(observation, dict) and "instruction" in observation:
+            self._initialize_from_task(observation, **kwargs)
+            self.initialized = True
+            # Return early - system prompt is already added, no need for user message
+            return
+
+        # Build user message based on observation type (all subsequent observations are execution results)
         if isinstance(observation, dict):
-            if "instruction" in observation:
-                # Initial task instruction
-                user_message = self._format_initial_instruction(observation)
-            else:
-                # Code execution result
-                user_message = self._format_execution_result(observation)
+            # Code execution result
+            user_message = self._format_execution_result(observation)
         elif isinstance(observation, str):
             user_message = observation
         else:
@@ -434,20 +444,38 @@ Task: {{ input_str }}"""
 
         return Action(action=python_code)
 
-    def _format_initial_instruction(self, observation: dict) -> str:
-        """Format initial task instruction as user message."""
-        parts = [f"Task: {observation.get('instruction', 'No instruction provided')}"]
+    def _initialize_from_task(self, observation: dict, **kwargs):
+        """
+        Initialize the agent with task information from the first observation.
 
-        if "available_apps" in observation:
-            apps = ", ".join(observation["available_apps"])
-            parts.append(f"\nAvailable Apps: {apps}")
+        Args:
+            observation: Initial observation containing task instruction and user info
+            **kwargs: Additional arguments that may contain user_info or task_instruction
+        """
+        # Extract user information from observation or kwargs
+        if "user_info" in observation:
+            self.user_info = observation["user_info"]
+        elif "user_info" in kwargs:
+            self.user_info = kwargs["user_info"]
+        else:
+            # Default user info
+            self.user_info = {"first_name": "User", "last_name": "Test", "email": "user@example.com", "phone_number": "+1234567890"}
 
-        if "helper_apis" in observation:
-            parts.append("\nHelper APIs:")
-            for name, usage in observation["helper_apis"].items():
-                parts.append(f"- {name}: {usage}")
+        # Extract task instruction
+        self.task_instruction = observation.get("instruction", "")
 
-        return "\n".join(parts)
+        # Get app descriptions placeholder
+        app_descriptions = observation.get("app_descriptions", "")
+        if not app_descriptions:
+            # Default placeholder
+            app_descriptions = "[List of available apps will be shown here]"
+
+        # Format the system prompt with user info and task
+        template = Template(self.SYSTEM_PROMPT)
+        system_prompt = template.render(main_user=self.user_info, app_descriptions=app_descriptions, input_str=self.task_instruction)
+
+        # Set the system message
+        self.messages = [{"role": "system", "content": system_prompt}]
 
     def _format_execution_result(self, observation: dict) -> str:
         """Format code execution result as user message."""
