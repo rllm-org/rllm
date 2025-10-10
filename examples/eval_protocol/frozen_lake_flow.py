@@ -1,27 +1,29 @@
 """
-Frozen Lake Workflow for rllm-fw
+Frozen Lake Workflow for rllm
 
-This workflow bridges eval-protocol's MCPGymRolloutProcessor with rllm-fw's Workflow pattern
+This workflow bridges eval-protocol's MCPGymRolloutProcessor with rllm's Workflow pattern
 for the FrozenLake environment.
 """
 
 import asyncio
 from pathlib import Path
 
+import eval_protocol
+from eval_protocol.benchmarks.test_frozen_lake import test_frozen_lake_evaluation
+from eval_protocol.models import EvaluationRow, InputMetadata, Message
+from eval_protocol.pytest.default_mcp_gym_rollout_processor import (
+    MCPGymRolloutProcessor,
+)
+from eval_protocol.pytest.types import RolloutProcessorConfig
+
 from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.workflows.workflow import Workflow
-
-import eval_protocol
-from eval_protocol.models import EvaluationRow, InputMetadata, Message
-from eval_protocol.pytest.default_mcp_gym_rollout_processor import MCPGymRolloutProcessor
-from eval_protocol.pytest.types import RolloutProcessorConfig
-from eval_protocol.benchmarks.test_frozen_lake import test_frozen_lake_evaluation
 
 
 class FrozenLakeWorkflow(Workflow):
     """
     Workflow that executes frozen lake tasks using MCPGymRolloutProcessor.
-    
+
     Task format expected:
     {
         "id": "frozen_lake_task_0",
@@ -30,12 +32,12 @@ class FrozenLakeWorkflow(Workflow):
         "user_prompt_template": "{observation}"
     }
     """
-    
+
     # Class variables (shared across all workflow instances)
     _shared_server_started = False
     _server_lock = asyncio.Lock()
     _shared_rollout_processor = MCPGymRolloutProcessor()
-    
+
     def __init__(
         self,
         steps: int = 30,
@@ -49,7 +51,7 @@ class FrozenLakeWorkflow(Workflow):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
-        
+
         # Use shared rollout processor across all instances
         self.rollout_processor = FrozenLakeWorkflow._shared_rollout_processor
 
@@ -68,16 +70,16 @@ class FrozenLakeWorkflow(Workflow):
             semaphore=asyncio.Semaphore(1),
             kwargs={"start_server": False},
         )
-        
+
     async def run(self, task: dict, uid: str, **kwargs) -> Episode:
         """
         Execute the frozen lake workflow.
-        
+
         Args:
             task: Dict containing frozen lake task data
             uid: Unique identifier for this episode
             **kwargs: Additional arguments
-            
+
         Returns:
             Episode with trajectory and computed rewards
         """
@@ -90,27 +92,27 @@ class FrozenLakeWorkflow(Workflow):
                     # First workflow to reach here starts the server
                     self.config.kwargs["start_server"] = True
                     FrozenLakeWorkflow._shared_server_started = True
-        
+
         self.reset(task=task, uid=uid)
-        
+
         try:
             eval_row = self._task_to_evaluation_row(task)
 
             tasks = self.rollout_processor([eval_row], self.config)
-            
+
             if not tasks:
                 raise ValueError("MCPGymRolloutProcessor returned no tasks")
-            
+
             result_row: EvaluationRow = await tasks[0]
-            
+
             episode = await self._evaluate_and_create_episode(result_row, task, uid)
-            
+
             return episode
-        
+
         except Exception as e:
             # Gracefully handle failures - return a failed Episode instead of crashing
             print(f"⚠️  Task {uid} failed: {e}")
-            
+
             failed_episode = Episode(
                 id=uid,
                 task=task,
@@ -119,7 +121,7 @@ class FrozenLakeWorkflow(Workflow):
                 metrics={"frozen_lake_reward": 0.0, "error": str(e)},
             )
             return failed_episode
-    
+
     def _task_to_evaluation_row(self, task: dict) -> EvaluationRow:
         """Convert rllm task dict to eval protocol EvaluationRow."""
         return EvaluationRow(
@@ -132,7 +134,7 @@ class FrozenLakeWorkflow(Workflow):
                 },
             ),
         )
-    
+
     async def _evaluate_and_create_episode(
         self,
         row: EvaluationRow,
@@ -144,14 +146,14 @@ class FrozenLakeWorkflow(Workflow):
         """
         # Call the evaluation function
         evaluated_row: EvaluationRow = await test_frozen_lake_evaluation(row)
-        
+
         # Extract reward and metrics from evaluation_result
         if evaluated_row.evaluation_result is None:
             raise ValueError("Evaluation function did not return a result")
-        
+
         reward = evaluated_row.evaluation_result.score
         reward_info = evaluated_row.evaluation_result.metrics or {}
-        
+
         def msg_to_dict(msg: Message) -> dict:
             """Convert eval_protocol Message to chat completion dict."""
             d = {"role": msg.role, "content": msg.content}
@@ -172,39 +174,39 @@ class FrozenLakeWorkflow(Workflow):
             if msg.name:
                 d["name"] = msg.name
             return d
-        
+
         trajectory = Trajectory()
         all_messages = []
-        
+
         for msg in row.messages:
             msg_dict = msg_to_dict(msg)
             all_messages.append(msg_dict)
-            
+
             # Create Step with only observation and chat_completions for user or tool message
             if msg.role in ["user", "tool"]:
                 new_step = Step(observation=str(msg.content or ""), chat_completions=all_messages.copy())
                 trajectory.steps.append(new_step)
-            
+
             # Create new Step with action/response for assistant message
             elif msg.role == "assistant":
                 # Extract action: tool calls if present, otherwise message content
                 action_data = msg_dict.get("tool_calls") if msg.tool_calls else str(msg.content or "")
-                
+
                 new_step = Step(
                     model_response=str(msg.content) if msg.content else "",
                     action=action_data,
                     chat_completions=all_messages.copy(),
                 )
                 trajectory.steps.append(new_step)
-        
+
         # Assign final reward to the last step (sparse reward)
         if trajectory.steps:
             trajectory.steps[-1].reward = reward
             trajectory.steps[-1].info = reward_info
-        
+
         trajectory.reward = reward
         trajectory.task = task
-        
+
         # Create episode
         episode = Episode(
             id=uid,
@@ -213,9 +215,9 @@ class FrozenLakeWorkflow(Workflow):
             trajectories=[("frozen_lake_agent", trajectory)],
             metrics={"frozen_lake_reward": reward, **reward_info},
         )
-        
+
         return episode
-    
+
     def cleanup(self):
         """Cleanup MCP server resources."""
         if self.rollout_processor:

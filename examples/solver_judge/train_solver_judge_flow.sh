@@ -29,7 +29,7 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     actor_rollout_ref.actor.clip_ratio_low=0.2 \
     actor_rollout_ref.actor.clip_ratio_high=0.28 \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
-    actor_rollout_ref.actor.fsdp_config.param_offload=True \
+    actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
@@ -42,7 +42,7 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
+    actor_rollout_ref.ref.fsdp_config.param_offload=False \
     algorithm.adv_estimator=grpo \
     rllm.compact_filtering.enable=True \
     rllm.compact_filtering.mask_max_prompt_length_exceeded=True \
