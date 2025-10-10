@@ -1,6 +1,7 @@
 import sys
-from wrapt.importer import when_imported
+
 from wrapt import wrap_function_wrapper
+from wrapt.importer import when_imported
 
 _TARGETS = {
     "vllm_rollout_spmd": "verl.workers.rollout.vllm_rollout.vllm_rollout_spmd",
@@ -18,6 +19,7 @@ def _wrap_once(module_name: str, cls_name: str, method_name: str, wrapper):
     """Wrap a class method once, descriptor-safe, even if hot-reloaded/imported twice."""
     sentinel = f"__patched_{cls_name}_{method_name}__"
     assert method_name in ["_init_zeromq", "__init__", "init_worker", "load_model", "update_params"], f"{method_name} is not a class method"
+
     def apply(mod):
         cls = getattr(mod, cls_name, None)
         if cls is None or getattr(cls, sentinel, False):
@@ -42,9 +44,10 @@ def _patch_vllm_rollout_spmd(target_module: str):
     def _init_zeromq_wrapper(wrapped, instance, args, kwargs):
         # full replacement: do NOT call `wrapped`
         import getpass
-        import threading
-        import zmq
         import os
+        import threading
+
+        import zmq
         from filelock import FileLock
 
         tensor_parallel_size = instance.config.tensor_model_parallel_size
@@ -75,9 +78,9 @@ def _patch_vllm_rollout_spmd(target_module: str):
         if args:
             _, config, tokenizer, _ = args[:4]
         else:
-            config = kwargs.get('config')
-            tokenizer = kwargs.get('tokenizer')
-        
+            config = kwargs.get("config")
+            tokenizer = kwargs.get("tokenizer")
+
         instance.tokenizer = tokenizer
         instance.config = config
         instance.inference_engine = None
@@ -91,9 +94,10 @@ def _patch_vllm_rollout_spmd(target_module: str):
     # init_worker replacement (handles ranks & LoRA wiring)
     def init_worker_wrapper(wrapped, instance, args, kwargs):
         # full replacement
+        import os
+
         from vllm.config import LoRAConfig
         from vllm.worker.worker_base import WorkerWrapperBase
-        import os
 
         (all_kwargs,) = args  # expect list[dict[str, Any]]
         all_kwargs[0]["rank"] = int(os.environ["RANK"])
@@ -104,7 +108,7 @@ def _patch_vllm_rollout_spmd(target_module: str):
         if getattr(instance, "lora_kwargs", None):
             lora_kwargs = {k: v for k, v in instance.lora_kwargs.items() if k != "enable_lora"}
             # Fix: for vLLM, the smallest `max_lora_rank` is 8, and allowed values are (8, 16, 32, 64, 128, 256, 320, 512)
-            # verl mistakenly set `max_lora_rank = config.lora_rank`,this prevents us from using very small lora_rank (e.g. 1). 
+            # verl mistakenly set `max_lora_rank = config.lora_rank`,this prevents us from using very small lora_rank (e.g. 1).
             vllm_max_lora_ranks = [8, 16, 32, 64, 128, 256, 320, 512]
             lora_rank = lora_kwargs["max_lora_rank"]
 
@@ -134,10 +138,7 @@ def _patch_vllm_rollout_spmd(target_module: str):
         instance.sharding_manager.model_runner = instance.inference_engine.worker.model_runner
 
         # patch compute_logits
-        _monkey_patch_compute_logits(
-            instance.inference_engine.worker.model_runner.model,
-            len(instance.tokenizer)
-        )
+        _monkey_patch_compute_logits(instance.inference_engine.worker.model_runner.model, len(instance.tokenizer))
 
     # Install wrappers (idempotent)
     _wrap_once(target_module, cls_name, "_init_zeromq", _init_zeromq_wrapper)
@@ -152,14 +153,15 @@ def _patch_fsdp_vllm(target_module: str):
 
     def update_params_wrapper(wrapped, instance, args, kwargs):
         # full replacement
+        import importlib as _importlib
+        import logging
         import os
         import time
-        import logging
-        import importlib as _importlib
         from dataclasses import asdict
-        from verl.utils.vllm_utils import TensorLoRARequest, patch_vllm_moe_model_weight_loader
-        from verl.utils.model import check_exclude_modules, check_target_modules
+
         from verl.utils.device import get_device_id
+        from verl.utils.model import check_exclude_modules, check_target_modules
+        from verl.utils.vllm_utils import TensorLoRARequest, patch_vllm_moe_model_weight_loader
 
         try:
             # torch 2.5+
@@ -180,6 +182,7 @@ def _patch_fsdp_vllm(target_module: str):
         if peft_config:
             if instance.base_sync_done:
                 from verl.utils.vllm_utils import TensorLoRARequest  # local import for clarity
+
                 lora_int_id = int(time.time_ns() % 0x7FFFFFFF)
                 lora_request = TensorLoRARequest(
                     lora_name=f"{lora_int_id}",
@@ -219,12 +222,7 @@ def _patch_fsdp_vllm(target_module: str):
         patch_vllm_moe_model_weight_loader(model)
         device = get_device_id()  # used when fsdp2 set cpu_offload_policy
 
-        loaded_params = model.load_weights(
-            (
-                (name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param)
-                for name, param in updated_params.items()
-            )
-        )
+        loaded_params = model.load_weights(((name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in updated_params.items()))
 
         instance.base_sync_done = True
         logger.info(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
