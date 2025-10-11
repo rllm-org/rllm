@@ -29,22 +29,29 @@ class HLEJudge:
 
     def __init__(self, judge_engine: OpenAIEngine):
         self.judge_engine = judge_engine
-        self.judge_prompt = """Please act as an impartial judge and evaluate the quality of the response provided by an AI assistant to the user question displayed below. Your evaluation should consider correctness and helpfulness. You will be given a reference answer and the assistant's answer. You need to evaluate if the assistant's answer is correct.
-
-Be as objective as possible. After providing your explanation, you must rate the response on a scale of 1 to 5 by strictly following this format: "[[rating]]", for example: "Rating: [[3]]".
-
-Here are the details:
+        # Binary yes/no judge prompt aligned with Tongyi DeepResearch
+        self.judge_prompt = """You are an impartial judge evaluating the correctness of an AI assistant's answer.
 
 [Question]
 {question}
 
-[Reference Answer]
+[Correct Answer]
 {reference_answer}
 
 [Assistant's Answer]
 {assistant_answer}
 
-Please provide your evaluation and rating."""
+Task: Determine if the assistant's answer is correct by comparing it to the correct answer.
+
+Instructions:
+1. Extract the final answer from the assistant's response
+2. Compare it with the correct answer
+3. Provide your reasoning
+4. Answer with "yes" if correct, "no" if incorrect
+
+Output format:
+correct: [yes/no]
+reasoning: [your explanation]"""
 
     async def judge_response(self, question: str, reference_answer: str, assistant_answer: str) -> dict[str, Any]:
         """
@@ -75,27 +82,24 @@ Please provide your evaluation and rating."""
 
             judgment_text = response.text if hasattr(response, "text") else str(response)
 
-            # Extract rating
-            rating = 0
-            if "[[" in judgment_text and "]]" in judgment_text:
+            # Parse binary yes/no from judge output
+            is_correct = False
+            if "correct:" in judgment_text.lower():
+                # Extract the yes/no after "correct:"
                 try:
-                    rating_text = judgment_text.split("[[")[1].split("]]")[0]
-                    rating = int(rating_text)
+                    correct_line = [line for line in judgment_text.lower().split("\n") if "correct:" in line][0]
+                    is_correct = "yes" in correct_line
                 except (IndexError, ValueError):
-                    rating = 0
-
-            # Consider rating >= 4 as correct for binary accuracy
-            is_correct = rating >= 4
+                    is_correct = False
 
             return {
                 "judgment": judgment_text,
-                "rating": rating,
                 "is_correct": is_correct,
             }
 
         except Exception as e:
             print(f"Judge error: {e}")
-            return {"judgment": f"Judge error: {e}", "rating": 0, "is_correct": False}
+            return {"judgment": f"Judge error: {e}", "is_correct": False}
 
 
 async def evaluate_hle_dataset(dataset_path: str, args) -> dict[str, Any]:
@@ -380,13 +384,9 @@ def calculate_hle_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
     if total == 0:
         return {"error": "No results to evaluate"}
 
-    # Basic accuracy (judge-based)
+    # Basic accuracy (judge-based binary yes/no)
     judge_correct = sum(1 for r in results if r.get("is_correct", False))
     judge_accuracy = judge_correct / total
-
-    # Rating distribution
-    ratings = [r.get("rating", 0) for r in results]
-    avg_rating = statistics.mean(ratings) if ratings else 0
 
     # Termination analysis
     termination_counts = {}
@@ -402,10 +402,8 @@ def calculate_hle_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
         "total_questions": total,
         "judge_accuracy": judge_accuracy,
         "judge_correct": judge_correct,
-        "average_rating": avg_rating,
         "average_rounds": avg_rounds,
         "termination_distribution": termination_counts,
-        "rating_distribution": {f"rating_{i}": ratings.count(i) for i in range(1, 6)},
     }
 
 
@@ -452,7 +450,7 @@ def print_hle_summary(metrics: dict[str, Any]):
     print("=" * 60)
     print(f"Total Questions: {metrics.get('total_questions', 0)}")
     print(f"Judge Accuracy: {metrics.get('judge_accuracy', 0):.2%}")
-    print(f"Average Rating: {metrics.get('average_rating', 0):.2f}/5.0")
+    print(f"Correct Answers: {metrics.get('judge_correct', 0)}/{metrics.get('total_questions', 0)}")
     print(f"Average Rounds: {metrics.get('average_rounds', 0):.1f}")
     print(f"Evaluation Time: {metrics.get('evaluation_time', 0):.1f}s")
 
@@ -460,11 +458,6 @@ def print_hle_summary(metrics: dict[str, Any]):
     term_dist = metrics.get("termination_distribution", {})
     for reason, count in term_dist.items():
         print(f"  {reason}: {count}")
-
-    print("\nRating Distribution:")
-    rating_dist = metrics.get("rating_distribution", {})
-    for rating, count in rating_dist.items():
-        print(f"  {rating}: {count}")
 
     print("=" * 60)
 
