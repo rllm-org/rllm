@@ -54,7 +54,7 @@ python3 -m examples.simple_math.train_hendrycks_math \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='rllm-agent' \
-    trainer.experiment_name='deepscaler-debug-math-fsdp1' \
+    trainer.experiment_name='simple-math' \
     trainer.val_before_train=True \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \

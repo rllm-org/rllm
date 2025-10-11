@@ -73,6 +73,7 @@ dependencies = [
     "rich",
     "PyYAML",
     "pydantic",
+    "wrapt",
 
     # Development and testing
     "pytest",

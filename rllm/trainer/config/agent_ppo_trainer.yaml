@@ -41,6 +41,7 @@ rllm:
     n_parallel_tasks: 256
     retry_limit: 3
   disable_thinking: False
+  accumulate_reasoning: False
   mask_truncated_samples: False
   stepwise_advantage:
     enable: False

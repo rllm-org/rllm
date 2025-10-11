@@ -2,7 +2,7 @@
 # Adapted from https://github.com/volcengine/verl/blob/v0.5.0/scripts/install_vllm_sglang_mcore.sh
 
 echo "1. install inference frameworks and pytorch they need"
-pip install "sglang[all]==0.4.6.post1" --no-cache-dir --find-links https://flashinfer.ai/whl/cu124/torch2.6/flashinfer-python && pip install torch-memory-saver --no-cache-dir
+pip install "sglang[all]==0.4.6.post3" --no-cache-dir --find-links https://flashinfer.ai/whl/cu124/torch2.6/flashinfer-python && pip install torch-memory-saver --no-cache-dir
 pip install --no-cache-dir "vllm==0.8.5.post1" "torch==2.6.0" "torchvision==0.21.0" "torchaudio==2.6.0" "tensordict==0.6.2" torchdata
 
 
@@ -34,4 +34,4 @@ pip install opencv-fixer && \
 
 
 echo "5. Install verl"
-pip install --no-deps --no-cache-dir git+https://github.com/volcengine/verl.git@v0.5.0
+pip install --no-deps -e verl/

@@ -1,21 +1,21 @@
-site_name: rLLM
+site_name: ""
 site_description: A library for training LLM agents with reinforcement learning
 repo_url: https://github.com/rllm-org/rllm
 docs_dir: docs
 theme:
   name: material
-  logo: assets/agentica-logo.png
-  favicon: assets/agentica-logo-black.png
+  logo: assets/rllm_logo_white.png  # use a white or transparent version if possible
+  favicon: assets/rllm_logo_white.png
   palette:
     - scheme: default
-      primary: black
-      accent: black
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
     - scheme: slate
-      primary: black
-      accent: black
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
@@ -29,6 +29,9 @@ theme:
     - navigation.indexes
     - content.code.copy
     - content.code.annotate
+
+extra_css:
+  - stylesheets/extra.css
 
 plugins:
   - search

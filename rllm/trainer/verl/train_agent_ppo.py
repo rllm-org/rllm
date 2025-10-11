@@ -15,7 +15,7 @@ from rllm.trainer.verl.agent_ppo_trainer import AgentPPOTrainer
 
 # Local application imports
 from rllm.trainer.verl.agent_workflow_trainer import AgentWorkflowPPOTrainer
-from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
+from rllm.trainer.verl.ray_runtime_env import get_ppo_ray_runtime_env
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils.device import is_cuda_available
 
@@ -28,14 +28,12 @@ def main(config):
 def run_ppo_agent(config):
     # Check if Ray is not initialized
     if not ray.is_initialized():
-        # Initialize Ray with a local cluster configuration
-        # Set environment variables in the runtime environment to control tokenizer parallelism,
-        # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
-        # `num_cpus` specifies the number of CPU cores Ray can use, obtained from the configuration
-        ray.init(
-            runtime_env=get_ppo_ray_runtime_env(),
-            num_cpus=config.ray_init.num_cpus,
-        )
+        # read off all the `ray_init` settings from the config
+        if config is not None and hasattr(config, "ray_init"):
+            ray_init_settings = {k: v for k, v in config.ray_init.items() if v is not None}
+        else:
+            ray_init_settings = {}
+        ray.init(runtime_env=get_ppo_ray_runtime_env(), **ray_init_settings)
 
     # Create a remote instance of the TaskRunner class, and
     # Execute the `run` method of the TaskRunner instance remotely and wait for it to complete
@@ -94,10 +92,6 @@ class TaskRunner:
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         # Used for multimodal LLM, could be None
         # processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
-
-        from rllm.parser.utils import fix_pad_token
-
-        fix_pad_token(tokenizer)
 
         # Define worker classes based on the actor strategy.
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:

@@ -59,6 +59,8 @@ class R1ToolParser(ToolParser):
         self.tool_call_begin = "<｜tool▁call▁begin｜>"
         self.tool_call_end = "<｜tool▁call▁end｜>"
         self.tool_sep = "<｜tool▁sep｜>"
+        self.tool_output_begin = "<｜tool▁response▁begin｜>"
+        self.tool_output_end = "<｜tool_response_end｜>"
 
     def parse(self, model_response: str) -> list[ToolCall]:
         """Parse tool calls from model output.
@@ -82,7 +84,7 @@ class R1ToolParser(ToolParser):
         <｜tool▁calls▁begin｜>
         <｜tool▁call▁begin｜>function<｜tool▁sep｜>function_name
         ```json
-        {"param": "value"}
+        {"param1": "value1", "param2": "value2"}
         ```
         <｜tool▁call▁end｜>
         // Additional tool calls follow the same format
@@ -169,10 +171,16 @@ You may call one or more functions to assist with the user query.
 {tools_schema}
 </tools>
 
-For function call returns, you should first print <｜tool▁calls▁begin｜>
+Output format for tool calls:
 
-For each function call, you should return object like:
-<｜tool▁call▁begin｜>function<｜tool▁sep｜><function_name>
+<｜tool▁calls▁begin｜>
+<｜tool▁call▁begin｜>function<｜tool▁sep｜>function_name
+```json
+{{"param1": "value1", "param2": "value2"}}
+```
+<｜tool▁call▁end｜>
+// Additional tool calls follow the same format
+<｜tool▁calls▁end｜>
 """
 
 
@@ -243,6 +251,11 @@ class QwenToolParser(ToolParser):
 
     def get_tool_prompt(self, tools_schema: str) -> str:
         return f"""
+
+# Tools
+
+You may call one or more functions to assist with the user query.
+
 You are provided with function signatures within <tools></tools> XML tags:
 <tools>
 {tools_schema}
@@ -251,5 +264,5 @@ You are provided with function signatures within <tools></tools> XML tags:
 For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
 <tool_call>
 {{"name": <function-name>, "arguments": <args-json-object>}}
-</tool_call><|im_end|>
-"""
+</tool_call>
+""".rstrip()

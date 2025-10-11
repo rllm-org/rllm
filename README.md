@@ -56,8 +56,7 @@ conda create -n rllm python=3.10 -y
 conda activate rllm
 
 # Install verl (version pinned by v0.2 branch)
-bash verl/scripts/install_vllm_sglang_mcore.sh
-pip install --no-deps -e ./verl
+bash scripts/install_verl.sh
 
 # Install rllm
 pip install -e .

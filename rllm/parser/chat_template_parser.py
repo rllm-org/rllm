@@ -1,10 +1,12 @@
+import json
 import logging
-from datetime import datetime
+import re
 
-import requests
 import torch
 
-from .utils import PARSER_TEST_MESSAGES, fix_pad_token
+from rllm.tools.tool_base import Tool, ToolCall, ToolOutput
+
+from .utils import PARSER_TEST_MESSAGES
 
 logger = logging.getLogger(__name__)
 
@@ -14,9 +16,6 @@ class ChatTemplateParser:
         self.tokenizer = tokenizer
         self.assistant_token = ""
         self.generation_prompt_ids = self._get_generation_prompt_ids(tokenizer)
-
-        # Fix pad_token if it's the same as eos_token
-        fix_pad_token(self.tokenizer)
 
     def _get_generation_prompt_ids(self, tokenizer):
         """Return the generation prompt tokens (ids, tokens, decoded string)."""
@@ -100,9 +99,6 @@ class ChatTemplateParser:
             elif "llama" in model_name:
                 logger.info(f"Using LlamaChatTemplateParser for {tokenizer.name_or_path}")
                 return LlamaChatTemplateParser(tokenizer)
-            elif "harmony" in model_name or "gpt-oss" in model_name:
-                logger.info(f"Using HarmonyChatTemplateParser for {tokenizer.name_or_path}")
-                return HarmonyChatTemplateParser(tokenizer)
 
         # Default to the standard parser if no specific match
         parser = ChatTemplateParser(tokenizer)
@@ -162,71 +158,49 @@ class DeepseekQwenChatTemplateParser(ChatTemplateParser):
         self.system_token = ""
         self.user_token = "<｜User｜>"
         self.assistant_token = "<｜Assistant｜>"
-        self.generation_prompt = self.eos_token + self.assistant_token + "<think>\n"
+        self.generation_prompt = self.assistant_token + "<think>\n"
 
-    def parse(self, messages, add_generation_prompt=False, is_first_msg=False, **kwargs) -> str:
+        from rllm.parser.tool_parser import R1ToolParser
+
+        self.tool_parser = R1ToolParser()
+
+    def parse(self, messages: list[dict], add_generation_prompt: bool = False, is_first_msg: bool = False, tools: list[Tool | dict] = None, accumulate_reasoning: bool = False, **kwargs) -> str:
+        tools = tools or []
+        tools_prompt_str = ""
+        if tools:
+            try:
+                tool_schema_strs = []
+                for tool in tools:
+                    if isinstance(tool, Tool):
+                        tool_schema_str = json.dumps(tool.json)
+                    elif isinstance(tool, dict):
+                        tool_schema_str = json.dumps(tool)
+                    else:
+                        tool_schema_str = tool
+                    tool_schema_strs.append(tool_schema_str)
+                tools_schema_str = "\n".join(tool_schema_strs)
+                tools_prompt_str = self.tool_parser.get_tool_prompt(tools_schema_str)
+            except Exception as e:
+                import traceback
+
+                traceback.print_exc()
+                logger.error(f"Failed to format tools: {e}")
+
         result = ""
 
         if is_first_msg:
             result += self.bos_token
 
-        for message in messages:
-            if message["role"] == "system":
-                result += self.parse_system(message)
-            elif message["role"] == "user":
-                result += self.parse_user(message)
-            elif message["role"] == "assistant":
-                result += self.parse_assistant(message)
-            else:
-                raise NotImplementedError(f"Unsupported message role: {message['role']}")
-
-        if add_generation_prompt:
-            result += self.generation_prompt
-        return result
-
-    def parse_system(self, message):
-        return self.system_token + message["content"]
-
-    def parse_user(self, message):
-        return self.user_token + message["content"]
-
-    def parse_assistant(self, message):
-        return self.assistant_token + message["content"] + self.eos_token
-
-
-class QwenChatTemplateParser(ChatTemplateParser):
-    def __init__(self, tokenizer, disable_thinking=True):
-        super().__init__(tokenizer)
-        self.bos_token = tokenizer.bos_token
-        self.eos_token = tokenizer.eos_token
-        self.eot_token = "<|im_end|>\n"
-        self.system_token = "<|im_start|>system\n"
-        self.user_token = "<|im_start|>user\n"
-        self.assistant_token = "<|im_start|>assistant\n"
-        if disable_thinking:
-            self.assistant_token += "<think>\\n\\n</think>\\n\\n"
-        self.generation_prompt = self.assistant_token
-
-        self.tool_start_token = "\n<tool_call>\n"
-        self.tool_end_token = "\n</tool_call>"
-
-        self.tool_response_start_token = "<tool_response>\n"
-        self.tool_response_end_token = "\n</tool_response>"
-
-    def parse(self, messages, add_generation_prompt=False, is_first_msg=False, **kwargs) -> str:
-        result = ""
-
-        # if the first message is not a system message, add the system message
-        if is_first_msg and messages[0]["role"] != "system":
-            result += self.system_token + "You are Qwen, created by Alibaba Cloud. You are a helpful assistant." + self.eot_token
+        if is_first_msg and messages[0]["role"] != "system" and tools_prompt_str:
+            result += self.system_token + tools_prompt_str
 
         for message in messages:
             if message["role"] == "system":
-                result += self.parse_system(message)
+                result += self.parse_system(message, tools_prompt_str)
             elif message["role"] == "user":
                 result += self.parse_user(message)
             elif message["role"] == "assistant":
-                result += self.parse_assistant(message)
+                result += self.parse_assistant(message, accumulate_reasoning=accumulate_reasoning)
             elif message["role"] == "tool":
                 result += self.parse_tool(message)
             else:
@@ -236,18 +210,306 @@ class QwenChatTemplateParser(ChatTemplateParser):
             result += self.generation_prompt
         return result
 
-    def parse_system(self, message):
-        return self.system_token + message["content"] + self.eot_token
+    def parse_system(self, message, tools_prompt_str=""):
+        content = message["content"]
+
+        if "# Tools" not in content and tools_prompt_str:
+            content += tools_prompt_str
+
+        return self.system_token + content
+
+    def parse_user(self, message):
+        return self.user_token + message["content"]
+
+    def parse_assistant(self, message, accumulate_reasoning=False):
+        content = (message.get("content", None) or "").strip()
+        reasoning = (message.get("reasoning", None) or "").strip()
+        tool_calls = message.get("tool_calls", None) or []
+
+        if not reasoning and not tool_calls:
+            return self.assistant_token + content + self.eos_token
+
+        else:
+            result = self.assistant_token
+
+            if reasoning and accumulate_reasoning:
+                result += "<think>\n" + reasoning + "\n</think>\n\n"
+
+            if content:
+                result += content
+                if tool_calls:
+                    result += "\n"
+
+            if tool_calls:
+                try:
+                    tool_calls_strs = []
+                    for tool_call in tool_calls:
+                        if isinstance(tool_call, ToolCall):
+                            tool_call_dict = tool_call.to_dict()
+                        elif isinstance(tool_call, dict) and "function" in tool_call:
+                            tool_call_dict = tool_call["function"]
+                        else:
+                            tool_call_dict = tool_call
+                        # Avoid mutating original message structures by parsing into a local variable
+                        arguments_obj = tool_call_dict.get("arguments")
+                        if isinstance(arguments_obj, str):
+                            try:
+                                arguments_obj = json.loads(arguments_obj)
+                            except json.JSONDecodeError:
+                                pass
+                        tool_call_json = f"```json\n{json.dumps(arguments_obj)}\n```"
+                        tool_call_str = f"{self.tool_parser.tool_call_begin}function{self.tool_parser.tool_sep}{tool_call_dict['name']}\n{tool_call_json}\n{self.tool_parser.tool_call_end}"
+                        tool_calls_strs.append(tool_call_str)
+                    joined_calls_str = "\n".join(tool_calls_strs)
+                    tool_calls_str = f"{self.tool_parser.tool_calls_begin}\n{joined_calls_str}\n{self.tool_parser.tool_calls_end}"
+                except Exception as e:
+                    import traceback
+
+                    traceback.print_exc()
+                    logger.error(f"Failed to format tool calls: {e}")
+                    tool_calls_str = ""
+
+                result += tool_calls_str
+
+            result += self.eos_token
+            return result
+
+    def parse_tool(self, message):
+        tool_outputs: list[ToolOutput | dict] = message.get("tool_outputs", [])
+
+        if not tool_outputs:
+            return self.user_token + self.tool_parser.tool_output_begin + "\n" + message["content"] + "\n" + self.tool_parser.tool_output_end
+
+        else:
+            try:
+                tool_outputs_strs = []
+                for tool_output in tool_outputs:
+                    if not isinstance(tool_output, ToolOutput):
+                        tool_output = ToolOutput(**tool_output)
+                    tool_output_str = f"{self.tool_parser.tool_output_begin}\n{str(tool_output)}\n{self.tool_parser.tool_output_end}"
+                    tool_outputs_strs.append(tool_output_str)
+                tool_outputs_str = "\n".join(tool_outputs_strs)
+            except Exception as e:
+                logger.error(f"Failed to format tool outputs: {e}")
+                tool_outputs_str = ""
+
+            return self.user_token + tool_outputs_str
+
+    def parse_completion(self, completion_ids):
+        completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=False)
+
+        if completion_text.count("</think>") == 1:
+            reasoning, _, content = completion_text.partition("</think>")
+            if reasoning.startswith("<think>"):
+                reasoning = reasoning[len("<think>") :]
+            if content.endswith(self.eos_token):
+                content = content[: -len(self.eos_token)]
+            reasoning = reasoning.strip()
+            content = content.strip()
+        else:
+            reasoning = None
+            content = completion_text
+            if content.startswith("<think>"):
+                content = content[len("<think>") :]
+            if content.endswith(self.eos_token):
+                content = content[: -len(self.eos_token)]
+            content = content.strip()
+
+        tool_calls = self.tool_parser.parse(completion_text)
+
+        begin_pattern = re.escape(self.tool_parser.tool_call_begin)
+        end_pattern = re.escape(self.tool_parser.tool_call_end)
+        content = re.sub(f"{begin_pattern}.*?{end_pattern}", "", content, flags=re.DOTALL)
+
+        wrapper_begin_pattern = re.escape(self.tool_parser.tool_calls_begin)
+        wrapper_end_pattern = re.escape(self.tool_parser.tool_calls_end)
+        content = re.sub(f"{wrapper_begin_pattern}.*?{wrapper_end_pattern}", "", content, flags=re.DOTALL)
+
+        content = content.strip()
+
+        return {
+            "content": content,
+            "reasoning": reasoning,
+            "tool_calls": tool_calls,
+        }
+
+
+class QwenChatTemplateParser(ChatTemplateParser):
+    def __init__(self, tokenizer, disable_thinking=False):
+        super().__init__(tokenizer)
+        self.bos_token = tokenizer.bos_token
+        self.eos_token = tokenizer.eos_token
+        self.eot_token = "<|im_end|>\n"
+        self.system_token = "<|im_start|>system\n"
+        self.user_token = "<|im_start|>user\n"
+        self.assistant_token = "<|im_start|>assistant\n"
+        if disable_thinking:
+            self.assistant_token += "<think>\n\n</think>\n\n"
+        self.generation_prompt = self.assistant_token
+
+        from rllm.parser.tool_parser import QwenToolParser
+
+        self.tool_parser = QwenToolParser()
+
+    def parse(self, messages: list[dict], add_generation_prompt: bool = False, is_first_msg: bool = False, tools: list[Tool] = None, accumulate_reasoning: bool = False, **kwargs) -> str:
+        tools = tools or []
+        tools_prompt_str = ""
+        if tools:
+            try:
+                tool_schema_strs = []
+                for tool in tools:
+                    if isinstance(tool, Tool):
+                        tool_schema_str = json.dumps(tool.json)
+                    elif isinstance(tool, dict):
+                        tool_schema_str = json.dumps(tool)
+                    else:
+                        tool_schema_str = tool
+                    tool_schema_strs.append(tool_schema_str)
+                tools_schema_str = "\n".join(tool_schema_strs)
+                tools_prompt_str = self.tool_parser.get_tool_prompt(tools_schema_str)
+            except Exception as e:
+                logger.error(f"Failed to format tools: {e}")
+
+        result = ""
+
+        # if the first message is not a system message, add the system message
+        if is_first_msg and messages[0]["role"] != "system":
+            result += self.system_token + "You are Qwen, created by Alibaba Cloud. You are a helpful assistant." + tools_prompt_str + self.eot_token
+
+        for message in messages:
+            if message["role"] == "system":
+                result += self.parse_system(message, tools_prompt_str)
+            elif message["role"] == "user":
+                result += self.parse_user(message)
+            elif message["role"] == "assistant":
+                result += self.parse_assistant(message, accumulate_reasoning=accumulate_reasoning)
+            elif message["role"] == "tool":
+                result += self.parse_tool(message)
+            else:
+                raise NotImplementedError(f"Unsupported message role: {message['role']}")
+
+        if add_generation_prompt:
+            result += self.generation_prompt
+        return result
+
+    def parse_system(self, message, tools_prompt_str=""):
+        content = message["content"]
+
+        if "# Tools" not in content and tools_prompt_str:
+            content += tools_prompt_str
+
+        return self.system_token + content + self.eot_token
 
     def parse_user(self, message):
         return self.user_token + message["content"] + self.eot_token
 
-    def parse_assistant(self, message):
-        result = self.assistant_token + message["content"] + self.eot_token
-        return result
+    def parse_assistant(self, message, accumulate_reasoning=False):
+        content = (message.get("content", None) or "").strip()
+        reasoning = (message.get("reasoning", None) or "").strip()
+        tool_calls = message.get("tool_calls", None) or []
+
+        if not reasoning and not tool_calls:
+            return self.assistant_token + content + self.eot_token
+
+        else:
+            result = self.assistant_token
+
+            if reasoning and accumulate_reasoning:
+                result += "<think>\n" + reasoning + "\n</think>\n\n"
+
+            if content:
+                result += content
+                if tool_calls:
+                    result += "\n"
+
+            if tool_calls:
+                try:
+                    tool_calls_strs = []
+                    for tool_call in tool_calls:
+                        if isinstance(tool_call, ToolCall):
+                            tool_call_dict = tool_call.to_dict()
+                        elif isinstance(tool_call, dict) and "function" in tool_call:
+                            tool_call_dict = tool_call["function"]
+                        else:
+                            tool_call_dict = tool_call
+                        arguments_obj = tool_call_dict.get("arguments")
+                        if isinstance(arguments_obj, str):
+                            try:
+                                arguments_obj = json.loads(arguments_obj)
+                            except json.JSONDecodeError:
+                                pass
+                        tool_call_for_dump = dict(tool_call_dict)
+                        if arguments_obj is not None:
+                            tool_call_for_dump["arguments"] = arguments_obj
+                        tool_call_str = f"{self.tool_parser.tool_call_begin}\n{json.dumps(tool_call_for_dump)}\n{self.tool_parser.tool_call_end}"
+                        tool_calls_strs.append(tool_call_str)
+                    tool_calls_str = "\n".join(tool_calls_strs)
+                except Exception as e:
+                    logger.error(f"Failed to format tool calls: {e}")
+                    tool_calls_str = ""
+
+                result += tool_calls_str
+
+            result += self.eot_token
+            return result
 
     def parse_tool(self, message):
-        return self.user_token + self.tool_response_start_token + message["content"] + self.tool_response_end_token + self.eot_token
+        tool_outputs: list[ToolOutput | dict] = message.get("tool_outputs", [])
+
+        if not tool_outputs:
+            return self.user_token + self.tool_parser.tool_output_begin + "\n" + message["content"] + "\n" + self.tool_parser.tool_output_end + self.eot_token
+
+        else:
+            try:
+                tool_outputs_strs = []
+                for tool_output in tool_outputs:
+                    if not isinstance(tool_output, ToolOutput):
+                        tool_output = ToolOutput(**tool_output)
+                    tool_output_str = f"{self.tool_parser.tool_output_begin}\n{str(tool_output)}\n{self.tool_parser.tool_output_end}"
+                    tool_outputs_strs.append(tool_output_str)
+                tool_outputs_str = "\n".join(tool_outputs_strs)
+            except Exception as e:
+                logger.error(f"Failed to format tool outputs: {e}")
+                tool_outputs_str = ""
+
+            return self.user_token + tool_outputs_str + self.eot_token
+
+    def parse_completion(self, completion_ids):
+        completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=False)
+
+        if completion_text.count("</think>") == 1:
+            reasoning, _, content = completion_text.partition("</think>")
+            if reasoning.startswith("<think>"):
+                reasoning = reasoning[len("<think>") :]
+            if content.endswith(self.eos_token):
+                content = content[: -len(self.eos_token)]
+            if content.endswith(self.eot_token):
+                content = content[: -len(self.eot_token)]
+            reasoning = reasoning.strip()
+            content = content.strip()
+        else:
+            reasoning = None
+            content = completion_text
+            if content.startswith("<think>"):
+                content = content[len("<think>") :]
+            if content.endswith(self.eos_token):
+                content = content[: -len(self.eos_token)]
+            if content.endswith(self.eot_token):
+                content = content[: -len(self.eot_token)]
+            content = content.strip()
+
+        tool_calls = self.tool_parser.parse(content)
+
+        begin_pattern = re.escape(self.tool_parser.tool_call_begin)
+        end_pattern = re.escape(self.tool_parser.tool_call_end)
+        content = re.sub(f"{begin_pattern}.*?{end_pattern}", "", content, flags=re.DOTALL)
+        content = content.strip()
+
+        return {
+            "content": content,
+            "reasoning": reasoning,
+            "tool_calls": tool_calls,
+        }
 
 
 class LlamaChatTemplateParser(ChatTemplateParser):
@@ -260,11 +522,13 @@ class LlamaChatTemplateParser(ChatTemplateParser):
         self.eot_token = "<|eot_id|>"
         self.generation_prompt = self.assistant_token
 
-        # took tokens
+        # tool tokens
         self.tool_start_token = "<|start_header_id|>tool<|end_header_id|>\n\n"
         self.tool_end_token = "<|eot_id|>"
         self.tool_response_start_token = "<|start_header_id|>tool_response<|end_header_id|>\n\n"
         self.tool_response_end_token = "<|eot_id|>"
+
+        # TODO: add tool parser for llama
 
     def parse(self, messages, add_generation_prompt=False, is_first_msg=False, **kwargs) -> str:
         result = ""
@@ -300,167 +564,6 @@ class LlamaChatTemplateParser(ChatTemplateParser):
     def parse_tool(self, message):
         return self.user_token + self.tool_response_start_token + message["content"] + self.tool_response_end_token + self.eot_token
 
-
-class HarmonyChatTemplateParser(ChatTemplateParser):
-    """Parser for OpenAI Harmony format used by gpt-oss models.
-
-    The Harmony format supports 5 roles: system, developer, user, assistant, tool
-    Assistant messages can have channels: final, analysis, commentary
-    Tool calls use recipients and constraints for structured interactions.
-    """
-
-    def __init__(self, tokenizer, default_channel="final", reasoning_effort="high"):
-        super().__init__(tokenizer)
-        self.start_token = "<|start|>"
-        self.end_token = "<|end|>"
-        self.message_token = "<|message|>"
-        self.channel_token = "<|channel|>"
-        self.constrain_token = "<|constrain|>"
-        self.call_token = "<|call|>"
-        self.default_channel = default_channel
-        self.reasoning_effort = reasoning_effort
-        assert self.reasoning_effort in ["low", "medium", "high"], f"Invalid reasoning effort: {self.reasoning_effort}"
-
-        self._cached_date = self._get_current_date()
-
-    def _get_current_date(self):
-        """Get current date dynamically from API or fallback to system date."""
-        try:
-            # Try to get date from worldtimeapi.org
-            response = requests.get("http://worldtimeapi.org/api/timezone/Etc/UTC", timeout=2)
-            if response.status_code == 200:
-                data = response.json()
-                date_str = data["datetime"][:10]  # Extract YYYY-MM-DD
-                return date_str
-        except Exception:
-            pass
-
-        try:
-            # Fallback to timeapi.io
-            response = requests.get("http://timeapi.io/api/Time/current/zone?timeZone=UTC", timeout=2)
-            if response.status_code == 200:
-                data = response.json()
-                date_str = data.get("date", "")
-                # Handle different date formats
-                try:
-                    # Try MM/DD/YYYY format
-                    if "/" in date_str:
-                        date_obj = datetime.strptime(date_str, "%m/%d/%Y")
-                        return date_obj.strftime("%Y-%m-%d")
-                    # Try YYYY-MM-DD format
-                    elif "-" in date_str and len(date_str) == 10:
-                        datetime.strptime(date_str, "%Y-%m-%d")  # Validate format
-                        return date_str
-                except ValueError:
-                    pass
-        except Exception:
-            pass
-
-        try:
-            # Try another simple API
-            response = requests.get("http://date.jsontest.com/", timeout=2)
-            if response.status_code == 200:
-                data = response.json()
-                date_str = data.get("date", "")
-                # Usually returns MM-DD-YYYY format
-                if "-" in date_str:
-                    try:
-                        date_obj = datetime.strptime(date_str, "%m-%d-%Y")
-                        return date_obj.strftime("%Y-%m-%d")
-                    except ValueError:
-                        pass
-        except Exception:
-            pass
-
-        # Final fallback to system date
-        return datetime.now().strftime("%Y-%m-%d")
-
-    def _get_default_system_message(self):
-        """Get the default system message with cached current date."""
-        current_date = self._cached_date
-        return f"""You are ChatGPT, a large language model trained by OpenAI.
-Knowledge cutoff: 2024-06
-Current date: {current_date}
-
-Reasoning: {self.reasoning_effort}
-
-# Valid channels: analysis, commentary, final. Channel must be included for every message."""
-
-    def parse(self, messages, add_generation_prompt=False, is_first_msg=False, **kwargs) -> str:
-        result = ""
-
-        # Always add default system message first when it's the first message
-        if is_first_msg:
-            result += self._format_message("system", self._get_default_system_message())
-            result += self._format_message("developer", "")
-
-        for message in messages:
-            if message["role"] == "system":
-                result += self.parse_system(message)
-            elif message["role"] == "developer":
-                result += self.parse_developer(message)
-            elif message["role"] == "user":
-                result += self.parse_user(message)
-            elif message["role"] == "assistant":
-                result += self.parse_assistant(message)
-            elif message["role"] == "tool":
-                result += self.parse_tool(message)
-            else:
-                raise NotImplementedError(f"Unsupported message role: {message['role']}")
-
-        if add_generation_prompt:
-            result += self.generation_prompt
-        return result
-
-    def _format_message(self, role, content, channel=None, recipient=None, constraint=None, is_call=False):
-        """Helper method to format messages according to Harmony format."""
-        result = self.start_token + role
-
-        if recipient:
-            result += f" to={recipient}"
-
-        if channel:
-            result += self.channel_token + channel
-
-        if constraint:
-            result += f" {self.constrain_token}{constraint}"
-
-        result += self.message_token + content
-
-        if is_call:
-            result += self.call_token
-        else:
-            result += self.end_token
-
-        return result
-
-    def parse_system(self, message):
-        return self._format_message("system", message["content"])
-
-    def parse_developer(self, message):
-        return self._format_message("developer", message["content"])
-
-    def parse_user(self, message):
-        return self._format_message("user", message["content"])
-
-    def parse_assistant(self, message):
-        # Extract harmony-specific metadata from message
-        channel = message.get("channel", self.default_channel)
-        recipient = message.get("recipient")
-        constraint = message.get("constraint")
-        is_call = message.get("is_call", False)
-
-        return self._format_message("assistant", message["content"], channel=channel, recipient=recipient, constraint=constraint, is_call=is_call)
-
-    def parse_tool(self, message):
-        # Tool messages format: <|start|>{tool_name} to=assistant<|channel|>commentary<|message|>{content}<|end|>
-        tool_name = message.get("name", "tool")
-        channel = message.get("channel", "commentary")
-        recipient = message.get("recipient", "assistant")
-
-        return self._format_message(tool_name, message["content"], channel=channel, recipient=recipient)
-
-    @property
-    def generation_prompt(self):
-        """Generate the prompt to start assistant generation."""
-        return f"{self.start_token}assistant{self.channel_token}{self.default_channel}{self.message_token}"
+    def parse_completion(self, completion_ids):
+        # TODO: add parse_completion for llama
+        raise NotImplementedError("LLamaChatTemplateParser does not support parse_completion")

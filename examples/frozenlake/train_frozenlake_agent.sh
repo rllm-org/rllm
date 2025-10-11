@@ -52,7 +52,7 @@ python3 -m examples.frozenlake.train_frozenlake_agent \
     trainer.logger=['console','wandb'] \
     trainer.project_name='rllm-agent' \
     trainer.experiment_name='frozenlake-agent-0.6B' \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=40 \

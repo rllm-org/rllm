@@ -644,44 +644,55 @@ class AgentPPOTrainer(RayPPOTrainer):
             for chat_completion in chat_completions:
                 f.write(json.dumps(chat_completion) + "\n")
 
-        # reverse the list and create tensors, pad, then flip to achieve left padding
+        # left pad prompts
+        max_prompt_length = self.config.data.max_prompt_length
         prompts_batch = torch.nn.utils.rnn.pad_sequence(
             [torch.flip(i, dims=[0]) for i in all_initial_tokens_list],
             batch_first=True,
             padding_value=self.tokenizer.pad_token_id,
         ).flip(dims=[1])
+        prompts_batch = pad_sequence_to_length(prompts_batch, max_prompt_length, self.tokenizer.pad_token_id, left_pad=True)
+        prompts_batch = prompts_batch[:, -max_prompt_length:]
 
-        prompts_batch = pad_sequence_to_length(prompts_batch, self.config.data.max_prompt_length, self.tokenizer.pad_token_id, left_pad=True)
-
+        # right pad responses
+        max_response_length = self.config.data.max_response_length
         response_batch = torch.nn.utils.rnn.pad_sequence(
             all_response_tokens_list,
             batch_first=True,
             padding_value=self.tokenizer.pad_token_id,
         )
-
-        max_response_length = self.config.data.max_response_length
         response_batch = pad_sequence_to_length(response_batch, max_response_length, self.tokenizer.pad_token_id, left_pad=False)
+        response_batch = response_batch[:, :max_response_length]
 
-        traj_mask = torch.nn.utils.rnn.pad_sequence(all_masks_list, batch_first=True, padding_value=0)
-        traj_mask = pad_sequence_to_length(traj_mask, max_response_length, 0, left_pad=False)
-
+        # input_ids
         trajectory_batch = torch.concat([prompts_batch, response_batch], dim=1)
 
-        attention_mask = torch.where(trajectory_batch != self.tokenizer.pad_token_id, 1, 0)
+        # attention mask
+        prompt_lengths = torch.as_tensor([len(t) for t in all_initial_tokens_list]).clamp_(min=0, max=max_prompt_length)
+        prompt_pos = torch.arange(max_prompt_length).unsqueeze(0)
+        prompt_mask = prompt_pos >= (max_prompt_length - prompt_lengths.unsqueeze(1))
 
-        # Compute position_ids
+        response_lengths = torch.as_tensor([len(t) for t in all_response_tokens_list]).clamp_(min=0, max=max_response_length)
+        resp_pos = torch.arange(max_response_length).unsqueeze(0)
+        response_mask = resp_pos < response_lengths.unsqueeze(1)
+
+        attention_mask = torch.cat([prompt_mask, response_mask], dim=1).long()
+
+        # loss mask
+        traj_mask = torch.nn.utils.rnn.pad_sequence(all_masks_list, batch_first=True, padding_value=0)
+        traj_mask = pad_sequence_to_length(traj_mask, max_response_length, 0, left_pad=False)
+        traj_mask = traj_mask[:, :max_response_length]
+
+        # position_ids
         position_ids = (torch.cumsum(attention_mask, dim=1) - 1) * attention_mask
 
-        # Place all rewards to last response token
+        # Place all rewards to last response token (e.g., eos token)
         score_batch = torch.zeros_like(response_batch, dtype=torch.float32)
 
-        prompt_length = prompts_batch.shape[1]
-        valid_response_length_sequences = attention_mask[:, prompt_length:].sum(dim=-1)
-
-        for i, traj_score in enumerate(traj_scores):
-            last_valid_idx = valid_response_length_sequences[i] - 1
-            if last_valid_idx >= 0 and last_valid_idx < score_batch.shape[1]:
-                score_batch[i, last_valid_idx] = traj_score
+        for i, score in enumerate(traj_scores):
+            resp_len = response_lengths[i]
+            if resp_len > 0 and resp_len <= score_batch.shape[1]:
+                score_batch[i, resp_len - 1] = score
 
         tensor_batch = {
             "input_ids": trajectory_batch,
@@ -851,48 +862,58 @@ class AgentPPOTrainer(RayPPOTrainer):
             all_steps_step_num.extend([len(episode_steps) for _ in range(len(episode_steps))])
             all_steps_step_ids.extend([f"{uids[idx]}_step{i}" for i in range(len(episode_steps))])
 
-        # Convert all steps into token tensors
-        # reverse the list and create tensors, pad, then flip to achieve left padding
+        # left pad prompts
+        max_prompt_length = self.config.data.max_prompt_length
         prompts_batch = torch.nn.utils.rnn.pad_sequence(
             [torch.flip(i, dims=[0]) for i in all_prompts_list],
             batch_first=True,
             padding_value=self.tokenizer.pad_token_id,
         ).flip(dims=[1])
+        prompts_batch = pad_sequence_to_length(prompts_batch, max_prompt_length, self.tokenizer.pad_token_id, left_pad=True)
+        prompts_batch = prompts_batch[:, -max_prompt_length:]
 
-        prompts_batch = pad_sequence_to_length(prompts_batch, self.config.data.max_prompt_length, self.tokenizer.pad_token_id, left_pad=True)
-
+        # right pad responses
+        max_response_length = self.config.data.max_response_length
         response_batch = torch.nn.utils.rnn.pad_sequence(
             all_responses_list,
             batch_first=True,
             padding_value=self.tokenizer.pad_token_id,
         )
-
-        max_response_length = self.config.data.max_response_length
         response_batch = pad_sequence_to_length(response_batch, max_response_length, self.tokenizer.pad_token_id, left_pad=False)
+        response_batch = response_batch[:, :max_response_length]
 
+        # input_ids
         complete_step_batch = torch.concat([prompts_batch, response_batch], dim=1)
-        attention_mask = torch.where(complete_step_batch != self.tokenizer.pad_token_id, 1, 0)
+
+        # attention mask
+        prompt_lengths = torch.as_tensor([len(t) for t in all_prompts_list]).clamp_(min=0, max=max_prompt_length)
+        prompt_pos = torch.arange(max_prompt_length).unsqueeze(0)
+        prompt_mask = prompt_pos >= (max_prompt_length - prompt_lengths.unsqueeze(1))
+
+        response_lengths = torch.as_tensor([len(t) for t in all_responses_list]).clamp_(min=0, max=max_response_length)
+        resp_pos = torch.arange(max_response_length).unsqueeze(0)
+        response_mask = resp_pos < response_lengths.unsqueeze(1)
+
+        attention_mask = torch.cat([prompt_mask, response_mask], dim=1).long()
+
+        # loss mask
+        traj_mask = attention_mask[:, max_prompt_length:]
+
+        # position_ids
         position_ids = (torch.cumsum(attention_mask, dim=1) - 1) * attention_mask
 
-        # same as regular repsonse_mask, padded tensors will have this zeroed out
-        traj_mask = torch.where(response_batch != self.tokenizer.pad_token_id, 1, 0)
-
-        # Place all rewards to last response token of the last_step response
+        # Place all rewards to last response token of each step
         score_batch = torch.zeros_like(response_batch, dtype=torch.float32)
         mc_return_batch = torch.zeros_like(response_batch, dtype=torch.float32)
 
-        prompt_length = prompts_batch.shape[1]
-        valid_response_length_sequences = attention_mask[:, prompt_length:].sum(dim=-1)
-
-        # reward is given for last token of every step for logging purposes, but only last steps will be used to calculate advantage
         step_index = 0
         for i, traj_score in enumerate(training_rewards):
             step_num = step_numbers[i] + 1  # since step_numbers is 0 indexed
             for _ in range(step_num):
-                last_valid_idx = valid_response_length_sequences[step_index] - 1
-                if last_valid_idx >= 0 and last_valid_idx < score_batch.shape[1]:
-                    score_batch[step_index, last_valid_idx] = traj_score
-                    mc_return_batch[step_index, last_valid_idx] = all_mc_returns[step_index]
+                resp_len = response_lengths[step_index]
+                if resp_len > 0 and resp_len <= score_batch.shape[1]:
+                    score_batch[step_index, resp_len - 1] = traj_score
+                    mc_return_batch[step_index, resp_len - 1] = all_mc_returns[step_index]
                 step_index += 1
         assert step_index == score_batch.shape[0], f"Number of total steps used should equal to batch size, but got {step_index} and {score_batch.shape[0]}"
 
@@ -1002,3 +1023,8 @@ class AgentPPOTrainer(RayPPOTrainer):
             batch.non_tensor_batch["is_pad_step"][idx] = True
 
         return batch
+
+    def shutdown(self):
+        if hasattr(self, "agent_execution_engine") and self.agent_execution_engine is not None:
+            self.agent_execution_engine.shutdown()
+            self.agent_execution_engine = None
