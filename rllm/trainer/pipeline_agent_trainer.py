@@ -4,7 +4,7 @@ import ray
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 
 from rllm.data import Dataset
-from rllm.trainer.verl.train_workflow_fireworks import PipelineTaskRunner
+from rllm.trainer.verl.train_workflow_pipeline import PipelineTaskRunner
 
 
 class PipelineAgentTrainer:
