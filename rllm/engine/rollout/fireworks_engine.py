@@ -64,6 +64,7 @@ class FireworksEngine(OpenAIEngine):
         upload_model_command = f"firectl create model {fireworks_model_id} {lora_adapter_path} --base-model {base_model} -a {account_id} --output json"
         print(f"running command: {upload_model_command}")
         upload_model_output = os.popen(upload_model_command).read()
+        print("Fireworks upload model message: ", upload_model_output)
         upload_model_output = json.loads(upload_model_output)
 
         assert fireworks_model_id in upload_model_output.get("name")

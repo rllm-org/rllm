@@ -10,18 +10,18 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     data.train_batch_size=16 \
     +trainer.n_training_gpus_per_node=8 \
     data.max_prompt_length=4096 \
-    data.max_response_length=4096 \
+    data.max_response_length=16384 \
     actor_rollout_ref.model.lora_rank=32 \
     actor_rollout_ref.model.lora_alpha=32 \
     actor_rollout_ref.rollout.load_format=safetensors \
-    actor_rollout_ref.model.target_modules=[q_proj,k_proj,v_proj,o_proj] \
-    actor_rollout_ref.model.path=Qwen/Qwen3-30B-A3B-Instruct-2507 \
+    actor_rollout_ref.model.target_modules=all-linear \
+    actor_rollout_ref.model.path=Qwen/Qwen3-8B \
     actor_rollout_ref.actor.optim.lr=3e-5 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=32768 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=8 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=16 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
@@ -56,17 +56,17 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='solver-judge-workflow' \
-    trainer.experiment_name='countdown-solver-judge-30b' \
+    trainer.experiment_name='countdown-solver-judge-8b' \
     trainer.max_actor_ckpt_to_keep=2 \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=1 \
-    trainer.test_freq=25 \
+    trainer.test_freq=10 \
     trainer.default_hdfs_dir=null \
     trainer.total_epochs=100 \
     rllm.workflow.use_workflow=True \
-    fireworks.deployment_id=test-hot-reload-qwen-30b-3 \
-    fireworks.model_id_prefix=test-qwen-30b-solver-judge
+    fireworks.deployment_id=test-hot-reload-qwen-8b-3 \
+    fireworks.model_id_prefix=test-qwen-8b-solver-judge
 
 pkill -9 -f 'ray::WorkerDict'

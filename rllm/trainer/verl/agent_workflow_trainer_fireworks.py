@@ -101,7 +101,11 @@ class FireworksAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
         fireworks_engine = FireworksEngine(
             tokenizer=self.tokenizer,
             deployment_id=self.config.fireworks.deployment_id,
-            sampling_params={"temperature": 0.6, "top_p": 0.95, "max_tokens": 2048},
+            sampling_params={
+                "temperature": 0.6,
+                "top_p": 0.95,
+                "max_tokens": self.config.data.max_prompt_length + self.config.data.max_response_length,
+            },
         )
         self.fireworks_engine = fireworks_engine
         self.agent_execution_engine = AgentWorkflowEngine(
