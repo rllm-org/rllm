@@ -8,7 +8,7 @@ export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 python3 -m examples.solver_judge.train_solver_judge_flow \
     data.train_batch_size=16 \
-    +trainer.n_training_gpus_per_node=4 \
+    +trainer.n_training_gpus_per_node=8 \
     data.max_prompt_length=4096 \
     data.max_response_length=4096 \
     actor_rollout_ref.model.lora_rank=32 \
@@ -32,7 +32,7 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=8 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.mode="async" \
     actor_rollout_ref.rollout.enforce_eager=False \
@@ -59,7 +59,7 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     trainer.experiment_name='countdown-solver-judge-8b' \
     trainer.max_actor_ckpt_to_keep=2 \
     trainer.val_before_train=False \
-    trainer.n_gpus_per_node=4 \
+    trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=1 \
     trainer.test_freq=25 \
