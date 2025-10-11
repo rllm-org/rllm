@@ -67,7 +67,11 @@ Please provide your evaluation and rating."""
 
             messages = [{"role": "user", "content": prompt}]
 
-            response = await self.judge_engine.get_model_response(messages=messages, temperature=0.1, max_tokens=1000)
+            # Use appropriate token parameter based on model
+            if "o3" in self.judge_engine.model.lower() or "o1" in self.judge_engine.model.lower():
+                response = await self.judge_engine.get_model_response(messages=messages, max_completion_tokens=1000)
+            else:
+                response = await self.judge_engine.get_model_response(messages=messages, temperature=0.1, max_tokens=1000)
 
             judgment_text = response.text if hasattr(response, "text") else str(response)
 
@@ -344,11 +348,17 @@ def setup_rollout_engine(args, model_role="evaluation") -> OpenAIEngine:
     # For evaluation, DeepResearch handles all sampling params internally
     # For judge, we need basic params
     if model_role == "judge":
-        sampling_params = {
-            "temperature": 0.1,
-            "top_p": 0.95,
-            "max_tokens": 1000,
-        }
+        # Check if model is O3/O1 (use model_name which is already determined above)
+        if "o3" in model_name.lower() or "o1" in model_name.lower():
+            sampling_params = {
+                "max_completion_tokens": 1000,
+            }
+        else:
+            sampling_params = {
+                "temperature": 0.1,
+                "top_p": 0.95,
+                "max_tokens": 1000,
+            }
     else:
         # Don't set default sampling_params for evaluation
         # DeepResearch will handle model-specific params

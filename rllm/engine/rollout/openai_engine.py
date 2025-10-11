@@ -43,12 +43,19 @@ class OpenAIEngine(RolloutEngine):
         sampling_params = self.sampling_params.copy()
         sampling_params.update(kwargs)
 
-        max_tokens = sampling_params.pop("max_tokens", sampling_params.pop("max_new_tokens", self.max_response_length))
+        # Support max_completion_tokens (O3) or max_tokens (GPT-4) or max_new_tokens with fallback
+        # Check which parameter was provided to determine API parameter name
+        if "max_completion_tokens" in sampling_params:
+            max_completion_tokens = sampling_params.pop("max_completion_tokens")
+            create_params = {"max_completion_tokens": max_completion_tokens}
+        else:
+            max_tokens = sampling_params.pop("max_tokens", sampling_params.pop("max_new_tokens", self.max_response_length))
+            create_params = {"max_tokens": max_tokens}
 
         retries = self.api_retries
         while retries > 0:
             try:
-                response = await self.client.chat.completions.create(model=self.model, messages=messages, timeout=3600, max_tokens=max_tokens, **sampling_params)
+                response = await self.client.chat.completions.create(model=self.model, messages=messages, timeout=3600, **create_params, **sampling_params)
 
                 content = response.choices[0].message.content
                 reasoning = response.choices[0].message.reasoning if hasattr(response.choices[0].message, "reasoning") and isinstance(response.choices[0].message.reasoning, str) else ""
@@ -105,16 +112,22 @@ class OpenAIEngine(RolloutEngine):
         if enforce_max_prompt_length and (prompt_length > self.max_prompt_length or prompt_length > self.max_model_length):
             raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
 
-        max_tokens = sampling_params.pop("max_tokens", sampling_params.pop("max_new_tokens", self.max_response_length))
-        remaining_tokens = self.max_model_length - prompt_length
-        if remaining_tokens <= max_tokens:
-            max_tokens = remaining_tokens
-            print(f"Warning: Decreasing max_tokens to {max_tokens} to stay within max_model_length")
+        # Support max_completion_tokens (O3) or max_tokens (GPT-4) or max_new_tokens with fallback
+        if "max_completion_tokens" in sampling_params:
+            max_completion_tokens = sampling_params.pop("max_completion_tokens")
+            create_params = {"max_completion_tokens": max_completion_tokens}
+        else:
+            max_tokens = sampling_params.pop("max_tokens", sampling_params.pop("max_new_tokens", self.max_response_length))
+            remaining_tokens = self.max_model_length - prompt_length
+            if remaining_tokens <= max_tokens:
+                max_tokens = remaining_tokens
+                print(f"Warning: Decreasing max_tokens to {max_tokens} to stay within max_model_length")
+            create_params = {"max_tokens": max_tokens}
 
         retries = self.api_retries
         while retries > 0:
             try:
-                response = await self.client.completions.create(model=self.model, prompt=prompt, timeout=3600, max_tokens=max_tokens, **sampling_params)
+                response = await self.client.completions.create(model=self.model, prompt=prompt, timeout=3600, **create_params, **sampling_params)
 
                 text = response.choices[0].text
                 completion_ids = self.tokenizer.encode(text, add_special_tokens=False)
