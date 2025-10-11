@@ -54,8 +54,11 @@ class OpenAIEngine(RolloutEngine):
                 reasoning = response.choices[0].message.reasoning if hasattr(response.choices[0].message, "reasoning") and isinstance(response.choices[0].message.reasoning, str) else ""
                 tool_calls = response.choices[0].message.tool_calls if hasattr(response.choices[0].message, "tool_calls") and isinstance(response.choices[0].message.tool_calls, list) else []
 
+                # Build text with reasoning if available, otherwise use content
                 if reasoning:
-                    text = f"{THOUGHT_DELIMITER_START}\n{reasoning}\n{THOUGHT_DELIMITER_END}\n\n{content}"  # best guess
+                    text = f"{THOUGHT_DELIMITER_START}\n{reasoning}\n{THOUGHT_DELIMITER_END}\n\n{content}"
+                else:
+                    text = content
 
                 prompt_length = response.usage.prompt_tokens
                 completion_length = response.usage.completion_tokens
