@@ -9,10 +9,11 @@ Now supports both:
 - OpenAI native function calling (for o3, o3-mini, etc.)
 """
 
-import os
-import json
 import http.client
+import json
+import os
 from abc import ABC, abstractmethod
+
 from rllm.tools.tool_base import Tool as RLLMTool
 
 
@@ -40,8 +41,7 @@ class DeepResearchTool(RLLMTool, ABC):
             "function": {
                 "name": name,
                 "description": description,
-                "parameters": parameters
-                or {"type": "object", "properties": {}, "required": []},
+                "parameters": parameters or {"type": "object", "properties": {}, "required": []},
             },
         }
 
@@ -118,21 +118,12 @@ class SearchTool(DeepResearchTool):
                         entry = f"{idx}. [{title}]({link})\n   {snippet}"
                         web_snippets.append(entry)
 
-                    result = (
-                        f"Google search for '{q}' found {len(web_snippets)} results:\n\n"
-                        + "\n\n".join(web_snippets)
-                    )
+                    result = f"Google search for '{q}' found {len(web_snippets)} results:\n\n" + "\n\n".join(web_snippets)
                     all_results.append(result)
                 else:
-                    all_results.append(
-                        f"Google search error for '{q}': {response.status_code}"
-                    )
+                    all_results.append(f"Google search error for '{q}': {response.status_code}")
 
-            return (
-                "\n=======\n".join(all_results)
-                if len(all_results) > 1
-                else all_results[0]
-            )
+            return "\n=======\n".join(all_results) if len(all_results) > 1 else all_results[0]
 
         except Exception as e:
             return f"Google search fallback error: {e}"
@@ -183,13 +174,9 @@ Placeholder results for '{query}'..."""
 
                 # Localize for Chinese queries
                 if self.contains_chinese(q):
-                    payload = json.dumps(
-                        {"q": q, "location": "China", "gl": "cn", "hl": "zh-cn"}
-                    )
+                    payload = json.dumps({"q": q, "location": "China", "gl": "cn", "hl": "zh-cn"})
                 else:
-                    payload = json.dumps(
-                        {"q": q, "location": "United States", "gl": "us", "hl": "en"}
-                    )
+                    payload = json.dumps({"q": q, "location": "United States", "gl": "us", "hl": "en"})
 
                 headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
 
@@ -220,18 +207,13 @@ Placeholder results for '{query}'..."""
                     entry = f"{idx}. [{page.get('title', 'Untitled')}]({page.get('link', '')}){date_published}{source}{snippet}"
                     web_snippets.append(entry)
 
-                content = (
-                    f"Google search for '{q}' found {len(web_snippets)} results:\n\n"
-                    + "\n\n".join(web_snippets)
-                )
+                content = f"Google search for '{q}' found {len(web_snippets)} results:\n\n" + "\n\n".join(web_snippets)
                 all_results.append(content)
 
             except Exception as e:
                 all_results.append(f"Search error for '{q}': {e}")
 
-        return (
-            "\n=======\n".join(all_results) if len(all_results) > 1 else all_results[0]
-        )
+        return "\n=======\n".join(all_results) if len(all_results) > 1 else all_results[0]
 
 
 class ScholarTool(DeepResearchTool):
@@ -308,17 +290,13 @@ To enable Google Scholar search, configure SERPER_API_KEY in your .env file."""
 
                     papers.append(entry)
 
-                result_text = f"Google Scholar search for '{q}':\n\n" + "\n\n".join(
-                    papers
-                )
+                result_text = f"Google Scholar search for '{q}':\n\n" + "\n\n".join(papers)
                 all_results.append(result_text)
 
             except Exception as e:
                 all_results.append(f"Scholar search error for '{q}': {e}")
 
-        return (
-            "\n=======\n".join(all_results) if len(all_results) > 1 else all_results[0]
-        )
+        return "\n=======\n".join(all_results) if len(all_results) > 1 else all_results[0]
 
 
 class VisitTool(DeepResearchTool):
@@ -385,9 +363,7 @@ Then the tool will fetch and parse webpage content."""
                 soup = BeautifulSoup(response.text, "html.parser")
 
                 # Remove unwanted elements
-                for element in soup(
-                    ["script", "style", "nav", "footer", "header", "aside"]
-                ):
+                for element in soup(["script", "style", "nav", "footer", "header", "aside"]):
                     element.decompose()
 
                 # Extract title
@@ -487,19 +463,19 @@ class FileParserTool(DeepResearchTool):
                     ".c",
                     ".h",
                 ]:
-                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    with open(file_path, encoding="utf-8", errors="ignore") as f:
                         content = f.read()
 
                 # JSON files
                 elif file_ext == ".json":
-                    with open(file_path, "r", encoding="utf-8") as f:
+                    with open(file_path, encoding="utf-8") as f:
                         data = json.load(f)
                         content = json.dumps(data, indent=2, ensure_ascii=False)
 
                 # CSV files
                 elif file_ext == ".csv":
                     rows = []
-                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    with open(file_path, encoding="utf-8", errors="ignore") as f:
                         reader = csv.reader(f)
                         for i, row in enumerate(reader):
                             if i >= 100:
@@ -543,9 +519,7 @@ class FileParserTool(DeepResearchTool):
                 # Default: try as text
                 else:
                     try:
-                        with open(
-                            file_path, "r", encoding="utf-8", errors="ignore"
-                        ) as f:
+                        with open(file_path, encoding="utf-8", errors="ignore") as f:
                             content = f.read()
                     except Exception:
                         content = f"[Cannot parse file type: {file_ext}]"
@@ -572,9 +546,7 @@ class PythonInterpreterTool(DeepResearchTool):
             description="Execute Python code for calculations and analysis",
             parameters={
                 "type": "object",
-                "properties": {
-                    "code": {"type": "string", "description": "Python code to execute"}
-                },
+                "properties": {"code": {"type": "string", "description": "Python code to execute"}},
                 "required": ["code"],
             },
         )
@@ -660,9 +632,7 @@ class PythonInterpreterTool(DeepResearchTool):
                 "matplotlib.pyplot",
             ]
             # Check if the module or its parent is allowed
-            if name in safe_modules or any(
-                name.startswith(m + ".") for m in safe_modules
-            ):
+            if name in safe_modules or any(name.startswith(m + ".") for m in safe_modules):
                 return __import__(name, *args, **kwargs)
             else:
                 raise ImportError(f"Module '{name}' is not allowed for safety reasons")
@@ -748,11 +718,7 @@ class PythonInterpreterTool(DeepResearchTool):
                 elif stdout_content:
                     return f"[Output]\n{stdout_content.rstrip()}"
                 else:
-                    meaningful_vars = {
-                        k: v
-                        for k, v in local_vars.items()
-                        if not k.startswith("_") and k not in allowed_modules
-                    }
+                    meaningful_vars = {k: v for k, v in local_vars.items() if not k.startswith("_") and k not in allowed_modules}
                     if meaningful_vars:
                         return f"[Variables]\n{meaningful_vars}"
                     else:

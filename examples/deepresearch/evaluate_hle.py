@@ -7,21 +7,21 @@ DeepResearch integration and AgentWorkflowEngine.
 Original: https://github.com/Alibaba-NLP/DeepResearch/blob/main/evaluation/evaluate_hle_official.py
 """
 
+import argparse
 import asyncio
 import json
 import os
-import argparse
-from datetime import datetime
-from typing import Dict, List, Any
 import statistics
+from datetime import datetime
+from typing import Any
 
-from dotenv import find_dotenv, load_dotenv
 from datasets import load_dataset
-
-from rllm.engine.rollout import OpenAIEngine
-from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
-from deepresearch_workflow import DeepResearchWorkflow
 from deepresearch_tools import get_all_tools
+from deepresearch_workflow import DeepResearchWorkflow
+from dotenv import find_dotenv, load_dotenv
+
+from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
+from rllm.engine.rollout import OpenAIEngine
 
 
 class HLEJudge:
@@ -46,9 +46,7 @@ Here are the details:
 
 Please provide your evaluation and rating."""
 
-    async def judge_response(
-        self, question: str, reference_answer: str, assistant_answer: str
-    ) -> Dict[str, Any]:
+    async def judge_response(self, question: str, reference_answer: str, assistant_answer: str) -> dict[str, Any]:
         """
         Judge a single response.
 
@@ -69,13 +67,9 @@ Please provide your evaluation and rating."""
 
             messages = [{"role": "user", "content": prompt}]
 
-            response = await self.judge_engine.get_model_response(
-                messages=messages, temperature=0.1, max_tokens=1000
-            )
+            response = await self.judge_engine.get_model_response(messages=messages, temperature=0.1, max_tokens=1000)
 
-            judgment_text = (
-                response.text if hasattr(response, "text") else str(response)
-            )
+            judgment_text = response.text if hasattr(response, "text") else str(response)
 
             # Extract rating
             rating = 0
@@ -100,7 +94,7 @@ Please provide your evaluation and rating."""
             return {"judgment": f"Judge error: {e}", "rating": 0, "is_correct": False}
 
 
-async def evaluate_hle_dataset(dataset_path: str, args) -> Dict[str, Any]:
+async def evaluate_hle_dataset(dataset_path: str, args) -> dict[str, Any]:
     """
     Evaluate DeepResearch on HLE dataset.
 
@@ -128,7 +122,7 @@ async def evaluate_hle_dataset(dataset_path: str, args) -> Dict[str, Any]:
         else:
             ds = load_dataset(dataset_name, split=split_name)
 
-        def extract_qa(example: Dict[str, Any]) -> Dict[str, str]:
+        def extract_qa(example: dict[str, Any]) -> dict[str, str]:
             q = ""
             a = ""
             if "question" in example:
@@ -149,12 +143,7 @@ async def evaluate_hle_dataset(dataset_path: str, args) -> Dict[str, Any]:
 
             if "choices" in example and a:
                 try:
-                    choices_text = "\n".join(
-                        [
-                            f"{i + 1}. {choice}"
-                            for i, choice in enumerate(example["choices"])
-                        ]
-                    )
+                    choices_text = "\n".join([f"{i + 1}. {choice}" for i, choice in enumerate(example["choices"])])
                     q = f"{q}\n\nChoices:\n{choices_text}"
                 except Exception:
                     pass
@@ -174,7 +163,7 @@ async def evaluate_hle_dataset(dataset_path: str, args) -> Dict[str, Any]:
                 ]:
                     if key in example and example[key]:
                         val = example[key]
-                        if isinstance(val, (list, tuple)):
+                        if isinstance(val, list | tuple):
                             val_str = "\n".join([str(v) for v in val][:5])
                         else:
                             val_str = str(val)
@@ -184,11 +173,7 @@ async def evaluate_hle_dataset(dataset_path: str, args) -> Dict[str, Any]:
                 # URLs
                 urls = []
                 if "urls" in example and example["urls"]:
-                    urls = (
-                        example["urls"]
-                        if isinstance(example["urls"], (list, tuple))
-                        else [example["urls"]]
-                    )
+                    urls = example["urls"] if isinstance(example["urls"], list | tuple) else [example["urls"]]
                 elif "url" in example and example["url"]:
                     urls = [example["url"]]
                 if urls:
@@ -199,11 +184,7 @@ async def evaluate_hle_dataset(dataset_path: str, args) -> Dict[str, Any]:
                 file_paths = []
                 for key in ["file_paths", "file_path", "files"]:
                     if key in example and example[key]:
-                        vals = (
-                            example[key]
-                            if isinstance(example[key], (list, tuple))
-                            else [example[key]]
-                        )
+                        vals = example[key] if isinstance(example[key], list | tuple) else [example[key]]
                         file_paths.extend([str(v) for v in vals])
                 if file_paths:
                     file_lines = "\n".join([f"- {p}" for p in file_paths[:10]])
@@ -213,11 +194,7 @@ async def evaluate_hle_dataset(dataset_path: str, args) -> Dict[str, Any]:
                 images = []
                 for key in ["images", "image"]:
                     if key in example and example[key]:
-                        vals = (
-                            example[key]
-                            if isinstance(example[key], (list, tuple))
-                            else [example[key]]
-                        )
+                        vals = example[key] if isinstance(example[key], list | tuple) else [example[key]]
                         images.extend([str(v) for v in vals])
                 if images:
                     img_lines = "\n".join([f"- {p}" for p in images[:10]])
@@ -305,9 +282,7 @@ async def evaluate_hle_dataset(dataset_path: str, args) -> Dict[str, Any]:
                     "episode_id": episode.id,
                     "is_correct": episode.is_correct,
                     "rounds": episode.metrics.get("rounds", 0),
-                    "termination_reason": episode.termination_reason.value
-                    if episode.termination_reason
-                    else "unknown",
+                    "termination_reason": episode.termination_reason.value if episode.termination_reason else "unknown",
                 }
             )
 
@@ -356,9 +331,7 @@ def setup_rollout_engine(args, model_role="evaluation") -> OpenAIEngine:
     elif together_api_key and model_role == "evaluation":
         api_key = together_api_key
         base_url = args.base_url or "https://api.together.xyz/v1"
-        model_name = args.model or os.getenv(
-            "TOGETHER_AI_MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct-Turbo"
-        )
+        model_name = args.model or os.getenv("TOGETHER_AI_MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct-Turbo")
         print(f"🔧 Using Together AI for {model_role}")
     elif openai_api_key:
         api_key = openai_api_key
@@ -366,9 +339,7 @@ def setup_rollout_engine(args, model_role="evaluation") -> OpenAIEngine:
         model_name = args.model or "gpt-4o"
         print(f"🔧 Using OpenAI for {model_role}")
     else:
-        raise ValueError(
-            "❌ API key required. Please set OPENAI_API_KEY or TOGETHER_AI_API_KEY in .env file"
-        )
+        raise ValueError("❌ API key required. Please set OPENAI_API_KEY or TOGETHER_AI_API_KEY in .env file")
 
     return OpenAIEngine(
         model=model_name,
@@ -383,7 +354,7 @@ def setup_rollout_engine(args, model_role="evaluation") -> OpenAIEngine:
     )
 
 
-def calculate_hle_metrics(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+def calculate_hle_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
     """Calculate HLE evaluation metrics."""
 
     total = len(results)
@@ -419,7 +390,7 @@ def calculate_hle_metrics(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def save_hle_results(results: List[Dict], metrics: Dict, args):
+def save_hle_results(results: list[dict], metrics: dict, args):
     """Save HLE evaluation results."""
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -454,7 +425,7 @@ def save_hle_results(results: List[Dict], metrics: Dict, args):
     print(f"📊 Metrics saved to: {metrics_file}")
 
 
-def print_hle_summary(metrics: Dict[str, Any]):
+def print_hle_summary(metrics: dict[str, Any]):
     """Print HLE evaluation summary."""
 
     print("\n" + "=" * 60)
@@ -480,9 +451,7 @@ def print_hle_summary(metrics: Dict[str, Any]):
 
 
 async def main():
-    parser = argparse.ArgumentParser(
-        description="Run HLE evaluation with DeepResearch + rLLM"
-    )
+    parser = argparse.ArgumentParser(description="Run HLE evaluation with DeepResearch + rLLM")
 
     # Dataset options (HF only)
     parser.add_argument(
@@ -510,17 +479,11 @@ async def main():
     # Model options
     parser.add_argument("--model", default=None, help="Model name to use")
     parser.add_argument("--base-url", default=None, help="API base URL")
-    parser.add_argument(
-        "--api-key", default=None, help="API key (uses env vars if not provided)"
-    )
+    parser.add_argument("--api-key", default=None, help="API key (uses env vars if not provided)")
 
     # Execution options
-    parser.add_argument(
-        "--parallel-tasks", type=int, default=4, help="Number of parallel tasks"
-    )
-    parser.add_argument(
-        "--output-dir", default="./hle_outputs", help="Output directory for results"
-    )
+    parser.add_argument("--parallel-tasks", type=int, default=4, help="Number of parallel tasks")
+    parser.add_argument("--output-dir", default="./hle_outputs", help="Output directory for results")
 
     args = parser.parse_args()
 

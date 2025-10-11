@@ -46,11 +46,17 @@ class DeepResearchWorkflow(Workflow):
         self.tools = tools or {}
         self.system_prompt = system_prompt
 
+        # Auto-detect if we should use native function calling
+        # O3 models require native function calling, other models use XML format
+        model_name = rollout_engine.model.lower()
+        use_native_fc = "o3" in model_name or "o1" in model_name
+
         # Create the DeepResearch agent
         self.agent = MultiTurnReactAgent(
             rollout_engine=rollout_engine,
             tools=self.tools,
             system_prompt=self.system_prompt,
+            use_native_function_calling=use_native_fc,
         )
 
         # Note: We don't register the agent since DeepResearch handles its own trajectory
@@ -145,14 +151,10 @@ class DeepResearchWorkflow(Workflow):
         # Determine if the answer is correct (if ground truth available)
         prediction = result.get("prediction", "")
         ground_truth = task.get("answer", "")
-        is_correct = (
-            self._evaluate_answer(prediction, ground_truth) if ground_truth else False
-        )
+        is_correct = self._evaluate_answer(prediction, ground_truth) if ground_truth else False
 
         # Map termination reason
-        termination_reason = self._map_termination_reason(
-            result.get("termination", "unknown")
-        )
+        termination_reason = self._map_termination_reason(result.get("termination", "unknown"))
 
         # Create episode
         episode = Episode()
@@ -183,9 +185,7 @@ class DeepResearchWorkflow(Workflow):
         # Check for tool calls
         if "<tool_call>" in response and "</tool_call>" in response:
             tool_call_text = response.split("<tool_call>")[1].split("</tool_call>")[0]
-            return Action(
-                action={"type": "tool_call", "tool_call": tool_call_text.strip()}
-            )
+            return Action(action={"type": "tool_call", "tool_call": tool_call_text.strip()})
         # Check for final answer
         elif "<answer>" in response and "</answer>" in response:
             answer = response.split("<answer>")[1].split("</answer>")[0].strip()

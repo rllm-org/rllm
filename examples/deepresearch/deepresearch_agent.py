@@ -57,9 +57,7 @@ def today_date():
     return datetime.now().date().strftime("%Y-%m-%d")
 
 
-def build_text_completion_prompt(
-    messages: list[dict], allow_special: bool = True
-) -> str:
+def build_text_completion_prompt(messages: list[dict], allow_special: bool = True) -> str:
     """
     Build text completion prompt from messages list.
     Adapted from qwen_agent.utils.utils.build_text_completion_prompt
@@ -108,6 +106,7 @@ class MultiTurnReactAgent:
         rollout_engine: RolloutEngine,
         tools: dict = None,
         system_prompt: str | None = None,
+        use_native_function_calling: bool = False,
         **kwargs,
     ):
         """
@@ -116,10 +115,13 @@ class MultiTurnReactAgent:
         Args:
             rollout_engine: rLLM OpenAI engine for model inference
             tools: Dictionary of available tools {tool_name: tool_instance}
+            system_prompt: Optional custom system prompt
+            use_native_function_calling: Placeholder for compatibility (not used in simplified version)
         """
         self.rollout_engine = rollout_engine
         self.tools = tools or {}
         self.system_prompt = system_prompt
+        self.use_native_function_calling = use_native_function_calling  # Stored but not used in this version
 
         # Configuration from original DeepResearch
         self.max_llm_calls = MAX_LLM_CALL_PER_RUN
@@ -139,7 +141,10 @@ class MultiTurnReactAgent:
 
     async def call_server(self, messages: list[dict], max_tries: int = 10) -> str:
         """
-        Call rLLM OpenAI engine (replacement for original call_server method).
+        Call rLLM OpenAI engine with model-specific parameters.
+
+        Different models support different sampling parameters. This method
+        automatically selects the appropriate parameter set based on the model.
 
         Args:
             messages: List of chat completion messages
@@ -150,20 +155,53 @@ class MultiTurnReactAgent:
         """
         for attempt in range(max_tries):
             try:
-                # Call rLLM OpenAI Engine with DeepResearch parameters
-                response = await self.rollout_engine.get_model_response(
-                    messages=messages,
-                    stop=["\n<tool_response>", "<tool_response>"],
-                    temperature=0.6,
-                    top_p=0.95,
-                    max_tokens=4096,  # Reasonable for GPT-4o 128k context
-                    presence_penalty=1.1,
-                )
+                # Base parameters for all models
+                api_params = {"messages": messages}
+
+                # Model-specific parameter configuration
+                model_name = self.rollout_engine.model.lower()
+
+                if "o3" in model_name or "o1" in model_name:
+                    # O3/O1 reasoning models: Very limited parameter support
+                    api_params.update(
+                        {
+                            "max_completion_tokens": 4096,
+                        }
+                    )
+                elif "gpt-4" in model_name:
+                    # GPT-4 family: Full parameter support
+                    api_params.update(
+                        {
+                            "stop": ["\n<tool_response>", "<tool_response>"],
+                            "temperature": 0.6,
+                            "top_p": 0.95,
+                            "max_tokens": 4096,
+                            "presence_penalty": 1.1,
+                        }
+                    )
+                elif "qwen" in model_name:
+                    # Tongyi Qwen models
+                    api_params.update(
+                        {
+                            "temperature": 0.6,
+                            "top_p": 0.95,
+                            "max_tokens": 4096,
+                        }
+                    )
+                else:
+                    # Default/fallback: Conservative parameters for unknown models
+                    api_params.update(
+                        {
+                            "temperature": 0.6,
+                            "max_tokens": 4096,
+                        }
+                    )
+
+                # Call rLLM OpenAI Engine
+                response = await self.rollout_engine.get_model_response(**api_params)
 
                 # Track actual token consumption from API
-                if hasattr(response, "prompt_tokens") and hasattr(
-                    response, "completion_tokens"
-                ):
+                if hasattr(response, "prompt_tokens") and hasattr(response, "completion_tokens"):
                     self.total_prompt_tokens += response.prompt_tokens
                     self.total_completion_tokens += response.completion_tokens
 
@@ -215,9 +253,7 @@ class MultiTurnReactAgent:
         start_time = time.time()
 
         # Setup system prompt with current date
-        system_prompt = (
-            self.system_prompt or DEEPRESEARCH_SYSTEM_PROMPT
-        ) + today_date()
+        system_prompt = (self.system_prompt or DEEPRESEARCH_SYSTEM_PROMPT) + today_date()
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": question},
@@ -266,21 +302,13 @@ class MultiTurnReactAgent:
 
             # Handle tool calls
             if "<tool_call>" in content and "</tool_call>" in content:
-                tool_call_text = content.split("<tool_call>")[1].split("</tool_call>")[
-                    0
-                ]
+                tool_call_text = content.split("<tool_call>")[1].split("</tool_call>")[0]
                 try:
                     # Special handling for Python code (match original logic)
                     if "python" in tool_call_text.lower():
                         try:
                             # Extract code from the original content (not just tool_call_text)
-                            code_raw = (
-                                content.split("<tool_call>")[1]
-                                .split("</tool_call>")[0]
-                                .split("<code>")[1]
-                                .split("</code>")[0]
-                                .strip()
-                            )
+                            code_raw = content.split("<tool_call>")[1].split("</tool_call>")[0].split("<code>")[1].split("</code>")[0].strip()
                             result = await self.execute_python(code_raw)
                             print(f"🐍 Python execution result: {result[:100]}...")
                         except Exception:
@@ -304,17 +332,13 @@ class MultiTurnReactAgent:
 
             # Check if we've exceeded call limit
             if num_llm_calls_available <= 0 and "<answer>" not in content:
-                messages[-1]["content"] = (
-                    "Sorry, the number of llm calls exceeds the limit."
-                )
+                messages[-1]["content"] = "Sorry, the number of llm calls exceeds the limit."
 
             # Handle context length limit using actual API consumption
             total_tokens_used = self.get_total_tokens_used()
 
             if total_tokens_used > self.max_context_tokens:
-                print(
-                    f"⚠️ Token limit exceeded: {total_tokens_used} > {self.max_context_tokens}"
-                )
+                print(f"⚠️ Token limit exceeded: {total_tokens_used} > {self.max_context_tokens}")
 
                 # Instead of replacing the last message, add a clear instruction
                 final_instruction = {
@@ -340,15 +364,11 @@ class MultiTurnReactAgent:
                 messages.append({"role": "assistant", "content": content.strip()})
 
                 if "<answer>" in content and "</answer>" in content:
-                    prediction = (
-                        content.split("<answer>")[1].split("</answer>")[0].strip()
-                    )
+                    prediction = content.split("<answer>")[1].split("</answer>")[0].strip()
                     termination = "answer generated due to token limit"
                 else:
                     prediction = content.strip()
-                    termination = (
-                        "response generated due to token limit (no answer format)"
-                    )
+                    termination = "response generated due to token limit (no answer format)"
 
                 result = {
                     "question": question,
@@ -361,9 +381,7 @@ class MultiTurnReactAgent:
 
         # Final validation logic from original Tongyi implementation
         if "<answer>" in messages[-1]["content"]:
-            prediction = (
-                messages[-1]["content"].split("<answer>")[1].split("</answer>")[0]
-            )
+            prediction = messages[-1]["content"].split("<answer>")[1].split("</answer>")[0]
             termination = "answer"
         else:
             prediction = "No answer found."
