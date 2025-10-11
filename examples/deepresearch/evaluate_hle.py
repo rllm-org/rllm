@@ -341,16 +341,25 @@ def setup_rollout_engine(args, model_role="evaluation") -> OpenAIEngine:
     else:
         raise ValueError("❌ API key required. Please set OPENAI_API_KEY or TOGETHER_AI_API_KEY in .env file")
 
+    # For evaluation, DeepResearch handles all sampling params internally
+    # For judge, we need basic params
+    if model_role == "judge":
+        sampling_params = {
+            "temperature": 0.1,
+            "top_p": 0.95,
+            "max_tokens": 1000,
+        }
+    else:
+        # Don't set default sampling_params for evaluation
+        # DeepResearch will handle model-specific params
+        sampling_params = {}
+
     return OpenAIEngine(
         model=model_name,
         tokenizer=None,
         base_url=base_url,
         api_key=api_key,
-        sampling_params={
-            "temperature": 0.1 if model_role == "judge" else 0.6,
-            "top_p": 0.95,
-            "max_tokens": 1000 if model_role == "judge" else 2048,
-        },
+        sampling_params=sampling_params,
     )
 
 
