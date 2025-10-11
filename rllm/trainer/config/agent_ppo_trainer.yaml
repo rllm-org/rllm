@@ -59,3 +59,4 @@ rllm:
 fireworks:
   deployment_id: null
   model_id_prefix: test-model
+  concurrency: 32

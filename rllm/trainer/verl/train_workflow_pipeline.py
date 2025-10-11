@@ -135,7 +135,7 @@ class PipelineTaskRunner:
         # Map roles to their corresponding remote worker classes.
         role_worker_mapping = {
             Role.Actor: ray.remote(ActorRolloutRefWorker),
-            Role.Rollout: ray.remote(max_concurrency=8)(rollout_worker_cls),
+            Role.Rollout: ray.remote(max_concurrency=config.fireworks.concurrency)(rollout_worker_cls),
             Role.ActorRollout: ray.remote(actor_rollout_cls),
         }
 
