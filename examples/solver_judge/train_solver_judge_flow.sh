@@ -7,21 +7,16 @@ export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 python3 -m examples.solver_judge.train_solver_judge_flow \
-    data.train_batch_size=16 \
-    +trainer.n_training_gpus_per_node=8 \
-    data.max_prompt_length=4096 \
-    data.max_response_length=16384 \
-    actor_rollout_ref.model.lora_rank=32 \
-    actor_rollout_ref.model.lora_alpha=32 \
-    actor_rollout_ref.rollout.load_format=safetensors \
-    actor_rollout_ref.model.target_modules=all-linear \
-    actor_rollout_ref.model.path=Qwen/Qwen3-8B \
-    actor_rollout_ref.actor.optim.lr=3e-5 \
+    data.train_batch_size=64 \
+    data.max_prompt_length=2048 \
+    data.max_response_length=1024 \
+    actor_rollout_ref.model.path=Qwen/Qwen3-0.6B \
+    actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=32768 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=16 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=64 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
@@ -29,10 +24,10 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     actor_rollout_ref.actor.clip_ratio_low=0.2 \
     actor_rollout_ref.actor.clip_ratio_high=0.28 \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
-    actor_rollout_ref.actor.fsdp_config.param_offload=False \
+    actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=8 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.mode="async" \
     actor_rollout_ref.rollout.enforce_eager=False \
@@ -42,7 +37,7 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
-    actor_rollout_ref.ref.fsdp_config.param_offload=False \
+    actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.adv_estimator=grpo \
     rllm.compact_filtering.enable=True \
     rllm.compact_filtering.mask_max_prompt_length_exceeded=True \
@@ -56,17 +51,14 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='solver-judge-workflow' \
-    trainer.experiment_name='countdown-solver-judge-8b' \
-    trainer.max_actor_ckpt_to_keep=2 \
+    trainer.experiment_name='countdown-solver-judge' \
     trainer.val_before_train=True \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.save_freq=1 \
-    trainer.test_freq=10 \
+    trainer.save_freq=1000 \
+    trainer.test_freq=25 \
     trainer.default_hdfs_dir=null \
     trainer.total_epochs=100 \
-    rllm.workflow.use_workflow=True \
-    fireworks.deployment_id=test-hot-reload-qwen-8b-3 \
-    fireworks.model_id_prefix=test-qwen-8b-solver-judge
+    rllm.workflow.use_workflow=True
 
-pkill -9 -f 'ray::WorkerDict'
+pkill -9 -f 'ray::WorkerDict' 
