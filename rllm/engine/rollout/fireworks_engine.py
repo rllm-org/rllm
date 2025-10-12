@@ -49,7 +49,7 @@ class FireworksEngine(OpenAIEngine):
             sampling_params=sampling_params,
             **kwargs,
         )
-        self._use_chat_completions = True # Always True for Fireworks
+        self._use_chat_completions = True  # Always True for Fireworks
 
     def update_model_weights(self, fireworks_model_id: str, lora_adapter_path: dict):
         self._upload_lora(fireworks_model_id, lora_adapter_path, self._base_model, self._account_id)
@@ -58,9 +58,7 @@ class FireworksEngine(OpenAIEngine):
         self.model = f"{self._account_id}/{fireworks_model_id}#{self._account_id}/{self._deployment_id}"
         asyncio.run(self._probe_deployment(self.model))
 
-    def _upload_lora(
-        self, fireworks_model_id, lora_adapter_path: str, base_model: str, account_id: str
-    ):
+    def _upload_lora(self, fireworks_model_id, lora_adapter_path: str, base_model: str, account_id: str):
         upload_model_command = f"firectl create model {fireworks_model_id} {lora_adapter_path} --base-model {base_model} -a {account_id} --output json"
         print(f"running command: {upload_model_command}")
         upload_model_output = os.popen(upload_model_command).read()
@@ -71,9 +69,7 @@ class FireworksEngine(OpenAIEngine):
         assert upload_model_output["state"].lower() == "ready"
         print(f"Successfully uploaded model {fireworks_model_id}")
 
-    def _hot_load_lora(
-        self, model_id: str, deployment: str, account_id: str
-    ) -> None:
+    def _hot_load_lora(self, model_id: str, deployment: str, account_id: str) -> None:
         load_lora_command = f"firectl load-lora {model_id} --deployment {deployment} --replace-merged-addon -a {account_id}"
         print(f"Running command: {load_lora_command}")
         load_lora_output = os.popen(load_lora_command).read()
@@ -83,10 +79,7 @@ class FireworksEngine(OpenAIEngine):
         print("Probing model: ", model_name)
         while True:
             try:
-                _ = await self.client.chat.completions.create(
-                    model=model_name,
-                    messages=[{"role": "user", "content": "hi"}]
-                )
+                _ = await self.client.chat.completions.create(model=model_name, messages=[{"role": "user", "content": "hi"}])
                 return
             except Exception as e:
                 error_message = str(e).lower()
@@ -99,4 +92,3 @@ class FireworksEngine(OpenAIEngine):
                     continue
                 else:
                     raise ValueError(e)
-

@@ -4,14 +4,14 @@ import socket
 import hydra
 import ray
 from omegaconf import OmegaConf
-from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
-from verl.trainer.ppo.reward import load_reward_manager
-from verl.utils.device import is_cuda_available
 
 from rllm.trainer.env_agent_mappings import WORKFLOW_CLASS_MAPPING
 from rllm.trainer.verl.agent_workflow_trainer_fireworks import (
     FireworksAgentWorkflowPPOTrainer,
 )
+from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
+from verl.trainer.ppo.reward import load_reward_manager
+from verl.utils.device import is_cuda_available
 
 
 @hydra.main(config_path="../config", config_name="agent_ppo_trainer", version_base=None)
@@ -69,6 +69,7 @@ class PipelineTaskRunner:
         from pprint import pprint
 
         from omegaconf import OmegaConf
+
         from verl.utils.fs import copy_to_local
 
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
@@ -102,10 +103,8 @@ class PipelineTaskRunner:
                 # import warnings
                 # warnings.warn(f"Legacy worker impl is going to be deprecated, will be removed in the future. \
                 #   Please set trainer.use_legacy_worker_impl = false to switch to the new worker implementation.")
-                from verl.workers.fsdp_workers import CriticWorker
+                pass
             elif use_legacy_worker_impl == "disable":
-                from verl.workers.roles import CriticWorker
-
                 print("Using new worker implementation")
             else:
                 raise ValueError(f"Invalid use_legacy_worker_impl: {use_legacy_worker_impl}")
@@ -119,7 +118,6 @@ class PipelineTaskRunner:
             from verl.workers.megatron_workers import (
                 ActorRolloutRefWorker,
                 AsyncActorRolloutRefWorker,
-                CriticWorker,
             )
 
             rollout_worker_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
@@ -129,7 +127,6 @@ class PipelineTaskRunner:
             raise NotImplementedError
 
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
-
 
         actor_rollout_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
         # Map roles to their corresponding remote worker classes.

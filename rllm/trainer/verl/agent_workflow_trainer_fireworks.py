@@ -1,20 +1,21 @@
 import asyncio
 import os
-import shutil
-import threading
 import time
 import uuid
 from collections import Counter, defaultdict
 from pprint import pprint
-from queue import Queue
 
 import numpy as np
 import torch
 from omegaconf import OmegaConf
+
+from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
+from rllm.engine.rollout.fireworks_engine import FireworksEngine
+from rllm.trainer.verl.agent_workflow_trainer import AgentWorkflowPPOTrainer
+from rllm.workflows.workflow import TerminationReason
+from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import (
-    AdvantageEstimator,
-    RayPPOTrainer,
     RayWorkerGroup,
     ResourcePoolManager,
     Role,
@@ -30,12 +31,6 @@ from verl.trainer.ppo.ray_trainer import (
 )
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.tracking import Tracking
-
-from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
-from rllm.engine.rollout.fireworks_engine import FireworksEngine
-from rllm.trainer.verl.agent_workflow_trainer import AgentWorkflowPPOTrainer
-from rllm.workflows.workflow import TerminationReason
-from verl import DataProto
 
 
 class FireworksAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
@@ -96,7 +91,7 @@ class FireworksAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
         self.actor_wg = RayWorkerGroup(resource_pool=actor_resource_pool, ray_cls_with_init=actor_cls)
 
         self.actor_wg.init_model()
-        self.actor_rollout_wg = self.actor_wg # for compatibility
+        self.actor_rollout_wg = self.actor_wg  # for compatibility
 
         fireworks_engine = FireworksEngine(
             tokenizer=self.tokenizer,
@@ -416,7 +411,6 @@ class FireworksAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
                             fireworks_model_id=f"{fireworks_model_id_prefix}-{self.global_steps}",
                             lora_adapter_path=lora_adapter_path,
                         )
-
 
                 with marked_timer("stop_profile", timing_raw):
                     self._stop_profiling(do_profile)

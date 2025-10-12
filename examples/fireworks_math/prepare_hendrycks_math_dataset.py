@@ -19,10 +19,12 @@ def prepare_math_data_hendrycks():
     # Optionally, preprocess if needed (example: rename fields, add source, etc.)
     def preprocess_fn(example):
         return {
-            "messages": [{
-                "role": "user",
-                "content": example.get("problem", ""),
-            }],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": example.get("problem", ""),
+                }
+            ],
             "ground_truth": example.get("solution", ""),
             "data_source": "hendrycks_math",
         }

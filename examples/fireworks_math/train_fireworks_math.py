@@ -16,6 +16,7 @@ def math_workflow_reward_fn(task_info: dict, action: str) -> RewardOutput:
         action = action.text
     return math_reward_fn(task_info, action)
 
+
 @hydra.main(config_path="pkg://rllm.trainer.config", config_name="agent_ppo_trainer", version_base=None)
 def main(config):
     train_dataset = DatasetRegistry.load_dataset("hendrycks_math", "train")
