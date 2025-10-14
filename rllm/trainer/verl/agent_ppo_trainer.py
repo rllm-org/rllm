@@ -302,11 +302,6 @@ class AgentPPOTrainer(RayPPOTrainer):
                                 batch = batch[size_mask]
 
                         # recompute old_log_probs
-                        with marked_timer("old_log_prob", timing_raw):
-                            old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-                            batch = batch.union(old_log_prob)
-
-                        # recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
                             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                             entropys = old_log_prob.batch["entropys"]
@@ -345,7 +340,12 @@ class AgentPPOTrainer(RayPPOTrainer):
                         if self.use_reference_policy:
                             # compute reference log_prob
                             with marked_timer("ref", timing_raw):
-                                ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                                # See RayPPO's definition of `ref_in_actor`. Basically when the loRA
+                                # is applied, we will use the actor without lora applied as the reference policy.
+                                if not self.ref_in_actor:
+                                    ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                                else:
+                                    ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
                                 batch = batch.union(ref_log_prob)
 
                         # compute rewards with KL penalty if needed

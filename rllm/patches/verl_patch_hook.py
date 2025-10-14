@@ -36,7 +36,7 @@ def _wrap_once(module_name: str, cls_name: str, method_name: str, wrapper):
         apply(sys.modules[module_name])
 
 
-# vLLMAsyncRollout
+# verl.workers.rollout.vllm_rollout.vllm_async_server.vLLMAsyncRollout
 def _patch_vllm_rollout_spmd(target_module: str):
     cls_name = "vLLMAsyncRollout"
 
@@ -147,7 +147,7 @@ def _patch_vllm_rollout_spmd(target_module: str):
     _wrap_once(target_module, cls_name, "load_model", load_model_wrapper)
 
 
-# FSDPVLLMShardingManager
+# verl.workers.sharding_manager.fsdp_vllm.FSDPVLLMShardingManager
 def _patch_fsdp_vllm(target_module: str):
     cls_name = "FSDPVLLMShardingManager"
 
@@ -156,18 +156,15 @@ def _patch_fsdp_vllm(target_module: str):
         import importlib as _importlib
         import logging
         import os
-        import time
         from dataclasses import asdict
 
-        from verl.utils.device import get_device_id
-        from verl.utils.model import check_exclude_modules, check_target_modules
         from verl.utils.vllm_utils import TensorLoRARequest, patch_vllm_moe_model_weight_loader
 
         try:
             # torch 2.5+
             from torch.distributed.tensor import DTensor
         except ImportError:
-            from torch.distributed._tensor import DTensor
+            from torch.distributed._tensor import DTensor  # noqa: F401
 
         updated_params = kwargs.get("updated_params") if "updated_params" in kwargs else args[0]
         peft_config = kwargs.get("peft_config") if "peft_config" in kwargs else (args[1] if len(args) > 1 else None)
@@ -179,52 +176,34 @@ def _patch_fsdp_vllm(target_module: str):
             logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
         model = instance.model_runner.model
-        if peft_config:
-            if instance.base_sync_done:
-                from verl.utils.vllm_utils import TensorLoRARequest  # local import for clarity
+        if peft_config and instance.base_sync_done:
+            from verl.utils.vllm_utils import TensorLoRARequest  # local import for clarity
 
-                lora_int_id = int(time.time_ns() % 0x7FFFFFFF)
-                lora_request = TensorLoRARequest(
-                    lora_name=f"{lora_int_id}",
-                    lora_int_id=lora_int_id,
-                    lora_path="simon_lora_path",
-                    peft_config=asdict(peft_config),
-                    lora_tensors=updated_params,
-                )
-                # async mode (WorkerWrapperBase): prefer llm_engine if present
-                ie = instance.inference_engine
-                if hasattr(ie, "llm_engine"):
-                    ie.llm_engine.add_lora(lora_request)
-                else:
-                    ie.add_lora(lora_request)
-                logger.info(f"vLLM load weights, loaded_params: {len(updated_params)}")
-                return
+            lora_int_id = 123
+            ie = instance.inference_engine
+            if hasattr(ie, "llm_engine"):
+                ie.llm_engine.remove_lora(lora_int_id)
             else:
-                # remap LoRA params to base-layer keys
-                def replace_lora_wrapper(k: str) -> str:
-                    stacked = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
-                    if k.endswith(".weight"):
-                        module_k = k[: -len(".weight")]
-                        if check_exclude_modules(peft_config, module_k):
-                            return k
-                        if any(module_k.endswith(s) for s in stacked) or check_target_modules(peft_config, module_k):
-                            return f"{module_k}.base_layer.weight"
-                    if k.endswith(".bias"):
-                        module_k = k[: -len(".bias")]
-                        if check_exclude_modules(peft_config, module_k):
-                            return k
-                        if any(module_k.endswith(s) for s in stacked) or check_target_modules(peft_config, module_k):
-                            return f"{module_k}.base_layer.bias"
-                    return k
+                ie.worker.remove_lora(lora_int_id)
 
-                updated_params = {replace_lora_wrapper(k): v for k, v in updated_params.items()}
+            lora_request = TensorLoRARequest(
+                lora_name=f"{lora_int_id}",
+                lora_int_id=lora_int_id,
+                lora_path="simon_lora_path",
+                peft_config=asdict(peft_config),
+                lora_tensors=dict(updated_params),
+            )
+            # async mode (WorkerWrapperBase): prefer llm_engine if present
+            if hasattr(ie, "llm_engine"):
+                ie.llm_engine.add_lora(lora_request)
+            else:
+                ie.worker.add_lora(lora_request)
+            logger.info(f"vLLM load weights, loaded_params: {len(updated_params)}")
+            return
+        else:
+            patch_vllm_moe_model_weight_loader(model)
 
-        patch_vllm_moe_model_weight_loader(model)
-        device = get_device_id()  # used when fsdp2 set cpu_offload_policy
-
-        loaded_params = model.load_weights(((name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in updated_params.items()))
-
-        instance.base_sync_done = True
-        logger.info(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
+            loaded_params = model.load_weights(updated_params)
+            logger.info(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
 
     _wrap_once(target_module, cls_name, "update_params", update_params_wrapper)
