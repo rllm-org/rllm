@@ -1,3 +1,4 @@
+import re
 from typing import Any
 
 from jinja2 import Template
@@ -22,7 +23,7 @@ class AppWorldReactAgent(BaseAgent):
     5. Environment executes the code and returns the result
     """
 
-    SYSTEM_PROMPT: str = """USER:
+    REACT_PROMPT: str = """USER:
 I am your supervisor and you are a super intelligent AI Assistant whose job is to achieve my day-to-day tasks completely autonomously.
 
 To do this, you will need to interact with app/s (e.g., spotify, venmo etc) using their associated APIs on my behalf. For this you will undertake a *multi-step conversation* using a python REPL environment. That is, you will write the python code and the environment will execute it and show you the result, based on which, you will write python code for the next step and so on, until you've achieved the goal. This environment will let you interact with app/s using their associated APIs on my behalf.
@@ -433,6 +434,9 @@ Task: {{ input_str }}"""
         Returns:
             Action: Action (string) containing the Python code to execute
         """
+        # import pdb
+        # pdb.set_trace()
+
         # Extract the Python code from the response
         python_code = self._extract_code_from_response(response)
         # Append assistant message to history
@@ -471,11 +475,27 @@ Task: {{ input_str }}"""
             app_descriptions = "[List of available apps will be shown here]"
 
         # Format the system prompt with user info and task
-        template = Template(self.SYSTEM_PROMPT)
-        system_prompt = template.render(main_user=self.user_info, app_descriptions=app_descriptions, input_str=self.task_instruction)
+        template = Template(self.REACT_PROMPT)
+        react_prompt = template.render(main_user=self.user_info, app_descriptions=app_descriptions, input_str=self.task_instruction)
 
         # Set the system message
-        self.messages = [{"role": "system", "content": system_prompt}]
+        self.messages = self.text_to_messages(react_prompt)
+
+    def text_to_messages(self, input_str: str) -> list[dict]:
+        messages_json = []
+        last_start = 0
+        for m in re.finditer("(USER|ASSISTANT|SYSTEM):\n", input_str, flags=re.IGNORECASE):
+            last_end = m.span()[0]
+            if len(messages_json) == 0:
+                if last_end != 0:
+                    raise ValueError(f"Start of the prompt has no assigned role: {input_str[:last_end]}")
+            else:
+                messages_json[-1]["content"] = input_str[last_start:last_end]
+            role = m.group(1).lower()
+            messages_json.append({"role": role, "content": None})
+            last_start = m.span()[1]
+        messages_json[-1]["content"] = input_str[last_start:]
+        return messages_json
 
     def _format_execution_result(self, observation: dict) -> str:
         """Format code execution result as user message."""

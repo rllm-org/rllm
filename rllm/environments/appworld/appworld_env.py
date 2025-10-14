@@ -1,3 +1,4 @@
+import json
 import logging
 import threading
 
@@ -97,7 +98,18 @@ class AppWorldEnv(BaseEnv):
             # Default user info if not available
             user_info = {"first_name": "User", "last_name": "Test", "email": "user@example.com", "phone_number": "+1234567890"}
 
-        observation = {"instruction": instruction, "user_info": user_info, "available_apps": ["spotify", "gmail", "calendar", "contacts", "messages", "notes", "todo", "files", "banking"], "helper_apis": {"show_app_descriptions": "apis.api_docs.show_app_descriptions()", "show_api_descriptions": "apis.api_docs.show_api_descriptions(app_name='app')", "show_api_doc": "apis.api_docs.show_api_doc(app_name='app', api_name='api')", "complete_task": "apis.supervisor.complete_task(answer='your_answer')"}}
+        app_descriptions = json.dumps(
+            [{"name": k, "description": v} for (k, v) in self.world.task.app_descriptions.items()],
+            indent=1,
+        )
+
+        observation = {
+            "instruction": instruction,
+            "user_info": user_info,
+            "available_apps": ["spotify", "gmail", "calendar", "contacts", "messages", "notes", "todo", "files", "banking"],
+            "helper_apis": {"show_app_descriptions": "apis.api_docs.show_app_descriptions()", "show_api_descriptions": "apis.api_docs.show_api_descriptions(app_name='app')", "show_api_doc": "apis.api_docs.show_api_doc(app_name='app', api_name='api')", "complete_task": "apis.supervisor.complete_task(answer='your_answer')"},
+            "app_descriptions": app_descriptions,
+        }
 
         return observation, {}
 
