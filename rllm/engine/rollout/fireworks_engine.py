@@ -51,14 +51,15 @@ class FireworksEngine(OpenAIEngine):
         )
         self._use_chat_completions = True  # Always True for Fireworks
 
-    def update_model_weights(self, fireworks_model_id: str, lora_adapter_path: dict):
+    def update_model_weights(self, fireworks_model_id: str, lora_adapter_path: dict) -> bool:
         self._upload_lora(fireworks_model_id, lora_adapter_path, self._base_model, self._account_id)
         self._hot_load_lora(fireworks_model_id, self._deployment_id, self._account_id)
 
         self.model = f"{self._account_id}/{fireworks_model_id}#{self._account_id}/{self._deployment_id}"
-        asyncio.run(self._probe_deployment(self.model))
+        is_deployment_ready = asyncio.run(self._probe_deployment(self.model))
+        return is_deployment_ready
 
-    def _upload_lora(self, fireworks_model_id, lora_adapter_path: str, base_model: str, account_id: str):
+    def _upload_lora(self, fireworks_model_id, lora_adapter_path: str, base_model: str, account_id: str) -> None:
         upload_model_command = f"firectl create model {fireworks_model_id} {lora_adapter_path} --base-model {base_model} -a {account_id} --output json"
         print(f"running command: {upload_model_command}")
         upload_model_output = os.popen(upload_model_command).read()
@@ -75,12 +76,12 @@ class FireworksEngine(OpenAIEngine):
         load_lora_output = os.popen(load_lora_command).read()
         print(load_lora_output)
 
-    async def _probe_deployment(self, model_name) -> None:
+    async def _probe_deployment(self, model_name) -> bool:
         print("Probing model: ", model_name)
         while True:
             try:
                 _ = await self.client.chat.completions.create(model=model_name, messages=[{"role": "user", "content": "hi"}])
-                return
+                return True
             except Exception as e:
                 error_message = str(e).lower()
                 if "404" in error_message:
@@ -91,4 +92,5 @@ class FireworksEngine(OpenAIEngine):
                     print(error_message)
                     continue
                 else:
-                    raise ValueError(e)
+                    print(e)
+                    return False

@@ -16,7 +16,6 @@ from rllm.workflows.workflow import TerminationReason
 from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import (
-    RayWorkerGroup,
     ResourcePoolManager,
     Role,
     WorkerType,
