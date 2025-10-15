@@ -66,7 +66,7 @@ class AgentPPOTrainer(RayPPOTrainer):
         super().init_workers()
 
         self.agent_execution_engine = AsyncAgentExecutionEngine(
-            rollout_engine=self.async_rollout_manager,
+            rollout_manager=self.async_rollout_manager,
             config=self.config,
             engine_name="verl",
             tokenizer=self.tokenizer,
