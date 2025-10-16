@@ -76,13 +76,13 @@ class AppWorldEnv(BaseEnv):
                     if not self.task.get("instruction"):
                         self.task["instruction"] = self.world.task.instruction
 
-                    print(f"Loaded AppWorld for task {task_id}")
-                    print(f"Instruction: {self.task['instruction'][:100]}...")
+                    logging.info(f"Loaded AppWorld for task {task_id}")
+                    logging.info(f"Instruction: {self.task['instruction'][:100]}...")
                 else:
                     raise ValueError("Task ID is required to initialize AppWorld shell")
             except Exception as e:
                 self.world = None
-                print(f"Error initializing AppWorld shell: {e}")
+                logging.error(f"Error initializing AppWorld shell: {e}")
                 raise e
 
         # Build initial observation
@@ -93,7 +93,6 @@ class AppWorldEnv(BaseEnv):
         if self.world and hasattr(self.world, "task") and hasattr(self.world.task, "supervisor"):
             main_user = self.world.task.supervisor
             user_info = {"first_name": main_user.first_name if hasattr(main_user, "first_name") else "User", "last_name": main_user.last_name if hasattr(main_user, "last_name") else "Test", "email": main_user.email if hasattr(main_user, "email") else "user@example.com", "phone_number": main_user.phone_number if hasattr(main_user, "phone_number") else "+1234567890"}
-            print(f"User info: {user_info}")
         else:
             # Default user info if not available
             user_info = {"first_name": "User", "last_name": "Test", "email": "user@example.com", "phone_number": "+1234567890"}
@@ -161,11 +160,10 @@ class AppWorldEnv(BaseEnv):
                     if self.world.task_completed():
                         # Evaluate the submitted answer
                         evaluation = self.world.evaluate()
-                        print(f"Evaluation: {evaluation.to_dict()}")
                         reward = 1.0 if evaluation and evaluation.to_dict()["success"] else 0.0
-                        print(f"Task completed! Reward: {reward}")
+                        logging.info(f"Task completed! Reward: {reward}")
                     else:
-                        print("Task completed but evaluation failed")
+                        logging.info("Task completed but evaluation failed")
 
             # Record execution history
             self.execution_history.append(

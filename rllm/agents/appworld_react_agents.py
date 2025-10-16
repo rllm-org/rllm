@@ -5,8 +5,6 @@ from jinja2 import Template
 
 from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 
-# logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(filename)s:%(lineno)d] %(message)s")
-
 
 class AppWorldReactAgent(BaseAgent):
     """
@@ -434,8 +432,6 @@ Task: {{ input_str }}"""
         Returns:
             Action: Action (string) containing the Python code to execute
         """
-        # import pdb
-        # pdb.set_trace()
 
         # Extract the Python code from the response
         python_code = self._extract_code_from_response(response)
