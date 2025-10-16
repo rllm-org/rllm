@@ -65,7 +65,7 @@ class PipelineAgentPPOTrainer(AgentPPOTrainer):
         self.rollout_wg.tp_size = self.config.actor_rollout_ref.rollout.get("tensor_model_parallel_size", 1)
 
         self.agent_execution_engine = AsyncAgentExecutionEngine(
-            rollout_engine=self.rollout_wg,
+            rollout_manager=self.rollout_wg,
             config=self.config,
             engine_name="verl",
             tokenizer=self.tokenizer,

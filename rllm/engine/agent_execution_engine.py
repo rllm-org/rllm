@@ -29,7 +29,7 @@ class AgentExecutionEngine:
         self,
         engine_name="openai",
         tokenizer=None,
-        rollout_engine=None,
+        rollout_manager=None,
         chat_parser=None,
         n_parallel_agents=1,
         trajectory_timeout=None,
@@ -111,7 +111,7 @@ class AgentExecutionEngine:
 
             self.rollout_engine = VerlEngine(
                 config=self.config,
-                rollout_manager=rollout_engine,
+                rollout_manager=rollout_manager,
                 tokenizer=self.tokenizer,
                 disable_thinking=self.config.rllm.disable_thinking,
             )

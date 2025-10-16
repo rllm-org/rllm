@@ -1,41 +1,25 @@
-import wrapt
+"""Main entry point for verl patches.
 
-_TARGET = "verl.workers.rollout.vllm_rollout.vllm_rollout_spmd"
+This module applies all verl patches using the modular patch system.
+Individual patches are organized in separate files by target module.
+"""
+
+from . import (
+    patch_fsdp_vllm,
+    patch_torch_functional,
+    patch_vllm_async_server,
+    patch_vllm_rollout_spmd,
+)
 
 
 def setup():
-    @wrapt.when_imported(_TARGET)
-    def _patch(mod):
-        # Your replacement method, defined here so nothing heavy is imported early.
-        def _patched_init_zeromq(self) -> str:
-            import getpass
-            import os
-            import threading
+    """
+    Setup all verl patches.
 
-            import zmq
-            from filelock import FileLock
-
-            tensor_parallel_size = self.config.tensor_model_parallel_size
-            local_world_size = int(os.environ["RAY_LOCAL_WORLD_SIZE"])
-            socket_type = "ipc" if tensor_parallel_size <= local_world_size else "tcp"
-
-            user = getpass.getuser()
-            with FileLock(f"/tmp/verl_vllm_zmq_{user}.lock"):
-                if socket_type == "ipc":
-                    pid = os.getpid()
-                    address = f"ipc:///tmp/verl_vllm_zmq_{pid}_{user}.ipc"
-                else:
-                    ip, port = self._get_free_port()
-                    address = f"tcp://{ip}:{port}"
-
-                context = zmq.Context()
-                self.socket = context.socket(zmq.REP)
-                self.socket.bind(address)
-
-            self.loop_thread = threading.Thread(target=self._loop_forever)
-            self.loop_thread.start()
-            return address
-
-        Cls = getattr(mod, "vLLMAsyncRollout", None)
-        if Cls is not None:
-            Cls._init_zeromq = _patched_init_zeromq
+    Called by Ray's worker_process_setup_hook to apply patches before
+    the main verl code runs.
+    """
+    patch_vllm_async_server.register()
+    patch_vllm_rollout_spmd.register()
+    patch_fsdp_vllm.register()
+    patch_torch_functional.register()

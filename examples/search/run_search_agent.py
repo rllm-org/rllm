@@ -51,7 +51,7 @@ if __name__ == "__main__":
         agent_args={"tool_map": tool_map, "system_prompt": SEARCH_SYSTEM_PROMPT, "parser_name": "qwen"},
         env_class=ToolEnvironment,
         env_args={"tool_map": tool_map, "reward_fn": search_reward_fn},
-        rollout_engine=None,
+        rollout_manager=None,
         engine_name="openai",
         tokenizer=tokenizer,
         sampling_params=sampling_params,
