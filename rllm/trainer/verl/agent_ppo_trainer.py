@@ -16,20 +16,21 @@ from omegaconf import OmegaConf
 from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
+from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.core_algos import agg_loss
-from verl.trainer.ppo.ray_trainer import (
-    RayPPOTrainer,
-    RayWorkerGroup,
-    ResourcePoolManager,
-    Role,
-    WorkerType,
-    compute_advantage,
+from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
-    compute_response_mask,
     compute_timing_metrics,
-    marked_timer,
     reduce_metrics,
 )
+from verl.trainer.ppo.ray_trainer import (
+    RayPPOTrainer,
+    ResourcePoolManager,
+    compute_advantage,
+    compute_response_mask,
+)
+from verl.trainer.ppo.utils import Role, WorkerType
+from verl.utils.debug import marked_timer
 
 
 class AgentPPOTrainer(RayPPOTrainer):
@@ -39,7 +40,7 @@ class AgentPPOTrainer(RayPPOTrainer):
         tokenizer,
         role_worker_mapping: dict[Role, WorkerType],
         resource_pool_manager: ResourcePoolManager,
-        ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
+        ray_worker_group_cls: type[RayWorkerGroup] = RayWorkerGroup,
         reward_fn=None,
         val_reward_fn=None,
         env_class=None,
@@ -88,6 +89,7 @@ class AgentPPOTrainer(RayPPOTrainer):
         """
         Initialize environment depending on env_class with the necessary extra_info, also set uid of the batch.
         """
+        assert self.agent_class is not None and self.env_class is not None, "Agent and environment classes must be provided"
         env_args = batch.non_tensor_batch["extra_info"].tolist()
 
         full_agent_args = dict(self.config.rllm.agent.get("agent_args", {})) | self.agent_args
