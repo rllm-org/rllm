@@ -37,7 +37,7 @@ python3 -m examples.fireworks_math.train_fireworks_math \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     +actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
-    actor_rollout_ref.model.enable_gradient_checkpointing=True \
+    +actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.strategy=megatron \
     actor_rollout_ref.actor.megatron.param_offload=True \
     actor_rollout_ref.actor.megatron.grad_offload=True \
