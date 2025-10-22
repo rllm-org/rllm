@@ -10,6 +10,7 @@ export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 RLLM_DIR=$(python3 -c "import rllm; import os; print(os.path.dirname(os.path.dirname(rllm.__file__)))")
 
 MODEL_PATH=Qwen/Qwen3-30B-A3B-Instruct-2507
+DIST_CKPT_PATH=/workspace/checkpoints/dist/Qwen3-30B-A3B-Instruct-2507
 gen_tp=2
 train_tp=2
 train_pp=2
@@ -43,10 +44,13 @@ python3 -m examples.fireworks_math.train_fireworks_math \
     actor_rollout_ref.actor.megatron.param_offload=True \
     actor_rollout_ref.actor.megatron.grad_offload=True \
     actor_rollout_ref.actor.megatron.optimizer_offload=True \
+    actor_rollout_ref.actor.megatron.use_dist_checkpointing=True \
+    actor_rollout_ref.actor.megatron.dist_checkpointing_path=$DIST_CKPT_PATH \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=$train_tp \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=$train_pp \
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=$train_tp \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=$train_pp \
+    actor_rollout_ref.ref.megatron.dist_checkpointing_path=$DIST_CKPT_PATH \
     actor_rollout_ref.ref.megatron.param_offload=True \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
