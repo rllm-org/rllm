@@ -426,10 +426,12 @@ class AgentExecutionEngine:
         assert all(env is not None and isinstance(env, BaseEnv) for env in self.envs), "All environments must be inheriting from BaseEnv"
         assert all(env.is_multithread_safe() for env in self.envs), "All environments must be multithread safe for async engine"  # type: ignore
         max_concurrency = self.n_parallel_agents
+        free_cache_engine = self.config.actor_rollout_ref.rollout.free_cache_engine if self.config else False
+
         self.executor = ThreadPoolExecutor(max_workers=max_concurrency)
 
-        if self.engine_name == "verl":
-            self.rollout_engine.wake_up()
+        if self.engine_name == "verl" and free_cache_engine:
+            await self.rollout_engine.wake_up()  # type: ignore
 
         async def launch_one_trajectory_task(env_idx: int):
             try:
@@ -462,8 +464,8 @@ class AgentExecutionEngine:
             except Exception as e:
                 raise e
 
-        if self.engine_name == "verl":
-            self.rollout_engine.sleep()
+        if self.engine_name == "verl" and free_cache_engine:
+            await self.rollout_engine.sleep()  # type: ignore
 
         self.executor.shutdown(wait=False, cancel_futures=True)
 
