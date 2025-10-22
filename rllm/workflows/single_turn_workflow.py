@@ -2,7 +2,6 @@ from typing import Any
 
 from rllm.agents.agent import Episode
 from rllm.engine.rollout.rollout_engine import ModelOutput
-from rllm.trainer.env_agent_mappings import AGENT_CLASS_MAPPING, ENV_CLASS_MAPPING
 from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflow
 
 
@@ -15,6 +14,8 @@ class SingleTurnWorkflow(Workflow):
         env_args=None,
         **kwargs,
     ):
+        from rllm.trainer.env_agent_mappings import AGENT_CLASS_MAPPING, ENV_CLASS_MAPPING
+
         super().__init__(**kwargs)
 
         agent_cls = AGENT_CLASS_MAPPING[agent_cls] if isinstance(agent_cls, str) else agent_cls
