@@ -6,7 +6,7 @@ from rllm.engine.rollout.rollout_engine import ModelOutput
 from rllm.rewards.reward_fn import math_reward_fn
 from rllm.rewards.reward_types import RewardOutput
 from rllm.trainer.pipeline_agent_trainer import PipelineAgentTrainer
-from rllm.workflows.single_turn_workflow import SingleTurnWorkflow
+from rllm.workflows.simple_workflow import SimpleWorkflow
 
 
 def math_workflow_reward_fn(task_info: dict, action: str) -> RewardOutput:
@@ -23,7 +23,7 @@ def main(config):
     test_dataset = DatasetRegistry.load_dataset("math500", "test")
 
     trainer = PipelineAgentTrainer(
-        workflow_class=SingleTurnWorkflow,
+        workflow_class=SimpleWorkflow,
         workflow_args={
             "reward_function": math_workflow_reward_fn,
             "max_prompt_length": config.data.max_prompt_length,
