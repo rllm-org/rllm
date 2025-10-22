@@ -18,11 +18,7 @@ from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
 from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.core_algos import agg_loss
-from verl.trainer.ppo.metric_utils import (
-    compute_data_metrics,
-    compute_timing_metrics,
-    reduce_metrics,
-)
+from verl.trainer.ppo.metric_utils import compute_data_metrics, compute_timing_metrics
 from verl.trainer.ppo.ray_trainer import (
     RayPPOTrainer,
     ResourcePoolManager,
@@ -31,6 +27,7 @@ from verl.trainer.ppo.ray_trainer import (
 )
 from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.debug import marked_timer
+from verl.utils.metric import reduce_metrics
 
 
 class AgentPPOTrainer(RayPPOTrainer):

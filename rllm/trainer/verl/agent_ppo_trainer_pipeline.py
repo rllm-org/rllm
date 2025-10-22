@@ -11,14 +11,11 @@ from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
 from rllm.trainer.verl.agent_ppo_trainer import AgentPPOTrainer
 from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
-from verl.trainer.ppo.metric_utils import (
-    compute_data_metrics,
-    compute_timing_metrics,
-    reduce_metrics,
-)
+from verl.trainer.ppo.metric_utils import compute_data_metrics, compute_timing_metrics
 from verl.trainer.ppo.ray_trainer import compute_advantage
 from verl.trainer.ppo.utils import Role
 from verl.utils.debug import marked_timer
+from verl.utils.metric import reduce_metrics
 
 
 class PipelineAgentPPOTrainer(AgentPPOTrainer):
