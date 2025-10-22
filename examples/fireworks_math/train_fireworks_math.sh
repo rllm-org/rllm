@@ -9,7 +9,10 @@ export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 # Find the directory where rllm package is located
 RLLM_DIR=$(python3 -c "import rllm; import os; print(os.path.dirname(os.path.dirname(rllm.__file__)))")
 
-MODEL_PATH=Qwen/Qwen3-4B
+MODEL_PATH=Qwen/Qwen3-30B-A3B-Instruct-2507
+gen_tp=2
+train_tp=2
+train_pp=2
 
 python3 -m examples.fireworks_math.train_fireworks_math \
     algorithm.adv_estimator=grpo \
@@ -24,7 +27,6 @@ python3 -m examples.fireworks_math.train_fireworks_math \
     actor_rollout_ref.model.path=$MODEL_PATH \
     actor_rollout_ref.hybrid_engine=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.strategy=fsdp2 \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-sum-norm \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=8 \
@@ -36,8 +38,15 @@ python3 -m examples.fireworks_math.train_fireworks_math \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
-    actor_rollout_ref.actor.fsdp_config.param_offload=True \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
+    actor_rollout_ref.actor.strategy=megatron \
+    actor_rollout_ref.actor.megatron.param_offload=True \
+    actor_rollout_ref.actor.megatron.grad_offload=True \
+    actor_rollout_ref.actor.megatron.optimizer_offload=True \
+    actor_rollout_ref.actor.megatron.tensor_model_parallel_size=$train_tp \
+    actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=$train_pp \
+    actor_rollout_ref.ref.megatron.tensor_model_parallel_size=$train_tp \
+    actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=$train_pp \
+    actor_rollout_ref.ref.megatron.param_offload=True \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
@@ -49,7 +58,6 @@ python3 -m examples.fireworks_math.train_fireworks_math \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.9 \
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.entropy_coeff=0 \
@@ -66,7 +74,7 @@ python3 -m examples.fireworks_math.train_fireworks_math \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='rllm-fireworks-workflow' \
-    trainer.experiment_name='fireworks-hendrycks-math-4b' \
+    trainer.experiment_name='fireworks-hendrycks-math-30b' \
     trainer.max_actor_ckpt_to_keep=2 \
     trainer.val_before_train=True \
     trainer.n_gpus_per_node=8 \
@@ -77,5 +85,5 @@ python3 -m examples.fireworks_math.train_fireworks_math \
     trainer.default_hdfs_dir=null \
     trainer.total_epochs=100 \
     rllm.workflow.use_workflow=True \
-    fireworks.deployment_id=qwen3-4b-3 \
-    fireworks.model_id_prefix=test-math-qwen3-4b-3
+    fireworks.deployment_id=rllm-qwen3-30b-1 \
+    fireworks.model_id_prefix=rllm-math-qwen3-30b-1
