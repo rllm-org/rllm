@@ -51,6 +51,9 @@ rllm:
     mode: broadcast # [broadcast, per_step]
     normalize_by_steps: False
   compact_filtering:
+    mask_unknown: False
+    mask_env_done: False
+    mask_error: True
     enable: False
     mask_max_prompt_length_exceeded: True
     mask_max_response_length_exceeded: True
