@@ -86,4 +86,5 @@ python3 -m examples.fireworks_math.train_fireworks_math \
     trainer.total_epochs=100 \
     rllm.workflow.use_workflow=True \
     +fireworks.deployment_id=rllm-qwen3-30b-1 \
-    +fireworks.model_id_prefix=rllm-math-qwen3-30b-1
+    +fireworks.model_id_prefix=rllm-math-qwen3-30b-1 \
+    +fireworks.concurrency=32
