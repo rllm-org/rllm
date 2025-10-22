@@ -22,8 +22,8 @@ python3 -m examples.fireworks_math.train_fireworks_math \
     data.max_response_length=16384 \
     +actor_rollout_ref.model.lora_rank=32 \
     +actor_rollout_ref.model.lora_alpha=32 \
-    actor_rollout_ref.rollout.load_format=safetensors \
-    actor_rollout_ref.model.target_modules=all-linear \
+    +actor_rollout_ref.rollout.load_format=safetensors \
+    +actor_rollout_ref.model.target_modules=all-linear \
     actor_rollout_ref.model.path=$MODEL_PATH \
     actor_rollout_ref.hybrid_engine=True \
     actor_rollout_ref.actor.optim.lr=3e-5 \
