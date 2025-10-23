@@ -82,12 +82,12 @@ class PipelineTaskRunner:
         local_path = copy_to_local(config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False))
 
         # Instantiate the tokenizer and processor.
-        from verl.utils import hf_tokenizer
+        from verl.utils import hf_processor, hf_tokenizer
 
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         # Used for multimodal LLM, could be None
-        # processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+        processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
         # Define worker classes based on the actor strategy.
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
@@ -173,6 +173,7 @@ class PipelineTaskRunner:
         trainer = FireworksAgentWorkflowPPOTrainer(
             config=config,
             tokenizer=tokenizer,
+            processor=processor,
             role_worker_mapping=role_worker_mapping,
             resource_pool_manager=resource_pool_manager,
             ray_worker_group_cls=ray_worker_group_cls,
