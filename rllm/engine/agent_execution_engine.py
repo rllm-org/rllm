@@ -70,6 +70,7 @@ class AgentExecutionEngine:
         self.max_response_length = max_response_length
         self.max_prompt_length = max_prompt_length
         self.enforce_max_prompt_length = enforce_max_prompt_length
+        self.disable_thinking = self.config.get("rllm", {}).get("disable_thinking", False) if self.config is not None else False
 
         self.agent_class = agent_class
         self.agent_args = agent_args
@@ -87,7 +88,7 @@ class AgentExecutionEngine:
             assert env_class.is_multithread_safe(), "Environment must be multithread safe for async engine"
 
         if chat_parser is None:
-            self.chat_parser = ChatTemplateParser.get_parser(self.tokenizer, disable_thinking=kwargs.get("disable_thinking", False))
+            self.chat_parser = ChatTemplateParser.get_parser(self.tokenizer, disable_thinking=self.disable_thinking)
         else:
             self.chat_parser = chat_parser
 
@@ -104,7 +105,7 @@ class AgentExecutionEngine:
                 tokenizer=self.tokenizer,
                 max_prompt_length=self.max_prompt_length,
                 max_response_length=self.max_response_length,
-                disable_thinking=kwargs.get("disable_thinking", False),
+                disable_thinking=self.disable_thinking,
             )
         elif self.engine_name == "verl":
             from rllm.engine.rollout.verl_engine import VerlEngine
@@ -113,7 +114,7 @@ class AgentExecutionEngine:
                 config=self.config,
                 rollout_manager=rollout_engine,
                 tokenizer=self.tokenizer,
-                disable_thinking=self.config.rllm.disable_thinking,
+                disable_thinking=self.disable_thinking,
             )
 
         # Create a thread pool executor for environment interactions (i.e. step, reset, close)

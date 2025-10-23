@@ -18,10 +18,11 @@ class VerlEngine(RolloutEngine):
         self.rollout_manager: AgentLoopManager = rollout_manager
         self.server_manager = AsyncLLMServerManager(config, server_handles=rollout_manager.server_handles)
         self.tokenizer = tokenizer
-        self.chat_parser = ChatTemplateParser.get_parser(tokenizer, disable_thinking=config.rllm.disable_thinking)
+        self.chat_parser = ChatTemplateParser.get_parser(tokenizer, disable_thinking=config.get("rllm", {}).get("disable_thinking", False))
 
         self.max_prompt_length = config.data.max_prompt_length
         self.max_response_length = config.data.max_response_length
+        self.accumulate_reasoning = config.get("rllm", {}).get("accumulate_reasoning", False)
 
         self.train_sampling_params = dict(
             temperature=0.0 if config.actor_rollout_ref.rollout.do_sample is False else config.actor_rollout_ref.rollout.temperature,
@@ -47,7 +48,7 @@ class VerlEngine(RolloutEngine):
 
         # these go to the parser
         tools = kwargs.pop("tools", [])
-        accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.config.rllm.accumulate_reasoning)
+        accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
 
         sampling_params = self.val_sampling_params.copy() if self.validate or validate else self.train_sampling_params.copy()
         sampling_params.update(kwargs)
