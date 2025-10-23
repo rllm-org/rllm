@@ -51,7 +51,7 @@ async def main():
 
     n_parallel_tasks = 3
     max_tasks = 3
-    model_id = "accounts/fireworks/models/qwen3-30b-a3b-instruct-2507"
+    model_id = "accounts/fireworks/models/qwen2p5-vl-32b-instruct"
 
     # Create dummy rollout_engine (required by Workflow base class but not used)
     rollout_engine = OpenAIEngine(
