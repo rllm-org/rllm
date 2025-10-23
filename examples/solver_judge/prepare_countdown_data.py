@@ -1,7 +1,5 @@
 import random
 
-from datasets import load_dataset
-
 from rllm.data.dataset import DatasetRegistry
 
 
