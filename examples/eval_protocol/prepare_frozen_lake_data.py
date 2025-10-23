@@ -31,5 +31,8 @@ def prepare_frozen_lake_data(train_size: int, test_size: int):
     DatasetRegistry.register_dataset("frozen_lake_eval_protocol", train_dataset, "train")
     DatasetRegistry.register_dataset("frozen_lake_eval_protocol", test_dataset, "test")
 
+    print(f"Train dataset size: {len(train_dataset)}")
+    print(f"Test dataset size: {len(test_dataset)}")
+
 if __name__ == "__main__":
-    prepare_frozen_lake_data(train_size=200, test_size=20)
+    prepare_frozen_lake_data(train_size=100, test_size=100)
