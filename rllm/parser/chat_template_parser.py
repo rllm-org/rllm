@@ -29,6 +29,9 @@ class ChatTemplateParser:
     def parse(self, messages, add_generation_prompt=False, is_first_msg=False, **kwargs) -> str:
         return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt)
 
+    def parse_completion(self, completion_ids: list[int]):
+        raise NotImplementedError("ChatTemplateParser does not support parse_completion")
+
     def verify_equivalence(self, messages, verbose=True):
         """Verify that parsing messages together is equivalent to parsing them individually.
 

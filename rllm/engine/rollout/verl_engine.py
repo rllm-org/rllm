@@ -1,9 +1,11 @@
+import asyncio
 import uuid
 
 from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine
 from rllm.parser import ChatTemplateParser
 from rllm.workflows import TerminationEvent, TerminationReason
-from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
+from verl.experimental.agent_loop.agent_loop import AgentLoopManager, AsyncLLMServerManager
+from verl.workers.rollout.replica import TokenOutput
 
 
 class VerlEngine(RolloutEngine):
@@ -13,8 +15,8 @@ class VerlEngine(RolloutEngine):
         if config.actor_rollout_ref.rollout.name not in ["vllm", "sglang"]:
             raise ValueError(f"VerlEngine only supports vllm or sglang rollout, but got {config.actor_rollout_ref.rollout.name}")
 
-        self.rollout_manager = rollout_manager
-        self.server_manager = AsyncLLMServerManager(config, rollout_manager.async_llm_servers)
+        self.rollout_manager: AgentLoopManager = rollout_manager
+        self.server_manager = AsyncLLMServerManager(config, server_handles=rollout_manager.server_handles)
         self.tokenizer = tokenizer
         self.chat_parser = ChatTemplateParser.get_parser(tokenizer, disable_thinking=config.get("rllm", {}).get("disable_thinking", False))
 
@@ -60,7 +62,8 @@ class VerlEngine(RolloutEngine):
         if enforce_max_prompt_length and prompt_length > self.max_prompt_length:
             raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
 
-        completion_ids: list[int] = await self.server_manager.generate(request_id=application_id, prompt_ids=prompt_ids, sampling_params=sampling_params)
+        token_output: TokenOutput = await self.server_manager.generate(request_id=application_id, prompt_ids=prompt_ids, sampling_params=sampling_params)  # type: ignore
+        completion_ids: list[int] = token_output.token_ids
 
         finish_reason = "stop"
         if len(completion_ids) >= max_tokens:
@@ -68,6 +71,7 @@ class VerlEngine(RolloutEngine):
             completion_ids = completion_ids[:max_tokens]
 
         completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
+        # TODO: implement parse_completion for the standard parser
         parsed_output = self.chat_parser.parse_completion(completion_ids)
 
         return ModelOutput(
@@ -82,8 +86,10 @@ class VerlEngine(RolloutEngine):
             finish_reason=finish_reason,
         )
 
-    def wake_up(self):
-        self.rollout_manager.wake_up()
+    async def wake_up(self):
+        """Wake up all rollout replica instances asynchronously."""
+        await asyncio.gather(*[replica.wake_up() for replica in self.rollout_manager.rollout_replicas])
 
-    def sleep(self):
-        self.rollout_manager.sleep()
+    async def sleep(self):
+        """Sleep all rollout replica instances asynchronously."""
+        await asyncio.gather(*[replica.sleep() for replica in self.rollout_manager.rollout_replicas])
