@@ -212,7 +212,7 @@ class FrozenLakeWorkflow(Workflow):
             id=uid,
             task=task,
             is_correct=(reward == 1.0),
-            trajectories=[("frozen_lake_agent", trajectory)],
+            trajectories=[trajectory],
             metrics={"frozen_lake_reward": reward, **reward_info},
         )
 
