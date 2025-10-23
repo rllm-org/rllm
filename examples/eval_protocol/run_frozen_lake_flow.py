@@ -85,6 +85,7 @@ async def main():
 
     try:
         episodes = await engine.execute_tasks(tasks)
+        print(episodes[0].trajectories)
 
         accuracy = evaluate_results(episodes)
 
@@ -92,8 +93,8 @@ async def main():
         output_dir.mkdir(exist_ok=True)
         output_file = output_dir / "frozen_lake_results.json"
 
-        # with open(output_file, "w") as f:
-        #     json.dump([episode.to_dict() for episode in episodes], f, indent=2)
+        with open(output_file, "w") as f:
+            json.dump([episode.to_dict() for episode in episodes], f, indent=2)
 
         print(f"\n✅ Results saved to {output_file}")
 
