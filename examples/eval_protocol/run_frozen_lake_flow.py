@@ -56,7 +56,7 @@ async def main():
     # Create dummy rollout_engine (required by Workflow base class but not used)
     rollout_engine = OpenAIEngine(
         model=model_id,
-        base_url="https://api.openai.com/v1",
+        base_url="https://api.fireworks.ai/inference/v1",
         api_key=os.getenv("FIREWORKS_API_KEY"),
     )
 

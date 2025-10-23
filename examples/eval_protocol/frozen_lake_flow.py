@@ -46,7 +46,7 @@ class FrozenLakeWorkflow(Workflow):
         max_tokens: int = 4096,
         **kwargs
     ):
-        super().__init__(**kwargs)
+        super().__init__(rollout_engine, **kwargs)
         self.steps = steps
         self.model = lite_llm_prefix + rollout_engine.model
         self.temperature = temperature
