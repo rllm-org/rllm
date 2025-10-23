@@ -50,7 +50,7 @@ async def main():
     """Main execution function."""
 
     n_parallel_tasks = 3
-    max_tasks = 3
+    max_tasks = 100
     model_id = "accounts/fireworks/models/qwen2p5-vl-32b-instruct"
 
     # Create dummy rollout_engine (required by Workflow base class but not used)
@@ -85,7 +85,6 @@ async def main():
 
     try:
         episodes = await engine.execute_tasks(tasks)
-        print(episodes[0].trajectories)
 
         accuracy = evaluate_results(episodes)
 
