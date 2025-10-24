@@ -85,7 +85,8 @@ async def main():
 
     try:
         episodes = await engine.execute_tasks(tasks)
-
+        for episode in episodes:
+            print(episode.trajectories)
         accuracy = evaluate_results(episodes)
 
         output_dir = Path("logs")

@@ -13,6 +13,7 @@ def main(config):
     trainer = PipelineAgentTrainer(
         workflow_class=FrozenLakeWorkflow,
         workflow_args={
+            "lite_llm_prefix": "fireworks_ai/",
             "steps": 30,
             "temperature": 1.0,
             "max_tokens": 16384,
