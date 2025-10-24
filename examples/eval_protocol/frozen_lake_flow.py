@@ -22,8 +22,6 @@ from rllm.workflows.workflow import Workflow
 class FrozenLakeWorkflow(Workflow):
     """
     Workflow that executes frozen lake tasks using MCPGymRolloutProcessor.
-    
-    Each workflow instance creates its own MCP server. Designed for sequential execution.
 
     Task format expected:
     {
@@ -33,6 +31,11 @@ class FrozenLakeWorkflow(Workflow):
         "user_prompt_template": "{observation}"
     }
     """
+
+    # Class variables (shared across all workflow instances)
+    _shared_server_started = False
+    _server_lock = asyncio.Lock()
+    _shared_rollout_processor = MCPGymRolloutProcessor()
 
     def __init__(
         self,
@@ -49,8 +52,8 @@ class FrozenLakeWorkflow(Workflow):
         self.temperature = temperature
         self.max_tokens = max_tokens
 
-        # Create individual rollout processor for this instance
-        self.rollout_processor = MCPGymRolloutProcessor()
+        # Use shared rollout processor across all instances
+        self.rollout_processor = FrozenLakeWorkflow._shared_rollout_processor
 
         eval_protocol_path = Path(eval_protocol.__file__).parent
         server_script_path = eval_protocol_path / "mcp_servers" / "frozen_lake" / "server.py"
@@ -65,7 +68,7 @@ class FrozenLakeWorkflow(Workflow):
             server_script_path=str(server_script_path),
             steps=self.steps,
             semaphore=asyncio.Semaphore(1),
-            kwargs={"start_server": True},  # Always start server for each task
+            kwargs={"start_server": False},
         )
 
     async def run(self, task: dict, uid: str, **kwargs) -> Episode:
@@ -80,6 +83,20 @@ class FrozenLakeWorkflow(Workflow):
         Returns:
             Episode with trajectory and computed rewards
         """
+        # Thread-safe server startup (double-checked locking pattern)
+        if not FrozenLakeWorkflow._shared_server_started:
+            # Only acquire lock if server not started yet
+            async with FrozenLakeWorkflow._server_lock:
+                # Check again inside lock (another workflow might have started it)
+                if not FrozenLakeWorkflow._shared_server_started:
+                    # First workflow to reach here starts the server
+                    self.config.kwargs["start_server"] = True
+                    FrozenLakeWorkflow._shared_server_started = True
+                else:
+                    self.config.kwargs["start_server"] = False
+        else:
+            self.config.kwargs["start_server"] = False
+
         self.reset(task=task, uid=uid)
 
         try:
