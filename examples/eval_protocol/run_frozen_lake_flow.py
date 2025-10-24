@@ -49,9 +49,9 @@ def evaluate_results(episodes):
 async def main():
     """Main execution function."""
 
-    n_parallel_tasks = 10
+    n_parallel_tasks = 1
     max_tasks = 10
-    model_id = "accounts/fireworks/models/qwen2p5-vl-32b-instruct"
+    model_id = "accounts/fireworks/models/qwen3-235b-a22b"
 
     # Create dummy rollout_engine (required by Workflow base class but not used)
     rollout_engine = OpenAIEngine(
