@@ -16,7 +16,7 @@ def main(config):
             "lite_llm_prefix": "fireworks_ai/",
             "steps": 30,
             "temperature": 1.0,
-            "max_tokens": 16384,
+            "max_tokens": 32768,
         },
         config=config,
         train_dataset=train_dataset,
