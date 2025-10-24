@@ -4,6 +4,8 @@ for the FrozenLake environment.
 """
 
 import asyncio
+import signal
+import traceback
 from pathlib import Path
 
 import eval_protocol
@@ -18,6 +20,14 @@ from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.engine.rollout.openai_engine import OpenAIEngine
 from rllm.workflows.workflow import Workflow
 
+_orig_signal = signal.signal
+
+def tracing_signal(sig, handler):
+    print(f"[DEBUG] signal.signal({sig}, {handler}) called")
+    traceback.print_stack()
+    return _orig_signal(sig, handler)
+
+signal.signal = tracing_signal
 
 class FrozenLakeWorkflow(Workflow):
     """
