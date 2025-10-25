@@ -76,7 +76,7 @@ class FrozenLakeWorkflow(Workflow):
             mcp_config_path="",
             server_script_path=str(self._server_script_path),
             steps=self._max_steps,
-            semaphore=asyncio.Semaphore(1),
+            semaphore=self._rollout_processor_semaphore,
             kwargs={"start_server": self._rollout_processor_server_started},
         )
 
