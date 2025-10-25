@@ -68,7 +68,7 @@ python3 -m examples.eval_protocol.train_frozen_lake_flow \
     trainer.project_name='rllm-fireworks-workflow' \
     trainer.experiment_name='fireworks-frozen-lake-8b' \
     trainer.max_actor_ckpt_to_keep=2 \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.n_gpus_per_node=8 \
     +trainer.n_training_gpus_per_node=8 \
     trainer.nnodes=1 \
