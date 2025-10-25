@@ -43,44 +43,40 @@ class FrozenLakeWorkflow(Workflow):
         self,
         rollout_engine: OpenAIEngine,
         lite_llm_prefix: str = "fireworks_ai/",
-        steps: int = 30,
+        max_steps: int = 30,
         temperature: float = 1.0,
         max_tokens: int = 4096,
         **kwargs
     ):
-
-        _orig_signal = signal.signal
-
-        def tracing_signal(sig, handler):
-            print(f"[DEBUG] signal.signal({sig}, {handler}) called")
-            traceback.print_stack()
-            return _orig_signal(sig, handler)
-
-        signal.signal = tracing_signal
-
         super().__init__(rollout_engine, **kwargs)
-        self.steps = steps
-        self.model = lite_llm_prefix + rollout_engine.model
-        self.temperature = temperature
-        self.max_tokens = max_tokens
+
+        self._rollout_processor_server_started = False
+        self._rollout_processor_semaphore = asyncio.Semaphore(1)
+        self._lite_llm_prefix = lite_llm_prefix
+        self._temperature = temperature
+        self._max_tokens = max_tokens
+        self._max_steps = max_steps
+
+        eval_protocol_path = Path(eval_protocol.__file__).parent
+        self._server_script_path = eval_protocol_path / "mcp_servers" / "frozen_lake" / "server.py"
 
         # Use shared rollout processor across all instances
         self.rollout_processor = FrozenLakeWorkflow._shared_rollout_processor
 
-        eval_protocol_path = Path(eval_protocol.__file__).parent
-        server_script_path = eval_protocol_path / "mcp_servers" / "frozen_lake" / "server.py"
 
-        self.config = RolloutProcessorConfig(
+    def _build_rollout_processor_config(self):
+        model = self._lite_llm_prefix + self.rollout_engine.model
+        return RolloutProcessorConfig(
             completion_params={
-                "model": self.model,
-                "temperature": self.temperature,
-                "max_tokens": self.max_tokens,
+                "model": model,
+                "temperature": self._temperature,
+                "max_tokens": self._max_tokens,
             },
             mcp_config_path="",
-            server_script_path=str(server_script_path),
-            steps=self.steps,
+            server_script_path=str(self._server_script_path),
+            steps=self._max_steps,
             semaphore=asyncio.Semaphore(1),
-            kwargs={"start_server": False},
+            kwargs={"start_server": self._rollout_processor_server_started},
         )
 
     async def run(self, task: dict, uid: str, **kwargs) -> Episode:
@@ -102,19 +98,19 @@ class FrozenLakeWorkflow(Workflow):
                 # Check again inside lock (another workflow might have started it)
                 if not FrozenLakeWorkflow._shared_server_started:
                     # First workflow to reach here starts the server
-                    self.config.kwargs["start_server"] = True
+                    self._rollout_processor_server_started = True
                     FrozenLakeWorkflow._shared_server_started = True
                 else:
-                    self.config.kwargs["start_server"] = False
+                    self._rollout_processor_server_started = False
         else:
-            self.config.kwargs["start_server"] = False
+            self._rollout_processor_server_started = False
 
         self.reset(task=task, uid=uid)
 
         try:
             eval_row = self._task_to_evaluation_row(task)
 
-            tasks = self.rollout_processor([eval_row], self.config)
+            tasks = self.rollout_processor([eval_row], self._build_rollout_processor_config())
 
             if not tasks:
                 raise ValueError("MCPGymRolloutProcessor returned no tasks")
