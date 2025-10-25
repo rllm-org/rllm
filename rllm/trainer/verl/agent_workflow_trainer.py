@@ -53,22 +53,23 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
 
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
+        self._validate_config()
 
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._thread.start()
 
     def _validate_config(self):
+        assert self.workflow_class is not None, "workflow_class is required for agent workflow trainer"
         assert self.config.actor_rollout_ref.hybrid_engine is True, "Only hybrid engine is supported"
         assert self.config.actor_rollout_ref.rollout.mode == "async", "Only async rollout mode is supported"
         assert self.use_rm is False, "Reward models are not supported. Rewards should be assigned using a reward function in the workflow or environment."
         if self.config.rllm.rejection_sample.multiplier != 1:
             assert self.config.rllm.rejection_sample.enable is True, "rejection sampling is disabled, but rejection_sample.multiplier is not 1"
 
+        # TODO: revisit whether this is now supported by Verl
         if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
             raise NotImplementedError("REMAX is not supported yet")
-
-        super()._validate_config()
 
     def init_workers(self):
         super().init_workers()
@@ -136,7 +137,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         for epoch in range(self.config.trainer.total_epochs):
             pprint(f"epoch {epoch}, step {self.global_steps} started")
             for batch_dict in self.train_dataloader:
-                do_profile = self.global_steps in self.config.trainer.profile_steps if self.config.trainer.profile_steps is not None else False
+                do_profile = self.global_steps in self.config.trainer.profile_steps if self.config.trainer.get("profile_steps") is not None else False
                 with marked_timer("start_profile", timing_raw):
                     self._start_profiling(do_profile)
 
@@ -642,7 +643,9 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
 
     def shutdown(self):
         """A cleanup method to gracefully stop the background event loop."""
-        self.agent_execution_engine.shutdown()
+        if hasattr(self, "agent_execution_engine") and self.agent_execution_engine is not None:
+            self.agent_execution_engine.shutdown()
+            self.agent_execution_engine = None
         if hasattr(self, "_loop") and self._loop is not None and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
         if hasattr(self, "_thread") and self._thread is not None:
