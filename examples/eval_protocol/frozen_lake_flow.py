@@ -20,14 +20,6 @@ from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.engine.rollout.openai_engine import OpenAIEngine
 from rllm.workflows.workflow import Workflow
 
-_orig_signal = signal.signal
-
-def tracing_signal(sig, handler):
-    print(f"[DEBUG] signal.signal({sig}, {handler}) called")
-    traceback.print_stack()
-    return _orig_signal(sig, handler)
-
-signal.signal = tracing_signal
 
 class FrozenLakeWorkflow(Workflow):
     """
@@ -56,6 +48,16 @@ class FrozenLakeWorkflow(Workflow):
         max_tokens: int = 4096,
         **kwargs
     ):
+
+        _orig_signal = signal.signal
+
+        def tracing_signal(sig, handler):
+            print(f"[DEBUG] signal.signal({sig}, {handler}) called")
+            traceback.print_stack()
+            return _orig_signal(sig, handler)
+
+        signal.signal = tracing_signal
+
         super().__init__(rollout_engine, **kwargs)
         self.steps = steps
         self.model = lite_llm_prefix + rollout_engine.model
