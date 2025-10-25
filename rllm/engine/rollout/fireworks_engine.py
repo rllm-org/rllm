@@ -84,13 +84,12 @@ class FireworksEngine(OpenAIEngine):
                 return True
             except Exception as e:
                 error_message = str(e).lower()
+                print(error_message)
                 if "404" in error_message:
                     time.sleep(10)
                     continue
                 if "502" in error_message:
                     time.sleep(10)
-                    print(error_message)
                     continue
                 else:
-                    print(e)
                     return False
