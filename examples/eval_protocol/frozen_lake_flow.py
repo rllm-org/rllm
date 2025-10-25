@@ -66,6 +66,7 @@ class FrozenLakeWorkflow(Workflow):
 
     def _build_rollout_processor_config(self):
         model = self._lite_llm_prefix + self.rollout_engine.model
+        print("model in frozen_lake_flow", model)
         return RolloutProcessorConfig(
             completion_params={
                 "model": model,
