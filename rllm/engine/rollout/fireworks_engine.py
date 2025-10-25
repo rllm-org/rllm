@@ -81,6 +81,15 @@ class FireworksEngine(OpenAIEngine):
         while True:
             try:
                 _ = await self.client.chat.completions.create(model=model_name, messages=[{"role": "user", "content": "hi"}])
+
+                gateway = Gateway()
+                formatted_deployment_id = f"accounts/{self._account_id}/deployments/{self._deployment_id}"
+                list_model_request = SyncListDeployedModelsRequest(filter=f'deployment="{formatted_deployment_id}"')
+                list_model_response = gateway.list_deployed_models_sync(list_model_request)
+                assert list_model_response.total_size == 1, f"Expected only one model under deployment {formatted_deployment_id}"
+                deployed_model = list_model_response.deployed_models[0]
+                self.model = deployed_model.name
+
                 return True
             except Exception as e:
                 error_message = str(e).lower()
