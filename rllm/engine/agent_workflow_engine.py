@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from rllm.agents.agent import Episode
 from rllm.engine.rollout import ModelOutput, RolloutEngine
+from rllm.engine.rollout.verl_engine import VerlEngine
 from rllm.misc import colorful_print
 from rllm.workflows.workflow import TerminationReason, Workflow
 
@@ -164,14 +165,26 @@ class AgentWorkflowEngine:
         Returns:
             DataProto: Transformed results compatible with Verl training.
         """
-        self.rollout_engine.wake_up()
+        free_cache_engine = self.config.actor_rollout_ref.rollout.free_cache_engine if self.config else False
+        if free_cache_engine:
+            # TODO: later probably should make the `wake_up` and `sleep` methods in base class to be async
+            if isinstance(self.rollout_engine, VerlEngine):
+                await self.rollout_engine.wake_up()
+            else:
+                self.rollout_engine.wake_up()
+
         if batch.meta_info.get("validate", False):
             self.rollout_engine.validate = True
         tasks = batch.non_tensor_batch["extra_info"].tolist()
         task_ids = batch.non_tensor_batch["task_ids"].tolist()
         results = await self.execute_tasks(tasks, task_ids, **kwargs)  # list of Episodes
         self.rollout_engine.validate = False
-        self.rollout_engine.sleep()
+
+        if free_cache_engine:
+            if isinstance(self.rollout_engine, VerlEngine):
+                await self.rollout_engine.sleep()
+            else:
+                self.rollout_engine.sleep()
         return self.transform_results_for_verl(results, task_ids)
 
     def transform_results_for_verl(self, episodes: list[Episode], task_ids: np.ndarray) -> "DataProto":
