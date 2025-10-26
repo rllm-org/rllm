@@ -10,7 +10,7 @@ import torch
 from tqdm import tqdm
 
 from rllm.agents.agent import Episode
-from rllm.engine.rollout import ModelOutput
+from rllm.engine.rollout import ModelOutput, RolloutEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
 from rllm.misc import colorful_print
 from rllm.workflows.workflow import TerminationReason, Workflow
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class AgentWorkflowEngine:
-    def __init__(self, workflow_cls: type[Workflow], workflow_args: dict, rollout_engine: VerlEngine, config=None, n_parallel_tasks: int = 128, retry_limit: int = 3, raise_on_error: bool = True, **kwargs):
+    def __init__(self, workflow_cls: type[Workflow], workflow_args: dict, rollout_engine: RolloutEngine, config=None, n_parallel_tasks: int = 128, retry_limit: int = 3, raise_on_error: bool = True, **kwargs):
         """Initialize the AgentWorkflowEngine.
 
         Args:
@@ -167,7 +167,11 @@ class AgentWorkflowEngine:
         """
         free_cache_engine = self.config.actor_rollout_ref.rollout.free_cache_engine if self.config else False
         if free_cache_engine:
-            await self.rollout_engine.wake_up()
+            # TODO: later probably should make the `wake_up` and `sleep` methods in base class to be async
+            if isinstance(self.rollout_engine, VerlEngine):
+                await self.rollout_engine.wake_up()
+            else:
+                self.rollout_engine.wake_up()
 
         if batch.meta_info.get("validate", False):
             self.rollout_engine.validate = True
@@ -177,7 +181,10 @@ class AgentWorkflowEngine:
         self.rollout_engine.validate = False
 
         if free_cache_engine:
-            await self.rollout_engine.sleep()
+            if isinstance(self.rollout_engine, VerlEngine):
+                await self.rollout_engine.sleep()
+            else:
+                self.rollout_engine.sleep()
         return self.transform_results_for_verl(results, task_ids)
 
     def transform_results_for_verl(self, episodes: list[Episode], task_ids: np.ndarray) -> "DataProto":
