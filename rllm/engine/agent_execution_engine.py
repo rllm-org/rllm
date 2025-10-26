@@ -167,7 +167,6 @@ class AgentExecutionEngine:
         for idx, env in enumerate(envs):
             env.idx = idx
         self.agents = agents
-        self.n_parallel_agents = len(envs)
 
     async def run_agent_trajectory_async(self, idx, application_id, seed=0, mode="Text", **kwargs):
         """Run a single agent's trajectory asynchronously"""
@@ -426,28 +425,28 @@ class AgentExecutionEngine:
             timing_raw = {}
         assert all(env is not None and isinstance(env, BaseEnv) for env in self.envs), "All environments must be inheriting from BaseEnv"
         assert all(env.is_multithread_safe() for env in self.envs), "All environments must be multithread safe for async engine"  # type: ignore
-        max_concurrency = self.n_parallel_agents
-        self.executor = ThreadPoolExecutor(max_workers=max_concurrency)
+        semaphore = asyncio.Semaphore(self.n_parallel_agents)
 
         if self.engine_name == "verl":
             self.rollout_engine.wake_up()
 
         async def launch_one_trajectory_task(env_idx: int):
-            try:
-                application_id = str(uuid.uuid4())
-                result = await self.run_agent_trajectory_with_retry(
-                    idx=env_idx,
-                    application_id=application_id,
-                    seed=reset_seed,
-                    mode=mode,
-                    **kwargs,
-                )
-            except Exception as e:
-                import traceback
+            async with semaphore:
+                try:
+                    application_id = str(uuid.uuid4())
+                    result = await self.run_agent_trajectory_with_retry(
+                        idx=env_idx,
+                        application_id=application_id,
+                        seed=reset_seed,
+                        mode=mode,
+                        **kwargs,
+                    )
+                except Exception as e:
+                    import traceback
 
-                traceback.print_exc()
-                raise e
-            return result
+                    traceback.print_exc()
+                    raise e
+                return result
 
         # Create all N conceptual tasks. Their execution will be throttled by the semaphore
         # and the availability of agent/env indices.
