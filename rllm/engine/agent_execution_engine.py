@@ -61,6 +61,7 @@ class AgentExecutionEngine:
         self.tokenizer = tokenizer
         self.engine_name = engine_name
         self.n_parallel_agents = n_parallel_agents
+        self.max_workers = max_workers
         self.overlong_filter = overlong_filter
 
         # For interaction
