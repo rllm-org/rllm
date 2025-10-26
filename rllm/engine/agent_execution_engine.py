@@ -117,6 +117,7 @@ class AgentExecutionEngine:
                 disable_thinking=self.disable_thinking,
             )
 
+
     async def get_model_response(self, prompt, application_id, **kwargs) -> str:
         """
         Compute model response asynchronously based on the engine type.
