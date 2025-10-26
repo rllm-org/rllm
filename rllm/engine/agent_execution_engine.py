@@ -441,10 +441,10 @@ class AgentExecutionEngine:
         """
         Transform step-by-step results into trajectory format for training.
         The assemble is aggresive, if steps is not cumulative, the response_masks is set to all 0s.
-        
+
         Each step_result contains:
         - steps: List of {"prompt": str, "response": str, "prompt_ids": list, "completion_ids": list}
-        
+
         For training, we need to assemble the full conversation sequence where:
         - prompt_tokens: Initial prompt (first step's prompt_ids)
         - response_tokens: All subsequent conversation (completion_ids + next step's prompt_ids)
@@ -457,49 +457,43 @@ class AgentExecutionEngine:
         response_tokens = []
         response_masks = []
         is_valid_trajectory = True
-        
+
         for i, step in enumerate(steps):
             current_prompt_ids = step["prompt_ids"]
             current_completion_ids = step["completion_ids"]
-            
+
             if i == 0:
                 # First step: just add completion
                 response_tokens.extend(current_completion_ids)
                 response_masks.extend([1] * len(current_completion_ids))  # completion contributes to loss
                 accumulated_sequence.extend(current_completion_ids)
             else:
-                if current_prompt_ids[:len(accumulated_sequence)] != accumulated_sequence:
+                if current_prompt_ids[: len(accumulated_sequence)] != accumulated_sequence:
                     # Find the first differing position
-                    prefix = current_prompt_ids[:len(accumulated_sequence)]
+                    prefix = current_prompt_ids[: len(accumulated_sequence)]
                     diff_pos = None
-                    for i, (expected, actual) in enumerate(zip(accumulated_sequence, prefix)):
+                    for i, (expected, actual) in enumerate(zip(accumulated_sequence, prefix, strict=False)):
                         if expected != actual:
                             diff_pos = i
                             break
-                    
+
                     if diff_pos is not None:
-                        logger.warning(f"When assemble steps, detect the trajectory not accumulative at position {diff_pos}. "
-                                      f"Expected: {accumulated_sequence[diff_pos:diff_pos+5]}, "
-                                      f"Got: {prefix[diff_pos:diff_pos+5]}. "
-                                      f"Setting response_masks to all 0s. This is likely due to retokenization.")
+                        logger.warning(f"When assemble steps, detect the trajectory not accumulative at position {diff_pos}. Expected: {accumulated_sequence[diff_pos : diff_pos + 5]}, Got: {prefix[diff_pos : diff_pos + 5]}. Setting response_masks to all 0s. This is likely due to retokenization.")
                     else:
-                        logger.warning(f"When assemble steps, detect length mismatch. "
-                                      f"Expected length: {len(accumulated_sequence)}, "
-                                      f"Got length: {len(prefix)}. "
-                                      f"Setting response_masks to all 0s.")
-                    
+                        logger.warning(f"When assemble steps, detect length mismatch. Expected length: {len(accumulated_sequence)}, Got length: {len(prefix)}. Setting response_masks to all 0s.")
+
                     is_valid_trajectory = False
                     break
-                
-                response_tokens.extend(current_prompt_ids[len(accumulated_sequence):] + current_completion_ids)
+
+                response_tokens.extend(current_prompt_ids[len(accumulated_sequence) :] + current_completion_ids)
                 response_masks.extend([0] * (len(current_prompt_ids) - len(accumulated_sequence)) + [1] * len(current_completion_ids))  # completion contributes to loss
                 accumulated_sequence = current_prompt_ids + current_completion_ids
-        
+
         assert len(response_masks) == len(response_tokens)
 
         prompt_tokens = torch.tensor(initial_prompt_ids, dtype=torch.long)
-        response_tokens= torch.tensor(response_tokens, dtype=torch.long)
-        response_masks = torch.tensor(response_masks, dtype=torch.long) * int(is_valid_trajectory) # very aggresive filtering
+        response_tokens = torch.tensor(response_tokens, dtype=torch.long)
+        response_masks = torch.tensor(response_masks, dtype=torch.long) * int(is_valid_trajectory)  # very aggresive filtering
 
         return prompt_tokens, response_tokens, response_masks
 
