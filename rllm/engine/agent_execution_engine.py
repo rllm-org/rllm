@@ -117,8 +117,6 @@ class AgentExecutionEngine:
                 disable_thinking=self.disable_thinking,
             )
 
-        # Create a thread pool executor for environment interactions (i.e. step, reset, close)
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
 
     async def get_model_response(self, prompt, application_id, **kwargs) -> str:
         """
@@ -425,6 +423,8 @@ class AgentExecutionEngine:
             timing_raw = {}
         assert all(env is not None and isinstance(env, BaseEnv) for env in self.envs), "All environments must be inheriting from BaseEnv"
         assert all(env.is_multithread_safe() for env in self.envs), "All environments must be multithread safe for async engine"  # type: ignore
+        if self.executor is None or self.executor._shutdown:
+            self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
         semaphore = asyncio.Semaphore(self.n_parallel_agents)
 
         if self.engine_name == "verl":
