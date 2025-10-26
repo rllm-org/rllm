@@ -44,6 +44,7 @@ rllm:
   disable_thinking: False
   accumulate_reasoning: False
   mask_truncated_samples: False
+  rollout_assemble_mode: hybrid
   stepwise_advantage:
     enable: False
     mode: broadcast # [broadcast, per_step]
