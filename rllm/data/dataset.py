@@ -385,8 +385,13 @@ class DatasetRegistry:
         """
         processed_data = []
         for entry in data:
+            # Extract the actual question for VERL filtering to work correctly
+            # Try common field names: question, prompt, instruction, input
+            question = entry.get("question") or entry.get("prompt") or entry.get("instruction") or entry.get("input") or "placeholder"
+
             processed_entry = {
-                "prompt": [{"role": "user", "content": "placeholder"}],
+                # Use actual question so VERL's length filtering works correctly
+                "prompt": [{"role": "user", "content": question}],
                 "reward_model": {
                     "style": "rule",
                     "ground_truth": None,

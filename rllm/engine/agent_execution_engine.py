@@ -207,8 +207,12 @@ class AgentExecutionEngine:
         messages = agent.chat_completions
         prompt_tokens, _ = convert_messages_to_tokens_and_masks(messages, tokenizer=self.tokenizer, parser=self.chat_parser, contains_first_msg=True, contains_generation_msg=True)
         prompt_token_len = len(prompt_tokens)
-        # Note, this should never happen!
+        # This can happen if:
+        # 1. Initial task prompt from environment is too long (should be filtered during dataset loading)
+        # 2. Checkpoint contains cached dataset that wasn't filtered (delete checkpoint's data.pt)
         if prompt_token_len > self.max_prompt_length:
+            # Log details for debugging
+            logger.warning(f"Trajectory {idx}: Initial prompt length {prompt_token_len} exceeds max_prompt_length {self.max_prompt_length}. First 200 chars of prompt: {self.chat_parser.parse(messages[:1], add_generation_prompt=False)[:200]}...")
             agent.reset()
             raise Exception(f"Trajectory {idx}: initial prompt length {prompt_token_len} already exceeded max_prompt_length {self.max_prompt_length}, retrying")
 
