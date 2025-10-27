@@ -1,5 +1,4 @@
 import asyncio
-import concurrent.futures
 import logging
 import time
 import traceback
@@ -117,7 +116,6 @@ class AgentExecutionEngine:
                 tokenizer=self.tokenizer,
                 disable_thinking=self.disable_thinking,
             )
-
 
     async def get_model_response(self, prompt, application_id, **kwargs) -> str:
         """
