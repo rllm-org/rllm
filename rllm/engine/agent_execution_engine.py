@@ -422,7 +422,7 @@ class AgentExecutionEngine:
             timing_raw = {}
         assert all(env is not None and isinstance(env, BaseEnv) for env in self.envs), "All environments must be inheriting from BaseEnv"
         assert all(env.is_multithread_safe() for env in self.envs), "All environments must be multithread safe for async engine"  # type: ignore
-        if self.executor is None or self.executor._shutdown:
+        if not hasattr(self, "executor") or self.executor._shutdown:
             self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
         semaphore = asyncio.Semaphore(self.n_parallel_agents)
 
@@ -478,6 +478,8 @@ class AgentExecutionEngine:
         Returns:
             A list of trajectories, one for each task.
         """
+        if not hasattr(self, "executor") or self.executor._shutdown:
+            self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
 
         max_concurrent = self.n_parallel_agents
 
@@ -519,6 +521,9 @@ class AgentExecutionEngine:
 
         all_trajectories = {task_id: trajectory for task_id, trajectory in results}
         ordered_trajectories = [all_trajectories[i] for i in range(len(all_trajectories))]
+
+        self.executor.shutdown(wait=False, cancel_futures=True)
+
         return ordered_trajectories
 
     def shutdown(self):
