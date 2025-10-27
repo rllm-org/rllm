@@ -139,14 +139,8 @@ class PipelineAgentPPOTrainer(AgentPPOTrainer):
                     # Get the generator function which will yield results as they complete
                     if self.config.rllm.agent.step_advantage_broadcast:
                         raise Exception("Stepwise advantage broadcasting not supported on pipelined trainer yet")
-                    if self.config.rllm.rollout_assemble_mode == "hybrid":
-                        mode = "Hybrid"
-                    elif self.config.rllm.rollout_assemble_mode == "token":
-                        mode = "Token"
-                    else:
-                        raise ValueError("rllm.rollout_assemble_mode only accept 'token' or 'hybrid'")
 
-                    gen_seq_generator = self.generate_agent_trajectories_async(timing_raw=timing_raw, meta_info=batch.meta_info, mode=mode)
+                    gen_seq_generator = self.generate_agent_trajectories_async(timing_raw=timing_raw, meta_info=batch.meta_info)
                     thread = threading.Thread(target=create_replay_queue, args=(gen_seq_generator, replay_queue, batch_iter, timing_raw))
                     thread.start()
 

@@ -549,13 +549,7 @@ class AgentPPOTrainer(RayPPOTrainer):
         with marked_timer("collect_trajectory", timing_raw):
             trajectories = []
             if self.async_rollout_mode:
-                if self.config.rllm.rollout_assemble_mode == "hybrid":
-                    mode = "Hybrid"
-                elif self.config.rllm.rollout_assemble_mode == "token":
-                    mode = "Token"
-                else:
-                    raise ValueError("rllm.rollout_assemble_mode only accept 'token' or 'hybrid'")
-                gen_seq_generator = self.generate_agent_trajectories_async(timing_raw=timing_raw, meta_info=meta_info, mode=mode)
+                gen_seq_generator = self.generate_agent_trajectories_async(timing_raw=timing_raw, meta_info=meta_info, mode="Token")
                 for _, trajectory in enumerate(gen_seq_generator):
                     trajectories.append(trajectory)
             else:

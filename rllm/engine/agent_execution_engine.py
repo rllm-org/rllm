@@ -382,39 +382,7 @@ class AgentExecutionEngine:
         if mode == "Text":
             return trajectory
         elif mode == "Token":
-            token_result = {
-                "prompt_tokens": torch.tensor(prompt_tokens, dtype=torch.long),
-                "response_tokens": torch.tensor(response_tokens, dtype=torch.long),
-                "response_masks": torch.tensor(response_masks, dtype=torch.long),
-                "trajectory_reward": trajectory.reward,
-                "idx": env.idx,
-                "chat_completions": agent.chat_completions,
-                "metrics": {
-                    # Total number of steps taken in the trajectory
-                    "steps": len(trajectory.steps),
-                    # Time to calculate reward
-                    "reward_time": reward_time,
-                    # Total time spent in environment execution (env.step)
-                    "env_time": env_time,
-                    # Time to calculate response tokens
-                    "llm_time": llm_time,
-                    # Total time spent in the trajectory
-                    "total_time": total_time,
-                },
-            }
-            return token_result
-        elif mode == "Conversation":
-            return agent.chat_completions
-        elif mode == "Step":
-            steps_result = {
-                "steps": episode_steps,
-                "trajectory_reward": trajectory.reward,
-                "idx": env.idx,
-                "mc_returns": [step.mc_return for step in trajectory.steps][: len(episode_steps)],
-            }
-            return steps_result
-        elif mode == "Hybrid":
-            prompt_tokens, response_tokens, response_masks = self.assemble_steps(episode_steps)
+            prompt_tokens, response_tokens, response_masks, is_valid_trajectory = self.assemble_steps(episode_steps)
             token_result = {
                 "prompt_tokens": prompt_tokens,
                 "response_tokens": response_tokens,
@@ -433,9 +401,22 @@ class AgentExecutionEngine:
                     "llm_time": llm_time,
                     # Total time spent in the trajectory
                     "total_time": total_time,
+                    "token_mismatch": 0.0 if is_valid_trajectory else 1.0,
                 },
             }
             return token_result
+        elif mode == "Conversation":
+            return agent.chat_completions
+        elif mode == "Step":
+            steps_result = {
+                "steps": episode_steps,
+                "trajectory_reward": trajectory.reward,
+                "idx": env.idx,
+                "mc_returns": [step.mc_return for step in trajectory.steps][: len(episode_steps)],
+            }
+            return steps_result
+        else:
+            raise ValueError(f"Mode {mode} not supported")
 
     def assemble_steps(self, steps: list[dict]):
         """
@@ -493,9 +474,12 @@ class AgentExecutionEngine:
 
         prompt_tokens = torch.tensor(initial_prompt_ids, dtype=torch.long)
         response_tokens = torch.tensor(response_tokens, dtype=torch.long)
-        response_masks = torch.tensor(response_masks, dtype=torch.long) * int(is_valid_trajectory)  # very aggresive filtering
+        response_masks = torch.tensor(response_masks, dtype=torch.long)
 
-        return prompt_tokens, response_tokens, response_masks
+        if self.config.rllm.filter_token_mismatch:
+            response_masks = response_masks * int(is_valid_trajectory)
+
+        return prompt_tokens, response_tokens, response_masks, is_valid_trajectory
 
     async def run_agent_trajectory_with_retry(self, idx, application_id, seed=0, mode="Text", **kwargs):
         for _ in range(self.retry_limit):
