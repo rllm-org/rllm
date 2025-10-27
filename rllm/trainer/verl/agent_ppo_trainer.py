@@ -1040,8 +1040,10 @@ class AgentPPOTrainer(RayPPOTrainer):
         # for the padded dataproto, make the traj mask to 0. is_last_step also False
         for i in range(pad_size):
             idx = original_batch_size + i
-            batch.non_tensor_batch["is_last_step"][idx] = False
-            batch.non_tensor_batch["is_pad_step"][idx] = True
+            if "is_last_step" in batch.non_tensor_batch:
+                batch.non_tensor_batch["is_last_step"][idx] = False
+            if "is_pad_step" in batch.non_tensor_batch:
+                batch.non_tensor_batch["is_pad_step"][idx] = True
 
         return batch
 
