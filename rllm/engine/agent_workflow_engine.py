@@ -85,7 +85,8 @@ class AgentWorkflowEngine:
                 uid = f"{task_id}:{rollout_idx}"
                 episode = await workflow.run_with_termination_handling(task=task, uid=uid, **kwargs)
 
-                colorful_print(f"[{uid}] Rollout completed with termination reason: {episode.termination_reason}", fg="green" if episode.is_correct else "yellow")
+                reward = episode.trajectories[0].reward if episode.trajectories else 0.0
+                colorful_print(f"[{uid}] Rollout completed. Reward: {reward:.1f}, Termination: {episode.termination_reason}", fg="green" if episode.is_correct else "yellow")
 
                 if episode.termination_reason != TerminationReason.ERROR:
                     return task_id, rollout_idx, episode
