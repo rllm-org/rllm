@@ -10,13 +10,7 @@ def prepare_frozen_lake_data(train_size: int, test_size: int):
     user_prompt_template = "Current game state grid:\n{observation}\n\nYou are navigating the 4x4 grid above. Navigate safely to reach the goal 'G' while avoiding holes 'H'. Choose your next move from: LEFT, DOWN, RIGHT, or UP."
 
     def create_row(idx, seed):
-        return {
-            "id": f"run_{idx}",
-            "system_prompt": system_prompt,
-            "user_prompt_template": user_prompt_template,
-            "environment_context": {"game": "FrozenLake", "map_name": "4x4", "seed": seed}
-        }
-
+        return {"id": f"run_{idx}", "system_prompt": system_prompt, "user_prompt_template": user_prompt_template, "environment_context": {"game": "FrozenLake", "map_name": "4x4", "seed": seed}}
 
     seeds = random.sample(range(1, 1_000_001), train_size + test_size)
     all_rows = []
@@ -33,6 +27,7 @@ def prepare_frozen_lake_data(train_size: int, test_size: int):
 
     print(f"Train dataset size: {len(train_dataset)}")
     print(f"Test dataset size: {len(test_dataset)}")
+
 
 if __name__ == "__main__":
     prepare_frozen_lake_data(train_size=100, test_size=100)

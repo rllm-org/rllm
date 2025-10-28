@@ -78,7 +78,7 @@ async def main():
     for i in range(max_tasks):
         tasks.append(test_dataset[i])
 
-    print(f"Starting frozen lake workflow execution...")
+    print("Starting frozen lake workflow execution...")
     print(f"Model: {model_id}")
     print(f"Parallel tasks: {n_parallel_tasks}")
     print()
@@ -103,6 +103,7 @@ async def main():
     except Exception as e:
         print(f"❌ Error during execution: {e}")
         import traceback
+
         traceback.print_exc()
         raise
     finally:

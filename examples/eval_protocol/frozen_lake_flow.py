@@ -4,8 +4,6 @@ for the FrozenLake environment.
 """
 
 import asyncio
-import signal
-import traceback
 from pathlib import Path
 
 import eval_protocol
@@ -39,15 +37,7 @@ class FrozenLakeWorkflow(Workflow):
     _server_lock = asyncio.Lock()
     _shared_rollout_processor = MCPGymRolloutProcessor()
 
-    def __init__(
-        self,
-        rollout_engine: OpenAIEngine,
-        lite_llm_prefix: str = "fireworks_ai/",
-        max_steps: int = 30,
-        temperature: float = 1.0,
-        max_tokens: int = 4096,
-        **kwargs
-    ):
+    def __init__(self, rollout_engine: OpenAIEngine, lite_llm_prefix: str = "fireworks_ai/", max_steps: int = 30, temperature: float = 1.0, max_tokens: int = 4096, **kwargs):
         super().__init__(rollout_engine, **kwargs)
 
         self._rollout_processor_server_started = False
@@ -62,7 +52,6 @@ class FrozenLakeWorkflow(Workflow):
 
         # Use shared rollout processor across all instances
         self.rollout_processor = FrozenLakeWorkflow._shared_rollout_processor
-
 
     def _build_rollout_processor_config(self):
         model = self._lite_llm_prefix + self.rollout_engine.model
@@ -178,7 +167,7 @@ class FrozenLakeWorkflow(Workflow):
                         "function": {
                             "name": tc.function.name,
                             "arguments": tc.function.arguments,
-                        }
+                        },
                     }
                     for tc in msg.tool_calls
                 ]

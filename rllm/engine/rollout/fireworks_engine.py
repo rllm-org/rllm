@@ -10,6 +10,7 @@ from fireworks.control_plane.generated.protos_grpcio.gateway.deployed_model_pb2 
     ListDeployedModelsRequest as SyncListDeployedModelsRequest,
 )
 from fireworks.gateway import Gateway
+
 from rllm.engine.rollout.openai_engine import OpenAIEngine
 
 
