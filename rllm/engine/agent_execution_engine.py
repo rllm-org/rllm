@@ -30,7 +30,7 @@ class AgentExecutionEngine:
         tokenizer=None,
         rollout_engine=None,
         chat_parser=None,
-        n_parallel_agents=1,
+        n_parallel_agents=1,  # The number of active agents
         trajectory_timeout=None,
         gamma=0.2,
         api_retries=3,
@@ -44,7 +44,7 @@ class AgentExecutionEngine:
         agent_args=None,
         rollout_engine_args=None,
         env_args=None,
-        max_workers=64,
+        max_workers=64,  # The number of concurrent env operations
         enforce_max_prompt_length=False,  # If enabled, applies max_prompt check per step
         overlong_filter=False,  # Filter for overlong trajectories (i.e. TRUNCATION, MAX_STEPS, TIMEOUT)
         **kwargs,
@@ -60,7 +60,7 @@ class AgentExecutionEngine:
         self.tokenizer = tokenizer
         self.engine_name = engine_name
         self.n_parallel_agents = n_parallel_agents
-        self.max_workers = max_workers
+        self.max_env_workers = max_workers
         self.overlong_filter = overlong_filter
 
         # For interaction
@@ -423,7 +423,7 @@ class AgentExecutionEngine:
         assert all(env is not None and isinstance(env, BaseEnv) for env in self.envs), "All environments must be inheriting from BaseEnv"
         assert all(env.is_multithread_safe() for env in self.envs), "All environments must be multithread safe for async engine"  # type: ignore
         if not hasattr(self, "executor") or self.executor._shutdown:
-            self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
+            self.executor = ThreadPoolExecutor(max_workers=self.max_env_workers)
         semaphore = asyncio.Semaphore(self.n_parallel_agents)
 
         if self.engine_name == "verl":
@@ -479,7 +479,7 @@ class AgentExecutionEngine:
             A list of trajectories, one for each task.
         """
         if not hasattr(self, "executor") or self.executor._shutdown:
-            self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
+            self.executor = ThreadPoolExecutor(max_workers=self.max_env_workers)
 
         max_concurrent = self.n_parallel_agents
 
