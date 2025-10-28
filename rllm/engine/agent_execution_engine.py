@@ -1,5 +1,4 @@
 import asyncio
-import concurrent.futures
 import logging
 import time
 import traceback
@@ -31,7 +30,7 @@ class AgentExecutionEngine:
         tokenizer=None,
         rollout_engine=None,
         chat_parser=None,
-        n_parallel_agents=1,
+        n_parallel_agents=1,  # The number of active agents
         trajectory_timeout=None,
         gamma=0.2,
         api_retries=3,
@@ -45,7 +44,7 @@ class AgentExecutionEngine:
         agent_args=None,
         rollout_engine_args=None,
         env_args=None,
-        max_workers=64,
+        max_workers=64,  # The number of concurrent env operations
         enforce_max_prompt_length=False,  # If enabled, applies max_prompt check per step
         overlong_filter=False,  # Filter for overlong trajectories (i.e. TRUNCATION, MAX_STEPS, TIMEOUT)
         **kwargs,
@@ -61,6 +60,7 @@ class AgentExecutionEngine:
         self.tokenizer = tokenizer
         self.engine_name = engine_name
         self.n_parallel_agents = n_parallel_agents
+        self.max_env_workers = max_workers
         self.overlong_filter = overlong_filter
 
         # For interaction
@@ -117,9 +117,6 @@ class AgentExecutionEngine:
                 disable_thinking=self.disable_thinking,
             )
 
-        # Create a thread pool executor for environment interactions (i.e. step, reset, close)
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-
     async def get_model_response(self, prompt, application_id, **kwargs) -> str:
         """
         Compute model response asynchronously based on the engine type.
@@ -167,7 +164,6 @@ class AgentExecutionEngine:
         for idx, env in enumerate(envs):
             env.idx = idx
         self.agents = agents
-        self.n_parallel_agents = len(envs)
 
     async def run_agent_trajectory_async(self, idx, application_id, seed=0, mode="Text", **kwargs):
         """Run a single agent's trajectory asynchronously"""
@@ -426,28 +422,30 @@ class AgentExecutionEngine:
             timing_raw = {}
         assert all(env is not None and isinstance(env, BaseEnv) for env in self.envs), "All environments must be inheriting from BaseEnv"
         assert all(env.is_multithread_safe() for env in self.envs), "All environments must be multithread safe for async engine"  # type: ignore
-        max_concurrency = self.n_parallel_agents
-        self.executor = ThreadPoolExecutor(max_workers=max_concurrency)
+        if not hasattr(self, "executor") or self.executor._shutdown:
+            self.executor = ThreadPoolExecutor(max_workers=self.max_env_workers)
+        semaphore = asyncio.Semaphore(self.n_parallel_agents)
 
         if self.engine_name == "verl":
             self.rollout_engine.wake_up()
 
         async def launch_one_trajectory_task(env_idx: int):
-            try:
-                application_id = str(uuid.uuid4())
-                result = await self.run_agent_trajectory_with_retry(
-                    idx=env_idx,
-                    application_id=application_id,
-                    seed=reset_seed,
-                    mode=mode,
-                    **kwargs,
-                )
-            except Exception as e:
-                import traceback
+            async with semaphore:
+                try:
+                    application_id = str(uuid.uuid4())
+                    result = await self.run_agent_trajectory_with_retry(
+                        idx=env_idx,
+                        application_id=application_id,
+                        seed=reset_seed,
+                        mode=mode,
+                        **kwargs,
+                    )
+                except Exception as e:
+                    import traceback
 
-                traceback.print_exc()
-                raise e
-            return result
+                    traceback.print_exc()
+                    raise e
+                return result
 
         # Create all N conceptual tasks. Their execution will be throttled by the semaphore
         # and the availability of agent/env indices.
@@ -480,6 +478,8 @@ class AgentExecutionEngine:
         Returns:
             A list of trajectories, one for each task.
         """
+        if not hasattr(self, "executor") or self.executor._shutdown:
+            self.executor = ThreadPoolExecutor(max_workers=self.max_env_workers)
 
         max_concurrent = self.n_parallel_agents
 
@@ -521,6 +521,9 @@ class AgentExecutionEngine:
 
         all_trajectories = {task_id: trajectory for task_id, trajectory in results}
         ordered_trajectories = [all_trajectories[i] for i in range(len(all_trajectories))]
+
+        self.executor.shutdown(wait=False, cancel_futures=True)
+
         return ordered_trajectories
 
     def shutdown(self):
