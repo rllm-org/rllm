@@ -10,7 +10,6 @@ from fireworks.control_plane.generated.protos_grpcio.gateway.deployed_model_pb2 
     ListDeployedModelsRequest as SyncListDeployedModelsRequest,
 )
 from fireworks.gateway import Gateway
-
 from rllm.engine.rollout.openai_engine import OpenAIEngine
 
 
@@ -82,6 +81,7 @@ class FireworksEngine(OpenAIEngine):
             try:
                 _ = await self.client.chat.completions.create(model=model_name, messages=[{"role": "user", "content": "hi"}])
 
+                # TODO(tianyi): Remove after landing https://github.com/BerriAI/litellm/pull/15938/
                 gateway = Gateway()
                 formatted_deployment_id = f"accounts/{self._account_id}/deployments/{self._deployment_id}"
                 list_model_request = SyncListDeployedModelsRequest(filter=f'deployment="{formatted_deployment_id}"')
