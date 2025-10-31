@@ -180,6 +180,18 @@ class AgentPPOTrainer(RayPPOTrainer):
                         batch = self._pad_dataproto_to_world_size(batch=batch)
                     else:
                         final_gen_batch_output, generate_metrics = self.generate_agent_trajectory(timing_raw=timing_raw, meta_info=batch.meta_info)
+
+                        # If some trajectories were skipped (overlong prompts), filter the batch to match
+                        if "skipped_indices" in final_gen_batch_output.meta_info:
+                            skipped_indices = final_gen_batch_output.meta_info.pop("skipped_indices")
+                            # Create mask for valid (non-skipped) indices
+                            valid_mask = np.ones(len(batch.batch), dtype=bool)
+                            valid_mask[skipped_indices] = False
+                            # Filter batch to only include valid samples
+                            valid_indices = np.where(valid_mask)[0]
+                            batch = batch.select_idxs(valid_indices)
+                            print(f"Filtered batch from {len(valid_mask)} to {len(valid_indices)} samples after skipping {len(skipped_indices)} overlong prompts")
+
                         batch = batch.union(final_gen_batch_output)
                         metrics.update(generate_metrics)
 
@@ -551,16 +563,36 @@ class AgentPPOTrainer(RayPPOTrainer):
             trajectories = []
             if self.async_rollout_mode:
                 gen_seq_generator = self.generate_agent_trajectories_async(timing_raw=timing_raw, meta_info=meta_info, mode="Token")
-                for _, trajectory in enumerate(gen_seq_generator):
-                    trajectories.append(trajectory)
+                for trajectory in gen_seq_generator:
+                    # Skip None trajectories (overlong prompts)
+                    if trajectory is not None:
+                        trajectories.append(trajectory)
             else:
                 raise ValueError("Only async rollout mode is supported")
+
+        # Check if all trajectories were skipped
+        if not trajectories:
+            raise RuntimeError("All trajectories were skipped (likely all prompts exceed max_prompt_length). Please check your dataset and increase max_prompt_length or enable filtering.")
+
         # Sort trajectories by their idx, to ensure they are in order.
         trajectories.sort(key=lambda x: x["idx"])
+
+        # Determine which indices were skipped by checking missing idx values
+        # Expected indices are 0 to (batch_size * rollout.n - 1)
+        expected_count = len(self.agent_execution_engine.envs)
+        actual_indices = set(t["idx"] for t in trajectories)
+        expected_indices = set(range(expected_count))
+        skipped_indices = sorted(expected_indices - actual_indices)
+
+        if skipped_indices:
+            print(f"Skipped {len(skipped_indices)} trajectories due to overlong prompts at env indices: {skipped_indices}")
 
         with marked_timer("transform_trajectory", timing_raw):
             # Transform the raw trajectories into DataProto format.
             final_gen_batch_output, metrics = self._transform_agent_trajectories(trajectories)
+            # Store skipped indices in meta_info for potential filtering of original batch
+            if skipped_indices:
+                final_gen_batch_output.meta_info["skipped_indices"] = skipped_indices
         return final_gen_batch_output, metrics
 
     def generate_agent_steps(self, timing_raw=None, meta_info=None, uids=None):
