@@ -179,7 +179,6 @@ class AgentWorkflowEngine:
             try:
                 logger.info(f"Logging {len(results)} episodes to step={self.current_step}, mode={self.current_mode}, epoch={self.current_epoch}")
                 self.episode_logger.log_episodes_batch(results, self.current_step, self.current_mode, self.current_epoch)
-                logger.info(f"Successfully logged {len(results)} episodes")
             except Exception as e:
                 logger.error(f"Failed to log episodes: {e}")
                 import traceback
