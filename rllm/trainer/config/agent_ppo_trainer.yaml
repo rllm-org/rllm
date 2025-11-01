@@ -65,3 +65,7 @@ fireworks:
   deployment_id: null
   model_id_prefix: test-model
   concurrency: 32
+
+trainer:
+  log_episodes: false
+  episode_log_dir: logs/${trainer.project_name}/${trainer.experiment_name}
