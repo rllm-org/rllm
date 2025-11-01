@@ -79,13 +79,10 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
 
         # Create episode logger if enabled in config
         episode_logger = None
-        if self.config.trainer.get('log_episodes', False):
+        if self.config.trainer.get("log_episodes", False):
             # Get episode log directory from config, default to "logs/my_project/my_experiment"
-            episode_log_dir = self.config.trainer.get('episode_log_dir', f'logs/{self.config.trainer.project_name}/{self.config.trainer.experiment_name}')
-            episode_logger = EpisodeLogger(
-                base_dir=episode_log_dir,
-                subdirectory="episodes"
-            )
+            episode_log_dir = self.config.trainer.get("episode_log_dir", f"logs/{self.config.trainer.project_name}/{self.config.trainer.experiment_name}")
+            episode_logger = EpisodeLogger(base_dir=episode_log_dir, subdirectory="episodes")
 
         self.agent_execution_engine = AgentWorkflowEngine(
             workflow_cls=self.workflow_class,

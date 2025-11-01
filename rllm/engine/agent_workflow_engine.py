@@ -49,7 +49,7 @@ class AgentWorkflowEngine:
         self.n_parallel_tasks = n_parallel_tasks
         self.executor = ThreadPoolExecutor(max_workers=self.n_parallel_tasks)
         self.workflow_queue = None
-        
+
         # Episode logging support
         self.episode_logger = episode_logger
         self.current_step = 0
@@ -58,7 +58,7 @@ class AgentWorkflowEngine:
 
     def set_training_step(self, step: int, mode: str = "train", epoch: int = 0):
         """Set current training step for episode logging.
-        
+
         Args:
             step: Current training step number
             mode: Mode identifier ('train' or 'val'), defaults to 'train'
@@ -67,7 +67,7 @@ class AgentWorkflowEngine:
         self.current_step = step
         self.current_mode = mode
         self.current_epoch = epoch
-    
+
     async def initialize_pool(self):
         """Initialize the workflow pool with parallel workflow instances.
 
@@ -173,7 +173,7 @@ class AgentWorkflowEngine:
         sorted_tasks = sorted(task_states.keys(), key=lambda task_id: task_states[task_id]["idx"])
         for task_id in sorted_tasks:
             results.extend(task_states[task_id]["episodes"])
-        
+
         # Log episodes if logger is provided
         if self.episode_logger is not None:
             try:
@@ -182,8 +182,9 @@ class AgentWorkflowEngine:
             except Exception as e:
                 logger.error(f"Failed to log episodes: {e}")
                 import traceback
+
                 traceback.print_exc()
-        
+
         return results
 
     async def execute_tasks_verl(self, batch: "DataProto", **kwargs) -> "DataProto":
