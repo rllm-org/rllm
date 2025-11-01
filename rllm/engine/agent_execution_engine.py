@@ -203,10 +203,17 @@ class AgentExecutionEngine:
         messages = agent.chat_completions
         prompt_tokens, _ = convert_messages_to_tokens_and_masks(messages, tokenizer=self.tokenizer, parser=self.chat_parser, contains_first_msg=True, contains_generation_msg=True)
         prompt_token_len = len(prompt_tokens)
-        # Note, this should never happen!
+
+        # Check if initial prompt already exceeds max length
+        # This can happen if:
+        # 1. Dataset filtering didn't catch this sample (e.g., different tokenization)
+        # 2. Checkpoint contains cached dataset that wasn't filtered (delete checkpoint's data.pt)
         if prompt_token_len > self.max_prompt_length:
-            agent.reset()
-            raise Exception(f"Trajectory {idx}: initial prompt length {prompt_token_len} already exceeded max_prompt_length {self.max_prompt_length}, retrying")
+            logger.warning(f"Trajectory {idx}: Initial prompt length {prompt_token_len} exceeds max_prompt_length {self.max_prompt_length}. Skipping this sample entirely (no trajectory will be returned). First 200 chars of prompt: {self.chat_parser.parse(messages[:1], add_generation_prompt=False)[:200]}...")
+
+            # Close the environment and return None to skip this trajectory entirely
+            await loop.run_in_executor(self.executor, env.close)
+            return None
 
         for step_idx in range(self.max_steps):
             # Get action from agent
@@ -410,7 +417,11 @@ class AgentExecutionEngine:
     async def run_agent_trajectory_with_retry(self, idx, application_id, seed=0, mode="Text", **kwargs):
         for _ in range(self.retry_limit):
             try:
-                return await asyncio.wait_for(self.run_agent_trajectory_async(idx, application_id=application_id, seed=seed, mode=mode, **kwargs), timeout=7200)
+                result = await asyncio.wait_for(self.run_agent_trajectory_async(idx, application_id=application_id, seed=seed, mode=mode, **kwargs), timeout=7200)
+                # If result is None, it means the trajectory was skipped (e.g., overlong prompt)
+                if result is None:
+                    return None
+                return result
             except Exception:
                 traceback.print_exc()
                 continue
@@ -452,10 +463,18 @@ class AgentExecutionEngine:
         tasks_to_run = [launch_one_trajectory_task(i) for i in range(len(self.envs))]
 
         tasks_completed = 0
+        skipped_count = 0
         for coro in asyncio.as_completed(tasks_to_run):
             try:
                 result = await coro
                 tasks_completed += 1
+
+                # Skip None results (trajectories that were skipped due to overlong prompts)
+                if result is None:
+                    skipped_count += 1
+                    colorful_print(f"Number of Trajectories {tasks_completed}/{len(self.envs)} completed ({skipped_count} skipped due to overlong prompts)", "cyan")
+                    continue
+
                 colorful_print(f"Number of Trajectories {tasks_completed}/{len(self.envs)} completed", "cyan")
                 yield result
             except Exception as e:
