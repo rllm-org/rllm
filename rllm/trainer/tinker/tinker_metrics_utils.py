@@ -2,7 +2,7 @@
 
 import io
 import logging
-from typing import Any, List
+from typing import Any
 
 import numpy as np
 import tinker
@@ -15,28 +15,28 @@ logger = logging.getLogger(__name__)
 
 
 def print_episodes(
-    episodes: List[Episode],
+    episodes: list[Episode],
     tokenizer: Any,
     num_episodes_to_print: int = 2,
 ):
     """
     Print sample episodes for inspection.
-    
+
     Args:
         episodes: List of Episode objects
         tokenizer: Tokenizer for decoding
         num_episodes_to_print: Number of episodes to print
     """
     from rllm.trainer.tinker.tinker_data_processor import TinkerDatumBuilder
-    
+
     buf = io.StringIO()
-    
+
     def bprint(s: str):
         print(s, file=buf)
-    
+
     for episode_idx, episode in enumerate(episodes[:num_episodes_to_print]):
         bprint(f"\n====== Episode {episode_idx} ======")
-        
+
         # Select representative trajectories from this episode (up to 4)
         max_trajs_to_print = 4
         selected_inds = list(range(len(episode.trajectories)))
@@ -49,28 +49,28 @@ def print_episodes(
             selected_trajs = [episode.trajectories[i] for i in selected_inds]
         else:
             selected_trajs = episode.trajectories
-        
+
         # Compute advantages for this episode (based on trajectory rewards)
         episode_rewards = [traj.reward for traj in episode.trajectories]
         # Simple GRPO advantage computation (no algorithm_config needed for display)
         mean_reward = np.mean(episode_rewards)
         advantages = [r - mean_reward for r in episode_rewards]
-        
+
         for traj_idx, traj in enumerate(selected_trajs):
             actual_traj_idx = selected_inds[traj_idx]
             advantage = advantages[actual_traj_idx]
-            
+
             bprint(f"****** trajectory idx={actual_traj_idx}, reward={traj.reward:.3g}, advantage={advantage:.3g}, steps={len(traj.steps)} ******")
-            
+
             # Build datum(s) from trajectory - this handles multi-turn merging
             datums = TinkerDatumBuilder.build_datum_from_trajectory(traj, advantage)
-            
+
             for datum_idx, datum in enumerate(datums):
                 bprint(f"---- datum {datum_idx + 1}/{len(datums)} ----")
                 bprint(colorize_example(datum, tokenizer, key="advantages"))
-        
+
         bprint("====== End Episode ======")
-    
+
     logger.info(buf.getvalue().rstrip())
 
 
@@ -178,7 +178,7 @@ def print_trajectories(
     logger.info(buf.getvalue().rstrip())
 
 
-def compute_env_metrics(episodes: List[Episode]) -> dict:
+def compute_env_metrics(episodes: list[Episode]) -> dict:
     """
     Compute environment-specific metrics from episodes.
 
@@ -222,9 +222,9 @@ def compute_env_metrics(episodes: List[Episode]) -> dict:
                 total_steps += 1
 
                 # Collect per-step metrics if available
-                if hasattr(step, 'info') and step.info:
+                if hasattr(step, "info") and step.info:
                     all_step_metrics.append(step.info)
-            
+
             ob_tokens_per_trajectory.append(traj_ob_tokens)
             ac_tokens_per_trajectory.append(traj_ac_tokens)
 
@@ -263,7 +263,7 @@ def compute_env_metrics(episodes: List[Episode]) -> dict:
         metric_counts = {}
         for step_metric in all_step_metrics:
             for key, value in step_metric.items():
-                if isinstance(value, (int, float)):
+                if isinstance(value, int | float):
                     metric_sums[key] = metric_sums.get(key, 0) + value
                     metric_counts[key] = metric_counts.get(key, 0) + 1
 
@@ -310,7 +310,7 @@ def compute_kl_and_entropy_metrics(training_datums: list[tinker.Datum], training
 
     flat_sampling_logprobs = torch.cat(all_sampling_logprobs)
     entropy_sample = -flat_sampling_logprobs.mean().item()
-    
+
     # Compute perplexity: exp(-mean_logprob)
     mean_logprob = flat_sampling_logprobs.mean().item()
     perplexity = torch.exp(-torch.tensor(mean_logprob)).item()
@@ -324,7 +324,7 @@ def compute_kl_and_entropy_metrics(training_datums: list[tinker.Datum], training
 
 
 def compute_training_metrics(
-    episodes: List[Episode],
+    episodes: list[Episode],
     batch_idx: int,
     time_metrics: dict,
     learning_rate: float,

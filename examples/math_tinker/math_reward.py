@@ -11,7 +11,8 @@ import logging
 import re
 import signal
 import types
-from typing import Any, Callable, Dict, Tuple, TypeVar
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 import sympy
 from pylatexenc import latex2text
@@ -247,10 +248,7 @@ def _sympy_parse(expr: str):
     py_expr = expr.replace("^", "**")
     return sympy_parser.parse_expr(
         py_expr,
-        transformations=(
-            sympy_parser.standard_transformations
-            + (sympy_parser.implicit_multiplication_application,)
-        ),
+        transformations=(sympy_parser.standard_transformations + (sympy_parser.implicit_multiplication_application,)),
     )
 
 
@@ -438,12 +436,7 @@ def split_tuple(expr: str):
     expr = _strip_properly_formatted_commas(expr)
     if len(expr) == 0:
         return []
-    if (
-        len(expr) > 2
-        and expr[0] in TUPLE_CHARS
-        and expr[-1] in TUPLE_CHARS
-        and all([ch not in expr[1:-1] for ch in TUPLE_CHARS])
-    ):
+    if len(expr) > 2 and expr[0] in TUPLE_CHARS and expr[-1] in TUPLE_CHARS and all([ch not in expr[1:-1] for ch in TUPLE_CHARS]):
         elems = [elem.strip() for elem in expr[1:-1].split(",")]
     else:
         elems = [expr]
@@ -484,14 +477,7 @@ def grade_answer(given_answer: str, ground_truth: str) -> bool:
 
     is_correct = False
 
-    if (
-        len(ground_truth_elems) > 1
-        and (
-            ground_truth_normalized[0] != given_normalized[0]
-            or ground_truth_normalized[-1] != given_normalized[-1]
-        )
-        or len(ground_truth_elems) != len(given_elems)
-    ):
+    if len(ground_truth_elems) > 1 and (ground_truth_normalized[0] != given_normalized[0] or ground_truth_normalized[-1] != given_normalized[-1]) or len(ground_truth_elems) != len(given_elems):
         is_correct = False
     else:
         for ground_truth_elem, given_elem in zip(ground_truth_elems, given_elems, strict=True):
@@ -547,8 +533,8 @@ def _timeout_handler(signum: int, frame: types.FrameType | None) -> None:
 
 def run_with_timeout_signal(
     func: Callable[..., T],
-    args: Tuple[Any, ...] = (),
-    kwargs: Dict[str, Any] = {},
+    args: tuple[Any, ...] = (),
+    kwargs: dict[str, Any] | None = None,
     timeout_seconds: int = 5,
 ) -> T | None:
     """
@@ -569,6 +555,8 @@ def run_with_timeout_signal(
     signal.alarm(timeout_seconds)
 
     try:
+        if kwargs is None:
+            kwargs = {}
         result = func(*args, **kwargs)
     except TimeoutException:
         logger.warning(f"Function timed out after {timeout_seconds} seconds.")

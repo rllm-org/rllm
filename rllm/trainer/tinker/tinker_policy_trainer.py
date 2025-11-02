@@ -7,13 +7,13 @@ It does NOT contain any environment or agent logic.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING
 
-from rllm.agents.agent import Episode
 import tinker
 from tinker import types
 from tinker_cookbook import checkpoint_utils
 
+from rllm.agents.agent import Episode
 from rllm.trainer.tinker.tinker_data_processor import (
     TinkerAdvantageComputer,
     TinkerTrajectoryFilter,
@@ -29,14 +29,14 @@ logger = logging.getLogger(__name__)
 class TinkerPolicyTrainer:
     """
     Handles policy updates via gradient descent.
-    
+
     This class handles:
     - Training client management
     - Data processing (filtering, advantages, datum conversion)
     - Forward-backward passes
     - Optimizer steps
     - Checkpoint saving/loading
-    
+
     It does NOT handle:
     - Environment or agent interactions
     - Trajectory collection
@@ -58,7 +58,7 @@ class TinkerPolicyTrainer:
         self.config = config
         self.service_client = service_client
         self.training_client = None
-        
+
         # Initialize data processors
         self.advantage_computer = TinkerAdvantageComputer(config.algorithm)
         self.trajectory_filter = TinkerTrajectoryFilter(config.algorithm)
@@ -66,7 +66,7 @@ class TinkerPolicyTrainer:
     async def initialize_async(self, resume_from_checkpoint: bool = True):
         """
         Initialize or resume training client.
-        
+
         Args:
             resume_from_checkpoint: If True, attempt to resume from last checkpoint
         """
@@ -79,13 +79,11 @@ class TinkerPolicyTrainer:
             # Resume from checkpoint
             logger.info(f"Resuming from checkpoint: {resume_info}")
             try:
-                self.training_client = await self.service_client.create_training_client_from_state_async(
-                    resume_info["state_path"]
-                )
+                self.training_client = await self.service_client.create_training_client_from_state_async(resume_info["state_path"])
             except Exception as e:
                 logger.error(f"Failed to resume from checkpoint: {e}")
                 raise
-            
+
             if "sampler_path" in resume_info:
                 logger.info(f"Using sampler checkpoint: {resume_info['sampler_path']}")
                 sampling_client = self.create_sampling_client(resume_info["sampler_path"])
@@ -105,7 +103,7 @@ class TinkerPolicyTrainer:
             train_unembed = self.config.tinker.model.get("train_unembed", True)
             train_attn = self.config.tinker.model.get("train_attn", True)
             train_mlp = self.config.tinker.model.get("train_mlp", True)
-            
+
             self.training_client = await self.service_client.create_lora_training_client_async(
                 base_model=self.config.tinker.model.name,
                 rank=self.config.tinker.model.lora_rank,
@@ -128,13 +126,13 @@ class TinkerPolicyTrainer:
 
     async def step(
         self,
-        episodes: List[Episode],
+        episodes: list[Episode],
         learning_rate: float = None,
         optimizer_step: bool = True,
-    ) -> tuple[List[torch.Tensor], List[tinker.Datum]]:
+    ) -> tuple[list[torch.Tensor], list[tinker.Datum]]:
         """
         Complete training step: process episodes and update policy.
-        
+
         This method:
         1. Filters episodes (if configured)
         2. Computes advantages
@@ -195,28 +193,27 @@ class TinkerPolicyTrainer:
 
         # Return both logprobs and datums (with masks for metrics)
         return training_logprobs_D, training_datums
-    
-    async def forward_backward_future(self, episodes: List[Episode]):
-        
+
+    async def forward_backward_future(self, episodes: list[Episode]):
         training_datums = process_episodes(
             episodes,
             self.advantage_computer,
             self.trajectory_filter,
         )
-        
+
         datums_no_mask = [self._remove_mask(datum) for datum in training_datums]
-        
+
         fwd_bwd_future = await self.training_client.forward_backward_async(
             datums_no_mask,
             loss_fn="importance_sampling",
         )
-        
+
         return fwd_bwd_future
-    
+
     async def optim_step_future(self, learning_rate: float = None):
         if learning_rate is None:
             learning_rate = self.config.tinker.training.learning_rate
-        
+
         adam_params = types.AdamParams(
             learning_rate=learning_rate,
             beta1=0.9,
@@ -225,7 +222,7 @@ class TinkerPolicyTrainer:
         )
         optim_step_future = await self.training_client.optim_step_async(adam_params)
         return optim_step_future
-    
+
     async def save_checkpoint_async(
         self,
         batch_idx: int,
@@ -253,10 +250,10 @@ class TinkerPolicyTrainer:
     def create_sampling_client(self, sampler_path: str) -> tinker.SamplingClient:
         """
         Create a sampling client from a checkpoint path.
-        
+
         Args:
             sampler_path: Path to sampler checkpoint
-            
+
         Returns:
             Tinker sampling client
         """

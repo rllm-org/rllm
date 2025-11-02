@@ -1,7 +1,3 @@
-import logging
-import os
-import time
-
 import tinker
 from tinker_cookbook import model_info, renderers
 
@@ -12,24 +8,14 @@ from rllm.workflows import TerminationEvent, TerminationReason
 class TinkerEngine(RolloutEngine):
     """
     RolloutEngine implementation using Tinker for model inference.
-    
+
     Uses Tinker's renderer system for response parsing instead of ChatTemplateParser.
     """
 
-    def __init__(
-        self,
-        base_url: str,
-        model_name: str,
-        tokenizer,
-        service_client: tinker.ServiceClient,
-        max_prompt_length: int = 4096,
-        max_response_length: int = 4096,
-        sampling_params: dict | None = None,
-        **kwargs
-    ):
+    def __init__(self, base_url: str, model_name: str, tokenizer, service_client: tinker.ServiceClient, max_prompt_length: int = 4096, max_response_length: int = 4096, sampling_params: dict | None = None, **kwargs):
         """
         Initialize TinkerEngine.
-        
+
         Args:
             base_url: Tinker service base URL
             model_name: Name of the model to use
@@ -66,7 +52,7 @@ class TinkerEngine(RolloutEngine):
     def set_sampling_client(self, sampling_client):
         """
         Set the sampling client for inference.
-        
+
         Args:
             sampling_client: Tinker SamplingClient instance
         """
@@ -75,14 +61,14 @@ class TinkerEngine(RolloutEngine):
     async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         """
         Generate model response for a given set of messages.
-        
+
         Args:
             messages: List of message dictionaries (OpenAI format)
             **kwargs: Additional parameters including:
                 - application_id: Session/application ID for tracing
                 - validate: Whether this is validation (for greedy decoding)
                 - enforce_max_prompt_length: Whether to enforce max prompt length
-                
+
         Returns:
             ModelOutput with generated text and metadata
         """
@@ -90,8 +76,8 @@ class TinkerEngine(RolloutEngine):
             raise RuntimeError("Sampling client not set. Call set_sampling_client() first.")
 
         # Extract kwargs
-        application_id = kwargs.pop("application_id", None)
-        validate = kwargs.pop("validate", False)
+        kwargs.pop("application_id", None)
+        kwargs.pop("validate", False)
         enforce_max_prompt_length = kwargs.pop("enforce_max_prompt_length", True)
 
         # Prepare sampling params (override defaults with kwargs)
@@ -111,17 +97,12 @@ class TinkerEngine(RolloutEngine):
         if enforce_max_prompt_length and prompt_length > self.max_prompt_length:
             raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
 
-        # Time the generation
-        start_time = time.time()
-        
         # Call Tinker sampling API
         sample_response = await self.sampling_client.sample_async(
             prompt=tinker_prompt,
             num_samples=1,
             sampling_params=sampling_params,
         )
-        
-        end_time = time.time()
 
         # Extract response tokens and logprobs
         response_tokens = sample_response.sequences[0].tokens
@@ -160,4 +141,3 @@ class TinkerEngine(RolloutEngine):
             completion_length=len(response_tokens),
             finish_reason=finish_reason,
         )
-

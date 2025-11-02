@@ -7,31 +7,26 @@ that provides backwards compatibility with the original AgentTrainer interface.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
-from typing import TYPE_CHECKING
 import uuid
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import TYPE_CHECKING
 
 import tinker
 from omegaconf import OmegaConf
 
+from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
+from rllm.trainer.tinker.tinker_data_processor import Episode, Step, Trajectory
 from rllm.trainer.tinker.tinker_metrics_utils import (
     compute_training_metrics,
-    print_metrics_table,
     print_episodes,
+    print_metrics_table,
 )
-from rllm.trainer.tinker.tinker_data_processor import Trajectory, Step, Episode
 from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer
-from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import json
-from queue import Queue
-from threading import Thread
-from collections import defaultdict
-from typing import Dict, List
-
-from rllm.data import DatasetRegistry
 
 if TYPE_CHECKING:
     pass
@@ -106,15 +101,15 @@ class TinkerAgentTrainer:
                 "max_prompt_length": self.config.data.max_prompt_length,
                 "max_response_length": self.config.data.max_response_length,
                 "sampling_params": self.config.tinker.sampling,
-            }
+            },
         )
         # Track number of batches for progress calculation
         self.num_train_batches = None
-    
+
     def fit_agent(self):
         """Main training loop using Tinker backend - sync wrapper for async training."""
         asyncio.run(self._fit_agent_async())
-    
+
     async def _fit_agent_async(self):
         """Async main training loop using Tinker backend."""
         from verl.utils.tracking import Tracking
@@ -146,11 +141,11 @@ class TinkerAgentTrainer:
 
         # Training loop
         batch_idx = 0
-        
+
         # Calculate total batches for progress tracking
-        if self.train_dataloader and hasattr(self.train_dataloader, '__len__'):
+        if self.train_dataloader and hasattr(self.train_dataloader, "__len__"):
             self.num_train_batches = len(self.train_dataloader)
-        
+
         for epoch in range(self.config.trainer.total_epochs):
             for batch_data in self.train_dataloader:
                 if batch_idx < start_batch:
@@ -187,28 +182,22 @@ class TinkerAgentTrainer:
 
                 # Stream: train on each minibatch as it arrives
                 train_step_start = time.time()
-                async for minibatch_episodes in self.generate_agent_episodes(
-                    group_size=self.config.tinker.training.group_size,
-                    minibatch_size=minibatch_size
-                ):
+                async for minibatch_episodes in self.generate_agent_episodes(group_size=self.config.tinker.training.group_size, minibatch_size=minibatch_size):
                     episodes.extend(minibatch_episodes)
                     minibatch_count += 1
-                    
+
                     # Track timing on first minibatch
                     if minibatch_count == 1:
                         time_metrics["time/first_minibatch_sample"] = time.time() - t_sample_start
-                    
+
                     if minibatch_count == num_minibatches:
                         time_metrics["time/last_minibatch_sample"] = time.time() - t_sample_start
-                    
+
                     logger.info(f"Training for batch {batch_idx}, minibatch {minibatch_count}/{num_minibatches}")
-                    
+
                     # Train immediately (streaming), only optimize on last minibatch
                     t_train_start = time.time()
-                    logprobs, datums = await self.trainer.step(
-                        minibatch_episodes,
-                        optimizer_step=False
-                    )
+                    logprobs, datums = await self.trainer.step(minibatch_episodes, optimizer_step=False)
                     forward_backward_times.append(time.time() - t_train_start)
                     training_logprobs.extend(logprobs)
                     training_datums.extend(datums)
@@ -240,14 +229,9 @@ class TinkerAgentTrainer:
                 )
                 tracking_logger.log(data=metrics, step=batch_idx)
                 print_metrics_table(metrics, batch_idx)
-                
+
                 # Validation
-                if (
-                    self.val_dataloader
-                    and self.config.trainer.test_freq > 0
-                    and batch_idx % self.config.trainer.test_freq == 0
-                    and batch_idx > 0
-                ):
+                if self.val_dataloader and self.config.trainer.test_freq > 0 and batch_idx % self.config.trainer.test_freq == 0 and batch_idx > 0:
                     logger.info(f"Validating at batch {batch_idx}")
                     val_metrics = await self.validate_agent(self.val_dataloader, sampling_client)
                     if val_metrics:
@@ -306,7 +290,7 @@ class TinkerAgentTrainer:
                 agents[idx] = agent
         self.agent_execution_engine.update_envs_and_agents(envs, agents)
         return envs
-    
+
     async def validate_agent(self, dataloader, sampling_client):
         episodes_ls = []
         self.agent_execution_engine.rollout_engine.set_sampling_client(sampling_client)
@@ -314,16 +298,13 @@ class TinkerAgentTrainer:
             batch = self.build_interleave_batch(batch, 1)
             self.init_envs_and_agents(batch)
             # For validation, collect all episodes from generator
-            async for episode_batch in self.generate_agent_episodes(
-                group_size=1,
-                minibatch_size=1
-            ):
+            async for episode_batch in self.generate_agent_episodes(group_size=1, minibatch_size=1):
                 episodes_ls.extend(episode_batch)
-        
+
         all_trajectories = []
         for episode in episodes_ls:
             all_trajectories.extend(episode.trajectories)
-        
+
         mean_reward = sum([traj.reward for traj in all_trajectories]) / len(all_trajectories)
         std_reward = sum([(traj.reward - mean_reward) ** 2 for traj in all_trajectories]) / len(all_trajectories)
         min_reward = min([traj.reward for traj in all_trajectories])
@@ -340,7 +321,7 @@ class TinkerAgentTrainer:
     async def generate_agent_episodes(self, timing_raw=None, meta_info=None, group_size: int = None, minibatch_size: int = None):
         """
         Generate episodes in minibatches with overlapping generation and training.
-        
+
         This uses a background producer task to continuously generate episodes
         while the main loop yields minibatches for training.
         """
@@ -353,9 +334,7 @@ class TinkerAgentTrainer:
 
         async def produce_episodes():
             """Background task: continuously generate episodes and fill queue"""
-            async for traj in self.agent_execution_engine.trajectory_generator(
-                timing_raw=timing_raw, mode="Step", meta_info=meta_info
-            ):
+            async for traj in self.agent_execution_engine.trajectory_generator(timing_raw=timing_raw, mode="Step", meta_info=meta_info):
                 group_dict[traj["idx"] // group_size].append(traj)
                 if len(group_dict[traj["idx"] // group_size]) == group_size:
                     episode = self.convert_to_episode(group_dict[traj["idx"] // group_size])
@@ -377,11 +356,11 @@ class TinkerAgentTrainer:
                     if produce_completed.is_set():
                         break
                     continue
-                
+
                 if len(minibatch) == minibatch_size:
                     yield minibatch
                     minibatch = []
-            
+
             # Yield any remaining episodes
             remaining = episode_queue.qsize()
             if remaining > 0:
@@ -392,17 +371,19 @@ class TinkerAgentTrainer:
 
         finally:
             await producer_task
-    
+
     def convert_to_episode(self, group: list):
         trajectories = []
         for traj in group:
             steps = []
             for step in traj["steps"]:
-                steps.append(Step(
-                    prompt_ids=step["prompt_ids"],
-                    response_ids=step["response_ids"],
-                    logprobs=step["logprobs"],
-                ))
+                steps.append(
+                    Step(
+                        prompt_ids=step["prompt_ids"],
+                        response_ids=step["response_ids"],
+                        logprobs=step["logprobs"],
+                    )
+                )
             traj = Trajectory(steps=steps, reward=traj["trajectory_reward"])
             trajectories.append(traj)
         return Episode(trajectories=trajectories)
@@ -412,7 +393,7 @@ class TinkerAgentTrainer:
         batch_with_uid = []
         for batch_item in batch:
             batch_with_uid.append({**batch_item, "uid": str(uuid.uuid4())})
-        
+
         for batch_item in batch_with_uid:
             interleave_batch.extend([batch_item for _ in range(group_size)])
         return interleave_batch
