@@ -7,16 +7,13 @@ set -x
 # Model to use (matching math_rl recipe default for Hendrycks MATH)
 MODEL_PATH=Qwen/Qwen3-8B
 
-# IMPORTANT: First prepare the dataset with proper filtering
-# python -m examples.simple_math_tinker.prepare_tinker_math_dataset
+# To match the performance of tinker's original rl_loop.py
+# Apply a small patch at rllm/engine/agent_execution_engine.py
+# Comment out the line that sets reward to 0.0:
 
-# Run training with EXACT math_rl-matching configuration:
-# Key parameters (matching original):
-# 1. group_size=16 - matches math_rl GRPO group size for MATH
-# 2. train_batch_size=128 - matches math_rl groups_per_batch
-# 3. norm_adv_by_std_in_grpo=false - math_rl doesn't normalize by std
-# 4. max_response_length=512 - matches math_rl default
-# 5. Uses MathAgentWithFewshot for few-shot prompting
+# if response_token_len - len(env_msg_tokens) > self.max_response_length:
+#     cur_step.reward = 0.0
+
 
 python3 -m examples.math_tinker.train_math_tinker \
     tinker.model.name=$MODEL_PATH \
@@ -31,11 +28,11 @@ python3 -m examples.math_tinker.train_math_tinker \
     data.max_prompt_length=2048 \
     data.max_response_length=512 \
     data.train_batch_size=128 \
-    data.val_batch_size=32 \
+    data.val_batch_size=500 \
     agent.max_steps=1 \
     trainer.total_epochs=1 \
     trainer.logger=['wandb'] \
-    trainer.project_name='rllm-agent' \
+    trainer.project_name='rllm-tinker' \
     trainer.experiment_name='rllm-tinker-math' \
     trainer.val_before_train=False \
     trainer.test_freq=20 \
