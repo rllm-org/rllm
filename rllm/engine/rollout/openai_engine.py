@@ -143,6 +143,7 @@ class OpenAIEngine(RolloutEngine):
                     tool_calls=parsed_output["tool_calls"],
                     prompt_ids=prompt_ids,
                     completion_ids=completion_ids,
+                    logprobs=[],
                     prompt_length=prompt_length,
                     completion_length=completion_length,
                     finish_reason=finish_reason,

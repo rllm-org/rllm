@@ -11,6 +11,7 @@ class ModelOutput:
     tool_calls: list[ToolCall]
     prompt_ids: list[int]
     completion_ids: list[int]
+    logprobs: list[float]
     prompt_length: int
     completion_length: int
     finish_reason: str
@@ -23,6 +24,7 @@ class ModelOutput:
             "tool_calls": [tool_call.to_dict() for tool_call in self.tool_calls],
             "prompt_ids": self.prompt_ids,
             "completion_ids": self.completion_ids,
+            "logprobs": self.logprobs,
             "prompt_length": self.prompt_length,
             "completion_length": self.completion_length,
             "finish_reason": self.finish_reason,
@@ -37,6 +39,7 @@ class ModelOutput:
             tool_calls=[ToolCall(**tool_call) for tool_call in data["tool_calls"]],
             prompt_ids=data["prompt_ids"],
             completion_ids=data["completion_ids"],
+            logprobs=data["logprobs"],
             prompt_length=data["prompt_length"],
             completion_length=data["completion_length"],
             finish_reason=data["finish_reason"],
