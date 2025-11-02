@@ -8,7 +8,6 @@ a simplified API similar to the original trainer.
 
 import hydra
 from omegaconf import DictConfig
-from transformers import AutoTokenizer
 
 from examples.math_tinker.math_agent_with_fewshot import MathAgentWithFewshot
 from examples.math_tinker.math_reward import math_reward_fn
@@ -47,17 +46,15 @@ def main(config: DictConfig):
     test_dataset = DatasetRegistry.load_dataset("math500", "test")
 
     if train_dataset is None or test_dataset is None:
-        raise ValueError("Datasets not found! Please run prepare_math_dataset_fixed.py first:\n  python -m examples.simple_math_tinker.prepare_tinker_math_dataset")
+        raise ValueError("Datasets not found! Please run prepare_tinker_math_dataset.py first:\n  python -m examples.math_tinker.prepare_tinker_math_dataset")
 
     # Create dataloaders
     train_dataloader = create_dataloader(train_dataset, config.data.train_batch_size)
     test_dataloader = create_dataloader(test_dataset, config.data.val_batch_size)
 
-    tokenizer = AutoTokenizer.from_pretrained(config.tinker.model.name)
     # Create trainer (uses separated components internally)
     trainer = TinkerAgentTrainer(
         config=config,
-        tokenizer=tokenizer,
         agent_class=MathAgentWithFewshot,
         env_class=SingleTurnEnvironment,
         agent_args={"use_fewshot": True},

@@ -16,13 +16,12 @@ MODEL_PATH=Qwen/Qwen3-8B
 
 
 python3 -m examples.math_tinker.train_math_tinker \
-    tinker.model.name=$MODEL_PATH \
-    tinker.model.lora_rank=32 \
-    tinker.training.group_size=16 \
-    tinker.training.learning_rate=4e-5 \
-    tinker.training.save_every=20 \
-    tinker.sampling.temperature=1.0 \
-    tinker.sampling.top_p=1.0 \
+    model.name=$MODEL_PATH \
+    model.lora_rank=32 \
+    training.group_size=16 \
+    training.learning_rate=4e-5 \
+    sampling.temperature=1.0 \
+    sampling.top_p=1.0 \
     algorithm.adv_estimator=grpo \
     algorithm.norm_adv_by_std_in_grpo=false \
     data.max_prompt_length=2048 \
@@ -33,10 +32,8 @@ python3 -m examples.math_tinker.train_math_tinker \
     trainer.total_epochs=1 \
     trainer.logger=['wandb'] \
     trainer.project_name='rllm-tinker' \
-    trainer.experiment_name='rllm-tinker-math' \
+    trainer.experiment_name='rllm-tinker-math-refactor' \
     trainer.val_before_train=False \
     trainer.test_freq=20 \
     trainer.save_freq=20 \
-    trainer.default_local_dir='/tmp/rllm-tinker-math'
-
-
+    trainer.default_local_dir='/tmp/rllm-tinker-math-refactor'

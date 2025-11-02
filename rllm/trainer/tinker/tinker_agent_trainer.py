@@ -246,7 +246,7 @@ class TinkerAgentTrainer:
                 time_metrics["time/save_sampler"] = time.time() - t_save_sampler_start
 
                 # Checkpoint (full state) - skip if this is the resume batch
-                if batch_idx % self.config.tinker.training.save_every == 0:
+                if batch_idx % self.config.tinker.training.save_freq == 0:
                     logger.info(f"Saving state checkpoint at batch {batch_idx}")
                     await self.trainer.save_checkpoint_async(batch_idx, kind="state")
 

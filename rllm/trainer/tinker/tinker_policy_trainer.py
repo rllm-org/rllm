@@ -10,6 +10,7 @@ import logging
 from typing import TYPE_CHECKING
 
 import tinker
+from omegaconf import OmegaConf
 from tinker import types
 from tinker_cookbook import checkpoint_utils
 
@@ -100,18 +101,18 @@ class TinkerPolicyTrainer:
             # Start from scratch
             # Create LoRA training client
             # Configure which layers to train (for compatibility with deployment targets)
-            train_unembed = self.config.tinker.model.get("train_unembed", True)
-            train_attn = self.config.tinker.model.get("train_attn", True)
-            train_mlp = self.config.tinker.model.get("train_mlp", True)
+            train_unembed = OmegaConf.select(self.config, "model.train_unembed", default=True)
+            train_attn = OmegaConf.select(self.config, "model.train_attn", default=True)
+            train_mlp = OmegaConf.select(self.config, "model.train_mlp", default=True)
 
             self.training_client = await self.service_client.create_lora_training_client_async(
-                base_model=self.config.tinker.model.name,
-                rank=self.config.tinker.model.lora_rank,
+                base_model=self.config.model.name,
+                rank=self.config.model.lora_rank,
                 train_unembed=train_unembed,
                 train_attn=train_attn,
                 train_mlp=train_mlp,
             )
-            logger.info(f"Starting training from scratch with model: {self.config.tinker.model.name}")
+            logger.info(f"Starting training from scratch with model: {self.config.model.name}")
             sampler_future = await self.training_client.save_weights_for_sampler_async(name="000000")
             sampler_result = await sampler_future.result_async()
             sampling_client = self.create_sampling_client(sampler_result.path)
@@ -128,6 +129,9 @@ class TinkerPolicyTrainer:
         self,
         episodes: list[Episode],
         learning_rate: float = None,
+        beta1: float = 0.9,
+        beta2: float = 0.95,
+        eps: float = 1e-8,
         optimizer_step: bool = True,
     ) -> tuple[list[torch.Tensor], list[tinker.Datum]]:
         """
@@ -151,7 +155,7 @@ class TinkerPolicyTrainer:
             - training_datums: List of datums WITH masks for metrics
         """
         if learning_rate is None:
-            learning_rate = self.config.tinker.training.learning_rate
+            learning_rate = self.config.training.learning_rate
 
         # Step 1: Process to datums (includes filtering and advantage computation)
         training_datums = process_episodes(
@@ -172,9 +176,9 @@ class TinkerPolicyTrainer:
         # Step 5: Optimizer step
         adam_params = types.AdamParams(
             learning_rate=learning_rate,
-            beta1=0.9,
-            beta2=0.95,
-            eps=1e-8,
+            beta1=beta1,
+            beta2=beta2,
+            eps=eps,
         )
         if optimizer_step:
             optim_step_future = await self.training_client.optim_step_async(adam_params)
@@ -210,15 +214,15 @@ class TinkerPolicyTrainer:
 
         return fwd_bwd_future
 
-    async def optim_step_future(self, learning_rate: float = None):
+    async def optim_step_future(self, learning_rate: float = None, beta1: float = 0.9, beta2: float = 0.95, eps: float = 1e-8):
         if learning_rate is None:
-            learning_rate = self.config.tinker.training.learning_rate
+            learning_rate = self.config.training.learning_rate
 
         adam_params = types.AdamParams(
             learning_rate=learning_rate,
-            beta1=0.9,
-            beta2=0.95,
-            eps=1e-8,
+            beta1=beta1,
+            beta2=beta2,
+            eps=eps,
         )
         optim_step_future = await self.training_client.optim_step_async(adam_params)
         return optim_step_future

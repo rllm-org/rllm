@@ -3,29 +3,30 @@
 # Default settings match tinker_cookbook.recipes.math_rl for MATH dataset
 
 # Tinker-specific settings
-tinker:
-  base_url: null  # Tinker service URL (null for local)
+tinker_base_url: null  # Tinker service URL (null for local)
   
-  # Model Configuration
-  model:
-    name: "Qwen/Qwen3-8B"  # Default model for MATH dataset
-    lora_rank: 32
-    train_unembed: true  # Train LoRA on output embedding layer (set to false for Fireworks compatibility)
-    train_attn: true     # Train LoRA on attention layers
-    train_mlp: true      # Train LoRA on MLP layers
-  
-  # Training Configuration
-  training:
-    group_size: 16  # Number of rollouts per prompt (for GRPO)
-    learning_rate: 2e-5  # 2e-5 for MATH dataset
-    max_length: 32768
-    save_every: 20
-    num_minibatches: 1
-  
-  # Sampling Configuration
-  sampling:
-    temperature: 0.6
-    top_p: 0.95
+# Model Configuration
+model:
+  name: "Qwen/Qwen3-8B"  # Default model for MATH dataset
+  lora_rank: 32
+  train_unembed: true  # Train LoRA on output embedding layer (set to false for Fireworks compatibility)
+  train_attn: true     # Train LoRA on attention layers
+  train_mlp: true      # Train LoRA on MLP layers
+
+# Training Configuration
+training:
+  group_size: 16  # Number of rollouts per prompt (for GRPO)
+  learning_rate: 2e-5  # 2e-5 for MATH dataset
+  beta1: 0.9
+  beta2: 0.95
+  eps: 1e-8
+  max_length: 32768
+  num_minibatches: 1
+
+# Sampling Configuration
+sampling:
+  temperature: 0.6
+  top_p: 0.95
 
 # Algorithm Configuration (compatible with verl)
 algorithm:
@@ -37,6 +38,10 @@ algorithm:
 # Agent Configuration
 agent:
   max_steps: 1  # Single-turn vs multi-turn
+  agent_args: {}
+
+env:
+  env_args: {}
 
 # Data Configuration
 data:
@@ -56,7 +61,6 @@ trainer:
   test_freq: 5
   save_freq: 20
   val_before_train: true
-  val_only: false
   default_local_dir: '/tmp/rllm-tinker-checkpoints'
 
 # Hydra configuration
