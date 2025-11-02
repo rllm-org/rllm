@@ -95,7 +95,7 @@ class AgentExecutionEngine:
         self.rollout_engine_args = rollout_engine_args
         self.sampling_params = kwargs.get("sampling_params", {})  # for openai api requests
 
-        assert self.engine_name in ["openai", "verl"], "Currently only openai and verl are supported as rollout engine"
+        assert self.engine_name in ["openai", "verl", "tinker"], "Currently only openai, verl and tinker are supported as rollout engine"
         if self.engine_name == "openai":
             from rllm.engine.rollout.openai_engine import OpenAIEngine
 
@@ -115,6 +115,12 @@ class AgentExecutionEngine:
                 rollout_manager=rollout_engine,
                 tokenizer=self.tokenizer,
                 disable_thinking=self.disable_thinking,
+            )
+        elif self.engine_name == "tinker":
+            from rllm.engine.rollout.tinker_engine import TinkerEngine
+
+            self.rollout_engine = TinkerEngine(
+                **rollout_engine_args,
             )
 
         # Create a thread pool executor for environment interactions (i.e. step, reset, close)
@@ -149,6 +155,9 @@ class AgentExecutionEngine:
             meta_data = sampling_params.pop("meta_info", {})
             validate = meta_data.get("validate", False)
             output = await self.rollout_engine.get_model_response(prompt, application_id=application_id, validate=validate, enforce_max_prompt_length=False, **sampling_params)
+            return output
+        elif self.engine_name == "tinker":
+            output = await self.rollout_engine.get_model_response(prompt, application_id=application_id, enforce_max_prompt_length=False, **sampling_params)
             return output
         else:
             raise NotImplementedError(f"Engine type '{self.engine_name}' not supported")
@@ -242,7 +251,8 @@ class AgentExecutionEngine:
                 "prompt": self.chat_parser.parse(prompt_messages, add_generation_prompt=True, is_first_msg=True),
                 "response": response,
                 "prompt_ids": model_output.prompt_ids,
-                "completion_ids": model_output.completion_ids,
+                "response_ids": model_output.completion_ids,
+                "logprobs": model_output.logprobs,
             }
             episode_steps.append(prompt_response_pair)
 
@@ -497,7 +507,8 @@ class AgentExecutionEngine:
         assert all(env is not None and isinstance(env, BaseEnv) for env in self.envs), "All environments must be inheriting from BaseEnv"
         assert all(env.is_multithread_safe() for env in self.envs), "All environments must be multithread safe for async engine"  # type: ignore
         max_concurrency = self.n_parallel_agents
-        free_cache_engine = self.config.actor_rollout_ref.rollout.free_cache_engine if self.config else False
+        if self.engine_name == "verl":
+            free_cache_engine = self.config.actor_rollout_ref.rollout.free_cache_engine if self.config else False
 
         self.executor = ThreadPoolExecutor(max_workers=max_concurrency)
 
