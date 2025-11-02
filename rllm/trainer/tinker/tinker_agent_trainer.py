@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 import tinker
 from omegaconf import OmegaConf
+from transformers import AutoTokenizer
 
 from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
 from rllm.trainer.tinker.tinker_data_processor import Episode, Step, Trajectory
@@ -46,7 +47,6 @@ class TinkerAgentTrainer:
     def __init__(
         self,
         config,
-        tokenizer=None,  # Deprecated: kept for backwards compatibility, not used
         agent_class=None,
         env_class=None,
         agent_args=None,
@@ -59,7 +59,6 @@ class TinkerAgentTrainer:
 
         Args:
             config: Training configuration (OmegaConf)
-            tokenizer: (Deprecated) Tokenizer - no longer needed, kept for compatibility
             agent_class: Agent class to instantiate
             env_class: Environment class to instantiate
             agent_args: Arguments for agent initialization
@@ -73,15 +72,16 @@ class TinkerAgentTrainer:
         self.agent_class = agent_class
         self.agent_args = agent_args
         self.env_args = env_args
-        self.tokenizer = tokenizer
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
 
-        service_client = tinker.ServiceClient(base_url=self.config.tinker.base_url)
+        service_client = tinker.ServiceClient(base_url=self.config.tinker_base_url)
         self.trainer = TinkerPolicyTrainer(
             config=config,
             service_client=service_client,
         )
+
+        tokenizer = AutoTokenizer.from_pretrained(self.config.model.name)
         self.agent_execution_engine = AsyncAgentExecutionEngine(
             config=self.config,
             engine_name="tinker",
@@ -95,12 +95,12 @@ class TinkerAgentTrainer:
             env_args=env_args,
             rollout_engine_args={
                 "base_url": None,
-                "model_name": self.config.tinker.model.name,
+                "model_name": self.config.model.name,
                 "tokenizer": tokenizer,
                 "service_client": service_client,
                 "max_prompt_length": self.config.data.max_prompt_length,
                 "max_response_length": self.config.data.max_response_length,
-                "sampling_params": self.config.tinker.sampling,
+                "sampling_params": self.config.sampling,
             },
         )
         # Track number of batches for progress calculation
@@ -142,6 +142,11 @@ class TinkerAgentTrainer:
         # Training loop
         batch_idx = 0
 
+        learning_rate = self.config.training.learning_rate
+        beta1 = self.config.training.beta1
+        beta2 = self.config.training.beta2
+        eps = self.config.training.eps
+
         # Calculate total batches for progress tracking
         if self.train_dataloader and hasattr(self.train_dataloader, "__len__"):
             self.num_train_batches = len(self.train_dataloader)
@@ -155,7 +160,7 @@ class TinkerAgentTrainer:
                 t_start = time.time()
                 time_metrics = {}
 
-                batch_data = self.build_interleave_batch(batch_data, self.config.tinker.training.group_size)
+                batch_data = self.build_interleave_batch(batch_data, self.config.training.group_size)
                 self.init_envs_and_agents(batch_data)
 
                 # Pass tokenizer on first call (batch_idx == start_batch)
@@ -169,8 +174,8 @@ class TinkerAgentTrainer:
                 t_sample_start = time.time()
 
                 # Calculate minibatch size from config
-                num_minibatches = self.config.tinker.training.get("num_minibatches", 1)
-                total_batch_size = len(batch_data) // self.config.tinker.training.group_size
+                num_minibatches = self.config.training.get("num_minibatches", 1)
+                total_batch_size = len(batch_data) // self.config.training.group_size
                 minibatch_size = max(1, total_batch_size // num_minibatches)
 
                 # Collect all episodes, logprobs, and datums for metrics
@@ -182,7 +187,7 @@ class TinkerAgentTrainer:
 
                 # Stream: train on each minibatch as it arrives
                 train_step_start = time.time()
-                async for minibatch_episodes in self.generate_agent_episodes(group_size=self.config.tinker.training.group_size, minibatch_size=minibatch_size):
+                async for minibatch_episodes in self.generate_agent_episodes(group_size=self.config.training.group_size, minibatch_size=minibatch_size):
                     episodes.extend(minibatch_episodes)
                     minibatch_count += 1
 
@@ -197,14 +202,14 @@ class TinkerAgentTrainer:
 
                     # Train immediately (streaming), only optimize on last minibatch
                     t_train_start = time.time()
-                    logprobs, datums = await self.trainer.step(minibatch_episodes, optimizer_step=False)
+                    logprobs, datums = await self.trainer.step(minibatch_episodes, learning_rate=learning_rate, beta1=beta1, beta2=beta2, eps=eps, optimizer_step=False)
                     forward_backward_times.append(time.time() - t_train_start)
                     training_logprobs.extend(logprobs)
                     training_datums.extend(datums)
                     logger.info(f"Processed minibatch {minibatch_count}/{num_minibatches} with {len(minibatch_episodes)} episodes")
 
                 optim_step_time = time.time()
-                optim_step_future = await self.trainer.optim_step_future(learning_rate=self.config.tinker.training.learning_rate)
+                optim_step_future = await self.trainer.optim_step_future(learning_rate=learning_rate, beta1=beta1, beta2=beta2, eps=eps)
                 await optim_step_future.result_async()
                 time_metrics["time/optim_step"] = time.time() - optim_step_time
                 time_metrics["time/forward_backward"] = sum(forward_backward_times)
@@ -221,7 +226,7 @@ class TinkerAgentTrainer:
                     episodes=episodes,
                     batch_idx=batch_idx,
                     time_metrics=time_metrics,
-                    learning_rate=self.config.tinker.training.learning_rate,
+                    learning_rate=learning_rate,
                     total_batches=total_batches,
                     epoch=epoch,
                     training_datums=training_datums,  # Pass datums for KL/perplexity metrics
@@ -246,12 +251,12 @@ class TinkerAgentTrainer:
                 time_metrics["time/save_sampler"] = time.time() - t_save_sampler_start
 
                 # Checkpoint (full state) - skip if this is the resume batch
-                if batch_idx % self.config.tinker.training.save_freq == 0:
+                if batch_idx % self.config.trainer.save_freq == 0:
                     logger.info(f"Saving state checkpoint at batch {batch_idx}")
                     await self.trainer.save_checkpoint_async(batch_idx, kind="state")
 
         # Save final checkpoint
-        if batch_idx % self.config.tinker.training.save_every != 0:
+        if batch_idx % self.config.trainer.save_freq != 0:
             logger.info(f"Saving final checkpoint at batch {batch_idx}")
             await self.trainer.save_checkpoint_async(batch_idx, kind="state")
         del tracking_logger
@@ -262,8 +267,8 @@ class TinkerAgentTrainer:
         """
         env_args = batch
 
-        full_agent_args = self.agent_args
-        base_env_args = self.env_args
+        full_agent_args = dict(self.config.agent.get("agent_args", {})) | self.agent_args
+        base_env_args = dict(self.config.env.get("env_args", {})) | self.env_args
 
         def _create_env(i):
             if isinstance(env_args[i], str):
