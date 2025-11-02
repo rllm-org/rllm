@@ -81,11 +81,11 @@ class TinkerAgentTrainer:
             service_client=service_client,
         )
 
-        tokenizer = AutoTokenizer.from_pretrained(self.config.model.name)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config.model.name)
         self.agent_execution_engine = AsyncAgentExecutionEngine(
             config=self.config,
             engine_name="tinker",
-            tokenizer=tokenizer,
+            tokenizer=self.tokenizer,
             max_steps=self.config.agent.max_steps,
             max_response_length=self.config.data.max_response_length,
             max_prompt_length=self.config.data.max_prompt_length,
@@ -96,7 +96,7 @@ class TinkerAgentTrainer:
             rollout_engine_args={
                 "base_url": None,
                 "model_name": self.config.model.name,
-                "tokenizer": tokenizer,
+                "tokenizer": self.tokenizer,
                 "service_client": service_client,
                 "max_prompt_length": self.config.data.max_prompt_length,
                 "max_response_length": self.config.data.max_response_length,
