@@ -14,6 +14,7 @@ import torch
 from omegaconf import OmegaConf
 
 from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
+from rllm.parser.chat_template_parser import ChatTemplateParser
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
 from verl.trainer.ppo.core_algos import agg_loss
@@ -91,6 +92,7 @@ class AgentPPOTrainer(RayPPOTrainer):
         env_args = batch.non_tensor_batch["extra_info"].tolist()
 
         full_agent_args = dict(self.config.rllm.agent.get("agent_args", {})) | self.agent_args
+        full_agent_args["chat_template_parser"] = ChatTemplateParser.get_parser(self.tokenizer, self.config.rllm.disable_thinking)
         base_env_args = dict(self.config.rllm.env.get("env_args", {})) | self.env_args
 
         def _create_env(i):

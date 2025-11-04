@@ -75,6 +75,7 @@ class AgentExecutionEngine:
 
         self.agent_class = agent_class
         self.agent_args = agent_args
+        self.agent_args["chat_template_parser"] = self.chat_parser
         self.env_class = env_class
         self.env_args = env_args
 
