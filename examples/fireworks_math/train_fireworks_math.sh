@@ -10,6 +10,7 @@ export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 RLLM_DIR=$(python3 -c "import rllm; import os; print(os.path.dirname(os.path.dirname(rllm.__file__)))")
 
 MODEL_PATH=Qwen/Qwen3-4B
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 python3 -m examples.fireworks_math.train_fireworks_math \
     algorithm.adv_estimator=grpo \
@@ -77,5 +78,6 @@ python3 -m examples.fireworks_math.train_fireworks_math \
     trainer.default_hdfs_dir=null \
     trainer.total_epochs=100 \
     rllm.workflow.use_workflow=True \
-    fireworks.deployment_id=wtk15cs9 \
-    fireworks.model_id_prefix=qwen3-4b-math
+    fireworks.deployment_id=rllm-qwen3-8b-3 \
+    fireworks.model_id_prefix=rllm-qwen3-8b-math \
+    fireworks.return_token_ids=True
