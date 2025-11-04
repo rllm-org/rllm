@@ -227,6 +227,13 @@ class AgentExecutionEngine:
 
             kwargs["max_tokens"] = max_tokens
 
+            # Add tools for rollout_engine if agent provides them (for use_tool_calling)
+            # May be duplicated if already added tool to sys prompt in agent.reset()
+            if hasattr(agent, "get_tools_for_rollout_engine") and callable(agent.get_tools_for_rollout_engine) and hasattr(agent, "use_tool_calling") and agent.use_tool_calling:
+                tools = agent.get_tools_for_rollout_engine()
+                if tools:
+                    kwargs["tools"] = tools
+
             start_time = time.time()
             response = await self.get_model_response(prompt_messages, application_id, **kwargs)
             delta_time = time.time() - start_time
