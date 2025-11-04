@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING
 
 import tinker
+import torch
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
@@ -51,8 +52,8 @@ class TinkerAgentTrainer:
         env_class=None,
         agent_args=None,
         env_args=None,
-        train_dataloader=None,
-        val_dataloader=None,
+        train_dataset=None,
+        val_dataset=None,
     ):
         """
         Initialize the Tinker agent trainer.
@@ -72,8 +73,19 @@ class TinkerAgentTrainer:
         self.agent_class = agent_class
         self.agent_args = agent_args
         self.env_args = env_args
-        self.train_dataloader = train_dataloader
-        self.val_dataloader = val_dataloader
+
+        self.train_dataloader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=self.config.data.train_batch_size,
+            shuffle=True,
+            collate_fn=lambda x: x,  # Return batches as lists
+        )
+        self.val_dataloader = torch.utils.data.DataLoader(
+            val_dataset,
+            batch_size=self.config.data.val_batch_size,
+            shuffle=False,
+            collate_fn=lambda x: x,  # Return batches as lists
+        )
 
         service_client = tinker.ServiceClient(base_url=self.config.tinker_base_url)
         self.trainer = TinkerPolicyTrainer(
@@ -82,6 +94,8 @@ class TinkerAgentTrainer:
         )
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.model.name)
+        sampling_params = self.config.sampling
+        assert sampling_params.get("temperature", 1.0) == 1.0 and sampling_params.get("top_p", 1.0) == 1.0, "temperature and top_p must be 1.0 for tinker agent trainer"
         self.agent_execution_engine = AsyncAgentExecutionEngine(
             config=self.config,
             engine_name="tinker",
@@ -100,7 +114,7 @@ class TinkerAgentTrainer:
                 "service_client": service_client,
                 "max_prompt_length": self.config.data.max_prompt_length,
                 "max_response_length": self.config.data.max_response_length,
-                "sampling_params": self.config.sampling,
+                "sampling_params": sampling_params,
             },
         )
         # Track number of batches for progress calculation

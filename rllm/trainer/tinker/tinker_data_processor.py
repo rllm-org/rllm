@@ -40,6 +40,9 @@ class TinkerAdvantageComputer:
         if not group_rewards:
             return []
 
+        if len(group_rewards) == 1:
+            return group_rewards
+
         mean_reward = sum(group_rewards) / len(group_rewards)
         advantages = [r - mean_reward for r in group_rewards]
 
