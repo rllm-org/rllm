@@ -81,6 +81,8 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
         )
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.model.name)
+        sampling_params = self.config.sampling
+        assert sampling_params.get("temperature", 1.0) == 1.0 and sampling_params.get("top_p", 1.0) == 1.0, "temperature and top_p must be 1.0 for tinker workflow trainer"
         self.rollout_engine = TinkerEngine(
             base_url=self.config.tinker_base_url,
             model_name=self.config.model.name,
@@ -88,7 +90,7 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
             service_client=service_client,
             max_prompt_length=self.config.data.max_prompt_length,
             max_response_length=self.config.data.max_response_length,
-            sampling_params=self.config.sampling,
+            sampling_params=sampling_params,
         )
         self.agent_execution_engine = AgentWorkflowEngine(
             workflow_cls=self.workflow_class,
@@ -117,26 +119,22 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
 
     async def validate_agent(self, dataloader, sampling_client):
         episodes_ls = []
+        all_episode_metrics = {}  # episode_id -> episode.metrics dict
         self.agent_execution_engine.rollout_engine.set_sampling_client(sampling_client)
         for batch in dataloader:
             batch = self.build_interleave_batch(batch, 1)
             self.init_envs_and_agents(batch)
             # For validation, collect all episodes from generator
-            async for episode_batch in self.generate_agent_episodes(group_size=1, minibatch_size=1):
+            async for episode_batch, episode_metrics in self.generate_agent_episodes(group_size=1, minibatch_size=1, return_metrics=True):
                 episodes_ls.extend(episode_batch)
+                all_episode_metrics.update(episode_metrics)
 
-        # Collect metrics from episodes (similar to VERL trainer)
+        # Collect workflow metrics per episode (deduplicated by episode.id)
+        # all_episode_metrics is: {episode_id: {metric_name: metric_value, ...}, ...}
         workflow_metrics = defaultdict(list)
-        is_correct_lst = []
-
-        for episode in episodes_ls:
-            # Extract is_correct from episode
-            if episode.is_correct is not None:
-                is_correct_lst.append(episode.is_correct)
-
-            # Extract workflow-provided metrics from episode.metrics
-            if episode.metrics:
-                for key, value in episode.metrics.items():
+        for episode_id, episode_metric_dict in all_episode_metrics.items():
+            if episode_metric_dict:  # Check if metrics dict is not None
+                for key, value in episode_metric_dict.items():
                     workflow_metrics[key].append(float(value))
 
         # Compute trajectory-level statistics
@@ -157,10 +155,6 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
             "val/turns_mean": mean_turns,
         }
 
-        # Add episode-level accuracy if available
-        if is_correct_lst:
-            metrics["val/accuracy"] = sum(is_correct_lst) / len(is_correct_lst)
-
         # Add workflow-provided metrics (e.g., solver_acc, judge_acc)
         for key, values in workflow_metrics.items():
             if values:
@@ -168,18 +162,17 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
 
         return metrics
 
-    async def generate_agent_episodes(self, timing_raw=None, meta_info=None, group_size=None, minibatch_size=None):
+    async def generate_agent_episodes(self, timing_raw=None, meta_info=None, group_size=None, minibatch_size=None, return_metrics=False):
         """
         Generate episodes in minibatches with overlapping generation and training.
 
         This uses a background producer task to continuously generate episodes
         while the main loop yields minibatches for training.
-        """
-        if timing_raw is None:
-            timing_raw = {}
 
-        if group_size is None:
-            group_size = self.config.training.group_size
+        Args:
+            return_metrics: If True, yields (episodes, metrics) tuple where metrics is
+                          {episode_id: {metric_name: value, ...}}. If False, yields only episodes.
+        """
 
         num_minibatches = self.config.training.num_minibatches
 
@@ -191,10 +184,14 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
         episodes = await self.agent_execution_engine.execute_tasks(current_batch, task_ids)
         episodes = self.make_sure_contain_token_and_logprob(episodes)
         episodes = self.maybe_broadcast_reward(episodes)
-        episodes = self.regroup(episodes)
-        yield episodes
+        regrouped_episodes, episode_metrics = self.regroup(episodes)
 
-    def regroup(self, episodes: list[Episode]) -> list[Episode]:
+        if return_metrics:
+            yield regrouped_episodes, episode_metrics
+        else:
+            yield regrouped_episodes
+
+    def regroup(self, episodes: list[Episode]) -> tuple[list[Episode], dict]:
         # This function basically
         # TODO: naive implementation, groupby task_id_agent_name_step_idx
         unique_step_uids = set()
@@ -202,11 +199,14 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
         step_groupby_step_uid = defaultdict(list)
 
         new_episodes = []
+        metrics = {}
 
         def get_task_id(episode: Episode):
             return ":".join(episode.id.split(":")[:-1])
 
         for episode in episodes:
+            if episode.id not in metrics and episode.metrics:
+                metrics[episode.id] = episode.metrics
             task_id = get_task_id(episode)
             unique_task_ids.add(task_id)
             for trajectory in episode.trajectories:
@@ -227,7 +227,7 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
         print(f"len unique_step_uids: {len(unique_step_uids)}")
         print(f"len new_episodes: {len(new_episodes)}")
 
-        return new_episodes
+        return new_episodes, metrics
 
     def maybe_broadcast_reward(self, episodes: list[Episode]) -> list[Episode]:
         assert self.config.trainer.reward_broadcast in ["step", "trajectory"]

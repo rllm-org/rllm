@@ -94,6 +94,8 @@ class TinkerAgentTrainer:
         )
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.model.name)
+        sampling_params = self.config.sampling
+        assert sampling_params.get("temperature", 1.0) == 1.0 and sampling_params.get("top_p", 1.0) == 1.0, "temperature and top_p must be 1.0 for tinker agent trainer"
         self.agent_execution_engine = AsyncAgentExecutionEngine(
             config=self.config,
             engine_name="tinker",
@@ -112,7 +114,7 @@ class TinkerAgentTrainer:
                 "service_client": service_client,
                 "max_prompt_length": self.config.data.max_prompt_length,
                 "max_response_length": self.config.data.max_response_length,
-                "sampling_params": self.config.sampling,
+                "sampling_params": sampling_params,
             },
         )
         # Track number of batches for progress calculation
