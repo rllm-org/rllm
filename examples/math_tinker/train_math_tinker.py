@@ -16,23 +16,6 @@ from rllm.environments.base.single_turn_env import SingleTurnEnvironment
 from rllm.trainer.tinker.tinker_agent_trainer import TinkerAgentTrainer
 
 
-class SimpleDataLoader:
-    """Simple reusable dataloader."""
-
-    def __init__(self, dataset, batch_size):
-        self.dataset = dataset
-        self.batch_size = batch_size
-
-    def __iter__(self):
-        for i in range(0, len(self.dataset), self.batch_size):
-            yield self.dataset[i : i + self.batch_size]
-
-
-def create_dataloader(dataset, batch_size):
-    """Create a simple reusable dataloader from dataset."""
-    return SimpleDataLoader(dataset, batch_size)
-
-
 @hydra.main(version_base=None, config_path="../../rllm/trainer/config", config_name="tinker_agent_trainer")
 def main(config: DictConfig):
     """
@@ -48,10 +31,6 @@ def main(config: DictConfig):
     if train_dataset is None or test_dataset is None:
         raise ValueError("Datasets not found! Please run prepare_tinker_math_dataset.py first:\n  python -m examples.math_tinker.prepare_tinker_math_dataset")
 
-    # Create dataloaders
-    train_dataloader = create_dataloader(train_dataset, config.data.train_batch_size)
-    test_dataloader = create_dataloader(test_dataset, config.data.val_batch_size)
-
     # Create trainer (uses separated components internally)
     trainer = TinkerAgentTrainer(
         config=config,
@@ -59,8 +38,8 @@ def main(config: DictConfig):
         env_class=SingleTurnEnvironment,
         agent_args={"use_fewshot": True},
         env_args={"reward_fn": math_reward_fn},
-        train_dataloader=train_dataloader,
-        val_dataloader=test_dataloader,
+        train_dataset=train_dataset,
+        val_dataset=test_dataset,
     )
 
     # Train (all orchestration handled internally by TinkerAgentTrainer)
