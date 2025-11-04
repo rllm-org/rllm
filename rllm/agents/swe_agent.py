@@ -100,10 +100,9 @@ logger = logging.getLogger(__name__)
 
 
 class SWEAgent(BaseAgent):
-    def __init__(self, use_tool_calling: bool = True, scaffold: str = "r2egym", chat_template_parser: ChatTemplateParser = None, accumulate_reasoning: bool = False, **kwargs):
+    def __init__(self, use_tool_calling: bool = True, scaffold: str = "r2egym", chat_template_parser: ChatTemplateParser = None, **kwargs):
         self.use_tool_calling = use_tool_calling
         self.scaffold = scaffold
-        self.accumulate_reasoning = accumulate_reasoning
         assert scaffold in ["r2egym", "sweagent"], f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent']"
         self.system_prompt = SWE_SYSTEM_PROMPT_FN_CALL if use_tool_calling else SWE_SYSTEM_PROMPT
         if scaffold == "sweagent":
