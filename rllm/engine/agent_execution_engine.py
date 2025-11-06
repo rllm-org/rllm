@@ -95,7 +95,7 @@ class AgentExecutionEngine:
         self.rollout_engine_args = rollout_engine_args
         self.sampling_params = kwargs.get("sampling_params", {})  # for openai api requests
 
-        assert self.engine_name in ["openai", "verl"], "Currently only openai and verl are supported as rollout engine"
+        assert self.engine_name in ["openai", "verl", "tinker"], "Currently only openai, verl and tinker are supported as rollout engine"
         if self.engine_name == "openai":
             from rllm.engine.rollout.openai_engine import OpenAIEngine
 
@@ -115,6 +115,12 @@ class AgentExecutionEngine:
                 rollout_manager=rollout_engine,
                 tokenizer=self.tokenizer,
                 disable_thinking=self.disable_thinking,
+            )
+        elif self.engine_name == "tinker":
+            from rllm.engine.rollout.tinker_engine import TinkerEngine
+
+            self.rollout_engine = TinkerEngine(
+                **rollout_engine_args,
             )
 
         # Create a thread pool executor for environment interactions (i.e. step, reset, close)
@@ -144,12 +150,15 @@ class AgentExecutionEngine:
 
         if self.engine_name == "openai":
             output = await self.rollout_engine.get_model_response(prompt, application_id=application_id, enforce_max_prompt_length=False, **sampling_params)
-            return output.text
+            return output
         elif self.engine_name == "verl":
             meta_data = sampling_params.pop("meta_info", {})
             validate = meta_data.get("validate", False)
             output = await self.rollout_engine.get_model_response(prompt, application_id=application_id, validate=validate, enforce_max_prompt_length=False, **sampling_params)
-            return output.text
+            return output
+        elif self.engine_name == "tinker":
+            output = await self.rollout_engine.get_model_response(prompt, application_id=application_id, enforce_max_prompt_length=False, **sampling_params)
+            return output
         else:
             raise NotImplementedError(f"Engine type '{self.engine_name}' not supported")
 
@@ -232,7 +241,8 @@ class AgentExecutionEngine:
             kwargs["max_tokens"] = max_tokens
 
             start_time = time.time()
-            response = await self.get_model_response(prompt_messages, application_id, **kwargs)
+            model_output = await self.get_model_response(prompt_messages, application_id, **kwargs)
+            response = model_output.text
             delta_time = time.time() - start_time
             llm_time += delta_time
             total_time += delta_time
@@ -240,6 +250,9 @@ class AgentExecutionEngine:
             prompt_response_pair = {
                 "prompt": self.chat_parser.parse(prompt_messages, add_generation_prompt=True, is_first_msg=True),
                 "response": response,
+                "prompt_ids": model_output.prompt_ids,
+                "response_ids": model_output.completion_ids,
+                "logprobs": model_output.logprobs,
             }
             episode_steps.append(prompt_response_pair)
 
@@ -379,10 +392,11 @@ class AgentExecutionEngine:
         if mode == "Text":
             return trajectory
         elif mode == "Token":
+            prompt_tokens, response_tokens, response_masks, is_valid_trajectory = self.assemble_steps(episode_steps)
             token_result = {
-                "prompt_tokens": torch.tensor(prompt_tokens, dtype=torch.long),
-                "response_tokens": torch.tensor(response_tokens, dtype=torch.long),
-                "response_masks": torch.tensor(response_masks, dtype=torch.long),
+                "prompt_tokens": prompt_tokens,
+                "response_tokens": response_tokens,
+                "response_masks": response_masks,
                 "trajectory_reward": trajectory.reward,
                 "idx": env.idx,
                 "chat_completions": agent.chat_completions,
@@ -397,6 +411,7 @@ class AgentExecutionEngine:
                     "llm_time": llm_time,
                     # Total time spent in the trajectory
                     "total_time": total_time,
+                    "token_mismatch": 0.0 if is_valid_trajectory else 1.0,
                 },
             }
             return token_result
@@ -410,6 +425,71 @@ class AgentExecutionEngine:
                 "mc_returns": [step.mc_return for step in trajectory.steps][: len(episode_steps)],
             }
             return steps_result
+        else:
+            raise ValueError(f"Mode {mode} not supported")
+
+    def assemble_steps(self, steps: list[dict]):
+        """
+        Transform step-by-step results into trajectory format for training.
+        The assemble is aggresive, if steps is not cumulative, the response_masks is set to all 0s.
+
+        Each step_result contains:
+        - steps: List of {"prompt": str, "response": str, "prompt_ids": list, "completion_ids": list}
+
+        For training, we need to assemble the full conversation sequence where:
+        - prompt_tokens: Initial prompt (first step's prompt_ids)
+        - response_tokens: All subsequent conversation (completion_ids + next step's prompt_ids)
+        - response_masks: Mask indicating which tokens contribute to loss (only completion_ids)
+        """
+
+        # Start with initial prompt from first step
+        initial_prompt_ids = steps[0]["prompt_ids"]
+        accumulated_sequence = initial_prompt_ids.copy()
+        response_tokens = []
+        response_masks = []
+        is_valid_trajectory = True
+
+        for i, step in enumerate(steps):
+            current_prompt_ids = step["prompt_ids"]
+            current_completion_ids = step["completion_ids"]
+
+            if i == 0:
+                # First step: just add completion
+                response_tokens.extend(current_completion_ids)
+                response_masks.extend([1] * len(current_completion_ids))  # completion contributes to loss
+                accumulated_sequence.extend(current_completion_ids)
+            else:
+                if current_prompt_ids[: len(accumulated_sequence)] != accumulated_sequence:
+                    # Find the first differing position
+                    prefix = current_prompt_ids[: len(accumulated_sequence)]
+                    diff_pos = None
+                    for i, (expected, actual) in enumerate(zip(accumulated_sequence, prefix, strict=False)):
+                        if expected != actual:
+                            diff_pos = i
+                            break
+
+                    if diff_pos is not None:
+                        logger.warning(f"When assemble steps, detect the trajectory not accumulative at position {diff_pos}. Expected: {accumulated_sequence[diff_pos : diff_pos + 5]}, Got: {prefix[diff_pos : diff_pos + 5]}. Setting response_masks to all 0s. This is likely due to retokenization.")
+                    else:
+                        logger.warning(f"When assemble steps, detect length mismatch. Expected length: {len(accumulated_sequence)}, Got length: {len(prefix)}. Setting response_masks to all 0s.")
+
+                    is_valid_trajectory = False
+                    break
+
+                response_tokens.extend(current_prompt_ids[len(accumulated_sequence) :] + current_completion_ids)
+                response_masks.extend([0] * (len(current_prompt_ids) - len(accumulated_sequence)) + [1] * len(current_completion_ids))  # completion contributes to loss
+                accumulated_sequence = current_prompt_ids + current_completion_ids
+
+        assert len(response_masks) == len(response_tokens)
+
+        prompt_tokens = torch.tensor(initial_prompt_ids, dtype=torch.long)
+        response_tokens = torch.tensor(response_tokens, dtype=torch.long)
+        response_masks = torch.tensor(response_masks, dtype=torch.long)
+
+        if self.config.rllm.filter_token_mismatch:
+            response_masks = response_masks * int(is_valid_trajectory)
+
+        return prompt_tokens, response_tokens, response_masks, is_valid_trajectory
 
     async def run_agent_trajectory_with_retry(self, idx, application_id, seed=0, mode="Text", **kwargs):
         for _ in range(self.retry_limit):
@@ -427,7 +507,8 @@ class AgentExecutionEngine:
         assert all(env is not None and isinstance(env, BaseEnv) for env in self.envs), "All environments must be inheriting from BaseEnv"
         assert all(env.is_multithread_safe() for env in self.envs), "All environments must be multithread safe for async engine"  # type: ignore
         max_concurrency = self.n_parallel_agents
-        free_cache_engine = self.config.actor_rollout_ref.rollout.free_cache_engine if self.config else False
+        if self.engine_name == "verl":
+            free_cache_engine = self.config.actor_rollout_ref.rollout.free_cache_engine if self.config else False
 
         self.executor = ThreadPoolExecutor(max_workers=max_concurrency)
 
