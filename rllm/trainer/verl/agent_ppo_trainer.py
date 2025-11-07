@@ -153,6 +153,7 @@ class AgentPPOTrainer(RayPPOTrainer):
 
         for epoch in range(self.config.trainer.total_epochs):
             pprint(f"epoch {epoch}, step {self.global_steps} started")
+
             for batch_dict in self.train_dataloader:
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
                 batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
@@ -182,15 +183,25 @@ class AgentPPOTrainer(RayPPOTrainer):
                         final_gen_batch_output, generate_metrics = self.generate_agent_trajectory(timing_raw=timing_raw, meta_info=batch.meta_info)
 
                         # If some trajectories were skipped (overlong prompts), filter the batch to match
-                        if "skipped_indices" in final_gen_batch_output.meta_info:
-                            skipped_indices = final_gen_batch_output.meta_info.pop("skipped_indices")
-                            # Create mask for valid (non-skipped) indices
-                            valid_mask = np.ones(len(batch.batch), dtype=bool)
-                            valid_mask[skipped_indices] = False
-                            # Filter batch to only include valid samples
-                            valid_indices = np.where(valid_mask)[0]
+                        # Get valid indices directly from AgentExecutionEngine (handled internally)
+                        valid_indices = getattr(self.agent_execution_engine, "_last_valid_indices", None)
+                        skipped_indices = getattr(self.agent_execution_engine, "_last_skipped_indices", [])
+
+                        # Ensure batch size matches the number of trajectories collected
+                        num_trajectories = len(final_gen_batch_output.batch)
+                        if valid_indices is not None and len(valid_indices) != num_trajectories:
+                            if len(valid_indices) > num_trajectories:
+                                valid_indices = valid_indices[:num_trajectories]
+                            else:
+                                raise RuntimeError(f"Fewer valid indices ({len(valid_indices)}) than trajectories ({num_trajectories}).")
+
+                        if valid_indices is not None and len(valid_indices) < len(batch.batch):
+                            # Filter batch to only include valid samples (matching the number of trajectories collected)
                             batch = batch.select_idxs(valid_indices)
-                            print(f"Filtered batch from {len(valid_mask)} to {len(valid_indices)} samples after skipping {len(skipped_indices)} overlong prompts")
+
+                        # Final sanity check: batch sizes must match before union
+                        if len(batch.batch) != len(final_gen_batch_output.batch):
+                            raise RuntimeError(f"Batch size mismatch before union: batch has {len(batch.batch)} samples, final_gen_batch_output has {len(final_gen_batch_output.batch)} samples. valid_indices: {len(valid_indices) if valid_indices else 'None'}, skipped_indices: {len(skipped_indices)}")
 
                         batch = batch.union(final_gen_batch_output)
                         metrics.update(generate_metrics)
@@ -564,7 +575,7 @@ class AgentPPOTrainer(RayPPOTrainer):
             if self.async_rollout_mode:
                 gen_seq_generator = self.generate_agent_trajectories_async(timing_raw=timing_raw, meta_info=meta_info, mode="Token")
                 for trajectory in gen_seq_generator:
-                    # Skip None trajectories (overlong prompts)
+                    # Skip None trajectories (overlong prompts) - these are handled by AgentExecutionEngine
                     if trajectory is not None:
                         trajectories.append(trajectory)
             else:
@@ -574,25 +585,18 @@ class AgentPPOTrainer(RayPPOTrainer):
         if not trajectories:
             raise RuntimeError("All trajectories were skipped (likely all prompts exceed max_prompt_length). Please check your dataset and increase max_prompt_length or enable filtering.")
 
-        # Sort trajectories by their idx, to ensure they are in order.
-        trajectories.sort(key=lambda x: x["idx"])
-
-        # Determine which indices were skipped by checking missing idx values
-        # Expected indices are 0 to (batch_size * rollout.n - 1)
-        expected_count = len(self.agent_execution_engine.envs)
-        actual_indices = set(t["idx"] for t in trajectories)
-        expected_indices = set(range(expected_count))
-        skipped_indices = sorted(expected_indices - actual_indices)
-
+        # Get skipped indices from AgentExecutionEngine (handled internally)
+        skipped_indices = getattr(self.agent_execution_engine, "_last_skipped_indices", [])
         if skipped_indices:
             print(f"Skipped {len(skipped_indices)} trajectories due to overlong prompts at env indices: {skipped_indices}")
+
+        # Sort trajectories by their idx, to ensure they are in order.
+        trajectories.sort(key=lambda x: x["idx"])
 
         with marked_timer("transform_trajectory", timing_raw):
             # Transform the raw trajectories into DataProto format.
             final_gen_batch_output, metrics = self._transform_agent_trajectories(trajectories)
-            # Store skipped indices in meta_info for potential filtering of original batch
-            if skipped_indices:
-                final_gen_batch_output.meta_info["skipped_indices"] = skipped_indices
+
         return final_gen_batch_output, metrics
 
     def generate_agent_steps(self, timing_raw=None, meta_info=None, uids=None):
@@ -865,18 +869,23 @@ class AgentPPOTrainer(RayPPOTrainer):
             timing_raw = {}
         queue = Queue()
 
+        # Create a unique sentinel object to signal completion
+        # (Cannot use None since None is used for skipped trajectories)
+        _SENTINEL = object()
+
         def runner():
             async def consume():
                 async for item in self.agent_execution_engine.trajectory_generator(timing_raw=timing_raw, mode=mode, meta_info=meta_info):
                     queue.put(item)
-                queue.put(None)  # sentinel to signal done
+                # Use a special sentinel object instead of None (since None is used for skipped trajectories)
+                queue.put(_SENTINEL)  # sentinel to signal done
 
             asyncio.run(consume())
 
         Thread(target=runner, daemon=True).start()
         while True:
             item = queue.get()
-            if item is None:
+            if item is _SENTINEL:
                 break
             yield item
 

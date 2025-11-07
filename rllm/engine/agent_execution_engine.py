@@ -437,6 +437,10 @@ class AgentExecutionEngine:
             self.executor = ThreadPoolExecutor(max_workers=self.max_env_workers)
         semaphore = asyncio.Semaphore(self.n_parallel_agents)
 
+        # Initialize skipped indices and valid indices lists (will be populated as trajectories complete)
+        self._last_skipped_indices = []
+        self._last_valid_indices = None  # Will be computed after all trajectories complete
+
         if self.engine_name == "verl":
             self.rollout_engine.wake_up()
 
@@ -456,29 +460,54 @@ class AgentExecutionEngine:
 
                     traceback.print_exc()
                     raise e
-                return result
+                # Return tuple (env_idx, result) so we can track which env returned None
+                return (env_idx, result)
 
         # Create all N conceptual tasks. Their execution will be throttled by the semaphore
         # and the availability of agent/env indices.
         tasks_to_run = [launch_one_trajectory_task(i) for i in range(len(self.envs))]
 
+        # Track results by index to maintain order and identify skipped trajectories
+        results_by_idx = {}
         tasks_completed = 0
         skipped_count = 0
+
         for coro in asyncio.as_completed(tasks_to_run):
             try:
-                result = await coro
+                env_idx, result = await coro
                 tasks_completed += 1
 
-                # Skip None results (trajectories that were skipped due to overlong prompts)
+                # Store result with its env_idx (None if skipped)
                 if result is None:
                     skipped_count += 1
+                    results_by_idx[env_idx] = None  # Store None to mark as skipped
                     colorful_print(f"Number of Trajectories {tasks_completed}/{len(self.envs)} completed ({skipped_count} skipped due to overlong prompts)", "cyan")
-                    continue
-
-                colorful_print(f"Number of Trajectories {tasks_completed}/{len(self.envs)} completed", "cyan")
-                yield result
+                else:
+                    results_by_idx[env_idx] = result
+                    colorful_print(f"Number of Trajectories {tasks_completed}/{len(self.envs)} completed", "cyan")
             except Exception as e:
                 raise e
+
+        # Verify all tasks completed and are stored
+        if len(results_by_idx) != len(self.envs):
+            missing = sorted(set(range(len(self.envs))) - set(results_by_idx.keys()))
+            raise RuntimeError(f"Not all trajectories were stored! Missing indices: {missing}. Expected {len(self.envs)} but got {len(results_by_idx)}")
+
+        # Yield all trajectories in order (0 to len(self.envs)-1)
+        # None values indicate skipped trajectories
+        skipped_indices = []
+        for idx in range(len(self.envs)):
+            # All indices should be in results_by_idx after the check above
+            result = results_by_idx[idx]
+            if result is None:
+                skipped_indices.append(idx)
+            yield result  # Yield result (None for skipped, trajectory dict otherwise)
+
+        # Store skipped indices and valid indices as instance variables for trainer to access
+        self._last_skipped_indices = skipped_indices
+        # Compute valid indices (complement of skipped indices) for easier batch filtering
+        total_count = len(self.envs)
+        self._last_valid_indices = [i for i in range(total_count) if i not in skipped_indices]
 
         if self.engine_name == "verl":
             self.rollout_engine.sleep()
