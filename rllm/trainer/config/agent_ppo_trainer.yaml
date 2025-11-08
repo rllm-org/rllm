@@ -44,6 +44,7 @@ rllm:
   disable_thinking: False
   accumulate_reasoning: False
   mask_truncated_samples: False
+  filter_token_mismatch: True
   stepwise_advantage:
     enable: False
     mode: broadcast # [broadcast, per_step]

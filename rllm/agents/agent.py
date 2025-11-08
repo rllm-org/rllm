@@ -6,6 +6,10 @@ from typing import Any
 
 @dataclass
 class Step:
+    prompt_ids: list[int] = field(default_factory=list)
+    response_ids: list[int] = field(default_factory=list)
+    logprobs: list[float] = field(default_factory=list)
+
     chat_completions: list[dict[str, str]] = field(default_factory=list)
 
     observation: Any = None
@@ -22,6 +26,9 @@ class Step:
 
     def to_dict(self) -> dict:
         return {
+            "prompt_ids": self.prompt_ids,
+            "response_ids": self.response_ids,
+            "logprobs": self.logprobs,
             "chat_completions": self.chat_completions,
             "observation": self.observation,
             "thought": self.thought,
@@ -39,6 +46,9 @@ class Step:
         from rllm.engine.rollout import ModelOutput
 
         return cls(
+            prompt_ids=data["prompt_ids"],
+            response_ids=data["response_ids"],
+            logprobs=data["logprobs"],
             chat_completions=data["chat_completions"],
             observation=data["observation"],
             thought=data["thought"],
