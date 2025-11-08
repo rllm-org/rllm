@@ -5,7 +5,6 @@ import ray
 from rllm.data import Dataset
 from rllm.trainer.verl.ray_runtime_env import get_ppo_ray_runtime_env
 from rllm.trainer.verl.train_agent_ppo import TaskRunner
-from rllm.trainer.verl.train_workflow_pipeline import PipelineTaskRunner
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env as get_fireworks_ray_runtime_env
 
 
@@ -133,6 +132,9 @@ class AgentTrainer:
         """
         if not ray.is_initialized():
             ray.init(runtime_env=get_fireworks_ray_runtime_env(), num_cpus=self.config.ray_init.num_cpus)
+
+        # Lazy import to avoid requiring fireworks package for users who don't use it
+        from rllm.trainer.verl.train_workflow_pipeline import PipelineTaskRunner
 
         runner = PipelineTaskRunner.remote()
 
