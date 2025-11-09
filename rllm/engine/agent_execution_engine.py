@@ -13,6 +13,7 @@ from rllm.agents.utils import (
     convert_messages_to_tokens_and_masks,
     get_recent_assistant_user_messages,
 )
+from rllm.engine.rollout.rollout_engine import ModelOutput
 from rllm.environments.base.base_env import BaseEnv
 from rllm.environments.env_utils import (
     compute_mc_return,
@@ -126,7 +127,7 @@ class AgentExecutionEngine:
         # Create a thread pool executor for environment interactions (i.e. step, reset, close)
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
 
-    async def get_model_response(self, prompt, application_id, **kwargs) -> str:
+    async def get_model_response(self, prompt, application_id, **kwargs) -> ModelOutput:
         """
         Compute model response asynchronously based on the engine type.
 
@@ -507,12 +508,9 @@ class AgentExecutionEngine:
         assert all(env is not None and isinstance(env, BaseEnv) for env in self.envs), "All environments must be inheriting from BaseEnv"
         assert all(env.is_multithread_safe() for env in self.envs), "All environments must be multithread safe for async engine"  # type: ignore
         max_concurrency = self.n_parallel_agents
-        if self.engine_name == "verl":
-            free_cache_engine = self.config.actor_rollout_ref.rollout.free_cache_engine if self.config else False
-
         self.executor = ThreadPoolExecutor(max_workers=max_concurrency)
 
-        if self.engine_name == "verl" and free_cache_engine:
+        if self.engine_name == "verl":
             await self.rollout_engine.wake_up()  # type: ignore
 
         async def launch_one_trajectory_task(env_idx: int):
@@ -546,7 +544,7 @@ class AgentExecutionEngine:
             except Exception as e:
                 raise e
 
-        if self.engine_name == "verl" and free_cache_engine:
+        if self.engine_name == "verl":
             await self.rollout_engine.sleep()  # type: ignore
 
         self.executor.shutdown(wait=False, cancel_futures=True)

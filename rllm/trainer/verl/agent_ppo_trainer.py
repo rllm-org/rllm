@@ -82,6 +82,10 @@ class AgentPPOTrainer(RayPPOTrainer):
             **self.config.rllm.agent.get("engine_args", {}),
         )
 
+        # If `free_cache_engine` is False, we need to manually `sleep` at the start
+        if self.config.actor_rollout_ref.rollout.get("free_cache_engine", False):
+            self.async_rollout_manager.sleep()
+
     def init_envs_and_agents(self, batch):
         """
         Initialize environment depending on env_class with the necessary extra_info, also set uid of the batch.
