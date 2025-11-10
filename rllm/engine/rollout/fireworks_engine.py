@@ -168,7 +168,7 @@ class FireworksEngine(OpenAIEngine):
                 await asyncio.sleep(1)
 
     def _fireworks_chat_completion(self, messages, sampling_params):
-        url = urljoin(str(self.client.base_url), "/chat/completions")
+        url = urljoin(str(self.client.base_url), "chat/completions")
         payload = {
             "model": self.model,
             "messages": messages,
