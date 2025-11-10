@@ -140,7 +140,7 @@ class FireworksEngine(OpenAIEngine):
                 finish_reason = response["choices"][0]["finish_reason"]
 
                 prompt_token_ids = response["prompt_token_ids"]
-                completion_token_ids = response.json()['choices'][0]['token_ids']
+                completion_token_ids = response.json()["choices"][0]["token_ids"]
                 return ModelOutput(
                     text=text,
                     content=content,
