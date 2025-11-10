@@ -40,8 +40,7 @@ class AgentTrainer:
             agent_args: Optional arguments to pass to the agent class
             env_args: Optional arguments to pass to the environment class
         """
-
-        if workflow_class is not None and config.rllm.workflow.use_workflow:
+        if workflow_class is not None:
             if agent_class is not None:
                 raise ValueError("agent_class is not supported when using workflow, instead use workflow_args['agent_cls']")
             if agent_args is not None:
@@ -81,7 +80,7 @@ class AgentTrainer:
         from rllm.trainer.tinker.tinker_agent_trainer import TinkerAgentTrainer
         from rllm.trainer.tinker.tinker_workflow_trainer import TinkerWorkflowTrainer
 
-        if self.config.rllm.workflow.use_workflow:
+        if self.workflow_class is not None:
             trainer = TinkerWorkflowTrainer(
                 config=self.config,
                 workflow_class=self.workflow_class,

@@ -60,10 +60,6 @@ trainer:
   val_before_train: true
   default_local_dir: '/tmp/rllm-tinker-checkpoints'
 
-rllm:
-  workflow:
-    use_workflow: true
-
 # Hydra configuration
 hydra:
   run:
