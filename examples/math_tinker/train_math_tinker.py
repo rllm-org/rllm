@@ -13,7 +13,7 @@ from examples.math_tinker.math_agent_with_fewshot import MathAgentWithFewshot
 from examples.math_tinker.math_reward import math_reward_fn
 from rllm.data.dataset import DatasetRegistry
 from rllm.environments.base.single_turn_env import SingleTurnEnvironment
-from rllm.trainer.tinker.tinker_agent_trainer import TinkerAgentTrainer
+from rllm.trainer import AgentTrainer
 
 
 @hydra.main(version_base=None, config_path="../../rllm/trainer/config", config_name="tinker_agent_trainer")
@@ -32,7 +32,7 @@ def main(config: DictConfig):
         raise ValueError("Datasets not found! Please run prepare_tinker_math_dataset.py first:\n  python -m examples.math_tinker.prepare_tinker_math_dataset")
 
     # Create trainer (uses separated components internally)
-    trainer = TinkerAgentTrainer(
+    trainer = AgentTrainer(
         config=config,
         agent_class=MathAgentWithFewshot,
         env_class=SingleTurnEnvironment,
@@ -40,10 +40,11 @@ def main(config: DictConfig):
         env_args={"reward_fn": math_reward_fn},
         train_dataset=train_dataset,
         val_dataset=test_dataset,
+        backend="tinker",
     )
 
     # Train (all orchestration handled internally by TinkerAgentTrainer)
-    trainer.fit_agent()
+    trainer.train()
 
 
 if __name__ == "__main__":
