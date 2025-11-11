@@ -10,7 +10,7 @@ import hydra
 import ray
 from omegaconf import OmegaConf
 
-from rllm.trainer.env_agent_mappings import AGENT_CLASS_MAPPING, ENV_CLASS_MAPPING, WORKFLOW_CLASS_MAPPING
+from rllm.trainer.env_agent_mappings import AGENT_CLASS_MAPPING, ENV_CLASS_MAPPING
 from rllm.trainer.verl.agent_ppo_trainer import AgentPPOTrainer
 
 # Local application imports
@@ -155,9 +155,8 @@ class TaskRunner:
         val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {}))
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
-        if config.rllm.workflow.use_workflow:
-            if workflow_class is None:
-                workflow_class = WORKFLOW_CLASS_MAPPING[config.rllm.workflow.name]
+        if workflow_class is not None:
+            # Should provide workflow_class if want to use workflow trainer
             workflow_args = workflow_args or {}
             if config.rllm.workflow.get("workflow_args") is not None:
                 for key, value in config.rllm.workflow.get("workflow_args").items():
