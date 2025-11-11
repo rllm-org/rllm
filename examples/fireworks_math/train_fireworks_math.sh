@@ -9,7 +9,7 @@ export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 # Find the directory where rllm package is located
 RLLM_DIR=$(python3 -c "import rllm; import os; print(os.path.dirname(os.path.dirname(rllm.__file__)))")
 
-MODEL_PATH=Qwen/Qwen3-4B
+MODEL_PATH=Qwen/Qwen3-8B
 export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 python3 -m examples.fireworks_math.train_fireworks_math \
