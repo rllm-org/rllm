@@ -99,6 +99,11 @@ strands = [
     "strands-agents",
 ]
 
+tinker = [
+    "tinker",
+    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook",
+]
+
 [tool.ruff]
 line-length = 5000 # TODO: Reduce this to a more reasonable value
 
