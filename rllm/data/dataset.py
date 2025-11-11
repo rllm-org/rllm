@@ -3,7 +3,6 @@ import logging
 import os
 from typing import Any
 
-import numpy as np
 import pandas as pd
 import polars as pl
 import torch
@@ -374,27 +373,6 @@ class DatasetRegistry:
         logger.info(f"Removed dataset '{name}' from registry.")
         return True
 
-    @staticmethod
-    def _convert_to_json_serializable(obj: Any) -> Any:
-        """Convert numpy arrays and other non-serializable objects to JSON-serializable types.
-
-        Args:
-            obj: Object to convert
-
-        Returns:
-            JSON-serializable version of the object
-        """
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, np.integer | np.floating):
-            return obj.item()
-        elif isinstance(obj, dict):
-            return {key: DatasetRegistry._convert_to_json_serializable(value) for key, value in obj.items()}
-        elif isinstance(obj, list | tuple):
-            return [DatasetRegistry._convert_to_json_serializable(item) for item in obj]
-        else:
-            return obj
-
     @classmethod
     def apply_verl_postprocessing(cls, data: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Apply Verl postprocessing to the dataset.
@@ -404,27 +382,16 @@ class DatasetRegistry:
 
         Returns:
             List of dictionaries with Verl-compatible format
-
-        Note:
-            All nested structures (lists, dicts) are JSON-serialized to avoid
-            PyArrow "Nested data conversions not implemented for chunked array outputs"
-            error when loading from Parquet in distributed contexts.
         """
         processed_data = []
         for entry in data:
-            # Convert numpy arrays to lists before JSON serialization
-            serializable_entry = cls._convert_to_json_serializable(entry)
-
             processed_entry = {
-                # Serialize nested structures as JSON strings to avoid PyArrow chunked array issues
-                "prompt": json.dumps([{"role": "user", "content": "placeholder"}]),
-                "reward_model": json.dumps(
-                    {
-                        "style": "rule",
-                        "ground_truth": None,
-                    }
-                ),
-                "extra_info": json.dumps(serializable_entry),
+                "prompt": [{"role": "user", "content": "placeholder"}],
+                "reward_model": {
+                    "style": "rule",
+                    "ground_truth": None,
+                },
+                "extra_info": entry,
             }
             processed_data.append(processed_entry)
         return processed_data
