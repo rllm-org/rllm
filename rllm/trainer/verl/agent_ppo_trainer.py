@@ -302,11 +302,6 @@ class AgentPPOTrainer(RayPPOTrainer):
                                 batch = batch[size_mask]
 
                         # recompute old_log_probs
-                        with marked_timer("old_log_prob", timing_raw):
-                            old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-                            batch = batch.union(old_log_prob)
-
-                        # recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
                             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                             entropys = old_log_prob.batch["entropys"]
