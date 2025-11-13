@@ -145,6 +145,9 @@ ignore = [
 where   = ["."]
 include = ["rllm", "rllm.*"]
 
+[tool.setuptools.package-data]
+rllm = ["trainer/config/*.yaml"]
+
 [tool.mypy]
 plugins = ["pydantic.mypy"]
 ignore_missing_imports = true
