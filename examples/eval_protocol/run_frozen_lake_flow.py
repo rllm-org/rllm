@@ -10,10 +10,10 @@ import json
 import os
 from pathlib import Path
 
-from rllm.workflows.eval_protocol_workflow import EvalProtocolWorkflow
 from rllm.data.dataset import DatasetRegistry
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.openai_engine import OpenAIEngine
+from rllm.workflows.eval_protocol_workflow import EvalProtocolWorkflow
 
 
 def evaluate_results(episodes):

@@ -1,14 +1,13 @@
 import asyncio
 import importlib
 import inspect
- 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 import eval_protocol
 from eval_protocol.models import EvaluationRow, InputMetadata, Message
 from eval_protocol.pytest.default_mcp_gym_rollout_processor import MCPGymRolloutProcessor
-from eval_protocol.pytest.types import RolloutProcessorConfig
 from eval_protocol.pytest.evaluation_test_utils import build_rollout_processor_config
 
 from rllm.agents.agent import Episode, Step, Trajectory
@@ -43,19 +42,16 @@ class EvalProtocolWorkflow(Workflow):
         self._env_module_path = env_path
 
         # Resolve evaluation function and rollout hints from env module
-        self._eval_func: Optional[Callable[[EvaluationRow], Any]] = None
+        self._eval_func: Callable[[EvaluationRow], Any] | None = None
         try:
             module = importlib.import_module(self._env_module_path)
         except Exception as e:
-            raise ImportError(f"Failed to import env module '{self._env_module_path}': {e}")
+            raise ImportError(f"Failed to import env module '{self._env_module_path}': {e}") from e
 
-        candidate_tests = [
-            obj for _, obj in inspect.getmembers(module)
-            if callable(obj) and hasattr(obj, "__ep_params__")
-        ]
+        candidate_tests = [obj for _, obj in inspect.getmembers(module) if callable(obj) and hasattr(obj, "__ep_params__")]
         if not candidate_tests:
             raise ValueError(f"No evaluation tests found in '{self._env_module_path}'.")
-        
+
         # Use the decorated evaluation function directly
         self._eval_func = candidate_tests[0]
         self._ep_params: dict[str, Any] = getattr(self._eval_func, "__ep_params__", {})
@@ -64,7 +60,7 @@ class EvalProtocolWorkflow(Workflow):
         self._mcp_config_path = self._ep_params.get("mcp_config_path")
         self._rollout_processor_kwargs = self._ep_params.get("rollout_processor_kwargs") or {}
         self._mode = self._ep_params.get("mode")
-        
+
         self.rollout_processor = self._ep_params.get("rollout_processor")
 
         assert self.rollout_processor is not None
@@ -73,7 +69,7 @@ class EvalProtocolWorkflow(Workflow):
         if isinstance(self.rollout_processor, MCPGymRolloutProcessor):
             if self._server_script_path is None:
                 raise ValueError("server_script_path is required for MCPGymRolloutProcessor")
-            
+
             eval_protocol_path = Path(eval_protocol.__file__).parent.parent
             server_script_path = Path(self._server_script_path)
             self._server_script_path = eval_protocol_path / server_script_path
@@ -82,7 +78,7 @@ class EvalProtocolWorkflow(Workflow):
         self.reset(task=task, uid=uid)
 
         eval_row = self._task_to_evaluation_row(task)
-        
+
         rollout_processor_config = build_rollout_processor_config(
             rollout_processor=self.rollout_processor,
             model=f"{self._lite_llm_prefix}{getattr(self.rollout_engine, 'model', '')}",
@@ -211,4 +207,3 @@ class EvalProtocolWorkflow(Workflow):
     def cleanup(self) -> None:
         if hasattr(self, "rollout_processor") and isinstance(self.rollout_processor, MCPGymRolloutProcessor):
             self.rollout_processor.cleanup()
-
