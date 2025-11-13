@@ -2,7 +2,7 @@ set -x
 
 MODEL_PATH=Qwen/Qwen3-4B-Instruct-2507
 
-python3 -m examples.solver_judge_tinker.train_solver_judge_flow_tinker \
+python -m examples.solver_judge_tinker.train_solver_judge_flow_tinker \
     model.name=$MODEL_PATH \
     model.lora_rank=32 \
     training.group_size=4 \

@@ -11,12 +11,12 @@ from tqdm import tqdm
 
 from rllm.agents.agent import Episode
 from rllm.engine.rollout import ModelOutput, RolloutEngine
-from rllm.engine.rollout.verl_engine import VerlEngine
 from rllm.misc import colorful_print
 from rllm.workflows.workflow import TerminationReason, Workflow
 
 # Avoid hard dependency on verl at import time; only for typing
 if TYPE_CHECKING:
+    from rllm.engine.rollout.verl_engine import VerlEngine
     from verl import DataProto
 
 logger = logging.getLogger(__name__)
