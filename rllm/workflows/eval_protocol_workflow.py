@@ -9,6 +9,7 @@ import eval_protocol
 from eval_protocol.models import EvaluationRow, InputMetadata, Message
 from eval_protocol.pytest.default_mcp_gym_rollout_processor import MCPGymRolloutProcessor
 from eval_protocol.pytest.types import RolloutProcessorConfig
+from eval_protocol.pytest.evaluation_test_utils import build_rollout_processor_config
 
 from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.engine.rollout.openai_engine import OpenAIEngine
@@ -27,14 +28,10 @@ class EvalProtocolWorkflow(Workflow):
       - lite_llm_prefix: prefix for model id (default: "fireworks_ai/")
       - steps, temperature, max_tokens: generation/rollout params
     """
-    _shared_server_started = False
-    _server_lock = asyncio.Lock()
-    _shared_rollout_processor = MCPGymRolloutProcessor()
 
     def __init__(self, rollout_engine: OpenAIEngine, lite_llm_prefix: str = "fireworks_ai/", temperature: float = 1.0, max_tokens: int = 4096, env_path: str = "", steps: int = 30, **kwargs):
         super().__init__(rollout_engine, **kwargs)
 
-        self._rollout_processor_server_started = False
         self._rollout_processor_semaphore = asyncio.Semaphore(1)
         self._lite_llm_prefix = lite_llm_prefix
         self._temperature = temperature
@@ -74,8 +71,6 @@ class EvalProtocolWorkflow(Workflow):
 
         # Decide rollout processor; prefer the instance provided by the decorator
         if isinstance(self.rollout_processor, MCPGymRolloutProcessor):
-            self.rollout_processor = EvalProtocolWorkflow._shared_rollout_processor
-
             if self._server_script_path is None:
                 raise ValueError("server_script_path is required for MCPGymRolloutProcessor")
             
@@ -83,56 +78,35 @@ class EvalProtocolWorkflow(Workflow):
             server_script_path = Path(self._server_script_path)
             self._server_script_path = eval_protocol_path / server_script_path
 
-
-    def _build_rollout_processor_config(self) -> RolloutProcessorConfig:
-        model = f"{self._lite_llm_prefix}{getattr(self.rollout_engine, 'model', '')}"
-        base = dict(
-            completion_params={"model": model, "temperature": self._temperature, "max_tokens": self._max_tokens},
-            mcp_config_path=self._mcp_config_path or "",
-            steps=self._steps,
-            semaphore=self._rollout_processor_semaphore,
-        )
-
-        if isinstance(self.rollout_processor, MCPGymRolloutProcessor):
-            return RolloutProcessorConfig(
-                **base,
-                server_script_path=str(self._server_script_path) if self._server_script_path else None,
-                kwargs={**self._rollout_processor_kwargs, "start_server": self._rollout_processor_server_started},
-            )
-
-        # RemoteRolloutProcessor, SingleTurnRolloutProcessor, AgentRolloutProcessor
-        return RolloutProcessorConfig(
-            **base,
-            server_script_path=None,
-            kwargs=self._rollout_processor_kwargs,
-        )
-
     async def run(self, task: dict[str, Any], uid: str, **kwargs) -> Episode:
-        # MCP server lifecycle synchronization (only for MCP variant)
-        if isinstance(self.rollout_processor, MCPGymRolloutProcessor):
-            if not EvalProtocolWorkflow._shared_server_started:
-                async with EvalProtocolWorkflow._server_lock:
-                    if not EvalProtocolWorkflow._shared_server_started:
-                        self._rollout_processor_server_started = True
-                        EvalProtocolWorkflow._shared_server_started = True
-                    else:
-                        self._rollout_processor_server_started = False
-            else:
-                self._rollout_processor_server_started = False
-
         self.reset(task=task, uid=uid)
 
+        eval_row = self._task_to_evaluation_row(task)
+        
+        rollout_processor_config = build_rollout_processor_config(
+            rollout_processor=self.rollout_processor,
+            model=f"{self._lite_llm_prefix}{getattr(self.rollout_engine, 'model', '')}",
+            semaphore=self._rollout_processor_semaphore,
+            temperature=self._temperature,
+            max_tokens=self._max_tokens,
+            steps=self._steps,
+            mcp_config_path=self._mcp_config_path or "",
+            server_script_path=str(self._server_script_path) if self._server_script_path else None,
+            rollout_processor_kwargs=self._rollout_processor_kwargs,
+            start_server=True,
+            server_mode="shared",
+        )
+
         try:
-            eval_row = self._task_to_evaluation_row(task)
-
-            tasks = self.rollout_processor([eval_row], self._build_rollout_processor_config())
-
+            tasks = self.rollout_processor([eval_row], rollout_processor_config)
             if not tasks:
-                raise ValueError("MCPGymRolloutProcessor returned no tasks")
+                raise ValueError("RolloutProcessor returned no tasks")
 
             result_row: EvaluationRow = await tasks[0]
 
-            episode = await self._evaluate_and_create_episode(result_row, task, uid)
+            evaluated_row: EvaluationRow = await self._eval_func(result_row)  # pyright: ignore[reportOptionalCall]
+
+            episode = self._evaluation_row_to_episode(evaluated_row, task, uid)
 
             return episode
 
@@ -162,17 +136,13 @@ class EvalProtocolWorkflow(Workflow):
             ),
         )
 
-    async def _evaluate_and_create_episode(self, row: EvaluationRow, task: dict[str, Any], uid: str) -> Episode:
-        # Execute env-specific evaluation function exported by env module
-        assert self._eval_func is not None
-        evaluated_row: EvaluationRow = await self._eval_func(row)
-
+    def _evaluation_row_to_episode(self, row: EvaluationRow, task: dict[str, Any], uid: str) -> Episode:
         # Extract reward and metrics from evaluation_result
-        if evaluated_row.evaluation_result is None:
+        if row.evaluation_result is None:
             raise ValueError("Evaluation function did not return a result")
 
-        reward = evaluated_row.evaluation_result.score
-        reward_info = evaluated_row.evaluation_result.metrics or {}
+        reward = row.evaluation_result.score
+        reward_info = row.evaluation_result.metrics or {}
 
         def msg_to_dict(msg: Message) -> dict:
             """Convert eval_protocol Message to chat completion dict."""
