@@ -16,10 +16,11 @@ import tinker
 import torch
 from transformers import AutoTokenizer
 
+from rllm.agents.agent import Episode, Trajectory
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.tinker_engine import TinkerEngine
 from rllm.trainer.tinker.tinker_agent_trainer import TinkerAgentTrainer
-from rllm.trainer.tinker.tinker_data_processor import Episode, Trajectory, TrajectoryGroup
+from rllm.trainer.tinker.tinker_data_processor import TrajectoryGroup
 from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer
 
 if TYPE_CHECKING:
