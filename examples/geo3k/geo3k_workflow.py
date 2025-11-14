@@ -1,0 +1,48 @@
+from io import BytesIO
+from PIL import Image
+from rllm.agents.agent import Action, Episode, Step, Trajectory
+from rllm.engine import ModelOutput, RolloutEngine
+from rllm.rewards.reward_fn import RewardFunction, math_reward_fn
+from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflow
+from rllm.workflows.simple_workflow import SimpleAgent
+
+
+class Geo3KWorkflow(Workflow):
+    def __init__(self, rollout_engine: RolloutEngine, reward_function: RewardFunction, **kwargs):
+        super().__init__(rollout_engine, **kwargs)
+        self.agent = SimpleAgent()
+        self.reward_fn: RewardFunction = reward_function or math_reward_fn
+
+    async def run(self, task: dict, uid: str, **kwargs) -> Episode:
+        self.reset(task, uid)
+
+        question = task.get("question")
+        image = task.get("image", task.get("images", None))
+        if isinstance(image, list) and len(image) > 0:
+            image = image[0]
+        if isinstance(image, dict) and "bytes" in image:
+            image = Image.open(BytesIO(image["bytes"]))
+        assert isinstance(image, Image.Image) or isinstance(image, str) or image is None, f"Image must be a PIL.Image.Image or a string, but got {type(image)}"
+        messages = [{"role": "user", "content": question, "image": image}]
+
+        output: ModelOutput = await self.rollout_engine.get_model_response(messages, application_id=uid, **kwargs)
+        action = Action(output.content)
+        reward_result = self.reward_fn(task, action)
+
+        trajectory: Trajectory = self.agent.trajectory
+        trajectory.steps.append(
+            Step(
+                chat_completions=messages + [{"role": "assistant", "content": output.content, "reasoning": output.reasoning}],
+                thought=output.reasoning,
+                action=action,
+                reward=reward_result.reward,
+                model_output=output,
+            )
+        )
+
+        self.commit(agent=self.agent, reset=True)
+
+        if output.finish_reason == "length":
+            raise TerminationEvent(TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED)
+
+        raise TerminationEvent(TerminationReason.ENV_DONE)

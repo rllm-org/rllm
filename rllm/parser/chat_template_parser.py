@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from copy import deepcopy
 
 import torch
 
@@ -12,8 +13,9 @@ logger = logging.getLogger(__name__)
 
 
 class ChatTemplateParser:
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer, processor=None):
         self.tokenizer = tokenizer
+        self.processor = processor
         self.generation_prompt = self._get_generation_prompt(tokenizer)
 
     def _get_generation_prompt(self, tokenizer):
@@ -27,7 +29,10 @@ class ChatTemplateParser:
         return generation_prompt
 
     def parse(self, messages, add_generation_prompt=False, is_first_msg=False, **kwargs) -> str:
-        return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt)
+        if self.processor is not None:
+            return self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt)
+        else:
+            return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt)
 
     def parse_completion(self, completion_ids: list[int]):
         raise NotImplementedError("ChatTemplateParser does not support parse_completion")
@@ -69,7 +74,7 @@ class ChatTemplateParser:
         return is_equivalent
 
     @classmethod
-    def get_parser(cls, tokenizer, disable_thinking=False) -> "ChatTemplateParser":
+    def get_parser(cls, tokenizer, processor=None, disable_thinking=False) -> "ChatTemplateParser":
         """Factory method to get the appropriate parser based on a string identifier.
 
         Args:
@@ -93,13 +98,16 @@ class ChatTemplateParser:
                 return DeepseekQwenChatTemplateParser(tokenizer)
             elif "qwen" in model_name or "r2e" in model_name or "deepswe" in model_name or "qwen" in tokenizer_cls:
                 logger.info(f"Using QwenChatTemplateParser for {tokenizer.name_or_path}")
-                return QwenChatTemplateParser(tokenizer, disable_thinking=disable_thinking)
+                return QwenChatTemplateParser(tokenizer, processor=processor, disable_thinking=disable_thinking)
             elif "llama" in model_name:
                 logger.info(f"Using LlamaChatTemplateParser for {tokenizer.name_or_path}")
                 return LlamaChatTemplateParser(tokenizer)
+            elif "glm" in model_name or "glyph" in model_name:
+                logger.info(f"Using GLM4ChatTemplateParser for {tokenizer.name_or_path}")
+                return GLM4ChatTemplateParser(tokenizer, processor=processor)
 
-        # Default to the standard parser if no specific match
-        parser = ChatTemplateParser(tokenizer)
+        # Default to the standard parser if no specific match 
+        parser = ChatTemplateParser(tokenizer, processor=processor)
         logger.info(f"No custom parser found. Using default ChatTemplateParser for {tokenizer.name_or_path}")
         assert parser.verify_equivalence(PARSER_TEST_MESSAGES), "Parser failed equivalence check"
         return parser
@@ -344,8 +352,8 @@ class DeepseekQwenChatTemplateParser(ChatTemplateParser):
 
 
 class QwenChatTemplateParser(ChatTemplateParser):
-    def __init__(self, tokenizer, disable_thinking=False):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer, processor=None, disable_thinking=False):
+        super().__init__(tokenizer, processor=processor)
         self.bos_token = tokenizer.bos_token
         self.eos_token = tokenizer.eos_token
         self.eot_token = "<|im_end|>\n"
@@ -355,6 +363,9 @@ class QwenChatTemplateParser(ChatTemplateParser):
         if disable_thinking:
             self.assistant_token += "<think>\n\n</think>\n\n"
         self.generation_prompt = self.assistant_token
+        self.image_token = "<|image_pad|>"
+        self.vision_start_token = "<|vision_start|>"
+        self.vision_end_token = "<|vision_end|>"
 
         from rllm.parser.tool_parser import QwenToolParser
 
@@ -410,6 +421,12 @@ class QwenChatTemplateParser(ChatTemplateParser):
         return self.system_token + content + self.eot_token
 
     def parse_user(self, message):
+        if "image" in message and message["image"] is not None:
+            content = message["content"]
+            if message["content"].startswith("<image>"):
+                content = content[len("<image>") :]
+            return self.user_token + self.vision_start_token + self.image_token + self.vision_end_token + content + self.eot_token
+
         return self.user_token + message["content"] + self.eot_token
 
     def parse_assistant(self, message, accumulate_reasoning=False):
@@ -520,6 +537,19 @@ class QwenChatTemplateParser(ChatTemplateParser):
             "tool_calls": tool_calls,
         }
 
+    def process_image_data(self, messages):
+        from qwen_vl_utils import fetch_image
+        messages = deepcopy(messages)
+        image_data = []
+        for message in messages:
+            if "image" in message and message["image"] is not None:
+                image = message["image"]
+                if not isinstance(image, dict):
+                    image = {"image": image}
+                processed_image = fetch_image(image, image_patch_size=self.processor.image_processor.patch_size) # PIL.Image.Image
+                image_data.append(processed_image)
+        return image_data
+
 
 class LlamaChatTemplateParser(ChatTemplateParser):
     def __init__(self, tokenizer):
@@ -576,3 +606,103 @@ class LlamaChatTemplateParser(ChatTemplateParser):
     def parse_completion(self, completion_ids):
         # TODO: add parse_completion for llama
         raise NotImplementedError("LLamaChatTemplateParser does not support parse_completion")
+
+
+class GLM4ChatTemplateParser(ChatTemplateParser):
+    def __init__(self, tokenizer, processor=None):
+        super().__init__(tokenizer, processor=processor)
+        self.bos_token = "[gMASK]<sop>"
+        self.system_token = "<|system|>\n"
+        self.user_token = "<|user|>\n"
+        self.assistant_token = "<|assistant|>\n"
+        self.eos_token = "<|user|>"
+        self.image_placeholder = "<|begin_of_image|><|image|><|end_of_image|>"
+        self.generation_prompt = self.assistant_token
+
+        # TODO: handle tool calls
+
+    def parse(self, messages: list[dict], add_generation_prompt: bool = False, is_first_msg: bool = False, accumulate_reasoning: bool = False, **kwargs) -> str:
+        result = ""
+
+        if is_first_msg:
+            result += self.bos_token
+
+        for message in messages:
+            if message["role"] == "system":
+                result += self.parse_system(message)
+            elif message["role"] == "user":
+                result += self.parse_user(message)
+            elif message["role"] == "assistant":
+                result += self.parse_assistant(message, accumulate_reasoning=accumulate_reasoning)
+            elif message["role"] == "tool":
+                result += self.parse_tool(message)
+            else:
+                raise NotImplementedError(f"Unsupported message role: {message['role']}")
+
+        if add_generation_prompt:
+            result += self.generation_prompt
+        else:
+            result += self.eos_token
+
+        return result
+
+    def parse_system(self, message):
+        return self.system_token + message["content"]
+
+    def parse_user(self, message):
+        if "image" in message and message["image"] is not None:
+            content = message["content"]
+            if message["content"].startswith("<image>"):
+                content = content[len("<image>") :]
+            return self.user_token + self.image_placeholder + content
+
+        return self.user_token + message["content"]
+
+    def parse_assistant(self, message, accumulate_reasoning=False):
+        content = (message.get("content", None) or "").strip()
+        reasoning = (message.get("reasoning", None) or "").strip()
+
+        if reasoning and accumulate_reasoning:
+            return self.assistant_token + "<think>" + reasoning + "</think>" + content
+
+        return self.assistant_token + content
+
+    def parse_tool(self, message):
+        raise NotImplementedError("GLM4ChatTemplateParser does not support parse_tool")
+
+    def parse_completion(self, completion_ids):
+        completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=False)
+
+        if completion_text.count("</think>") == 1:
+            reasoning, _, content = completion_text.partition("</think>")
+            if reasoning.startswith("<think>"):
+                reasoning = reasoning[len("<think>") :]
+            if content.endswith(self.eos_token):
+                content = content[: -len(self.eos_token)]
+            reasoning = reasoning.strip()
+            content = content.strip()
+        else:
+            reasoning = None
+            content = completion_text
+            if content.startswith("<think>"):
+                content = content[len("<think>") :]
+            if content.endswith(self.eos_token):
+                content = content[: -len(self.eos_token)]
+            content = content.strip()
+
+        return {
+            "content": content,
+            "reasoning": reasoning,
+            "tool_calls": [],
+        }
+
+    def process_image_data(self, messages):
+        from PIL import Image
+        messages = deepcopy(messages)
+        image_data = []
+        for message in messages:
+            if "image" in message and message["image"] is not None:
+                image = message["image"]
+                assert isinstance(image, Image.Image), "Image must be a PIL.Image.Image"
+                image_data.append(image)
+        return image_data

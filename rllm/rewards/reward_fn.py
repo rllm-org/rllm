@@ -1,3 +1,6 @@
+import re
+import string
+from collections import Counter
 from typing import Protocol, runtime_checkable
 
 from rllm.agents.agent import Action
@@ -97,3 +100,76 @@ def code_reward_fn(task_info: dict, action: str) -> RewardOutput:
     if isinstance(action, Action):
         action = action.action
     return reward_fn(task_info, action)
+
+
+def f1_reward_fn(task_info: dict, action: str) -> RewardOutput:
+    """
+    A reward function that computes F1 score between predicted text and gold text.
+
+    This function normalizes both texts (lowercase, remove punctuation, remove articles,
+    fix whitespace) before tokenizing and computing F1 score based on token overlap.
+
+    Args:
+        task_info: The task dictionary containing ground_truth (gold text)
+        action: The agent's predicted response/solution
+
+    Returns:
+        RewardOutput: The calculated reward value (F1 score)
+
+    Example:
+        >>> task_info = {"ground_truth": "Hello, world!"}
+        >>> action = "hello there world"
+        >>> output = f1_reward_fn(task_info, action)
+        >>> print(output.reward)  # F1 score between the texts
+    """
+    if isinstance(action, Action):
+        action = action.action
+
+    # Extract gold text from task_info
+    gold_text = task_info.get("ground_truth", "")
+    if gold_text is None:
+        gold_text = ""
+
+    def normalize_text(s: str) -> str:
+        """Normalize text for evaluation (following HotpotQA/SQuAD standards)"""
+        def remove_articles(text: str) -> str:
+            return re.sub(r"\b(a|an|the)\b", " ", text)
+
+        def white_space_fix(text: str) -> str:
+            return " ".join(text.split())
+
+        def remove_punc(text: str) -> str:
+            exclude = set(string.punctuation)
+            return "".join(ch for ch in text if ch not in exclude)
+
+        def lower(text: str) -> str:
+            return text.lower()
+
+        return white_space_fix(remove_articles(remove_punc(lower(s))))
+
+    # Normalize and tokenize both texts
+    predicted_normalized = normalize_text(str(action))
+    gold_normalized = normalize_text(str(gold_text))
+    predicted_tokens = predicted_normalized.split()
+    gold_tokens = gold_normalized.split()
+
+    # Handle empty cases - if neither predicted nor gold are passed, return 0
+    if not predicted_tokens and not gold_tokens:
+        f1_score = 0.0
+    elif not predicted_tokens or not gold_tokens:
+        f1_score = 0.0
+    else:
+        # Compute token overlap using Counter intersection
+        predicted_counter = Counter(predicted_tokens)
+        gold_counter = Counter(gold_tokens)
+        common = predicted_counter & gold_counter
+        num_same = sum(common.values())
+
+        if num_same == 0:
+            f1_score = 0.0
+        else:
+            precision = num_same / len(predicted_tokens)
+            recall = num_same / len(gold_tokens)
+            f1_score = (2 * precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+
+    return RewardOutput(reward=f1_score, metadata={})

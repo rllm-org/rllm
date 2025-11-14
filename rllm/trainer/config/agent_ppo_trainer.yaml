@@ -16,6 +16,7 @@ actor_rollout_ref:
 
 data:
   gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
+  return_multi_modal_inputs: False
 
 rllm:
   agent:
