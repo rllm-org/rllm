@@ -21,8 +21,9 @@ import torch
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
+from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
-from rllm.trainer.tinker.tinker_data_processor import Episode, Step, Trajectory, TrajectoryGroup
+from rllm.trainer.tinker.tinker_data_processor import TrajectoryGroup
 from rllm.trainer.tinker.tinker_metrics_utils import (
     compute_training_metrics,
     print_episodes,
