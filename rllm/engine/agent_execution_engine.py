@@ -30,7 +30,7 @@ class AgentExecutionEngine:
         tokenizer=None,
         rollout_engine=None,
         chat_parser=None,
-        n_parallel_agents=1,  # The number of active agents
+        n_parallel_agents=128,  # The number of active agents
         trajectory_timeout=None,
         gamma=0.2,
         api_retries=3,
