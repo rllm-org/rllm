@@ -396,6 +396,96 @@ class TinkerDatumBuilder:
         return datums
 
 
+def process_episodes(
+    episodes: list,
+    advantage_computer: TinkerAdvantageComputer,
+    trajectory_filter: TinkerTrajectoryFilter,
+    algorithm_config,
+) -> list[tinker.Datum]:
+    """
+    Main pipeline to convert Episode objects to training datums.
+
+    This function:
+    1. Groups trajectories based on grouping_level configuration
+    2. Computes advantages for each group
+    3. Builds Tinker Datums for training
+
+    Grouping levels:
+    - trajectory: Group trajectories by (task_id, trajectory_name) for multi-agent workflows.
+                 Advantage computed across trajectory rewards.
+    - step: Group individual steps at same position for step-level advantage computation.
+    - episode: Each episode's trajectories form one group (simple single-agent case).
+
+    Args:
+        episodes: List of Episode objects
+        advantage_computer: Computer for calculating advantages
+        trajectory_filter: Filter for removing constant-reward groups
+        algorithm_config: Configuration with grouping_level setting
+
+    Returns:
+        List of Tinker Datum objects ready for training
+    """
+    from collections import defaultdict
+
+    grouping_level = algorithm_config.get("grouping_level", "episode")
+
+    # Group trajectories based on grouping_level
+    trajectory_groups_dict = defaultdict(list)
+
+    def get_task_id(episode):
+        """Extract task_id from episode.id (format: task_id:rollout_idx)"""
+        return ":".join(episode.id.split(":")[:-1]) if ":" in episode.id else episode.id
+
+    if grouping_level == "trajectory":
+        # Group by (task_id, trajectory_name) - for multi-agent workflows like solver-judge
+        for episode in episodes:
+            task_id = get_task_id(episode)
+            for trajectory in episode.trajectories:
+                group_key = (task_id, trajectory.name)
+                trajectory_groups_dict[group_key].append(trajectory)
+
+    elif grouping_level == "step":
+        # Group by (task_id, trajectory_name, step_idx) - for step-level advantages
+        for episode in episodes:
+            task_id = get_task_id(episode)
+            for trajectory in episode.trajectories:
+                for step_idx, step in enumerate(trajectory.steps):
+                    group_key = (task_id, trajectory.name, step_idx)
+                    # Create single-step trajectory
+                    from rllm.agents.agent import Trajectory
+
+                    single_step_traj = Trajectory(steps=[step], reward=step.reward, name=trajectory.name)
+                    trajectory_groups_dict[group_key].append(single_step_traj)
+
+    else:  # "episode" or default
+        # Simple grouping: all trajectories in an episode form one group
+        for episode in episodes:
+            group_key = episode.id
+            trajectory_groups_dict[group_key].extend(episode.trajectories)
+
+    # Convert dict to list of TrajectoryGroup objects for filtering
+    trajectory_groups = [TrajectoryGroup(trajectories=trajs, group_id=str(key)) for key, trajs in trajectory_groups_dict.items()]
+
+    # Apply filtering based on configuration
+    filtered_groups = trajectory_filter.filter_groups(trajectory_groups)
+
+    training_datums = []
+    for group in filtered_groups:
+        # Extract rewards for the group (from all trajectories)
+        group_rewards = [traj.reward for traj in group.trajectories]
+
+        # Compute advantages
+        advantages = advantage_computer.compute(group_rewards)
+
+        # Create datums for all trajectories in the group
+        for trajectory, advantage in zip(group.trajectories, advantages, strict=False):
+            # Use trajectory-level building (merges steps when possible)
+            new_datums = TinkerDatumBuilder.build_datum_from_trajectory(trajectory, advantage)
+            training_datums.extend(new_datums)
+
+    return training_datums
+
+
 def process_trajectory_groups(
     groups: list[TrajectoryGroup],
     advantage_computer: TinkerAdvantageComputer,

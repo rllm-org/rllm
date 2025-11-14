@@ -23,7 +23,6 @@ from transformers import AutoTokenizer
 
 from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
-from rllm.trainer.tinker.tinker_data_processor import TrajectoryGroup
 from rllm.trainer.tinker.tinker_metrics_utils import (
     compute_training_metrics,
     print_episodes,
@@ -215,13 +214,9 @@ class TinkerAgentTrainer:
 
                     logger.info(f"Training for batch {batch_idx}, minibatch {minibatch_count}/{num_minibatches}")
 
-                    # Convert episodes to trajectory groups
-                    # For agent trainer, each episode becomes one group (simple conversion)
-                    trajectory_groups = [TrajectoryGroup(trajectories=episode.trajectories, group_id=episode.id if hasattr(episode, "id") else f"group_{i}") for i, episode in enumerate(minibatch_episodes)]
-
                     # Train immediately (streaming), only optimize on last minibatch
                     t_train_start = time.time()
-                    logprobs, datums = await self.trainer.step(trajectory_groups, learning_rate=learning_rate, beta1=beta1, beta2=beta2, eps=eps, optimizer_step=False)
+                    logprobs, datums = await self.trainer.step(minibatch_episodes, learning_rate=learning_rate, beta1=beta1, beta2=beta2, eps=eps, optimizer_step=False)
                     forward_backward_times.append(time.time() - t_train_start)
                     training_logprobs.extend(logprobs)
                     training_datums.extend(datums)

@@ -17,8 +17,7 @@ from tinker_cookbook import checkpoint_utils
 from rllm.trainer.tinker.tinker_data_processor import (
     TinkerAdvantageComputer,
     TinkerTrajectoryFilter,
-    TrajectoryGroup,
-    process_trajectory_groups,
+    process_episodes,
 )
 
 if TYPE_CHECKING:
@@ -127,7 +126,7 @@ class TinkerPolicyTrainer:
 
     async def step(
         self,
-        groups: list[TrajectoryGroup],
+        episodes: list,
         learning_rate: float = None,
         beta1: float = 0.9,
         beta2: float = 0.95,
@@ -135,18 +134,15 @@ class TinkerPolicyTrainer:
         optimizer_step: bool = True,
     ) -> tuple[list[torch.Tensor], list[tinker.Datum]]:
         """
-        Complete training step: process trajectory groups and update policy.
+        Complete training step: process episodes and update policy.
 
         This method:
-        1. Converts episodes to trajectory groups if needed
-        2. Filters groups (if configured)
-        3. Computes advantages
-        4. Converts to datums
-        5. Performs forward-backward pass
-        6. Applies optimizer step
+        1. Processes episodes to compute advantages and create datums
+        2. Performs forward-backward pass
+        3. Applies optimizer step
 
         Args:
-            data: List of Episode or TrajectoryGroup objects
+            episodes: List of Episode objects
             learning_rate: Learning rate (uses config value if None)
             optimizer_step: Whether to apply optimizer step after forward-backward
 
@@ -159,10 +155,11 @@ class TinkerPolicyTrainer:
             learning_rate = self.config.training.learning_rate
 
         # Step 1: Process to datums (includes filtering and advantage computation)
-        training_datums = process_trajectory_groups(
-            groups,
+        training_datums = process_episodes(
+            episodes,
             self.advantage_computer,
             self.trajectory_filter,
+            self.config.algorithm,
         )
 
         # Step 3: Remove mask from datums (not needed by forward_backward)
@@ -199,11 +196,12 @@ class TinkerPolicyTrainer:
         # Return both logprobs and datums (with masks for metrics)
         return training_logprobs_D, training_datums
 
-    async def forward_backward_future(self, groups: list[TrajectoryGroup]):
-        training_datums = process_trajectory_groups(
-            groups,
+    async def forward_backward_future(self, episodes: list):
+        training_datums = process_episodes(
+            episodes,
             self.advantage_computer,
             self.trajectory_filter,
+            self.config.algorithm,
         )
 
         datums_no_mask = [self._remove_mask(datum) for datum in training_datums]
