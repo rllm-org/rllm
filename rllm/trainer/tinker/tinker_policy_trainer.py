@@ -132,7 +132,7 @@ class TinkerPolicyTrainer:
         beta2: float = 0.95,
         eps: float = 1e-8,
         optimizer_step: bool = True,
-    ) -> tuple[list[torch.Tensor], list[tinker.Datum]]:
+    ) -> tuple[list[torch.Tensor], list[tinker.Datum], dict]:
         """
         Complete training step: process episodes and update policy.
 
@@ -147,15 +147,16 @@ class TinkerPolicyTrainer:
             optimizer_step: Whether to apply optimizer step after forward-backward
 
         Returns:
-            Tuple of (training_logprobs, training_datums)
+            Tuple of (training_logprobs, training_datums, grouping_metrics)
             - training_logprobs: List of training logprobs for KL computation
             - training_datums: List of datums WITH masks for metrics
+            - grouping_metrics: Dict with grouping and advantage statistics
         """
         if learning_rate is None:
             learning_rate = self.config.training.learning_rate
 
         # Step 1: Process to datums (includes filtering and advantage computation)
-        training_datums = process_episodes(
+        training_datums, grouping_metrics = process_episodes(
             episodes,
             self.advantage_computer,
             self.trajectory_filter,
@@ -193,11 +194,11 @@ class TinkerPolicyTrainer:
             training_logprobs = output["logprobs"].to_torch()
             training_logprobs_D.append(training_logprobs)
 
-        # Return both logprobs and datums (with masks for metrics)
-        return training_logprobs_D, training_datums
+        # Return logprobs, datums (with masks for metrics), and grouping metrics
+        return training_logprobs_D, training_datums, grouping_metrics
 
     async def forward_backward_future(self, episodes: list):
-        training_datums = process_episodes(
+        training_datums, grouping_metrics = process_episodes(
             episodes,
             self.advantage_computer,
             self.trajectory_filter,
@@ -211,7 +212,7 @@ class TinkerPolicyTrainer:
             loss_fn="importance_sampling",
         )
 
-        return fwd_bwd_future
+        return fwd_bwd_future, grouping_metrics
 
     async def optim_step_future(self, learning_rate: float = None, beta1: float = 0.9, beta2: float = 0.95, eps: float = 1e-8):
         if learning_rate is None:

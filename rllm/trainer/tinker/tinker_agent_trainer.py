@@ -201,6 +201,7 @@ class TinkerAgentTrainer:
 
                 # Stream: train on each minibatch as it arrives
                 train_step_start = time.time()
+                all_grouping_metrics = []
                 async for minibatch_episodes in self.generate_agent_episodes(group_size=self.config.training.group_size, minibatch_size=minibatch_size):
                     episodes.extend(minibatch_episodes)
                     minibatch_count += 1
@@ -216,10 +217,11 @@ class TinkerAgentTrainer:
 
                     # Train immediately (streaming), only optimize on last minibatch
                     t_train_start = time.time()
-                    logprobs, datums = await self.trainer.step(minibatch_episodes, learning_rate=learning_rate, beta1=beta1, beta2=beta2, eps=eps, optimizer_step=False)
+                    logprobs, datums, grouping_metrics = await self.trainer.step(minibatch_episodes, learning_rate=learning_rate, beta1=beta1, beta2=beta2, eps=eps, optimizer_step=False)
                     forward_backward_times.append(time.time() - t_train_start)
                     training_logprobs.extend(logprobs)
                     training_datums.extend(datums)
+                    all_grouping_metrics.append(grouping_metrics)
                     logger.info(f"Processed minibatch {minibatch_count}/{num_minibatches} with {len(minibatch_episodes)} episodes")
 
                 optim_step_time = time.time()
@@ -246,6 +248,19 @@ class TinkerAgentTrainer:
                     training_datums=training_datums,  # Pass datums for KL/perplexity metrics
                     training_logprobs=training_logprobs,
                 )
+
+                # Aggregate grouping metrics from all minibatches
+                if all_grouping_metrics:
+                    import numpy as np
+
+                    # Average numeric metrics across minibatches
+                    aggregated_grouping_metrics = {}
+                    for key in all_grouping_metrics[0].keys():
+                        values = [m[key] for m in all_grouping_metrics if key in m]
+                        if values:
+                            aggregated_grouping_metrics[key] = np.mean(values)
+                    metrics.update(aggregated_grouping_metrics)
+
                 tracking_logger.log(data=metrics, step=batch_idx)
                 print_metrics_table(metrics, batch_idx)
 

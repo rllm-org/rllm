@@ -401,7 +401,7 @@ def process_episodes(
     advantage_computer: TinkerAdvantageComputer,
     trajectory_filter: TinkerTrajectoryFilter,
     algorithm_config,
-) -> list[tinker.Datum]:
+) -> tuple[list[tinker.Datum], dict]:
     """
     Main pipeline to convert Episode objects to training datums.
 
@@ -423,9 +423,13 @@ def process_episodes(
         algorithm_config: Configuration with grouping_level setting
 
     Returns:
-        List of Tinker Datum objects ready for training
+        Tuple of (datums, metrics_dict):
+        - datums: List of Tinker Datum objects ready for training
+        - metrics_dict: Dictionary with grouping and advantage statistics
     """
     from collections import defaultdict
+
+    import numpy as np
 
     grouping_level = algorithm_config.get("grouping_level", "episode")
 
@@ -469,6 +473,10 @@ def process_episodes(
     # Apply filtering based on configuration
     filtered_groups = trajectory_filter.filter_groups(trajectory_groups)
 
+    # Track metrics
+    all_advantages = []
+    group_sizes = []
+
     training_datums = []
     for group in filtered_groups:
         # Extract rewards for the group (from all trajectories)
@@ -477,13 +485,33 @@ def process_episodes(
         # Compute advantages
         advantages = advantage_computer.compute(group_rewards)
 
+        # Track for metrics
+        all_advantages.extend(advantages)
+        group_sizes.append(len(group.trajectories))
+
         # Create datums for all trajectories in the group
         for trajectory, advantage in zip(group.trajectories, advantages, strict=False):
             # Use trajectory-level building (merges steps when possible)
             new_datums = TinkerDatumBuilder.build_datum_from_trajectory(trajectory, advantage)
             training_datums.extend(new_datums)
 
-    return training_datums
+    # Compute grouping and advantage metrics
+    metrics = {}
+    if filtered_groups:
+        metrics["grouping/num_groups"] = len(filtered_groups)
+        metrics["grouping/num_groups_before_filter"] = len(trajectory_groups)
+        metrics["grouping/avg_group_size"] = np.mean(group_sizes)
+        metrics["grouping/max_group_size"] = np.max(group_sizes)
+        metrics["grouping/min_group_size"] = np.min(group_sizes)
+
+    if all_advantages:
+        metrics["advantage/mean"] = np.mean(all_advantages)
+        metrics["advantage/std"] = np.std(all_advantages)
+        metrics["advantage/max"] = np.max(all_advantages)
+        metrics["advantage/min"] = np.min(all_advantages)
+        metrics["advantage/fraction_zero"] = np.sum(np.abs(all_advantages) < 1e-8) / len(all_advantages)
+
+    return training_datums, metrics
 
 
 def process_trajectory_groups(
