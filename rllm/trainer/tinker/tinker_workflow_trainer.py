@@ -19,7 +19,7 @@ from transformers import AutoTokenizer
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.tinker_engine import TinkerEngine
 from rllm.trainer.tinker.tinker_agent_trainer import TinkerAgentTrainer
-from rllm.trainer.tinker.tinker_data_processor import Episode, Trajectory
+from rllm.trainer.tinker.tinker_data_processor import Episode, Trajectory, TrajectoryGroup
 from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer
 
 if TYPE_CHECKING:
@@ -118,15 +118,15 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
         self.current_batch = batch_data
 
     async def validate_agent(self, dataloader, sampling_client):
-        episodes_ls = []
+        all_trajectory_groups = []
         all_episode_metrics = {}  # episode_id -> episode.metrics dict
         self.agent_execution_engine.rollout_engine.set_sampling_client(sampling_client)
         for batch in dataloader:
             batch = self.build_interleave_batch(batch, 1)
             self.init_envs_and_agents(batch)
-            # For validation, collect all episodes from generator
-            async for episode_batch, episode_metrics in self.generate_agent_episodes(group_size=1, minibatch_size=1, return_metrics=True):
-                episodes_ls.extend(episode_batch)
+            # For validation, collect all trajectory groups from generator
+            async for trajectory_groups, episode_metrics in self.generate_agent_episodes(group_size=1, minibatch_size=1, return_metrics=True):
+                all_trajectory_groups.extend(trajectory_groups)
                 all_episode_metrics.update(episode_metrics)
 
         # Collect workflow metrics per episode (deduplicated by episode.id)
@@ -137,10 +137,10 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
                 for key, value in episode_metric_dict.items():
                     workflow_metrics[key].append(float(value))
 
-        # Compute trajectory-level statistics
+        # Compute trajectory-level statistics from all groups
         all_trajectories = []
-        for episode in episodes_ls:
-            all_trajectories.extend(episode.trajectories)
+        for group in all_trajectory_groups:
+            all_trajectories.extend(group.trajectories)
 
         mean_reward = sum([traj.reward for traj in all_trajectories]) / len(all_trajectories)
         std_reward = sum([(traj.reward - mean_reward) ** 2 for traj in all_trajectories]) / len(all_trajectories)
@@ -164,14 +164,17 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
 
     async def generate_agent_episodes(self, timing_raw=None, meta_info=None, group_size=None, minibatch_size=None, return_metrics=False):
         """
-        Generate episodes in minibatches with overlapping generation and training.
+        Generate trajectory groups in minibatches with overlapping generation and training.
 
-        This uses a background producer task to continuously generate episodes
-        while the main loop yields minibatches for training.
+        This uses a background producer task to continuously generate episodes (from rollout)
+        and regroups them into TrajectoryGroup objects for advantage computation.
 
         Args:
-            return_metrics: If True, yields (episodes, metrics) tuple where metrics is
-                          {episode_id: {metric_name: value, ...}}. If False, yields only episodes.
+            return_metrics: If True, yields (trajectory_groups, metrics) tuple where metrics is
+                          {episode_id: {metric_name: value, ...}}. If False, yields only trajectory_groups.
+
+        Yields:
+            list[TrajectoryGroup] or tuple[list[TrajectoryGroup], dict] depending on return_metrics
         """
 
         num_minibatches = self.config.training.num_minibatches
@@ -183,61 +186,116 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
 
         episodes = await self.agent_execution_engine.execute_tasks(current_batch, task_ids)
         episodes = self.make_sure_contain_token_and_logprob(episodes)
-        episodes = self.maybe_broadcast_reward(episodes)
-        regrouped_episodes, episode_metrics = self.regroup(episodes)
+        trajectory_groups, episode_metrics = self.regroup(episodes)
 
         if return_metrics:
-            yield regrouped_episodes, episode_metrics
+            yield trajectory_groups, episode_metrics
         else:
-            yield regrouped_episodes
+            yield trajectory_groups
 
-    def regroup(self, episodes: list[Episode]) -> tuple[list[Episode], dict]:
-        # This function basically
-        # TODO: naive implementation, groupby task_id_agent_name_step_idx
-        unique_step_uids = set()
-        unique_task_ids = set()
-        step_groupby_step_uid = defaultdict(list)
+    def regroup(self, episodes: list[Episode]) -> tuple[list[TrajectoryGroup], dict]:
+        """
+        Regroup episodes into TrajectoryGroup objects based on grouping_level configuration.
 
-        new_episodes = []
+        The grouping level determines how advantages are computed:
+
+        - trajectory: Group trajectories by (task_id, trajectory_name). Each trajectory
+                     keeps all its steps. Trajectories with different names are grouped
+                     separately (important for multi-agent scenarios). Advantage is
+                     computed per trajectory (e.g., via GRPO across trajectory rewards),
+                     then broadcast to all steps in that trajectory during datum creation.
+
+        - step: Group individual steps at the same position (task_id + trajectory_name
+                + step_idx) across different rollouts. Each step becomes a single-step
+                trajectory in a group. Advantage is computed per step (e.g., via GRPO
+                across step rewards).
+
+        The resulting TrajectoryGroup objects are consumed by process_trajectory_groups() which:
+        1. Extracts rewards from trajectories in each group
+        2. Computes advantages across those rewards
+        3. Assigns each trajectory its computed advantage
+        4. Broadcasts the advantage to all steps in the trajectory
+
+        Args:
+            episodes: List of episodes to regroup
+
+        Returns:
+            Tuple of (trajectory_groups, metrics_dict)
+        """
+        grouping_level = self.config.algorithm.grouping_level
+        trajectory_groups = []
         metrics = {}
 
         def get_task_id(episode: Episode):
             return ":".join(episode.id.split(":")[:-1])
 
-        for episode in episodes:
-            if episode.id not in metrics and episode.metrics:
-                metrics[episode.id] = episode.metrics
-            task_id = get_task_id(episode)
-            unique_task_ids.add(task_id)
-            for trajectory in episode.trajectories:
-                for step_idx, step in enumerate(trajectory.steps):
-                    step_uid = f"{task_id}:{trajectory.name}:{step_idx}"
-                    if step_uid not in unique_step_uids:
-                        unique_step_uids.add(step_uid)
+        if grouping_level == "trajectory":
+            # Group trajectories by (task_id, trajectory_name)
+            # This ensures trajectories with different names are grouped separately
+            temp_groups = defaultdict(list)
 
-                    step_groupby_step_uid[step_uid].append(step)
-
-        for step_uid, steps in step_groupby_step_uid.items():
-            trajectorys = [Trajectory(steps=[step], reward=step.reward) for step in steps]
-            new_episode = Episode(trajectories=trajectorys)
-            new_episodes.append(new_episode)
-
-        print(f"len episodes: {len(episodes)}")
-        print(f"len unique_task_ids: {len(unique_task_ids)}")
-        print(f"len unique_step_uids: {len(unique_step_uids)}")
-        print(f"len new_episodes: {len(new_episodes)}")
-
-        return new_episodes, metrics
-
-    def maybe_broadcast_reward(self, episodes: list[Episode]) -> list[Episode]:
-        assert self.config.trainer.reward_broadcast in ["step", "trajectory"]
-        # if "step" mode do nothing, if "trajectory" mode, overwrite each step's reward with trajectory reward
-        if self.config.trainer.reward_broadcast == "trajectory":
             for episode in episodes:
+                if episode.id not in metrics and episode.metrics:
+                    metrics[episode.id] = episode.metrics
+                task_id = get_task_id(episode)
+
+                # Add all trajectories to the group for this (task_id, trajectory_name)
                 for trajectory in episode.trajectories:
-                    for step in trajectory.steps:
-                        step.reward = trajectory.reward
-        return episodes
+                    # Each trajectory keeps all its steps
+                    # Compute trajectory-level reward as the sum/mean of step rewards
+                    traj_reward = trajectory.reward if trajectory.reward is not None else sum(step.reward for step in trajectory.steps)
+                    # Update trajectory with proper reward
+                    updated_trajectory = Trajectory(steps=trajectory.steps, reward=traj_reward, name=trajectory.name)
+                    # Group by both task_id and trajectory name
+                    group_key = (task_id, trajectory.name)
+                    temp_groups[group_key].append(updated_trajectory)
+
+            # Create TrajectoryGroup objects from grouped trajectories
+            for group_key, trajectories in temp_groups.items():
+                group_id = f"{group_key[0]}:{group_key[1]}"  # "task_id:trajectory_name"
+                trajectory_group = TrajectoryGroup(trajectories=trajectories, group_id=group_id)
+                trajectory_groups.append(trajectory_group)
+
+            print("Trajectory-level grouping:")
+            print(f"  len episodes: {len(episodes)}")
+            print(f"  len unique (task_id, traj_name) groups: {len(temp_groups)}")
+            print(f"  len trajectory_groups: {len(trajectory_groups)}")
+
+        elif grouping_level == "step":
+            # Group individual steps by step position
+            unique_step_uids = set()
+            unique_task_ids = set()
+            step_groupby_step_uid = defaultdict(list)
+
+            for episode in episodes:
+                if episode.id not in metrics and episode.metrics:
+                    metrics[episode.id] = episode.metrics
+                task_id = get_task_id(episode)
+                unique_task_ids.add(task_id)
+
+                for trajectory in episode.trajectories:
+                    for step_idx, step in enumerate(trajectory.steps):
+                        step_uid = f"{task_id}:{trajectory.name}:{step_idx}"
+                        if step_uid not in unique_step_uids:
+                            unique_step_uids.add(step_uid)
+
+                        step_groupby_step_uid[step_uid].append(step)
+
+            # Create TrajectoryGroup objects where each trajectory contains a single step
+            for step_uid, steps in step_groupby_step_uid.items():
+                trajectories = [Trajectory(steps=[step], reward=step.reward) for step in steps]
+                trajectory_group = TrajectoryGroup(trajectories=trajectories, group_id=step_uid)
+                trajectory_groups.append(trajectory_group)
+
+            print("Step-level grouping:")
+            print(f"  len episodes: {len(episodes)}")
+            print(f"  len unique_task_ids: {len(unique_task_ids)}")
+            print(f"  len unique_step_uids: {len(unique_step_uids)}")
+            print(f"  len trajectory_groups: {len(trajectory_groups)}")
+        else:
+            raise ValueError(f"Invalid grouping_level: {grouping_level}. Must be 'trajectory' or 'step'")
+
+        return trajectory_groups, metrics
 
     def make_sure_contain_token_and_logprob(self, episodes: list[Episode]) -> list[Episode]:
         for episode in episodes:

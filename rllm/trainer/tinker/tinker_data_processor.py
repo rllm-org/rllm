@@ -5,15 +5,34 @@ handling filtering, advantage computation, and conversion to tinker.Datum format
 """
 
 import logging
+from dataclasses import dataclass
 
 import numpy as np
 import tinker
 import torch
 from tinker.types.tensor_data import TensorData
 
-from rllm.agents.agent import Episode, Step, Trajectory
+from rllm.agents.agent import Step, Trajectory
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TrajectoryGroup:
+    """
+    A group of trajectories for advantage computation.
+
+    Unlike Episode (which represents raw rollout data), TrajectoryGroup is specifically
+    structured for advantage computation. All trajectories in a group will have their
+    rewards compared to compute advantages (e.g., via GRPO).
+
+    Attributes:
+        trajectories: List of trajectories to compare for advantage computation
+        group_id: Optional identifier for the group (e.g., "task1:agent_0")
+    """
+
+    trajectories: list[Trajectory]
+    group_id: str = None
 
 
 class TinkerAdvantageComputer:
@@ -108,41 +127,41 @@ class TinkerTrajectoryFilter:
         first = values[0]
         return all(abs(v - first) < 1e-8 for v in values)
 
-    def filter_episodes(self, episodes: list[Episode]) -> list[Episode]:
+    def filter_groups(self, groups: list[TrajectoryGroup]) -> list[TrajectoryGroup]:
         """
-        Filter episodes based on configuration.
+        Filter trajectory groups based on configuration.
 
-        If remove_constant_reward_groups=True, removes episodes where all trajectories
-        have the same reward. If all episodes would be removed, keeps at least one
-        episode to prevent empty batches.
+        If remove_constant_reward_groups=True, removes groups where all trajectories
+        have the same reward. If all groups would be removed, keeps at least one
+        group to prevent empty batches.
 
         Args:
-            episodes: List of Episode objects
+            groups: List of TrajectoryGroup objects
 
         Returns:
-            Filtered list of Episode objects
+            Filtered list of TrajectoryGroup objects
         """
         if not self.remove_constant_reward_groups:
-            # Keep all episodes (default behavior)
-            return episodes
+            # Keep all groups (default behavior)
+            return groups
 
-        # Filter out constant-reward episodes
-        filtered_episodes = []
-        for episode in episodes:
-            # Get rewards from all trajectories in the episode
-            episode_rewards = [traj.reward for traj in episode.trajectories]
-            if not self._all_same(episode_rewards):
-                filtered_episodes.append(episode)
+        # Filter out constant-reward groups
+        filtered_groups = []
+        for group in groups:
+            # Get rewards from all trajectories in the group
+            group_rewards = [traj.reward for traj in group.trajectories]
+            if not self._all_same(group_rewards):
+                filtered_groups.append(group)
 
         # Safety: Never return empty list to prevent batch size issues
-        if not filtered_episodes:
-            logger.warning("All episodes have uniform rewards. There will be no gradient. Keeping one episode to prevent empty batch.")
-            return episodes[:1]
+        if not filtered_groups:
+            logger.warning("All groups have uniform rewards. There will be no gradient. Keeping one group to prevent empty batch.")
+            return groups[:1]
 
-        if len(filtered_episodes) < len(episodes):
-            logger.info(f"Filtered {len(episodes) - len(filtered_episodes)} constant-reward episodes (kept {len(filtered_episodes)} episodes with reward variance)")
+        if len(filtered_groups) < len(groups):
+            logger.info(f"Filtered {len(groups) - len(filtered_groups)} constant-reward groups (kept {len(filtered_groups)} groups with reward variance)")
 
-        return filtered_episodes
+        return filtered_groups
 
 
 class TinkerDatumBuilder:
@@ -377,40 +396,47 @@ class TinkerDatumBuilder:
         return datums
 
 
-def process_episodes(
-    episodes: list[Episode],
+def process_trajectory_groups(
+    groups: list[TrajectoryGroup],
     advantage_computer: TinkerAdvantageComputer,
     trajectory_filter: TinkerTrajectoryFilter,
 ) -> list[tinker.Datum]:
     """
-    Main pipeline to convert Episode objects to training datums.
+    Main pipeline to convert TrajectoryGroup objects to training datums.
 
     This function:
-    1. Filters episodes (if configured)
-    2. Computes advantages for each episode
+    1. Filters groups (if configured)
+    2. Computes advantages for each group
     3. Builds Tinker Datums for training
 
+    TrajectoryGroup structure depends on grouping_level (set in regroup()):
+    - trajectory-level: Each group contains multiple complete trajectories (with all steps).
+                       Advantages are computed across trajectory rewards, then broadcast
+                       to all steps in each trajectory.
+    - step-level: Each group contains multiple single-step trajectories.
+                 Advantages are computed across step rewards.
+
     Args:
-        episodes: List of Episode objects
+        groups: List of TrajectoryGroup objects (created by regroup())
         advantage_computer: Computer for calculating advantages
-        trajectory_filter: Filter for removing constant-reward episodes
+        trajectory_filter: Filter for removing constant-reward groups
 
     Returns:
         List of Tinker Datum objects ready for training
     """
     # Apply filtering based on configuration
-    filtered_episodes = trajectory_filter.filter_episodes(episodes)
+    filtered_groups = trajectory_filter.filter_groups(groups)
 
     training_datums = []
-    for episode in filtered_episodes:
-        # Extract rewards for the episode (from all trajectories)
-        episode_rewards = [traj.reward for traj in episode.trajectories]
+    for group in filtered_groups:
+        # Extract rewards for the group (from all trajectories)
+        group_rewards = [traj.reward for traj in group.trajectories]
 
         # Compute advantages
-        advantages = advantage_computer.compute(episode_rewards)
+        advantages = advantage_computer.compute(group_rewards)
 
-        # Create datums for all trajectories in the episode
-        for trajectory, advantage in zip(episode.trajectories, advantages, strict=False):
+        # Create datums for all trajectories in the group
+        for trajectory, advantage in zip(group.trajectories, advantages, strict=False):
             # Use trajectory-level building (merges steps when possible)
             new_datums = TinkerDatumBuilder.build_datum_from_trajectory(trajectory, advantage)
             training_datums.extend(new_datums)

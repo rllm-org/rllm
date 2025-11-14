@@ -15,7 +15,7 @@ MODEL_PATH=Qwen/Qwen3-8B
 #     cur_step.reward = 0.0
 
 
-python3 -m examples.math_tinker.train_math_tinker \
+python -m examples.math_tinker.train_math_tinker \
     model.name=$MODEL_PATH \
     model.lora_rank=32 \
     training.group_size=16 \
