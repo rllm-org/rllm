@@ -2,7 +2,10 @@ import asyncio
 import json
 import os
 import time
+from urllib.parse import urljoin
 
+import openai
+import requests
 from fireworks.control_plane.generated.protos_grpcio.gateway.deployed_model_pb2 import (
     DeployedModel as SyncDeployedModel,
 )
@@ -12,6 +15,8 @@ from fireworks.control_plane.generated.protos_grpcio.gateway.deployed_model_pb2 
 from fireworks.gateway import Gateway
 
 from rllm.engine.rollout.openai_engine import OpenAIEngine
+from rllm.engine.rollout.rollout_engine import ModelOutput
+from rllm.globals import THOUGHT_DELIMITER_END, THOUGHT_DELIMITER_START
 
 
 class FireworksEngine(OpenAIEngine):
@@ -103,3 +108,76 @@ class FireworksEngine(OpenAIEngine):
                     continue
                 else:
                     return False
+
+    async def chat_completion(self, messages: list[dict], **kwargs) -> ModelOutput:
+        kwargs.pop("application_id", None)
+        kwargs.pop("validate", None)
+        kwargs.pop("model", None)
+        kwargs.pop("enforce_max_prompt_length", None)
+
+        sampling_params = self.sampling_params.copy()
+        sampling_params.update(kwargs)
+
+        create_params = self._prepare_max_tokens_param(sampling_params)
+
+        retries = self.api_retries
+        while retries > 0:
+            try:
+                merged_sampling_params = {**create_params, **sampling_params}
+                response = self._fireworks_chat_completion(messages=messages, sampling_params=merged_sampling_params)
+                content = response["choices"][0]["message"]["content"]
+                reasoning = response["choices"][0]["message"].get("reasoning", "")
+                tool_calls = response["choices"][0]["message"].get("tool_calls", [])
+
+                # Build text with reasoning if available, otherwise use content
+                if reasoning:
+                    text = f"{THOUGHT_DELIMITER_START}\n{reasoning}\n{THOUGHT_DELIMITER_END}\n\n{content}"
+                else:
+                    text = content
+
+                prompt_length = response["usage"]["prompt_tokens"]
+                completion_length = response["usage"]["completion_tokens"]
+                finish_reason = response["choices"][0]["finish_reason"]
+
+                prompt_token_ids = response["prompt_token_ids"]
+                completion_token_ids = response["choices"][0]["token_ids"]
+                return ModelOutput(
+                    text=text,
+                    content=content,
+                    reasoning=reasoning,
+                    tool_calls=tool_calls,
+                    prompt_ids=prompt_token_ids,
+                    completion_ids=completion_token_ids,
+                    prompt_length=prompt_length,
+                    completion_length=completion_length,
+                    finish_reason=finish_reason,
+                )
+
+            except openai.RateLimitError:
+                retries -= 1
+                if retries == 0:
+                    raise Exception("Rate limit reached and retries exhausted.") from None
+                print("Sleep for 5 seconds for API limit.")
+                await asyncio.sleep(5)
+
+            except Exception as e:
+                retries -= 1
+                if retries == 0:
+                    raise Exception(f"Error processing content after retries: {e}") from e
+                print(f"Error: {e}, retrying...")
+                await asyncio.sleep(1)
+
+    def _fireworks_chat_completion(self, messages, sampling_params):
+        url = urljoin(str(self.client.base_url), "chat/completions")
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            **sampling_params,
+        }
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.client.api_key}",
+        }
+        response = requests.request("POST", url, headers=headers, data=json.dumps(payload))
+        return response.json()
