@@ -1,8 +1,8 @@
 """
-Run Frozen Lake Workflow with rllm-fw
+Run Frozen Lake Workflow with rllm-fw using EvalProtocolWorkflow
 
 This script demonstrates how to execute frozen lake tasks using rllm-fw's
-AgentWorkflowEngine with eval-protocol's MCPGymRolloutProcessor.
+AgentWorkflowEngine with the generic EvalProtocolWorkflow.
 """
 
 import asyncio
@@ -10,11 +10,10 @@ import json
 import os
 from pathlib import Path
 
-from frozen_lake_flow import FrozenLakeWorkflow
-
 from rllm.data.dataset import DatasetRegistry
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.openai_engine import OpenAIEngine
+from rllm.workflows.eval_protocol_workflow import EvalProtocolWorkflow
 
 
 def evaluate_results(episodes):
@@ -38,7 +37,7 @@ def evaluate_results(episodes):
 
     for episode in episodes:
         status = "✅" if episode.is_correct else "❌"
-        reward = episode.metrics.get("frozen_lake_reward", 0.0)
+        reward = episode.metrics.get("evaluation_reward", 0.0)
         print(f"{status} Task {episode.id}: reward={reward:.3f}")
 
     print("=" * 60)
@@ -51,7 +50,7 @@ async def main():
 
     n_parallel_tasks = 4
     max_tasks = 4
-    model_id = "accounts/pyroworks/deployedModels/qwen3-8b-g0m657sn"
+    model_id = "accounts/fireworks/models/kimi-k2-instruct"
 
     # Create dummy rollout_engine (required by Workflow base class but not used)
     rollout_engine = OpenAIEngine(
@@ -61,8 +60,9 @@ async def main():
     )
 
     engine = AgentWorkflowEngine(
-        workflow_cls=FrozenLakeWorkflow,
+        workflow_cls=EvalProtocolWorkflow,
         workflow_args={
+            "env_path": "eval_protocol.benchmarks.test_frozen_lake",
             "lite_llm_prefix": "fireworks_ai/",
             "steps": 30,
             "temperature": 1.0,
