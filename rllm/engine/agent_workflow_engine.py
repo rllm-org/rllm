@@ -223,7 +223,22 @@ class AgentWorkflowEngine:
             else:
                 self.rollout_engine.sleep()
         self.current_mode = "train"
-        return self.transform_results_for_verl(results, task_ids)
+
+        if self.config.rllm.get("use_new_verl_transform", True):
+            from rllm.engine.verl_utils.data_classes import CompactFilteringConfig
+            from rllm.engine.verl_utils.workflow_transform import transform_workflow_episodes_for_verl
+
+            logger.info("Using new experimental Verl transform")
+            return transform_workflow_episodes_for_verl(
+                results,
+                task_ids,
+                tokenizer=self.rollout_engine.tokenizer,
+                max_prompt_length=self.config.data.max_prompt_length,
+                max_response_length=self.config.data.max_response_length,
+                cf_config=CompactFilteringConfig.from_config(self.config.rllm.compact_filtering),
+            )
+        else:
+            return self.transform_results_for_verl(results, task_ids)
 
     def transform_results_for_verl(self, episodes: list[Episode], task_ids: np.ndarray) -> "DataProto":
         """Transform episode results into Verl-compatible DataProto format.
