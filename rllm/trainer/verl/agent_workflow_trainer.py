@@ -193,7 +193,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         else:
                             solve_partial += 1
 
-                    # Build a view with a single item per episode_id for metrics/logging
+                    # Build a view with a single item per episode_id (task_name:rollout_idx) for metrics/logging
                     seen_episodes = set()
                     episode_unique_idxs = []
                     for i, episode_id in enumerate(new_batch.non_tensor_batch["episode_ids"]):

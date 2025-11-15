@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 import uuid
@@ -16,7 +18,6 @@ from rllm.workflows.workflow import TerminationReason, Workflow
 
 # Avoid hard dependency on verl at import time; only for typing
 if TYPE_CHECKING:
-    from rllm.engine.rollout.verl_engine import VerlEngine
     from verl import DataProto
 
 logger = logging.getLogger(__name__)
@@ -188,7 +189,7 @@ class AgentWorkflowEngine:
 
         return results
 
-    async def execute_tasks_verl(self, batch: "DataProto", **kwargs) -> "DataProto":
+    async def execute_tasks_verl(self, batch: DataProto, **kwargs) -> DataProto:
         """Execute tasks from a Verl DataProto batch and return results.
 
         Args:
@@ -198,6 +199,9 @@ class AgentWorkflowEngine:
         Returns:
             DataProto: Transformed results compatible with Verl training.
         """
+        # Import at runtime to avoid hard dependency
+        from rllm.engine.rollout.verl_engine import VerlEngine
+
         free_cache_engine = self.config.actor_rollout_ref.rollout.free_cache_engine if self.config else False
         if free_cache_engine:
             # TODO: later probably should make the `wake_up` and `sleep` methods in base class to be async
@@ -240,7 +244,7 @@ class AgentWorkflowEngine:
         else:
             return self.transform_results_for_verl(results, task_ids)
 
-    def transform_results_for_verl(self, episodes: list[Episode], task_ids: np.ndarray) -> "DataProto":
+    def transform_results_for_verl(self, episodes: list[Episode], task_ids: np.ndarray) -> DataProto:
         """Transform episode results into Verl-compatible DataProto format.
 
         Args:

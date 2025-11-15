@@ -140,6 +140,7 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
             "metrics": np.array(accumulated.metrics),
             "is_valid": np.array(is_valid),
             "is_last_step": np.array(accumulated.is_last_step),
+            # The padding is done after the transform (in `_pad_dataproto_to_world_size`), so we simply set all to False here
             "is_pad_step": np.array([False] * len(accumulated.episode_ids)),
         },
         meta_info={
@@ -148,7 +149,7 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
     )
 
 
-def _process_trajectory(trajectory: Trajectory, episode: Episode, task_id: str, accumulated: AccumulatedData):
+def _process_trajectory(trajectory: Trajectory, episode: Episode, task_id: str, accumulated: AccumulatedData) -> int:
     """Processes a trajectory and returns an AccumulatedData.
 
     Args:
@@ -157,13 +158,13 @@ def _process_trajectory(trajectory: Trajectory, episode: Episode, task_id: str, 
         task_id: Task identifier corresponding to the episode.
         accumulated: AccumulatedData to process the trajectory into.
     Returns:
-        None: The trajectory is processed into the accumulated data.
+        n_steps: The number of steps in the trajectory.
     """
     name = trajectory.name
     trajectory_id = f"{task_id}_{name}"
     if len(trajectory.steps) == 0:
         print(f"Trajectory {trajectory_id} has no steps, skipping")
-        return
+        return 0
 
     n_steps = len(trajectory.steps)
 
@@ -201,6 +202,8 @@ def _process_trajectory(trajectory: Trajectory, episode: Episode, task_id: str, 
             metrics=episode.metrics,
         )
 
+    return n_steps
+
 
 def _process_episode(episode: Episode, task_id: str, accumulated: AccumulatedData) -> int:
     """Processes an episode and returns an AccumulatedData.
@@ -224,8 +227,12 @@ def _process_episode(episode: Episode, task_id: str, accumulated: AccumulatedDat
         print(f"Episode {episode.id} has no valid trajectories, dropping it from the batch")
         return 0
 
+    if episode.termination_reason is None:
+        episode.termination_reason = TerminationReason.UNKNOWN
+
     for trajectory in episode.trajectories:
-        _process_trajectory(trajectory, episode, task_id, accumulated)
+        n_steps = _process_trajectory(trajectory, episode, task_id, accumulated)
+        total_steps += n_steps
 
     return total_steps
 

@@ -1,8 +1,8 @@
 from dataclasses import dataclass, field
 from typing import Any
 
-import numpy as np
 import torch
+from omegaconf import DictConfig, OmegaConf
 
 from rllm.workflows.workflow import TerminationReason
 
@@ -30,7 +30,7 @@ class CompactFilteringConfig:
     mask_error: bool = False
 
     @classmethod
-    def from_config(cls, config: Any) -> "CompactFilteringConfig":
+    def from_config(cls, config: DictConfig) -> "CompactFilteringConfig":
         """Create a CompactFilteringConfig from a dictionary configuration.
 
         Args:
@@ -38,12 +38,7 @@ class CompactFilteringConfig:
         Returns:
             CompactFilteringConfig: The CompactFilteringConfig built from the configuration.
         """
-        if isinstance(config, dict):
-            return cls(**config)
-        elif isinstance(config, CompactFilteringConfig):
-            return config
-        else:
-            raise ValueError(f"Invalid configuration type: {type(config)}")
+        return cls(**OmegaConf.to_container(config))  # type: ignore
 
     def should_mask(self, termination_reason: TerminationReason) -> bool:
         """Check if a specific termination reason should be masked/filtered out.
@@ -128,39 +123,3 @@ class AccumulatedData:
     def __len__(self) -> int:
         """Return the total number of batch rows accumulated."""
         return len(self.prompts)
-
-
-@dataclass
-class BatchedTensors:
-    """Container for batched and padded tensors ready for DataProto.
-
-    Separates the batching logic output from the DataProto construction.
-    """
-
-    # Main sequence data
-    input_ids: torch.Tensor
-    attention_mask: torch.Tensor
-    position_ids: torch.Tensor
-
-    # Separated prompt/response views
-    prompts: torch.Tensor
-    responses: torch.Tensor
-    response_mask: torch.Tensor  # trajectory mask
-
-    # Reward tensors (aligned with response tokens)
-    traj_rewards: torch.Tensor
-    step_rewards: torch.Tensor
-
-    # Non-tensor metadata (to be passed through)
-    episode_ids: np.ndarray
-    trajectory_ids: np.ndarray
-    step_ids: np.ndarray
-    step_nums: np.ndarray
-    is_correct: np.ndarray
-    termination_reasons: np.ndarray
-    metrics: np.ndarray
-    is_last_step: np.ndarray
-    is_valid: np.ndarray  # filtering flags
-
-    # Meta info
-    repeat_counts: list[int]
