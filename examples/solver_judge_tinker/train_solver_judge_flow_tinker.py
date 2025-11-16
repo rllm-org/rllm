@@ -6,7 +6,7 @@ from rllm.rewards.countdown_reward import countdown_reward_fn
 from rllm.trainer import AgentTrainer
 
 
-@hydra.main(config_path="pkg://rllm.trainer.config", config_name="tinker_workflow_trainer", version_base=None)
+@hydra.main(config_path="pkg://rllm.trainer.config", config_name="tinker_rl_trainer", version_base=None)
 def main(config):
     train_dataset = DatasetRegistry.load_dataset("countdown", "train")
     test_dataset = DatasetRegistry.load_dataset("countdown", "test")

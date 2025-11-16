@@ -16,10 +16,10 @@ import tinker
 import torch
 from transformers import AutoTokenizer
 
+from rllm.agents.agent import Episode
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.tinker_engine import TinkerEngine
 from rllm.trainer.tinker.tinker_agent_trainer import TinkerAgentTrainer
-from rllm.trainer.tinker.tinker_data_processor import Episode, Trajectory
 from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer
 
 if TYPE_CHECKING:
@@ -118,15 +118,15 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
         self.current_batch = batch_data
 
     async def validate_agent(self, dataloader, sampling_client):
-        episodes_ls = []
+        all_episodes = []
         all_episode_metrics = {}  # episode_id -> episode.metrics dict
         self.agent_execution_engine.rollout_engine.set_sampling_client(sampling_client)
         for batch in dataloader:
             batch = self.build_interleave_batch(batch, 1)
             self.init_envs_and_agents(batch)
             # For validation, collect all episodes from generator
-            async for episode_batch, episode_metrics in self.generate_agent_episodes(group_size=1, minibatch_size=1, return_metrics=True):
-                episodes_ls.extend(episode_batch)
+            async for episodes, episode_metrics in self.generate_agent_episodes(group_size=1, minibatch_size=1, return_metrics=True):
+                all_episodes.extend(episodes)
                 all_episode_metrics.update(episode_metrics)
 
         # Collect workflow metrics per episode (deduplicated by episode.id)
@@ -137,9 +137,9 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
                 for key, value in episode_metric_dict.items():
                     workflow_metrics[key].append(float(value))
 
-        # Compute trajectory-level statistics
+        # Compute trajectory-level statistics from all episodes
         all_trajectories = []
-        for episode in episodes_ls:
+        for episode in all_episodes:
             all_trajectories.extend(episode.trajectories)
 
         mean_reward = sum([traj.reward for traj in all_trajectories]) / len(all_trajectories)
@@ -164,14 +164,14 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
 
     async def generate_agent_episodes(self, timing_raw=None, meta_info=None, group_size=None, minibatch_size=None, return_metrics=False):
         """
-        Generate episodes in minibatches with overlapping generation and training.
-
-        This uses a background producer task to continuously generate episodes
-        while the main loop yields minibatches for training.
+        Generate episodes from workflow execution.
 
         Args:
             return_metrics: If True, yields (episodes, metrics) tuple where metrics is
                           {episode_id: {metric_name: value, ...}}. If False, yields only episodes.
+
+        Yields:
+            list[Episode] or tuple[list[Episode], dict] depending on return_metrics
         """
 
         num_minibatches = self.config.training.num_minibatches
@@ -183,61 +183,21 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
 
         episodes = await self.agent_execution_engine.execute_tasks(current_batch, task_ids)
         episodes = self.make_sure_contain_token_and_logprob(episodes)
-        episodes = self.maybe_broadcast_reward(episodes)
-        regrouped_episodes, episode_metrics = self.regroup(episodes)
+
+        # Update trajectory-level rewards from step-level rewards
+        for episode in episodes:
+            for trajectory in episode.trajectories:
+                if trajectory.reward == 0.0 and trajectory.steps:
+                    # Compute trajectory reward from step rewards
+                    trajectory.reward = sum(step.reward if step.reward is not None else 0.0 for step in trajectory.steps)
+
+        # Extract episode metrics if available
+        episode_metrics = {ep.id: ep.metrics for ep in episodes if hasattr(ep, "metrics") and ep.metrics}
 
         if return_metrics:
-            yield regrouped_episodes, episode_metrics
+            yield episodes, episode_metrics
         else:
-            yield regrouped_episodes
-
-    def regroup(self, episodes: list[Episode]) -> tuple[list[Episode], dict]:
-        # This function basically
-        # TODO: naive implementation, groupby task_id_agent_name_step_idx
-        unique_step_uids = set()
-        unique_task_ids = set()
-        step_groupby_step_uid = defaultdict(list)
-
-        new_episodes = []
-        metrics = {}
-
-        def get_task_id(episode: Episode):
-            return ":".join(episode.id.split(":")[:-1])
-
-        for episode in episodes:
-            if episode.id not in metrics and episode.metrics:
-                metrics[episode.id] = episode.metrics
-            task_id = get_task_id(episode)
-            unique_task_ids.add(task_id)
-            for trajectory in episode.trajectories:
-                for step_idx, step in enumerate(trajectory.steps):
-                    step_uid = f"{task_id}:{trajectory.name}:{step_idx}"
-                    if step_uid not in unique_step_uids:
-                        unique_step_uids.add(step_uid)
-
-                    step_groupby_step_uid[step_uid].append(step)
-
-        for step_uid, steps in step_groupby_step_uid.items():
-            trajectorys = [Trajectory(steps=[step], reward=step.reward) for step in steps]
-            new_episode = Episode(trajectories=trajectorys)
-            new_episodes.append(new_episode)
-
-        print(f"len episodes: {len(episodes)}")
-        print(f"len unique_task_ids: {len(unique_task_ids)}")
-        print(f"len unique_step_uids: {len(unique_step_uids)}")
-        print(f"len new_episodes: {len(new_episodes)}")
-
-        return new_episodes, metrics
-
-    def maybe_broadcast_reward(self, episodes: list[Episode]) -> list[Episode]:
-        assert self.config.trainer.reward_broadcast in ["step", "trajectory"]
-        # if "step" mode do nothing, if "trajectory" mode, overwrite each step's reward with trajectory reward
-        if self.config.trainer.reward_broadcast == "trajectory":
-            for episode in episodes:
-                for trajectory in episode.trajectories:
-                    for step in trajectory.steps:
-                        step.reward = trajectory.reward
-        return episodes
+            yield episodes
 
     def make_sure_contain_token_and_logprob(self, episodes: list[Episode]) -> list[Episode]:
         for episode in episodes:

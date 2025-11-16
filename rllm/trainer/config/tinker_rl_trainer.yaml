@@ -1,5 +1,6 @@
 # Tinker Backend Configuration for rLLM
 # This config is used when training agents with Tinker backend
+# Unified configuration supporting both workflow and agent training modes
 # Default settings match tinker_cookbook.recipes.math_rl for MATH dataset
 
 # Tinker-specific settings
@@ -34,12 +35,19 @@ algorithm:
   gamma: 1.0
   lam: 0.95
   norm_adv_by_std_in_grpo: false  # math_rl doesn't normalize by std
+  grouping_level: 'trajectory'  # Options: 'trajectory' or 'step'
 
-# Agent Configuration
+# Workflow Configuration (for workflow training mode)
+workflow:
+  n_parallel_tasks: 256
+  retry_limit: 3 
+
+# Agent Configuration (for agent training mode)
 agent:
   max_steps: 1  # Single-turn vs multi-turn
   agent_args: {}
 
+# Environment Configuration (for agent training mode)
 env:
   env_args: {}
 
@@ -67,3 +75,4 @@ trainer:
 hydra:
   run:
     dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+

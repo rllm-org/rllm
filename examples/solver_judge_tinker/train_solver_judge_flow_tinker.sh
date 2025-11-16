@@ -11,6 +11,7 @@ python -m examples.solver_judge_tinker.train_solver_judge_flow_tinker \
     sampling.top_p=1.0 \
     algorithm.adv_estimator=grpo \
     algorithm.norm_adv_by_std_in_grpo=true \
+    algorithm.grouping_level=trajectory \
     data.max_prompt_length=2048 \
     data.max_response_length=1024 \
     data.train_batch_size=64 \

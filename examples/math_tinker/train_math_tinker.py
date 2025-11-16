@@ -16,7 +16,7 @@ from rllm.environments.base.single_turn_env import SingleTurnEnvironment
 from rllm.trainer import AgentTrainer
 
 
-@hydra.main(version_base=None, config_path="../../rllm/trainer/config", config_name="tinker_agent_trainer")
+@hydra.main(version_base=None, config_path="../../rllm/trainer/config", config_name="tinker_rl_trainer")
 def main(config: DictConfig):
     """
     Main training function using TinkerAgentTrainer.
