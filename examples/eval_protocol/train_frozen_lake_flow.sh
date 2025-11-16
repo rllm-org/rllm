@@ -9,14 +9,14 @@ export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 # Find the directory where rllm package is located
 RLLM_DIR=$(python3 -c "import rllm; import os; print(os.path.dirname(os.path.dirname(rllm.__file__)))")
 
-MODEL_PATH=Qwen/Qwen3-4B
+MODEL_PATH=Qwen/Qwen3-8B
 
-python3 -m examples.fireworks_math.train_fireworks_math \
+python3 -m examples.eval_protocol.train_frozen_lake_flow \
     algorithm.adv_estimator=grpo \
-    data.train_batch_size=8 \
-    data.val_batch_size=512 \
-    data.max_prompt_length=4096 \
-    data.max_response_length=2048 \
+    data.train_batch_size=16 \
+    data.val_batch_size=48 \
+    data.max_prompt_length=16384 \
+    data.max_response_length=4096 \
     actor_rollout_ref.model.lora_rank=32 \
     actor_rollout_ref.model.lora_alpha=32 \
     actor_rollout_ref.rollout.load_format=safetensors \
@@ -54,7 +54,7 @@ python3 -m examples.fireworks_math.train_fireworks_math \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.entropy_coeff=0 \
     algorithm.kl_ctrl.kl_coef=0.001 \
-    rllm.compact_filtering.enable=False \
+    rllm.compact_filtering.enable=True \
     rllm.compact_filtering.mask_max_prompt_length_exceeded=True \
     rllm.compact_filtering.mask_max_response_length_exceeded=True \
     rllm.compact_filtering.mask_max_turns_exceeded=False \
@@ -66,16 +66,16 @@ python3 -m examples.fireworks_math.train_fireworks_math \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='rllm-fireworks-workflow' \
-    trainer.experiment_name='fireworks-hendrycks-math-4b' \
+    trainer.experiment_name='fireworks-frozen-lake-8b' \
     trainer.max_actor_ckpt_to_keep=2 \
     trainer.val_before_train=False \
-    trainer.n_gpus_per_node=2 \
-    +trainer.n_training_gpus_per_node=2 \
+    trainer.n_gpus_per_node=8 \
+    +trainer.n_training_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=1 \
     trainer.test_freq=10 \
     trainer.default_hdfs_dir=null \
     trainer.total_epochs=100 \
     rllm.workflow.use_workflow=True \
-    fireworks.deployment_id=wtk15cs9 \
-    fireworks.model_id_prefix=qwen3-4b-math
+    fireworks.deployment_id=rllm-qwen3-8b-1 \
+    fireworks.model_id_prefix=test-frozen-lake-qwen3-8b-1

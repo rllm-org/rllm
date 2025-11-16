@@ -1,14 +1,24 @@
 ## Before Running Your Training Job
 
+First, install Fireworks SDK and export your FIREWORKS_API_KEY
+
+```bash
+pip install fireworks-ai
+```
+
+```bash
+export FIREWORKS_API_KEY=<YOUR_FIREWORKS_API_KEY>
+```
+
 Before starting your training, create a **Fireworks deployment**.
 
-I recommend installing **firectl** by following the guide here:
+We recommend installing **firectl** by following the guide here:
 [firectl Documentation](https://docs.fireworks.ai/tools-sdks/firectl/firectl)
 
 Then, create your deployment:
 
 ```bash
-firectl create deployment accounts/fireworks/models/qwen3-30b-a3b-instruct-2507   --enable-hot-reload-latest-addon   --deployment-id <YOUR_CUSTOM_DEPLOYMENT_ID>   --accelerator-type NVIDIA_H100_80GB
+firectl create deployment accounts/fireworks/models/accounts/fireworks/models/qwen3-4b --enable-hot-reload-latest-addon   --deployment-id <YOUR_CUSTOM_DEPLOYMENT_ID>   --accelerator-type NVIDIA_H100_80GB
 ```
 
 ---

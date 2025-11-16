@@ -98,7 +98,7 @@ class ToolEnvironment(BaseEnv):
 
             task_info = self.task if self.task is not None else {}
             reward_output = self.reward_fn(task_info=task_info, action=llm_response)
-            return {}, reward_output.reward, done, {"response": action, "metadata": reward_output.metadata}
+            return {}, reward_output.reward, done, {"response": action, "metadata": reward_output.metadata, "is_correct": reward_output.is_correct}
 
         tool_calls = action
         assert isinstance(tool_calls, list)

@@ -94,6 +94,11 @@ class ToolAgent(BaseAgent):
         self.messages.extend(obs_messages)
         self.current_observation = observation
 
+        if self._trajectory.steps:
+            self._trajectory.steps[-1].reward = reward
+            self._trajectory.steps[-1].done = done
+            self._trajectory.steps[-1].info = info
+
     def update_from_model(self, response: str, **kwargs) -> Action:
         """
         Updates the agent's state based on the model's response.

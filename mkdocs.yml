@@ -121,6 +121,7 @@ nav:
           - Agent Workflow Engine: api/engine/agent_workflow_engine.md
       - Trainer:
           - Agent Trainer: api/trainer/agent_trainer.md
+          - Ray Runtime Environment: api/trainer/ray_runtime_env.md
       - Tools:
           - Tool Base Classes: api/tools/tool_base.md
           - Tool Registry: api/tools/registry.md

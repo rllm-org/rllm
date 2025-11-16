@@ -33,6 +33,7 @@ The engine module contains the core execution infrastructure:
 The trainer module provides RL training capabilities:
 
 - **Agent Trainer**: Main training interface for RL algorithms
+- **Ray Runtime Environment**: Configuration for Ray runtime environment
 
 ### 🛠️ Tools
 The tools module provides a comprehensive framework for creating and managing tools:

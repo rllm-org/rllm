@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class AgentWorkflowEngine:
-    def __init__(self, workflow_cls: type[Workflow], workflow_args: dict, rollout_engine: RolloutEngine, config=None, n_parallel_tasks: int = 128, retry_limit: int = 3, raise_on_error: bool = True, **kwargs):
+    def __init__(self, workflow_cls: type[Workflow], workflow_args: dict, rollout_engine: RolloutEngine, config=None, n_parallel_tasks: int = 128, retry_limit: int = 3, raise_on_error: bool = True, episode_logger=None, **kwargs):
         """Initialize the AgentWorkflowEngine.
 
         Args:
@@ -34,6 +34,7 @@ class AgentWorkflowEngine:
             n_parallel_tasks: Number of parallel workflow instances to maintain.
             retry_limit: Maximum number of retry attempts for failed tasks.
             raise_on_error: Whether to raise exceptions on permanent failures.
+            episode_logger: Optional logger for saving episode data to files.
             **kwargs: Additional keyword arguments.
         """
         self.workflow_cls = workflow_cls
@@ -49,6 +50,24 @@ class AgentWorkflowEngine:
         self.n_parallel_tasks = n_parallel_tasks
         self.executor = ThreadPoolExecutor(max_workers=self.n_parallel_tasks)
         self.workflow_queue = None
+
+        # Episode logging support
+        self.episode_logger = episode_logger
+        self.current_step = 0
+        self.current_epoch = 0
+        self.current_mode = "train"  # "train" or "val"
+
+    def set_training_step(self, step: int, mode: str = "train", epoch: int = 0):
+        """Set current training step for episode logging.
+
+        Args:
+            step: Current training step number
+            mode: Mode identifier ('train' or 'val'), defaults to 'train'
+            epoch: Current epoch number, defaults to 0
+        """
+        self.current_step = step
+        self.current_mode = mode
+        self.current_epoch = epoch
 
     async def initialize_pool(self):
         """Initialize the workflow pool with parallel workflow instances.
@@ -86,7 +105,9 @@ class AgentWorkflowEngine:
                 uid = f"{task_id}:{rollout_idx}"
                 episode = await workflow.run_with_termination_handling(task=task, uid=uid, **kwargs)
 
-                colorful_print(f"[{uid}] Rollout completed with termination reason: {episode.termination_reason}", fg="green" if episode.is_correct else "yellow")
+                # Display rewards for all trajectories
+                rewards_str = ", ".join([f"{traj.name}: {traj.reward:.1f}" for traj in episode.trajectories])
+                colorful_print(f"[{uid}] Rollout completed. Rewards: {rewards_str}, Termination: {episode.termination_reason}", fg="green" if episode.is_correct else "yellow")
 
                 if episode.termination_reason != TerminationReason.ERROR:
                     return task_id, rollout_idx, episode
@@ -153,6 +174,18 @@ class AgentWorkflowEngine:
         sorted_tasks = sorted(task_states.keys(), key=lambda task_id: task_states[task_id]["idx"])
         for task_id in sorted_tasks:
             results.extend(task_states[task_id]["episodes"])
+
+        # Log episodes if logger is provided
+        if self.episode_logger is not None:
+            try:
+                logger.info(f"Logging {len(results)} episodes to step={self.current_step}, mode={self.current_mode}, epoch={self.current_epoch}")
+                self.episode_logger.log_episodes_batch(results, self.current_step, self.current_mode, self.current_epoch)
+            except Exception as e:
+                logger.error(f"Failed to log episodes: {e}")
+                import traceback
+
+                traceback.print_exc()
+
         return results
 
     async def execute_tasks_verl(self, batch: "DataProto", **kwargs) -> "DataProto":
@@ -173,8 +206,12 @@ class AgentWorkflowEngine:
             else:
                 self.rollout_engine.wake_up()
 
-        if batch.meta_info.get("validate", False):
+        is_validation = batch.meta_info.get("validate", False)
+        if is_validation:
             self.rollout_engine.validate = True
+            self.current_mode = "val"
+        else:
+            self.current_mode = "train"
         tasks = batch.non_tensor_batch["extra_info"].tolist()
         task_ids = batch.non_tensor_batch["task_ids"].tolist()
         results = await self.execute_tasks(tasks, task_ids, **kwargs)  # list of Episodes
@@ -185,6 +222,7 @@ class AgentWorkflowEngine:
                 await self.rollout_engine.sleep()
             else:
                 self.rollout_engine.sleep()
+        self.current_mode = "train"
         return self.transform_results_for_verl(results, task_ids)
 
     def transform_results_for_verl(self, episodes: list[Episode], task_ids: np.ndarray) -> "DataProto":

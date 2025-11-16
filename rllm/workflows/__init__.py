@@ -11,6 +11,8 @@ __all__ = [
     "TerminationEvent",
     "SingleTurnWorkflow",
     "MultiTurnWorkflow",
+    "CumulativeWorkflow",
+    "TimingTrackingMixin",
 ]
 
 
@@ -23,4 +25,12 @@ def __getattr__(name):
         from .multi_turn_workflow import MultiTurnWorkflow as _Multi
 
         return _Multi
+    if name == "CumulativeWorkflow":
+        from .cumulative_workflow import CumulativeWorkflow as _Cumulative
+
+        return _Cumulative
+    if name == "TimingTrackingMixin":
+        from .timing_mixin import TimingTrackingMixin as _Mixin
+
+        return _Mixin
     raise AttributeError(name)
