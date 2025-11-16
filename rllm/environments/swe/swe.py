@@ -164,11 +164,25 @@ class SWEEnv(BaseEnv):
         """Create an environment instance from JSON configuration.
 
         Args:
-            extra_info: Dictionary containing configuration parameters
+            extra_info: Dictionary containing configuration parameters.
+                       The entire dict will be used as 'entry', and any keys
+                       matching __init__ parameters will be extracted and passed.
 
         Returns:
             Initialized SWEEnv instance
         """
+        import inspect
+
         if isinstance(extra_info, str):
             extra_info = json.loads(extra_info)
-        return SWEEnv(entry=extra_info)
+
+        sig = inspect.signature(SWEEnv.__init__)
+        init_params = {}
+        for param_name, param in sig.parameters.items():
+            if param_name == "self":
+                continue
+            if param_name in extra_info:
+                init_params[param_name] = extra_info[param_name]
+            # else if param has default value, use the default value
+        init_params["entry"] = extra_info
+        return SWEEnv(**init_params)

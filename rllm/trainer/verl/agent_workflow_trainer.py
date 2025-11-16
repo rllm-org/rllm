@@ -12,6 +12,7 @@ from omegaconf import OmegaConf
 
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
+from rllm.utils.episode_logger import EpisodeLogger
 from rllm.workflows.workflow import TerminationReason
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
@@ -80,6 +81,13 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
             tokenizer=self.tokenizer,
         )
 
+        # Create episode logger if enabled in config
+        episode_logger = None
+        if self.config.trainer.get("log_episodes", False):
+            # Get episode log directory from config, default to "logs/my_project/my_experiment"
+            episode_log_dir = self.config.trainer.get("episode_log_dir", f"logs/{self.config.trainer.project_name}/{self.config.trainer.experiment_name}")
+            episode_logger = EpisodeLogger(base_dir=episode_log_dir, subdirectory="episodes")
+
         self.agent_execution_engine = AgentWorkflowEngine(
             workflow_cls=self.workflow_class,
             workflow_args=self.workflow_args,
@@ -87,6 +95,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
             config=self.config,
             n_parallel_tasks=self.config.rllm.workflow.n_parallel_tasks,
             retry_limit=self.config.rllm.workflow.retry_limit,
+            episode_logger=episode_logger,
         )
 
         # init workflow workers
@@ -115,6 +124,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
 
         start_time = time.time()
         if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
+            self.agent_execution_engine.set_training_step(self.global_steps, mode="val", epoch=0)
             val_metrics = self._validate_agent()
             pprint(f"Initial validation metrics: {val_metrics}")
             logger.log(data=val_metrics, step=self.global_steps)
@@ -148,6 +158,9 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                 new_batch = new_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n)
 
                 new_batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"])
+
+                # Update training step in engine for episode logging
+                self.agent_execution_engine.set_training_step(self.global_steps, mode="train", epoch=epoch)
 
                 with marked_timer("step", timing_raw):
                     # generate trajectories
@@ -395,6 +408,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                     # validate
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and self.global_steps % self.config.trainer.test_freq == 0:
                         with marked_timer("testing", timing_raw, color="green"):
+                            self.agent_execution_engine.set_training_step(self.global_steps, mode="val", epoch=epoch)
                             val_metrics: dict = self._validate_agent()
                         metrics.update(val_metrics)
 
@@ -459,6 +473,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                 if self.global_steps >= self.total_training_steps:
                     # perform validation after training
                     if self.val_reward_fn is not None:
+                        self.agent_execution_engine.set_training_step(self.global_steps, mode="val", epoch=epoch)
                         val_metrics = self._validate_agent()
                         pprint(f"Final validation metrics: {val_metrics}")
                         logger.log(data=val_metrics, step=self.global_steps)
