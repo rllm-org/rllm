@@ -58,6 +58,41 @@ class Dataset(torch.utils.data.Dataset):
 
         return Dataset(data=repeated_data, name=self.name, split=self.split)
 
+    def shuffle(self, seed: int | None = None) -> "Dataset":
+        """Shuffle the dataset (HuggingFace-compatible API).
+
+        Args:
+            seed: Random seed for reproducibility
+
+        Returns:
+            Dataset: A new shuffled dataset
+        """
+        import random
+
+        indices = list(range(len(self.data)))
+        if seed is not None:
+            random.Random(seed).shuffle(indices)
+        else:
+            random.shuffle(indices)
+
+        shuffled_data = [self.data[i] for i in indices]
+        return Dataset(data=shuffled_data, name=self.name, split=self.split)
+
+    def select(self, indices: list[int] | range) -> "Dataset":
+        """Select a subset of the dataset (HuggingFace-compatible API).
+
+        Args:
+            indices: List or range of indices to select
+
+        Returns:
+            Dataset: A new dataset with selected examples
+        """
+        if isinstance(indices, range):
+            indices = list(indices)
+
+        selected_data = [self.data[i] for i in indices if 0 <= i < len(self.data)]
+        return Dataset(data=selected_data, name=self.name, split=self.split)
+
     def get_data_path(self) -> str | None:
         """Get the absolute path of the dataset file.
 
