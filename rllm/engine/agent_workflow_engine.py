@@ -232,7 +232,6 @@ class AgentWorkflowEngine:
             from rllm.engine.verl_utils.data_classes import CompactFilteringConfig
             from rllm.engine.verl_utils.workflow_transform import transform_workflow_episodes_for_verl
 
-            logger.info("Using new experimental Verl transform")
             return transform_workflow_episodes_for_verl(
                 results,
                 task_ids,

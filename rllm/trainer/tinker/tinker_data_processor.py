@@ -9,10 +9,9 @@ from dataclasses import dataclass
 
 import numpy as np
 import tinker
-import torch
 from tinker.types.tensor_data import TensorData
 
-from rllm.agents.agent import Step, Trajectory
+from rllm.agents.agent import Episode, Step, Trajectory
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +103,35 @@ class TinkerAdvantageComputer:
             return self.compute_grpo_advantages(group_rewards)
 
 
+def _validate_and_build_datum(all_tokens: list[int], prompt_tokens: list[int], logprobs: list[float], advantage: float) -> tinker.Datum:
+    """
+    Helper function to validate and build a Tinker Datum using numpy.
+    """
+    input_tokens = all_tokens[:-1]  # no need to convert to numpy array
+    target_tokens = np.array(all_tokens[1:], dtype=np.int32)
+    # Create `all_logprobs` by padding `logprobs` with `prompt_tokens` - 1 length zeros to the left
+    ob_len = len(prompt_tokens) - 1
+    all_logprobs = np.pad(logprobs, (ob_len, 0), mode="constant", constant_values=0.0)
+    # Create `all_advantages` by concatenating `ob_len` zeros with `advantage` for the response length
+    all_advantages = np.concatenate([np.zeros(ob_len, dtype=np.float32), np.full(len(input_tokens) - ob_len, advantage, dtype=np.float32)])
+    # Create `all_mask` by concatenating `ob_len` zeros and `len(input_tokens) - ob_len` ones
+    all_mask = np.concatenate([np.zeros(ob_len, dtype=np.float32), np.full(len(input_tokens) - ob_len, 1.0, dtype=np.float32)])
+
+    # Validate that all arrays have the same length
+    assert len(input_tokens) == len(target_tokens) == len(all_logprobs) == len(all_advantages) == len(all_mask), f"Length mismatch: input={len(input_tokens)}, target={len(target_tokens)}, logprobs={len(all_logprobs)}, advantages={len(all_advantages)}, mask={len(all_mask)}"
+
+    # Create Datum
+    return tinker.types.Datum(
+        model_input=tinker.types.ModelInput.from_ints(tokens=input_tokens),
+        loss_fn_inputs={
+            "target_tokens": TensorData.from_numpy(target_tokens),
+            "logprobs": TensorData.from_numpy(all_logprobs),
+            "advantages": TensorData.from_numpy(all_advantages),
+            "mask": TensorData.from_numpy(all_mask),
+        },
+    )
+
+
 class TinkerTrajectoryFilter:
     """
     Filters episodes based on configuration (e.g., removing constant-reward episodes).
@@ -192,30 +220,7 @@ class TinkerDatumBuilder:
 
         # Combine prompt and response
         all_tokens = prompt_tokens + response_tokens
-        input_tokens = all_tokens[:-1]
-        target_tokens = all_tokens[1:]
-
-        # Create masks (only train on response)
-        ob_len = len(prompt_tokens) - 1
-        all_logprobs = [0.0] * ob_len + logprobs
-        all_advantages = [0.0] * ob_len + [advantage] * (len(input_tokens) - ob_len)
-        all_mask = [0.0] * ob_len + [1.0] * (len(input_tokens) - ob_len)
-
-        # Ensure all lists have the same length
-        assert len(input_tokens) == len(target_tokens) == len(all_logprobs) == len(all_advantages) == len(all_mask), f"Length mismatch: input={len(input_tokens)}, target={len(target_tokens)}, logprobs={len(all_logprobs)}, advantages={len(all_advantages)}, mask={len(all_mask)}"
-
-        # Create Datum
-        datum = tinker.types.Datum(
-            model_input=tinker.types.ModelInput.from_ints(tokens=[int(t) for t in input_tokens]),
-            loss_fn_inputs={
-                "target_tokens": TensorData.from_torch(torch.tensor(target_tokens)),
-                "logprobs": TensorData.from_torch(torch.tensor(all_logprobs)),
-                "advantages": TensorData.from_torch(torch.tensor(all_advantages)),
-                "mask": TensorData.from_torch(torch.tensor(all_mask)),
-            },
-        )
-
-        return datum
+        return _validate_and_build_datum(all_tokens, prompt_tokens, logprobs, advantage)
 
     @staticmethod
     def build_datum(trajectory: dict, advantage: float) -> tinker.Datum:
@@ -235,30 +240,7 @@ class TinkerDatumBuilder:
 
         # Combine prompt and response
         all_tokens = prompt_tokens + response_tokens
-        input_tokens = all_tokens[:-1]
-        target_tokens = all_tokens[1:]
-
-        # Create masks (only train on response)
-        ob_len = len(prompt_tokens) - 1
-        all_logprobs = [0.0] * ob_len + logprobs
-        all_advantages = [0.0] * ob_len + [advantage] * (len(input_tokens) - ob_len)
-        all_mask = [0.0] * ob_len + [1.0] * (len(input_tokens) - ob_len)
-
-        # Ensure all lists have the same length
-        assert len(input_tokens) == len(target_tokens) == len(all_logprobs) == len(all_advantages) == len(all_mask), f"Length mismatch: input={len(input_tokens)}, target={len(target_tokens)}, logprobs={len(all_logprobs)}, advantages={len(all_advantages)}, mask={len(all_mask)}"
-
-        # Create Datum
-        datum = tinker.types.Datum(
-            model_input=tinker.types.ModelInput.from_ints(tokens=[int(t) for t in input_tokens]),
-            loss_fn_inputs={
-                "target_tokens": TensorData.from_torch(torch.tensor(target_tokens)),
-                "logprobs": TensorData.from_torch(torch.tensor(all_logprobs)),
-                "advantages": TensorData.from_torch(torch.tensor(all_advantages)),
-                "mask": TensorData.from_torch(torch.tensor(all_mask)),
-            },
-        )
-
-        return datum
+        return _validate_and_build_datum(all_tokens, prompt_tokens, logprobs, advantage)
 
     @staticmethod
     def build_datum_from_trajectory(trajectory: Trajectory, advantage: float) -> list[tinker.Datum]:
@@ -355,15 +337,15 @@ class TinkerDatumBuilder:
                 shifted_advantages = self.advantages[1:]
                 shifted_mask = self.mask[1:]
 
-                assert len(input_tokens) == len(target_tokens) == len(shifted_logprobs) == len(shifted_advantages) == len(shifted_mask)
+                assert len(input_tokens) == len(target_tokens) == len(shifted_logprobs) == len(shifted_advantages) == len(shifted_mask), f"Length mismatch: input={len(input_tokens)}, target={len(target_tokens)}, logprobs={len(shifted_logprobs)}, advantages={len(shifted_advantages)}, mask={len(shifted_mask)}"
 
                 return tinker.types.Datum(
                     model_input=tinker.types.ModelInput.from_ints(tokens=[int(t) for t in input_tokens]),
                     loss_fn_inputs={
-                        "target_tokens": TensorData.from_torch(torch.tensor(target_tokens)),
-                        "logprobs": TensorData.from_torch(torch.tensor(shifted_logprobs)),
-                        "advantages": TensorData.from_torch(torch.tensor(shifted_advantages)),
-                        "mask": TensorData.from_torch(torch.tensor(shifted_mask)),
+                        "target_tokens": TensorData.from_numpy(np.array(target_tokens)),
+                        "logprobs": TensorData.from_numpy(np.array(shifted_logprobs)),
+                        "advantages": TensorData.from_numpy(np.array(shifted_advantages)),
+                        "mask": TensorData.from_numpy(np.array(shifted_mask)),
                     },
                 )
 
@@ -397,7 +379,7 @@ class TinkerDatumBuilder:
 
 
 def process_episodes(
-    episodes: list,
+    episodes: list[Episode],
     advantage_computer: TinkerAdvantageComputer,
     trajectory_filter: TinkerTrajectoryFilter,
     algorithm_config,
