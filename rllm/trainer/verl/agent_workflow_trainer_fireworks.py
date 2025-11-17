@@ -10,7 +10,12 @@ import torch
 from omegaconf import OmegaConf
 
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
-from rllm.engine.rollout.fireworks_engine import FireworksEngine
+
+try:
+    from rllm.engine.rollout.fireworks_engine import FireworksEngine
+except ImportError as e:
+    raise ImportError("The 'fireworks' package is required to use the Fireworks backend. Please install it with: pip install fireworks-ai") from e
+
 from rllm.trainer.verl.agent_workflow_trainer import AgentWorkflowPPOTrainer
 from rllm.workflows.workflow import TerminationReason
 from verl import DataProto
