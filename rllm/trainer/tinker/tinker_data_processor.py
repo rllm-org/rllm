@@ -419,8 +419,8 @@ def process_episodes(
     trajectory_groups_dict = defaultdict(list)
 
     def get_task_id(episode):
-        """Extract task_id from episode.id (format: task_id:rollout_idx)"""
-        return ":".join(episode.id.split(":")[:-1]) if ":" in episode.id else episode.id
+        """Extract task_id from episode.id (format: task_id:rollout_idx) => task_id"""
+        return episode.id.split(":")[0] if ":" in episode.id else episode.id
 
     if grouping_level == "trajectory":
         # Group by (task_id, trajectory_name) - for multi-agent workflows like solver-judge
@@ -438,8 +438,6 @@ def process_episodes(
                 for step_idx, step in enumerate(trajectory.steps):
                     group_key = (task_id, trajectory.name, step_idx)
                     # Create single-step trajectory
-                    from rllm.agents.agent import Trajectory
-
                     single_step_traj = Trajectory(steps=[step], reward=step.reward, name=trajectory.name)
                     trajectory_groups_dict[group_key].append(single_step_traj)
 
