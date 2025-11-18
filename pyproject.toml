@@ -74,6 +74,7 @@ dependencies = [
     "PyYAML",
     "pydantic",
     "wrapt",
+    "asgiref>=3.7.0",  # Async/sync conversion utilities
 
     # Development and testing
     "pytest",
