@@ -2,7 +2,7 @@
 
 This example shows how to use **Eval Protocol**'s FrozenLake environment from within **rLLM** using the generic `EvalProtocolWorkflow`.
 
-For a conceptual overview of how this integration works and how it generalizes to other benchmarks, see the core-concepts page on [Eval Protocol Integration](../core-concepts/eval-protocol.md).
+For a conceptual overview of how this integration works and how it generalizes to other benchmarks, see the core-concepts page on [Eval Protocol Integration](../../docs/core-concepts/eval-protocol.md).
 
 ---
 
