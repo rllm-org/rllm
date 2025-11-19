@@ -9,11 +9,13 @@ def prepare_geo3k_data():
     train_dataset = dataset["train"]
     test_dataset = dataset["test"]
     
-    instruction_following = (
-        r"You FIRST think about the reasoning process as an internal monologue and then provide the final answer. "
-        r"The reasoning process MUST BE enclosed within <think> </think> tags. "
-        r"The final answer MUST BE put in \boxed{}."
-    )
+    # instruction_following = (
+    #     r"You FIRST think about the reasoning process as an internal monologue and then provide the final answer. "
+    #     r"The reasoning process MUST BE enclosed within <think> </think> tags. "
+    #     r"The final answer MUST BE put in \boxed{}."
+    # )
+
+    instruction_following = "Let's think step by step and output your final answer in \\boxed{}."
     
     def process_fn(example, idx):
         problem = example.pop("problem")

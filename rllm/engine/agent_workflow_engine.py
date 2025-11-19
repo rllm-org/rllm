@@ -437,23 +437,7 @@ class AgentWorkflowEngine:
                 text_position_ids = torch.ones((1, len(input_ids[i])), dtype=torch.long)
                 text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item())
                 position_ids_list.append(torch.cat((text_position_ids, vision_position_ids), dim=0))  # (4, seq_length)
-                
-        elif processor is not None and "Glm4vImageProcessor" in processor.image_processor.__class__.__name__:
-            from verl.models.transformers.glm4v import get_rope_index
-
-            for i in range(batch_size):
-                model_inputs = multi_modal_inputs[i] if i < len(multi_modal_inputs) else {}
-                vision_position_ids = get_rope_index(
-                    processor,
-                    input_ids=input_ids[i],
-                    image_grid_thw=model_inputs.get("image_grid_thw"),
-                    video_grid_thw=model_inputs.get("video_grid_thw"),
-                    attention_mask=attention_mask[i],
-                )  # (3, seq_length)
-                valid_mask = attention_mask[i].bool()
-                text_position_ids = torch.ones((1, len(input_ids[i])), dtype=torch.long)
-                text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item())
-                position_ids_list.append(torch.cat((text_position_ids, vision_position_ids), dim=0))  # (4, seq_length)
+        
         else:
             # Fallback: should not reach here if called correctly
             raise ValueError(f"Unsupported processor type: {processor.__class__.__name__ if processor else None}")

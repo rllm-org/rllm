@@ -23,7 +23,7 @@ class Geo3KWorkflow(Workflow):
         if isinstance(image, dict) and "bytes" in image:
             image = Image.open(BytesIO(image["bytes"]))
         assert isinstance(image, Image.Image) or isinstance(image, str) or image is None, f"Image must be a PIL.Image.Image or a string, but got {type(image)}"
-        messages = [{"role": "user", "content": question, "image": image}]
+        messages = [{"role": "user", "content": question, "images": [image]}]
 
         output: ModelOutput = await self.rollout_engine.get_model_response(messages, application_id=uid, **kwargs)
         action = Action(output.content)

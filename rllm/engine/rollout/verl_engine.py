@@ -62,7 +62,7 @@ class VerlEngine(RolloutEngine):
         prompt = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, tools=tools, accumulate_reasoning=accumulate_reasoning)
         request_prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False) # list[int]
 
-        if any(msg.get("image", None) is not None and msg["role"] == "user" for msg in messages) and self.processor is not None:
+        if any(msg.get("images", None) is not None and msg["role"] == "user" for msg in messages) and self.processor is not None:
             image_data = self.chat_parser.process_image_data(messages) # list[PIL.Image.Image]
             model_inputs = self.processor(text=[prompt], images=image_data)
             prompt_ids = model_inputs.pop("input_ids")[0] # list[int]

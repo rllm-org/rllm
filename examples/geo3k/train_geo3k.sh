@@ -8,7 +8,7 @@ python3 -m examples.geo3k.train_geo3k \
     data.val_batch_size=512 \
     data.max_prompt_length=1024 \
     data.max_response_length=2048 \
-    actor_rollout_ref.model.path=Qwen/Qwen2.5-VL-3B-Instruct \
+    actor_rollout_ref.model.path=Qwen/Qwen3-VL-2B-Instruct \
     actor_rollout_ref.hybrid_engine=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.strategy=fsdp \
@@ -44,7 +44,7 @@ python3 -m examples.geo3k.train_geo3k \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='geo3k' \
-    trainer.experiment_name='geo3k-qwen2.5-vl-3b-instruct' \
+    trainer.experiment_name='qwen3-vl-2b-instruct' \
     trainer.val_before_train=True \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \

@@ -102,9 +102,6 @@ class ChatTemplateParser:
             elif "llama" in model_name:
                 logger.info(f"Using LlamaChatTemplateParser for {tokenizer.name_or_path}")
                 return LlamaChatTemplateParser(tokenizer)
-            elif "glm" in model_name or "glyph" in model_name:
-                logger.info(f"Using GLM4ChatTemplateParser for {tokenizer.name_or_path}")
-                return GLM4ChatTemplateParser(tokenizer, processor=processor)
 
         # Default to the standard parser if no specific match 
         parser = ChatTemplateParser(tokenizer, processor=processor)
@@ -421,11 +418,14 @@ class QwenChatTemplateParser(ChatTemplateParser):
         return self.system_token + content + self.eot_token
 
     def parse_user(self, message):
-        if "image" in message and message["image"] is not None:
+        if "images" in message and message["images"] is not None:
+            assert isinstance(message["images"], list), "images must be a list"
+            n_imgs = len(message["images"])
             content = message["content"]
             if message["content"].startswith("<image>"):
                 content = content[len("<image>") :]
-            return self.user_token + self.vision_start_token + self.image_token + self.vision_end_token + content + self.eot_token
+            vision_tokens = (self.vision_start_token + self.image_token + self.vision_end_token) * n_imgs
+            return self.user_token + vision_tokens + content + self.eot_token
 
         return self.user_token + message["content"] + self.eot_token
 
@@ -542,12 +542,15 @@ class QwenChatTemplateParser(ChatTemplateParser):
         messages = deepcopy(messages)
         image_data = []
         for message in messages:
-            if "image" in message and message["image"] is not None:
-                image = message["image"]
-                if not isinstance(image, dict):
-                    image = {"image": image}
-                processed_image = fetch_image(image, image_patch_size=self.processor.image_processor.patch_size) # PIL.Image.Image
-                image_data.append(processed_image)
+            if "images" in message and message["images"] is not None:
+                assert isinstance(message["images"], list), "images must be a list"
+                images = message["images"]
+                if not images or images[0] is None:
+                    continue
+                for image in images:
+                    image_dict = image if isinstance(image, dict) else {"image": image}
+                    processed_image = fetch_image(image_dict, image_patch_size=self.processor.image_processor.patch_size) # PIL.Image.Image
+                    image_data.append(processed_image)
         return image_data
 
 
@@ -606,103 +609,3 @@ class LlamaChatTemplateParser(ChatTemplateParser):
     def parse_completion(self, completion_ids):
         # TODO: add parse_completion for llama
         raise NotImplementedError("LLamaChatTemplateParser does not support parse_completion")
-
-
-class GLM4ChatTemplateParser(ChatTemplateParser):
-    def __init__(self, tokenizer, processor=None):
-        super().__init__(tokenizer, processor=processor)
-        self.bos_token = "[gMASK]<sop>"
-        self.system_token = "<|system|>\n"
-        self.user_token = "<|user|>\n"
-        self.assistant_token = "<|assistant|>\n"
-        self.eos_token = "<|user|>"
-        self.image_placeholder = "<|begin_of_image|><|image|><|end_of_image|>"
-        self.generation_prompt = self.assistant_token
-
-        # TODO: handle tool calls
-
-    def parse(self, messages: list[dict], add_generation_prompt: bool = False, is_first_msg: bool = False, accumulate_reasoning: bool = False, **kwargs) -> str:
-        result = ""
-
-        if is_first_msg:
-            result += self.bos_token
-
-        for message in messages:
-            if message["role"] == "system":
-                result += self.parse_system(message)
-            elif message["role"] == "user":
-                result += self.parse_user(message)
-            elif message["role"] == "assistant":
-                result += self.parse_assistant(message, accumulate_reasoning=accumulate_reasoning)
-            elif message["role"] == "tool":
-                result += self.parse_tool(message)
-            else:
-                raise NotImplementedError(f"Unsupported message role: {message['role']}")
-
-        if add_generation_prompt:
-            result += self.generation_prompt
-        else:
-            result += self.eos_token
-
-        return result
-
-    def parse_system(self, message):
-        return self.system_token + message["content"]
-
-    def parse_user(self, message):
-        if "image" in message and message["image"] is not None:
-            content = message["content"]
-            if message["content"].startswith("<image>"):
-                content = content[len("<image>") :]
-            return self.user_token + self.image_placeholder + content
-
-        return self.user_token + message["content"]
-
-    def parse_assistant(self, message, accumulate_reasoning=False):
-        content = (message.get("content", None) or "").strip()
-        reasoning = (message.get("reasoning", None) or "").strip()
-
-        if reasoning and accumulate_reasoning:
-            return self.assistant_token + "<think>" + reasoning + "</think>" + content
-
-        return self.assistant_token + content
-
-    def parse_tool(self, message):
-        raise NotImplementedError("GLM4ChatTemplateParser does not support parse_tool")
-
-    def parse_completion(self, completion_ids):
-        completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=False)
-
-        if completion_text.count("</think>") == 1:
-            reasoning, _, content = completion_text.partition("</think>")
-            if reasoning.startswith("<think>"):
-                reasoning = reasoning[len("<think>") :]
-            if content.endswith(self.eos_token):
-                content = content[: -len(self.eos_token)]
-            reasoning = reasoning.strip()
-            content = content.strip()
-        else:
-            reasoning = None
-            content = completion_text
-            if content.startswith("<think>"):
-                content = content[len("<think>") :]
-            if content.endswith(self.eos_token):
-                content = content[: -len(self.eos_token)]
-            content = content.strip()
-
-        return {
-            "content": content,
-            "reasoning": reasoning,
-            "tool_calls": [],
-        }
-
-    def process_image_data(self, messages):
-        from PIL import Image
-        messages = deepcopy(messages)
-        image_data = []
-        for message in messages:
-            if "image" in message and message["image"] is not None:
-                image = message["image"]
-                assert isinstance(image, Image.Image), "Image must be a PIL.Image.Image"
-                image_data.append(image)
-        return image_data
