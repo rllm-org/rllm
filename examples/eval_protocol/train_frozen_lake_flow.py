@@ -1,6 +1,6 @@
 import hydra
 
-from examples.eval_protocol.frozen_lake_flow import FrozenLakeWorkflow
+from rllm.workflows.eval_protocol_workflow import EvalProtocolWorkflow
 from rllm.data.dataset import DatasetRegistry
 from rllm.trainer.agent_trainer import AgentTrainer
 
@@ -11,10 +11,11 @@ def main(config):
     test_dataset = DatasetRegistry.load_dataset("frozen_lake_eval_protocol", "test")
 
     trainer = AgentTrainer(
-        workflow_class=FrozenLakeWorkflow,
+        workflow_class=EvalProtocolWorkflow,
         workflow_args={
+            "env_path": "eval_protocol.benchmarks.test_frozen_lake",
             "lite_llm_prefix": "fireworks_ai/",
-            "max_steps": 30,
+            "steps": 30,
             "temperature": 1.0,
             "max_tokens": 32768,
         },

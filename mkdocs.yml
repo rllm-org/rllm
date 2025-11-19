@@ -81,6 +81,7 @@ nav:
         - AgentWorkflowEngine for Episode Rollout: core-concepts/workflow-engine.md
         - AgentTrainer for RL Training: core-concepts/training.md
         - RL Algorithms for Agents: core-concepts/rl-algos.md
+        - Eval Protocol Integration: core-concepts/eval-protocol.md
       - References:
         - Examples: examples/index.md
         - API Reference: api/index.md
@@ -96,6 +97,7 @@ nav:
       - AgentWorkflowEngine for Episode Rollout: core-concepts/workflow-engine.md
       - AgentTrainer for RL Training: core-concepts/training.md
       - RL Algorithms for Agents: core-concepts/rl-algos.md
+      - Eval Protocol Integration: core-concepts/eval-protocol.md
   - Examples:
       - Overview: examples/index.md
       - DeepScaleR: examples/deepscaler.md
