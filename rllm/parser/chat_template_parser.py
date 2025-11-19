@@ -103,7 +103,7 @@ class ChatTemplateParser:
                 logger.info(f"Using LlamaChatTemplateParser for {tokenizer.name_or_path}")
                 return LlamaChatTemplateParser(tokenizer)
 
-        # Default to the standard parser if no specific match 
+        # Default to the standard parser if no specific match
         parser = ChatTemplateParser(tokenizer, processor=processor)
         logger.info(f"No custom parser found. Using default ChatTemplateParser for {tokenizer.name_or_path}")
         assert parser.verify_equivalence(PARSER_TEST_MESSAGES), "Parser failed equivalence check"
@@ -539,6 +539,7 @@ class QwenChatTemplateParser(ChatTemplateParser):
 
     def process_image_data(self, messages):
         from qwen_vl_utils import fetch_image
+
         messages = deepcopy(messages)
         image_data = []
         for message in messages:
@@ -549,7 +550,7 @@ class QwenChatTemplateParser(ChatTemplateParser):
                     continue
                 for image in images:
                     image_dict = image if isinstance(image, dict) else {"image": image}
-                    processed_image = fetch_image(image_dict, image_patch_size=self.processor.image_processor.patch_size) # PIL.Image.Image
+                    processed_image = fetch_image(image_dict, image_patch_size=self.processor.image_processor.patch_size)  # PIL.Image.Image
                     image_data.append(processed_image)
         return image_data
 

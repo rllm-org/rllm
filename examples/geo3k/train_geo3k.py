@@ -2,8 +2,8 @@ import hydra
 
 from examples.geo3k.geo3k_workflow import Geo3KWorkflow
 from rllm.data.dataset import DatasetRegistry
-from rllm.trainer.agent_trainer import AgentTrainer
 from rllm.rewards.reward_fn import math_reward_fn
+from rllm.trainer.agent_trainer import AgentTrainer
 
 
 @hydra.main(config_path="pkg://rllm.trainer.config", config_name="agent_ppo_trainer", version_base=None)

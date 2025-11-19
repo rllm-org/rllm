@@ -288,7 +288,7 @@ class AgentWorkflowEngine:
                         prompts.append(prompt)
                         responses.append(response)
                         traj_mask.append(mask)
-                        multi_modal_inputs_list.append({}) # empty dict
+                        multi_modal_inputs_list.append({})  # empty dict
 
                     elif isinstance(trajectory.steps[0].model_output, ModelOutput):
                         step = trajectory.steps[0]
@@ -309,7 +309,7 @@ class AgentWorkflowEngine:
                         prompts.append(prompt)
                         responses.append(response)
                         traj_mask.append(mask)
-                        multi_modal_inputs_list.append({}) # empty dict
+                        multi_modal_inputs_list.append({})  # empty dict
 
                     step_rewards.append(trajectory.reward)
                     step_ids.append(trajectory_id)
@@ -334,7 +334,7 @@ class AgentWorkflowEngine:
                             prompts.append(prompt)
                             responses.append(response)
                             traj_mask.append(mask)
-                            multi_modal_inputs_list.append({}) # empty dict
+                            multi_modal_inputs_list.append({})  # empty dict
 
                         step_rewards.append(step.reward)
                         step_ids.append(f"{trajectory_id}_step{step_idx}")  # unique step identifier e.g., 1234567890_solver_step0
@@ -386,8 +386,8 @@ class AgentWorkflowEngine:
 
         if hasattr(self.rollout_engine, "processor") and self.rollout_engine.processor is not None:
             position_ids = self._handle_multimodal_position_ids(
-                processor=self.rollout_engine.processor, 
-                input_ids=input_ids, 
+                processor=self.rollout_engine.processor,
+                input_ids=input_ids,
                 attention_mask=attention_mask,
                 multi_modal_inputs=multi_modal_inputs_list,
             )
@@ -414,13 +414,7 @@ class AgentWorkflowEngine:
         if cf.enable:
             for i in range(len(episode_ids)):
                 termination_reason = termination_reasons[i]
-                if (cf.mask_max_prompt_length_exceeded and termination_reason == TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED) \
-                or (cf.mask_max_response_length_exceeded and termination_reason == TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED) \
-                or (cf.mask_env_done and termination_reason == TerminationReason.ENV_DONE) \
-                or (cf.mask_max_turns_exceeded and termination_reason == TerminationReason.MAX_TURNS_EXCEEDED) \
-                or (cf.mask_timeout and termination_reason == TerminationReason.TIMEOUT) \
-                or (cf.mask_unknown and termination_reason == TerminationReason.UNKNOWN) \
-                or (cf.mask_error and termination_reason == TerminationReason.ERROR):
+                if (cf.mask_max_prompt_length_exceeded and termination_reason == TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED) or (cf.mask_max_response_length_exceeded and termination_reason == TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED) or (cf.mask_env_done and termination_reason == TerminationReason.ENV_DONE) or (cf.mask_max_turns_exceeded and termination_reason == TerminationReason.MAX_TURNS_EXCEEDED) or (cf.mask_timeout and termination_reason == TerminationReason.TIMEOUT) or (cf.mask_unknown and termination_reason == TerminationReason.UNKNOWN) or (cf.mask_error and termination_reason == TerminationReason.ERROR):
                     is_valid[i] = False  # set flag to filter out the episode later (after advantages are computed)
 
         non_tensors = {
@@ -461,7 +455,7 @@ class AgentWorkflowEngine:
         """Handle multimodal position ids calculation. Borrowed from verl.utils.dataset.rl_dataset.py"""
         batch_size = input_ids.shape[0]
         position_ids_list = []
-        
+
         if processor is not None and "Qwen2VLImageProcessor" in processor.image_processor.__class__.__name__:
             # qwen-vl mrope
             if "Qwen3VLProcessor" in processor.__class__.__name__:
@@ -483,15 +477,14 @@ class AgentWorkflowEngine:
                 text_position_ids = torch.ones((1, len(input_ids[i])), dtype=torch.long)
                 text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item())
                 position_ids_list.append(torch.cat((text_position_ids, vision_position_ids), dim=0))  # (4, seq_length)
-        
+
         else:
             # Fallback: should not reach here if called correctly
             raise ValueError(f"Unsupported processor type: {processor.__class__.__name__ if processor else None}")
-        
+
         # Stack all position_ids to form batch: (batch_size, 4, seq_length)
         position_ids = torch.stack(position_ids_list, dim=0)
         return position_ids
-
 
     def shutdown(self):
         """Shutdown the workflow engine and cleanup resources."""

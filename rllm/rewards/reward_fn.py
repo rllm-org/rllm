@@ -132,6 +132,7 @@ def f1_reward_fn(task_info: dict, action: str) -> RewardOutput:
 
     def normalize_text(s: str) -> str:
         """Normalize text for evaluation (following HotpotQA/SQuAD standards)"""
+
         def remove_articles(text: str) -> str:
             return re.sub(r"\b(a|an|the)\b", " ", text)
 

@@ -1,10 +1,12 @@
 from io import BytesIO
+
 from PIL import Image
+
 from rllm.agents.agent import Action, Episode, Step, Trajectory
 from rllm.engine import ModelOutput, RolloutEngine
 from rllm.rewards.reward_fn import RewardFunction, math_reward_fn
-from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflow
 from rllm.workflows.simple_workflow import SimpleAgent
+from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflow
 
 
 class Geo3KWorkflow(Workflow):

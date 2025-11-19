@@ -1,22 +1,21 @@
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 from rllm.tools.tool_base import ToolCall
 
 
 @dataclass
 class ModelOutput:
-    text: Optional[str] = None
-    content: Optional[str] = None
-    reasoning: Optional[str] = None
-    tool_calls: Optional[list[ToolCall]] = None
-    prompt_ids: Optional[list[int]] = None
-    completion_ids: Optional[list[int]] = None
-    multi_modal_inputs: Optional[dict[str, list]] = None
-    logprobs: Optional[list[float]] = None
+    text: str | None = None
+    content: str | None = None
+    reasoning: str | None = None
+    tool_calls: list[ToolCall] | None = None
+    prompt_ids: list[int] | None = None
+    completion_ids: list[int] | None = None
+    multi_modal_inputs: dict[str, list] | None = None
+    logprobs: list[float] | None = None
     prompt_length: int = 0
     completion_length: int = 0
-    finish_reason: Optional[str] = None
+    finish_reason: str | None = None
 
     def to_dict(self):
         return {
