@@ -1,5 +1,4 @@
 import asyncio
-import concurrent.futures
 import logging
 import time
 import traceback
@@ -31,7 +30,7 @@ class AgentExecutionEngine:
         tokenizer=None,
         rollout_engine=None,
         chat_parser=None,
-        n_parallel_agents=1,
+        n_parallel_agents=128,  # The number of active agents
         trajectory_timeout=None,
         gamma=0.2,
         api_retries=3,
@@ -45,7 +44,7 @@ class AgentExecutionEngine:
         agent_args=None,
         rollout_engine_args=None,
         env_args=None,
-        max_workers=64,
+        max_workers=64,  # The number of concurrent env operations
         enforce_max_prompt_length=False,  # If enabled, applies max_prompt check per step
         overlong_filter=False,  # Filter for overlong trajectories (i.e. TRUNCATION, MAX_STEPS, TIMEOUT)
         **kwargs,
@@ -61,6 +60,7 @@ class AgentExecutionEngine:
         self.tokenizer = tokenizer
         self.engine_name = engine_name
         self.n_parallel_agents = n_parallel_agents
+        self.max_env_workers = max_workers
         self.overlong_filter = overlong_filter
 
         # For interaction
@@ -95,7 +95,7 @@ class AgentExecutionEngine:
         self.rollout_engine_args = rollout_engine_args
         self.sampling_params = kwargs.get("sampling_params", {})  # for openai api requests
 
-        assert self.engine_name in ["openai", "verl"], "Currently only openai and verl are supported as rollout engine"
+        assert self.engine_name in ["openai", "verl", "tinker"], "Currently only openai, verl and tinker are supported as rollout engine"
         if self.engine_name == "openai":
             from rllm.engine.rollout.openai_engine import OpenAIEngine
 
@@ -116,9 +116,15 @@ class AgentExecutionEngine:
                 tokenizer=self.tokenizer,
                 disable_thinking=self.disable_thinking,
             )
+        elif self.engine_name == "tinker":
+            from rllm.engine.rollout.tinker_engine import TinkerEngine
+
+            self.rollout_engine = TinkerEngine(
+                **rollout_engine_args,
+            )
 
         # Create a thread pool executor for environment interactions (i.e. step, reset, close)
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
 
     async def get_model_response(self, prompt, application_id, **kwargs) -> str:
         """
@@ -150,6 +156,9 @@ class AgentExecutionEngine:
             validate = meta_data.get("validate", False)
             output = await self.rollout_engine.get_model_response(prompt, application_id=application_id, validate=validate, enforce_max_prompt_length=False, **sampling_params)
             return output
+        elif self.engine_name == "tinker":
+            output = await self.rollout_engine.get_model_response(prompt, application_id=application_id, enforce_max_prompt_length=False, **sampling_params)
+            return output
         else:
             raise NotImplementedError(f"Engine type '{self.engine_name}' not supported")
 
@@ -167,7 +176,6 @@ class AgentExecutionEngine:
         for idx, env in enumerate(envs):
             env.idx = idx
         self.agents = agents
-        self.n_parallel_agents = len(envs)
 
     async def run_agent_trajectory_async(self, idx, application_id, seed=0, mode="Text", **kwargs):
         """Run a single agent's trajectory asynchronously"""
@@ -242,7 +250,8 @@ class AgentExecutionEngine:
                 "prompt": self.chat_parser.parse(prompt_messages, add_generation_prompt=True, is_first_msg=True),
                 "response": response,
                 "prompt_ids": model_output.prompt_ids,
-                "completion_ids": model_output.completion_ids,
+                "response_ids": model_output.completion_ids,
+                "logprobs": model_output.logprobs,
             }
             episode_steps.append(prompt_response_pair)
 
@@ -497,29 +506,33 @@ class AgentExecutionEngine:
         assert all(env is not None and isinstance(env, BaseEnv) for env in self.envs), "All environments must be inheriting from BaseEnv"
         assert all(env.is_multithread_safe() for env in self.envs), "All environments must be multithread safe for async engine"  # type: ignore
         max_concurrency = self.n_parallel_agents
-        free_cache_engine = self.config.actor_rollout_ref.rollout.free_cache_engine if self.config else False
+        if self.engine_name == "verl":
+            free_cache_engine = self.config.actor_rollout_ref.rollout.free_cache_engine if self.config else False
 
         self.executor = ThreadPoolExecutor(max_workers=max_concurrency)
 
         if self.engine_name == "verl" and free_cache_engine:
             await self.rollout_engine.wake_up()  # type: ignore
 
-        async def launch_one_trajectory_task(env_idx: int):
-            try:
-                application_id = str(uuid.uuid4())
-                result = await self.run_agent_trajectory_with_retry(
-                    idx=env_idx,
-                    application_id=application_id,
-                    seed=reset_seed,
-                    mode=mode,
-                    **kwargs,
-                )
-            except Exception as e:
-                import traceback
+        semaphore = asyncio.Semaphore(self.n_parallel_agents)
 
-                traceback.print_exc()
-                raise e
-            return result
+        async def launch_one_trajectory_task(env_idx: int):
+            async with semaphore:
+                try:
+                    application_id = str(uuid.uuid4())
+                    result = await self.run_agent_trajectory_with_retry(
+                        idx=env_idx,
+                        application_id=application_id,
+                        seed=reset_seed,
+                        mode=mode,
+                        **kwargs,
+                    )
+                except Exception as e:
+                    import traceback
+
+                    traceback.print_exc()
+                    raise e
+                return result
 
         # Create all N conceptual tasks. Their execution will be throttled by the semaphore
         # and the availability of agent/env indices.
@@ -552,6 +565,8 @@ class AgentExecutionEngine:
         Returns:
             A list of trajectories, one for each task.
         """
+        if not hasattr(self, "executor") or self.executor._shutdown:
+            self.executor = ThreadPoolExecutor(max_workers=self.max_env_workers)
 
         max_concurrent = self.n_parallel_agents
 
@@ -593,6 +608,9 @@ class AgentExecutionEngine:
 
         all_trajectories = {task_id: trajectory for task_id, trajectory in results}
         ordered_trajectories = [all_trajectories[i] for i in range(len(all_trajectories))]
+
+        self.executor.shutdown(wait=False, cancel_futures=True)
+
         return ordered_trajectories
 
     def shutdown(self):

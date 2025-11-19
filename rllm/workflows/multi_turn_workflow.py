@@ -2,10 +2,11 @@ from typing import Any
 
 from rllm.agents.agent import Episode
 from rllm.engine.rollout.rollout_engine import ModelOutput
+from rllm.workflows.timing_mixin import TimingTrackingMixin
 from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflow
 
 
-class MultiTurnWorkflow(Workflow):
+class MultiTurnWorkflow(TimingTrackingMixin, Workflow):
     def __init__(
         self,
         agent_cls,
@@ -33,17 +34,17 @@ class MultiTurnWorkflow(Workflow):
     async def run(self, task: dict, uid: str, **kwargs) -> Episode | None:
         """Execute a multi-step workflow"""
 
-        observation, info = await self.run_in_executor(self.reset, task=task, uid=uid)
+        observation, info = await self.timed_env_call(self.reset, task=task, uid=uid)
 
         self.agent.update_from_env(observation, 0, False, info)
 
         for _ in range(1, self.max_steps + 1):
-            output: ModelOutput = await self.rollout_engine.get_model_response(self.agent.chat_completions, application_id=uid, **kwargs)
+            output: ModelOutput = await self.timed_llm_call(self.agent.chat_completions, application_id=uid, **kwargs)
             response = output.text
 
             action = self.agent.update_from_model(response)
 
-            next_obs, reward, done, info = await self.run_in_executor(self.env.step, action)
+            next_obs, reward, done, info = await self.timed_env_call(self.env.step, action)
             self.agent.update_from_env(next_obs, reward, done, info)
 
             if output.finish_reason == "length":

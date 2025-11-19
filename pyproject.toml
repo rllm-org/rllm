@@ -74,6 +74,7 @@ dependencies = [
     "PyYAML",
     "pydantic",
     "wrapt",
+    "asgiref>=3.7.0",  # Async/sync conversion utilities
 
     # Development and testing
     "pytest",
@@ -97,6 +98,11 @@ smolagents = [
 
 strands = [
     "strands-agents",
+]
+
+tinker = [
+    "tinker",
+    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook",
 ]
 
 [tool.ruff]
@@ -139,6 +145,9 @@ ignore = [
 [tool.setuptools.packages.find]
 where   = ["."]
 include = ["rllm", "rllm.*"]
+
+[tool.setuptools.package-data]
+rllm = ["trainer/config/*.yaml"]
 
 [tool.mypy]
 plugins = ["pydantic.mypy"]

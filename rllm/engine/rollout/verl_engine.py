@@ -97,6 +97,7 @@ class VerlEngine(RolloutEngine):
             prompt_ids=prompt_ids,
             completion_ids=completion_ids,
             multi_modal_inputs=multi_modal_inputs,
+            logprobs=[],
             prompt_length=prompt_length,
             completion_length=len(completion_ids),
             finish_reason=finish_reason,
