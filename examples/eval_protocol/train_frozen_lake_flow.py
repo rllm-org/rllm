@@ -1,8 +1,8 @@
 import hydra
 
-from rllm.workflows.eval_protocol_workflow import EvalProtocolWorkflow
 from rllm.data.dataset import DatasetRegistry
 from rllm.trainer.agent_trainer import AgentTrainer
+from rllm.workflows.eval_protocol_workflow import EvalProtocolWorkflow
 
 
 @hydra.main(config_path="pkg://rllm.trainer.config", config_name="agent_ppo_trainer", version_base=None)
