@@ -467,7 +467,11 @@ def grade_answer_mathd(given_answer: str, ground_truth: str) -> bool:
     return False
 
 
-def extract_answer(passage: str) -> str:
+def extract_answer(passage: str) -> str | None:
+    if "<|begin_of_box|>" in passage and "<|end_of_box|>" in passage:
+        matches = re.findall(r"<\|begin_of_box\|>([\s\S]*?)<\|end_of_box\|>", passage)
+        if matches:
+            return matches[-1].strip()
     if "\\boxed" in passage:
         return extract_boxed_answer(passage)
     return None
