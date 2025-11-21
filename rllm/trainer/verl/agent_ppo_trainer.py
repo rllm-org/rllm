@@ -64,6 +64,10 @@ class AgentPPOTrainer(RayPPOTrainer):
     def init_workers(self):
         super().init_workers()
 
+        engine_args = OmegaConf.to_container(self.config.rllm.agent.get("engine_args", {})) or {}
+        n_parallel_agents = engine_args.pop("n_parallel_agents", None) or self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
+        print(f"n_parallel_agents: {n_parallel_agents}")
+
         self.agent_execution_engine = AsyncAgentExecutionEngine(
             rollout_engine=self.async_rollout_manager,
             config=self.config,
@@ -81,7 +85,8 @@ class AgentPPOTrainer(RayPPOTrainer):
             trajectory_timeout=self.config.rllm.agent.trajectory_timeout,
             overlong_filter=self.config.rllm.agent.get("overlong_filter", False),
             disable_thinking=self.config.rllm.disable_thinking,
-            **self.config.rllm.agent.get("engine_args", {}),
+            n_parallel_agents=n_parallel_agents,
+            **engine_args,
         )
 
     def init_envs_and_agents(self, batch):
@@ -300,11 +305,6 @@ class AgentPPOTrainer(RayPPOTrainer):
                                 size_mask = torch.zeros(batch.batch["input_ids"].shape[0], dtype=torch.bool)
                                 size_mask[:max_batch_size] = True
                                 batch = batch[size_mask]
-
-                        # recompute old_log_probs
-                        with marked_timer("old_log_prob", timing_raw):
-                            old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-                            batch = batch.union(old_log_prob)
 
                         # recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
