@@ -717,7 +717,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
             # Legend before the example
             legend = " ".join(
                 [
-                    "\x1b[37mwhite=masked\x1b[0m",
+                    "\x1b[40mwhite=masked\x1b[0m",
                     "\x1b[34mblue=unmasked\x1b[0m",
                     "\x1b[42m green bg=reward>0 \x1b[0m",
                     "\x1b[41m red bg=reward<=0 \x1b[0m",
@@ -734,7 +734,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                 if not is_valid:
                     continue
                 tok = self.tokenizer.decode([tok_id]).replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-                prompt_parts.append(f"\x1b[37m{tok}\x1b[0m")  # white
+                prompt_parts.append(f"\x1b[40m{tok}\x1b[0m")  # white
             print("".join(prompt_parts))
 
             # Separator line between prompt and response for readability
@@ -776,7 +776,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                 tok = self.tokenizer.decode([tok_id]).replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
 
                 contributes = bool(loss_mask[j].item()) if hasattr(loss_mask[j], "item") else bool(loss_mask[j])
-                fg = "\x1b[34m" if contributes else "\x1b[37m"  # blue if in loss, else white
+                fg = "\x1b[34m" if contributes else "\x1b[40m"  # blue if in loss, else white
 
                 bg = ""
                 if reward_idx is not None and j == reward_idx:
