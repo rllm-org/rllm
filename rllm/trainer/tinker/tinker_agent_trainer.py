@@ -365,15 +365,22 @@ class TinkerAgentTrainer:
         group_dict = defaultdict(list)
         episode_queue = asyncio.Queue()
         produce_completed = asyncio.Event()
+        producer_exception = None
 
         async def produce_episodes():
             """Background task: continuously generate episodes and fill queue"""
-            async for traj in self.agent_execution_engine.trajectory_generator(timing_raw=timing_raw, mode="Step", meta_info=meta_info):
-                group_dict[traj["idx"] // group_size].append(traj)
-                if len(group_dict[traj["idx"] // group_size]) == group_size:
-                    episode = self.convert_to_episode(group_dict[traj["idx"] // group_size])
-                    await episode_queue.put(episode)  # Use await for async queue
-            produce_completed.set()
+            nonlocal producer_exception
+            try:
+                async for traj in self.agent_execution_engine.trajectory_generator(timing_raw=timing_raw, mode="Step", meta_info=meta_info):
+                    group_dict[traj["idx"] // group_size].append(traj)
+                    if len(group_dict[traj["idx"] // group_size]) == group_size:
+                        episode = self.convert_to_episode(group_dict[traj["idx"] // group_size])
+                        await episode_queue.put(episode)  # Use await for async queue
+            except Exception as e:
+                logger.exception(f"Producer task failed with exception: {e}")
+                producer_exception = e
+            finally:
+                produce_completed.set()
 
         # Start producer in background
         producer_task = asyncio.create_task(produce_episodes())
@@ -381,12 +388,30 @@ class TinkerAgentTrainer:
         try:
             # This generator yields to the caller (training loop)
             minibatch = []
+            timeout_count = 0
+            max_timeouts = 6000  # 600 seconds (10 minutes) with 0.1s timeout
+
             while True:
+                # Check if producer failed
+                if producer_exception is not None:
+                    raise RuntimeError("Episode generation failed in producer task") from producer_exception
+
                 # Collect minibatch
                 try:
                     episode = await asyncio.wait_for(episode_queue.get(), timeout=0.1)
                     minibatch.append(episode)
+                    timeout_count = 0  # Reset timeout counter on successful get
                 except asyncio.TimeoutError:
+                    timeout_count += 1
+                    if timeout_count > max_timeouts:
+                        # Check producer status
+                        if producer_exception is not None:
+                            raise RuntimeError("Episode generation failed") from producer_exception
+                        elif produce_completed.is_set() and episode_queue.empty():
+                            break
+                        else:
+                            raise TimeoutError(f"Episode generation stuck: no episodes received for {max_timeouts * 0.1:.1f} seconds. Producer completed: {produce_completed.is_set()}, Queue size: {episode_queue.qsize()}") from None
+
                     if produce_completed.is_set():
                         break
                     continue
@@ -404,7 +429,10 @@ class TinkerAgentTrainer:
                 yield minibatch
 
         finally:
+            # Wait for producer and check for exceptions
             await producer_task
+            if producer_exception is not None:
+                raise RuntimeError("Episode generation failed") from producer_exception
 
     def convert_to_episode(self, group: list):
         trajectories = []
