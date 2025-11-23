@@ -21,7 +21,6 @@ dependencies = [
     # Core ML/AI packages
     "torch>=2.6",
     "transformers>=4.5",
-    "sentence-transformers",
 
     # Data processing
     "datasets",
@@ -29,18 +28,8 @@ dependencies = [
     "polars",
     "pillow",
 
-    # Cloud and infrastructure
-    "google-cloud-aiplatform",
-    "vertexai",
-    "docker",
-    "kubernetes",
+    # Infrastructure
     "ray",
-
-    # Web and automation
-    "gradio",
-    "selenium",
-    "browsergym",
-    "firecrawl",
 
     # Math and science
     "numpy",
@@ -48,29 +37,15 @@ dependencies = [
     "pylatexenc",
     "antlr4-python3-runtime==4.9.3",
 
-    # Code evaluation
-    "swebench",
-    "e2b_code_interpreter",
-
     # Tools
     "mcp",
-    "camel-ai",
 
     # Utilities
     "hydra-core",
     "openai",
-    "fire",
-    "gdown",
-    "together>=1.4",
-    "wandb",
-    "gymnasium",
-    "click",
     "fastapi",
     "uvicorn",
-    "httpx",
-    "jupyter",
     "tqdm",
-    "rich",
     "PyYAML",
     "pydantic",
     "wrapt",
@@ -88,6 +63,11 @@ dependencies = [
     "mkdocstrings[python]>=0.24.0",
     "mkdocs-autorefs>=0.5.0",
     "pymdown-extensions>=10.0.0",
+
+
+    # Tinker
+    "tinker",
+    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook",
 ]
 
 [project.optional-dependencies]
@@ -100,9 +80,23 @@ strands = [
     "strands-agents",
 ]
 
-tinker = [
-    "tinker",
-    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook",
+
+swe = [
+    "docker",
+    "kubernetes",
+    "swebench",
+]
+
+web = [
+    "selenium",
+    "browsergym",
+    "firecrawl",
+    "gymnasium",
+]
+
+code-tools = [
+    "e2b_code_interpreter",
+    "together>=1.4",
 ]
 
 [tool.ruff]
