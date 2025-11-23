@@ -12,6 +12,7 @@ from rllm.agents.utils import (
     convert_messages_to_tokens_and_masks,
     get_recent_assistant_user_messages,
 )
+from rllm.engine.rollout.rollout_engine import ModelOutput
 from rllm.environments.base.base_env import BaseEnv
 from rllm.environments.env_utils import (
     compute_mc_return,
@@ -74,6 +75,7 @@ class AgentExecutionEngine:
 
         self.agent_class = agent_class
         self.agent_args = agent_args
+        self.agent_args["chat_template_parser"] = self.chat_parser
         self.env_class = env_class
         self.env_args = env_args
 
@@ -117,7 +119,7 @@ class AgentExecutionEngine:
                 disable_thinking=self.disable_thinking,
             )
 
-    async def get_model_response(self, prompt, application_id, **kwargs) -> str:
+    async def get_model_response(self, prompt, application_id, **kwargs) -> ModelOutput:
         """
         Compute model response asynchronously based on the engine type.
 
@@ -135,20 +137,18 @@ class AgentExecutionEngine:
         Raises:
             NotImplementedError: If the engine type is not supported
         """
-
         sampling_params = self.sampling_params.copy()
         sampling_params.update(kwargs)
-
         if self.engine_name == "openai":
             output = await self.rollout_engine.get_model_response(prompt, application_id=application_id, enforce_max_prompt_length=False, **sampling_params)
-            return output.text
+            return output
         elif self.engine_name == "verl":
             meta_data = sampling_params.pop("meta_info", {})
             validate = meta_data.get("validate", False)
             output = await self.rollout_engine.get_model_response(prompt, application_id=application_id, validate=validate, enforce_max_prompt_length=False, **sampling_params)
-            return output.text
-        else:
-            raise NotImplementedError(f"Engine type '{self.engine_name}' not supported")
+            return output
+
+        raise NotImplementedError(f"Engine type '{self.engine_name}' not supported")
 
     def update_envs_and_agents(self, envs, agents):
         """
@@ -227,20 +227,30 @@ class AgentExecutionEngine:
 
             kwargs["max_tokens"] = max_tokens
 
+            # Add tools for rollout_engine if agent provides them (for use_tool_calling)
+            # May be duplicated if already added tool to sys prompt in agent.reset()
+            if hasattr(agent, "get_tools_for_rollout_engine") and callable(agent.get_tools_for_rollout_engine) and hasattr(agent, "use_tool_calling") and agent.use_tool_calling:
+                tools = agent.get_tools_for_rollout_engine()
+                if tools:
+                    kwargs["tools"] = tools
+
             start_time = time.time()
-            response = await self.get_model_response(prompt_messages, application_id, **kwargs)
+            # Return ModelOutput instead of response text, for agent.update_from_model
+            # response text -> ModelOutput in rollout_engines
+            # So no need to get ModelOutput.text and re-parse it in agent.update_from_model
+            model_output = await self.get_model_response(prompt_messages, application_id, **kwargs)
             delta_time = time.time() - start_time
             llm_time += delta_time
             total_time += delta_time
             # Update steps
             prompt_response_pair = {
                 "prompt": self.chat_parser.parse(prompt_messages, add_generation_prompt=True, is_first_msg=True),
-                "response": response,
+                "response": model_output.text,
             }
             episode_steps.append(prompt_response_pair)
 
             # Update agent with model response
-            action: Action = agent.update_from_model(response)
+            action: Action = agent.update_from_model(model_output)
             action = action.action
 
             # Take step in environment using the executor
