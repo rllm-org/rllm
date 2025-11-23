@@ -20,7 +20,8 @@ from rllm.misc import colorful_print
 from rllm.sdk.data_process import group_steps, trace_to_step
 from rllm.sdk.protocol import TrajectoryView
 from rllm.sdk.proxy.proxy_manager import VerlProxyManager
-from rllm.sdk.shortcuts import _session_with_name
+from rllm.sdk.session import SESSION_BACKEND
+from rllm.sdk.session.base import wrap_with_session_context
 from rllm.sdk.store.sqlite_store import SqliteTraceStore
 from rllm.workflows.workflow import TerminationReason
 
@@ -77,41 +78,19 @@ class AgentSdkEngine:
         else:
             raise NotImplementedError(f"Rollout engine type {type(rollout_engine)} not supported")
 
-        self.wrapped_agent_run_func = self._prepare_run_func_with_tracing(self.agent_run_func)
+        self.wrapped_agent_run_func = wrap_with_session_context(self.agent_run_func, tracer_service_name="agent-sdk-worker")
         self.groupby_key = self.config.rllm.sdk.processing.groupby_key
         self.traj_name_key = self.config.rllm.sdk.processing.traj_name_key
         self.store = SqliteTraceStore(db_path=self.config.rllm.sdk.store.path)
-
-    def _prepare_run_func_with_tracing(self, func):
-        """Wrap agent function with session context for automatic trace collection.
-
-        Creates wrapper that uses _session_with_name to set explicit session name
-        from task metadata. Returns both function output and session UID for trace retrieval.
-        """
-        if inspect.iscoroutinefunction(func):
-
-            async def wrapped_func_async(metadata, *args, **kwargs):
-                session_name = metadata.pop("session_name", None)
-                with _session_with_name(name=session_name, **metadata) as session:
-                    output = await func(*args, **kwargs)
-                return output, session._uid
-
-            return wrapped_func_async
-        else:
-
-            def wrapped_func_sync(metadata, *args, **kwargs):
-                session_name = metadata.pop("session_name", None)
-                with _session_with_name(name=session_name, **metadata) as session:
-                    output = func(*args, **kwargs)
-                return output, session._uid
-
-        return wrapped_func_sync
 
     def _setup_verl_proxy(self, proxy_config: dict, tracer: Optional["TracerProtocol"]) -> None:
         """Setup LiteLLM proxy for VERL rollout engine.
 
         Initializes VerlProxyManager and starts proxy in subprocess or external mode.
         Proxy handles trace collection from vLLM servers and persists to SQLite.
+
+        When using OpenTelemetry-based sessions, sync storage mode is required to ensure
+        synchronization between tracer persistence and session reads.
         """
         model_name = proxy_config.get("model_name")
         if not model_name:
@@ -122,6 +101,12 @@ class AgentSdkEngine:
         proxy_port = proxy_config.get("proxy_port", 4000)
         proxy_mode = proxy_config.get("mode", "external")
         admin_token = proxy_config.get("admin_token", "my-shared-secret")
+
+        # Check if using OpenTelemetry session backend - requires sync storage mode
+        requires_sync_storage = SESSION_BACKEND == "opentelemetry"
+
+        if requires_sync_storage and proxy_mode == "external":
+            logger.warning("OpenTelemetry-based sessions require synchronous storage mode for proper synchronization. When using external proxy mode, ensure the proxy is started with --sync-tracer flag. Alternatively, use proxy_mode='subprocess' to automatically enable sync storage. Without sync storage, there may be synchronization issues between tracer persistence and session reads.")
 
         self.proxy_manager = VerlProxyManager(
             rollout_engine=self.rollout_engine,
@@ -144,7 +129,11 @@ class AgentSdkEngine:
             # Start subprocess, wait for server, then reload config
             db_path = proxy_config.get("db_path")
             project = proxy_config.get("project", "rllm-agent-sdk")
-            self.proxy_manager.start_proxy_subprocess(config=config_payload, db_path=db_path, project=project)
+            # Enable sync storage when using OpenTelemetry sessions
+            sync_tracer = requires_sync_storage
+            if sync_tracer:
+                logger.info("Enabling synchronous tracer persistence for OpenTelemetry session backend")
+            self.proxy_manager.start_proxy_subprocess(config=config_payload, db_path=db_path, project=project, sync_tracer=sync_tracer)
         elif proxy_mode == "external":
             # Reload external proxy with the generated configuration
             self.proxy_manager.reload_proxy_config(config=config_payload)
