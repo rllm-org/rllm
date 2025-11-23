@@ -42,22 +42,6 @@ This is a more complex example with 2 agents and more complex grouping logic.
 ./train_solver_judge_flow.sh
 ```
 
-### Solver-Judge Flow with SQLite Storage
-
-This example demonstrates using SQLite-based session storage instead of the default in-memory storage. SQLite storage is useful for multi-process scenarios, persistence, and debugging.
-
-**Quick test (recommended first):**
-```bash
-python3 -m examples.sdk.solver_judge_sqlite.test_sqlite_storage
-```
-
-**Full training:**
-```bash
-./examples/sdk/solver_judge_sqlite/train_sqlite.sh
-```
-
-See `examples/sdk/solver_judge_sqlite/README.md` for detailed documentation on using SQLite storage.
-
 ## Optional: Manual Proxy Setup
 
 By default, the training scripts use `rllm.sdk.proxy.mode=subprocess` which automatically manages the LiteLLM proxy. If you prefer to manually manage the proxy, you can set `rllm.sdk.proxy.mode=external` in your training script and start the proxy yourself:

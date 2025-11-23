@@ -62,8 +62,13 @@ def trajectory(name: str = "agent", **traj_metadata):
                     # Run the function
                     result = await func(*args, **kwargs)
 
-                    # Convert each trace to a StepView
-                    steps = [trace_to_step_view(trace) for trace in traj_sess.llm_calls]
+                    # Convert each trace to a StepView. Prefer async accessor when available
+                    # (e.g., OpenTelemetry sessions) to avoid async_to_sync recursion errors.
+                    if hasattr(traj_sess, "llm_calls_async"):
+                        traces = await traj_sess.llm_calls_async()  # type: ignore[attr-defined]
+                    else:
+                        traces = traj_sess.llm_calls
+                    steps = [trace_to_step_view(trace) for trace in traces]
 
                     return TrajectoryView(
                         name=name,
