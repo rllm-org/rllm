@@ -710,107 +710,24 @@ class AgentPPOTrainer(RayPPOTrainer):
 
     def visualize_trajectory(self, tensor_batch, sample_idx=0, max_samples=1, mask_key="response_mask"):
         """
-        Visualize the trajectory from tensor_batch by detokenizing prompts and responses,
-        and highlighting the masked parts with color.
-
-        Args:
-            tensor_batch: The tensor batch containing trajectory data
-            sample_idx: Starting index of samples to visualize
-            max_samples: Maximum number of samples to visualize
+        Visualize the trajectory from tensor_batch using the shared visualization utility.
         """
-        from rllm.misc import colorful_print
+        from rllm.utils.visualization import visualize_trajectories
 
-        # Get the relevant tensors
-        prompts = tensor_batch.batch["prompts"]
-        responses = tensor_batch.batch["responses"]
-        traj_mask = tensor_batch.batch[mask_key]
-        token_level_scores = tensor_batch.batch["token_level_scores"]
+        if len(tensor_batch) == 0:
+            return
 
-        # Full attention mask (covers prompt + response); split it into prompt and response parts
-        full_attn_mask = tensor_batch.batch["attention_mask"]
-        prompt_len = prompts.shape[1]
-        resp_len = responses.shape[1]
-        prompt_attn_mask = full_attn_mask[:, :prompt_len]
-        response_attn_mask = full_attn_mask[:, -resp_len:]
+        end_idx = min(sample_idx + max_samples, len(tensor_batch))
+        indices = list(range(sample_idx, end_idx))
 
-        batch_size = prompts.shape[0]
-        end_idx = min(sample_idx + max_samples, batch_size)
-
-        for i in range(sample_idx, end_idx):
-            colorful_print("\n" + "=" * 60, fg="cyan", bold=True)
-            colorful_print(f"Sample {i}", fg="cyan", bold=True)
-
-            # Legend before the example
-            legend = " ".join(
-                [
-                    "\x1b[37mwhite=masked\x1b[0m",
-                    "\x1b[34mblue=unmasked\x1b[0m",
-                    "\x1b[42m green bg=reward>0 \x1b[0m",
-                    "\x1b[41m red bg=reward<=0 \x1b[0m",
-                ]
-            )
-            print(f"[{legend}]")
-
-            # Detokenize prompt
-            prompt_tokens = prompts[i]
-            prompt_valid_mask = prompt_attn_mask[i].bool()
-            # Build one-line colored prompt (prompt is always masked-from-loss => white)
-            prompt_parts = []
-            for tok_id, is_valid in zip(prompt_tokens.tolist(), prompt_valid_mask.tolist(), strict=False):
-                if not is_valid:
-                    continue
-                tok = self.tokenizer.decode([tok_id]).replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-                prompt_parts.append(f"\x1b[37m{tok}\x1b[0m")  # white
-            print("".join(prompt_parts))
-
-            # Separator line between prompt and response for readability
-            print("----------------")
-
-            # Detokenize response with token-level highlighting
-            resp_tokens = responses[i]
-            resp_valid_mask = response_attn_mask[i].bool()
-            loss_mask = traj_mask[i]
-            rewards = token_level_scores[i]
-
-            # Pre-compute reward positions (typically only the last valid resp token has nonzero reward)
-            reward_idx = None
-            reward_value = 0.0
-            if rewards is not None:
-                # consider only valid response positions
-                for j, is_valid in enumerate(resp_valid_mask.tolist()):
-                    if not is_valid:
-                        continue
-                    val = float(rewards[j].item()) if hasattr(rewards[j], "item") else float(rewards[j])
-                    if abs(val) > 1e-9:
-                        reward_idx = j
-                        reward_value = val
-
-            # Fallback: if no nonzero reward found, use the last valid response token
-            if reward_idx is None:
-                valid_indices = [idx for idx, v in enumerate(resp_valid_mask.tolist()) if v]
-                if valid_indices:
-                    reward_idx = valid_indices[-1]
-                    if rewards is not None:
-                        val = float(rewards[reward_idx].item()) if hasattr(rewards[reward_idx], "item") else float(rewards[reward_idx])
-                        reward_value = val
-
-            # Colors: white for masked-from-loss; blue for contributes-to-loss; overlay background red/green if reward token
-            response_parts = []
-            for j, tok_id in enumerate(resp_tokens.tolist()):
-                if not bool(resp_valid_mask[j].item() if hasattr(resp_valid_mask[j], "item") else resp_valid_mask[j]):
-                    continue
-                tok = self.tokenizer.decode([tok_id]).replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-
-                contributes = bool(loss_mask[j].item()) if hasattr(loss_mask[j], "item") else bool(loss_mask[j])
-                fg = "\x1b[34m" if contributes else "\x1b[37m"  # blue if in loss, else white
-
-                bg = ""
-                if reward_idx is not None and j == reward_idx:
-                    bg = "\x1b[42m" if reward_value > 0 else "\x1b[41m"  # green background for positive, red for negative/zero
-
-                response_parts.append(f"{bg}{fg}{tok}\x1b[0m")
-
-            print("".join(response_parts))
+        visualize_trajectories(
+            batch=tensor_batch,
+            tokenizer=self.tokenizer,
+            sample_indices=indices,
+            mask_key=mask_key,
+            reward_key="token_level_scores",
+            show_workflow_metadata=False,
+        )
 
     def generate_agent_trajectories_async(self, timing_raw=None, meta_info=None, mode="Token"):
         """
