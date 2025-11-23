@@ -3,7 +3,6 @@
 
 Example:
     python -m rllm.sdk.proxy.litellm_server \
-        --config /tmp/litellm_proxy_config_autogen.yaml \
         --host 127.0.0.1 --port 4000 \
         --db-path ~/.rllm/traces.db --project my-app \
         --admin-token my-shared-secret
@@ -49,11 +48,18 @@ class FlushTracerPayload(BaseModel):
 class LiteLLMProxyRuntime:
     """Owns LiteLLM initialization and reload logic."""
 
-    def __init__(self, initial_config: Path, state_dir: Path, tracer: SqliteTracer | None):
-        self._current_config = initial_config
+    def __init__(
+        self,
+        state_dir: Path,
+        tracer: SqliteTracer | None,
+        *,
+        await_tracer_persistence: bool = False,
+    ):
+        self._current_config: Path | None = None
         self._state_dir = state_dir
         self._tracer = tracer
         self._lock = asyncio.Lock()
+        self._await_tracer_persistence = await_tracer_persistence
 
     async def startup(self) -> None:
         # Don't initialize LiteLLM on startup - wait for first reload request
@@ -74,8 +80,8 @@ class LiteLLMProxyRuntime:
             raise FileNotFoundError(f"Config file does not exist: {config_path}")
 
         async with self._lock:
-            # Clean up existing LiteLLM state if this is a reload
-            if self._current_config != config_path:
+            # Clean up existing LiteLLM state if this is a reload (not first-time initialization)
+            if self._current_config is not None:
                 logging.info("Reloading LiteLLM configuration...")
                 # Clear existing router and model list
                 if hasattr(litellm, "model_list"):
@@ -99,7 +105,7 @@ class LiteLLMProxyRuntime:
         callbacks = [cb for cb in getattr(litellm, "callbacks", []) if not isinstance(cb, SamplingParametersCallback | TracingCallback)]
         callbacks.append(SamplingParametersCallback(add_return_token_ids=True))
         if self._tracer:
-            callbacks.append(TracingCallback(self._tracer))
+            callbacks.append(TracingCallback(self._tracer, await_persistence=self._await_tracer_persistence))
         litellm.callbacks = callbacks
 
     async def flush_tracer(self, timeout: float = 30.0) -> bool:
@@ -135,8 +141,8 @@ class LiteLLMProxyRuntime:
         return len(data.get("model_list", []))
 
     @property
-    def config_path(self) -> str:
-        return str(self._current_config)
+    def config_path(self) -> str | None:
+        return str(self._current_config) if self._current_config else None
 
 
 def _build_tracer(db_path: str | None, project: str | None) -> SqliteTracer | None:
@@ -148,7 +154,6 @@ def _build_tracer(db_path: str | None, project: str | None) -> SqliteTracer | No
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="LiteLLM proxy server with reload endpoint.")
-    parser.add_argument("--config", required=True, help="Initial LiteLLM config YAML.")
     parser.add_argument("--host", default=os.getenv("LITELLM_PROXY_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.getenv("LITELLM_PROXY_PORT", "4000")))
     parser.add_argument("--state-dir", default=os.getenv("LITELLM_PROXY_STATE_DIR", "./.litellm_proxy"))
@@ -156,6 +161,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--db-path", default=os.getenv("SQLITE_DB_PATH", "~/.rllm/traces.db"), help="Path to SQLite database file.")
     parser.add_argument("--project", default=os.getenv("PROJECT_NAME", "default"), help="Project name/namespace for the tracer.")
     parser.add_argument("--log-level", default=os.getenv("LITELLM_PROXY_LOG_LEVEL", "INFO"))
+    parser.add_argument(
+        "--sync-tracer",
+        action="store_true",
+        help="If set, liteLLM responses wait for tracer persistence (slower but consistent session reads).",
+    )
     return parser.parse_args()
 
 
@@ -167,9 +177,9 @@ def main() -> None:
     )
 
     runtime = LiteLLMProxyRuntime(
-        initial_config=Path(args.config).expanduser().resolve(),
         state_dir=Path(args.state_dir).expanduser().resolve(),
         tracer=_build_tracer(args.db_path, args.project),
+        await_tracer_persistence=args.sync_tracer,
     )
 
     @asynccontextmanager

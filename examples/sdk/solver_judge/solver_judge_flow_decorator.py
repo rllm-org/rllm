@@ -22,7 +22,8 @@ from rllm.workflows.workflow import Workflow
 
 class Solver:
     def __init__(self, **kwargs):
-        self.client = get_chat_client_async(base_url="http://localhost:4000/v1", api_key="EMPTY", model="Qwen/Qwen3-4B-Instruct-2507")
+        self.client = get_chat_client_async(base_url="http://localhost:4000/v1", api_key="EMPTY")
+        self.model = "Qwen/Qwen3-4B-Instruct-2507"
 
     @trajectory(name="solver")
     async def generate_solution(self, problem: str):
@@ -36,6 +37,7 @@ class Solver:
         """
         messages = [{"role": "user", "content": f"{problem}. Output the final answer within <answer>...</answer>"}]
         response = await self.client.chat.completions.create(
+            model=self.model,
             messages=messages,
             temperature=1,
             max_tokens=1000,
@@ -62,7 +64,8 @@ class Solver:
 
 class Judge:
     def __init__(self, **kwargs):
-        self.client = get_chat_client_async(base_url="http://localhost:4000/v1", api_key="EMPTY", model="Qwen/Qwen3-4B-Instruct-2507")
+        self.client = get_chat_client_async(base_url="http://localhost:4000/v1", api_key="EMPTY")
+        self.model = "Qwen/Qwen3-4B-Instruct-2507"
 
     @trajectory(name="judge")
     async def judge_solutions(self, problem: str, solutions: list[str]):
@@ -73,6 +76,7 @@ class Judge:
         """
         messages = [{"role": "user", "content": self._create_judge_prompt(problem, solutions)}]
         response = await self.client.chat.completions.create(
+            model=self.model,
             messages=messages,
             temperature=1,
             max_tokens=1000,

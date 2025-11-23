@@ -11,7 +11,6 @@ import uuid
 from typing import Any
 
 from rllm.sdk.protocol import Trace
-from rllm.sdk.session import get_active_sessions, get_current_metadata, get_current_session_name
 from rllm.sdk.store import SqliteTraceStore
 
 logger = logging.getLogger(__name__)
@@ -38,10 +37,10 @@ class SqliteTracer:
         >>> from rllm.sdk import get_chat_client
         >>>
         >>> tracer = SqliteTracer(db_path="traces.db")
-        >>> llm = get_chat_client(tracer=tracer, model="gpt-4")
+        >>> llm = get_chat_client(tracer=tracer)
         >>>
         >>> with SessionContext() as session:
-        ...     llm.chat.completions.create(...)
+        ...     llm.chat.completions.create(model="gpt-4", messages=[...])
         ... # Trace is stored in SQLite with session UID
         >>>
         >>> # Query traces by session UID
@@ -147,6 +146,14 @@ class SqliteTracer:
         trace_id = item.get("trace_id", "unknown")
         session_uids = item.get("session_uids")
 
+        # Critical invariant: we must have session_uids to build session mapping.
+        # If missing, persistence would succeed but retrieval by session would be impossible.
+        # Treat this as a hard error (sync mode -> HTTP error; non-sync -> logged by worker).
+        if not session_uids:
+            error_msg = f"SqliteTracer: missing session_uids for trace {trace_id}. Cannot create session mapping; retrieval by session will fail."
+            logger.error(f"[SqliteTracer._store_trace_with_retry] {error_msg}")
+            raise RuntimeError(error_msg)
+
         for attempt in range(max_retries):
             try:
                 await self.store.store(
@@ -163,7 +170,10 @@ class SqliteTracer:
                     logger.warning(f"[SqliteTracer._store_trace_with_retry] Failed to store trace {trace_id} (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {retry_delays[attempt]}s...")
                     await asyncio.sleep(retry_delays[attempt])
                 else:
-                    logger.exception(f"[SqliteTracer._store_trace_with_retry] Dropping trace {trace_id} after {max_retries} failed attempts: {e}")
+                    # On final failure, log and re-raise so sync callers fail the request
+                    error_msg = f"SqliteTracer: failed to persist trace {trace_id} after {max_retries} attempts (session_uids={session_uids}). Last error: {e}"
+                    logger.exception(f"[SqliteTracer._store_trace_with_retry] {error_msg}")
+                    raise RuntimeError(error_msg) from e
 
     def _stop_worker_loop(self) -> None:
         """Stop the worker event loop gracefully."""
@@ -198,20 +208,97 @@ class SqliteTracer:
             self._start_background_worker()
 
         try:
-            # Convert Trace object to dict for storage
-            trace_data = trace.model_dump()
-
-            queue_item = {
-                "trace_id": trace.trace_id,
-                "data": trace_data,
-                "namespace": self.namespace,
-                "context_type": "llm_trace",
-                "metadata": metadata,
-                "session_uids": session_uids,
-            }
+            queue_item = self._serialize_trace(trace, metadata, session_uids)
             self._store_queue.put_nowait(queue_item)
         except queue.Full:
             logger.warning(f"Store queue full (max size: {self._max_queue_size}), dropping trace {trace.trace_id}")
+
+    def _serialize_trace(
+        self,
+        trace: Trace,
+        metadata: dict[str, Any] | None,
+        session_uids: list[str] | None,
+    ) -> dict[str, Any]:
+        """Return queue item payload shared by async and sync logging paths."""
+        trace_data = trace.model_dump()
+        return {
+            "trace_id": trace.trace_id,
+            "data": trace_data,
+            "namespace": self.namespace,
+            "context_type": "llm_trace",
+            "metadata": metadata,
+            "session_uids": session_uids,
+        }
+
+    async def _store_trace_now(
+        self,
+        trace: Trace,
+        metadata: dict[str, Any] | None,
+        session_uids: list[str] | None,
+    ) -> None:
+        """Persist a trace immediately, reusing the worker retry logic."""
+        queue_item = self._serialize_trace(trace, metadata, session_uids)
+        await self._store_trace_with_retry(queue_item)
+
+    def _create_trace_payload(
+        self,
+        name: str,
+        input: str | list | dict,
+        output: str | dict,
+        model: str,
+        latency_ms: float,
+        tokens: dict[str, int],
+        session_name: str | None,
+        metadata: dict[str, Any] | None,
+        trace_id: str | None,
+        parent_trace_id: str | None,
+        cost: float | None,
+        environment: str | None,
+        tools: list[dict] | None,
+        contexts: list[str | dict] | None,
+        tags: list[str] | None,
+        session_uids: list[str] | None,
+    ) -> tuple[Trace, dict[str, Any], list[str] | None]:
+        """Build the Trace object plus metadata/session UID list.
+
+        This method does NOT perform any autofill or context lookups.
+        All values are used as-is from the caller. If trace_id is None,
+        a new one is generated. All other None values remain None.
+
+        IMPORTANT: Callers MUST provide session_uids explicitly. The tracer
+        does not auto-detect from context - this is the caller's responsibility.
+        """
+        # Generate trace_id only if not provided (no extraction from output)
+        if trace_id is None:
+            trace_id = f"tr_{uuid.uuid4().hex[:16]}"
+
+        # Copy metadata to snapshot state before async queueing
+        # (prevents caller mutations from affecting stored trace)
+        final_metadata = dict(metadata) if metadata else {}
+
+        # Use session_uids as-is (no auto-detection from context)
+        prepared_session_uids = list(session_uids) if session_uids else None
+
+        trace = Trace(
+            trace_id=trace_id,
+            session_name=session_name or "",
+            name=name,
+            input=input,
+            output=output,
+            model=model,
+            latency_ms=latency_ms,
+            tokens=tokens,
+            metadata=final_metadata,
+            timestamp=time.time(),
+            parent_trace_id=parent_trace_id,
+            cost=cost,
+            environment=environment,
+            tools=tools,
+            contexts=contexts,
+            tags=tags,
+        )
+
+        return trace, final_metadata, prepared_session_uids
 
     def log_llm_call(
         self,
@@ -231,6 +318,7 @@ class SqliteTracer:
         contexts: list[str | dict] | None = None,
         tags: list[str] | None = None,
         session_uids: list[str] | None = None,
+        sessions: list | None = None,  # Ignored - uses session_uids instead
     ) -> None:
         """
         Log an LLM call to SQLite store (non-blocking).
@@ -245,65 +333,88 @@ class SqliteTracer:
             model: Model identifier (e.g., "gpt-4")
             latency_ms: Latency in milliseconds
             tokens: Token usage dict with keys: prompt, completion, total
-            session_name: Session name (optional, extracted from context if available)
-            metadata: Additional metadata dict
-            trace_id: Unique trace ID (auto-generated if None, or extracted from output.id)
+            session_name: Session name (caller must provide, no auto-detection)
+            metadata: Additional metadata dict (caller must provide, no merging)
+            trace_id: Unique trace ID (caller should provide, auto-generated if None)
             parent_trace_id: Parent trace ID for nested calls
             cost: Cost in USD (optional)
             environment: Environment name (e.g., "production", "dev")
             tools: List of tool definitions used
             contexts: List of context IDs or dicts
             tags: List of tags for categorization
-            session_uids: List of session UIDs to associate with this trace (optional, auto-detected from context if not provided)
+            session_uids: List of session UIDs to associate with this trace (caller must provide)
+            sessions: Ignored - this tracer uses session_uids, not session objects
         """
-        # Extract trace_id: prefer provided trace_id, then check output for id, otherwise generate
-        if trace_id is None:
-            # Check if output contains an id field (common in LLM provider responses)
-            if isinstance(output, dict):
-                trace_id = output.get("id")
-
-        # Generate trace ID if still not available
-        if trace_id is None:
-            trace_id = f"tr_{uuid.uuid4().hex[:16]}"
-
-        # Get session_name from context if not provided
-        if session_name is None:
-            session_name = get_current_session_name()
-
-        # Merge context metadata with call-specific metadata
-        context_meta = get_current_metadata()
-        final_metadata = {**context_meta, **(metadata or {})}
-
-        # Get session UIDs: use provided session_uids, or auto-detect from active sessions
-        if session_uids is None:
-            active_sessions = get_active_sessions()
-            session_uids = [s._uid for s in active_sessions]
-
-        # Create Trace object following the protocol
-        trace = Trace(
-            trace_id=trace_id,
-            session_name=session_name or "",  # Trace protocol requires session_name
+        trace, final_metadata, prepared_session_uids = self._create_trace_payload(
             name=name,
             input=input,
             output=output,
             model=model,
             latency_ms=latency_ms,
             tokens=tokens,
-            metadata=final_metadata,
-            timestamp=time.time(),
+            session_name=session_name,
+            metadata=metadata,
+            trace_id=trace_id,
             parent_trace_id=parent_trace_id,
             cost=cost,
             environment=environment,
             tools=tools,
             contexts=contexts,
             tags=tags,
+            session_uids=session_uids,
         )
 
-        # Queue trace for storage (non-blocking, worker will await it)
         self._queue_trace(
             trace=trace,
             metadata=final_metadata,
-            session_uids=session_uids if session_uids else None,
+            session_uids=prepared_session_uids,
+        )
+
+    async def log_llm_call_sync(
+        self,
+        name: str,
+        input: str | list | dict,
+        output: str | dict,
+        model: str,
+        latency_ms: float,
+        tokens: dict[str, int],
+        session_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        trace_id: str | None = None,
+        parent_trace_id: str | None = None,
+        cost: float | None = None,
+        environment: str | None = None,
+        tools: list[dict] | None = None,
+        contexts: list[str | dict] | None = None,
+        tags: list[str] | None = None,
+        session_uids: list[str] | None = None,
+        sessions: list | None = None,  # Ignored - uses session_uids instead
+    ) -> None:
+        """Store an LLM call synchronously by awaiting the SQLite write."""
+
+        trace, final_metadata, prepared_session_uids = self._create_trace_payload(
+            name=name,
+            input=input,
+            output=output,
+            model=model,
+            latency_ms=latency_ms,
+            tokens=tokens,
+            session_name=session_name,
+            metadata=metadata,
+            trace_id=trace_id,
+            parent_trace_id=parent_trace_id,
+            cost=cost,
+            environment=environment,
+            tools=tools,
+            contexts=contexts,
+            tags=tags,
+            session_uids=session_uids,
+        )
+
+        await self._store_trace_now(
+            trace=trace,
+            metadata=final_metadata,
+            session_uids=prepared_session_uids,
         )
 
     def flush(self, timeout: float = 30.0) -> bool:

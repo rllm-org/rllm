@@ -15,7 +15,6 @@ echo "Starting LiteLLM proxy..."
 
 # Start the proxy (now as a module in rllm.sdk.proxy)
 python -m rllm.sdk.proxy.litellm_server \
-  --config litellm_proxy_config_autogen.yaml \
   --host 127.0.0.1 \
   --port 4000 \
   --state-dir /tmp/litellm_proxy \

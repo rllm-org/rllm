@@ -11,8 +11,6 @@ from typing import Any
 
 import aiosqlite
 
-from rllm.sdk.session import get_active_sessions
-
 logger = logging.getLogger(__name__)
 
 
@@ -50,10 +48,12 @@ class SqliteTraceStore:
     while avoiding data duplication. Each trace is stored once, but can be associated
     with multiple session contexts (for nested sessions).
 
+    This store does NOT perform any auto-detection of session context.
+    Callers must explicitly provide session_uids when storing traces.
+
     Features:
     - Fast queries by session_uid (indexed junction table)
     - Single table for traces and signals (differentiated by context_type)
-    - Automatic session context extraction from active sessions
     - Batch insert support with transactions
     - DELETE journal mode for compatibility (not WAL)
     """
@@ -85,7 +85,7 @@ class SqliteTraceStore:
                     logger.warning(f"Failed to create directory {db_dir}: {e}")
 
         self.db_path = db_path
-        self._sqlite_busy_timeout_ms = 5000
+        self._sqlite_busy_timeout_ms = 20000
         self._initialized = False
 
     async def _ensure_initialized(self) -> None:
@@ -159,20 +159,6 @@ class SqliteTraceStore:
         finally:
             await conn.close()
 
-    def _get_active_session_uids(self) -> list[str]:
-        """
-        Get session UIDs from active sessions.
-
-        Returns:
-            List of session UIDs (one per active session, outer → inner)
-        """
-        try:
-            sessions = get_active_sessions()
-            return [sess._uid for sess in sessions]
-        except Exception:
-            # If no sessions or import fails, return empty list
-            return []
-
     async def store(
         self,
         trace_id: str,
@@ -185,8 +171,9 @@ class SqliteTraceStore:
         """
         Store a trace or signal.
 
-        Automatically extracts session_uids from active sessions if not provided,
-        and creates junction table entries for fast queries.
+        Creates junction table entries for fast queries by session_uid.
+        The store does NOT perform any auto-detection - callers must provide
+        all values including session_uids.
 
         Args:
             trace_id: Unique trace/signal ID
@@ -194,14 +181,10 @@ class SqliteTraceStore:
             namespace: Namespace for organization (default: "default")
             context_type: Type of context ('llm_trace' or signal type) (default: "llm_trace")
             metadata: Metadata dictionary (default: {})
-            session_uids: List of session UIDs to associate with this trace (default: auto-detect from context)
+            session_uids: List of session UIDs to associate with this trace (caller must provide)
         """
         await self._ensure_initialized()
         now = time.time()
-
-        # Use provided session_uids, or auto-detect from active sessions
-        if session_uids is None:
-            session_uids = self._get_active_session_uids()
 
         conn = await self._connect()
         try:
@@ -255,9 +238,13 @@ class SqliteTraceStore:
         self,
         traces: list[dict[str, Any]],
         preserve_order: bool = True,
+        session_uids: list[str] | None = None,
     ) -> list[TraceContext]:
         """
         Store multiple traces/signals in a batch.
+
+        The store does NOT perform any auto-detection - callers must provide
+        all values including session_uids.
 
         Args:
             traces: List of trace dicts with keys:
@@ -266,14 +253,15 @@ class SqliteTraceStore:
                    - namespace (optional, default: "default")
                    - type (context_type, optional, default: "llm_trace")
                    - metadata (optional, default: {})
+                   - session_uids (optional, overrides the batch-level session_uids)
             preserve_order: If True, maintains insertion order (default: True)
+            session_uids: Default session UIDs for all traces (caller must provide)
 
         Returns:
             List of stored TraceContext objects
         """
         await self._ensure_initialized()
         now = time.time()
-        session_uids = self._get_active_session_uids()
         stored = []
 
         conn = await self._connect()
@@ -284,6 +272,8 @@ class SqliteTraceStore:
                 namespace = trace.get("namespace", "default")
                 context_type = trace.get("type", "llm_trace")
                 metadata = trace.get("metadata", {})
+                # Per-trace session_uids overrides batch-level session_uids
+                trace_session_uids = trace.get("session_uids", session_uids)
 
                 # Insert or replace trace
                 await conn.execute(
@@ -316,10 +306,10 @@ class SqliteTraceStore:
 
                 # Insert new junction entries
                 # CRITICAL: Use actual_created_at (not 'now') to keep junction table in sync with traces table
-                if session_uids:
+                if trace_session_uids:
                     await conn.executemany(
                         "INSERT INTO trace_sessions (trace_id, session_uid, created_at) VALUES (?, ?, ?)",
-                        [(trace_id, uid, actual_created_at) for uid in session_uids],
+                        [(trace_id, uid, actual_created_at) for uid in trace_session_uids],
                     )
 
                 # Create TraceContext for return

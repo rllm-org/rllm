@@ -112,8 +112,16 @@ class ProxyManager:
         db_path: str | None = None,
         project: str | None = None,
         snapshot_directory: str | None = None,
+        sync_tracer: bool = False,
     ) -> str:
         """Start LiteLLM proxy as subprocess (no GIL contention).
+
+        Args:
+            config: LiteLLM configuration dict.
+            db_path: Path to SQLite database file.
+            project: Project name/namespace for the tracer.
+            snapshot_directory: Directory to save config snapshot.
+            sync_tracer: If True, enable synchronous tracer persistence (waits for traces to be stored before returning response).
 
         Returns:
             Path to the config snapshot on disk.
@@ -131,8 +139,6 @@ class ProxyManager:
             sys.executable,
             "-m",
             "rllm.sdk.proxy.litellm_server",
-            "--config",
-            snapshot_path,
             "--host",
             self.proxy_host,
             "--port",
@@ -147,9 +153,25 @@ class ProxyManager:
         if project:
             cmd.extend(["--project", project])
 
+        if sync_tracer:
+            cmd.extend(["--sync-tracer"])
+
         env = os.environ.copy()
         env["AIOHTTP_CONNECTOR_LIMIT"] = "4096"
         env["AIOHTTP_KEEPALIVE_TIMEOUT"] = "60"
+        # Ensure the proxy subprocess has a working CA bundle for outbound HTTPS
+        # (fixes SSLCertVerificationError on hosts with incomplete system CAs)
+        try:
+            import certifi  # type: ignore
+
+            ca_path = certifi.where()
+            env["SSL_CERT_FILE"] = ca_path
+            env["REQUESTS_CA_BUNDLE"] = ca_path
+            env["CURL_CA_BUNDLE"] = ca_path
+            env["OPENAI_CA_BUNDLE"] = ca_path
+        except Exception:
+            # Best-effort; if certifi is unavailable, rely on system CA store
+            pass
 
         def set_limits() -> None:
             """Set resource limits for the proxy subprocess."""
@@ -169,7 +191,7 @@ class ProxyManager:
         )
 
         try:
-            self._wait_for_server_start(timeout=10.0)
+            self._wait_for_server_start(timeout=30.0)
             logger.info("Proxy server started, sending configuration...")
             self.reload_proxy_config(config=config)
             logger.info("Proxy configuration loaded successfully")

@@ -42,6 +42,4 @@ def main(config):
 
 
 if __name__ == "__main__":
-    # main()
-    dataset = DatasetRegistry.load_dataset("abc", "train")
-    print(dataset)
+    main()

@@ -4,10 +4,9 @@ from rllm.sdk.decorators import trajectory
 from rllm.sdk.protocol import StepView, Trace, TrajectoryView
 from rllm.sdk.session import (
     ContextVarSession,
-    InMemoryStorage,
+    SessionBuffer,
+    SessionBufferProtocol,
     SessionContext,
-    SessionStorage,
-    SqliteSessionStorage,
     get_current_metadata,
     get_current_session,
     get_current_session_name,
@@ -32,10 +31,9 @@ __all__ = [
     "get_current_session",  # Get current session instance
     "get_current_session_name",  # Get current session name
     "get_current_metadata",  # Get current metadata
-    # Session Storage
-    "SessionStorage",  # Storage protocol
-    "InMemoryStorage",  # Default in-memory storage
-    "SqliteSessionStorage",  # SQLite-backed storage
+    # Session Buffer (ephemeral trace storage)
+    "SessionBufferProtocol",  # Buffer protocol
+    "SessionBuffer",  # Default in-memory buffer
     # Shortcuts
     "session",
     "get_chat_client",

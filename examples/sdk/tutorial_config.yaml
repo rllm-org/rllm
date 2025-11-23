@@ -1,0 +1,137 @@
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+actor_rollout_ref:
+  model:
+    path: Qwen/Qwen3-4B-Instruct-2507
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+  
+  actor:
+    strategy: fsdp
+    optim:
+      lr: 1e-6
+    loss_agg_mode: seq-mean-token-mean
+    use_dynamic_bsz: true
+    ppo_max_token_len_per_gpu: 32768
+    ppo_mini_batch_size: 2
+    use_kl_loss: false
+    kl_loss_coef: 0.001
+    kl_loss_type: low_var_kl
+    entropy_coeff: 0.0
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.28
+    ulysses_sequence_parallel_size: 1
+    fsdp_config:
+      param_offload: true
+      optimizer_offload: true
+  
+  rollout:
+    tensor_model_parallel_size: 1
+    name: vllm
+    mode: async
+    enforce_eager: false
+    temperature: 1.0
+    top_p: 1.0
+    gpu_memory_utilization: 0.7
+    n: 4
+    agent:
+      num_workers: 0
+    val_kwargs:
+      n: 1
+      temperature: 1.0
+      top_p: 1.0
+      do_sample: true
+  
+  ref:
+    fsdp_config:
+      param_offload: true
+
+data:
+  train_batch_size: 4
+  max_prompt_length: 2048
+  max_response_length: 1024
+  gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
+
+algorithm:
+  adv_estimator: grpo
+
+rllm:
+  agent:
+    name: math_agent
+    max_steps: 20
+    trajectory_timeout: null
+    overlong_filter: False
+    agent_args: {}
+    engine_args: {}
+  env:
+    name: custom
+    env_args: {}
+  workflow:
+    use_workflow: False
+    name: single_turn_workflow
+    workflow_args:
+      agent_cls: null
+      agent_args: {}
+      env_cls: null
+      env_args: {}
+      timeout: 1e6
+      gamma: 0.0 # no discounting
+      reward_bonus_coeff: 0.0 # no reward shaping
+    n_parallel_tasks: 16
+    retry_limit: 3
+  disable_thinking: False
+  accumulate_reasoning: False
+  mask_truncated_samples: False
+  filter_token_mismatch: True
+  stepwise_advantage:
+    enable: true
+    mode: per_step
+    normalize_by_steps: False
+  compact_filtering:
+    enable: False
+    mask_max_prompt_length_exceeded: True
+    mask_max_response_length_exceeded: True
+    mask_env_done: False
+    mask_max_turns_exceeded: false
+    mask_timeout: True
+    mask_unknown: False
+    mask_error: True
+  rejection_sample:
+    enable: False
+    multiplier: 1.0
+  sdk:
+    store:
+      path: /tmp/rllm_demo.db
+    processing:
+      groupby_key: null
+      traj_name_key: null
+    proxy:
+      host: 127.0.0.1
+      port: 4000
+      mode: external # external | subprocess
+      admin_token: my-shared-secret
+
+fireworks:
+  deployment_id: null
+  model_id_prefix: test-model
+  concurrency: 32
+
+trainer:
+  critic_warmup: 0
+  logger: ['console']
+  project_name: solver-judge-workflow
+  experiment_name: sdk-solver-judge
+  val_before_train: false
+  n_gpus_per_node: 1
+  nnodes: 1
+  save_freq: 200
+  test_freq: 10
+  total_epochs: 1
+  log_episodes: false
+  episode_log_dir: logs/${trainer.project_name}/${trainer.experiment_name}
