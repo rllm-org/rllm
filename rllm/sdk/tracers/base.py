@@ -47,9 +47,14 @@ class TracerProtocol(Protocol):
         tools: list[dict] | None = None,
         contexts: list[str | dict] | None = None,
         tags: list[str] | None = None,
+        session_uids: list[str] | None = None,
+        sessions: list | None = None,
     ) -> None:
         """
         Log an LLM call trace.
+
+        Tracers do NOT perform any auto-fill or context lookups.
+        All values are used as-is from the caller.
 
         Args:
             name: Identifier for the call (e.g., "chat.completions.create")
@@ -58,15 +63,17 @@ class TracerProtocol(Protocol):
             model: Model identifier (e.g., "gpt-4")
             latency_ms: Latency in milliseconds
             tokens: Token usage dict with keys: prompt, completion, total
-            session_name: Session name (optional, may be inferred from context)
-            metadata: Additional metadata dict
-            trace_id: Unique trace ID (auto-generated if None)
+            session_name: Session name (caller must provide, no auto-detection)
+            metadata: Additional metadata dict (caller must provide, no merging)
+            trace_id: Unique trace ID (caller should provide, auto-generated if None)
             parent_trace_id: Parent trace ID for nested calls
             cost: Cost in USD (optional)
             environment: Environment name (e.g., "production", "dev")
             tools: List of tool definitions used
             contexts: List of context IDs or dicts
             tags: List of tags for categorization
+            session_uids: List of session UIDs (for SqliteTracer)
+            sessions: List of session objects (for InMemorySessionTracer)
         """
         ...
 
@@ -97,6 +104,3 @@ class TracerProtocol(Protocol):
             timeout: Maximum time to wait in seconds
         """
         ...
-
-    def __repr__(self):
-        return f"CompositeTracer(tracers={[t.__class__.__name__ for t in self.tracers]})"
