@@ -25,9 +25,9 @@ Aliases (backward compatible):
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, overload
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
 
 from openai import AsyncOpenAI, OpenAI
 from openai._streaming import AsyncStream, Stream
@@ -35,16 +35,16 @@ from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from openai.types.completion import Completion
 
-if TYPE_CHECKING:
-    from typing import AsyncIterator, Literal
-
-_T = TypeVar("_T")
-
 from rllm.sdk.chat.util import extract_completion_tokens, extract_usage_tokens, merge_args
 from rllm.sdk.proxy.metadata_slug import assemble_routing_metadata, build_proxied_base_url
 from rllm.sdk.session import get_active_session_uids, get_current_metadata, get_current_session_name
 from rllm.sdk.session.contextvar import get_active_cv_sessions
 from rllm.sdk.tracers import InMemorySessionTracer
+
+if TYPE_CHECKING:
+    from typing import Literal
+
+_T = TypeVar("_T")
 
 # Shared tracer instance for all clients (when no custom tracer provided)
 _SHARED_TRACER = InMemorySessionTracer()
@@ -166,11 +166,13 @@ def _accumulate_stream_content(chunks: list[ChatCompletionChunk]) -> dict:
     if tool_calls:
         message["tool_calls"] = tool_calls
 
-    result["choices"] = [{
-        "index": 0,
-        "message": message,
-        "finish_reason": finish_reason,
-    }]
+    result["choices"] = [
+        {
+            "index": 0,
+            "message": message,
+            "finish_reason": finish_reason,
+        }
+    ]
 
     # Check for usage in last chunk (some providers include it)
     last = chunks[-1]
@@ -218,11 +220,13 @@ def _accumulate_completion_content(chunks: list[Completion]) -> dict:
         if choice.finish_reason:
             finish_reason = choice.finish_reason
 
-    result["choices"] = [{
-        "index": 0,
-        "text": "".join(text_parts),
-        "finish_reason": finish_reason,
-    }]
+    result["choices"] = [
+        {
+            "index": 0,
+            "text": "".join(text_parts),
+            "finish_reason": finish_reason,
+        }
+    ]
 
     # Check for usage in last chunk
     last = chunks[-1]
@@ -292,7 +296,7 @@ class TrackedStream(Generic[_T]):
         self._on_stream_end()
         self._stream.close()
 
-    def __enter__(self) -> "TrackedStream[_T]":
+    def __enter__(self) -> TrackedStream[_T]:
         return self
 
     def __exit__(self, *args: Any) -> None:
@@ -314,7 +318,7 @@ class TrackedAsyncStream(Generic[_T]):
     _chunks: list[_T] = field(default_factory=list)
     _exhausted: bool = False
 
-    def __aiter__(self) -> "TrackedAsyncStream[_T]":
+    def __aiter__(self) -> TrackedAsyncStream[_T]:
         return self
 
     async def __anext__(self) -> _T:
@@ -350,7 +354,7 @@ class TrackedAsyncStream(Generic[_T]):
         self._on_stream_end()
         await self._stream.close()
 
-    async def __aenter__(self) -> "TrackedAsyncStream[_T]":
+    async def __aenter__(self) -> TrackedAsyncStream[_T]:
         return self
 
     async def __aexit__(self, *args: Any) -> None:
@@ -366,22 +370,18 @@ class TrackedAsyncStream(Generic[_T]):
 class _ChatCompletions:
     """Namespace for chat.completions.create()"""
 
-    parent: "TrackedChatClient"
+    parent: TrackedChatClient
 
     @overload
-    def create(
-        self, *args: Any, stream: "Literal[True]", **kwargs: Any
-    ) -> TrackedStream[ChatCompletionChunk]: ...
+    def create(self, *args: Any, stream: Literal[True], **kwargs: Any) -> TrackedStream[ChatCompletionChunk]: ...
 
     @overload
-    def create(
-        self, *args: Any, stream: "Literal[False]" = ..., **kwargs: Any
-    ) -> ChatCompletion: ...
+    def create(self, *args: Any, stream: Literal[False] = ..., **kwargs: Any) -> ChatCompletion: ...
 
     @overload
-    def create(self, *args: Any, **kwargs: Any) -> Union[ChatCompletion, TrackedStream[ChatCompletionChunk]]: ...
+    def create(self, *args: Any, **kwargs: Any) -> ChatCompletion | TrackedStream[ChatCompletionChunk]: ...
 
-    def create(self, *args: Any, **kwargs: Any) -> Union[ChatCompletion, TrackedStream[ChatCompletionChunk]]:
+    def create(self, *args: Any, **kwargs: Any) -> ChatCompletion | TrackedStream[ChatCompletionChunk]:
         p = self.parent
         call_kwargs = merge_args(args, kwargs)
 
@@ -395,9 +395,7 @@ class _ChatCompletions:
 
         # Get client (with proxy URL if enabled)
         if p.use_proxy:
-            client = _get_scoped_client(
-                p._client, p.base_url, assemble_routing_metadata(metadata), p._headers
-            )
+            client = _get_scoped_client(p._client, p.base_url, assemble_routing_metadata(metadata), p._headers)
         else:
             client = _get_scoped_client(p._client, None, None, p._headers)
 
@@ -438,22 +436,18 @@ class _ChatCompletions:
 class _Completions:
     """Namespace for completions.create()"""
 
-    parent: "TrackedChatClient"
+    parent: TrackedChatClient
 
     @overload
-    def create(
-        self, *args: Any, stream: "Literal[True]", **kwargs: Any
-    ) -> TrackedStream[Completion]: ...
+    def create(self, *args: Any, stream: Literal[True], **kwargs: Any) -> TrackedStream[Completion]: ...
 
     @overload
-    def create(
-        self, *args: Any, stream: "Literal[False]" = ..., **kwargs: Any
-    ) -> Completion: ...
+    def create(self, *args: Any, stream: Literal[False] = ..., **kwargs: Any) -> Completion: ...
 
     @overload
-    def create(self, *args: Any, **kwargs: Any) -> Union[Completion, TrackedStream[Completion]]: ...
+    def create(self, *args: Any, **kwargs: Any) -> Completion | TrackedStream[Completion]: ...
 
-    def create(self, *args: Any, **kwargs: Any) -> Union[Completion, TrackedStream[Completion]]:
+    def create(self, *args: Any, **kwargs: Any) -> Completion | TrackedStream[Completion]:
         p = self.parent
         call_kwargs = merge_args(args, kwargs)
 
@@ -466,9 +460,7 @@ class _Completions:
         is_streaming = call_kwargs.get("stream", False)
 
         if p.use_proxy:
-            client = _get_scoped_client(
-                p._client, p.base_url, assemble_routing_metadata(metadata), p._headers
-            )
+            client = _get_scoped_client(p._client, p.base_url, assemble_routing_metadata(metadata), p._headers)
         else:
             client = _get_scoped_client(p._client, None, None, p._headers)
 
@@ -509,7 +501,7 @@ class _Completions:
 
 @dataclass
 class _ChatNamespace:
-    parent: "TrackedChatClient"
+    parent: TrackedChatClient
 
     @property
     def completions(self) -> _ChatCompletions:
@@ -563,26 +555,18 @@ class TrackedChatClient:
 
 @dataclass
 class _AsyncChatCompletions:
-    parent: "TrackedAsyncChatClient"
+    parent: TrackedAsyncChatClient
 
     @overload
-    async def create(
-        self, *args: Any, stream: "Literal[True]", **kwargs: Any
-    ) -> TrackedAsyncStream[ChatCompletionChunk]: ...
+    async def create(self, *args: Any, stream: Literal[True], **kwargs: Any) -> TrackedAsyncStream[ChatCompletionChunk]: ...
 
     @overload
-    async def create(
-        self, *args: Any, stream: "Literal[False]" = ..., **kwargs: Any
-    ) -> ChatCompletion: ...
+    async def create(self, *args: Any, stream: Literal[False] = ..., **kwargs: Any) -> ChatCompletion: ...
 
     @overload
-    async def create(
-        self, *args: Any, **kwargs: Any
-    ) -> Union[ChatCompletion, TrackedAsyncStream[ChatCompletionChunk]]: ...
+    async def create(self, *args: Any, **kwargs: Any) -> ChatCompletion | TrackedAsyncStream[ChatCompletionChunk]: ...
 
-    async def create(
-        self, *args: Any, **kwargs: Any
-    ) -> Union[ChatCompletion, TrackedAsyncStream[ChatCompletionChunk]]:
+    async def create(self, *args: Any, **kwargs: Any) -> ChatCompletion | TrackedAsyncStream[ChatCompletionChunk]:
         p = self.parent
         call_kwargs = merge_args(args, kwargs)
 
@@ -595,9 +579,7 @@ class _AsyncChatCompletions:
         is_streaming = call_kwargs.get("stream", False)
 
         if p.use_proxy:
-            client = _get_scoped_client(
-                p._client, p.base_url, assemble_routing_metadata(metadata), p._headers
-            )
+            client = _get_scoped_client(p._client, p.base_url, assemble_routing_metadata(metadata), p._headers)
         else:
             client = _get_scoped_client(p._client, None, None, p._headers)
 
@@ -636,26 +618,18 @@ class _AsyncChatCompletions:
 
 @dataclass
 class _AsyncCompletions:
-    parent: "TrackedAsyncChatClient"
+    parent: TrackedAsyncChatClient
 
     @overload
-    async def create(
-        self, *args: Any, stream: "Literal[True]", **kwargs: Any
-    ) -> TrackedAsyncStream[Completion]: ...
+    async def create(self, *args: Any, stream: Literal[True], **kwargs: Any) -> TrackedAsyncStream[Completion]: ...
 
     @overload
-    async def create(
-        self, *args: Any, stream: "Literal[False]" = ..., **kwargs: Any
-    ) -> Completion: ...
+    async def create(self, *args: Any, stream: Literal[False] = ..., **kwargs: Any) -> Completion: ...
 
     @overload
-    async def create(
-        self, *args: Any, **kwargs: Any
-    ) -> Union[Completion, TrackedAsyncStream[Completion]]: ...
+    async def create(self, *args: Any, **kwargs: Any) -> Completion | TrackedAsyncStream[Completion]: ...
 
-    async def create(
-        self, *args: Any, **kwargs: Any
-    ) -> Union[Completion, TrackedAsyncStream[Completion]]:
+    async def create(self, *args: Any, **kwargs: Any) -> Completion | TrackedAsyncStream[Completion]:
         p = self.parent
         call_kwargs = merge_args(args, kwargs)
 
@@ -668,9 +642,7 @@ class _AsyncCompletions:
         is_streaming = call_kwargs.get("stream", False)
 
         if p.use_proxy:
-            client = _get_scoped_client(
-                p._client, p.base_url, assemble_routing_metadata(metadata), p._headers
-            )
+            client = _get_scoped_client(p._client, p.base_url, assemble_routing_metadata(metadata), p._headers)
         else:
             client = _get_scoped_client(p._client, None, None, p._headers)
 
@@ -710,7 +682,7 @@ class _AsyncCompletions:
 
 @dataclass
 class _AsyncChatNamespace:
-    parent: "TrackedAsyncChatClient"
+    parent: TrackedAsyncChatClient
 
     @property
     def completions(self) -> _AsyncChatCompletions:

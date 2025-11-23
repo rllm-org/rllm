@@ -105,10 +105,7 @@ def get_active_otel_session_uids() -> list[str]:
 
 def get_current_otel_session() -> OpenTelemetrySession:
     """Not implemented - use get_current_otel_metadata() or get_current_otel_session_name() instead."""
-    raise NotImplementedError(
-        "get_current_otel_session() is not supported with baggage-based sessions. "
-        "Use get_current_otel_metadata(), get_current_otel_session_name(), or get_active_otel_session_uids() instead."
-    )
+    raise NotImplementedError("get_current_otel_session() is not supported with baggage-based sessions. Use get_current_otel_metadata(), get_current_otel_session_name(), or get_active_otel_session_uids() instead.")
 
 
 def otel_session(**kwargs: Any) -> OpenTelemetrySession:
@@ -227,10 +224,12 @@ class OpenTelemetrySession:
             self._merged_metadata["session_name"] = self._init_name
 
         # Write to baggage and decorate span
-        self._baggage_token = _write_baggage({
-            "session_uid_chain": self._session_uid_chain,
-            "metadata": self._merged_metadata,
-        })
+        self._baggage_token = _write_baggage(
+            {
+                "session_uid_chain": self._session_uid_chain,
+                "metadata": self._merged_metadata,
+            }
+        )
         self._decorate_span()
         return self
 
