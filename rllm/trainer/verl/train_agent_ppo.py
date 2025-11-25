@@ -1,5 +1,6 @@
-# Copyright under Agentica Project.
 """
+Copyright under Agentica Project.
+
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
 
@@ -12,6 +13,7 @@ from omegaconf import OmegaConf
 
 from rllm.trainer.env_agent_mappings import AGENT_CLASS_MAPPING, ENV_CLASS_MAPPING
 from rllm.trainer.verl.agent_ppo_trainer import AgentPPOTrainer
+from rllm.trainer.verl.agent_sdk_trainer import AgentSdkTrainer
 
 # Local application imports
 from rllm.trainer.verl.agent_workflow_trainer import AgentWorkflowPPOTrainer
@@ -86,12 +88,12 @@ class TaskRunner:
         local_path = copy_to_local(config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False))
 
         # Instantiate the tokenizer and processor.
-        from verl.utils import hf_tokenizer
+        from verl.utils import hf_processor, hf_tokenizer
 
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         # Used for multimodal LLM, could be None
-        # processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+        processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
         # Define worker classes based on the actor strategy.
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
@@ -157,11 +159,8 @@ class TaskRunner:
 
         # if config.rllm.workflow.use_workflow:
         if agent_run_func is not None:
-            # TODO: add it back to the top once the import issue is resolved (i.e. safe to import this even if the user doesn't use it)
-            from rllm.trainer.verl.agent_omni_trainer import AgentOmniTrainer
-
-            print("IMPORTANT: Using AgentOmniTrainer")
-            trainer = AgentOmniTrainer(
+            print("IMPORTANT: Using AgentSdkTrainer")
+            trainer = AgentSdkTrainer(
                 config=config,
                 tokenizer=tokenizer,
                 role_worker_mapping=role_worker_mapping,
@@ -182,6 +181,7 @@ class TaskRunner:
             trainer = AgentWorkflowPPOTrainer(
                 config=config,
                 tokenizer=tokenizer,
+                processor=processor,
                 role_worker_mapping=role_worker_mapping,
                 resource_pool_manager=resource_pool_manager,
                 ray_worker_group_cls=ray_worker_group_cls,

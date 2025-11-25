@@ -3,7 +3,6 @@ import logging
 import os
 from typing import Any
 
-import numpy as np
 import pandas as pd
 import polars as pl
 import torch
@@ -58,6 +57,41 @@ class Dataset(torch.utils.data.Dataset):
             repeated_data.extend([item.copy() for _ in range(n)])
 
         return Dataset(data=repeated_data, name=self.name, split=self.split)
+
+    def shuffle(self, seed: int | None = None) -> "Dataset":
+        """Shuffle the dataset (HuggingFace-compatible API).
+
+        Args:
+            seed: Random seed for reproducibility
+
+        Returns:
+            Dataset: A new shuffled dataset
+        """
+        import random
+
+        indices = list(range(len(self.data)))
+        if seed is not None:
+            random.Random(seed).shuffle(indices)
+        else:
+            random.shuffle(indices)
+
+        shuffled_data = [self.data[i] for i in indices]
+        return Dataset(data=shuffled_data, name=self.name, split=self.split)
+
+    def select(self, indices: list[int] | range) -> "Dataset":
+        """Select a subset of the dataset (HuggingFace-compatible API).
+
+        Args:
+            indices: List or range of indices to select
+
+        Returns:
+            Dataset: A new dataset with selected examples
+        """
+        if isinstance(indices, range):
+            indices = list(indices)
+
+        selected_data = [self.data[i] for i in indices if 0 <= i < len(self.data)]
+        return Dataset(data=selected_data, name=self.name, split=self.split)
 
     def get_data_path(self) -> str | None:
         """Get the absolute path of the dataset file.
@@ -374,27 +408,6 @@ class DatasetRegistry:
         logger.info(f"Removed dataset '{name}' from registry.")
         return True
 
-    @staticmethod
-    def _convert_to_json_serializable(obj: Any) -> Any:
-        """Convert numpy arrays and other non-serializable objects to JSON-serializable types.
-
-        Args:
-            obj: Object to convert
-
-        Returns:
-            JSON-serializable version of the object
-        """
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, np.integer | np.floating):
-            return obj.item()
-        elif isinstance(obj, dict):
-            return {key: DatasetRegistry._convert_to_json_serializable(value) for key, value in obj.items()}
-        elif isinstance(obj, list | tuple):
-            return [DatasetRegistry._convert_to_json_serializable(item) for item in obj]
-        else:
-            return obj
-
     @classmethod
     def apply_verl_postprocessing(cls, data: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Apply Verl postprocessing to the dataset.
@@ -404,27 +417,16 @@ class DatasetRegistry:
 
         Returns:
             List of dictionaries with Verl-compatible format
-
-        Note:
-            All nested structures (lists, dicts) are JSON-serialized to avoid
-            PyArrow "Nested data conversions not implemented for chunked array outputs"
-            error when loading from Parquet in distributed contexts.
         """
         processed_data = []
         for entry in data:
-            # Convert numpy arrays to lists before JSON serialization
-            serializable_entry = cls._convert_to_json_serializable(entry)
-
             processed_entry = {
-                # Serialize nested structures as JSON strings to avoid PyArrow chunked array issues
-                "prompt": json.dumps([{"role": "user", "content": "placeholder"}]),
-                "reward_model": json.dumps(
-                    {
-                        "style": "rule",
-                        "ground_truth": None,
-                    }
-                ),
-                "extra_info": json.dumps(serializable_entry),
+                "prompt": [{"role": "user", "content": "placeholder"}],
+                "reward_model": {
+                    "style": "rule",
+                    "ground_truth": None,
+                },
+                "extra_info": entry,
             }
             processed_data.append(processed_entry)
         return processed_data

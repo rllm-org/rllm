@@ -73,5 +73,5 @@ def get_ppo_ray_runtime_env():
     env.update(_get_forwarded_env_vars())
     return {
         "env_vars": env,
-        "worker_process_setup_hook": PPO_RAY_RUNTIME_ENV["worker_process_setup_hook"],
+        # "worker_process_setup_hook": PPO_RAY_RUNTIME_ENV["worker_process_setup_hook"],
     }

@@ -9,7 +9,7 @@ from verl.workers.rollout.replica import TokenOutput
 
 
 class VerlEngine(RolloutEngine):
-    def __init__(self, config, rollout_manager, tokenizer, **kwargs):
+    def __init__(self, config, rollout_manager, tokenizer, processor=None, **kwargs):
         self.config = config
 
         if config.actor_rollout_ref.rollout.name not in ["vllm", "sglang"]:
@@ -18,7 +18,8 @@ class VerlEngine(RolloutEngine):
         self.rollout_manager: AgentLoopManager = rollout_manager
         self.server_manager = AsyncLLMServerManager(config, server_handles=rollout_manager.server_handles)
         self.tokenizer = tokenizer
-        self.chat_parser = ChatTemplateParser.get_parser(tokenizer, disable_thinking=config.get("rllm", {}).get("disable_thinking", False))
+        self.processor = processor
+        self.chat_parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=config.get("rllm", {}).get("disable_thinking", False))
 
         self.max_prompt_length = config.data.max_prompt_length
         self.max_response_length = config.data.max_response_length
@@ -56,13 +57,24 @@ class VerlEngine(RolloutEngine):
         max_tokens = sampling_params.pop("max_tokens", sampling_params.pop("max_new_tokens", self.max_response_length))
 
         prompt = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, tools=tools, accumulate_reasoning=accumulate_reasoning)
-        prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
-        prompt_length = len(prompt_ids)
+        request_prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)  # list[int]
 
+        if any(msg.get("images", None) is not None and msg["role"] == "user" for msg in messages) and self.processor is not None:
+            image_data = self.chat_parser.process_image_data(messages)  # list[PIL.Image.Image]
+            model_inputs = self.processor(text=[prompt], images=image_data)
+            prompt_ids = model_inputs.pop("input_ids")[0]  # list[int]
+            model_inputs.pop("attention_mask")
+            multi_modal_inputs = dict(model_inputs)
+        else:
+            image_data = None
+            multi_modal_inputs = None
+            prompt_ids = request_prompt_ids
+
+        prompt_length = len(prompt_ids)
         if enforce_max_prompt_length and prompt_length > self.max_prompt_length:
             raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
 
-        token_output: TokenOutput = await self.server_manager.generate(request_id=application_id, prompt_ids=prompt_ids, sampling_params=sampling_params)  # type: ignore
+        token_output: TokenOutput = await self.server_manager.generate(request_id=application_id, prompt_ids=request_prompt_ids, image_data=image_data, sampling_params=sampling_params)  # type: ignore
         completion_ids: list[int] = token_output.token_ids
 
         finish_reason = "stop"
@@ -81,6 +93,7 @@ class VerlEngine(RolloutEngine):
             tool_calls=parsed_output["tool_calls"],
             prompt_ids=prompt_ids,
             completion_ids=completion_ids,
+            multi_modal_inputs=multi_modal_inputs,
             logprobs=[],
             prompt_length=prompt_length,
             completion_length=len(completion_ids),

@@ -1,0 +1,54 @@
+# Tinker Backend Configuration for rLLM SFT
+# This config is used when training with Tinker backend for supervised fine-tuning
+
+# Tinker-specific settings
+tinker_base_url: null  # Tinker service URL (null for local)
+
+# Model Configuration
+model:
+  name: "Qwen/Qwen2.5-7B-Instruct"  # Default model
+  lora_rank: 32
+  train_unembed: true  # Train LoRA on output embedding layer
+  train_attn: true     # Train LoRA on attention layers
+  train_mlp: true      # Train LoRA on MLP layers
+
+# Data Configuration
+data:
+  train_files: null  # Path to training parquet file(s)
+  val_files: null    # Path to validation parquet file(s)
+  train_batch_size: 32
+  micro_batch_size_per_gpu: 32  # Validation batch size
+  train_max_samples: -1  # Maximum training samples (-1 for all)
+  val_max_samples: -1    # Maximum validation samples (-1 for all)
+  max_length: 2048       # Maximum sequence length
+  renderer_name: "role_colon"  # Tokenization renderer: "role_colon", "llama3", "qwen3"
+  
+  # rLLM-specific data settings
+  rllm:
+    tokenize_and_mask_method: cumulative  # "cumulative" or "stepwise"
+    # cumulative -> TrainOnWhat.ALL_ASSISTANT_MESSAGES
+    # stepwise -> TrainOnWhat.LAST_ASSISTANT_MESSAGE
+
+# Optimizer Configuration
+optim:
+  lr: 1e-5            # Learning rate
+  betas: [0.9, 0.95]  # Adam beta parameters
+  eps: 1e-8           # Adam epsilon
+  lr_scheduler: constant  # LR schedule: "constant", "linear", "cosine"
+  warmup_steps_ratio: 0.1  # Warmup steps as ratio of total steps
+
+# Trainer Configuration
+trainer:
+  total_epochs: 1
+  logger: ['console']  # Options: 'console', 'wandb', 'tensorboard'
+  project_name: 'rllm-tinker-sft'
+  experiment_name: 'default'
+  save_freq: 20   # Save checkpoint every N steps (-1 to disable)
+  test_freq: 10   # Run validation every N steps (-1 to disable)
+  default_local_dir: '/tmp/rllm-tinker-sft-checkpoints'
+
+# Hydra configuration
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
