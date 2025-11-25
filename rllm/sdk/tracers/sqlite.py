@@ -10,6 +10,7 @@ import time
 import uuid
 from typing import Any
 
+from rllm.sdk.data_process import build_llm_io
 from rllm.sdk.protocol import Trace
 from rllm.sdk.store import SqliteTraceStore
 
@@ -279,12 +280,14 @@ class SqliteTracer:
         # Use session_uids as-is (no auto-detection from context)
         prepared_session_uids = list(session_uids) if session_uids else None
 
+        llm_input, llm_output = build_llm_io(input, output)
+
         trace = Trace(
             trace_id=trace_id,
             session_name=session_name or "",
             name=name,
-            input=input,
-            output=output,
+            input=llm_input,
+            output=llm_output,
             model=model,
             latency_ms=latency_ms,
             tokens=tokens,

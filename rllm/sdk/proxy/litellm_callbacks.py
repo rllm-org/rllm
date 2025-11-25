@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.types.utils import ModelResponse, ModelResponseStream
 
 from rllm.sdk.tracers import SqliteTracer
+
+logger = logging.getLogger(__name__)
 
 
 class SamplingParametersCallback(CustomLogger):
@@ -18,23 +21,26 @@ class SamplingParametersCallback(CustomLogger):
     Injects metadata from request state if available.
     """
 
-    def __init__(self, add_return_token_ids: bool = False):
+    def __init__(self, add_return_token_ids: bool = False, add_logprobs: bool = False):
         super().__init__()
         self.add_return_token_ids = add_return_token_ids
+        self.add_logprobs = add_logprobs
 
     async def async_pre_call_hook(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         data = kwargs.get("data") or (args[2] if len(args) > 2 else {})
         model = data.get("model", "")
 
-        # Request token-level logprobs; do not force top_logprobs list
-        # result = {**data, "logprobs": True}
-        result = {**data}
-
         # Extract litellm_params to check backend type
         litellm_params = kwargs.get("litellm_params", {})
+        is_vllm = self._supports_token_ids(model, litellm_params)
+
+        result = {**data}
+
+        if is_vllm and self.add_logprobs and "logprobs" not in result:
+            result["logprobs"] = True
 
         # Only add return_token_ids if explicitly enabled AND model supports it
-        if self.add_return_token_ids and self._supports_token_ids(model, litellm_params):
+        if self.add_return_token_ids and is_vllm:
             result["return_token_ids"] = True
 
         # Inject metadata from request state if available

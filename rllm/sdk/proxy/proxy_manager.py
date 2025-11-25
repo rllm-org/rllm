@@ -113,6 +113,7 @@ class ProxyManager:
         project: str | None = None,
         snapshot_directory: str | None = None,
         sync_tracer: bool = False,
+        add_logprobs: bool = True,
     ) -> str:
         """Start LiteLLM proxy as subprocess (no GIL contention).
 
@@ -122,6 +123,7 @@ class ProxyManager:
             project: Project name/namespace for the tracer.
             snapshot_directory: Directory to save config snapshot.
             sync_tracer: If True, enable synchronous tracer persistence (waits for traces to be stored before returning response).
+            add_logprobs: If True, automatically add logprobs=True to requests.
 
         Returns:
             Path to the config snapshot on disk.
@@ -155,6 +157,9 @@ class ProxyManager:
 
         if sync_tracer:
             cmd.extend(["--sync-tracer"])
+
+        if add_logprobs:
+            cmd.extend(["--add-logprobs"])
 
         env = os.environ.copy()
         env["AIOHTTP_CONNECTOR_LIMIT"] = "4096"
@@ -287,8 +292,20 @@ class VerlProxyManager(ProxyManager):
         admin_token: str | None = None,
         auto_instrument_vllm: bool = True,
         proxy_access_log: bool = False,
+        add_logprobs: bool = False,
     ):
-        """Initialize the proxy manager for a VERL rollout engine."""
+        """Initialize the proxy manager for a VERL rollout engine.
+
+        Args:
+            rollout_engine: The VERL rollout engine instance.
+            model_name: Model name for the proxy configuration.
+            proxy_host: Host address for the proxy server.
+            proxy_port: Port number for the proxy server.
+            admin_token: Optional admin token for proxy authentication.
+            auto_instrument_vllm: If True, automatically instrument vLLM servers.
+            proxy_access_log: If True, enable proxy access logging.
+            add_logprobs: If True, automatically add logprobs=True to requests.
+        """
 
         if type(rollout_engine).__name__ != "VerlEngine":
             raise TypeError(f"VerlProxyManager only supports VerlEngine, got {type(rollout_engine).__name__}")
@@ -303,6 +320,7 @@ class VerlProxyManager(ProxyManager):
         self.model_name = model_name
         self.rollout_engine = rollout_engine
         self.auto_instrument_vllm = auto_instrument_vllm
+        self.add_logprobs = add_logprobs
         self._server_addresses: list[str] = []
 
         if auto_instrument_vllm:
