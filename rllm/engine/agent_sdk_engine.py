@@ -398,13 +398,11 @@ class AgentSdkEngine:
         Returns:
             DataProto with training-ready tensors (prompts, responses, rewards, masks).
         """
-        free_cache_engine = self.config.actor_rollout_ref.rollout.free_cache_engine if self.config else False
-        if free_cache_engine:
-            # TODO: later probably should make the `wake_up` and `sleep` methods in base class to be async
-            if isinstance(self.rollout_engine, VerlEngine):
-                await self.rollout_engine.wake_up()
-            else:
-                self.rollout_engine.wake_up()
+        # TODO: later probably should make the `wake_up` and `sleep` methods in base class to be async
+        if isinstance(self.rollout_engine, VerlEngine):
+            await self.rollout_engine.wake_up()
+        else:
+            self.rollout_engine.wake_up()
 
         if batch.meta_info.get("validate", False):
             self.rollout_engine.validate = True
@@ -413,11 +411,10 @@ class AgentSdkEngine:
         episodes = await self.execute_tasks(tasks, task_ids, **kwargs)  # list of Episodes
         self.rollout_engine.validate = False
 
-        if free_cache_engine:
-            if isinstance(self.rollout_engine, VerlEngine):
-                await self.rollout_engine.sleep()
-            else:
-                self.rollout_engine.sleep()
+        if isinstance(self.rollout_engine, VerlEngine):
+            await self.rollout_engine.sleep()
+        else:
+            self.rollout_engine.sleep()
         return self.transform_results_for_verl(episodes, task_ids)
 
     def transform_results_for_verl(self, episodes: list[Episode], task_ids: np.ndarray) -> "DataProto":
