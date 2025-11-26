@@ -14,11 +14,10 @@ logger = logging.getLogger(__name__)
 
 
 class SamplingParametersCallback(CustomLogger):
-    """Inject sampling parameters and metadata before LiteLLM sends requests.
+    """Inject sampling parameters before LiteLLM sends requests.
 
     Adds logprobs and top_logprobs to all requests.
     Only adds return_token_ids for vLLM-compatible backends (not OpenAI/Anthropic).
-    Injects metadata from request state if available.
     """
 
     def __init__(self, add_return_token_ids: bool = False, add_logprobs: bool = False):
@@ -28,52 +27,14 @@ class SamplingParametersCallback(CustomLogger):
 
     async def async_pre_call_hook(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         data = kwargs.get("data") or (args[2] if len(args) > 2 else {})
-        model = data.get("model", "")
 
-        # Extract litellm_params to check backend type
-        litellm_params = kwargs.get("litellm_params", {})
-        is_vllm = self._supports_token_ids(model, litellm_params)
+        if self.add_logprobs:
+            data["logprobs"] = True
 
-        result = {**data}
+        if self.add_return_token_ids:
+            data["return_token_ids"] = True
 
-        if is_vllm and self.add_logprobs and "logprobs" not in result:
-            result["logprobs"] = True
-
-        # Only add return_token_ids if explicitly enabled AND model supports it
-        if self.add_return_token_ids and is_vllm:
-            result["return_token_ids"] = True
-
-        # Inject metadata from request state if available
-        proxy_server_request = litellm_params.get("proxy_server_request")
-        if proxy_server_request:
-            request_state = getattr(proxy_server_request, "state", None)
-            if request_state:
-                rllm_metadata = getattr(request_state, "rllm_metadata", None)
-                if rllm_metadata:
-                    result["metadata"] = {**result.get("metadata", {}), **rllm_metadata}
-
-        return result
-
-    @staticmethod
-    def _supports_token_ids(model: str, litellm_params: dict[str, Any] | None = None) -> bool:
-        """Check if model supports return_token_ids parameter.
-
-        Only vLLM backends support this. We detect vLLM by checking the
-        backend model type in litellm_params (configured by proxy_manager).
-
-        Args:
-            model: The model name from the request (unused, kept for compatibility)
-            litellm_params: LiteLLM parameters containing backend info
-
-        Returns:
-            True if backend is vLLM, False otherwise
-        """
-        # Check if backend is vLLM (configured as hosted_vllm/* by proxy_manager)
-        if litellm_params:
-            backend_model = litellm_params.get("model", "")
-            if "vllm" in backend_model.lower() or "hosted_vllm" in backend_model.lower():
-                return True
-        return False
+        return data
 
 
 class TracingCallback(CustomLogger):
@@ -104,10 +65,10 @@ class TracingCallback(CustomLogger):
 
         Uses litellm_call_id for deduplication to ensure we only log once per request.
         """
-        raw_meta_from_data = data.get("metadata", {}) if isinstance(data, dict) else {}
-        metadata = raw_meta_from_data.get("requester_metadata") if isinstance(raw_meta_from_data, dict) else None
+        # Get rllm_metadata injected by MetadataRoutingMiddleware
+        metadata = data.get("rllm_metadata", {}) if isinstance(data, dict) else {}
         if not isinstance(metadata, dict):
-            metadata = raw_meta_from_data if isinstance(raw_meta_from_data, dict) else {}
+            metadata = {}
 
         model = data.get("model", "unknown") if isinstance(data, dict) else "unknown"
         messages = data.get("messages", []) if isinstance(data, dict) else []
