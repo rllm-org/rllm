@@ -1,3 +1,4 @@
+import base64
 from io import BytesIO
 
 from PIL import Image
@@ -10,10 +11,11 @@ from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflo
 
 
 class Geo3KWorkflow(Workflow):
-    def __init__(self, rollout_engine: RolloutEngine, reward_function: RewardFunction, **kwargs):
+    def __init__(self, rollout_engine: RolloutEngine, reward_function: RewardFunction = None, encode_as_base64: bool = False, **kwargs):
         super().__init__(rollout_engine, **kwargs)
         self.agent = SimpleAgent()
         self.reward_fn: RewardFunction = reward_function or math_reward_fn
+        self.encode_as_base64 = encode_as_base64
 
     async def run(self, task: dict, uid: str, **kwargs) -> Episode:
         self.reset(task, uid)
@@ -24,8 +26,24 @@ class Geo3KWorkflow(Workflow):
             image = image[0]
         if isinstance(image, dict) and "bytes" in image:
             image = Image.open(BytesIO(image["bytes"]))
-        assert isinstance(image, Image.Image) or isinstance(image, str) or image is None, f"Image must be a PIL.Image.Image or a string, but got {type(image)}"
-        messages = [{"role": "user", "content": question, "images": [image]}]
+        assert isinstance(image, Image.Image) or image is None, f"Image must be a PIL.Image.Image, but got {type(image)}"
+
+        if self.encode_as_base64:
+            # format as openai compatible base64 encoded image
+            buffer = BytesIO()
+            image.save(buffer, format="JPEG")
+            image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": question},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
+                    ],
+                }
+            ]
+        else:
+            messages = [{"role": "user", "content": question, "images": [image]}]
 
         output: ModelOutput = await self.rollout_engine.get_model_response(messages, application_id=uid, **kwargs)
         action = Action(output.content)
