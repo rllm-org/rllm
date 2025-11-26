@@ -35,6 +35,7 @@ python preprocess_geo3k.py
 ```
 
 This will:
+
 - Download the `hiyouga/geometry3k` dataset from HuggingFace
 - Process geometry problems with images and text
 - Register the dataset with rLLM's DatasetRegistry
@@ -50,6 +51,7 @@ python run_geo3k.py
 ```
 
 This will:
+
 - Load the Geometry3K test dataset
 - Run the VLM workflow on each problem
 - Evaluate performance using pass@1 and pass@k metrics
@@ -65,12 +67,16 @@ bash train_geo3k.sh
 ```
 
 **Training Configuration:**
+
 - Base model: `Qwen/Qwen3-VL-2B-Instruct`
 - Algorithm: GRPO (Group Relative Policy Optimization)
 - Training batch size: 32
 - Response length: Up to 2048 tokens
 - Number of GPUs: 8 (configurable)
-- Training epochs: 15
+- Training epochs: 3
+
+**Results:**
+![vlm accuracy](../assets/vlm-acc.png)
 
 ## Code Reference
 

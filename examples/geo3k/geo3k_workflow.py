@@ -28,8 +28,9 @@ class Geo3KWorkflow(Workflow):
             image = Image.open(BytesIO(image["bytes"]))
         assert isinstance(image, Image.Image) or image is None, f"Image must be a PIL.Image.Image, but got {type(image)}"
 
-        if self.encode_as_base64:
+        if self.encode_as_base64 and image is not None:
             # format as openai compatible base64 encoded image
+            image = image.convert("RGB")
             buffer = BytesIO()
             image.save(buffer, format="JPEG")
             image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
@@ -42,8 +43,10 @@ class Geo3KWorkflow(Workflow):
                     ],
                 }
             ]
-        else:
+        elif image is not None:
             messages = [{"role": "user", "content": question, "images": [image]}]
+        else:
+            messages = [{"role": "user", "content": question}]
 
         output: ModelOutput = await self.rollout_engine.get_model_response(messages, application_id=uid, **kwargs)
         action = Action(output.content)
