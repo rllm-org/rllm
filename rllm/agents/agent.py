@@ -151,6 +151,24 @@ class Episode:
         )
 
 
+@dataclass
+class TrajectoryGroup:
+    """
+    A group of trajectories for advantage computation.
+
+    Unlike Episode (which represents raw rollout data), TrajectoryGroup is specifically
+    structured for advantage computation. All trajectories in a group will have their
+    rewards compared to compute advantages (e.g., via GRPO).
+
+    Attributes:
+        trajectories: List of trajectories to compare for advantage computation
+        group_id: Optional identifier for the group (e.g., "task1:agent_0")
+    """
+
+    trajectories: list[Trajectory]
+    group_id: str = None
+
+
 class BaseAgent(ABC):
     @property
     def chat_completions(self) -> list[dict[str, str]]:

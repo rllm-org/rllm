@@ -10,8 +10,6 @@ from rllm.workflows.workflow import TerminationReason
 from verl.protocol import DataProto
 from verl.utils.torch_functional import pad_sequence_to_length
 
-_DEBUG_FLAG = False  # set to True for experimental features (debugging purposes)
-
 
 def _pad_sequence_batch(sequences: list[torch.Tensor], pad_token_id: int, max_length: int, left_pad: bool = True) -> torch.Tensor:
     """Pads a list of sequences to a maximum length.
@@ -110,9 +108,6 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
     position_ids = (torch.cumsum(attention_mask, dim=1) - 1) * attention_mask  # shape: [bs, max_prompt_length + max_response_length]
 
     traj_mask = _pad_sequence_batch(accumulated.traj_mask, 0, max_response_length, left_pad=False)  # shape: [bs, max_response_length]
-
-    if _DEBUG_FLAG:
-        assert (traj_mask == responses_mask).all(), "traj_mask and responses_mask must be the same"
 
     step_rewards_batch, traj_rewards_batch = _build_step_and_trajectory_rewards(accumulated.step_rewards, accumulated.traj_rewards, responses_batch, accumulated.responses)  # shape: [bs, max_response_length]
 
@@ -246,7 +241,7 @@ def transform_workflow_episodes_for_verl(
     cf_config: CompactFilteringConfig,
 ) -> DataProto:
     """
-    Transforms a list of episodes (from running a rLLM workflow)into a Verl-compatible DataProto.
+    Transforms a list of episodes (from running a rLLM workflow) into a verl-compatible DataProto.
 
     Args:
         episodes: List of episodes to transform.

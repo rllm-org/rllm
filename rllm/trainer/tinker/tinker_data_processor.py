@@ -5,33 +5,14 @@ handling filtering, advantage computation, and conversion to tinker.Datum format
 """
 
 import logging
-from dataclasses import dataclass
 
 import numpy as np
 import tinker
 from tinker.types.tensor_data import TensorData
 
-from rllm.agents.agent import Episode, Step, Trajectory
+from rllm.agents.agent import Episode, Step, Trajectory, TrajectoryGroup
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class TrajectoryGroup:
-    """
-    A group of trajectories for advantage computation.
-
-    Unlike Episode (which represents raw rollout data), TrajectoryGroup is specifically
-    structured for advantage computation. All trajectories in a group will have their
-    rewards compared to compute advantages (e.g., via GRPO).
-
-    Attributes:
-        trajectories: List of trajectories to compare for advantage computation
-        group_id: Optional identifier for the group (e.g., "task1:agent_0")
-    """
-
-    trajectories: list[Trajectory]
-    group_id: str = None
 
 
 class TinkerAdvantageComputer:
