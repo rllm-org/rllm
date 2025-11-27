@@ -24,6 +24,7 @@ def prepare_geo3k_data():
         image = example.pop("images")
 
         data = {
+            "idx": idx,
             "data_source": "geo3k",
             "image": image,
             "question": prompt,

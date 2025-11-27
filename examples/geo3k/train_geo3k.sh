@@ -54,4 +54,4 @@ python3 -m examples.geo3k.train_geo3k \
     rllm.agent.max_steps=1 \
     rllm.stepwise_advantage.enable=False \
     rllm.workflow.use_workflow=True \
-    trainer.total_epochs=15
+    trainer.total_epochs=3
