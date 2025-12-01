@@ -21,3 +21,6 @@ Supervised fine-tuning of base math models(e.g. Qwen/Qwen2.5-Math-1.5B) using hi
 
 ### ⚖️ [Solver-Judge Workflow](solver_judge.md)
 Train a multi-agent workflow to sample multiple candidate solutions, then use a judge to select the best.
+
+### 👁️ [Vision-Language Models (VLM)](vlm.md)
+Train multimodal agents that can reason over both images and text, demonstrated with geometry problem solving.
