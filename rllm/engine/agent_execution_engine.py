@@ -17,8 +17,8 @@ from rllm.environments.env_utils import (
     compute_mc_return,
     compute_trajectory_reward,
 )
-from rllm.misc import colorful_print
 from rllm.parser import ChatTemplateParser
+from rllm.utils import colorful_print
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class AgentExecutionEngine:
         tokenizer=None,
         rollout_engine=None,
         chat_parser=None,
-        n_parallel_agents=1,  # The number of active agents
+        n_parallel_agents=128,  # The number of active agents
         trajectory_timeout=None,
         gamma=0.2,
         api_retries=3,

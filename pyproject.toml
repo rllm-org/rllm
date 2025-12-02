@@ -51,6 +51,7 @@ dependencies = [
     # Code evaluation
     "swebench",
     "e2b_code_interpreter",
+    "eval-protocol",
 
     # Tools
     "mcp",
