@@ -32,7 +32,7 @@ class Step:
             "chat_completions": self.chat_completions,
             "observation": self.observation,
             "thought": self.thought,
-            "action": self.action,
+            "action": self.action.action if isinstance(self.action, Action) else self.action,
             "model_response": self.model_response,
             "model_output": self.model_output.to_dict() if self.model_output is not None else None,
             "info": self.info,
@@ -77,10 +77,17 @@ class Trajectory:
     info: dict = field(default_factory=dict)
 
     def to_dict(self):
+        # Remove large/non-serializable payloads (e.g., images) from task
+        def _sanitize_task(task_obj):
+            if isinstance(task_obj, dict):
+                cleaned = {k: v for k, v in task_obj.items() if k not in ("image", "images")}
+                return cleaned
+            return task_obj
+
         return {
             "uid": self.uid,
             "name": self.name,
-            "task": self.task,
+            "task": _sanitize_task(self.task),
             "steps": [step.to_dict() for step in self.steps],
             "reward": float(self.reward),
             "info": self.info,
@@ -125,9 +132,16 @@ class Episode:
     info: dict = field(default_factory=dict)
 
     def to_dict(self):
+        # Remove large/non-serializable payloads (e.g., images) from task
+        def _sanitize_task(task_obj):
+            if isinstance(task_obj, dict):
+                cleaned = {k: v for k, v in task_obj.items() if k not in ("image", "images")}
+                return cleaned
+            return task_obj
+
         return {
             "id": self.id,
-            "task": self.task,
+            "task": _sanitize_task(self.task),
             "termination_reason": self.termination_reason.value if self.termination_reason is not None else None,
             "is_correct": bool(self.is_correct),
             "trajectories": [trajectory.to_dict() for trajectory in self.trajectories],

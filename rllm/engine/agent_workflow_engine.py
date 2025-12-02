@@ -199,16 +199,7 @@ class AgentWorkflowEngine:
         Returns:
             DataProto: Transformed results compatible with Verl training.
         """
-        # Import at runtime to avoid hard dependency
-        from rllm.engine.rollout.verl_engine import VerlEngine
-
-        free_cache_engine = self.config.actor_rollout_ref.rollout.free_cache_engine if self.config else False
-        if free_cache_engine:
-            # TODO: later probably should make the `wake_up` and `sleep` methods in base class to be async
-            if isinstance(self.rollout_engine, VerlEngine):
-                await self.rollout_engine.wake_up()
-            else:
-                self.rollout_engine.wake_up()
+        await self.rollout_engine.wake_up()
 
         is_validation = batch.meta_info.get("validate", False)
         if is_validation:
@@ -220,11 +211,9 @@ class AgentWorkflowEngine:
         task_ids = batch.non_tensor_batch["task_ids"].tolist()
         results = await self.execute_tasks(tasks, task_ids, **kwargs)  # list of Episodes
         self.rollout_engine.validate = False
-        if free_cache_engine:
-            if isinstance(self.rollout_engine, VerlEngine):
-                await self.rollout_engine.sleep()
-            else:
-                self.rollout_engine.sleep()
+
+        await self.rollout_engine.sleep()
+
         self.current_mode = "train"
 
         if self.config.rllm.get("use_new_verl_transform", True):

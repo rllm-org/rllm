@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from litellm.integrations.custom_logger import CustomLogger
@@ -9,65 +10,31 @@ from litellm.types.utils import ModelResponse, ModelResponseStream
 
 from rllm.sdk.tracers import SqliteTracer
 
+logger = logging.getLogger(__name__)
+
 
 class SamplingParametersCallback(CustomLogger):
-    """Inject sampling parameters and metadata before LiteLLM sends requests.
+    """Inject sampling parameters before LiteLLM sends requests.
 
     Adds logprobs and top_logprobs to all requests.
     Only adds return_token_ids for vLLM-compatible backends (not OpenAI/Anthropic).
-    Injects metadata from request state if available.
     """
 
-    def __init__(self, add_return_token_ids: bool = False):
+    def __init__(self, add_return_token_ids: bool = False, add_logprobs: bool = False):
         super().__init__()
         self.add_return_token_ids = add_return_token_ids
+        self.add_logprobs = add_logprobs
 
     async def async_pre_call_hook(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         data = kwargs.get("data") or (args[2] if len(args) > 2 else {})
-        model = data.get("model", "")
 
-        # Request token-level logprobs; do not force top_logprobs list
-        # result = {**data, "logprobs": True}
-        result = {**data}
+        if self.add_logprobs:
+            data["logprobs"] = True
 
-        # Extract litellm_params to check backend type
-        litellm_params = kwargs.get("litellm_params", {})
+        if self.add_return_token_ids:
+            data["return_token_ids"] = True
 
-        # Only add return_token_ids if explicitly enabled AND model supports it
-        if self.add_return_token_ids and self._supports_token_ids(model, litellm_params):
-            result["return_token_ids"] = True
-
-        # Inject metadata from request state if available
-        proxy_server_request = litellm_params.get("proxy_server_request")
-        if proxy_server_request:
-            request_state = getattr(proxy_server_request, "state", None)
-            if request_state:
-                rllm_metadata = getattr(request_state, "rllm_metadata", None)
-                if rllm_metadata:
-                    result["metadata"] = {**result.get("metadata", {}), **rllm_metadata}
-
-        return result
-
-    @staticmethod
-    def _supports_token_ids(model: str, litellm_params: dict[str, Any] | None = None) -> bool:
-        """Check if model supports return_token_ids parameter.
-
-        Only vLLM backends support this. We detect vLLM by checking the
-        backend model type in litellm_params (configured by proxy_manager).
-
-        Args:
-            model: The model name from the request (unused, kept for compatibility)
-            litellm_params: LiteLLM parameters containing backend info
-
-        Returns:
-            True if backend is vLLM, False otherwise
-        """
-        # Check if backend is vLLM (configured as hosted_vllm/* by proxy_manager)
-        if litellm_params:
-            backend_model = litellm_params.get("model", "")
-            if "vllm" in backend_model.lower() or "hosted_vllm" in backend_model.lower():
-                return True
-        return False
+        return data
 
 
 class TracingCallback(CustomLogger):
@@ -79,9 +46,10 @@ class TracingCallback(CustomLogger):
     pre-send, and avoids duplicate logging from nested deployment calls.
     """
 
-    def __init__(self, tracer: SqliteTracer):
+    def __init__(self, tracer: SqliteTracer, *, await_persistence: bool = False):
         super().__init__()
         self.tracer = tracer
+        self._await_persistence = await_persistence
 
     async def async_post_call_success_hook(
         self,
@@ -97,8 +65,10 @@ class TracingCallback(CustomLogger):
 
         Uses litellm_call_id for deduplication to ensure we only log once per request.
         """
-        raw_meta_from_data = data.get("metadata", {}) if isinstance(data, dict) else {}
-        metadata = raw_meta_from_data.get("requester_metadata", {})
+        # Get rllm_metadata injected by MetadataRoutingMiddleware
+        metadata = data.get("rllm_metadata", {}) if isinstance(data, dict) else {}
+        if not isinstance(metadata, dict):
+            metadata = {}
 
         model = data.get("model", "unknown") if isinstance(data, dict) else "unknown"
         messages = data.get("messages", []) if isinstance(data, dict) else []
@@ -125,21 +95,27 @@ class TracingCallback(CustomLogger):
         # This ensures the context_id matches the actual completion ID from the provider
         response_id = response_payload.get("id", None)
 
-        # Extract session_uids from metadata (sent from client via metadata routing)
+        # Extract session_uids and session_name from metadata (sent from client)
         session_uids = metadata.get("session_uids", None)
+        session_name = metadata.get("session_name")
 
-        self.tracer.log_llm_call(
+        log_kwargs = dict(
             name=f"proxy/{model}",
             model=model,
             input={"messages": messages},
             output=response_payload,
             metadata=metadata,
-            session_name=metadata.get("session_name", None),
+            session_name=session_name,
             latency_ms=latency_ms,
             tokens=tokens,
-            trace_id=response_id,  # Use the provider's response ID as the trace_id
-            session_uids=session_uids,  # Pass session UIDs from client
+            trace_id=response_id,
+            session_uids=session_uids,
         )
+
+        if self._await_persistence:
+            await self.tracer.log_llm_call_sync(**log_kwargs)
+        else:
+            self.tracer.log_llm_call(**log_kwargs)
 
         # Return response unchanged
         return response

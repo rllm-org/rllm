@@ -1,0 +1,4 @@
+# RLLM SDK Configuration
+# Session backend: "contextvar" (default) or "opentelemetry"
+session_backend: contextvar
+# session_backend: opentelemetry

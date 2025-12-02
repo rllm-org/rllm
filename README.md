@@ -35,30 +35,56 @@ rLLM is an open-source framework for post-training language agents via reinforce
 
 ## Getting Started 🎯
 
-### Installation
+### Step 1: Building rLLM
+
+rLLM requires Python >= 3.11. You can install it either directly via pip or build from source.
+
+**Option A: Direct Installation**
+
+```bash
+uv pip install "git+https://github.com/rllm-org/rllm.git"
+```
+
+**Option B: Building from Source**
 
 ```bash
 # Clone the repository
-git clone --recurse-submodules https://github.com/rllm-org/rllm.git
+git clone https://github.com/rllm-org/rllm.git
 cd rllm
 
 # Create a conda environment
-conda create -n rllm python=3.10 -y
+conda create -n rllm python=3.11 -y
 conda activate rllm
+
+# Build rLLM from source
+pip install -e .
+```
+
+### Step 2: Installing Training Backend
+
+rLLM supports two training backends: `verl` and `Tinker`. Choose one based on your needs.
+
+**Option A: Using `verl` as Training Backend**
+
+```bash
+# Initialize and update the verl submodule
+git submodule update --init --recursive
 
 # Install verl
 bash scripts/install_verl.sh
-
-# Install rLLM
-pip install -e .
 ```
+
+**Option B: Using `Tinker` as Training Backend**
+
+No additional installation needed. `tinker` and `tinker-cookbook` are pre-installed when you install rLLM.
+
+> **Note:** The direct pip installation (Option A in Step 1) comes with Tinker as the default training backend. If you want to use `verl`, you'll need to build from source (Option B in Step 1) and then install `verl` (Option A in Step 2).
 
 ### Installation with Docker 🐳
 
 For a containerized setup, you can use Docker:
 
 ```bash
-
 # Build the Docker image
 docker build -t rllm .
 

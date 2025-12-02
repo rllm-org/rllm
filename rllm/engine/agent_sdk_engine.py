@@ -18,9 +18,10 @@ from rllm.engine.rollout import ModelOutput, RolloutEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
 from rllm.misc import colorful_print
 from rllm.sdk.data_process import group_steps, trace_to_step
-from rllm.sdk.protocol import TrajectoryView
+from rllm.sdk.protocol import Trace, TrajectoryView
 from rllm.sdk.proxy.proxy_manager import VerlProxyManager
-from rllm.sdk.shortcuts import _session_with_name
+from rllm.sdk.session import SESSION_BACKEND
+from rllm.sdk.session.base import wrap_with_session_context
 from rllm.sdk.store.sqlite_store import SqliteTraceStore
 from rllm.workflows.workflow import TerminationReason
 
@@ -77,41 +78,19 @@ class AgentSdkEngine:
         else:
             raise NotImplementedError(f"Rollout engine type {type(rollout_engine)} not supported")
 
-        self.wrapped_agent_run_func = self._prepare_run_func_with_tracing(self.agent_run_func)
+        self.wrapped_agent_run_func = wrap_with_session_context(self.agent_run_func, tracer_service_name="agent-sdk-worker")
         self.groupby_key = self.config.rllm.sdk.processing.groupby_key
         self.traj_name_key = self.config.rllm.sdk.processing.traj_name_key
         self.store = SqliteTraceStore(db_path=self.config.rllm.sdk.store.path)
-
-    def _prepare_run_func_with_tracing(self, func):
-        """Wrap agent function with session context for automatic trace collection.
-
-        Creates wrapper that uses _session_with_name to set explicit session name
-        from task metadata. Returns both function output and session UID for trace retrieval.
-        """
-        if inspect.iscoroutinefunction(func):
-
-            async def wrapped_func_async(metadata, *args, **kwargs):
-                session_name = metadata.pop("session_name", None)
-                with _session_with_name(name=session_name, **metadata) as session:
-                    output = await func(*args, **kwargs)
-                return output, session._uid
-
-            return wrapped_func_async
-        else:
-
-            def wrapped_func_sync(metadata, *args, **kwargs):
-                session_name = metadata.pop("session_name", None)
-                with _session_with_name(name=session_name, **metadata) as session:
-                    output = func(*args, **kwargs)
-                return output, session._uid
-
-        return wrapped_func_sync
 
     def _setup_verl_proxy(self, proxy_config: dict, tracer: Optional["TracerProtocol"]) -> None:
         """Setup LiteLLM proxy for VERL rollout engine.
 
         Initializes VerlProxyManager and starts proxy in subprocess or external mode.
         Proxy handles trace collection from vLLM servers and persists to SQLite.
+
+        When using OpenTelemetry-based sessions, sync storage mode is required to ensure
+        synchronization between tracer persistence and session reads.
         """
         model_name = proxy_config.get("model_name")
         if not model_name:
@@ -123,6 +102,14 @@ class AgentSdkEngine:
         proxy_mode = proxy_config.get("mode", "external")
         admin_token = proxy_config.get("admin_token", "my-shared-secret")
 
+        # Check if using OpenTelemetry session backend - requires sync storage mode
+        requires_sync_storage = SESSION_BACKEND == "opentelemetry"
+
+        if requires_sync_storage and proxy_mode == "external":
+            logger.warning("OpenTelemetry-based sessions require synchronous storage mode for proper synchronization. When using external proxy mode, ensure the proxy is started with --sync-tracer flag. Alternatively, use proxy_mode='subprocess' to automatically enable sync storage. Without sync storage, there may be synchronization issues between tracer persistence and session reads.")
+
+        add_logprobs = proxy_config.get("add_logprobs", False)
+
         self.proxy_manager = VerlProxyManager(
             rollout_engine=self.rollout_engine,
             model_name=model_name,
@@ -130,6 +117,7 @@ class AgentSdkEngine:
             proxy_port=proxy_port,
             admin_token=admin_token,
             proxy_access_log=False,
+            add_logprobs=add_logprobs,
         )
 
         self.rollout_engine_endpoint = self.proxy_manager.get_proxy_url()
@@ -144,7 +132,17 @@ class AgentSdkEngine:
             # Start subprocess, wait for server, then reload config
             db_path = proxy_config.get("db_path")
             project = proxy_config.get("project", "rllm-agent-sdk")
-            self.proxy_manager.start_proxy_subprocess(config=config_payload, db_path=db_path, project=project)
+            # Enable sync storage when using OpenTelemetry sessions
+            sync_tracer = requires_sync_storage
+            if sync_tracer:
+                logger.info("Enabling synchronous tracer persistence for OpenTelemetry session backend")
+            self.proxy_manager.start_proxy_subprocess(
+                config=config_payload,
+                db_path=db_path,
+                project=project,
+                sync_tracer=sync_tracer,
+                add_logprobs=add_logprobs,
+            )
         elif proxy_mode == "external":
             # Reload external proxy with the generated configuration
             self.proxy_manager.reload_proxy_config(config=config_payload)
@@ -291,13 +289,14 @@ class AgentSdkEngine:
             session_name = trace.data.get("session_name", None)
             if not session_name or session_name not in rollout_session_names:
                 continue
-            traces_by_session_name[session_name].append((trace.id, trace.data))
+            trace_obj = Trace(**trace.data)
+            traces_by_session_name[session_name].append((trace.id, trace_obj))
 
         num_traces_collected = sum(len(traces) for traces in traces_by_session_name.values())
 
         for session_name, traces in traces_by_session_name.items():
-            steps = [trace_to_step(trace[1]) for trace in traces]
-            step_id_to_step = {trace[0]: step for trace, step in zip(traces, steps, strict=False)}
+            steps = [trace_to_step(entry[1]) for entry in traces]
+            step_id_to_step = {entry[0]: step for entry, step in zip(traces, steps, strict=False)}
 
             task_id = session_name.split(":")[0]
             retry_attempt = int(session_name.split(":")[2])
@@ -398,13 +397,11 @@ class AgentSdkEngine:
         Returns:
             DataProto with training-ready tensors (prompts, responses, rewards, masks).
         """
-        free_cache_engine = self.config.actor_rollout_ref.rollout.free_cache_engine if self.config else False
-        if free_cache_engine:
-            # TODO: later probably should make the `wake_up` and `sleep` methods in base class to be async
-            if isinstance(self.rollout_engine, VerlEngine):
-                await self.rollout_engine.wake_up()
-            else:
-                self.rollout_engine.wake_up()
+        # TODO: later probably should make the `wake_up` and `sleep` methods in base class to be async
+        if isinstance(self.rollout_engine, VerlEngine):
+            await self.rollout_engine.wake_up()
+        else:
+            self.rollout_engine.wake_up()
 
         if batch.meta_info.get("validate", False):
             self.rollout_engine.validate = True
@@ -413,11 +410,10 @@ class AgentSdkEngine:
         episodes = await self.execute_tasks(tasks, task_ids, **kwargs)  # list of Episodes
         self.rollout_engine.validate = False
 
-        if free_cache_engine:
-            if isinstance(self.rollout_engine, VerlEngine):
-                await self.rollout_engine.sleep()
-            else:
-                self.rollout_engine.sleep()
+        if isinstance(self.rollout_engine, VerlEngine):
+            await self.rollout_engine.sleep()
+        else:
+            self.rollout_engine.sleep()
         return self.transform_results_for_verl(episodes, task_ids)
 
     def transform_results_for_verl(self, episodes: list[Episode], task_ids: np.ndarray) -> "DataProto":
@@ -437,6 +433,7 @@ class AgentSdkEngine:
 
         prompts = []
         responses = []
+        rollout_logprobs = []
         traj_rewards = []
         step_rewards = []
         episode_ids = []
@@ -520,6 +517,9 @@ class AgentSdkEngine:
                         response_ids = torch.tensor(step.model_output.completion_ids, dtype=torch.long)
                         responses.append(response_ids)
 
+                        rollout_logprob = torch.tensor(step.model_output.logprobs, dtype=torch.float32)
+                        rollout_logprobs.append(rollout_logprob)
+
                         mask = torch.ones_like(response_ids, dtype=torch.long)
                         traj_mask.append(mask)
 
@@ -586,6 +586,18 @@ class AgentSdkEngine:
         traj_mask = pad_sequence_to_length(traj_mask, max_response_length, 0, left_pad=False)
         traj_mask = traj_mask[:, :max_response_length]  # truncate if necessary
 
+        # Pad rollout_logprobs to match response_batch shape
+        rollout_logprobs_batch = None
+        if rollout_logprobs and all(len(logprobs) == len(response) for logprobs, response in zip(rollout_logprobs, responses, strict=False)):
+            rollout_logprobs_batch = torch.nn.utils.rnn.pad_sequence(
+                rollout_logprobs,
+                batch_first=True,
+                padding_value=-100.0,
+            )
+            rollout_logprobs_batch = pad_sequence_to_length(rollout_logprobs_batch, max_response_length, -100.0, left_pad=False)
+            rollout_logprobs_batch = rollout_logprobs_batch[:, :max_response_length]  # truncate if necessary
+            rollout_logprobs_batch = rollout_logprobs_batch.to(torch.float32)
+
         # Place all rewards to last response token of the last_step response
         traj_rewards_batch = torch.zeros_like(response_batch, dtype=torch.float32)
         step_rewards_batch = torch.zeros_like(response_batch, dtype=torch.float32)
@@ -605,17 +617,22 @@ class AgentSdkEngine:
                 if (cf.mask_max_prompt_length_exceeded and termination_reason == TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED) or (cf.mask_max_response_length_exceeded and termination_reason == TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED) or (cf.mask_env_done and termination_reason == TerminationReason.ENV_DONE) or (cf.mask_max_turns_exceeded and termination_reason == TerminationReason.MAX_TURNS_EXCEEDED) or (cf.mask_timeout and termination_reason == TerminationReason.TIMEOUT) or (cf.mask_unknown and termination_reason == TerminationReason.UNKNOWN) or (cf.mask_error and termination_reason == TerminationReason.ERROR):
                     is_valid[i] = False  # set flag to filter out the episode later (after advantages are computed)
 
+        # Build tensors dict, conditionally include rollout_log_probs if available
+        tensors_dict = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+            "prompts": prompts_batch,
+            "responses": response_batch,
+            "response_mask": traj_mask,
+            "traj_rewards": traj_rewards_batch,
+            "step_rewards": step_rewards_batch,
+        }
+        if rollout_logprobs_batch is not None:
+            tensors_dict["rollout_log_probs"] = rollout_logprobs_batch
+
         return DataProto.from_dict(
-            tensors={
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "position_ids": position_ids,
-                "prompts": prompts_batch,
-                "responses": response_batch,
-                "response_mask": traj_mask,
-                "traj_rewards": traj_rewards_batch,
-                "step_rewards": step_rewards_batch,
-            },
+            tensors=tensors_dict,
             non_tensors={
                 # episode_ids: Format "task_id:rollout_idx:retry_attempt" (e.g., "abc123:0:1")
                 "episode_ids": np.array(episode_ids),

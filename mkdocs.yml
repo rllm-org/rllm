@@ -105,6 +105,7 @@ nav:
       - FrozenLake Agent: examples/frozenlake.md
       - Math SFT: examples/sft.md
       - Solver-Judge Workflow: examples/solver_judge.md
+      - Vision-Language Models (VLM): examples/vlm.md
 
   - API Reference:
       - Overview: api/index.md
