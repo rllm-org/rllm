@@ -142,6 +142,7 @@ class AgentSdkEngine:
                 project=project,
                 sync_tracer=sync_tracer,
                 add_logprobs=add_logprobs,
+                add_return_token_ids=True,
             )
         elif proxy_mode == "external":
             # Reload external proxy with the generated configuration
