@@ -35,6 +35,7 @@ from verl.trainer.ppo.ray_trainer import (
     apply_kl_penalty,
     compute_advantage,
 )
+from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.debug import marked_timer
 from verl.utils.tracking import Tracking
@@ -106,8 +107,8 @@ class AgentSdkTrainer(RayPPOTrainer):
                 sys.modules["rllm_vllm_instrumentation_isolated"] = vllm_instrumentation
                 spec.loader.exec_module(vllm_instrumentation)
 
-                print(f"[VLLM_SERVER_PATCH] Calling instrument_vllm() in Ray worker pid={os.getpid()}")
-                success = vllm_instrumentation.instrument_vllm()
+                print(f"[VLLM_SERVER_PATCH] Calling instrument_vllm(add_response_logprobs=True) in Ray worker pid={os.getpid()}")
+                success = vllm_instrumentation.instrument_vllm(add_response_logprobs=True)
                 print(f"[VLLM_SERVER_PATCH] instrument_vllm() returned: {success}")
 
                 # Call parent __init__
@@ -139,6 +140,7 @@ class AgentSdkTrainer(RayPPOTrainer):
         )
 
         # Setup proxy config for VERL engine
+        add_logprobs = getattr(self.config.algorithm, "rollout_correction", {}).get("rollout_is") is not None
         proxy_config = {
             "model_name": self.config.actor_rollout_ref.model.path,
             "proxy_host": self.config.rllm.sdk.proxy.host,
@@ -147,6 +149,7 @@ class AgentSdkTrainer(RayPPOTrainer):
             "admin_token": self.config.rllm.sdk.proxy.admin_token,
             "db_path": self.config.rllm.sdk.store.path,
             "project": self.config.trainer.project_name,
+            "add_logprobs": add_logprobs,
         }
 
         self.agent_execution_engine = AgentSdkEngine(
@@ -354,6 +357,17 @@ class AgentSdkTrainer(RayPPOTrainer):
                                     "training/rollout_probs_diff_std": rollout_probs_diff_std.detach().item(),
                                 }
                             )
+
+                            # This follows VERL's pattern: compute IS weights from old_log_probs vs rollout_log_probs
+                            rollout_corr_config = getattr(self.config.algorithm, "rollout_correction", None)
+                            if rollout_corr_config is not None:
+                                with marked_timer("rollout_correction", timing_raw, color="purple"):
+                                    batch, is_metrics = compute_rollout_correction_and_add_to_batch(
+                                        batch=batch,
+                                        rollout_corr_config=rollout_corr_config,
+                                    )
+                                    metrics.update(is_metrics)
+                                print(f"Rollout correction metrics: {is_metrics}")
 
                     if self.use_reference_policy:
                         # compute reference log_prob

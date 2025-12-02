@@ -3,6 +3,18 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class LLMInput(BaseModel):
+    messages: list[dict]
+    prompt_token_ids: list[int]
+
+
+class LLMOutput(BaseModel):
+    message: dict
+    finish_reason: str
+    output_token_ids: list[int]
+    rollout_logprobs: None | list[float] = None
+
+
 class Trace(BaseModel):
     """
     A trace is a dictionary with the following structure:
@@ -63,8 +75,8 @@ class Trace(BaseModel):
     trace_id: str
     session_name: str
     name: str
-    input: str | list | dict
-    output: str | dict
+    input: LLMInput
+    output: LLMOutput
     model: str
     latency_ms: float
     tokens: dict[str, int]
@@ -94,8 +106,8 @@ class StepView(BaseModel):
     """
 
     id: str
-    input: str | list | dict | None = None  # LLM input
-    output: str | dict | None = None  # LLM output
+    input: Any | None = None  # Serialized LLM input
+    output: Any | None = None  # Serialized LLM output
     action: Any | None = None
     reward: float = 0.0
     metadata: dict | None = None
@@ -135,10 +147,20 @@ class TrajectoryView(BaseModel):
 
 def trace_to_step_view(trace: Trace) -> StepView:
     """Convert a trace to a StepView (trace wrapper with reward field)."""
+    if hasattr(trace.input, "model_dump"):
+        input_payload: Any = trace.input.model_dump()
+    else:
+        input_payload = trace.input
+
+    if hasattr(trace.output, "model_dump"):
+        output_payload: Any = trace.output.model_dump()
+    else:
+        output_payload = trace.output
+
     return StepView(
         id=trace.trace_id,
-        input=trace.input,
-        output=trace.output,
+        input=input_payload,
+        output=output_payload,
         reward=0.0,
         metadata=trace.metadata,
     )
