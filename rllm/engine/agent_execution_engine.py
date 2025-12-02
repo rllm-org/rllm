@@ -407,9 +407,10 @@ class AgentExecutionEngine:
             }
             return steps_result
 
-    async def run_agent_trajectory_with_retry(self, idx, application_id, seed=0, mode="Text", **kwargs):
+    async def run_agent_trajectory_with_retry(self, idx, seed=0, mode="Text", **kwargs):
         for _ in range(self.retry_limit):
             try:
+                application_id = str(uuid.uuid4())
                 return await asyncio.wait_for(self.run_agent_trajectory_async(idx, application_id=application_id, seed=seed, mode=mode, **kwargs), timeout=7200)
             except Exception:
                 traceback.print_exc()
@@ -432,10 +433,8 @@ class AgentExecutionEngine:
         async def launch_one_trajectory_task(env_idx: int):
             async with semaphore:
                 try:
-                    application_id = str(uuid.uuid4())
                     result = await self.run_agent_trajectory_with_retry(
                         idx=env_idx,
-                        application_id=application_id,
                         seed=reset_seed,
                         mode=mode,
                         **kwargs,
