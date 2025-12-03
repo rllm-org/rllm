@@ -67,6 +67,7 @@ class ProcessedStepData:
     mask: torch.Tensor
     step_reward: float
     step_id: str
+    multi_modal_inputs: dict = field(default_factory=dict)  # Optional multimodal inputs (e.g., image_grid_thw for Qwen-VL)
 
 
 @dataclass
@@ -97,6 +98,9 @@ class AccumulatedData:
     termination_reasons: list[Any] = field(default_factory=list)  # TerminationReason enum values
     metrics: list[dict] = field(default_factory=list)
 
+    # Multimodal data (parallel to tensor lists)
+    multi_modal_inputs: list[dict] = field(default_factory=list)  # Optional multimodal inputs per step
+
     # Episode-level tracking
     repeat_counts: list[int] = field(default_factory=list)  # number of batch rows per episode
 
@@ -119,6 +123,7 @@ class AccumulatedData:
         self.is_correct.append(is_correct)
         self.termination_reasons.append(termination_reason)
         self.metrics.append(metrics)
+        self.multi_modal_inputs.append(step_data.multi_modal_inputs)
 
     def __len__(self) -> int:
         """Return the total number of batch rows accumulated."""

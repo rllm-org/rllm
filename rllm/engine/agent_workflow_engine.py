@@ -217,16 +217,19 @@ class AgentWorkflowEngine:
         self.current_mode = "train"
 
         if self.config.rllm.get("use_new_verl_transform", True):
-            from rllm.engine.verl_utils.data_classes import CompactFilteringConfig
-            from rllm.engine.verl_utils.workflow_transform import transform_workflow_episodes_for_verl
+            from rllm.trainer.verl.verl_data_processor import CompactFilteringConfig, transform_episodes_for_verl
 
-            return transform_workflow_episodes_for_verl(
+            # Get processor for multimodal models if available
+            processor = getattr(self.rollout_engine, "processor", None)
+
+            return transform_episodes_for_verl(
                 results,
                 task_ids,
                 tokenizer=self.rollout_engine.tokenizer,
                 max_prompt_length=self.config.data.max_prompt_length,
                 max_response_length=self.config.data.max_response_length,
                 cf_config=CompactFilteringConfig.from_config(self.config.rllm.compact_filtering),
+                processor=processor,
             )
         else:
             return self.transform_results_for_verl(results, task_ids)
@@ -457,41 +460,6 @@ class AgentWorkflowEngine:
                 "repeat_counts": repeat_counts,
             },
         )
-
-    def _handle_multimodal_position_ids(self, processor, input_ids: torch.Tensor, attention_mask: torch.Tensor, multi_modal_inputs: list[dict]) -> torch.Tensor:
-        """Handle multimodal position ids calculation. Borrowed from verl.utils.dataset.rl_dataset.py"""
-        batch_size = input_ids.shape[0]
-        position_ids_list = []
-
-        if processor is not None and "Qwen2VLImageProcessor" in processor.image_processor.__class__.__name__:
-            # qwen-vl mrope
-            if "Qwen3VLProcessor" in processor.__class__.__name__:
-                from verl.models.transformers.qwen3_vl import get_rope_index
-            else:
-                from verl.models.transformers.qwen2_vl import get_rope_index
-
-            for i in range(batch_size):
-                model_inputs = multi_modal_inputs[i] if i < len(multi_modal_inputs) else {}
-                vision_position_ids = get_rope_index(
-                    processor,
-                    input_ids=input_ids[i],
-                    image_grid_thw=model_inputs.get("image_grid_thw"),
-                    video_grid_thw=model_inputs.get("video_grid_thw"),
-                    second_per_grid_ts=model_inputs.get("second_per_grid_ts"),
-                    attention_mask=attention_mask[i],
-                )  # (3, seq_length)
-                valid_mask = attention_mask[i].bool()
-                text_position_ids = torch.ones((1, len(input_ids[i])), dtype=torch.long)
-                text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item())
-                position_ids_list.append(torch.cat((text_position_ids, vision_position_ids), dim=0))  # (4, seq_length)
-
-        else:
-            # Fallback: should not reach here if called correctly
-            raise ValueError(f"Unsupported processor type: {processor.__class__.__name__ if processor else None}")
-
-        # Stack all position_ids to form batch: (batch_size, 4, seq_length)
-        position_ids = torch.stack(position_ids_list, dim=0)
-        return position_ids
 
     def shutdown(self):
         """Shutdown the workflow engine and cleanup resources."""
