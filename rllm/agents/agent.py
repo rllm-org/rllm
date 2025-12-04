@@ -67,13 +67,16 @@ class Action:
     action: Any = None
 
 
+_DEFAULT_TRAJ_NAME = "default_traj_name"
+
+
 @dataclass
 class Trajectory:
     uid: str = field(default_factory=lambda: str(uuid.uuid4()))  # unique id to deduplicate on
-    name: str = "agent"
+    name: str = _DEFAULT_TRAJ_NAME
     task: Any = None
     steps: list[Step] = field(default_factory=list)
-    reward: float = 0.0
+    reward: float | None = None  # it is possible that the trajectory-level reward does not exist
     info: dict = field(default_factory=dict)
 
     def to_dict(self):
@@ -89,7 +92,7 @@ class Trajectory:
             "name": self.name,
             "task": _sanitize_task(self.task),
             "steps": [step.to_dict() for step in self.steps],
-            "reward": float(self.reward),
+            "reward": float(self.reward) if self.reward is not None else None,
             "info": self.info,
         }
 

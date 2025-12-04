@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from rllm.agents.agent import Episode, Trajectory
-from rllm.engine.rollout import ModelOutput
+from rllm.engine.rollout import ModelOutput, VerlEngine
 from rllm.trainer.verl.verl_data_processor.dataclass import AccumulatedData, CompactFilteringConfig, ProcessedStepData
 from rllm.workflows.workflow import TerminationReason
 from verl.protocol import DataProto
@@ -276,9 +276,6 @@ def _process_episode(episode: Episode, task_id: str, accumulated: AccumulatedDat
         repeated_count: The number of times the episode is repeated.
     """
     total_steps = 0
-    if episode is None:
-        print(f"Episode with task_id {task_id} is None (failed task), dropping it from the batch")
-        return 0
 
     if all(len(trajectory.steps) == 0 for trajectory in episode.trajectories):
         # termination hits before an agent finishes it's first step
@@ -297,32 +294,32 @@ def _process_episode(episode: Episode, task_id: str, accumulated: AccumulatedDat
     return total_steps
 
 
-def transform_episodes_for_verl(
+def transform_episodes_to_dataproto(
     episodes: list[Episode],
-    task_ids: np.ndarray,
-    tokenizer,
+    rollout_engine: VerlEngine,
     max_prompt_length: int,
     max_response_length: int,
     cf_config: CompactFilteringConfig,
-    processor=None,
 ) -> DataProto:
     """
     Transforms a list of episodes (from running a rLLM workflow) into a verl-compatible DataProto.
 
     Args:
         episodes: List of episodes to transform.
-        task_ids: Array of task identifiers corresponding to the episodes.
-        tokenizer: Tokenizer to use for tokenizing the episodes.
+        rollout_engine: Rollout engine that contains the tokenizer and (optional) multimodal processor.
         max_prompt_length: The maximum length of the prompts.
         max_response_length: The maximum length of the responses.
         cf_config: Compact filtering configuration.
-        processor: Optional multimodal processor for handling position IDs (e.g., Qwen2VLProcessor).
     Returns:
         DataProto: The DataProto built from the episodes.
     """
+    tokenizer = rollout_engine.tokenizer
+    processor = getattr(rollout_engine, "processor", None)
+
     accumulated = AccumulatedData()
-    for i, episode in enumerate(episodes):
-        total_steps = _process_episode(episode, task_ids[i], accumulated)
+    for episode in episodes:
+        task_id = episode.id.split(":")[0]
+        total_steps = _process_episode(episode, task_id, accumulated)
         accumulated.repeat_counts.append(total_steps)
 
     assert hasattr(tokenizer, "pad_token_id"), "Tokenizer must have a pad token ID"
