@@ -30,10 +30,10 @@ def prepare_hotpotqa_data(train_size=None, test_size=None):
     hotpot_dataset = load_dataset("hotpotqa/hotpot_qa", "distractor", trust_remote_code=True)
 
     train_processed = process_split(hotpot_dataset["train"], train_size)
-    test_processed = process_split(hotpot_dataset["validation"], test_size)
+    test_processed = process_split(hotpot_dataset["validation"], test_size)[:1024]
 
     train_dataset = DatasetRegistry.register_dataset("hotpotqa", train_processed, "train")
-    test_dataset = DatasetRegistry.register_dataset("hotpotqa", test_processed, "test")
+    test_dataset = DatasetRegistry.register_dataset("hotpotqa-small", test_processed, "test")
 
     return train_dataset.get_data(), test_dataset.get_data()
 

@@ -17,6 +17,7 @@ Prerequisites:
    python examples/sdk/langgraph/search_agent_langgraph.py
 """
 
+import asyncio
 import os
 import re
 
@@ -27,13 +28,14 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from rllm.data import DatasetRegistry
 from rllm.rewards.reward_fn import RewardInput
 from rllm.rewards.search_reward import RewardConfig, RewardSearchFn
-from rllm.sdk import get_chat_client
+from rllm.sdk import get_chat_client, get_chat_client_async
 from rllm.sdk.session.base import _ensure_tracer_initialized
 
 # Import the conversion function
 from .local_retrieval_tool import to_langchain_tool
 
 MODEL = "Qwen/Qwen3-4B"
+# MODEL = "gpt-4.1"
 MAX_TURNS = 10
 
 SEARCH_SYSTEM_PROMPT = """You are a helpful AI assistant that can search for information to answer questions accurately.
@@ -65,21 +67,34 @@ print(test_result[:500] + "..." if len(test_result) > 500 else test_result)
 print("\n" + "=" * 70 + "\n")
 
 # Initialize the chat model with RLLM SDK
-custom_client = get_chat_client(
-    api_key="EMPTY",
+# Use both sync client (for LangChain internals) and async client (for async operations)
+sync_client = get_chat_client(
+    api_key=os.getenv("OPENAI_API_KEY", "EMPTY"),
     base_url="http://localhost:4000/v1",
+    # use_proxy=False,
+)
+async_client = get_chat_client_async(
+    api_key=os.getenv("OPENAI_API_KEY", "EMPTY"),
+    base_url="http://localhost:4000/v1",
+    # use_proxy=False,
 )
 
-response_model = ChatOpenAI(model=MODEL, temperature=0.7, client=custom_client)
-response_model.root_client = custom_client
+# Pass both clients to ChatOpenAI - it will use async_client for ainvoke()
+response_model = ChatOpenAI(
+    model=MODEL,
+    temperature=0.7,
+    client=sync_client,
+    async_client=async_client,
+)
 _ensure_tracer_initialized("search_agent")
 
 
-def agent_step(state: MessagesState):
+async def agent_step(state: MessagesState):
     """
     Agent decides whether to call tools or provide final answer.
+    Uses async ainvoke for better concurrency.
     """
-    response = response_model.bind_tools([retriever_tool]).invoke(state["messages"])
+    response = await response_model.bind_tools([retriever_tool]).ainvoke(state["messages"])
     return {"messages": [response]}
 
 
@@ -112,9 +127,9 @@ graph = workflow.compile()
 # Maximum number of turns (agent steps) before timeout
 
 
-def run_search_agent(question: str, ground_truth: str = None, max_turns: int = MAX_TURNS) -> dict:
+async def run_search_agent(question: str, ground_truth: str = None, max_turns: int = MAX_TURNS) -> dict:
     """
-    Run the search agent on a single question.
+    Run the search agent on a single question asynchronously.
 
     Args:
         question: The question to answer
@@ -131,7 +146,8 @@ def run_search_agent(question: str, ground_truth: str = None, max_turns: int = M
 
     # Use recursion_limit to enforce max turns
     # Each turn = agent step + tool step, so recursion_limit = max_turns * 2
-    for chunk in graph.stream(
+    # Use astream for async iteration
+    async for chunk in graph.astream(
         {"messages": [{"role": "system", "content": SEARCH_SYSTEM_PROMPT}, {"role": "user", "content": question}]},
         {"recursion_limit": max_turns * 2 + 5},  # +5 for safety margin
     ):
@@ -188,7 +204,8 @@ def run_search_agent(question: str, ground_truth: str = None, max_turns: int = M
     return result
 
 
-if __name__ == "__main__":
+async def main():
+    """Main async entry point."""
     # Set environment variables
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     if "RETRIEVAL_SERVER_URL" not in os.environ:
@@ -196,8 +213,8 @@ if __name__ == "__main__":
 
     test_dataset = DatasetRegistry.load_dataset("hotpotqa", "test")
     results = []
-    for i, task in enumerate(test_dataset.get_data()[:5]):  # Run on first 5 for demo
-        result = run_search_agent(question=task["question"], ground_truth=task.get("ground_truth"))
+    for task in test_dataset.get_data()[:5]:  # Run on first 5 for demo
+        result = await run_search_agent(question=task["question"], ground_truth=task.get("ground_truth"))
         results.append(result)
 
         print(f"\nQuestion: {result['question'][:100]}...")
@@ -209,3 +226,7 @@ if __name__ == "__main__":
     print(f"\n{'=' * 70}")
     print(f"SUMMARY: {correct_count}/{len(results)} correct")
     print(f"{'=' * 70}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

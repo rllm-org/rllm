@@ -28,7 +28,7 @@ export NUMEXPR_NUM_THREADS=4
 DATA_DIR=${1:-"./search_data/prebuilt_indices"}
 PORT=${2:-9002}
 NGPUS=${3:-""}  # Empty means use all GPUs
-DEVICE=${4:-"cpu"}  # cpu or gpu, defaults to cpu
+DEVICE=${4:-"gpu"}  # cpu or gpu, defaults to cpu
 
 echo "Starting Multi-GPU Sharded Retrieval Server..."
 echo "Data directory: $DATA_DIR"

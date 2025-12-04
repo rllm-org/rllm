@@ -102,6 +102,81 @@ def _is_chat_completions_endpoint(url: str) -> bool:
     return "/chat/completions" in url
 
 
+def _accumulate_chunks(chunks: list[Any], model: str | None) -> dict:
+    """Reconstruct a response dict from accumulated stream chunks."""
+    if not chunks:
+        return {}
+
+    first = chunks[0]
+    result: dict[str, Any] = {
+        "id": getattr(first, "id", None),
+        "model": getattr(first, "model", model),
+        "object": "chat.completion",
+        "created": getattr(first, "created", None),
+    }
+
+    # Accumulate content from all chunks
+    content_parts: list[str] = []
+    role = "assistant"
+    finish_reason = None
+    tool_call_map: dict[int, dict] = {}
+
+    for chunk in chunks:
+        if not getattr(chunk, "choices", None):
+            continue
+        delta = getattr(chunk.choices[0], "delta", None)
+        if delta:
+            if getattr(delta, "role", None):
+                role = delta.role
+            if getattr(delta, "content", None):
+                content_parts.append(delta.content)
+            # Handle tool calls streaming
+            if getattr(delta, "tool_calls", None):
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    if idx not in tool_call_map:
+                        tool_call_map[idx] = {
+                            "id": tc.id or "",
+                            "type": tc.type or "function",
+                            "function": {"name": "", "arguments": ""},
+                        }
+                    if tc.id:
+                        tool_call_map[idx]["id"] = tc.id
+                    if tc.function:
+                        if tc.function.name:
+                            tool_call_map[idx]["function"]["name"] = tc.function.name
+                        if tc.function.arguments:
+                            tool_call_map[idx]["function"]["arguments"] += tc.function.arguments
+        if getattr(chunk.choices[0], "finish_reason", None):
+            finish_reason = chunk.choices[0].finish_reason
+
+    # Build tool_calls list from map
+    tool_calls = []
+    if tool_call_map:
+        tool_calls = [tool_call_map[i] for i in sorted(tool_call_map.keys())]
+
+    # Build message
+    message: dict[str, Any] = {
+        "role": role,
+        "content": "".join(content_parts) if content_parts else None,
+    }
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+
+    result["choices"] = [{"index": 0, "message": message, "finish_reason": finish_reason}]
+
+    # Check for usage in last chunk
+    last = chunks[-1]
+    if hasattr(last, "usage") and last.usage:
+        result["usage"] = {
+            "prompt_tokens": last.usage.prompt_tokens or 0,
+            "completion_tokens": last.usage.completion_tokens or 0,
+            "total_tokens": last.usage.total_tokens or 0,
+        }
+
+    return result
+
+
 # =============================================================================
 # Stream wrapper for tracing
 # =============================================================================
@@ -155,7 +230,7 @@ class TrackedStream:
         self._exhausted = True
 
         latency_ms = (time.perf_counter() - self._start_time) * 1000
-        resp_dict = self._accumulate_chunks()
+        resp_dict = _accumulate_chunks(self._chunks, self._model)
 
         _log_trace(
             self._tracer,
@@ -165,80 +240,6 @@ class TrackedStream:
             metadata=self._metadata,
             latency_ms=latency_ms,
         )
-
-    def _accumulate_chunks(self) -> dict:
-        """Reconstruct a response dict from accumulated stream chunks."""
-        if not self._chunks:
-            return {}
-
-        first = self._chunks[0]
-        result: dict[str, Any] = {
-            "id": getattr(first, "id", None),
-            "model": getattr(first, "model", self._model),
-            "object": "chat.completion",
-            "created": getattr(first, "created", None),
-        }
-
-        # Accumulate content from all chunks
-        content_parts: list[str] = []
-        role = "assistant"
-        finish_reason = None
-        tool_call_map: dict[int, dict] = {}
-
-        for chunk in self._chunks:
-            if not getattr(chunk, "choices", None):
-                continue
-            delta = getattr(chunk.choices[0], "delta", None)
-            if delta:
-                if getattr(delta, "role", None):
-                    role = delta.role
-                if getattr(delta, "content", None):
-                    content_parts.append(delta.content)
-                # Handle tool calls streaming
-                if getattr(delta, "tool_calls", None):
-                    for tc in delta.tool_calls:
-                        idx = tc.index
-                        if idx not in tool_call_map:
-                            tool_call_map[idx] = {
-                                "id": tc.id or "",
-                                "type": tc.type or "function",
-                                "function": {"name": "", "arguments": ""},
-                            }
-                        if tc.id:
-                            tool_call_map[idx]["id"] = tc.id
-                        if tc.function:
-                            if tc.function.name:
-                                tool_call_map[idx]["function"]["name"] = tc.function.name
-                            if tc.function.arguments:
-                                tool_call_map[idx]["function"]["arguments"] += tc.function.arguments
-            if getattr(chunk.choices[0], "finish_reason", None):
-                finish_reason = chunk.choices[0].finish_reason
-
-        # Build tool_calls list from map
-        tool_calls = []
-        if tool_call_map:
-            tool_calls = [tool_call_map[i] for i in sorted(tool_call_map.keys())]
-
-        # Build message
-        message: dict[str, Any] = {
-            "role": role,
-            "content": "".join(content_parts) if content_parts else None,
-        }
-        if tool_calls:
-            message["tool_calls"] = tool_calls
-
-        result["choices"] = [{"index": 0, "message": message, "finish_reason": finish_reason}]
-
-        # Check for usage in last chunk
-        last = self._chunks[-1]
-        if hasattr(last, "usage") and last.usage:
-            result["usage"] = {
-                "prompt_tokens": last.usage.prompt_tokens or 0,
-                "completion_tokens": last.usage.completion_tokens or 0,
-                "total_tokens": last.usage.total_tokens or 0,
-            }
-
-        return result
 
     # Proxy all other attributes to the underlying stream
     def __getattr__(self, name: str) -> Any:
@@ -293,7 +294,7 @@ class AsyncTrackedStream:
         self._exhausted = True
 
         latency_ms = (time.perf_counter() - self._start_time) * 1000
-        resp_dict = self._accumulate_chunks()
+        resp_dict = _accumulate_chunks(self._chunks, self._model)
 
         _log_trace(
             self._tracer,
@@ -303,75 +304,6 @@ class AsyncTrackedStream:
             metadata=self._metadata,
             latency_ms=latency_ms,
         )
-
-    def _accumulate_chunks(self) -> dict:
-        """Reconstruct a response dict from accumulated stream chunks."""
-        if not self._chunks:
-            return {}
-
-        first = self._chunks[0]
-        result: dict[str, Any] = {
-            "id": getattr(first, "id", None),
-            "model": getattr(first, "model", self._model),
-            "object": "chat.completion",
-            "created": getattr(first, "created", None),
-        }
-
-        content_parts: list[str] = []
-        role = "assistant"
-        finish_reason = None
-        tool_call_map: dict[int, dict] = {}
-
-        for chunk in self._chunks:
-            if not getattr(chunk, "choices", None):
-                continue
-            delta = getattr(chunk.choices[0], "delta", None)
-            if delta:
-                if getattr(delta, "role", None):
-                    role = delta.role
-                if getattr(delta, "content", None):
-                    content_parts.append(delta.content)
-                if getattr(delta, "tool_calls", None):
-                    for tc in delta.tool_calls:
-                        idx = tc.index
-                        if idx not in tool_call_map:
-                            tool_call_map[idx] = {
-                                "id": tc.id or "",
-                                "type": tc.type or "function",
-                                "function": {"name": "", "arguments": ""},
-                            }
-                        if tc.id:
-                            tool_call_map[idx]["id"] = tc.id
-                        if tc.function:
-                            if tc.function.name:
-                                tool_call_map[idx]["function"]["name"] = tc.function.name
-                            if tc.function.arguments:
-                                tool_call_map[idx]["function"]["arguments"] += tc.function.arguments
-            if getattr(chunk.choices[0], "finish_reason", None):
-                finish_reason = chunk.choices[0].finish_reason
-
-        tool_calls = []
-        if tool_call_map:
-            tool_calls = [tool_call_map[i] for i in sorted(tool_call_map.keys())]
-
-        message: dict[str, Any] = {
-            "role": role,
-            "content": "".join(content_parts) if content_parts else None,
-        }
-        if tool_calls:
-            message["tool_calls"] = tool_calls
-
-        result["choices"] = [{"index": 0, "message": message, "finish_reason": finish_reason}]
-
-        last = self._chunks[-1]
-        if hasattr(last, "usage") and last.usage:
-            result["usage"] = {
-                "prompt_tokens": last.usage.prompt_tokens or 0,
-                "completion_tokens": last.usage.completion_tokens or 0,
-                "total_tokens": last.usage.total_tokens or 0,
-            }
-
-        return result
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._stream, name)
