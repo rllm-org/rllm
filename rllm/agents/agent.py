@@ -24,6 +24,9 @@ class Step:
     done: bool = False
     mc_return: float = 0.0
 
+    # field below are filled by the advantage computer
+    advantage: float | None = None
+
     def to_dict(self) -> dict:
         return {
             "prompt_ids": self.prompt_ids,
@@ -39,6 +42,7 @@ class Step:
             "reward": self.reward,
             "done": self.done,
             "mc_return": self.mc_return,
+            "advantage": self.advantage,
         }
 
     @classmethod
@@ -59,6 +63,7 @@ class Step:
             reward=data["reward"],
             done=data["done"],
             mc_return=data["mc_return"],
+            advantage=data["advantage"],
         )
 
 

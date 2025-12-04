@@ -188,17 +188,25 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
     if any(mm_inputs for mm_inputs in accumulated.multi_modal_inputs):
         non_tensors["multi_modal_inputs"] = np.array(accumulated.multi_modal_inputs, dtype=object)
 
+    tensors = {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "position_ids": position_ids,
+        "prompts": prompts_batch,
+        "responses": responses_batch,
+        "response_mask": traj_mask,
+        "traj_rewards": traj_rewards_batch,
+        "step_rewards": step_rewards_batch,
+    }
+
+    # Include the advantages and set returns to it as well, if the accumulated data already has them.
+    if len(accumulated.advantages) == len(accumulated.episode_ids):
+        advantage_tensor = torch.tensor(accumulated.advantages, dtype=torch.float32)
+        tensors["advantages"] = advantage_tensor
+        tensors["returns"] = advantage_tensor
+
     return DataProto.from_dict(
-        tensors={
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "position_ids": position_ids,
-            "prompts": prompts_batch,
-            "responses": responses_batch,
-            "response_mask": traj_mask,
-            "traj_rewards": traj_rewards_batch,
-            "step_rewards": step_rewards_batch,
-        },
+        tensors=tensors,
         non_tensors=non_tensors,
         meta_info={
             "repeat_counts": accumulated.repeat_counts,
@@ -225,6 +233,9 @@ def _process_trajectory(trajectory: Trajectory, episode: Episode, task_id: str, 
 
     n_steps = len(trajectory.steps)
 
+    # This corresponds to case when we have `per_step` mode for stepwise advantage computation
+    traj_reward = 0.0 if trajectory.reward is None else trajectory.reward
+
     for step_idx, step in enumerate(trajectory.steps):
         if not isinstance(step.model_output, ModelOutput):
             raise TypeError(f"Step {step_idx} in trajectory {trajectory_id} must have a valid model output, but got {type(step.model_output)}")
@@ -248,13 +259,14 @@ def _process_trajectory(trajectory: Trajectory, episode: Episode, task_id: str, 
             step_reward=step_reward,
             step_id=step_id,
             multi_modal_inputs=multi_modal_inputs,
+            advantage=step.advantage,
         )
 
         accumulated.add_step(
             step_data=step_data,
             episode_id=episode.id,
             trajectory_id=trajectory_id,
-            traj_reward=trajectory.reward,
+            traj_reward=traj_reward,
             step_num=n_steps,
             is_last=step_idx == n_steps - 1,
             is_correct=episode.is_correct,

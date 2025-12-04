@@ -201,6 +201,54 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
             actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
             metrics.update(actor_output_metrics)
 
+    def _compute_advantage_verl(self, batch: DataProto, metrics: dict):
+        # step_ids is safe to always use for advantage computation
+        # if we're not using computing advantages stepwise (i.e., for cumulative agents or single turn workflows)
+        # then step_ids == trajectory_ids
+        # NOTE: not very safe actually for a generic workflow. Only work for trajectory with a single step.
+        # batch.non_tensor_batch["uid"] = batch.non_tensor_batch["step_ids"]
+        batch.non_tensor_batch["uid"] = batch.non_tensor_batch["trajectory_ids"]
+
+        if self.config.rllm.stepwise_advantage.mode == "per_step":
+            batch.batch["token_level_scores"] = batch.batch["step_rewards"]
+        else:
+            batch.batch["token_level_scores"] = batch.batch["traj_rewards"]
+
+        # compute rewards. apply_kl_penalty if available
+        if self.config.algorithm.use_kl_in_reward:
+            batch, kl_metrics = apply_kl_penalty(batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty)
+            metrics.update(kl_metrics)
+        else:
+            batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+
+        if self.config.rllm.stepwise_advantage.mode == "broadcast":
+            is_last_step = batch.non_tensor_batch["is_last_step"]
+            last_step_indices = np.where(is_last_step == True)[0]
+            not_last_step_indices = np.where(is_last_step == False)[0]
+            non_last_step_batch = batch.select_idxs(not_last_step_indices)
+            batch = batch.select_idxs(last_step_indices)  # This batch only has last steps
+            # last_step_batch contains no padded steps as it was rounded down (not padded) to a multiple of world size
+        else:
+            batch = self._remove_padding(batch)  # compute advantages over non-padded steps only
+
+        # compute advantages, executed on the driver process
+        batch = compute_advantage(
+            batch,
+            adv_estimator=self.config.algorithm.adv_estimator,
+            gamma=self.config.algorithm.gamma,
+            lam=self.config.algorithm.lam,
+            num_repeat=self.config.actor_rollout_ref.rollout.n,
+            norm_adv_by_std_in_grpo=self.config.algorithm.norm_adv_by_std_in_grpo,
+            config=self.config.algorithm,
+        )
+
+        if self.config.rllm.stepwise_advantage.mode == "broadcast":
+            # Merging the separated out steps using the advantage from last steps
+            self._stepwise_advantage_broadcast(batch, non_last_step_batch)
+            batch = DataProto.concat([batch, non_last_step_batch])
+
+        return batch
+
     def fit_agent(self):
         """
         The training loop of PPO. Adapted to train the underlying model of agent.
@@ -232,7 +280,6 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         # we start from step 1
         self.global_steps += 1
 
-        batch = None
         rejection_sampling_state = RejectionSamplingState()
         termination_counts = Counter()
         workflow_metrics = defaultdict(list)
@@ -251,6 +298,8 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                 new_batch = new_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n)
 
                 new_batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"])
+
+                # pprint(new_batch.get_data_info())
 
                 # Update training step in engine for episode logging
                 self.agent_execution_engine.set_training_step(self.global_steps, mode="train", epoch=epoch)
@@ -273,23 +322,16 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         state=rejection_sampling_state,
                     )
 
-                    # TODO: simplify this logic
                     if len(filtered_groups) == 0:
-                        if self.config.rllm.rejection_sample.enable:
-                            if batch is None:
-                                batch = new_batch
-                            else:
-                                batch = DataProto.concat([batch, new_batch])
-                        pprint(rejection_sampling_metrics)
                         continue
-                    elif not batch:
-                        batch = new_batch
 
-                    metrics.update(trajectory_group_metrics)
-                    metrics.update(rejection_sampling_metrics)
+                    pprint(trajectory_group_metrics)
+                    pprint(rejection_sampling_metrics)
+                    # metrics.update(trajectory_group_metrics)
+                    # metrics.update(rejection_sampling_metrics)
 
                     # After the rejection sampling & filtering, we need to update the data proto as well.
-                    final_gen_batch_output = transform_episodes_to_dataproto(
+                    batch = transform_episodes_to_dataproto(
                         filtered_episodes,
                         rollout_engine=self.agent_execution_engine.rollout_engine,
                         max_prompt_length=self.config.data.max_prompt_length,
@@ -297,53 +339,13 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         cf_config=self.cf_config,
                     )
 
-                    # need to repeat to make shape match
-                    repeat_counts = final_gen_batch_output.meta_info["repeat_counts"]
-                    batch = batch.sample_level_repeat(repeat_counts)
-                    final_gen_batch_output.meta_info.pop("repeat_counts", None)  # no longer needed after this
-                    batch = batch.union(final_gen_batch_output)
-
-                    # if self.config.rllm.stepwise_advantage.mode == "broadcast":
-                    #     # need to make sure both number of last steps (number of uids) and number of total steps in the batch
-                    #     # (batch size after processing) are both multiples of world size
-
-                    #     # first we split the batch in two: one with only the last steps of each trajectory and the other with the remaining steps
-                    #     is_last_step = batch.non_tensor_batch["is_last_step"]
-                    #     valid_last_step_indices = np.where(is_last_step == True)[0]
-                    #     not_last_step_indices = np.where(is_last_step == False)[0]
-                    #     last_step_batch = batch.select_idxs(valid_last_step_indices)  # This batch only has valid last steps
-                    #     non_last_step_batch = batch.select_idxs(not_last_step_indices)
-
-                    #     # round down last_step_batch to make sure its multiple of world size
-                    #     num_trainer_replicas = self.actor_rollout_wg.world_size
-                    #     max_batch_size = (last_step_batch.batch["input_ids"].shape[0] // num_trainer_replicas) * num_trainer_replicas
-
-                    #     size_mask = torch.zeros(last_step_batch.batch["input_ids"].shape[0], dtype=torch.bool)
-                    #     size_mask[:max_batch_size] = True
-                    #     last_step_batch = last_step_batch[size_mask]  # filtered last steps
-
-                    #     # now we go through all the non_last_step_batch and keep everything that has same trajectory_id that exists in the filtered last steps
-                    #     valid_last_step_trajectory_ids = last_step_batch.non_tensor_batch["trajectory_ids"]
-                    #     non_last_step_trajectory_ids = non_last_step_batch.non_tensor_batch["trajectory_ids"]
-                    #     non_last_step_mask = np.isin(non_last_step_trajectory_ids, valid_last_step_trajectory_ids)
-                    #     non_last_step_batch = non_last_step_batch[non_last_step_mask]
-
-                    #     # concatenate then pad
-                    #     batch = DataProto.concat([last_step_batch, non_last_step_batch])
-                    #     batch = self._pad_dataproto_to_world_size(batch)
-
-                    # else:
-                    #     # then we just pad the batch size to a multiple of world size
-                    #     batch = self._pad_dataproto_to_world_size(batch=batch)
-
-                    # pad batch size to world size for batch balancing
-                    batch = self._pad_dataproto_to_world_size(batch=batch)
-
                     # Balance the number of valid tokens across DP ranks.
                     # NOTE: This usually changes the order of data in the `batch`,
                     # which won't affect the advantage calculation (since it's based on uid),
                     # but might affect the loss calculation (due to the change of mini-batching).
                     if self.config.trainer.balance_batch:
+                        # pad batch size to world size for batch balancing
+                        batch = self._pad_dataproto_to_world_size(batch=batch)
                         self._balance_batch(batch, metrics=metrics)
 
                     # compute global_valid tokens
@@ -352,50 +354,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                     batch = self._compute_step_level_values(batch=batch, timing_raw=timing_raw, metrics=metrics)
 
                     with marked_timer("adv", timing_raw, color="brown"):
-                        # step_ids is safe to always use for advantage computation
-                        # if we're not using computing advantages stepwise (i.e., for cumulative agents or single turn workflows)
-                        # then step_ids == trajectory_ids
-                        # NOTE: not very safe actually for a generic workflow. Only work for trajectory with a single step.
-                        # batch.non_tensor_batch["uid"] = batch.non_tensor_batch["step_ids"]
-                        batch.non_tensor_batch["uid"] = batch.non_tensor_batch["trajectory_ids"]
-
-                        if self.config.rllm.stepwise_advantage.mode == "per_step":
-                            batch.batch["token_level_scores"] = batch.batch["step_rewards"]
-                        else:
-                            batch.batch["token_level_scores"] = batch.batch["traj_rewards"]
-
-                        # compute rewards. apply_kl_penalty if available
-                        if self.config.algorithm.use_kl_in_reward:
-                            batch, kl_metrics = apply_kl_penalty(batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty)
-                            metrics.update(kl_metrics)
-                        else:
-                            batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
-
-                        if self.config.rllm.stepwise_advantage.mode == "broadcast":
-                            is_last_step = batch.non_tensor_batch["is_last_step"]
-                            last_step_indices = np.where(is_last_step == True)[0]
-                            not_last_step_indices = np.where(is_last_step == False)[0]
-                            non_last_step_batch = batch.select_idxs(not_last_step_indices)
-                            batch = batch.select_idxs(last_step_indices)  # This batch only has last steps
-                            # last_step_batch contains no padded steps as it was rounded down (not padded) to a multiple of world size
-                        else:
-                            batch = self._remove_padding(batch)  # compute advantages over non-padded steps only
-
-                        # compute advantages, executed on the driver process
-                        batch = compute_advantage(
-                            batch,
-                            adv_estimator=self.config.algorithm.adv_estimator,
-                            gamma=self.config.algorithm.gamma,
-                            lam=self.config.algorithm.lam,
-                            num_repeat=self.config.actor_rollout_ref.rollout.n,
-                            norm_adv_by_std_in_grpo=self.config.algorithm.norm_adv_by_std_in_grpo,
-                            config=self.config.algorithm,
-                        )
-
-                        if self.config.rllm.stepwise_advantage.mode == "broadcast":
-                            # Merging the separated out steps using the advantage from last steps
-                            self._stepwise_advantage_broadcast(batch, non_last_step_batch)
-                            batch = DataProto.concat([batch, non_last_step_batch])
+                        batch = self._compute_advantage_verl(batch=batch, metrics=metrics)
 
                     # remove invalid items filtered out due to compact filtering
                     is_valid = batch.non_tensor_batch["is_valid"]
@@ -450,12 +409,12 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                 for key, value in workflow_metrics.items():
                     metrics[f"batch/{key}"] = np.mean(value)
 
+                total_counts = max(sum(termination_counts.values()), 1)
                 for r in TerminationReason:
-                    metrics[f"batch/{r.value}"] = termination_counts[r.value] / len(set(new_batch.non_tensor_batch["episode_ids"]))
+                    metrics[f"batch/{r.value}"] = termination_counts[r.value] / total_counts
 
                 logger.log(data=metrics, step=self.global_steps)
 
-                batch = None
                 rejection_sampling_state.reset()
                 termination_counts = Counter()
                 workflow_metrics = defaultdict(list)

@@ -24,9 +24,6 @@ class RejectionSamplingConfig:
     # Minimum trajectories required per trajectory group (for "group" mode)
     min_trajs_per_group: int = 2
 
-    # Filter trajectory groups where all rewards are the same (zero variance)
-    filter_zero_variance_groups: bool = True
-
     # For "episode" mode (verl compatibility): minimum number of tasks with partial solves before proceeding
     min_partial_solve_tasks: int = 1
 
@@ -43,7 +40,6 @@ class RejectionSamplingMetrics:
     # Group-level filtering counts
     groups_before_filter: int = 0
     groups_after_filter: int = 0
-    groups_dropped_zero_variance: int = 0
     groups_dropped_insufficient_trajs: int = 0
 
     def reset(self):
@@ -53,7 +49,6 @@ class RejectionSamplingMetrics:
         self.solve_partial = 0
         self.groups_before_filter = 0
         self.groups_after_filter = 0
-        self.groups_dropped_zero_variance = 0
         self.groups_dropped_insufficient_trajs = 0
 
     def to_dict(self, prefix: str = "batch/") -> dict:
@@ -67,7 +62,6 @@ class RejectionSamplingMetrics:
             f"{prefix}solve_partial": self.solve_partial / total_tasks,
             f"{prefix}groups_before_filter": self.groups_before_filter,
             f"{prefix}groups_after_filter": self.groups_after_filter,
-            f"{prefix}groups_dropped_zero_variance": self.groups_dropped_zero_variance,
             f"{prefix}groups_dropped_insufficient_trajs": self.groups_dropped_insufficient_trajs,
         }
 
@@ -126,14 +120,6 @@ def update_episode_metrics(
             metrics.solve_none += 1
 
 
-def _has_reward_variance(group: TrajectoryGroup) -> bool:
-    """Check if a trajectory group has variance in rewards."""
-    if len(group.trajectories) <= 1:
-        return False
-    rewards = [traj.reward for traj in group.trajectories]
-    return len(set(rewards)) > 1
-
-
 def filter_groups(
     groups: list[TrajectoryGroup],
     config: RejectionSamplingConfig,
@@ -157,12 +143,6 @@ def filter_groups(
         # Check minimum trajectories
         if len(group.trajectories) < config.min_trajs_per_group:
             metrics.groups_dropped_insufficient_trajs += 1
-            dropped.append(group)
-            continue
-
-        # Check zero variance
-        if config.filter_zero_variance_groups and not _has_reward_variance(group):
-            metrics.groups_dropped_zero_variance += 1
             dropped.append(group)
             continue
 
