@@ -8,7 +8,7 @@ from rllm.trainer.common.rejection_sampling import (
     RejectionSamplingConfig,
     RejectionSamplingMetrics,
     RejectionSamplingState,
-    apply_rejection_sampling_and_filter_groups,
+    apply_rejection_sampling_and_filtering,
 )
 from rllm.trainer.common.transform import (
     TransformConfig,
@@ -29,5 +29,5 @@ __all__ = [
     "RejectionSamplingConfig",
     "RejectionSamplingMetrics",
     "RejectionSamplingState",
-    "apply_rejection_sampling_and_filter_groups",
+    "apply_rejection_sampling_and_filtering",
 ]

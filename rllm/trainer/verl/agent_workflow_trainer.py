@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 from rllm.agents.agent import Episode
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
-from rllm.trainer.common.rejection_sampling import RejectionSamplingConfig, RejectionSamplingState, apply_rejection_sampling_and_filter_groups
+from rllm.trainer.common.rejection_sampling import RejectionSamplingConfig, RejectionSamplingState, apply_rejection_sampling_and_filtering
 from rllm.trainer.common.transform import TransformConfig, transform_episodes_to_trajectory_groups
 from rllm.trainer.verl.verl_data_processor import CompactFilteringConfig, transform_episodes_to_dataproto
 from rllm.utils.episode_logger import EpisodeLogger
@@ -126,6 +126,82 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                     metrics_dict[key].append(value)
             termination_counter.update(episode.termination_reason)
 
+    def _compute_step_level_values(self, batch: DataProto, timing_raw: dict, metrics: dict) -> DataProto:
+        """
+        A DataProto-native function that computes old_log_probs, ref_log_probs, and critic values, etc.
+        """
+        # recompute old_log_probs
+        with marked_timer("old_log_prob", timing_raw, color="blue"):
+            old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+            entropys = old_log_prob.batch["entropys"]
+            response_masks = batch.batch["response_mask"]
+            loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
+            entropy_agg = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
+            old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
+            metrics.update(old_log_prob_metrics)
+            old_log_prob.batch.pop("entropys")
+            batch = batch.union(old_log_prob)
+
+            if "rollout_log_probs" in batch.batch.keys():
+                # TODO: we may want to add diff of probs too.
+                rollout_old_log_probs = batch.batch["rollout_log_probs"]
+                actor_old_log_probs = batch.batch["old_log_probs"]
+                attention_mask = batch.batch["attention_mask"]
+                responses = batch.batch["responses"]
+                response_length = responses.size(1)
+                response_mask = attention_mask[:, -response_length:]
+
+                rollout_probs = torch.exp(rollout_old_log_probs)
+                actor_probs = torch.exp(actor_old_log_probs)
+                rollout_probs_diff = torch.abs(rollout_probs - actor_probs)
+                rollout_probs_diff = torch.masked_select(rollout_probs_diff, response_mask.bool())
+                rollout_probs_diff_max = torch.max(rollout_probs_diff)
+                rollout_probs_diff_mean = torch.mean(rollout_probs_diff)
+                rollout_probs_diff_std = torch.std(rollout_probs_diff)
+                metrics.update(
+                    {
+                        "training/rollout_probs_diff_max": rollout_probs_diff_max.detach().item(),
+                        "training/rollout_probs_diff_mean": rollout_probs_diff_mean.detach().item(),
+                        "training/rollout_probs_diff_std": rollout_probs_diff_std.detach().item(),
+                    }
+                )
+
+        if self.use_reference_policy:
+            # compute reference log_prob
+            with marked_timer("ref", timing_raw, color="olive"):
+                if not self.ref_in_actor:
+                    ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                else:
+                    ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
+                batch = batch.union(ref_log_prob)
+
+        # compute values
+        if self.use_critic:
+            with marked_timer("values", timing_raw, color="cyan"):
+                values = self.critic_wg.compute_values(batch)
+                batch = batch.union(values)
+
+        return batch
+
+    def _update_policy(self, batch: DataProto, timing_raw: dict, metrics: dict):
+        """
+        A DataProto-native function that updates the policy, including actor and critic
+        """
+        # update critic
+        if self.use_critic:
+            with marked_timer("update_critic", timing_raw, color="pink"):
+                critic_output = self.critic_wg.update_critic(batch)
+            critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
+            metrics.update(critic_output_metrics)
+
+        # implement critic warmup
+        if self.config.trainer.critic_warmup <= self.global_steps:
+            # update actor
+            with marked_timer("update_actor", timing_raw, color="red"):
+                actor_output = self.actor_rollout_wg.update_actor(batch)
+            actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+            metrics.update(actor_output_metrics)
+
     def fit_agent(self):
         """
         The training loop of PPO. Adapted to train the underlying model of agent.
@@ -184,20 +260,21 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                     # generate a list of episodes (rollouts)
                     final_gen_episodes = self.generate_episodes(batch=new_batch, timing_raw=timing_raw)
 
-                    final_gen_trajectory_groups, traj_group_metrics = transform_episodes_to_trajectory_groups(final_gen_episodes, config=self.transform_config)
+                    final_gen_trajectory_groups, trajectory_group_metrics = transform_episodes_to_trajectory_groups(final_gen_episodes, config=self.transform_config)
 
                     # Log metrics and update termination counts
                     self._update_episode_metrics_and_termination_counts(final_gen_episodes, workflow_metrics, termination_counts)
 
                     # rejection sampling & filtering
                     # we do rejection sampling at the episode level instead of the traj/step level
-                    filtered_groups, filtered_episodes, rejection_sampling_metrics = apply_rejection_sampling_and_filter_groups(
+                    filtered_groups, filtered_episodes, rejection_sampling_metrics = apply_rejection_sampling_and_filtering(
                         episodes=final_gen_episodes,
                         groups=final_gen_trajectory_groups,
                         config=self.rs_config,
                         state=rejection_sampling_state,
                     )
 
+                    # TODO: simplify this logic
                     if len(filtered_groups) == 0:
                         if self.config.rllm.rejection_sample.enable:
                             if batch is None:
@@ -208,7 +285,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                     elif not batch:
                         batch = new_batch
 
-                    metrics.update(traj_group_metrics)
+                    metrics.update(trajectory_group_metrics)
                     metrics.update(rejection_sampling_metrics)
 
                     # After the rejection sampling & filtering, we need to update the data proto as well.
@@ -226,95 +303,61 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                     final_gen_batch_output.meta_info.pop("repeat_counts", None)  # no longer needed after this
                     batch = batch.union(final_gen_batch_output)
 
-                    if self.config.rllm.stepwise_advantage.mode == "broadcast":
-                        # need to make sure both number of last steps (number of uids) and number of total steps in the batch
-                        # (batch size after processing) are both multiples of world size
+                    # if self.config.rllm.stepwise_advantage.mode == "broadcast":
+                    #     # need to make sure both number of last steps (number of uids) and number of total steps in the batch
+                    #     # (batch size after processing) are both multiples of world size
 
-                        # first we split the batch in two: one with only the last steps of each trajectory and the other with the remaining steps
-                        is_last_step = batch.non_tensor_batch["is_last_step"]
-                        valid_last_step_indices = np.where(is_last_step == True)[0]
-                        not_last_step_indices = np.where(is_last_step == False)[0]
-                        last_step_batch = batch.select_idxs(valid_last_step_indices)  # This batch only has valid last steps
-                        non_last_step_batch = batch.select_idxs(not_last_step_indices)
+                    #     # first we split the batch in two: one with only the last steps of each trajectory and the other with the remaining steps
+                    #     is_last_step = batch.non_tensor_batch["is_last_step"]
+                    #     valid_last_step_indices = np.where(is_last_step == True)[0]
+                    #     not_last_step_indices = np.where(is_last_step == False)[0]
+                    #     last_step_batch = batch.select_idxs(valid_last_step_indices)  # This batch only has valid last steps
+                    #     non_last_step_batch = batch.select_idxs(not_last_step_indices)
 
-                        # round down last_step_batch to make sure its multiple of world size
-                        num_trainer_replicas = self.actor_rollout_wg.world_size
-                        max_batch_size = (last_step_batch.batch["input_ids"].shape[0] // num_trainer_replicas) * num_trainer_replicas
+                    #     # round down last_step_batch to make sure its multiple of world size
+                    #     num_trainer_replicas = self.actor_rollout_wg.world_size
+                    #     max_batch_size = (last_step_batch.batch["input_ids"].shape[0] // num_trainer_replicas) * num_trainer_replicas
 
-                        size_mask = torch.zeros(last_step_batch.batch["input_ids"].shape[0], dtype=torch.bool)
-                        size_mask[:max_batch_size] = True
-                        last_step_batch = last_step_batch[size_mask]  # filtered last steps
+                    #     size_mask = torch.zeros(last_step_batch.batch["input_ids"].shape[0], dtype=torch.bool)
+                    #     size_mask[:max_batch_size] = True
+                    #     last_step_batch = last_step_batch[size_mask]  # filtered last steps
 
-                        # now we go through all the non_last_step_batch and keep everything that has same trajectory_id that exists in the filtered last steps
-                        valid_last_step_trajectory_ids = last_step_batch.non_tensor_batch["trajectory_ids"]
-                        non_last_step_trajectory_ids = non_last_step_batch.non_tensor_batch["trajectory_ids"]
-                        non_last_step_mask = np.isin(non_last_step_trajectory_ids, valid_last_step_trajectory_ids)
-                        non_last_step_batch = non_last_step_batch[non_last_step_mask]
+                    #     # now we go through all the non_last_step_batch and keep everything that has same trajectory_id that exists in the filtered last steps
+                    #     valid_last_step_trajectory_ids = last_step_batch.non_tensor_batch["trajectory_ids"]
+                    #     non_last_step_trajectory_ids = non_last_step_batch.non_tensor_batch["trajectory_ids"]
+                    #     non_last_step_mask = np.isin(non_last_step_trajectory_ids, valid_last_step_trajectory_ids)
+                    #     non_last_step_batch = non_last_step_batch[non_last_step_mask]
 
-                        # concatenate then pad
-                        batch = DataProto.concat([last_step_batch, non_last_step_batch])
-                        batch = self._pad_dataproto_to_world_size(batch)
+                    #     # concatenate then pad
+                    #     batch = DataProto.concat([last_step_batch, non_last_step_batch])
+                    #     batch = self._pad_dataproto_to_world_size(batch)
 
-                    else:
-                        # then we just pad the batch size to a multiple of world size
-                        batch = self._pad_dataproto_to_world_size(batch=batch)
+                    # else:
+                    #     # then we just pad the batch size to a multiple of world size
+                    #     batch = self._pad_dataproto_to_world_size(batch=batch)
 
-                    # recompute old_log_probs
-                    with marked_timer("old_log_prob", timing_raw, color="blue"):
-                        old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-                        entropys = old_log_prob.batch["entropys"]
-                        response_masks = batch.batch["response_mask"]
-                        loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
-                        entropy_agg = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
-                        old_log_prob_metrics = {"actor/entropy": entropy_agg.detach().item()}
-                        metrics.update(old_log_prob_metrics)
-                        old_log_prob.batch.pop("entropys")
-                        batch = batch.union(old_log_prob)
+                    # pad batch size to world size for batch balancing
+                    batch = self._pad_dataproto_to_world_size(batch=batch)
 
-                        if "rollout_log_probs" in batch.batch.keys():
-                            # TODO: we may want to add diff of probs too.
-                            rollout_old_log_probs = batch.batch["rollout_log_probs"]
-                            actor_old_log_probs = batch.batch["old_log_probs"]
-                            attention_mask = batch.batch["attention_mask"]
-                            responses = batch.batch["responses"]
-                            response_length = responses.size(1)
-                            response_mask = attention_mask[:, -response_length:]
+                    # Balance the number of valid tokens across DP ranks.
+                    # NOTE: This usually changes the order of data in the `batch`,
+                    # which won't affect the advantage calculation (since it's based on uid),
+                    # but might affect the loss calculation (due to the change of mini-batching).
+                    if self.config.trainer.balance_batch:
+                        self._balance_batch(batch, metrics=metrics)
 
-                            rollout_probs = torch.exp(rollout_old_log_probs)
-                            actor_probs = torch.exp(actor_old_log_probs)
-                            rollout_probs_diff = torch.abs(rollout_probs - actor_probs)
-                            rollout_probs_diff = torch.masked_select(rollout_probs_diff, response_mask.bool())
-                            rollout_probs_diff_max = torch.max(rollout_probs_diff)
-                            rollout_probs_diff_mean = torch.mean(rollout_probs_diff)
-                            rollout_probs_diff_std = torch.std(rollout_probs_diff)
-                            metrics.update(
-                                {
-                                    "training/rollout_probs_diff_max": rollout_probs_diff_max.detach().item(),
-                                    "training/rollout_probs_diff_mean": rollout_probs_diff_mean.detach().item(),
-                                    "training/rollout_probs_diff_std": rollout_probs_diff_std.detach().item(),
-                                }
-                            )
+                    # compute global_valid tokens
+                    batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
-                    if self.use_reference_policy:
-                        # compute reference log_prob
-                        with marked_timer("ref", timing_raw, color="olive"):
-                            if not self.ref_in_actor:
-                                ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
-                            else:
-                                ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
-                            batch = batch.union(ref_log_prob)
-
-                    # compute values
-                    if self.use_critic:
-                        with marked_timer("values", timing_raw, color="cyan"):
-                            values = self.critic_wg.compute_values(batch)
-                            batch = batch.union(values)
+                    batch = self._compute_step_level_values(batch=batch, timing_raw=timing_raw, metrics=metrics)
 
                     with marked_timer("adv", timing_raw, color="brown"):
                         # step_ids is safe to always use for advantage computation
                         # if we're not using computing advantages stepwise (i.e., for cumulative agents or single turn workflows)
                         # then step_ids == trajectory_ids
-                        batch.non_tensor_batch["uid"] = batch.non_tensor_batch["step_ids"]
+                        # NOTE: not very safe actually for a generic workflow. Only work for trajectory with a single step.
+                        # batch.non_tensor_batch["uid"] = batch.non_tensor_batch["step_ids"]
+                        batch.non_tensor_batch["uid"] = batch.non_tensor_batch["trajectory_ids"]
 
                         if self.config.rllm.stepwise_advantage.mode == "per_step":
                             batch.batch["token_level_scores"] = batch.batch["step_rewards"]
@@ -364,34 +407,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         mask = batch.batch["attention_mask"][:, -1] == 1
                         batch = batch[~mask]
 
-                    # re-pad batch size to world size for gradient update
-                    batch = self._pad_dataproto_to_world_size(batch=batch)
-
-                    # Balance the number of valid tokens across DP ranks.
-                    # NOTE: This usually changes the order of data in the `batch`,
-                    # which won't affect the advantage calculation (since it's based on uid),
-                    # but might affect the loss calculation (due to the change of mini-batching).
-                    # TODO: Decouple the DP balancing and mini-batching.
-                    if self.config.trainer.balance_batch:
-                        self._balance_batch(batch, metrics=metrics)
-
-                    # compute global_valid tokens
-                    batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
-
-                    # update critic
-                    if self.use_critic:
-                        with marked_timer("update_critic", timing_raw, color="pink"):
-                            critic_output = self.critic_wg.update_critic(batch)
-                        critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
-                        metrics.update(critic_output_metrics)
-
-                    # implement critic warmup
-                    if self.config.trainer.critic_warmup <= self.global_steps:
-                        # update actor
-                        with marked_timer("update_actor", timing_raw, color="red"):
-                            actor_output = self.actor_rollout_wg.update_actor(batch)
-                        actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
-                        metrics.update(actor_output_metrics)
+                    self._update_policy(batch=batch, timing_raw=timing_raw, metrics=metrics)
 
                     # validate
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and self.global_steps % self.config.trainer.test_freq == 0:
@@ -437,7 +453,6 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                 for r in TerminationReason:
                     metrics[f"batch/{r.value}"] = termination_counts[r.value] / len(set(new_batch.non_tensor_batch["episode_ids"]))
 
-                # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
                 batch = None
