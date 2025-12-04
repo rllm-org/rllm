@@ -119,11 +119,10 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         # init workflow workers
         asyncio.run_coroutine_threadsafe(self.agent_execution_engine.initialize_pool(), self._loop).result()
 
-    def _update_episode_metrics_and_termination_counts(self, episodes: list[Episode], metrics_dict: dict, termination_counter: Counter):
+    def _update_episode_metrics_and_termination_counts(self, episodes: list[Episode], workflow_metrics: dict, termination_counter: Counter):
         for episode in episodes:
-            for metric_dict in episode.metrics:
-                for key, value in metric_dict.items():
-                    metrics_dict[key].append(value)
+            for key, value in episode.metrics.items():
+                workflow_metrics[key].append(value)
             termination_counter.update(episode.termination_reason)
 
     def _compute_step_level_values(self, batch: DataProto, timing_raw: dict, metrics: dict) -> DataProto:
@@ -281,6 +280,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                                 batch = new_batch
                             else:
                                 batch = DataProto.concat([batch, new_batch])
+                        pprint(rejection_sampling_metrics)
                         continue
                     elif not batch:
                         batch = new_batch

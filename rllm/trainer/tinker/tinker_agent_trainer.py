@@ -132,14 +132,10 @@ class TinkerAgentTrainer:
         os.makedirs(self.config.trainer.default_local_dir, exist_ok=True)
 
         # Setup logging
-        logger_backend = self.config.trainer.logger
-        if isinstance(logger_backend, str):
-            logger_backend = [logger_backend]
-
         tracking_logger = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
-            default_backend=logger_backend,
+            default_backend=self.config.trainer.logger,
             config=OmegaConf.to_container(self.config, resolve=True),
         )
 

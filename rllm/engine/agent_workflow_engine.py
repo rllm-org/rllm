@@ -105,7 +105,7 @@ class AgentWorkflowEngine:
                 episode = await workflow.run_with_termination_handling(task=task, uid=uid, **kwargs)
 
                 # Display rewards for all trajectories
-                rewards_str = ", ".join([f"{traj.name}: {traj.reward:.1f}" for traj in episode.trajectories])
+                rewards_str = ", ".join([f"{traj.name}: {traj.reward:.1f}" if traj.reward is not None else f"{traj.name}: none" for traj in episode.trajectories])
                 colorful_print(f"[{uid}] Rollout completed. Rewards: {rewards_str}, Termination: {episode.termination_reason}", fg="green" if episode.is_correct else "yellow")
 
                 if episode.termination_reason != TerminationReason.ERROR:
