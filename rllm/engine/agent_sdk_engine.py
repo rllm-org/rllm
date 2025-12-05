@@ -293,8 +293,6 @@ class AgentSdkEngine:
             trace_obj = Trace(**trace.data)
             traces_by_session_name[session_name].append((trace.id, trace_obj))
 
-        num_traces_collected = sum(len(traces) for traces in traces_by_session_name.values())
-
         for session_name, traces in traces_by_session_name.items():
             steps = [trace_to_step(entry[1]) for entry in traces]
             step_id_to_step = {entry[0]: step for entry, step in zip(traces, steps, strict=False)}
@@ -328,7 +326,33 @@ class AgentSdkEngine:
                     )
                 is_correct = trajectories[-1].reward >= 1.0 if len(trajectories) > 0 else False
 
-            episode = Episode(id=session_name, is_correct=is_correct, trajectories=trajectories, metrics={"retry_attempt": retry_attempt, "empty": int(len(steps) == 0), "flush_success": int(flush_success), "num_trajectories": len(trajectories), "traces_collected": num_traces_collected, "collect_sqlite_time": collect_sqlite_time, "flush_time": flush_time})
+            steps_used = sum(len(trajectory.steps) for trajectory in trajectories)
+
+            total_response_len = sum(len(step.model_output.completion_ids) for trajectory in trajectories for step in trajectory.steps)
+            max_response_len = max(len(step.model_output.completion_ids) for trajectory in trajectories for step in trajectory.steps)
+            min_response_len = min(len(step.model_output.completion_ids) for trajectory in trajectories for step in trajectory.steps)
+            mean_response_len = total_response_len / steps_used
+
+            min_prompt_len = min(len(step.model_output.prompt_ids) for trajectory in trajectories for step in trajectory.steps)
+            max_prompt_len = max(len(step.model_output.prompt_ids) for trajectory in trajectories for step in trajectory.steps)
+
+            metrics = {
+                "retry_attempt": retry_attempt,
+                "empty": int(len(steps) == 0),
+                "flush_success": int(flush_success),
+                "num_trajectories": len(trajectories),
+                "steps_collected": len(steps),
+                "steps_used": steps_used,
+                "mean_response_len": mean_response_len,
+                "max_response_len": max_response_len,
+                "min_response_len": min_response_len,
+                "max_prompt_len": max_prompt_len,
+                "min_prompt_len": min_prompt_len,
+                "collect_sqlite_time": collect_sqlite_time,
+                "flush_time": flush_time,
+            }
+
+            episode = Episode(id=session_name, is_correct=is_correct, trajectories=trajectories, metrics=metrics)
             task_states[task_id]["episodes"].append(episode)
 
         results = []
@@ -466,9 +490,7 @@ class AgentSdkEngine:
 
             for trajectory in episode.trajectories:
                 name = trajectory.name
-                # Construct trajectory_id from task_id and trajectory name
-                # Example: "abc123_solver", "abc123_judge"
-                trajectory_id = f"{task_ids[i]}_{name}"  # e.g., "1234567890_solver"
+                trajectory_id = f"{task_ids[i]}_{name}"  # e.g., "abc123_solver", "abc123_judge"
 
                 if len(trajectory.steps) == 0:
                     print(f"Trajectory {trajectory_id} has no steps, skipping")
@@ -510,9 +532,18 @@ class AgentSdkEngine:
 
                 # else:
                 # TODO: auto merge the steps if they share some prefix
+                max_prompt_length = self.config.data.max_prompt_length
+                valid_step_count = 0
                 for step_idx, step in enumerate(trajectory.steps):
                     if isinstance(step.model_output, ModelOutput):
                         prompt_ids = torch.tensor(step.model_output.prompt_ids, dtype=torch.long)
+
+                        # Skip steps with overlong prompts to avoid OOD (train/inference mismatch)
+                        # During rollout, model saw full prompt; truncating would create OOD data
+                        if len(prompt_ids) > max_prompt_length:
+                            logger.warning(f"Skipping step {step_idx} of trajectory {trajectory_id}: prompt length {len(prompt_ids)} > max_prompt_length {max_prompt_length}")
+                            continue
+
                         prompts.append(prompt_ids)
 
                         response_ids = torch.tensor(step.model_output.completion_ids, dtype=torch.long)
@@ -532,12 +563,15 @@ class AgentSdkEngine:
                         #     traj_mask.append(mask)
 
                         step_rewards.append(step.reward)
-                        # Construct step_id from trajectory_id and step index
-                        # Format: "{trajectory_id}_step{step_idx}"
-                        # Example: "abc123_solver_step0", "abc123_judge_step1"
-                        step_ids.append(f"{trajectory_id}_step{step_idx}")  # e.g., "1234567890_solver_step0"
+                        step_ids.append(f"{trajectory_id}_step{step_idx}")  # e.g., "abc123_solver_step0", "abc123_judge_step1"
 
-                    n_steps = len(trajectory.steps)
+                        valid_step_count += 1
+
+                # Use valid_step_count (steps not filtered due to overlong prompts)
+                n_steps = valid_step_count
+                if n_steps == 0:
+                    logger.warning(f"Trajectory {trajectory_id} has no valid steps after filtering overlong prompts, skipping")
+                    continue
 
                 trajectory_ids.extend([trajectory_id] * n_steps)
                 step_nums.extend([n_steps] * n_steps)

@@ -36,7 +36,19 @@ from .local_retrieval_tool import to_langchain_tool
 
 MODEL = "Qwen/Qwen3-4B"
 # MODEL = "gpt-4.1"
-MAX_TURNS = 10
+MAX_TURNS = 5
+MAX_RESPONSE_TOKENS = 2048
+
+TRAIN = True
+
+if TRAIN:
+    base_url = "http://localhost:4000/v1"
+    api_key = ""
+    use_proxy = True
+else:
+    base_url = "http://localhost:8000/v1"
+    api_key = "token-abc123"
+    use_proxy = False
 
 SEARCH_SYSTEM_PROMPT = """You are a helpful AI assistant that can search for information to answer questions accurately.
 
@@ -69,20 +81,21 @@ print("\n" + "=" * 70 + "\n")
 # Initialize the chat model with RLLM SDK
 # Use both sync client (for LangChain internals) and async client (for async operations)
 sync_client = get_chat_client(
-    api_key=os.getenv("OPENAI_API_KEY", "EMPTY"),
-    base_url="http://localhost:4000/v1",
-    # use_proxy=False,
+    api_key=api_key,
+    base_url=base_url,
+    use_proxy=use_proxy,
 )
 async_client = get_chat_client_async(
-    api_key=os.getenv("OPENAI_API_KEY", "EMPTY"),
-    base_url="http://localhost:4000/v1",
-    # use_proxy=False,
+    api_key=api_key,
+    base_url=base_url,
+    use_proxy=use_proxy,
 )
 
 # Pass both clients to ChatOpenAI - it will use async_client for ainvoke()
 response_model = ChatOpenAI(
     model=MODEL,
     temperature=0.7,
+    max_tokens=MAX_RESPONSE_TOKENS,
     client=sync_client,
     async_client=async_client,
 )
