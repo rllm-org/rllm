@@ -4,14 +4,21 @@ Common utilities for rLLM trainers.
 This module provides shared functionality across different trainer backends (verl, tinker, etc.).
 """
 
-from rllm.trainer.common.rejection_sampling import (
+from rllm.trainer.common.advantage import (
+    compute_advantage_from_trajectory_groups,
+    rLLMAdvantageEstimator,
+)
+from rllm.trainer.common.config import (
+    CompactFilteringConfig,
     RejectionSamplingConfig,
+    TransformConfig,
+)
+from rllm.trainer.common.rejection_sampling import (
     RejectionSamplingMetrics,
     RejectionSamplingState,
     apply_rejection_sampling_and_filtering,
 )
 from rllm.trainer.common.transform import (
-    TransformConfig,
     build_trajectory_groups,
     impute_trajectory_names,
     transform_episodes_to_trajectory_groups,
@@ -19,6 +26,10 @@ from rllm.trainer.common.transform import (
 )
 
 __all__ = [
+    # Config
+    "CompactFilteringConfig",
+    "RejectionSamplingConfig",
+    "TransformConfig",
     # Transform pipeline
     "transform_episodes_to_trajectory_groups",
     "TransformConfig",
@@ -30,4 +41,7 @@ __all__ = [
     "RejectionSamplingMetrics",
     "RejectionSamplingState",
     "apply_rejection_sampling_and_filtering",
+    # Advantage computation
+    "rLLMAdvantageEstimator",
+    "compute_advantage_from_trajectory_groups",
 ]

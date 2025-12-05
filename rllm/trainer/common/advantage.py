@@ -25,7 +25,7 @@ class rLLMAdvantageEstimator(str, Enum):
 
 
 def _calculate_grpo_advantages(rewards: np.ndarray, normalize_by_std=True) -> np.ndarray:
-    if not rewards or len(rewards) < 1:
+    if rewards is None or len(rewards) < 1:
         return np.array([])
     elif len(rewards) == 1:
         group_mean, group_std = 0.0, 1.0
@@ -41,6 +41,7 @@ def _calculate_grpo_advantages(rewards: np.ndarray, normalize_by_std=True) -> np
 
 
 def _calculate_reinforce_advantages(rewards: np.ndarray) -> np.ndarray:
+    """REINFORCE: advantage = reward (no baseline)"""
     return rewards
 
 
@@ -72,7 +73,7 @@ def compute_advantage_from_trajectory_groups(
                 for step in traj.steps:
                     step.advantage = advantage
         elif stepwise_advantages_mode == "per_step":
-            assert set([len(traj.steps) for traj in group.trajectories]) == 1, "All trajectories must have the same number of steps in per_step mode"
+            assert len(set([len(traj.steps) for traj in group.trajectories])) == 1, "All trajectories must have the same number of steps in per_step mode"
             # compute advantage step by step for all trajectories
             for step_idx in range(len(group.trajectories[0].steps)):
                 steps = [traj.steps[step_idx] for traj in group.trajectories]

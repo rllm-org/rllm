@@ -6,26 +6,9 @@ tracking episode-level correctness metrics while filtering based on reward varia
 """
 
 from dataclasses import dataclass, field
-from typing import Literal
 
 from rllm.agents.agent import Episode, TrajectoryGroup
-
-
-@dataclass
-class RejectionSamplingConfig:
-    """Configuration for rejection sampling."""
-
-    # Rejection sampling mode
-    # - "none": No rejection, just track metrics
-    # - "episode": Skip whole batch if criteria not met, accumulate until enough partial solves
-    # - "group": Filter groups with insufficient trajectories, pass remaining to trainer
-    mode: Literal["none", "episode", "group"] = "none"
-
-    # Minimum trajectories required per trajectory group (for "group" mode)
-    min_trajs_per_group: int = 2
-
-    # For "episode" mode (verl compatibility): minimum number of tasks with partial solves before proceeding
-    min_partial_solve_tasks: int = 1
+from rllm.trainer.common.config import RejectionSamplingConfig
 
 
 @dataclass
@@ -176,7 +159,7 @@ def filter_episodes(
 
 def apply_rejection_sampling_and_filtering(episodes: list[Episode], groups: list[TrajectoryGroup], config: RejectionSamplingConfig, state: RejectionSamplingState) -> tuple[list[TrajectoryGroup], list[Episode], dict]:
     """
-    Apply rejection sampling to trajectory groups.
+    Apply rejection sampling to trajectory groups and episodes.
 
     Args:
         episodes: List of episodes (for correctness metrics)

@@ -14,9 +14,11 @@ from omegaconf import OmegaConf
 from rllm.agents.agent import Episode
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
-from rllm.trainer.common.rejection_sampling import RejectionSamplingConfig, RejectionSamplingState, apply_rejection_sampling_and_filtering
-from rllm.trainer.common.transform import TransformConfig, transform_episodes_to_trajectory_groups
-from rllm.trainer.verl.verl_data_processor import CompactFilteringConfig, transform_episodes_to_dataproto
+from rllm.trainer.common.advantage import compute_advantage_from_trajectory_groups
+from rllm.trainer.common.config import CompactFilteringConfig, RejectionSamplingConfig, TransformConfig
+from rllm.trainer.common.rejection_sampling import RejectionSamplingState, apply_rejection_sampling_and_filtering
+from rllm.trainer.common.transform import transform_episodes_to_trajectory_groups
+from rllm.trainer.verl.verl_data_processor import transform_episodes_to_dataproto
 from rllm.utils.episode_logger import EpisodeLogger
 from rllm.workflows.workflow import TerminationReason
 from verl import DataProto
@@ -308,7 +310,11 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                     # generate a list of episodes (rollouts)
                     final_gen_episodes = self.generate_episodes(batch=new_batch, timing_raw=timing_raw)
 
-                    final_gen_trajectory_groups, trajectory_group_metrics = transform_episodes_to_trajectory_groups(final_gen_episodes, config=self.transform_config)
+                    final_gen_trajectory_groups, trajectory_group_metrics = transform_episodes_to_trajectory_groups(
+                        final_gen_episodes,
+                        transform_config=self.transform_config,
+                        compact_filtering_config=self.cf_config,
+                    )
 
                     # Log metrics and update termination counts
                     self._update_episode_metrics_and_termination_counts(final_gen_episodes, workflow_metrics, termination_counts)
@@ -316,7 +322,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                     # rejection sampling & filtering
                     # we do rejection sampling at the episode level instead of the traj/step level
                     filtered_groups, filtered_episodes, rejection_sampling_metrics = apply_rejection_sampling_and_filtering(
-                        episodes=final_gen_episodes,
+                        final_gen_episodes,
                         groups=final_gen_trajectory_groups,
                         config=self.rs_config,
                         state=rejection_sampling_state,
@@ -330,14 +336,22 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                     # metrics.update(trajectory_group_metrics)
                     # metrics.update(rejection_sampling_metrics)
 
-                    # After the rejection sampling & filtering, we need to update the data proto as well.
+                    use_rllm_advantage = self.config.rllm.stepwise_advantage.get("use_rllm_advantage", True)
+                    if use_rllm_advantage:
+                        with marked_timer("rllm_adv", timing_raw, color="brown"):
+                            normalize_by_std = self.config.rllm.stepwise_advantage.get("normalize_by_std", True)
+                            compute_advantage_from_trajectory_groups(filtered_groups, self.config.algorithm.adv_estimator, self.config.rllm.stepwise_advantage.mode, normalize_by_std)
+
                     batch = transform_episodes_to_dataproto(
                         filtered_episodes,
                         rollout_engine=self.agent_execution_engine.rollout_engine,
                         max_prompt_length=self.config.data.max_prompt_length,
                         max_response_length=self.config.data.max_response_length,
-                        cf_config=self.cf_config,
                     )
+
+                    if not use_rllm_advantage:
+                        with marked_timer("verl_adv", timing_raw, color="brown"):
+                            batch = self._compute_advantage_verl(batch=batch, metrics=metrics)
 
                     # Balance the number of valid tokens across DP ranks.
                     # NOTE: This usually changes the order of data in the `batch`,
@@ -353,20 +367,12 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
 
                     batch = self._compute_step_level_values(batch=batch, timing_raw=timing_raw, metrics=metrics)
 
-                    with marked_timer("adv", timing_raw, color="brown"):
-                        batch = self._compute_advantage_verl(batch=batch, metrics=metrics)
-
-                    # remove invalid items filtered out due to compact filtering
-                    is_valid = batch.non_tensor_batch["is_valid"]
-                    valid_idxs = np.where(is_valid == True)[0]
-                    batch = batch.select_idxs(valid_idxs)
-
                     # for backward compatibility
                     if self.config.rllm.mask_truncated_samples:
                         mask = batch.batch["attention_mask"][:, -1] == 1
                         batch = batch[~mask]
 
-                    self._update_policy(batch=batch, timing_raw=timing_raw, metrics=metrics)
+                    self._update_policy(batch, timing_raw=timing_raw, metrics=metrics)
 
                     # validate
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and self.global_steps % self.config.trainer.test_freq == 0:

@@ -12,26 +12,12 @@ The pipeline handles:
 
 import logging
 from collections import defaultdict
-from dataclasses import dataclass
 
-from rllm.agents.agent import _DEFAULT_TRAJ_NAME, Episode, Trajectory, TrajectoryGroup
+from rllm.agents.agent import Episode, Trajectory, TrajectoryGroup
+from rllm.trainer.common.config import CompactFilteringConfig, TransformConfig
+from rllm.workflows.workflow import TerminationReason
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class TransformConfig:
-    """Configuration for the episode-to-group transformation pipeline."""
-
-    # Name imputation
-    impute_missing_names: bool = True
-    # Default trajectory name (if user does not provide a name); treated as unnamed
-    default_traj_name: str = _DEFAULT_TRAJ_NAME
-    # Whether to drop unnamed trajectories on failure
-    drop_unnamed_traj: bool = False
-
-    # Reward configuration
-    broadcast: bool = True  # If True, use trajectory-level rewards; if False, use per-step rewards
 
 
 def impute_trajectory_names(
@@ -110,7 +96,7 @@ def validate_and_propagate_rewards(
     return warnings
 
 
-def build_trajectory_groups(episodes: list[Episode]) -> list[TrajectoryGroup]:
+def build_trajectory_groups(episodes: list[Episode], compact_filtering_config: CompactFilteringConfig | None = None) -> list[TrajectoryGroup]:
     """
     Build TrajectoryGroups from episodes based on the configured grouping strategy.
 
@@ -123,9 +109,13 @@ def build_trajectory_groups(episodes: list[Episode]) -> list[TrajectoryGroup]:
     trajectories_by_name: dict[str, list[Trajectory]] = defaultdict(list)
 
     for episode in episodes:
+        termination_reason = episode.termination_reason or TerminationReason.UNKNOWN
+        # skip episode if it should be masked by compact filtering
+        if compact_filtering_config and compact_filtering_config.should_mask(termination_reason):
+            continue
         task_id = episode.id.split(":")[0]
         for trajectory in episode.trajectories:
-            trajectories_by_name[f"{task_id}_{trajectory.name}"].append(trajectory)
+            trajectories_by_name[f"{task_id}:{trajectory.name}"].append(trajectory)
 
     groups = []
     for name, trajectories in trajectories_by_name.items():
@@ -140,7 +130,8 @@ def build_trajectory_groups(episodes: list[Episode]) -> list[TrajectoryGroup]:
 
 def transform_episodes_to_trajectory_groups(
     episodes: list[Episode],
-    config: TransformConfig | None = None,
+    transform_config: TransformConfig | None = None,
+    compact_filtering_config: CompactFilteringConfig | None = None,
     log_n_warnings: int = 1,
 ) -> tuple[list[TrajectoryGroup], dict]:
     """
@@ -154,7 +145,7 @@ def transform_episodes_to_trajectory_groups(
     Args:
         episodes: List of Episodes from workflow execution
         config: Transform configuration (uses defaults if not provided)
-        print_n_warnings: Number of warnings to log
+        log_n_warnings: Number of warnings to log
 
     Returns:
         Tuple of (list of TrajectoryGroups, metrics)
@@ -162,8 +153,6 @@ def transform_episodes_to_trajectory_groups(
     Example:
         >>> from rllm.trainer.common.transform import (
         ...     transform_episodes_to_trajectory_groups,
-        ...     TransformConfig,
-        ...     GroupingStrategy,
         ... )
         >>> config = TransformConfig(
         ...     impute_missing_names=True,
@@ -173,14 +162,14 @@ def transform_episodes_to_trajectory_groups(
         >>> result = transform_episodes_to_trajectory_groups(episodes, config)
         >>> print(f"Created {len(result.trajectory_groups)} groups")
     """
-    if config is None:
-        config = TransformConfig()
+    if transform_config is None:
+        transform_config = TransformConfig()
 
     metrics = dict()
     metrics["transform/num_trajs_before_transform"] = sum(len(episode.trajectories) for episode in episodes)
 
     # Step 1: Name imputation
-    rename_warnings = impute_trajectory_names(episodes, config)
+    rename_warnings = impute_trajectory_names(episodes, transform_config)
 
     for warning in rename_warnings[:log_n_warnings]:
         logger.warning(warning)
@@ -189,10 +178,10 @@ def transform_episodes_to_trajectory_groups(
         logger.warning(f"Skipping {len(rename_warnings) - log_n_warnings} more similar warnings with trajectory names")
 
     # Step 2: Build trajectory groups
-    groups = build_trajectory_groups(episodes)
+    groups = build_trajectory_groups(episodes, compact_filtering_config)
 
     # Step 3: Validate and propagate rewards
-    reward_warnings = validate_and_propagate_rewards(groups, config)
+    reward_warnings = validate_and_propagate_rewards(groups, transform_config)
 
     for warning in reward_warnings[:log_n_warnings]:
         logger.warning(warning)

@@ -3,10 +3,9 @@ import uuid
 import numpy as np
 import torch
 
-from rllm.agents.agent import Episode, Trajectory
+from rllm.agents.agent import Episode, Trajectory, TrajectoryGroup
 from rllm.engine.rollout import ModelOutput, VerlEngine
-from rllm.trainer.verl.verl_data_processor.dataclass import AccumulatedData, CompactFilteringConfig, ProcessedStepData
-from rllm.workflows.workflow import TerminationReason
+from rllm.trainer.verl.verl_data_processor.dataclass import AccumulatedData, ProcessedStepData
 from verl.protocol import DataProto
 from verl.utils.torch_functional import pad_sequence_to_length
 
@@ -71,19 +70,11 @@ def _build_step_and_trajectory_rewards(step_rewards: list[float], trajectory_rew
     return step_rewards_batch, trajectory_rewards_batch
 
 
-def _compact_filtering(termination_reasons: list[TerminationReason], cf_config: CompactFilteringConfig) -> list[bool]:
-    """Performs compact filtering based on the termination reasons and the compact filtering configuration.
-
-    Args:
-        termination_reasons: List of termination reasons.
-        cf_config: Compact filtering configuration.
-    Returns:
-        List of booleans indicating whether each episode is valid.
-    """
-    if not cf_config.enable:
-        return [True] * len(termination_reasons)
-
-    return [not cf_config.should_mask(reason) for reason in termination_reasons]
+def _build_per_step_advantages(response_mask: torch.Tensor, advantages: list[float]) -> torch.Tensor:
+    """Builds the per-step advantages for a batch of prompts/responses."""
+    assert response_mask.shape[0] == len(advantages), "response_mask and advantages must have the same length"
+    advantages_tensor = torch.tensor(advantages, dtype=torch.float32)
+    return advantages_tensor.unsqueeze(-1) * response_mask
 
 
 def _handle_multimodal_position_ids(processor, input_ids: torch.Tensor, attention_mask: torch.Tensor, multi_modal_inputs: list[dict]) -> torch.Tensor:
@@ -131,7 +122,7 @@ def _handle_multimodal_position_ids(processor, input_ids: torch.Tensor, attentio
     return position_ids
 
 
-def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_id: int, max_prompt_length: int, max_response_length: int, cf_config: CompactFilteringConfig, processor=None) -> "DataProto":
+def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_id: int, max_prompt_length: int, max_response_length: int, processor=None) -> "DataProto":
     """Batches the tensors from an AccumulatedData.
 
     Args:
@@ -139,7 +130,6 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
         pad_token_id: The token ID to use for padding.
         max_prompt_length: The maximum length to pad the prompts to.
         max_response_length: The maximum length to pad the responses to.
-        cf_config: Compact filtering configuration.
         processor: Optional multimodal processor for handling position IDs (e.g., Qwen2VLProcessor).
     Returns:
         DataProto: The DataProto built from the AccumulatedData.
@@ -167,21 +157,15 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
 
     step_rewards_batch, traj_rewards_batch = _build_step_and_trajectory_rewards(accumulated.step_rewards, accumulated.traj_rewards, responses_batch, accumulated.responses)  # shape: [bs, max_response_length]
 
-    is_valid = _compact_filtering(accumulated.termination_reasons, cf_config)
-
     non_tensors = {
-        "episode_ids": np.array(accumulated.episode_ids),
         "trajectory_ids": np.array(accumulated.trajectory_ids),
         "step_ids": np.array(accumulated.step_ids),
-        "batch_ids": np.array([str(uuid.uuid4())] * len(accumulated.episode_ids)),
+        "batch_ids": np.array([str(uuid.uuid4())] * len(accumulated.trajectory_ids)),
         "step_nums": np.array(accumulated.step_nums),
-        "is_correct": np.array(accumulated.is_correct),
-        "termination_reasons": np.array([x.value for x in accumulated.termination_reasons]),
-        "metrics": np.array(accumulated.metrics),
-        "is_valid": np.array(is_valid),
+        "is_valid": np.ones(len(accumulated.trajectory_ids), dtype=bool),
         "is_last_step": np.array(accumulated.is_last_step),
         # The padding is done after the transform (in `_pad_dataproto_to_world_size`), so we simply set all to False here
-        "is_pad_step": np.array([False] * len(accumulated.episode_ids)),
+        "is_pad_step": np.zeros(len(accumulated.trajectory_ids), dtype=bool),
     }
 
     # Include multi_modal_inputs in non_tensors if any are present
@@ -200,8 +184,8 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
     }
 
     # Include the advantages and set returns to it as well, if the accumulated data already has them.
-    if len(accumulated.advantages) == len(accumulated.episode_ids):
-        advantage_tensor = torch.tensor(accumulated.advantages, dtype=torch.float32)
+    if len(accumulated.advantages) == len(accumulated.trajectory_ids):
+        advantage_tensor = _build_per_step_advantages(traj_mask, accumulated.advantages)
         tensors["advantages"] = advantage_tensor
         tensors["returns"] = advantage_tensor
 
@@ -214,12 +198,11 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
     )
 
 
-def _process_trajectory(trajectory: Trajectory, episode: Episode, task_id: str, accumulated: AccumulatedData) -> int:
+def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: AccumulatedData) -> int:
     """Processes a trajectory and returns an AccumulatedData.
 
     Args:
         trajectory: Trajectory to process.
-        episode: (Parent) episode corresponding to the trajectory.
         task_id: Task identifier corresponding to the episode.
         accumulated: AccumulatedData to process the trajectory into.
     Returns:
@@ -264,14 +247,10 @@ def _process_trajectory(trajectory: Trajectory, episode: Episode, task_id: str, 
 
         accumulated.add_step(
             step_data=step_data,
-            episode_id=episode.id,
             trajectory_id=trajectory_id,
             traj_reward=traj_reward,
             step_num=n_steps,
             is_last=step_idx == n_steps - 1,
-            is_correct=episode.is_correct,
-            termination_reason=episode.termination_reason,
-            metrics=episode.metrics,
         )
 
     return n_steps
@@ -285,7 +264,7 @@ def _process_episode(episode: Episode, task_id: str, accumulated: AccumulatedDat
         task_id: Task identifier corresponding to the episode.
         accumulated: AccumulatedData to process the episode into.
     Returns:
-        repeated_count: The number of times the episode is repeated.
+        repeated_count: The total steps in this episode.
     """
     total_steps = 0
 
@@ -296,13 +275,19 @@ def _process_episode(episode: Episode, task_id: str, accumulated: AccumulatedDat
         print(f"Episode {episode.id} has no valid trajectories, dropping it from the batch")
         return 0
 
-    if episode.termination_reason is None:
-        episode.termination_reason = TerminationReason.UNKNOWN
-
     for trajectory in episode.trajectories:
-        n_steps = _process_trajectory(trajectory, episode, task_id, accumulated)
+        n_steps = _process_trajectory(trajectory, task_id, accumulated)
         total_steps += n_steps
 
+    return total_steps
+
+
+def _process_trajectory_group(trajectory_group: TrajectoryGroup, task_id: str, accumulated: AccumulatedData) -> int:
+    """Processes a trajectory group and returns an AccumulatedData."""
+    total_steps = 0
+    for trajectory in trajectory_group.trajectories:
+        n_steps = _process_trajectory(trajectory, task_id, accumulated)
+        total_steps += n_steps
     return total_steps
 
 
@@ -311,7 +296,6 @@ def transform_episodes_to_dataproto(
     rollout_engine: VerlEngine,
     max_prompt_length: int,
     max_response_length: int,
-    cf_config: CompactFilteringConfig,
 ) -> DataProto:
     """
     Transforms a list of episodes (from running a rLLM workflow) into a verl-compatible DataProto.
@@ -321,7 +305,6 @@ def transform_episodes_to_dataproto(
         rollout_engine: Rollout engine that contains the tokenizer and (optional) multimodal processor.
         max_prompt_length: The maximum length of the prompts.
         max_response_length: The maximum length of the responses.
-        cf_config: Compact filtering configuration.
     Returns:
         DataProto: The DataProto built from the episodes.
     """
@@ -336,4 +319,28 @@ def transform_episodes_to_dataproto(
 
     assert hasattr(tokenizer, "pad_token_id"), "Tokenizer must have a pad token ID"
     pad_token_id = tokenizer.pad_token_id
-    return _batch_tensors_and_build_data_proto(accumulated, pad_token_id, max_prompt_length, max_response_length, cf_config, processor)
+    return _batch_tensors_and_build_data_proto(accumulated, pad_token_id, max_prompt_length, max_response_length, processor)
+
+
+# TODO: extract common logic from transform_episodes_to_dataproto and transform_trajectory_groups_to_dataproto
+def transform_trajectory_groups_to_dataproto(
+    trajectory_groups: list[TrajectoryGroup],
+    rollout_engine: VerlEngine,
+    max_prompt_length: int,
+    max_response_length: int,
+) -> DataProto:
+    """
+    Transforms a list of trajectory groups (from running a rLLM workflow) into a verl-compatible DataProto.
+    """
+    tokenizer = rollout_engine.tokenizer
+    processor = getattr(rollout_engine, "processor", None)
+
+    accumulated = AccumulatedData()
+    for trajectory_group in trajectory_groups:
+        task_id = trajectory_group.group_id.split(":")[0]
+        total_steps = _process_trajectory_group(trajectory_group, task_id, accumulated)
+        accumulated.repeat_counts.append(total_steps)
+
+    assert hasattr(tokenizer, "pad_token_id"), "Tokenizer must have a pad token ID"
+    pad_token_id = tokenizer.pad_token_id
+    return _batch_tensors_and_build_data_proto(accumulated, pad_token_id, max_prompt_length, max_response_length, processor)
