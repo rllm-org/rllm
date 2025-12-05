@@ -39,15 +39,16 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         self,
         config,
         tokenizer,
-        role_worker_mapping: dict[Role, WorkerType],
-        resource_pool_manager: ResourcePoolManager,
+        processor=None,
+        role_worker_mapping: dict[Role, WorkerType] = None,
+        resource_pool_manager: ResourcePoolManager = None,
         ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
         reward_fn=None,
         val_reward_fn=None,
         workflow_class=None,
         workflow_args=None,
     ):
-        super().__init__(config=config, tokenizer=tokenizer, role_worker_mapping=role_worker_mapping, resource_pool_manager=resource_pool_manager, ray_worker_group_cls=ray_worker_group_cls, reward_fn=reward_fn, val_reward_fn=val_reward_fn)
+        super().__init__(config=config, tokenizer=tokenizer, processor=processor, role_worker_mapping=role_worker_mapping, resource_pool_manager=resource_pool_manager, ray_worker_group_cls=ray_worker_group_cls, reward_fn=reward_fn, val_reward_fn=val_reward_fn)
 
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
