@@ -1,3 +1,4 @@
+import json
 import logging
 import uuid
 from collections import defaultdict
@@ -237,3 +238,21 @@ class SequenceAccumulator:
 #         datums.append(accumulator.to_datum())
 
 #     return datums
+
+
+def try_serialize(data):
+    if isinstance(data, dict):
+        serialized_data = {}
+        for key, value in data.items():
+            serialized_data[key] = try_serialize(value)
+        return serialized_data
+    elif getattr(data, "model_dump", None) is not None:
+        return data.model_dump()
+    elif isinstance(data, list):
+        serialized_data = [try_serialize(item) for item in data]
+        return serialized_data
+    else:
+        try:
+            return json.dumps(data)
+        except Exception:
+            return "NOT_SERIALIZABLE"
