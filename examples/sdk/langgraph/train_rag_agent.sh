@@ -11,8 +11,8 @@ python3 -m examples.sdk.langgraph.train_rag_agent \
     algorithm.adv_estimator=rloo \
     data.train_batch_size=64 \
     data.val_batch_size=512 \
-    data.max_prompt_length=4096 \
-    data.max_response_length=6144 \
+    data.max_prompt_length=8192 \
+    data.max_response_length=2048 \
     actor_rollout_ref.model.path=Qwen/Qwen3-4B \
     actor_rollout_ref.hybrid_engine=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
@@ -51,7 +51,7 @@ python3 -m examples.sdk.langgraph.train_rag_agent \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='rag-agent' \
-    trainer.experiment_name='langgraph-qwen4b' \
+    trainer.experiment_name='langgraph-qwen4b-fp16' \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
@@ -63,4 +63,6 @@ python3 -m examples.sdk.langgraph.train_rag_agent \
     rllm.sdk.proxy.host=127.0.0.1 \
     rllm.sdk.proxy.port=4000 \
     rllm.sdk.proxy.mode=subprocess \
-    rllm.sdk.store.path="${HOME}/rllm-traces.db"
+    rllm.sdk.store.path="${HOME}/rllm-traces-30.db" \
+    actor_rollout_ref.actor.fsdp_config.dtype="float16" \
+    actor_rollout_ref.rollout.dtype="float16"
