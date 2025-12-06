@@ -33,32 +33,36 @@ def colorful_warning(string: str, *args, **kwargs) -> None:
     warnings.warn(click.style(string, *args, **kwargs), stacklevel=2)
 
 
-def abbreviate_string(full_string: str, max_length: int = 256):
+def abbreviate_string(full_string: str, max_length: int = 512):
     """Abbreviate a string to a maximum length, and mention how many characters are skipped in between."""
+    # TODO: this is only doing heuristic truncation. The exact skipped length is not guaranteed.
+    full_string = full_string.strip()
     if len(full_string) <= max_length:
         return full_string
     # we first use space to split the string into words
-    words = full_string.strip().split(" ")
+    words = full_string.split(" ")
+
+    truncate_goal = len(full_string) - max_length
 
     if len(words) <= 2:  # no way for our downstream algorithm to handle. Simply return the last max_length characters
-        return f"(skipped {len(full_string) - max_length} characters)\n..." + full_string[-max_length:]
+        return f"(skipped first {truncate_goal} characters)..." + full_string[-max_length:]
 
     # we try to retain the both ends and truncate the middle
-    full_length = len(full_string) - len(words) + 1  # take into account the spaces that are splitted
     left_idx, right_idx = 0, len(words) - 1
+    truncate_length = len(full_string)
     while left_idx <= right_idx:
-        cur_length = full_length - sum(len(word) for word in words[left_idx : (right_idx + 1)])
-        if cur_length <= max_length:
+        truncate_length = truncate_length - len(words[left_idx]) - len(words[right_idx]) - 2
+        if truncate_length <= truncate_goal:
             break
         left_idx += 1
         right_idx -= 1
 
     if left_idx > right_idx:
-        return f"(skipped {len(full_string) - max_length} characters)\n..." + full_string[-max_length:]
+        return f"(skipped first {truncate_goal} characters)..." + full_string[-max_length:]
     else:
         left_str = " ".join(words[:left_idx])
         right_str = " ".join(words[right_idx + 1 :])
-        skip_str = f"\n(skipped {full_length - (len(left_str) + len(right_str) + 1)} characters)\n"
+        skip_str = f"(skipped middle {truncate_length} characters)"
         return left_str + "..." + skip_str + "..." + right_str
 
 

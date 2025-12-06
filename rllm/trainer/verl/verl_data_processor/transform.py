@@ -122,7 +122,7 @@ def _handle_multimodal_position_ids(processor, input_ids: torch.Tensor, attentio
     return position_ids
 
 
-def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_id: int, max_prompt_length: int, max_response_length: int, processor=None) -> "DataProto":
+def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_id: int, max_prompt_length: int, max_response_length: int, stepwise_advantage_mode: str = "broadcast", processor=None) -> "DataProto":
     """Batches the tensors from an AccumulatedData.
 
     Args:
@@ -130,6 +130,7 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
         pad_token_id: The token ID to use for padding.
         max_prompt_length: The maximum length to pad the prompts to.
         max_response_length: The maximum length to pad the responses to.
+        stepwise_advantage_mode: The mode of stepwise advantage computation.
         processor: Optional multimodal processor for handling position IDs (e.g., Qwen2VLProcessor).
     Returns:
         DataProto: The DataProto built from the AccumulatedData.
@@ -188,6 +189,16 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
         advantage_tensor = _build_per_step_advantages(traj_mask, accumulated.advantages)
         tensors["advantages"] = advantage_tensor
         tensors["returns"] = advantage_tensor
+        # TODO: we should support `token_level_scores` from the `Step` attribute level.
+        # we also need to implement the `kl_penalty` logic used in `verl`.
+        if stepwise_advantage_mode == "per_step":
+            tensors["token_level_scores"] = tensors["step_rewards"]
+            tensors["token_level_rewards"] = tensors["step_rewards"]
+        elif stepwise_advantage_mode == "broadcast":
+            tensors["token_level_scores"] = tensors["traj_rewards"]
+            tensors["token_level_rewards"] = tensors["traj_rewards"]
+        else:
+            raise ValueError(f"Stepwise advantage mode {stepwise_advantage_mode} not supported")
 
     return DataProto.from_dict(
         tensors=tensors,
@@ -296,6 +307,7 @@ def transform_episodes_to_dataproto(
     rollout_engine: VerlEngine,
     max_prompt_length: int,
     max_response_length: int,
+    stepwise_advantage_mode: str = "broadcast",
 ) -> DataProto:
     """
     Transforms a list of episodes (from running a rLLM workflow) into a verl-compatible DataProto.
@@ -305,6 +317,7 @@ def transform_episodes_to_dataproto(
         rollout_engine: Rollout engine that contains the tokenizer and (optional) multimodal processor.
         max_prompt_length: The maximum length of the prompts.
         max_response_length: The maximum length of the responses.
+        stepwise_advantage_mode: The mode of stepwise advantage computation.
     Returns:
         DataProto: The DataProto built from the episodes.
     """

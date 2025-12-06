@@ -48,7 +48,7 @@ def _calculate_reinforce_advantages(rewards: np.ndarray) -> np.ndarray:
 def compute_advantage_from_trajectory_groups(
     groups: list[TrajectoryGroup],
     advantage_estimator=rLLMAdvantageEstimator.GRPO,
-    stepwise_advantages_mode="broadcast",
+    stepwise_advantage_mode="broadcast",
     normalize_by_std=True,
 ):
     """
@@ -63,8 +63,9 @@ def compute_advantage_from_trajectory_groups(
         logger.warning(f"Unsupported estimator {advantage_estimator} in rLLMAdvantageEstimator, using GRPO")
         advantage_fn = partial(_calculate_grpo_advantages, normalize_by_std=normalize_by_std)
 
+    # TODO: in the future, we should support per-trajectory-group advantage modes
     for group in groups:
-        if stepwise_advantages_mode == "broadcast":
+        if stepwise_advantage_mode == "broadcast":
             assert all(traj.reward is not None for traj in group.trajectories), "Trajectory reward cannot be None in broadcast mode"
             traj_rewards = np.array([traj.reward for traj in group.trajectories])
             advantages = advantage_fn(traj_rewards)
@@ -72,7 +73,7 @@ def compute_advantage_from_trajectory_groups(
             for traj, advantage in zip(group.trajectories, advantages, strict=False):
                 for step in traj.steps:
                     step.advantage = advantage
-        elif stepwise_advantages_mode == "per_step":
+        elif stepwise_advantage_mode == "per_step":
             assert len(set([len(traj.steps) for traj in group.trajectories])) == 1, "All trajectories must have the same number of steps in per_step mode"
             # compute advantage step by step for all trajectories
             for step_idx in range(len(group.trajectories[0].steps)):

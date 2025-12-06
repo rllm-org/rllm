@@ -32,7 +32,6 @@ from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
-    reduce_metrics,
 )
 from verl.trainer.ppo.ray_trainer import (
     RayPPOTrainer,
@@ -42,6 +41,7 @@ from verl.trainer.ppo.ray_trainer import (
 )
 from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.debug import marked_timer
+from verl.utils.metric import reduce_metrics
 
 
 class AgentWorkflowPPOTrainer(RayPPOTrainer):
@@ -301,8 +301,6 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
 
                 new_batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"])
 
-                # pprint(new_batch.get_data_info())
-
                 # Update training step in engine for episode logging
                 self.agent_execution_engine.set_training_step(self.global_steps, mode="train", epoch=epoch)
 
@@ -347,6 +345,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         rollout_engine=self.agent_execution_engine.rollout_engine,
                         max_prompt_length=self.config.data.max_prompt_length,
                         max_response_length=self.config.data.max_response_length,
+                        stepwise_advantage_mode=self.config.rllm.stepwise_advantage.mode,
                     )
 
                     if not use_rllm_advantage:
