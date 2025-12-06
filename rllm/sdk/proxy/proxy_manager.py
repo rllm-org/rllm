@@ -113,7 +113,8 @@ class ProxyManager:
         project: str | None = None,
         snapshot_directory: str | None = None,
         sync_tracer: bool = False,
-        add_logprobs: bool = True,
+        add_logprobs: bool = False,
+        add_return_token_ids: bool = False,
     ) -> str:
         """Start LiteLLM proxy as subprocess (no GIL contention).
 
@@ -160,6 +161,9 @@ class ProxyManager:
 
         if add_logprobs:
             cmd.extend(["--add-logprobs"])
+
+        if add_return_token_ids:
+            cmd.extend(["--add-return-token-ids"])
 
         env = os.environ.copy()
         env["AIOHTTP_CONNECTOR_LIMIT"] = "4096"

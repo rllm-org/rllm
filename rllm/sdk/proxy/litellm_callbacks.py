@@ -65,8 +65,8 @@ class TracingCallback(CustomLogger):
 
         Uses litellm_call_id for deduplication to ensure we only log once per request.
         """
-        # Get rllm_metadata injected by MetadataRoutingMiddleware
-        metadata = data.get("rllm_metadata", {}) if isinstance(data, dict) else {}
+
+        metadata = data.get("metadata", {}).get("requester_metadata", {}).get("rllm_metadata", {})
         if not isinstance(metadata, dict):
             metadata = {}
 
