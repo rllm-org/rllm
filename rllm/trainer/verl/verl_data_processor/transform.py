@@ -332,7 +332,7 @@ def transform_episodes_to_dataproto(
 
     assert hasattr(tokenizer, "pad_token_id"), "Tokenizer must have a pad token ID"
     pad_token_id = tokenizer.pad_token_id
-    return _batch_tensors_and_build_data_proto(accumulated, pad_token_id, max_prompt_length, max_response_length, processor)
+    return _batch_tensors_and_build_data_proto(accumulated, pad_token_id, max_prompt_length, max_response_length, stepwise_advantage_mode, processor)
 
 
 # TODO: extract common logic from transform_episodes_to_dataproto and transform_trajectory_groups_to_dataproto
