@@ -717,7 +717,7 @@ class AgentPPOTrainer(RayPPOTrainer):
             sample_idx: Starting index of samples to visualize
             max_samples: Maximum number of samples to visualize
         """
-        from rllm.misc import colorful_print
+        from rllm.utils import colorful_print
 
         # Get the relevant tensors
         prompts = tensor_batch.batch["prompts"]

@@ -107,6 +107,7 @@ def build_trajectory_groups(episodes: list[Episode], compact_filtering_config: C
         List of TrajectoryGroups
     """
     trajectories_by_name: dict[str, list[Trajectory]] = defaultdict(list)
+    metadata_by_name: dict[str, list[dict]] = defaultdict(list)
 
     for episode in episodes:
         termination_reason = episode.termination_reason or TerminationReason.UNKNOWN
@@ -116,6 +117,13 @@ def build_trajectory_groups(episodes: list[Episode], compact_filtering_config: C
         task_id = episode.id.split(":")[0]
         for trajectory in episode.trajectories:
             trajectories_by_name[f"{task_id}:{trajectory.name}"].append(trajectory)
+            metadata_by_name[f"{task_id}:{trajectory.name}"].append(
+                {
+                    "episode_id": episode.id,
+                    "termination_reason": episode.termination_reason,
+                    "is_correct": episode.is_correct,
+                }
+            )
 
     groups = []
     for name, trajectories in trajectories_by_name.items():
@@ -123,6 +131,7 @@ def build_trajectory_groups(episodes: list[Episode], compact_filtering_config: C
             TrajectoryGroup(
                 trajectories=trajectories,
                 group_id=name,
+                metadata=metadata_by_name[name],
             )
         )
     return groups

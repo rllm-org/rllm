@@ -1,7 +1,12 @@
+from __future__ import annotations
+
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from rllm.engine.rollout import ModelOutput
 
 
 @dataclass
@@ -16,7 +21,7 @@ class Step:
     thought: str = ""
     action: Any = None
     model_response: str = ""
-    model_output: "ModelOutput" = None  # noqa: F821
+    model_output: ModelOutput | None = None
     info: dict = field(default_factory=dict)  # Store any additional info.
 
     # field below are filled by the engine
@@ -26,6 +31,17 @@ class Step:
 
     # field below are filled by the advantage computer
     advantage: float | None = None
+
+    def __post_init__(self):
+        if self.model_output is None:
+            raise ValueError("model_output cannot be None")
+        # backfill fields like prompt_ids, response_ids, logprobs, etc.
+        if len(self.prompt_ids) == 0 and self.model_output.prompt_ids is not None:
+            self.prompt_ids = self.model_output.prompt_ids
+        if len(self.response_ids) == 0 and self.model_output.completion_ids is not None:
+            self.response_ids = self.model_output.completion_ids
+        if len(self.logprobs) == 0 and self.model_output.logprobs is not None:
+            self.logprobs = self.model_output.logprobs
 
     def to_dict(self) -> dict:
         return {
@@ -46,7 +62,7 @@ class Step:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Step":
+    def from_dict(cls, data: dict) -> Step:
         from rllm.engine.rollout import ModelOutput
 
         return cls(
@@ -102,7 +118,7 @@ class Trajectory:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Trajectory":
+    def from_dict(cls, data: dict) -> Trajectory:
         """Create Trajectory from dictionary, properly deserializing Step objects."""
         return cls(
             uid=data.get("uid", str(uuid.uuid4())),
@@ -133,7 +149,7 @@ class Trajectory:
 class Episode:
     id: str = ""  # rollout id e.g., task_id:rollout_idx
     task: Any = None
-    termination_reason: "TerminationReason" | None = None  # noqa: F821
+    termination_reason: TerminationReason | None = None  # noqa: F821
     is_correct: bool = False
     trajectories: list[Trajectory] = field(default_factory=list)
     metrics: dict = field(default_factory=dict)
@@ -158,7 +174,7 @@ class Episode:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Episode":
+    def from_dict(cls, data: dict) -> Episode:
         """Create Episode from dictionary, properly deserializing Trajectory objects."""
         from rllm.engine.agent_workflow_engine import TerminationReason
 
@@ -185,10 +201,12 @@ class TrajectoryGroup:
     Attributes:
         trajectories: List of trajectories to compare for advantage computation
         group_id: Optional identifier for the group (e.g., "task1:agent_0")
+        metadata: List of metadata for each trajectory in the group
     """
 
     trajectories: list[Trajectory]
-    group_id: str = None
+    group_id: str = None  # noqa: F821
+    metadata: list[dict] = field(default_factory=list)
 
 
 class BaseAgent(ABC):

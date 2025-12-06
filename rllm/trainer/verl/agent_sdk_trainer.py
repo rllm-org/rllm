@@ -17,7 +17,7 @@ from omegaconf import OmegaConf
 
 from rllm.engine.agent_sdk_engine import AgentSdkEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
-from rllm.misc import colorful_print
+from rllm.utils import colorful_print
 from rllm.workflows.workflow import TerminationReason
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor

@@ -17,8 +17,8 @@ from rllm.environments.env_utils import (
     compute_mc_return,
     compute_trajectory_reward,
 )
-from rllm.misc import colorful_print
 from rllm.parser import ChatTemplateParser
+from rllm.utils import colorful_print
 
 logger = logging.getLogger(__name__)
 

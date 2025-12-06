@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from rllm.agents.agent import Episode
 from rllm.engine.rollout import RolloutEngine
-from rllm.misc import colorful_print
+from rllm.utils import colorful_print
 from rllm.workflows.workflow import TerminationReason, Workflow
 
 # Avoid hard dependency on verl at import time; only for typing
@@ -208,6 +208,12 @@ class AgentWorkflowEngine:
         tasks = batch.non_tensor_batch["extra_info"].tolist()
         task_ids = batch.non_tensor_batch["task_ids"].tolist()
         episodes = await self.execute_tasks(tasks, task_ids, **kwargs)  # list of Episodes
+        # handle data sources in the input dataproto
+        if "data_source" in batch.non_tensor_batch:
+            data_sources = batch.non_tensor_batch["data_source"].tolist()
+            for episode, data_source in zip(episodes, data_sources, strict=True):
+                episode.info["data_source"] = data_source
+
         self.rollout_engine.validate = False
 
         await self.rollout_engine.sleep()

@@ -5,7 +5,7 @@ from examples.sdk.dispatch_search.utils import DISPATCH_USER_PROMPT_STEP_1, DISP
 from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.engine.rollout import RolloutEngine
 from rllm.engine.rollout.rollout_engine import ModelOutput
-from rllm.misc import colorful_print
+from rllm.utils import colorful_print
 from rllm.workflows.workflow import TerminationReason, Workflow
 
 

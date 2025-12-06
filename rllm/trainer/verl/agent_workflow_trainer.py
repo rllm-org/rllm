@@ -19,7 +19,7 @@ from rllm.trainer.common.config import CompactFilteringConfig, RejectionSampling
 from rllm.trainer.common.rejection_sampling import RejectionSamplingState, apply_rejection_sampling_and_filtering
 from rllm.trainer.common.transform import transform_episodes_to_trajectory_groups
 from rllm.trainer.verl.verl_data_processor import transform_episodes_to_dataproto
-from rllm.utils.episode_logger import EpisodeLogger
+from rllm.utils import EpisodeLogger, visualize_trajectory_last_steps
 from rllm.workflows.workflow import TerminationReason
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
@@ -385,15 +385,13 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         with marked_timer("save_checkpoint", timing_raw, color="green"):
                             self._save_checkpoint()
 
-                    # Visualize some sample trajectories
-                    if batch is not None and len(batch) > 0:
-                        # Randomly select a few samples to visualize
-                        batch_size = len(batch)
-                        num_samples = min(2, batch_size)  # Visualize up to 2 samples
-                        if num_samples > 0:
-                            sample_indices = np.random.choice(batch_size, size=num_samples, replace=False)
-                            for idx in sample_indices:
-                                self.visualize_trajectory_last_step(batch, sample_idx=idx, max_samples=1)
+                    # visualize some trajectory last steps
+                    visualize_trajectory_last_steps(
+                        filtered_groups,
+                        tokenizer=self.tokenizer,
+                        max_steps_to_visualize=2,
+                        show_workflow_metadata=True,
+                    )
 
                 with marked_timer("stop_profile", timing_raw):
                     self._stop_profiling(do_profile)
@@ -452,45 +450,27 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
             test_batch = test_batch.repeat(repeat_times=n_val_samples, interleave=True)
 
             test_batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"])  # these are not needed for environment based interaction
-            test_batch.meta_info = {"validate": True}
 
             test_gen_episodes = self.generate_episodes(batch=test_batch)
-            test_output_gen_batch = transform_episodes_to_dataproto(
+            test_batch = transform_episodes_to_dataproto(
                 test_gen_episodes,
                 rollout_engine=self.agent_execution_engine.rollout_engine,
                 max_prompt_length=self.config.data.max_prompt_length,
                 max_response_length=self.config.data.max_response_length,
-                cf_config=self.cf_config,
             )
 
-            repeat_counts = test_output_gen_batch.meta_info["repeat_counts"]
-            # need to repeat to make shape match
-            test_batch = test_batch.sample_level_repeat(repeat_counts)
-            test_output_gen_batch.meta_info.pop("repeat_counts", None)  # no longer needed after this
-            test_batch = test_batch.union(test_output_gen_batch)
+            test_batch.meta_info = {"validate": True}
 
-            seen_episodes = set()
-            selected_idxs = []
-            for i, episode_id in enumerate(test_batch.non_tensor_batch["episode_ids"]):
-                if episode_id not in seen_episodes:
-                    seen_episodes.add(episode_id)
-                    selected_idxs.append(i)
-            test_batch = test_batch.select_idxs(selected_idxs)
+            is_correct_lst.extend([episode.is_correct for episode in test_gen_episodes])
+            uid_lst.extend([episode.id.split(":")[0] for episode in test_gen_episodes])
 
-            is_correct_lst.extend(test_batch.non_tensor_batch["is_correct"])
-            uid_lst.extend(test_batch.non_tensor_batch["task_ids"])
-
-            data_sources = test_batch.non_tensor_batch.get("data_source", None)
-            if data_sources is None:
-                data_sources = ["unknown"] * len(test_batch)
+            data_sources = [episode.info.get("data_source", "unknown") for episode in test_gen_episodes]
             data_source_lst.extend(data_sources)
 
             # Collect workflow metrics per episode and data source
-            for i, data_source in enumerate(data_sources):
-                episode_metrics = test_batch.non_tensor_batch["metrics"][i]
-                if episode_metrics is not None:
-                    for key, value in episode_metrics.items():
-                        workflow_metrics_by_source[data_source][key].append(float(value))
+            for episode, data_source in zip(test_gen_episodes, data_sources, strict=True):
+                for key, value in episode.metrics.items():
+                    workflow_metrics_by_source[data_source][key].append(float(value))
 
         metrics = {}
         is_correct_array = np.array(is_correct_lst)
@@ -631,129 +611,3 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
             self._loop.call_soon_threadsafe(self._loop.stop)
         if hasattr(self, "_thread") and self._thread is not None:
             self._thread.join()
-
-    def visualize_trajectory_last_step(self, tensor_batch, sample_idx=0, max_samples=1):
-        """
-        Visualize last steps from a workflow rollout:
-        - detokenize prompts/responses
-        - show token usage mask
-        - show reward tokens (placed at the last response token)
-        - print Correct/Incorrect using `is_correct` from non_tensors
-        """
-        from rllm.misc import colorful_print
-
-        # Select only last steps if stepwise-advantage is enabled
-        if "is_last_step" in tensor_batch.non_tensor_batch:
-            is_last = tensor_batch.non_tensor_batch["is_last_step"]
-            if is_last is not None and len(is_last) == len(tensor_batch):
-                tensor_batch = tensor_batch[is_last]
-
-        prompts = tensor_batch.batch["prompts"]
-        responses = tensor_batch.batch["responses"]
-        # Full attention mask (covers prompt + response); split it into prompt and response parts
-        full_attn_mask = tensor_batch.batch["attention_mask"]
-        prompt_len = prompts.shape[1]
-        resp_len = responses.shape[1]
-        prompt_attn_mask = full_attn_mask[:, :prompt_len]
-        response_attn_mask = full_attn_mask[:, -resp_len:]
-
-        # Loss mask over the response tokens only
-        response_loss_mask = tensor_batch.batch.get("response_mask")
-
-        # Rewards aligned to response tokens
-        token_level_scores = tensor_batch.batch.get("step_rewards" if self.config.rllm.stepwise_advantage.mode == "per_step" else "traj_rewards")
-
-        # Optional meta to print outcome
-        is_correct = tensor_batch.non_tensor_batch.get("is_correct", None)
-        term_reasons = tensor_batch.non_tensor_batch.get("termination_reasons", None)
-        episode_ids = tensor_batch.non_tensor_batch.get("episode_ids", None)
-        trajectory_ids = tensor_batch.non_tensor_batch.get("trajectory_ids", None)
-
-        bsz = prompts.shape[0]
-        end_idx = min(sample_idx + max_samples, bsz)
-
-        for i in range(sample_idx, end_idx):
-            colorful_print("\n" + "=" * 60, fg="cyan", bold=True)
-            # Header with ids
-            if episode_ids is not None or trajectory_ids is not None:
-                colorful_print(f"Episode: {episode_ids[i] if episode_ids is not None else '?'}  | Traj: {trajectory_ids[i] if trajectory_ids is not None else '?'}", fg="cyan", bold=True)
-
-            # Outcome line
-            if is_correct is not None:
-                ok = bool(is_correct[i])
-                colorful_print(f"Outcome: {'✓ Correct' if ok else '✗ Incorrect'}", fg=("green" if ok else "red"), bold=True)
-
-            if term_reasons is not None:
-                colorful_print(f"Termination: {term_reasons[i]}", fg="yellow")
-
-            # Legend before the example
-            legend = " ".join(
-                [
-                    "\x1b[37mwhite=masked\x1b[0m",
-                    "\x1b[34mblue=unmasked\x1b[0m",
-                    "\x1b[42m green bg=reward>0 \x1b[0m",
-                    "\x1b[41m red bg=reward<=0 \x1b[0m",
-                ]
-            )
-            print(f"[{legend}]")
-
-            # Detokenize prompt
-            prompt_tokens = prompts[i]
-            prompt_valid_mask = prompt_attn_mask[i].bool()
-            # Build one-line colored prompt (prompt is always masked-from-loss => white)
-            prompt_parts = []
-            for tok_id, is_valid in zip(prompt_tokens.tolist(), prompt_valid_mask.tolist(), strict=False):
-                if not is_valid:
-                    continue
-                tok = self.tokenizer.decode([tok_id]).replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-                prompt_parts.append(f"\x1b[37m{tok}\x1b[0m")  # white
-            print("".join(prompt_parts))
-
-            # Separator line between prompt and response for readability
-            print("----------------")
-
-            # Detokenize response with token-level highlighting
-            resp_tokens = responses[i]
-            resp_valid_mask = response_attn_mask[i].bool()
-            loss_mask = response_loss_mask[i] if response_loss_mask is not None else resp_valid_mask
-            rewards = token_level_scores[i] if token_level_scores is not None else None
-
-            # Pre-compute reward positions (typically only the last valid resp token has nonzero reward)
-            reward_idx = None
-            reward_value = 0.0
-            if rewards is not None:
-                # consider only valid response positions
-                for j, is_valid in enumerate(resp_valid_mask.tolist()):
-                    if not is_valid:
-                        continue
-                    val = float(rewards[j].item()) if hasattr(rewards[j], "item") else float(rewards[j])
-                    if abs(val) > 1e-9:
-                        reward_idx = j
-                        reward_value = val
-
-            # Fallback: if no nonzero reward found, use the last valid response token
-            if reward_idx is None:
-                valid_indices = [idx for idx, v in enumerate(resp_valid_mask.tolist()) if v]
-                if valid_indices:
-                    reward_idx = valid_indices[-1]
-                    if rewards is not None:
-                        val = float(rewards[reward_idx].item()) if hasattr(rewards[reward_idx], "item") else float(rewards[reward_idx])
-                        reward_value = val
-
-            # Colors: white for masked-from-loss; blue for contributes-to-loss; overlay background red/green if reward token
-            response_parts = []
-            for j, tok_id in enumerate(resp_tokens.tolist()):
-                if not bool(resp_valid_mask[j].item() if hasattr(resp_valid_mask[j], "item") else resp_valid_mask[j]):
-                    continue
-                tok = self.tokenizer.decode([tok_id]).replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-
-                contributes = bool(loss_mask[j].item()) if hasattr(loss_mask[j], "item") else bool(loss_mask[j])
-                fg = "\x1b[34m" if contributes else "\x1b[37m"  # blue if in loss, else white
-
-                bg = ""
-                if reward_idx is not None and j == reward_idx:
-                    bg = "\x1b[42m" if reward_value > 0 else "\x1b[41m"  # green background for positive, red for negative/zero
-
-                response_parts.append(f"{bg}{fg}{tok}\x1b[0m")
-
-            print("".join(response_parts))
