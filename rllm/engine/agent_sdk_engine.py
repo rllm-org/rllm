@@ -328,13 +328,9 @@ class AgentSdkEngine:
 
             steps_used = sum(len(trajectory.steps) for trajectory in trajectories)
 
-            total_response_len = sum(len(step.model_output.completion_ids) for trajectory in trajectories for step in trajectory.steps)
-            max_response_len = max(len(step.model_output.completion_ids) for trajectory in trajectories for step in trajectory.steps)
-            min_response_len = min(len(step.model_output.completion_ids) for trajectory in trajectories for step in trajectory.steps)
-            mean_response_len = total_response_len / steps_used
-
-            min_prompt_len = min(len(step.model_output.prompt_ids) for trajectory in trajectories for step in trajectory.steps)
-            max_prompt_len = max(len(step.model_output.prompt_ids) for trajectory in trajectories for step in trajectory.steps)
+            # Collect all response and prompt lengths for metrics
+            all_response_lens = [len(step.model_output.completion_ids) for trajectory in trajectories for step in trajectory.steps]
+            all_prompt_lens = [len(step.model_output.prompt_ids) for trajectory in trajectories for step in trajectory.steps]
 
             metrics = {
                 "retry_attempt": retry_attempt,
@@ -343,11 +339,11 @@ class AgentSdkEngine:
                 "num_trajectories": len(trajectories),
                 "steps_collected": len(steps),
                 "steps_used": steps_used,
-                "mean_response_len": mean_response_len,
-                "max_response_len": max_response_len,
-                "min_response_len": min_response_len,
-                "max_prompt_len": max_prompt_len,
-                "min_prompt_len": min_prompt_len,
+                "mean_response_len": sum(all_response_lens) / len(all_response_lens) if all_response_lens else 0,
+                "max_response_len": max(all_response_lens, default=0),
+                "min_response_len": min(all_response_lens, default=0),
+                "max_prompt_len": max(all_prompt_lens, default=0),
+                "min_prompt_len": min(all_prompt_lens, default=0),
                 "collect_sqlite_time": collect_sqlite_time,
                 "flush_time": flush_time,
             }

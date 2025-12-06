@@ -608,7 +608,6 @@ class _RawChatCompletions:
 
         start = time.perf_counter()
         # Call with_raw_response on the underlying client
-        print(f"call_kwargs: {call_kwargs}")
         raw_response = client.with_raw_response.chat.completions.create(**call_kwargs)
 
         # Log trace if enabled (using the parsed data from raw_response.data)

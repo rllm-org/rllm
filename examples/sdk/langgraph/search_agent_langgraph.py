@@ -73,11 +73,6 @@ retriever_tool = to_langchain_tool(
     timeout=30.0,
 )
 
-print("Testing retriever tool...")
-test_result = retriever_tool.invoke({"query": "machine learning", "top_k": 3})
-print(test_result[:500] + "..." if len(test_result) > 500 else test_result)
-print("\n" + "=" * 70 + "\n")
-
 # Initialize the chat model with RLLM SDK
 # Use both sync client (for LangChain internals) and async client (for async operations)
 sync_client = get_chat_client(
