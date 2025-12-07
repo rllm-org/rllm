@@ -14,6 +14,7 @@ import tinker
 from omegaconf import OmegaConf
 from tinker.types import AdamParams
 from tinker_cookbook import checkpoint_utils
+from tinker_cookbook.tokenizer_utils import Tokenizer
 
 from rllm.agents.agent import Episode, TrajectoryGroup
 from rllm.trainer.common import AlgorithmConfig, CompactFilteringConfig, TransformConfig, transform_episodes_to_trajectory_groups
@@ -187,7 +188,7 @@ class TinkerPolicyTrainer:
         datums_no_mask = [self._remove_mask(datum) for datum in training_datums]
 
         # Step 4: Forward-backward pass
-        fwd_bwd_future = await self.training_client.forward_backward_async(
+        fwd_bwd_future = await self.training_client.forward_backward_async(  # type: ignore[attr-defined]
             datums_no_mask,
             loss_fn="importance_sampling",
         )
@@ -200,7 +201,7 @@ class TinkerPolicyTrainer:
             eps=eps,
         )
         if optimizer_step:
-            optim_step_future = await self.training_client.optim_step_async(adam_params)
+            optim_step_future = await self.training_client.optim_step_async(adam_params)  # type: ignore[attr-defined]
 
         # Wait for completion and extract logprobs
         fwd_bwd_result = await fwd_bwd_future.result_async()
@@ -232,7 +233,7 @@ class TinkerPolicyTrainer:
 
         datums_no_mask = [self._remove_mask(datum) for datum in training_datums]
 
-        fwd_bwd_future = await self.training_client.forward_backward_async(
+        fwd_bwd_future = await self.training_client.forward_backward_async(  # type: ignore[attr-defined]
             datums_no_mask,
             loss_fn="importance_sampling",
         )
@@ -242,7 +243,7 @@ class TinkerPolicyTrainer:
     @require_training_client
     async def optim_step_future(self, learning_rate: float | None = None, beta1: float = 0.9, beta2: float = 0.95, eps: float = 1e-8):
         if learning_rate is None:
-            learning_rate = self.config.training.learning_rate
+            learning_rate = self.config.training.learning_rate or 1e-6
 
         adam_params = AdamParams(
             learning_rate=learning_rate,
@@ -250,7 +251,7 @@ class TinkerPolicyTrainer:
             beta2=beta2,
             eps=eps,
         )
-        optim_step_future = await self.training_client.optim_step_async(adam_params)
+        optim_step_future = await self.training_client.optim_step_async(adam_params)  # type: ignore[attr-defined]
         return optim_step_future
 
     async def save_checkpoint_async(
@@ -288,7 +289,7 @@ class TinkerPolicyTrainer:
         Returns:
             Tinker sampling client
         """
-        return self.training_client.create_sampling_client(sampler_path)
+        return self.training_client.create_sampling_client(sampler_path)  # type: ignore[attr-defined]
 
     def get_last_checkpoint(self) -> dict | None:
         """
@@ -300,6 +301,6 @@ class TinkerPolicyTrainer:
         return checkpoint_utils.get_last_checkpoint(self.config.trainer.default_local_dir)
 
     @require_training_client
-    def get_tokenizer(self) -> tinker.Tokenizer:
+    def get_tokenizer(self) -> Tokenizer:
         """Get tokenizer from training client."""
-        return self.training_client.get_tokenizer()
+        return self.training_client.get_tokenizer()  # type: ignore[attr-defined]

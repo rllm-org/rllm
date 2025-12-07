@@ -2,6 +2,8 @@ set -x
 
 MODEL_PATH=Qwen/Qwen3-4B-Instruct-2507
 
+export TINKER_API_KEY=put-your-api-key-here
+
 python -m examples.solver_judge_tinker.train_solver_judge_flow_tinker \
     model.name=$MODEL_PATH \
     model.lora_rank=32 \

@@ -248,6 +248,7 @@ class TinkerWorkflowTrainer:
 
         # Training loop
         batch_idx = 0
+        break_flag = False
 
         learning_rate = self.config.training.learning_rate
         beta1 = self.config.training.beta1
@@ -259,10 +260,15 @@ class TinkerWorkflowTrainer:
             self.num_train_batches = len(self.train_dataloader)
 
         for epoch in range(self.config.trainer.total_epochs):
+            if break_flag:  # useful when `total_batches` is set
+                break
             for batch_data in self.train_dataloader:
                 if batch_idx < start_batch:
                     batch_idx += 1
                     continue
+                elif self.config.trainer.total_batches >= 0 and batch_idx > self.config.trainer.total_batches:
+                    break_flag = True
+                    break
 
                 timing_raw = {}
 

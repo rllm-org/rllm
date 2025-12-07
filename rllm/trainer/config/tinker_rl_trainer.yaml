@@ -63,6 +63,7 @@ data:
 # Trainer Configuration
 trainer:
   total_epochs: 10
+  total_batches: -1  # set to a number >= 0 to limit the number of batches to train on (overrides total_epochs)
   logger: ['console']  # Options: 'console', 'wandb', 'tensorboard'
   project_name: 'rllm-tinker'
   experiment_name: 'default'
