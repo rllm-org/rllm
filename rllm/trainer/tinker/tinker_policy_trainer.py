@@ -261,6 +261,8 @@ class TinkerPolicyTrainer:
         Returns:
             Tinker sampling client
         """
+        if self.training_client is None:
+            raise RuntimeError("Training client not initialized. Call initialize_async() first.")
         return self.training_client.create_sampling_client(sampler_path)
 
     def get_last_checkpoint(self) -> dict | None:

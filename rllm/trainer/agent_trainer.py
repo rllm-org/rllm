@@ -101,6 +101,8 @@ class AgentTrainer:
         from rllm.trainer.tinker.tinker_agent_trainer import TinkerAgentTrainer
         from rllm.trainer.tinker.tinker_workflow_trainer import TinkerWorkflowTrainer
 
+        assert self.train_dataset is not None, "train_dataset cannot be None for the tinker backend"
+
         if self.workflow_class is not None:
             trainer = TinkerWorkflowTrainer(
                 config=self.config,

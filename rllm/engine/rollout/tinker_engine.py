@@ -1,7 +1,11 @@
+import json
+
 import tinker
 from tinker_cookbook import model_info, renderers
+from tinker_cookbook.renderers import ToolCall as TinkerToolCall
 
 from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine
+from rllm.tools.tool_base import ToolCall
 from rllm.workflows import TerminationEvent, TerminationReason
 
 
@@ -57,6 +61,16 @@ class TinkerEngine(RolloutEngine):
             sampling_client: Tinker SamplingClient instance
         """
         self.sampling_client = sampling_client
+
+    def _convert_tinker_tool_call(self, tinker_tool_call: TinkerToolCall) -> ToolCall:
+        """Convert the Tinker tool call format to the rLLM format."""
+        # attempt to parse the arguments from JSON string to a Python dictionary
+        tinker_arguments = tinker_tool_call.function.arguments
+        try:
+            arguments = json.loads(tinker_arguments)
+        except json.JSONDecodeError:  # simply keep the arguments as a JSON string
+            arguments = {"_tinker_raw_arguments_json": tinker_arguments}
+        return ToolCall(name=tinker_tool_call.function.name, arguments=arguments)
 
     async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         """
@@ -121,12 +135,15 @@ class TinkerEngine(RolloutEngine):
             reasoning = ""
             tool_calls = []
 
+        # Convert Tinker tool calls to rLLM tool calls
+        tool_calls = [self._convert_tinker_tool_call(tinker_tool_call) for tinker_tool_call in tool_calls]
+
         # Decode full text
         completion_text = self.tokenizer.decode(response_tokens, skip_special_tokens=True)
 
         # Determine finish reason
         finish_reason = "stop"
-        if len(response_tokens) >= sampling_params.max_tokens:
+        if len(response_tokens) >= (sampling_params.max_tokens or self.max_response_length):
             finish_reason = "length"
 
         return ModelOutput(

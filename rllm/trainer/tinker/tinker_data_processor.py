@@ -392,8 +392,6 @@ def process_episodes(
     """
     from collections import defaultdict
 
-    import numpy as np
-
     grouping_level = algorithm_config.get("grouping_level", "episode")
 
     # Group trajectories based on grouping_level

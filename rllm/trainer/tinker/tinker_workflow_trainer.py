@@ -23,7 +23,9 @@ from rllm.trainer.tinker.tinker_agent_trainer import TinkerAgentTrainer
 from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer
 
 if TYPE_CHECKING:
-    pass
+    from rllm.data import Dataset
+    from rllm.workflows.workflow import Workflow
+
 
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARN)
@@ -40,20 +42,18 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
     def __init__(
         self,
         config,
-        workflow_class=None,
-        workflow_args=None,
-        train_dataset=None,
-        val_dataset=None,
+        workflow_class: type[Workflow],
+        train_dataset: Dataset,
+        workflow_args: dict | None = None,
+        val_dataset: Dataset | None = None,
     ):
         """
         Initialize the Tinker agent trainer.
 
         Args:
             config: Training configuration (OmegaConf)
-            agent_class: Agent class to instantiate
-            env_class: Environment class to instantiate
-            agent_args: Arguments for agent initialization
-            env_args: Arguments for environment initialization
+            workflow_class: Workflow class to instantiate
+            workflow_args: Arguments for workflow initialization
             train_dataset: Training data loader
             val_dataset: Validation data loader
         """
@@ -67,12 +67,16 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
             shuffle=True,
             collate_fn=lambda x: x,  # Return batches as lists
         )
-        self.val_dataloader = torch.utils.data.DataLoader(
-            val_dataset,
-            batch_size=self.config.data.val_batch_size,
-            shuffle=False,
-            collate_fn=lambda x: x,  # Return batches as lists
-        )
+
+        if isinstance(val_dataset, Dataset):
+            self.val_dataloader = torch.utils.data.DataLoader(
+                val_dataset,
+                batch_size=self.config.data.val_batch_size,
+                shuffle=False,
+                collate_fn=lambda x: x,  # Return batches as lists
+            )
+        else:
+            self.val_dataloader = None
 
         service_client = tinker.ServiceClient(base_url=self.config.tinker_base_url)
         self.trainer = TinkerPolicyTrainer(

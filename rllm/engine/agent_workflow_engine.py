@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from tqdm import tqdm
 
 from rllm.agents.agent import Episode
-from rllm.engine.rollout import RolloutEngine
+from rllm.engine.rollout import RolloutEngine, VerlEngine
 from rllm.utils import colorful_print
 from rllm.workflows.workflow import TerminationReason, Workflow
 
@@ -204,6 +204,7 @@ class AgentWorkflowEngine:
         Returns:
             DataProto: Transformed results compatible with Verl training.
         """
+        assert isinstance(self.rollout_engine, VerlEngine), "Rollout engine must be a VerlEngine to invoke execute_tasks_verl"
         await self.rollout_engine.wake_up()
 
         is_validation = batch.meta_info.get("validate", False)

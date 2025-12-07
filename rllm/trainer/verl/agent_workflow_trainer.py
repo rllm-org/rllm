@@ -20,7 +20,7 @@ from rllm.trainer.common.rejection_sampling import RejectionSamplingState, apply
 from rllm.trainer.common.transform import transform_episodes_to_trajectory_groups
 from rllm.trainer.verl.verl_data_processor import transform_episodes_to_dataproto
 from rllm.utils import EpisodeLogger, visualize_trajectory_last_steps
-from rllm.workflows.workflow import TerminationReason
+from rllm.workflows.workflow import TerminationReason, Workflow
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
 from verl.single_controller.ray import RayWorkerGroup
@@ -51,12 +51,12 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         tokenizer,
         role_worker_mapping: dict[Role, WorkerType],
         resource_pool_manager: ResourcePoolManager,
+        workflow_class: type[Workflow],
+        workflow_args: dict | None = None,
         ray_worker_group_cls: type[RayWorkerGroup] = RayWorkerGroup,
         processor=None,
         reward_fn=None,
         val_reward_fn=None,
-        workflow_class=None,
-        workflow_args=None,
     ):
         super().__init__(config=config, tokenizer=tokenizer, processor=processor, role_worker_mapping=role_worker_mapping, resource_pool_manager=resource_pool_manager, ray_worker_group_cls=ray_worker_group_cls, reward_fn=reward_fn, val_reward_fn=val_reward_fn)
 
@@ -69,7 +69,6 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         self._thread.start()
 
     def _validate_and_setup_configs(self):
-        assert self.workflow_class is not None, "workflow_class is required for agent workflow trainer"
         assert self.config.actor_rollout_ref.hybrid_engine is True, "Only hybrid engine is supported"
         assert self.config.actor_rollout_ref.rollout.mode == "async", "Only async rollout mode is supported"
         assert self.use_rm is False, "Reward models are not supported. Rewards should be assigned using a reward function in the workflow or environment."
