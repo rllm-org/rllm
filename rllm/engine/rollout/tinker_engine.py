@@ -58,7 +58,7 @@ class TinkerEngine(RolloutEngine):
         # Sampling client will be set via set_sampling_client()
         self.sampling_client = None
 
-    def set_sampling_client(self, sampling_client):
+    def set_sampling_client(self, sampling_client: tinker.SamplingClient):
         """
         Set the sampling client for inference.
 

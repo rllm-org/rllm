@@ -23,7 +23,14 @@ from omegaconf import OmegaConf
 from rllm.agents.agent import Episode
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.tinker_engine import TinkerEngine
-from rllm.trainer.common import AlgorithmConfig, CompactFilteringConfig, RejectionSamplingConfig, TransformConfig
+from rllm.trainer.common import (
+    AlgorithmConfig,
+    CompactFilteringConfig,
+    RejectionSamplingConfig,
+    TransformConfig,
+    build_trajectory_groups,
+    reduce_reward_metrics_by_trajectory_name,
+)
 from rllm.trainer.tinker.tinker_metrics_utils import compute_training_metrics, print_metrics_table
 from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer
 from rllm.utils import Tracking, marked_timer, visualize_trajectory_last_steps
@@ -85,7 +92,7 @@ class TinkerWorkflowTrainer:
             collate_fn=lambda x: x,  # Return batches as lists
         )
 
-        if isinstance(val_dataset, Dataset):
+        if val_dataset is not None:
             self.val_dataloader = torch.utils.data.DataLoader(
                 val_dataset,
                 batch_size=self.config.data.val_batch_size,
@@ -174,23 +181,11 @@ class TinkerWorkflowTrainer:
             for key, value in episode_metric_dict.items():
                 workflow_metrics[key].append(float(value))
 
-        # Compute trajectory-level statistics from all episodes
-        all_trajectories = []
-        for episode in all_episodes:
-            all_trajectories.extend(episode.trajectories)
+        # Turn episodes into trajectory groups without filtering or validating
+        trajectory_groups = build_trajectory_groups(all_episodes, compact_filtering_config=self.cf_config)
 
-        mean_reward = sum([traj.reward for traj in all_trajectories]) / len(all_trajectories)
-        std_reward = sum([(traj.reward - mean_reward) ** 2 for traj in all_trajectories]) / len(all_trajectories)
-        min_reward = min([traj.reward for traj in all_trajectories])
-        max_reward = max([traj.reward for traj in all_trajectories])
-        mean_turns = sum([len(traj.steps) for traj in all_trajectories]) / len(all_trajectories)
-        metrics = {
-            "val/reward_mean": mean_reward,
-            "val/reward_std": std_reward,
-            "val/reward_min": min_reward,
-            "val/reward_max": max_reward,
-            "val/turns_mean": mean_turns,
-        }
+        # Compute trajectory-level reward statistics
+        metrics = reduce_reward_metrics_by_trajectory_name(trajectory_groups, prefix="val")
 
         # Add workflow-provided metrics (e.g., solver_acc, judge_acc)
         for key, values in workflow_metrics.items():

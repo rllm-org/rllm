@@ -77,3 +77,20 @@ hydra:
   run:
     dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
 
+# rLLM configuration
+rllm:
+  compact_filtering:
+    enable: False
+    mask_max_prompt_length_exceeded: True
+    mask_max_response_length_exceeded: True
+    mask_max_turns_exceeded: True
+    mask_timeout: True
+    mask_unknown: False
+    mask_error: True
+  rejection_sample:
+    enable: False
+    multiplier: 1
+  stepwise_advantage:
+    enable: True
+    mode: broadcast
+    norm_adv_by_std_in_grpo: True

@@ -6,6 +6,7 @@ It does NOT contain any environment or agent logic.
 
 from __future__ import annotations
 
+import inspect
 import logging
 from functools import wraps
 from typing import TYPE_CHECKING
@@ -28,13 +29,26 @@ logger = logging.getLogger(__name__)
 
 # helper decorator for any function requiring a training client to be initialized
 def require_training_client(func):
-    @wraps(func)
-    async def wrapper(self, *args, **kwargs):
+    def _check_training_client(self):
         if self.training_client is None:
             raise RuntimeError("Training client not initialized. Call initialize_async() first.")
-        return await func(self, *args, **kwargs)
 
-    return wrapper
+    if inspect.iscoroutinefunction(func):
+
+        @wraps(func)
+        async def async_wrapper(self, *args, **kwargs):
+            _check_training_client(self)
+            return await func(self, *args, **kwargs)
+
+        return async_wrapper
+    else:
+
+        @wraps(func)
+        def sync_wrapper(self, *args, **kwargs):
+            _check_training_client(self)
+            return func(self, *args, **kwargs)
+
+        return sync_wrapper
 
 
 class TinkerPolicyTrainer:

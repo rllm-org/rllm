@@ -12,6 +12,7 @@ from rllm.trainer.common.config import (
     TransformConfig,
     rLLMAdvantageEstimator,
 )
+from rllm.trainer.common.metrics import reduce_reward_metrics_by_trajectory_name
 from rllm.trainer.common.rejection_sampling import (
     RejectionSamplingMetrics,
     RejectionSamplingState,
@@ -44,4 +45,6 @@ __all__ = [
     # Advantage computation
     "rLLMAdvantageEstimator",
     "compute_advantage_from_trajectory_groups",
+    # Metrics
+    "reduce_reward_metrics_by_trajectory_name",
 ]

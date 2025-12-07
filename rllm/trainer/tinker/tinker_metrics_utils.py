@@ -10,6 +10,7 @@ import torch
 from tinker_cookbook.display import colorize_example
 
 from rllm.agents.agent import Episode, TrajectoryGroup
+from rllm.trainer.common.metrics import reduce_reward_metrics_by_trajectory_name
 
 logger = logging.getLogger(__name__)
 
@@ -364,17 +365,8 @@ def compute_training_metrics(
     # Add time metrics (adding a "time/" prefix to the keys for compatibility)
     metrics.update({f"time/{key}": value for key, value in time_metrics.items()})
 
-    # Collect all rewards from TrajectoryGroup objects
-    rewards_by_traj_name = {}
-    for group in trajectory_groups:
-        for traj in group.trajectories:
-            rewards_by_traj_name[traj.name] = traj.reward
-
-    for traj_name, rewards in rewards_by_traj_name.items():
-        metrics[f"reward/{traj_name}/mean"] = np.mean(rewards)
-        metrics[f"reward/{traj_name}/max"] = np.max(rewards)
-        metrics[f"reward/{traj_name}/min"] = np.min(rewards)
-        metrics[f"reward/{traj_name}/std"] = np.std(rewards)
+    # Update the metrics with trajectory-level reward metrics
+    metrics.update(reduce_reward_metrics_by_trajectory_name(trajectory_groups, prefix="reward"))
 
     # Add environment metrics (detailed stats similar to tinker_cookbook)
     # TODO: actually implement separate metrics that are episode-based (currently trajectory-group-based)
