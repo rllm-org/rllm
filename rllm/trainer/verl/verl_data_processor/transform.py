@@ -354,6 +354,6 @@ def transform_trajectory_groups_to_dataproto(
         total_steps = _process_trajectory_group(trajectory_group, task_id, accumulated)
         accumulated.repeat_counts.append(total_steps)
 
-    assert hasattr(tokenizer, "pad_token_id"), "Tokenizer must have a pad token ID"
+    assert tokenizer is not None and hasattr(tokenizer, "pad_token_id"), "Tokenizer must have a pad token ID"
     pad_token_id = tokenizer.pad_token_id
     return _batch_tensors_and_build_data_proto(accumulated, pad_token_id, max_prompt_length, max_response_length, processor)

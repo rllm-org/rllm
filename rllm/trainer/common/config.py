@@ -4,6 +4,7 @@ from typing import Literal
 from omegaconf import DictConfig, OmegaConf
 
 from rllm.agents.agent import _DEFAULT_TRAJ_NAME
+from rllm.trainer.common.advantage import rLLMAdvantageEstimator
 from rllm.workflows.workflow import TerminationReason
 
 
@@ -83,3 +84,27 @@ class RejectionSamplingConfig:
 
     # For "episode" mode (verl compatibility): minimum number of tasks with partial solves before proceeding
     min_partial_solve_tasks: int = 1
+
+
+@dataclass
+class AlgorithmConfig:
+    """Configuration for algorithm parameters."""
+
+    estimator: rLLMAdvantageEstimator = rLLMAdvantageEstimator.GRPO
+    stepwise_advantage_mode: Literal["broadcast", "per_step"] = "broadcast"
+    normalize_by_std: bool = True
+
+    @classmethod
+    def from_config(cls, config: DictConfig) -> "AlgorithmConfig":
+        """Create an AlgorithmConfig from a dictionary configuration.
+
+        Args:
+            config: Dictionary configuration.
+        Returns:
+            AlgorithmConfig: The AlgorithmConfig built from the configuration.
+        """
+        return cls(
+            estimator=rLLMAdvantageEstimator(config.algorithm.adv_estimator),
+            stepwise_advantage_mode=config.rllm.stepwise_advantage.mode,
+            normalize_by_std=config.rllm.stepwise_advantage.get("normalize_by_std", True),
+        )

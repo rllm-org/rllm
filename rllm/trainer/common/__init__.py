@@ -9,6 +9,7 @@ from rllm.trainer.common.advantage import (
     rLLMAdvantageEstimator,
 )
 from rllm.trainer.common.config import (
+    AlgorithmConfig,
     CompactFilteringConfig,
     RejectionSamplingConfig,
     TransformConfig,
@@ -30,6 +31,7 @@ __all__ = [
     "CompactFilteringConfig",
     "RejectionSamplingConfig",
     "TransformConfig",
+    "AlgorithmConfig",
     # Transform pipeline
     "transform_episodes_to_trajectory_groups",
     "TransformConfig",

@@ -13,6 +13,8 @@ The pipeline handles:
 import logging
 from collections import defaultdict
 
+import numpy as np
+
 from rllm.agents.agent import Episode, Trajectory, TrajectoryGroup
 from rllm.trainer.common.config import CompactFilteringConfig, TransformConfig
 from rllm.workflows.workflow import TerminationReason
@@ -174,9 +176,6 @@ def transform_episodes_to_trajectory_groups(
     if transform_config is None:
         transform_config = TransformConfig()
 
-    metrics = dict()
-    metrics["transform/num_trajs_before_transform"] = sum(len(episode.trajectories) for episode in episodes)
-
     # Step 1: Name imputation
     rename_warnings = impute_trajectory_names(episodes, transform_config)
 
@@ -198,6 +197,15 @@ def transform_episodes_to_trajectory_groups(
     if len(reward_warnings) > log_n_warnings:
         logger.warning(f"Skipping {len(reward_warnings) - log_n_warnings} more similar warnings with reward validation")
 
-    metrics["transform/num_trajs_after_transform"] = sum(len(group.trajectories) for group in groups)
+    # return metrics
+    group_sizes_before = [len(episode.trajectories) for episode in episodes]
+    group_sizes = [len(group.trajectories) for group in groups]
+    metrics = dict()
+    metrics["grouping/num_trajs_before_filter"] = sum(group_sizes_before)
+    metrics["grouping/num_trajs_after_filter"] = sum(group_sizes)
+    metrics["grouping/num_groups"] = len(groups)
+    metrics["grouping/avg_group_size"] = np.mean(group_sizes)
+    metrics["grouping/max_group_size"] = np.max(group_sizes)
+    metrics["grouping/min_group_size"] = np.min(group_sizes)
 
     return groups, metrics

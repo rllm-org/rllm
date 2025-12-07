@@ -3,6 +3,7 @@ import json
 import tinker
 from tinker_cookbook import model_info, renderers
 from tinker_cookbook.renderers import ToolCall as TinkerToolCall
+from tinker_cookbook.tokenizer_utils import Tokenizer, get_tokenizer
 
 from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine
 from rllm.tools.tool_base import ToolCall
@@ -16,7 +17,7 @@ class TinkerEngine(RolloutEngine):
     Uses Tinker's renderer system for response parsing instead of ChatTemplateParser.
     """
 
-    def __init__(self, base_url: str, model_name: str, tokenizer, service_client: tinker.ServiceClient, max_prompt_length: int = 4096, max_response_length: int = 4096, sampling_params: dict | None = None, **kwargs):
+    def __init__(self, base_url: str, model_name: str, service_client: tinker.ServiceClient, tokenizer: Tokenizer | None = None, max_prompt_length: int = 4096, max_response_length: int = 4096, sampling_params: dict | None = None, **kwargs):
         """
         Initialize TinkerEngine.
 
@@ -32,7 +33,11 @@ class TinkerEngine(RolloutEngine):
         self.model_name = model_name
         self.max_prompt_length = max_prompt_length
         self.max_response_length = max_response_length
+
+        if tokenizer is None:
+            tokenizer = get_tokenizer(self.model_name)
         self.tokenizer = tokenizer
+
         self.default_sampling_params = sampling_params or {}
 
         # Initialize Tinker service client

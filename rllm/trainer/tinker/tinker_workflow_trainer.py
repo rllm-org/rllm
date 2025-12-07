@@ -14,11 +14,11 @@ from typing import TYPE_CHECKING
 
 import tinker
 import torch
-from transformers import AutoTokenizer
 
 from rllm.agents.agent import Episode
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.tinker_engine import TinkerEngine
+from rllm.trainer.common import AlgorithmConfig, CompactFilteringConfig, RejectionSamplingConfig, TransformConfig
 from rllm.trainer.tinker.tinker_agent_trainer import TinkerAgentTrainer
 from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer
 
@@ -78,24 +78,24 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
         else:
             self.val_dataloader = None
 
+        self._validate_and_setup_configs()
+
         service_client = tinker.ServiceClient(base_url=self.config.tinker_base_url)
         self.trainer = TinkerPolicyTrainer(
             config=config,
             service_client=service_client,
         )
 
-        self.tokenizer = AutoTokenizer.from_pretrained(self.config.model.name)
-        sampling_params = self.config.sampling
-        assert sampling_params.get("temperature", 1.0) == 1.0 and sampling_params.get("top_p", 1.0) == 1.0, "temperature and top_p must be 1.0 for tinker workflow trainer"
         self.rollout_engine = TinkerEngine(
             base_url=self.config.tinker_base_url,
             model_name=self.config.model.name,
-            tokenizer=self.tokenizer,
             service_client=service_client,
             max_prompt_length=self.config.data.max_prompt_length,
             max_response_length=self.config.data.max_response_length,
-            sampling_params=sampling_params,
+            sampling_params=self.config.sampling,
         )
+        self.tokenizer = self.rollout_engine.tokenizer
+
         self.agent_execution_engine = AgentWorkflowEngine(
             workflow_cls=self.workflow_class,
             workflow_args=self.workflow_args,
@@ -104,6 +104,7 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
             n_parallel_tasks=self.config.workflow.n_parallel_tasks,
             retry_limit=self.config.workflow.retry_limit,
         )
+
         self.n_parallel_tasks = self.config.workflow.n_parallel_tasks
         # Track number of batches for progress calculation
         self.num_train_batches = None
@@ -116,6 +117,28 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
 
         asyncio.run_coroutine_threadsafe(self.agent_execution_engine.initialize_pool(), self._loop).result()
 
+    def _validate_and_setup_configs(self):
+        sampling_params = self.config.sampling
+        # make an warning when the temperature or top_p is set away from default value
+        if sampling_params.get("temperature", 1.0) != 1.0 or sampling_params.get("top_p", 1.0) != 1.0:
+            logger.warning("Temperature and top_p are set away from 1.0, this is not recommended by Tinker and can cause mysterious issue with logprobs. See https://github.com/thinking-machines-lab/tinker-cookbook/pull/86 for discussion.")
+
+        self.cf_config = CompactFilteringConfig.from_config(self.config.rllm.compact_filtering)
+
+        # transform config (used for transforming episodes to trajectory groups)
+        self.transform_config = TransformConfig(broadcast=self.config.rllm.stepwise_advantage.mode == "broadcast")
+
+        # rejection sampling config (used for rejection sampling)
+        rs_mode = "episode" if self.config.rllm.rejection_sample.enable else "none"
+        self.rs_config = RejectionSamplingConfig(mode=rs_mode, min_partial_solve_tasks=self.config.data.train_batch_size)
+
+        # algorithm config (used for rLLM-native advantage computation)
+        self.algorithm_config = AlgorithmConfig(
+            estimator=self.config.algorithm.adv_estimator,
+            stepwise_advantage_mode=self.config.rllm.stepwise_advantage.mode,
+            normalize_by_std=self.config.rllm.stepwise_advantage.get("normalize_by_std", True),
+        )
+
     def init_envs_and_agents(self, batch_data):
         # no need to init envs and agents, thats maintained by the workflow
         # Store batch_data for use in generate_agent_episodes
@@ -124,7 +147,8 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
     async def validate_agent(self, dataloader, sampling_client):
         all_episodes = []
         all_episode_metrics = {}  # episode_id -> episode.metrics dict
-        self.agent_execution_engine.rollout_engine.set_sampling_client(sampling_client)
+        self.rollout_engine.set_sampling_client(sampling_client)
+
         for batch in dataloader:
             batch = self.build_interleave_batch(batch, 1)
             self.init_envs_and_agents(batch)

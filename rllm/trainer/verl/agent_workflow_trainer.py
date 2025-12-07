@@ -15,7 +15,7 @@ from rllm.agents.agent import Episode
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
 from rllm.trainer.common.advantage import compute_advantage_from_trajectory_groups
-from rllm.trainer.common.config import CompactFilteringConfig, RejectionSamplingConfig, TransformConfig
+from rllm.trainer.common.config import AlgorithmConfig, CompactFilteringConfig, RejectionSamplingConfig, TransformConfig
 from rllm.trainer.common.rejection_sampling import RejectionSamplingState, apply_rejection_sampling_and_filtering
 from rllm.trainer.common.transform import transform_episodes_to_trajectory_groups
 from rllm.trainer.verl.verl_data_processor import transform_episodes_to_dataproto
@@ -25,7 +25,6 @@ from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
 from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.core_algos import (
-    AdvantageEstimator,
     agg_loss,
 )
 from verl.trainer.ppo.metric_utils import (
@@ -75,10 +74,6 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         if self.config.rllm.rejection_sample.multiplier != 1:
             assert self.config.rllm.rejection_sample.enable is True, "rejection sampling is disabled, but rejection_sample.multiplier is not 1"
 
-        # TODO: revisit whether this is now supported by Verl
-        if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
-            raise NotImplementedError("REMAX is not supported yet")
-
         # TODO: add these configurations to the hydra config
         # compact filtering config (used for filtering out episodes that are not valid)
         self.cf_config = CompactFilteringConfig.from_config(self.config.rllm.compact_filtering)
@@ -89,6 +84,13 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         # rejection sampling config (used for rejection sampling)
         rs_mode = "episode" if self.config.rllm.rejection_sample.enable else "none"
         self.rs_config = RejectionSamplingConfig(mode=rs_mode, min_partial_solve_tasks=self.config.data.train_batch_size)
+
+        # algorithm config (used for rLLM-native advantage computation)
+        self.algorithm_config = AlgorithmConfig(
+            estimator=self.config.algorithm.adv_estimator,
+            stepwise_advantage_mode=self.config.rllm.stepwise_advantage.mode,
+            normalize_by_std=self.config.rllm.stepwise_advantage.get("normalize_by_std", True),
+        )
 
     def init_workers(self):
         super().init_workers()
@@ -336,8 +338,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                     use_rllm_advantage = self.config.rllm.stepwise_advantage.get("use_rllm_advantage", True)
                     if use_rllm_advantage:
                         with marked_timer("rllm_adv", timing_raw, color="brown"):
-                            normalize_by_std = self.config.rllm.stepwise_advantage.get("normalize_by_std", True)
-                            compute_advantage_from_trajectory_groups(filtered_groups, self.config.algorithm.adv_estimator, self.config.rllm.stepwise_advantage.mode, normalize_by_std)
+                            compute_advantage_from_trajectory_groups(filtered_groups, self.algorithm_config)
 
                     batch = transform_episodes_to_dataproto(
                         filtered_episodes,

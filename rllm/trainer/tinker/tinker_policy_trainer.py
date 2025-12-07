@@ -7,23 +7,33 @@ It does NOT contain any environment or agent logic.
 from __future__ import annotations
 
 import logging
+from functools import wraps
 from typing import TYPE_CHECKING
 
 import tinker
 from omegaconf import OmegaConf
-from tinker import types
+from tinker.types import AdamParams
 from tinker_cookbook import checkpoint_utils
 
-from rllm.trainer.tinker.tinker_data_processor import (
-    TinkerAdvantageComputer,
-    TinkerTrajectoryFilter,
-    process_episodes,
-)
+from rllm.agents.agent import Episode
+from rllm.trainer.common import AlgorithmConfig, CompactFilteringConfig, TransformConfig, transform_episodes_to_trajectory_groups
+from rllm.trainer.tinker.tinker_data_processor import transform_trajectory_groups_to_datums
 
 if TYPE_CHECKING:
     import torch
 
 logger = logging.getLogger(__name__)
+
+
+# helper decorator for any function requiring a training client to be initialized
+def require_training_client(func):
+    @wraps(func)
+    async def wrapper(self, *args, **kwargs):
+        if self.training_client is None:
+            raise RuntimeError("Training client not initialized. Call initialize_async() first.")
+        return await func(self, *args, **kwargs)
+
+    return wrapper
 
 
 class TinkerPolicyTrainer:
@@ -47,6 +57,9 @@ class TinkerPolicyTrainer:
         self,
         config,
         service_client: tinker.ServiceClient,
+        cf_config: CompactFilteringConfig | None = None,
+        transform_config: TransformConfig | None = None,
+        algorithm_config: AlgorithmConfig | None = None,
     ):
         """
         Initialize the policy trainer.
@@ -58,10 +71,10 @@ class TinkerPolicyTrainer:
         self.config = config
         self.service_client = service_client
         self.training_client = None
-
-        # Initialize data processors
-        self.advantage_computer = TinkerAdvantageComputer(config.algorithm)
-        self.trajectory_filter = TinkerTrajectoryFilter(config.algorithm)
+        # fill in the default versions of the configs if not provided
+        self.cf_config = cf_config or CompactFilteringConfig.from_config(self.config.rllm.compact_filtering)
+        self.transform_config = transform_config or TransformConfig()
+        self.algorithm_config = algorithm_config or AlgorithmConfig.from_config(self.config)
 
     async def initialize_async(self, resume_from_checkpoint: bool = True):
         """
@@ -124,10 +137,11 @@ class TinkerPolicyTrainer:
             loss_fn_inputs={k: v for k, v in datum.loss_fn_inputs.items() if k != "mask"},
         )
 
+    @require_training_client
     async def step(
         self,
-        episodes: list,
-        learning_rate: float = None,
+        episodes: list[Episode],
+        learning_rate: float | None = None,
         beta1: float = 0.9,
         beta2: float = 0.95,
         eps: float = 1e-8,
@@ -153,14 +167,20 @@ class TinkerPolicyTrainer:
             - grouping_metrics: Dict with grouping and advantage statistics
         """
         if learning_rate is None:
-            learning_rate = self.config.training.learning_rate
+            learning_rate = self.config.training.learning_rate or 1e-6
 
-        # Step 1: Process to datums (includes filtering and advantage computation)
-        training_datums, grouping_metrics = process_episodes(
+        # Step 1: Transform episodes to trajectory groups (filtering is done here)
+        trajectory_groups, grouping_metrics = transform_episodes_to_trajectory_groups(
             episodes,
-            self.advantage_computer,
-            self.trajectory_filter,
-            self.config.algorithm,
+            transform_config=self.transform_config,
+            compact_filtering_config=self.cf_config,
+            log_n_warnings=1,
+        )
+
+        # Step 2: Transform trajectory groups to datums (includes advantage computation)
+        training_datums = transform_trajectory_groups_to_datums(
+            trajectory_groups,
+            algorithm_config=self.algorithm_config,
         )
 
         # Step 3: Remove mask from datums (not needed by forward_backward)
@@ -173,7 +193,7 @@ class TinkerPolicyTrainer:
         )
 
         # Step 5: Optimizer step
-        adam_params = types.AdamParams(
+        adam_params = AdamParams(
             learning_rate=learning_rate,
             beta1=beta1,
             beta2=beta2,
@@ -197,12 +217,17 @@ class TinkerPolicyTrainer:
         # Return logprobs, datums (with masks for metrics), and grouping metrics
         return training_logprobs_D, training_datums, grouping_metrics
 
-    async def forward_backward_future(self, episodes: list):
-        training_datums, grouping_metrics = process_episodes(
+    @require_training_client
+    async def forward_backward_future(self, episodes: list[Episode]):
+        trajectory_groups, grouping_metrics = transform_episodes_to_trajectory_groups(
             episodes,
-            self.advantage_computer,
-            self.trajectory_filter,
-            self.config.algorithm,
+            transform_config=self.transform_config,
+            compact_filtering_config=self.cf_config,
+            log_n_warnings=1,
+        )
+        training_datums = transform_trajectory_groups_to_datums(
+            trajectory_groups,
+            algorithm_config=self.algorithm_config,
         )
 
         datums_no_mask = [self._remove_mask(datum) for datum in training_datums]
@@ -214,11 +239,12 @@ class TinkerPolicyTrainer:
 
         return fwd_bwd_future, grouping_metrics
 
-    async def optim_step_future(self, learning_rate: float = None, beta1: float = 0.9, beta2: float = 0.95, eps: float = 1e-8):
+    @require_training_client
+    async def optim_step_future(self, learning_rate: float | None = None, beta1: float = 0.9, beta2: float = 0.95, eps: float = 1e-8):
         if learning_rate is None:
             learning_rate = self.config.training.learning_rate
 
-        adam_params = types.AdamParams(
+        adam_params = AdamParams(
             learning_rate=learning_rate,
             beta1=beta1,
             beta2=beta2,
@@ -251,6 +277,7 @@ class TinkerPolicyTrainer:
         )
         return path_dict
 
+    @require_training_client
     def create_sampling_client(self, sampler_path: str) -> tinker.SamplingClient:
         """
         Create a sampling client from a checkpoint path.
@@ -261,8 +288,6 @@ class TinkerPolicyTrainer:
         Returns:
             Tinker sampling client
         """
-        if self.training_client is None:
-            raise RuntimeError("Training client not initialized. Call initialize_async() first.")
         return self.training_client.create_sampling_client(sampler_path)
 
     def get_last_checkpoint(self) -> dict | None:
@@ -274,8 +299,7 @@ class TinkerPolicyTrainer:
         """
         return checkpoint_utils.get_last_checkpoint(self.config.trainer.default_local_dir)
 
-    def get_tokenizer(self):
+    @require_training_client
+    def get_tokenizer(self) -> tinker.Tokenizer:
         """Get tokenizer from training client."""
-        if self.training_client is None:
-            raise RuntimeError("Training client not initialized. Call initialize_async() first.")
         return self.training_client.get_tokenizer()
