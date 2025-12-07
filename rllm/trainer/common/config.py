@@ -1,10 +1,10 @@
 from dataclasses import dataclass
+from enum import Enum
 from typing import Literal
 
 from omegaconf import DictConfig, OmegaConf
 
 from rllm.agents.agent import _DEFAULT_TRAJ_NAME
-from rllm.trainer.common.advantage import rLLMAdvantageEstimator
 from rllm.workflows.workflow import TerminationReason
 
 
@@ -86,13 +86,29 @@ class RejectionSamplingConfig:
     min_partial_solve_tasks: int = 1
 
 
+class rLLMAdvantageEstimator(str, Enum):
+    """
+    A unified advantage estimator for rLLM. Work with both `tinker` and `verl` backends at the expense of
+    losing some flexibility. Currently only supporting GRPO and REINFORCE.
+    TODO: add more estimators.
+    """
+
+    GRPO = "grpo"
+    REINFORCE = "reinforce"
+    OTHER = "other"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "rLLMAdvantageEstimator":
+        return cls.OTHER
+
+
 @dataclass
 class AlgorithmConfig:
     """Configuration for algorithm parameters."""
 
     estimator: rLLMAdvantageEstimator = rLLMAdvantageEstimator.GRPO
     stepwise_advantage_mode: Literal["broadcast", "per_step"] = "broadcast"
-    normalize_by_std: bool = True
+    norm_adv_by_std_in_grpo: bool = True
 
     @classmethod
     def from_config(cls, config: DictConfig) -> "AlgorithmConfig":
@@ -106,5 +122,5 @@ class AlgorithmConfig:
         return cls(
             estimator=rLLMAdvantageEstimator(config.algorithm.adv_estimator),
             stepwise_advantage_mode=config.rllm.stepwise_advantage.mode,
-            normalize_by_std=config.rllm.stepwise_advantage.get("normalize_by_std", True),
+            norm_adv_by_std_in_grpo=config.rllm.stepwise_advantage.get("norm_adv_by_std_in_grpo", True),
         )

@@ -152,7 +152,7 @@ class TinkerWorkflowTrainer:
         self.algorithm_config = AlgorithmConfig(
             estimator=self.config.algorithm.adv_estimator,
             stepwise_advantage_mode=self.config.rllm.stepwise_advantage.mode,
-            normalize_by_std=self.config.rllm.stepwise_advantage.get("normalize_by_std", True),
+            norm_adv_by_std_in_grpo=self.config.rllm.stepwise_advantage.get("norm_adv_by_std_in_grpo", True),
         )
 
     async def validate_agent(self, dataloader, sampling_client):

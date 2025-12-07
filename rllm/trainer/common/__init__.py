@@ -4,15 +4,13 @@ Common utilities for rLLM trainers.
 This module provides shared functionality across different trainer backends (verl, tinker, etc.).
 """
 
-from rllm.trainer.common.advantage import (
-    compute_advantage_from_trajectory_groups,
-    rLLMAdvantageEstimator,
-)
+from rllm.trainer.common.advantage import compute_advantage_from_trajectory_groups
 from rllm.trainer.common.config import (
     AlgorithmConfig,
     CompactFilteringConfig,
     RejectionSamplingConfig,
     TransformConfig,
+    rLLMAdvantageEstimator,
 )
 from rllm.trainer.common.rejection_sampling import (
     RejectionSamplingMetrics,

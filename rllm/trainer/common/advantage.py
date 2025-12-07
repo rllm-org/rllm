@@ -3,34 +3,17 @@ Generic advantage computation algorithms and utilities that work on TrajectoryGr
 """
 
 import logging
-from enum import Enum
 from functools import partial
 
 import numpy as np
 
 from rllm.agents.agent import TrajectoryGroup
-from rllm.trainer.common.config import AlgorithmConfig
+from rllm.trainer.common.config import AlgorithmConfig, rLLMAdvantageEstimator
 
 logger = logging.getLogger(__name__)
 
 
-class rLLMAdvantageEstimator(str, Enum):
-    """
-    A unified advantage estimator for rLLM. Work with both `tinker` and `verl` backends at the expense of
-    losing some flexibility. Currently only supporting GRPO and REINFORCE.
-    TODO: add more estimators.
-    """
-
-    GRPO = "grpo"
-    REINFORCE = "reinforce"
-    OTHER = "other"
-
-    @classmethod
-    def _missing_(cls, value: object) -> "rLLMAdvantageEstimator":
-        return cls.OTHER
-
-
-def _calculate_grpo_advantages(rewards: np.ndarray, normalize_by_std=True) -> np.ndarray:
+def _calculate_grpo_advantages(rewards: np.ndarray, norm_adv_by_std_in_grpo=True) -> np.ndarray:
     if rewards is None or len(rewards) < 1:
         return np.array([])
     elif len(rewards) == 1:
@@ -39,7 +22,7 @@ def _calculate_grpo_advantages(rewards: np.ndarray, normalize_by_std=True) -> np
         group_mean = np.mean(rewards)
         group_std = np.std(rewards)
 
-    if normalize_by_std and group_std > 1e-8:
+    if norm_adv_by_std_in_grpo and group_std > 1e-8:
         advantages = (rewards - group_mean) / group_std
     else:
         advantages = rewards - group_mean
@@ -60,12 +43,12 @@ def compute_advantage_from_trajectory_groups(
     """
     advantage_fn = None
     if algorithm_config.estimator == rLLMAdvantageEstimator.GRPO:
-        advantage_fn = partial(_calculate_grpo_advantages, normalize_by_std=algorithm_config.normalize_by_std)
+        advantage_fn = partial(_calculate_grpo_advantages, norm_adv_by_std_in_grpo=algorithm_config.norm_adv_by_std_in_grpo)
     elif algorithm_config.estimator == rLLMAdvantageEstimator.REINFORCE:
         advantage_fn = _calculate_reinforce_advantages
     else:
         logger.warning(f"Unsupported estimator {algorithm_config.estimator} in rLLMAdvantageEstimator, using GRPO")
-        advantage_fn = partial(_calculate_grpo_advantages, normalize_by_std=algorithm_config.normalize_by_std)
+        advantage_fn = partial(_calculate_grpo_advantages, norm_adv_by_std_in_grpo=algorithm_config.norm_adv_by_std_in_grpo)
 
     # TODO: in the future, we should support per-trajectory-group advantage modes
     for group in groups:
