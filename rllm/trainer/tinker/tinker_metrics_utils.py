@@ -9,11 +9,12 @@ import tinker
 import torch
 from tinker_cookbook.display import colorize_example
 
-from rllm.agents.agent import Episode
+from rllm.agents.agent import Episode, TrajectoryGroup
 
 logger = logging.getLogger(__name__)
 
 
+# TODO: delete this or refactor tinker_agent_trainer as well to not use it.
 def print_episodes(
     episodes: list[Episode],
     tokenizer: Any,
@@ -324,7 +325,7 @@ def compute_kl_and_entropy_metrics(training_datums: list[tinker.Datum], training
 
 
 def compute_training_metrics(
-    episodes: list[Episode],
+    trajectory_groups: list[TrajectoryGroup],
     batch_idx: int,
     time_metrics: dict,
     learning_rate: float,
@@ -337,7 +338,7 @@ def compute_training_metrics(
     Compute comprehensive training metrics.
 
     Args:
-        episodes: List of Episode objects
+        trajectory_groups: List of TrajectoryGroup objects
         batch_idx: Current batch index
         time_metrics: Dictionary of time measurements
         learning_rate: Current learning rate
@@ -360,28 +361,25 @@ def compute_training_metrics(
     if total_batches is not None and total_batches > 0:
         metrics["progress/done_frac"] = (batch_idx + 1) / total_batches
 
-    # Add time metrics
-    metrics.update(time_metrics)
+    # Add time metrics (adding a "time/" prefix to the keys for compatibility)
+    metrics.update({f"time/{key}": value for key, value in time_metrics.items()})
 
-    # Collect all rewards from Episode objects
-    all_rewards = []
-    for episode in episodes:
-        for traj in episode.trajectories:
-            all_rewards.append(traj.reward)
+    # Collect all rewards from TrajectoryGroup objects
+    rewards_by_traj_name = {}
+    for group in trajectory_groups:
+        for traj in group.trajectories:
+            rewards_by_traj_name[traj.name] = traj.reward
 
-    if all_rewards:
-        metrics.update(
-            {
-                "reward/mean": np.mean(all_rewards),
-                "reward/max": np.max(all_rewards),
-                "reward/min": np.min(all_rewards),
-                "reward/std": np.std(all_rewards),
-            }
-        )
+    for traj_name, rewards in rewards_by_traj_name.items():
+        metrics[f"reward/{traj_name}/mean"] = np.mean(rewards)
+        metrics[f"reward/{traj_name}/max"] = np.max(rewards)
+        metrics[f"reward/{traj_name}/min"] = np.min(rewards)
+        metrics[f"reward/{traj_name}/std"] = np.std(rewards)
 
     # Add environment metrics (detailed stats similar to tinker_cookbook)
-    env_metrics = compute_env_metrics(episodes)
-    metrics.update(env_metrics)
+    # TODO: actually implement separate metrics that are episode-based (currently trajectory-group-based)
+    # env_metrics = compute_env_metrics(episodes)
+    # metrics.update(env_metrics)
 
     # Add KL and entropy metrics if available
     if training_datums is not None and training_logprobs is not None:

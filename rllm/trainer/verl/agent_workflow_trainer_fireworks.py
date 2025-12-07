@@ -10,6 +10,7 @@ import torch
 from omegaconf import OmegaConf
 
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
+from rllm.utils import marked_timer
 
 try:
     from rllm.engine.rollout.fireworks_engine import FireworksEngine
@@ -34,7 +35,6 @@ from verl.trainer.ppo.ray_trainer import (
 )
 from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
-from verl.utils.debug import marked_timer
 from verl.utils.tracking import Tracking
 
 

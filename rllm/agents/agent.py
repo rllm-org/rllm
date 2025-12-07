@@ -34,7 +34,7 @@ class Step:
 
     def __post_init__(self):
         if self.model_output is None:
-            raise ValueError("model_output cannot be None")
+            return
         # backfill fields like prompt_ids, response_ids, logprobs, etc.
         if len(self.prompt_ids) == 0 and self.model_output.prompt_ids is not None:
             self.prompt_ids = self.model_output.prompt_ids
@@ -42,6 +42,10 @@ class Step:
             self.response_ids = self.model_output.completion_ids
         if len(self.logprobs) == 0 and self.model_output.logprobs is not None:
             self.logprobs = self.model_output.logprobs
+
+        # check that the token ids are filled
+        assert len(self.prompt_ids) > 0, "prompt_ids is empty"
+        assert len(self.response_ids) > 0, "response_ids is empty"
 
     def to_dict(self) -> dict:
         return {

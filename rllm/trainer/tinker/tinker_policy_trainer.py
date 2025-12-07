@@ -15,7 +15,7 @@ from omegaconf import OmegaConf
 from tinker.types import AdamParams
 from tinker_cookbook import checkpoint_utils
 
-from rllm.agents.agent import Episode
+from rllm.agents.agent import Episode, TrajectoryGroup
 from rllm.trainer.common import AlgorithmConfig, CompactFilteringConfig, TransformConfig, transform_episodes_to_trajectory_groups
 from rllm.trainer.tinker.tinker_data_processor import transform_trajectory_groups_to_datums
 
@@ -146,7 +146,7 @@ class TinkerPolicyTrainer:
         beta2: float = 0.95,
         eps: float = 1e-8,
         optimizer_step: bool = True,
-    ) -> tuple[list[torch.Tensor], list[tinker.Datum], dict]:
+    ) -> tuple[list[tinker.Datum], list[TrajectoryGroup], list[torch.Tensor], dict]:
         """
         Complete training step: process episodes and update policy.
 
@@ -214,8 +214,8 @@ class TinkerPolicyTrainer:
             training_logprobs = output["logprobs"].to_torch()
             training_logprobs_D.append(training_logprobs)
 
-        # Return logprobs, datums (with masks for metrics), and grouping metrics
-        return training_logprobs_D, training_datums, grouping_metrics
+        # Return datums (with masks for metrics), trajectory groups, logprobs, and grouping metrics
+        return training_datums, trajectory_groups, training_logprobs_D, grouping_metrics
 
     @require_training_client
     async def forward_backward_future(self, episodes: list[Episode]):

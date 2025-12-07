@@ -19,7 +19,7 @@ from rllm.trainer.common.config import AlgorithmConfig, CompactFilteringConfig, 
 from rllm.trainer.common.rejection_sampling import RejectionSamplingState, apply_rejection_sampling_and_filtering
 from rllm.trainer.common.transform import transform_episodes_to_trajectory_groups
 from rllm.trainer.verl.verl_data_processor import transform_episodes_to_dataproto
-from rllm.utils import EpisodeLogger, visualize_trajectory_last_steps
+from rllm.utils import EpisodeLogger, marked_timer, visualize_trajectory_last_steps
 from rllm.workflows.workflow import TerminationReason, Workflow
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
@@ -39,7 +39,6 @@ from verl.trainer.ppo.ray_trainer import (
     compute_advantage,
 )
 from verl.trainer.ppo.utils import Role, WorkerType
-from verl.utils.debug import marked_timer
 from verl.utils.metric import reduce_metrics
 
 

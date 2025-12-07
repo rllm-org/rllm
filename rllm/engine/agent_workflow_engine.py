@@ -75,6 +75,7 @@ class AgentWorkflowEngine:
         for parallel task processing. This method is idempotent and will
         not recreate the pool if it already exists.
         """
+        assert self.executor is not None, "executor is not initialized"
         if self.workflow_queue is not None:
             return
         self.workflow_queue = asyncio.Queue(maxsize=self.n_parallel_tasks)
@@ -98,6 +99,7 @@ class AgentWorkflowEngine:
         Raises:
             Exception: If task fails permanently after retry_limit attempts and raise_on_error is True.
         """
+        assert self.workflow_queue is not None, "workflow_queue is not initialized"
         workflow = await self.workflow_queue.get()
         try:
             for retry_attempt in range(1, self.retry_limit + 1):

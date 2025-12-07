@@ -14,6 +14,7 @@ import torch
 from omegaconf import OmegaConf
 
 from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
+from rllm.utils import marked_timer
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
 from verl.single_controller.ray import RayWorkerGroup
@@ -26,7 +27,6 @@ from verl.trainer.ppo.ray_trainer import (
     compute_response_mask,
 )
 from verl.trainer.ppo.utils import Role, WorkerType
-from verl.utils.debug import marked_timer
 from verl.utils.metric import reduce_metrics
 
 

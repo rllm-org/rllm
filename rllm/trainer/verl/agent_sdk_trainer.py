@@ -17,7 +17,7 @@ from omegaconf import OmegaConf
 
 from rllm.engine.agent_sdk_engine import AgentSdkEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
-from rllm.utils import colorful_print
+from rllm.utils import colorful_print, marked_timer
 from rllm.workflows.workflow import TerminationReason
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
@@ -37,7 +37,6 @@ from verl.trainer.ppo.ray_trainer import (
 )
 from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 from verl.trainer.ppo.utils import Role, WorkerType
-from verl.utils.debug import marked_timer
 from verl.utils.tracking import Tracking
 
 
