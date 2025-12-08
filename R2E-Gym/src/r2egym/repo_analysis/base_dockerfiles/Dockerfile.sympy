@@ -1,0 +1,53 @@
+FROM ubuntu:22.04
+
+ARG OLD_COMMIT
+
+RUN apt-get update && apt-get upgrade -y
+
+ENV DEBIAN_FRONTEND noninteractive
+
+RUN echo "tzdata tzdata/Areas select America" | debconf-set-selections && echo "tzdata tzdata/Zones/America select Los_Angeles" | debconf-set-selections
+
+# Install standard and python specific system dependencies
+RUN apt-get install -y git curl wget build-essential ca-certificates
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+ENV PATH="/root/.local/bin:${PATH}"
+
+RUN git clone https://github.com/sympy/sympy.git
+
+COPY list_files.py /list_files.py
+
+COPY read_file.py /read_file.py
+
+COPY run_tests.sh /sympy/run_tests.sh
+
+COPY expected_test_output.json /sympy/expected_test_output.json
+
+COPY syn_issue.json /sympy/syn_issue.json
+
+COPY execution_result.json /sympy/execution_result.json
+
+COPY parsed_commit.json /sympy/parsed_commit.json
+
+COPY modified_files.json /sympy/modified_files.json
+
+COPY modified_entities.json /sympy/modified_entities.json
+
+WORKDIR /sympy
+
+RUN git checkout $OLD_COMMIT
+
+RUN git status
+
+RUN uv venv --python 3.8
+
+RUN uv pip install -e .
+
+RUN uv pip install numpy mpmath pytest ipython numexpr
+
+COPY r2e_tests /sympy/r2e_tests
+

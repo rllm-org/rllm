@@ -1,0 +1,54 @@
+FROM ubuntu:22.04
+
+ARG OLD_COMMIT
+
+RUN apt-get update -y && apt-get upgrade -y
+
+ENV DEBIAN_FRONTEND noninteractive
+
+RUN echo "tzdata tzdata/Areas select America" | debconf-set-selections && echo "tzdata tzdata/Zones/America select Los_Angeles" | debconf-set-selections
+
+# Install standard and python specific system dependencies
+RUN apt-get install -y git curl wget build-essential ca-certificates python3-dev libjpeg-dev libwebp-dev gcc g++ gfortran libopenblas-dev liblapack-dev pkg-config 
+
+RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+
+ENV NVM_DIR=/root/.nvm
+
+RUN . "$NVM_DIR/nvm.sh" && nvm install 20
+
+RUN . "$NVM_DIR/nvm.sh" && nvm use 20
+
+ENV PATH="/root/.nvm/versions/node/v20/bin/:${PATH}"
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+ENV PATH="/root/.local/bin:${PATH}"
+
+RUN git clone https://github.com/aio-libs/aiohttp.git testbed
+
+COPY run_tests.sh /testbed/run_tests.sh
+
+COPY process_aiohttp_updateasyncio.py /testbed/process_aiohttp_updateasyncio.py
+
+COPY install.sh /testbed/install.sh
+
+WORKDIR /testbed
+
+RUN git checkout $OLD_COMMIT
+
+COPY Makefile /testbed/Makefile
+
+RUN git status
+
+RUN bash install.sh
+
+RUN uv pip install tree_sitter_languages
+
+ENV VIRTUAL_ENV=/testbed/.venv
+
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+COPY r2e_tests /r2e_tests 

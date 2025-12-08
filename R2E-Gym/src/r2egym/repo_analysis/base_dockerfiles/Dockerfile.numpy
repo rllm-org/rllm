@@ -1,0 +1,44 @@
+FROM ubuntu:22.04
+
+ARG OLD_COMMIT
+
+RUN apt-get update -y && apt-get upgrade -y
+
+ENV DEBIAN_FRONTEND noninteractive
+
+RUN echo "tzdata tzdata/Areas select America" | debconf-set-selections && echo "tzdata tzdata/Zones/America select Los_Angeles" | debconf-set-selections
+
+# Install standard and python specific system dependencies
+RUN apt-get install -y git curl wget build-essential ca-certificates python3-dev python3.11-dev gcc g++ gfortran libopenblas-dev liblapack-dev pkg-config
+
+RUN ln -s /usr/include/locale.h /usr/include/xlocale.h
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+ENV PATH="/root/.local/bin:${PATH}"
+
+RUN git clone https://github.com/numpy/numpy.git testbed
+
+COPY run_tests.sh /testbed/run_tests.sh
+
+COPY install.sh /testbed/install.sh
+
+WORKDIR /testbed
+
+RUN git checkout $OLD_COMMIT
+
+RUN git submodule update --init --recursive
+
+RUN git status
+
+RUN bash install.sh
+
+RUN uv pip install tree_sitter_languages
+
+ENV VIRTUAL_ENV=/testbed/.venv
+
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+COPY r2e_tests /r2e_tests
