@@ -34,7 +34,7 @@ dependencies = [
     "vertexai",
     "docker",
     "kubernetes",
-    "ray",
+    # "ray",
 
     # Web and automation
     "gradio",
@@ -63,7 +63,7 @@ dependencies = [
     "fire",
     "gdown",
     "together>=1.4",
-    "wandb",
+    # "wandb",
     "gymnasium",
     "click",
     "fastapi",
