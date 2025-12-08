@@ -1,7 +1,3 @@
-[submodule "verl"]
-	path = verl
-	url = https://github.com/volcengine/verl.git
-	branch = main
 [submodule "R2E-Gym"]
 	path = R2E-Gym
 	url = https://github.com/agentica-project/R2E-Gym.git
