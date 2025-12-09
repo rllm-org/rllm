@@ -41,6 +41,7 @@ rllm:
       gamma: 0.0 # no discounting
       reward_bonus_coeff: 0.0 # no reward shaping
     n_parallel_tasks: 256
+    raise_on_error: True
     retry_limit: 3
   disable_thinking: False
   accumulate_reasoning: False

@@ -41,6 +41,7 @@ algorithm:
 workflow:
   n_parallel_tasks: 256
   retry_limit: 3 
+  raise_on_error: True
 
 # Agent Configuration (for agent training mode)
 agent:

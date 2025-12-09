@@ -127,6 +127,7 @@ class TinkerWorkflowTrainer:
             config=self.config,
             n_parallel_tasks=self.config.workflow.n_parallel_tasks,
             retry_limit=self.config.workflow.retry_limit,
+            raise_on_error=self.config.workflow.raise_on_error,
         )
 
         self.n_parallel_tasks = self.config.workflow.n_parallel_tasks

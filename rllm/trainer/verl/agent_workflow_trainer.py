@@ -120,6 +120,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
             config=self.config,
             n_parallel_tasks=self.config.rllm.workflow.n_parallel_tasks,
             retry_limit=self.config.rllm.workflow.retry_limit,
+            raise_on_error=self.config.rllm.workflow.raise_on_error,
             episode_logger=episode_logger,
         )
 
