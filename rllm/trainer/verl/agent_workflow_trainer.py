@@ -19,7 +19,7 @@ from rllm.trainer.common.config import AlgorithmConfig, CompactFilteringConfig, 
 from rllm.trainer.common.rejection_sampling import RejectionSamplingState, apply_rejection_sampling_and_filtering
 from rllm.trainer.common.transform import transform_episodes_to_trajectory_groups
 from rllm.trainer.verl.verl_data_processor import transform_episodes_to_dataproto
-from rllm.utils import EpisodeLogger, marked_timer, visualize_trajectory_last_steps
+from rllm.utils import EpisodeLogger, Tracking, marked_timer, visualize_trajectory_last_steps
 from rllm.workflows.workflow import TerminationReason, Workflow
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
@@ -260,8 +260,6 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         """
         The training loop of PPO. Adapted to train the underlying model of agent.
         """
-        from verl.utils.tracking import Tracking
-
         logger = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
