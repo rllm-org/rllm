@@ -131,7 +131,7 @@ class TimingTrackingMixin:
             "total_time": self._timing_data["total_time"],
         }
 
-    def postprocess_episode(self, episode, termination_reason=None, error=None):
+    def postprocess_episode(self, episode, task, uid, termination_reason=None, error=None):
         """Override to add timing metrics to episode.
 
         This should be called from the subclass's postprocess_episode method.
@@ -141,7 +141,7 @@ class TimingTrackingMixin:
 
         # Call parent's postprocess if it exists
         if hasattr(super(), "postprocess_episode"):
-            episode = super().postprocess_episode(episode, termination_reason, error)
+            episode = super().postprocess_episode(episode, task, uid, termination_reason, error)
 
         # Add timing to episode info
         episode.info["timing"] = timing_metrics

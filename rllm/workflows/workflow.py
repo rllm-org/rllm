@@ -76,16 +76,16 @@ class Workflow(ABC):
             output = await asyncio.wait_for(coro, timeout=self.timeout)
             if output is not None and isinstance(output, Episode):
                 return output  # we assume it's already postprocessed
-            return self.postprocess_episode(self.collect_trajectories(), TerminationReason.UNKNOWN)
+            return self.postprocess_episode(self.collect_trajectories(), task, uid, TerminationReason.UNKNOWN)
         except asyncio.TimeoutError:
-            return self.postprocess_episode(self.collect_trajectories(), TerminationReason.TIMEOUT)
+            return self.postprocess_episode(self.collect_trajectories(), task, uid, TerminationReason.TIMEOUT)
         except TerminationEvent as e:
-            return self.postprocess_episode(self.collect_trajectories(), e.reason)
+            return self.postprocess_episode(self.collect_trajectories(), task, uid, e.reason)
         except Exception as e:
             import traceback
 
             error_details = {"error_message": str(e), "error_type": type(e).__name__, "traceback": traceback.format_exc()}
-            return self.postprocess_episode(self.collect_trajectories(), TerminationReason.ERROR, error=error_details)
+            return self.postprocess_episode(self.collect_trajectories(), task, uid, TerminationReason.ERROR, error=error_details)
 
     def commit(self, name: str | None = None, agent: BaseAgent | None = None, trajectory: Trajectory | None = None, reset: bool = False) -> None:
         """Commit a trajectory for training.
@@ -100,10 +100,11 @@ class Workflow(ABC):
         assert agent is None or trajectory is None, "Only one of agent or trajectory can be provided to workflow.commit"
 
         traj = agent.trajectory if agent is not None else trajectory
-        if name:
-            traj.name = name
-        if traj.steps:
-            self._completed_trajectories.append(deepcopy(traj))
+        if traj is not None:
+            if name is not None:
+                traj.name = name
+            if len(traj.steps) > 0:
+                self._completed_trajectories.append(deepcopy(traj))
 
         if agent is not None and reset:
             agent.reset()
@@ -192,7 +193,7 @@ class Workflow(ABC):
             metrics[name].append(traj.reward)
         episode.metrics = {f"{k}_acc": float(np.mean(v)) for k, v in metrics.items()}
 
-    def postprocess_episode(self, episode: Episode, termination_reason: TerminationReason = None, error: dict = None) -> Episode:
+    def postprocess_episode(self, episode: Episode, task: dict, uid: str, termination_reason: TerminationReason | None = None, error: dict | None = None) -> Episode:
         """Collect and process the trajectories
 
         Args:
@@ -200,38 +201,10 @@ class Workflow(ABC):
             termination_reason: The termination reason for the episode.
             error: The error details for the episode.
         """
-
-        # 1. assign a task id and task
-        episode.id = self.uid
-        episode.task = self.task
-
-        for trajectory in episode.trajectories:
-            # depending on the terminaiton reason, there may be a trajectry with an additional step with empty chat_completions
-            # i.e., if it's thrown between agent.update_from_env() and agent.update_from_model()
-            if trajectory.steps and not trajectory.steps[-1].chat_completions:
-                trajectory.steps.pop()
-
-            # 2. compute trajectory-level rewards
-            self.compute_trajectory_reward(trajectory)
-
-            # 3. adjust the step level rewards (e.g., reward shaping or discounting)
-            if len(trajectory.steps) > 1:
-                self.adjust_step_rewards(trajectory)
-
-        # 4. assign an episode-level correctness flag
-        self.assign_episode_correctness(episode)
-
-        # 5. collect additional metrics workflow
-        # by default, we report the acc of each agent using the traj reward
-        self.collect_metrics(episode)
-
-        # 6. store error details if provided
-        if error is not None:
-            episode.info["error"] = error
-
-        # 7. assign a termination reason
+        episode.task = task
+        episode.id = uid
         episode.termination_reason = termination_reason or TerminationReason.UNKNOWN
-
+        episode.info["error"] = error if error is not None else None
         return episode
 
     def reset(self, task: dict | None = None, uid: str | None = None) -> None:
