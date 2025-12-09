@@ -154,7 +154,9 @@ class TinkerAgentTrainer:
                 tracking_logger.log(data=val_metrics, step=start_batch)
 
         # Training loop
-        batch_idx = 0
+        # Initialize batch_idx to start_batch when resuming, or 0 when starting fresh
+        batch_idx = start_batch
+        logger.info(f"Starting training loop with batch_idx={batch_idx}, start_batch={start_batch}")
 
         learning_rate = self.config.training.learning_rate
         beta1 = self.config.training.beta1
@@ -165,8 +167,11 @@ class TinkerAgentTrainer:
         if self.train_dataloader and hasattr(self.train_dataloader, "__len__"):
             self.num_train_batches = len(self.train_dataloader)
 
+        # Track global batch number across all epochs
+        batches_processed = 0
         for epoch in range(self.config.trainer.total_epochs):
             for batch_data in self.train_dataloader:
+                # Skip batches until we reach start_batch (only relevant when resuming)
                 if batch_idx < start_batch:
                     batch_idx += 1
                     continue
@@ -272,6 +277,7 @@ class TinkerAgentTrainer:
                         tracking_logger.log(data=val_metrics, step=batch_idx)
 
                 batch_idx += 1
+                batches_processed += 1
 
                 logger.info(f"Saving sampler checkpoint at batch {batch_idx}")
                 t_save_sampler_start = time.time()
@@ -285,6 +291,11 @@ class TinkerAgentTrainer:
                     await self.trainer.save_checkpoint_async(batch_idx, kind="state")
 
         # Save final checkpoint
+        logger.info(f"Training loop completed. batch_idx={batch_idx}, start_batch={start_batch}, batches_processed={batches_processed}")
+        # Ensure batch_idx is at least start_batch (shouldn't be less when resuming)
+        if batch_idx < start_batch:
+            logger.warning(f"batch_idx ({batch_idx}) is less than start_batch ({start_batch}), using start_batch for final checkpoint")
+            batch_idx = start_batch
         if batch_idx % self.config.trainer.save_freq != 0:
             logger.info(f"Saving final checkpoint at batch {batch_idx}")
             await self.trainer.save_checkpoint_async(batch_idx, kind="state")

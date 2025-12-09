@@ -73,7 +73,37 @@ class TinkerPolicyTrainer:
         # Check for existing checkpoint
         resume_info = None
         if resume_from_checkpoint:
-            resume_info = self.get_last_checkpoint()
+            # Check if a Tinker model ID is provided in config
+            tinker_model_id = OmegaConf.select(self.config, "trainer.resume_from_tinker_id", default=None)
+            if tinker_model_id:
+                # Parse Tinker model ID format: tinker://{uuid}/weights/{checkpoint_name}
+                # Example: tinker://7af7f6f0-e8f9-4124-ab93-e7f08eb54a9d/weights/000060
+                if not tinker_model_id.startswith("tinker://"):
+                    raise ValueError(f"Invalid Tinker model ID format: {tinker_model_id}. Expected format: tinker://uuid/weights/checkpoint_name")
+
+                # Extract checkpoint name (e.g., "000060") from path
+                if "/weights/" not in tinker_model_id:
+                    raise ValueError(f"Invalid Tinker model ID format: {tinker_model_id}. Expected format: tinker://uuid/weights/checkpoint_name")
+
+                checkpoint_name = tinker_model_id.split("/weights/")[-1]
+                try:
+                    # Extract batch number from checkpoint name (6-digit format: 000060 -> 60)
+                    batch = int(checkpoint_name)
+                except ValueError as err:
+                    raise ValueError(f"Invalid checkpoint name format: {checkpoint_name}. Expected 6-digit number (e.g., 000060)") from err
+
+                # Construct sampler path by replacing "weights" with "sampler_weights"
+                sampler_path = tinker_model_id.replace("/weights/", "/sampler_weights/")
+
+                resume_info = {
+                    "state_path": tinker_model_id,
+                    "sampler_path": sampler_path,
+                    "batch": batch,
+                }
+                logger.info(f"Resuming from Tinker model ID: {tinker_model_id}")
+            else:
+                # Fall back to local checkpoint lookup
+                resume_info = self.get_last_checkpoint()
 
         if resume_info:
             # Resume from checkpoint
@@ -93,8 +123,11 @@ class TinkerPolicyTrainer:
                 logger.info(f"No sampler_path in checkpoint, using: {sampler_path}")
                 sampling_client = self.create_sampling_client(sampler_path)
 
-            start_batch = resume_info["batch"]
-            logger.info(f"Resuming from batch {start_batch}")
+            # Checkpoint batch number represents the last completed batch
+            # So we should resume from the next batch (batch + 1)
+            checkpoint_batch = resume_info["batch"]
+            start_batch = checkpoint_batch + 1
+            logger.info(f"Resuming from checkpoint at batch {checkpoint_batch}, starting training at batch {start_batch}")
             return start_batch, sampling_client
         else:
             # Start from scratch
