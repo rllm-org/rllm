@@ -12,11 +12,7 @@ def main(config):
 
     trainer = AgentTrainer(
         workflow_class=DispatcherSearcherWorkflow,
-        workflow_args={
-            "top_k": 3,
-            "shuffle_retrieved_info": False,
-            "effort_param": 0.5,
-        },
+        workflow_args={"top_k": 3, "shuffle_retrieved_info": False, "effort_param": 0.5, "rag_data_dir": "../rag"},
         config=config,
         train_dataset=train_dataset,
         val_dataset=test_dataset,

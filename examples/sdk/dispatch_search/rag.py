@@ -335,13 +335,12 @@ _indexer_registry: dict[str, RagIndexer] = {}
 
 
 class ClaimRAGTool(Tool):
-    def __init__(self, rag_dir: str = "rag", top_k: int = 3, index_name: str = "climate_claim"):
+    def __init__(self, rag_data_dir: str, top_k: int = 3, index_name: str = "climate_claim"):
         name = index_name + "_rag_tool"
         description = f"A tool that can search the {index_name} RAG index for relevant fact-check information about {index_name.split('_')[0]}."
 
         if index_name not in _indexer_registry:
-            curr_dir = os.path.dirname(os.path.abspath(__file__))
-            load_dir = os.path.join(curr_dir, rag_dir, index_name)
+            load_dir = os.path.join(rag_data_dir, index_name)
             logger.info(f"Loading RAG index from {load_dir}")
 
             _indexer_registry[index_name] = RagIndexer.load(load_dir)

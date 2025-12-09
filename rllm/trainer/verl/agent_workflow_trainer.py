@@ -82,7 +82,12 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
 
         # rejection sampling config (used for rejection sampling)
         rs_mode = "episode" if self.config.rllm.rejection_sample.enable else "none"
-        self.rs_config = RejectionSamplingConfig(mode=rs_mode, min_partial_solve_tasks=self.config.data.train_batch_size)
+
+        self.rs_config = RejectionSamplingConfig(
+            mode=rs_mode,
+            min_partial_solve_tasks=self.config.rllm.rejection_sample.min_partial_solve_tasks,
+            min_trajs_per_group=self.config.rllm.rejection_sample.min_trajs_per_group,
+        )
 
         # algorithm config (used for rLLM-native advantage computation)
         self.algorithm_config = AlgorithmConfig(

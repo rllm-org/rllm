@@ -62,6 +62,8 @@ rllm:
   rejection_sample:
     enable: False
     multiplier: 1
+    min_trajs_per_group: -1  # -1 means no filtering at all
+    min_partial_solve_tasks: 4  # minimum number of tasks with partial solves before proceeding (requires enable=True)
   sdk:
     store:
       path: ~/.rllm/traces.db

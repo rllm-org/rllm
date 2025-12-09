@@ -93,12 +93,12 @@ class SearcherAgent:
     A searcher agent who is equipped with a database of information.
     """
 
-    def __init__(self, rollout_engine: RolloutEngine, index_name: str, top_k: int = 3, shuffle_retrieved_info: bool = False):
+    def __init__(self, rollout_engine: RolloutEngine, rag_data_dir: str, index_name: str, top_k: int = 3, shuffle_retrieved_info: bool = False):
         self.rollout_engine = rollout_engine
         self.index_name = index_name
         self.top_k = top_k
         self.shuffle_retrieved_info = shuffle_retrieved_info
-        self.rag_tool = ClaimRAGTool(index_name=index_name, top_k=top_k)
+        self.rag_tool = ClaimRAGTool(rag_data_dir=rag_data_dir, index_name=index_name, top_k=top_k)
 
     def _parse_search_response(self, response: str) -> str:
         final_match = re.search(r"<answer>(.*?)</answer>", response, re.IGNORECASE | re.DOTALL)
@@ -137,12 +137,12 @@ class SearcherAgent:
 
 
 class DispatcherSearcherWorkflow(Workflow):
-    def __init__(self, rollout_engine: RolloutEngine, top_k: int = 3, shuffle_retrieved_info: bool = False, effort_param: float = 0.5, **kwargs):
+    def __init__(self, rollout_engine: RolloutEngine, rag_data_dir: str, top_k: int = 3, shuffle_retrieved_info: bool = False, effort_param: float = 0.5, **kwargs):
         super().__init__(rollout_engine, **kwargs)
 
         self.dispatcher_agent = DispatcherAgent(rollout_engine)
-        self.climate_searcher_agent = SearcherAgent(rollout_engine, index_name="climate_claim", top_k=top_k, shuffle_retrieved_info=shuffle_retrieved_info)
-        self.covid_searcher_agent = SearcherAgent(rollout_engine, index_name="covid_claim", top_k=top_k, shuffle_retrieved_info=shuffle_retrieved_info)
+        self.climate_searcher_agent = SearcherAgent(rollout_engine, rag_data_dir=rag_data_dir, index_name="climate_claim", top_k=top_k, shuffle_retrieved_info=shuffle_retrieved_info)
+        self.covid_searcher_agent = SearcherAgent(rollout_engine, rag_data_dir=rag_data_dir, index_name="covid_claim", top_k=top_k, shuffle_retrieved_info=shuffle_retrieved_info)
 
         self.effort_param = effort_param
 
@@ -159,21 +159,22 @@ class DispatcherSearcherWorkflow(Workflow):
         dispatch_action: DispatchAction = dispatch_step.action
 
         # Step 2: Let dispatched searcher agents return their responses
-        searcher_traj, dispatch_num = Trajectory(name="searcher"), 0
+        searcher_a_traj, searcher_b_traj = Trajectory(name="searcher_a"), Trajectory(name="searcher_b")
+        dispatch_num = 0
         searcher_responses = {}
         if dispatch_action == DispatchAction.DISPATCH_A:
-            searcher_traj.steps.append(await self.climate_searcher_agent.search_step(claim, debug=debug))
-            searcher_responses["searcher_a"] = searcher_traj.steps[-1].action
+            searcher_a_traj.steps.append(await self.climate_searcher_agent.search_step(claim, debug=debug))
+            searcher_responses["searcher_a"] = searcher_a_traj.steps[-1].action
             dispatch_num += 1
         elif dispatch_action == DispatchAction.DISPATCH_B:
-            searcher_traj.steps.append(await self.covid_searcher_agent.search_step(claim, debug=debug))
-            searcher_responses["searcher_b"] = searcher_traj.steps[-1].action
+            searcher_b_traj.steps.append(await self.covid_searcher_agent.search_step(claim, debug=debug))
+            searcher_responses["searcher_b"] = searcher_b_traj.steps[-1].action
             dispatch_num += 1
         elif dispatch_action == DispatchAction.DISPATCH_BOTH:
-            searcher_traj.steps.append(await self.climate_searcher_agent.search_step(claim, debug=debug))
-            searcher_traj.steps.append(await self.covid_searcher_agent.search_step(claim, debug=debug))
-            searcher_responses["searcher_a"] = searcher_traj.steps[-2].action
-            searcher_responses["searcher_b"] = searcher_traj.steps[-1].action
+            searcher_a_traj.steps.append(await self.climate_searcher_agent.search_step(claim, debug=debug))
+            searcher_b_traj.steps.append(await self.covid_searcher_agent.search_step(claim, debug=debug))
+            searcher_responses["searcher_a"] = searcher_a_traj.steps[-1].action
+            searcher_responses["searcher_b"] = searcher_b_traj.steps[-1].action
             dispatch_num += 2
         else:  # the dispatch action is invalid, stop right here
             dispatch_traj.steps[-1].reward = 0.0
@@ -189,7 +190,8 @@ class DispatcherSearcherWorkflow(Workflow):
 
         fact_check_step.reward = final_reward
 
-        searcher_traj.steps[-1].reward = final_reward
+        searcher_a_traj.steps[-1].reward = final_reward
+        searcher_b_traj.steps[-1].reward = final_reward
 
         termination_reason = TerminationReason.ENV_DONE if final_response != FinalResponse.ERROR else TerminationReason.UNKNOWN
 
@@ -197,7 +199,7 @@ class DispatcherSearcherWorkflow(Workflow):
             id=uid,
             task=task,
             termination_reason=termination_reason,
-            trajectories=[searcher_traj, dispatch_traj],
+            trajectories=[searcher_a_traj, searcher_b_traj, dispatch_traj],
             is_correct=is_correct,
             metrics={"searcher_acc": compute_searcher_accuracy(searcher_responses, source, label)},
         )
