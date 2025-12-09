@@ -50,6 +50,7 @@ dependencies = [
     "pydantic",
     "wrapt",
     "asgiref>=3.7.0",  # Async/sync conversion utilities
+    "wandb",
 
     # Development and testing
     "pytest",
