@@ -131,7 +131,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         for episode in episodes:
             for key, value in episode.metrics.items():
                 workflow_metrics[key].append(value)
-            termination_counter.update(episode.termination_reason)
+            termination_counter[episode.termination_reason] += 1
 
     def _compute_step_level_values(self, batch: DataProto, timing_raw: dict, metrics: dict) -> DataProto:
         """

@@ -88,7 +88,7 @@ def validate_and_propagate_rewards(
             assert num_missing_rewards == 0 or num_missing_rewards == len(group.trajectories), "Trajectories in a group must either ALL NOT have a trajectory-level reward or ALL have a trajectory-level reward"
             if num_missing_rewards > 0:
                 for traj in group.trajectories:
-                    assert len(traj.steps) > 0, "Trajectory must have at least one step"
+                    assert len(traj.steps) > 0, "Trajectory within a group must have at least one step"
                     traj.reward = traj.steps[-1].reward
                     warnings.append(f"Trajectory {traj.name} in group {group.group_id} has no trajectory-level reward, propagated from last step reward")
         else:  # broadcast=False
@@ -118,6 +118,8 @@ def build_trajectory_groups(episodes: list[Episode], compact_filtering_config: C
             continue
         task_id = episode.id.split(":")[0]
         for trajectory in episode.trajectories:
+            if len(trajectory.steps) == 0:
+                continue
             trajectories_by_name[f"{task_id}:{trajectory.name}"].append(trajectory)
             metadata_by_name[f"{task_id}:{trajectory.name}"].append(
                 {

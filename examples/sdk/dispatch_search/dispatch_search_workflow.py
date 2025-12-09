@@ -170,15 +170,12 @@ class DispatcherSearcherWorkflow(Workflow):
             searcher_b_traj.steps.append(await self.covid_searcher_agent.search_step(claim, debug=debug))
             searcher_responses["searcher_b"] = searcher_b_traj.steps[-1].action
             dispatch_num += 1
-        elif dispatch_action == DispatchAction.DISPATCH_BOTH:
+        else:  # dispatch both
             searcher_a_traj.steps.append(await self.climate_searcher_agent.search_step(claim, debug=debug))
             searcher_b_traj.steps.append(await self.covid_searcher_agent.search_step(claim, debug=debug))
             searcher_responses["searcher_a"] = searcher_a_traj.steps[-1].action
             searcher_responses["searcher_b"] = searcher_b_traj.steps[-1].action
             dispatch_num += 2
-        else:  # the dispatch action is invalid, stop right here
-            dispatch_traj.steps[-1].reward = 0.0
-            return Episode(id=uid, task=task, termination_reason=TerminationReason.ERROR, trajectories=[dispatch_traj])
 
         fact_check_step = await self.dispatcher_agent.fact_check_step(claim, searcher_responses, debug=debug)
         dispatch_traj.steps.append(fact_check_step)
@@ -188,10 +185,14 @@ class DispatcherSearcherWorkflow(Workflow):
         final_reward, is_correct = compute_final_reward_and_correctness(final_response, label, dispatch_num, self.effort_param)
         colorful_print(f"Final reward: {final_reward}, is_correct: {is_correct}, dispatch_num: {dispatch_num}, final_response: {final_response}, label: {label}", fg="cyan", bold=True)
 
-        fact_check_step.reward = final_reward
-
-        searcher_a_traj.steps[-1].reward = final_reward
-        searcher_b_traj.steps[-1].reward = final_reward
+        valid_trajectories = [dispatch_traj]
+        dispatch_traj.steps[-1].reward = final_reward  # assign reward to the fact check step
+        if len(searcher_a_traj.steps) > 0:
+            searcher_a_traj.steps[-1].reward = final_reward
+            valid_trajectories.append(searcher_a_traj)
+        if len(searcher_b_traj.steps) > 0:
+            searcher_b_traj.steps[-1].reward = final_reward
+            valid_trajectories.append(searcher_b_traj)
 
         termination_reason = TerminationReason.ENV_DONE if final_response != FinalResponse.ERROR else TerminationReason.UNKNOWN
 
@@ -199,7 +200,7 @@ class DispatcherSearcherWorkflow(Workflow):
             id=uid,
             task=task,
             termination_reason=termination_reason,
-            trajectories=[searcher_a_traj, searcher_b_traj, dispatch_traj],
+            trajectories=valid_trajectories,
             is_correct=is_correct,
             metrics={"searcher_acc": compute_searcher_accuracy(searcher_responses, source, label)},
         )
