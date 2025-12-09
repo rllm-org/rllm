@@ -90,7 +90,7 @@ class rLLMAdvantageEstimator(str, Enum):
     """
     A unified advantage estimator for rLLM. Work with both `tinker` and `verl` backends at the expense of
     losing some flexibility. Currently only supporting GRPO and REINFORCE.
-    TODO: add more estimators.
+    TODO(listar2000): add more estimators.
     """
 
     GRPO = "grpo"

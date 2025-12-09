@@ -268,7 +268,6 @@ class PipelineAgentPPOTrainer(AgentPPOTrainer):
                         else:
                             metrics[k] = np.mean(v)
 
-                # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
                 self.global_steps += 1
 

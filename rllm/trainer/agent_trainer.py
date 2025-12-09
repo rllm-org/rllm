@@ -163,8 +163,7 @@ class AgentTrainer:
         import ray
 
         if not ray.is_initialized():
-            # TODO: check whether we need a separate function to retrieve the runtime environment (for fireworks)
-            from verl.trainer.constants_ppo import get_ppo_ray_runtime_env as get_fireworks_ray_runtime_env
+            from rllm.trainer.verl.ray_runtime_env import get_ppo_ray_runtime_env as get_fireworks_ray_runtime_env
 
             ray.init(runtime_env=get_fireworks_ray_runtime_env(), num_cpus=self.config.ray_init.num_cpus)
 

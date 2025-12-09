@@ -1,7 +1,7 @@
 """
 Common metric utilities for rLLM. Work with TrajectoryGroups and Episodes.
 For backend-dependent metrics, please implement them in the backend-specific modules.
-TODO: think hard about what are the actually important metrics in agentic RL settings.
+TODO(listar2000): think hard about what are the actually important metrics in agentic RL settings.
 """
 
 import numpy as np

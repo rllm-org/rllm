@@ -73,7 +73,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         if self.config.rllm.rejection_sample.multiplier != 1:
             assert self.config.rllm.rejection_sample.enable is True, "rejection sampling is disabled, but rejection_sample.multiplier is not 1"
 
-        # TODO: add these configurations to the hydra config
+        # TODO(listar2000): add these configurations to the hydra config
         # compact filtering config (used for filtering out episodes that are not valid)
         self.cf_config = CompactFilteringConfig.from_config(self.config.rllm.compact_filtering)
 
@@ -150,7 +150,6 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
             batch = batch.union(old_log_prob)
 
             if "rollout_log_probs" in batch.batch.keys():
-                # TODO: we may want to add diff of probs too.
                 rollout_old_log_probs = batch.batch["rollout_log_probs"]
                 actor_old_log_probs = batch.batch["old_log_probs"]
                 attention_mask = batch.batch["attention_mask"]

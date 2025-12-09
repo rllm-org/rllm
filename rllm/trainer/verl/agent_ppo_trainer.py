@@ -318,7 +318,6 @@ class AgentPPOTrainer(RayPPOTrainer):
                             batch = batch.union(old_log_prob)
 
                             if "rollout_log_probs" in batch.batch.keys():
-                                # TODO: we may want to add diff of probs too.
                                 rollout_old_log_probs = batch.batch["rollout_log_probs"]
                                 actor_old_log_probs = batch.batch["old_log_probs"]
                                 attention_mask = batch.batch["attention_mask"]
@@ -440,7 +439,6 @@ class AgentPPOTrainer(RayPPOTrainer):
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
 
-                # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
                 self.global_steps += 1

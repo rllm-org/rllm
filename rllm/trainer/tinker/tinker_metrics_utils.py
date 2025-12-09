@@ -15,7 +15,7 @@ from rllm.trainer.common.metrics import reduce_reward_metrics_by_trajectory_name
 logger = logging.getLogger(__name__)
 
 
-# TODO: delete this or refactor tinker_agent_trainer as well to not use it.
+# TODO(listar2000): delete this or refactor tinker_agent_trainer as well to not use it.
 def print_episodes(
     episodes: list[Episode],
     tokenizer: Any,
@@ -369,7 +369,7 @@ def compute_training_metrics(
     metrics.update(reduce_reward_metrics_by_trajectory_name(trajectory_groups, prefix="reward"))
 
     # Add environment metrics (detailed stats similar to tinker_cookbook)
-    # TODO: actually implement separate metrics that are episode-based (currently trajectory-group-based)
+    # TODO(listar2000): actually implement separate metrics that are episode-based (currently trajectory-group-based)
     # env_metrics = compute_env_metrics(episodes)
     # metrics.update(env_metrics)
 

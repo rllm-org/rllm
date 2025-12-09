@@ -34,8 +34,10 @@ def colorful_warning(string: str, *args, **kwargs) -> None:
 
 
 def abbreviate_string(full_string: str, max_length: int = 512):
-    """Abbreviate a string to a maximum length, and mention how many characters are skipped in between."""
-    # TODO: this is only doing heuristic truncation. The exact skipped length is not guaranteed.
+    """
+    Abbreviate a string to a maximum length, and mention how many characters are skipped in between.
+    Note that the "...(skipped X characters)" is only a display hint and the exact skipped length is not guaranteed.
+    """
     full_string = full_string.strip()
     if len(full_string) <= max_length:
         return full_string

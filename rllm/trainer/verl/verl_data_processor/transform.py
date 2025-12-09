@@ -189,7 +189,7 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
         advantage_tensor = _build_per_step_advantages(traj_mask, accumulated.advantages)
         tensors["advantages"] = advantage_tensor
         tensors["returns"] = advantage_tensor
-        # TODO: we should support `token_level_scores` from the `Step` attribute level.
+        # TODO(listar2000): we should support `token_level_scores` from the `Step` attribute level.
         # we also need to implement the `kl_penalty` logic used in `verl`.
         if stepwise_advantage_mode == "per_step":
             tensors["token_level_scores"] = tensors["step_rewards"]

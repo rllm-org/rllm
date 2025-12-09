@@ -50,7 +50,7 @@ def compute_advantage_from_trajectory_groups(
         logger.warning(f"Unsupported estimator {algorithm_config.estimator} in rLLMAdvantageEstimator, using GRPO")
         advantage_fn = partial(_calculate_grpo_advantages, norm_adv_by_std_in_grpo=algorithm_config.norm_adv_by_std_in_grpo)
 
-    # TODO: in the future, we should support per-trajectory-group advantage modes
+    # TODO(listar2000): in the future, we should support per-trajectory-group advantage modes
     for group in groups:
         if algorithm_config.stepwise_advantage_mode == "broadcast":
             assert all(traj.reward is not None for traj in group.trajectories), "Trajectory reward cannot be None in broadcast mode"

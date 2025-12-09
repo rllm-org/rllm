@@ -205,7 +205,7 @@ class TinkerWorkflowTrainer:
         Yields:
             list[Episode]
         """
-        # TODO: implement mini-batching. Currently we only support one minibatch per batch.
+        # TODO(listar2000): implement mini-batching. Currently we only support one minibatch per batch.
         assert current_batch is not None, "current_batch is None"
 
         task_ids = [item["uid"] for item in current_batch]

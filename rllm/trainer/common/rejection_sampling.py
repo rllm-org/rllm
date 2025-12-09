@@ -185,7 +185,7 @@ def apply_rejection_sampling_and_filtering(episodes: list[Episode], groups: list
     # Step 2: Compute episode-level correctness metrics (always, for logging)
     update_episode_metrics(filtered_episodes, metrics)
 
-    # Step 3: Apply mode-specific logic (TODO: implement a group-level rejection sampling)
+    # Step 3: Apply mode-specific logic (TODO(listar2000): implement a group-level rejection sampling)
     if config.mode == "none":
         # No rejection, just return filtered groups with metrics
         return filtered_groups, filtered_episodes, metrics.to_dict()

@@ -83,7 +83,6 @@ class VerlEngine(RolloutEngine):
             completion_ids = completion_ids[:max_tokens]
 
         completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
-        # TODO: implement parse_completion for the standard parser
         parsed_output = self.chat_parser.parse_completion(completion_ids)
 
         return ModelOutput(
