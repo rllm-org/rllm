@@ -57,7 +57,7 @@ conda create -n rllm python=3.11 -y
 conda activate rllm
 
 # Build rLLM from source
-pip install -e .
+uv pip install -e .
 ```
 
 ### Step 2: Installing Training Backend

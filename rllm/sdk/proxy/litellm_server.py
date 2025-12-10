@@ -54,12 +54,16 @@ class LiteLLMProxyRuntime:
         tracer: SqliteTracer | None,
         *,
         await_tracer_persistence: bool = False,
+        add_logprobs: bool = False,
+        add_return_token_ids: bool = False,
     ):
         self._current_config: Path | None = None
         self._state_dir = state_dir
         self._tracer = tracer
         self._lock = asyncio.Lock()
         self._await_tracer_persistence = await_tracer_persistence
+        self._add_logprobs = add_logprobs
+        self._add_return_token_ids = add_return_token_ids
 
     async def startup(self) -> None:
         # Don't initialize LiteLLM on startup - wait for first reload request
@@ -103,7 +107,7 @@ class LiteLLMProxyRuntime:
 
     def _install_callbacks(self) -> None:
         callbacks = [cb for cb in getattr(litellm, "callbacks", []) if not isinstance(cb, SamplingParametersCallback | TracingCallback)]
-        callbacks.append(SamplingParametersCallback(add_return_token_ids=True))
+        callbacks.append(SamplingParametersCallback(add_return_token_ids=self._add_return_token_ids, add_logprobs=self._add_logprobs))
         if self._tracer:
             callbacks.append(TracingCallback(self._tracer, await_persistence=self._await_tracer_persistence))
         litellm.callbacks = callbacks
@@ -166,6 +170,16 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="If set, liteLLM responses wait for tracer persistence (slower but consistent session reads).",
     )
+    parser.add_argument(
+        "--add-return-token-ids",
+        action="store_true",
+        help="If set, automatically add return_token_ids=True to requests.",
+    )
+    parser.add_argument(
+        "--add-logprobs",
+        action="store_true",
+        help="If set, automatically add logprobs=True to requests.",
+    )
     return parser.parse_args()
 
 
@@ -180,6 +194,8 @@ def main() -> None:
         state_dir=Path(args.state_dir).expanduser().resolve(),
         tracer=_build_tracer(args.db_path, args.project),
         await_tracer_persistence=args.sync_tracer,
+        add_return_token_ids=args.add_return_token_ids,
+        add_logprobs=args.add_logprobs,
     )
 
     @asynccontextmanager

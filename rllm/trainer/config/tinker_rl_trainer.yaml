@@ -70,6 +70,7 @@ trainer:
   save_freq: 20
   val_before_train: true
   default_local_dir: '/tmp/rllm-tinker-checkpoints'
+  resume_from_tinker_id: null  # Tinker model ID path to resume from (e.g., tinker://uuid/weights/000060)
 
 # Hydra configuration
 hydra:

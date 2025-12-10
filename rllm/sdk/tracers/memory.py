@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from rllm.sdk.data_process import build_llm_io
 from rllm.sdk.protocol import Trace
 
 if TYPE_CHECKING:
@@ -126,12 +127,14 @@ class InMemorySessionTracer:
         actual_trace_id = trace_id or f"tr_{uuid.uuid4().hex[:16]}"
 
         # Build trace data - use all values as-is (no overwrites)
+        llm_input, llm_output = build_llm_io(input, output)
+
         trace_kwargs = {
             "trace_id": actual_trace_id,
             "session_name": session_name or "",
             "name": name,
-            "input": input,
-            "output": output,
+            "input": llm_input,
+            "output": llm_output,
             "model": model,
             "latency_ms": latency_ms,
             "tokens": tokens,

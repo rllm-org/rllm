@@ -77,9 +77,19 @@ verl = [
     "qwen-vl-utils",
 ]
 
+sdk = [
+    "litellm[proxy]",
+    "aiosqlite",
+    "asgiref",
+]
+
 tinker = [
     "tinker ; python_version >= '3.11'",
     "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook ; python_version >= '3.11'",
+]
+
+opentelemetry = [
+    "opentelemetry-sdk",
 ]
 
 smolagents = [

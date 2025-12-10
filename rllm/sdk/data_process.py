@@ -1,63 +1,133 @@
+import json
 import logging
 import uuid
 from collections import defaultdict
 
 from rllm.agents.agent import Step, Trajectory
 from rllm.engine.rollout import ModelOutput
+from rllm.sdk.protocol import LLMInput, LLMOutput, Trace
 
 logger = logging.getLogger(__name__)
 
 
-def trace_to_model_output(trace: dict) -> ModelOutput:
-    output = trace.get("output", {})
+def _extract_prompt_token_ids(output_payload: dict) -> list[int]:
+    """
+    Extract prompt token IDs from the output payload root level.
+    Per protocol.py: output["prompt_token_ids"] is the canonical location.
+    """
+    prompt_ids = output_payload.get("prompt_token_ids")
+    if prompt_ids is None:
+        return []
+    return list(prompt_ids)
 
-    # Extract prompt token IDs (vLLM-specific field)
-    prompt_ids = output.get("prompt_token_ids", [])
 
-    # Extract response choices (OpenAI-compatible format)
-    choices = output.get("choices", [])
+def _extract_completion_token_ids(output_payload: dict) -> list[int]:
+    completion_ids = output_payload.get("choices")[0].get("provider_specific_fields", {}).get("token_ids")
+    if completion_ids is None:
+        return []
+    return list(completion_ids)
 
-    # Extract message content and reasoning from first choice
-    content = choices[0].get("message", {}).get("content", "")
-    reasoning = choices[0].get("message", {}).get("reasoning", "")
 
-    # Extract completion token IDs from provider-specific fields (vLLM only)
-    provider_specific_fields = choices[0].get("provider_specific_fields", {})
-    completion_ids = provider_specific_fields.get("token_ids", [])
+def _extract_logprobs(output_payload: dict) -> list[float]:
+    """
+    Extract logprobs from the output payload.
 
-    # Validate required fields
-    assert output, trace
-    assert len(choices) == 1, "Only one choice is supported for now"
+    Prioritizes compact response_logprobs (from vLLM instrumentation) over
+    verbose OpenAI format logprobs for efficiency.
+    """
+    choices = output_payload.get("choices")
+    if not choices:
+        return []
+
+    choice = choices[0]
+    provider_fields = choice.get("provider_specific_fields", {})
+    response_logprobs = provider_fields.get("response_logprobs")
+
+    if response_logprobs is not None:
+        logprobs_list = list(response_logprobs)
+        return logprobs_list
+
+    # Fallback to parsing OpenAI format logprobs
+    logprobs_obj = choice.get("logprobs")
+    if logprobs_obj is None:
+        logger.debug("⚠️ [DATA_PROCESS] No logprobs found in response (neither response_logprobs nor logprobs)")
+        return []
+    logprobs = logprobs_obj.get("content")
+    if logprobs is None:
+        logger.debug("⚠️ [DATA_PROCESS] logprobs object found but no 'content' field")
+        return []
+    return [float(entry.get("logprob")) for entry in logprobs if entry and entry.get("logprob") is not None]
+
+
+def build_llm_output(payload: dict) -> LLMOutput:
+    """Normalize raw OpenAI-style output payloads into LLMOutput."""
+    if not isinstance(payload, dict):
+        raise TypeError(f"LLM output must be dict or LLMOutput, got {type(payload)}")
+
+    choices = payload.get("choices") or []
+    if not choices:
+        raise ValueError("LLM output payload missing 'choices'")
+    choice = choices[0]
+
+    token_ids = _extract_completion_token_ids(payload)
+    rollout_logprobs = _extract_logprobs(payload)
+
+    return LLMOutput(
+        message=choice.get("message") or {},
+        finish_reason=choice.get("finish_reason"),
+        output_token_ids=token_ids,
+        rollout_logprobs=rollout_logprobs,
+    )
+
+
+def build_llm_io(input_payload: dict, output_payload: dict) -> tuple[LLMInput, LLMOutput]:
+    """Normalize raw OpenAI input/output payloads into structured LLMInput/LLMOutput."""
+    llm_output = build_llm_output(output_payload)
+    prompt_token_ids = _extract_prompt_token_ids(output_payload)
+    llm_input = LLMInput(messages=input_payload.get("messages") or [], prompt_token_ids=prompt_token_ids)
+    return llm_input, llm_output
+
+
+def trace_to_model_output(trace: Trace) -> ModelOutput:
+    """Convert stored Trace protocol to ModelOutput."""
+    input_block = trace.input
+    output_block = trace.output
+
+    prompt_ids = input_block.prompt_token_ids
+    completion_ids = output_block.output_token_ids
+
+    content = output_block.message.get("content", "")
+    reasoning = output_block.message.get("reasoning", "")
+    tool_calls = output_block.message.get("tool_calls", [])
+    finish_reason = output_block.finish_reason or "stop"
+
     assert prompt_ids, "Prompt IDs are required"
     assert completion_ids, "Completion IDs are required"
 
     return ModelOutput(
-        text="",  # Not used in current implementation
+        text="",
         content=content,
         reasoning=reasoning,
-        tool_calls=[],  # TODO: Extract tool calls from message if present
+        tool_calls=tool_calls,
         prompt_ids=prompt_ids,
         completion_ids=completion_ids,
-        logprobs=[],  # TODO: Extract logprobs if available
+        logprobs=output_block.rollout_logprobs or [],
         prompt_length=len(prompt_ids),
         completion_length=len(completion_ids),
-        finish_reason=choices[0].get("finish_reason", "stop"),
+        finish_reason=finish_reason,
     )
 
 
-def trace_to_step(trace: dict) -> Step:
-    # Extract input messages (conversation history before this LLM call)
-    messages = trace.get("input", {}).get("messages", [])
-
-    # Extract response message (the LLM's response)
-    response_message = trace.get("output", {}).get("choices", [])[0].get("message", {})
-
+def trace_to_step(trace: Trace) -> Step:
+    """Convert stored Trace protocol to Step."""
+    messages = trace.input.messages
+    response_message = trace.output.message
     assert response_message, "Response message is required in trace output"
 
     return Step(
         chat_completions=messages + [response_message],
         model_output=trace_to_model_output(trace),
-        info=trace.get("metadata", {}),
+        info=trace.metadata,
     )
 
 
@@ -168,3 +238,21 @@ class SequenceAccumulator:
 #         datums.append(accumulator.to_datum())
 
 #     return datums
+
+
+def try_serialize(data):
+    if isinstance(data, dict):
+        serialized_data = {}
+        for key, value in data.items():
+            serialized_data[key] = try_serialize(value)
+        return serialized_data
+    elif getattr(data, "model_dump", None) is not None:
+        return data.model_dump()
+    elif isinstance(data, list):
+        serialized_data = [try_serialize(item) for item in data]
+        return serialized_data
+    else:
+        try:
+            return json.dumps(data)
+        except Exception:
+            return "NOT_SERIALIZABLE"

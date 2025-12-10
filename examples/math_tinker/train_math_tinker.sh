@@ -1,11 +1,16 @@
 #!/bin/bash
 # Train a math agent using TinkerAgentTrainer (simplified wrapper)
 # This exactly matches train_seperate.sh configuration but uses TinkerAgentTrainer
+#
+# To resume from a Tinker model ID (from Tinker console):
+#   trainer.resume_from_tinker_id='tinker://<uuid>/weights/<checkpoint_name>'
+#   where <checkpoint_name> is the name of the checkpoint to resume from
+#   e.g. trainer.resume_from_tinker_id='tinker://7af7f6f0-e8f9-4124-ab93-e7f08eb54a9d/weights/000060'
 
 set -x
 
 # Model to use (matching math_rl recipe default for Hendrycks MATH)
-MODEL_PATH=Qwen/Qwen3-8B
+MODEL_PATH=Qwen/Qwen3-30B-A3B
 
 # To match the performance of tinker's original rl_loop.py
 # Apply a small patch at rllm/engine/agent_execution_engine.py
@@ -32,8 +37,8 @@ python -m examples.math_tinker.train_math_tinker \
     trainer.total_epochs=1 \
     trainer.logger=['wandb'] \
     trainer.project_name='rllm-tinker' \
-    trainer.experiment_name='rllm-tinker-math-refactor' \
+    trainer.experiment_name='rllm-tinker-math' \
     trainer.val_before_train=False \
     trainer.test_freq=20 \
     trainer.save_freq=20 \
-    trainer.default_local_dir='/tmp/rllm-tinker-math-refactor'
+    trainer.default_local_dir='/tmp/rllm-tinker-math'
