@@ -332,16 +332,16 @@ class SolverJudgeWorkflow:
 ```
 Example run:
 ┌─────────────────────────────────────────────────┐
-│ Problem: Reach 150 with [25, 50, 75, 100]       │
+│ Problem: Reach 150 with [3, 50]                 │
 ├─────────────────────────────────────────────────┤
-│ Solver 1: "100 + 50 = 150"  → reward = 1.0 ✓   │
-│ Solver 2: "25 + 75 = 100"   → reward = 0.0 ✗   │
-│ Judge: selects Solver 1     → reward = 1.0 ✓   │
+│ Solver 1: "100 + 50 = 150"  → reward = 0.0 ✗    │
+│ Solver 2: "3 * 50 = 150"    → reward = 1.0 ✓    │
+│ Judge: selects Solver 1     → reward = 1.0 ✓    │
 └─────────────────────────────────────────────────┘
 
 Training signal:
-• Solver 1 is reinforced (correct answer)
-• Solver 2 learns to improve (wrong answer)
+• Solver 2 is reinforced (correct answer)
+• Solver 1 learns to improve (wrong answer)
 • Judge learns to identify correct solutions
 ```
 
