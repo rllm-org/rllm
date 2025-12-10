@@ -15,22 +15,6 @@ Training an RL agent requires two components:
 1. **Rollout function**: Perform a sequence of actions using the LLM
 2. **Reward function**: Evaluate how good the outcome is
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Training Loop                            │
-│                                                              │
-│   ┌──────────┐      ┌──────────┐      ┌──────────┐         │
-│   │  Task    │ ──▶  │ Rollout  │ ──▶  │  Reward  │ ──▶ ... │
-│   │ (question│      │ (generate│      │ (evaluate│         │
-│   │  + answer)│      │ response)│      │  result) │         │
-│   └──────────┘      └──────────┘      └──────────┘         │
-│                           │                                  │
-│                           ▼                                  │
-│                    LiteLLM Proxy                            │
-│                    (captures tokens)                         │
-└─────────────────────────────────────────────────────────────┘
-```
-
 The rLLM SDK handles the plumbing—you just define what to generate and how to score it.
 
 ---

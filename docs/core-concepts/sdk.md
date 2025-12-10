@@ -40,67 +40,14 @@ Our solution: **capture token IDs directly from the inference server** (vLLM), s
 
 ## System Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           YOUR AGENT CODE                                    │
-│  (LangGraph, LangChain, custom loops - any framework)                       │
-│                                                                              │
-│    llm = get_chat_client()  # Drop-in OpenAI client replacement             │
-│    with session(task_id="abc"):                                             │
-│        response = llm.chat.completions.create(...)                          │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                     │
-                                     ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          LiteLLM PROXY                                       │
-│  • Intercepts all LLM calls                                                  │
-│  • Injects params to fetch token_ids & logprobs                             │
-│  • Routes to vLLM servers with load balancing                               │
-│  • Attaches session metadata to each call                                   │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                     │
-                    ┌────────────────┴────────────────┐
-                    ▼                                 ▼
-         ┌──────────────────┐               ┌──────────────────┐
-         │   vLLM Server 1  │               │   vLLM Server N  │
-         │  (returns token  │     . . .     │  (distributed    │
-         │   IDs + logprobs)│               │   inference)     │
-         └──────────────────┘               └──────────────────┘
-                    │                                 │
-                    └────────────────┬────────────────┘
-                                     ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         SQLite DATABASE                                      │
-│  Stores per-call traces:                                                     │
-│  • prompt_token_ids, completion_token_ids                                   │
-│  • logprobs (optional)                                                       │
-│  • session_name, metadata, timestamps                                        │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                     │
-                                     ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        AgentSdkEngine                                        │
-│  • Executes agent rollouts concurrently (async/threading)                   │
-│  • Retrieves traces from SQLite after rollout completes                     │
-│  • Groups traces into trajectories based on session metadata                │
-│  • Transforms to training-ready format (DataProto for VERL)                 │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                     │
-                                     ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        AgentSdkTrainer                                       │
-│  • PPO training with stepwise advantage support                             │
-│  • Handles multi-step trajectories and reward assignment                    │
-│  • Validation, checkpointing, logging                                       │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+![System Architecture](../assets/sdk_arch.png)
 
 ### Data Flow Summary
 
-1. **Rollout Phase**: Your agent runs normally, making LLM calls via the SDK client
-2. **Capture Phase**: Proxy intercepts calls, fetches token IDs from vLLM, stores to SQLite
-3. **Collection Phase**: Engine retrieves traces, groups by session, builds trajectories
-4. **Training Phase**: Trainer receives tokenized data, computes advantages, updates model
+1. **Rollout Phase**: Your agent runs normally, making LLM calls via the SDK client, this invokes the litellm proxy to capture the token ids.
+2. **Capture Phase**: Proxy intercepts calls, injects metadata, fetches token IDs from vLLM. And finally stores all relevant information to the SQLite Store.
+3. **Collection Phase**: Engine fetches LLM calls directly from the SQLite Store, groups by `rollout_id`, and transform to `Trajectory` objects that's compatible with the Trainer.
+4. **Training Phase**: Trainer receives tokenized data, computes advantages and updates model weights.
 
 ---
 
@@ -138,12 +85,11 @@ def my_agent(question: str, ground_truth: str, **kwargs) -> float:
 
 ### 2. How It Works Under the Hood
 
-When you pass your agent function to `AgentTrainer`, the `AgentSdkEngine` automatically:
+When you pass your agent function to `AgentTrainer`, it will automatically:
 
 1. **Wraps each call in a session** - You don't need to manage sessions manually
-2. **Captures all LLM calls** - Every `client.chat.completions.create()` is traced
-3. **Groups traces by task** - Each agent invocation becomes a trajectory
-4. **Extracts token IDs** - For exact on-policy training
+2. **Captures all LLM calls** - Every `client.chat.completions.create()` is captured and stored to the SQLite Store.
+3. **Groups traces by task** - All LLM calls in the rollout becomes a trajectory ready for training.
 
 ```python
 from rllm.trainer.agent_trainer import AgentTrainer
@@ -318,8 +264,6 @@ We provide three hands-on tutorials that progressively introduce more complex ag
 | **[Simple Math Agent](../examples/sdk_math.md)** | Beginner | Basic `get_chat_client()`, single-step rollouts, `AgentTrainer` setup |
 | **[Solver-Judge Workflow](../examples/sdk_solver_judge.md)** | Intermediate | `@trajectory` decorator, multi-agent composition, per-agent reward assignment |
 | **[LangGraph RAG Agent](../examples/sdk_langgraph_rag.md)** | Advanced | Client injection into LangChain, multi-turn tracing, tool-using agents |
-
-**Recommended path**: Start with the Simple Math tutorial to understand the basics, then progress through Solver-Judge to learn multi-agent patterns, and finally explore LangGraph integration for production-ready agent architectures.
 
 ---
 

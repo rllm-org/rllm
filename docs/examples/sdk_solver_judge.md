@@ -15,7 +15,7 @@ By the end of this tutorial, you will have:
 3. Assigned separate rewards to each agent using `@trajectory`
 4. Trained the multi-agent system end-to-end
 
-**Dataset**: [Countdown](https://huggingface.co/datasets/Jiayi-Pan/Countdown) - Given numbers, reach a target using arithmetic operations.
+**Dataset**: [Countdown](https://huggingface.co/datasets/Jiayi-Pan/Countdown-Tasks-3to4) - Given numbers, reach a target using arithmetic operations.
 
 ---
 
@@ -26,30 +26,7 @@ Training an RL agent requires two components:
 1. **Rollout function**: Perform a sequence of actions using the LLM
 2. **Reward function**: Evaluate how good the outcome is
 
-In a multi-agent system, you have **multiple rollout functions** (Solver and Judge), and each gets its own reward:
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                        Training Loop                              │
-│                                                                   │
-│   ┌──────────┐      ┌──────────┐      ┌──────────┐              │
-│   │  Task    │ ──▶  │ Solver   │ ──▶  │  Reward  │ (per solver) │
-│   │ (target, │      │ (generate│      │ (correct │              │
-│   │  numbers)│      │ solution)│      │ equation?)│              │
-│   └──────────┘      └──────────┘      └──────────┘              │
-│                           │                                       │
-│                           ▼                                       │
-│                     ┌──────────┐      ┌──────────┐              │
-│                     │  Judge   │ ──▶  │  Reward  │ (selection)  │
-│                     │ (select  │      │ (picked  │              │
-│                     │   best)  │      │ correct?)│              │
-│                     └──────────┘      └──────────┘              │
-└──────────────────────────────────────────────────────────────────┘
-
-Result: Multiple trajectories, each with its own reward signal
-```
-
-**Key insight**: Each agent gets its OWN trajectory and reward signal. The trainer collects ALL trajectories and trains both agents simultaneously.
+In a multi-agent system, you have **multiple rollout functions** (Solver and Judge), and each gets its own reward.
 
 ### Concepts
 

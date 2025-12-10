@@ -5,6 +5,7 @@ In this tutorial, you'll train a retrieval-augmented generation (RAG) agent buil
 ## Overview
 
 By the end of this tutorial, you will have:
+
 1. Built a LangGraph agent with retrieval tool calling
 2. Injected rLLM SDK tracing into LangChain's ChatOpenAI
 3. Trained the agent to search effectively using RL
@@ -16,26 +17,6 @@ We will cover:
 - **Client injection**: Swap ChatOpenAI's internal client with traced SDK client
 - **LangGraph workflow**: StateGraph, nodes, edges, and `tools_condition`
 - **Multi-turn tracing**: All LLM calls in an agentic loop are captured
-
-### Architecture
-
-```
-┌───────────────────────────────────────────────────────────────┐
-│                    LangGraph Workflow                          │
-│                                                                │
-│   START ──▶ agent ──┬──▶ tools ──┐                            │
-│                     │            │                             │
-│                     │◀───────────┘                             │
-│                     │                                          │
-│                     └──▶ END (final answer)                   │
-└───────────────────────────────────────────────────────────────┘
-                          │
-                          │ LLM calls via SDK client
-                          ▼
-┌───────────────────────────────────────────────────────────────┐
-│              LiteLLM Proxy → SQLite Traces                     │
-└───────────────────────────────────────────────────────────────┘
-```
 
 ---
 
