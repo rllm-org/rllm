@@ -4,32 +4,84 @@ This guide will help you set up rLLM on your system.
 
 ## Prerequisites
 
-Before installing rLLM, ensure you have the following:
+Starting with v0.2.1, rLLM's recommended dependency manager is `uv`. To install `uv`, run:
 
-- Python 3.10 or higher
-- CUDA version >= 12.4
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+rLLM requires `python>=3.10`, but certain beckends may require a newer installation (e.g., `tinker` requires `python>=3.11`). Ensure that your system has a suitable installation of Python:
+
+```bash
+uv python install 3.11
+```
 
 ## Basic Installation
 
-rLLM uses [verl](https://github.com/volcengine/verl) as its training backend. Follow these steps to install rLLM and verl:
+The following will perform a minimal installation of rLLM:
 
 ```bash
-# Clone the repository
-git clone --recurse-submodules https://github.com/rllm-org/rllm.git
+git clone https://github.com/rllm-org/rllm.git
 cd rllm
 
-# Create a conda environment
-conda create -n rllm python=3.10 -y
-conda activate rllm
-
-# Install verl
-bash scripts/install_verl.sh
-
-# Install rLLM
-pip install -e .
+uv venv --python 3.11
+uv pip install -e .
 ```
 
-This will install rLLM and all its dependencies in development mode.
+rLLM support muiltiple backend for training, including `verl` and `tinker`, which need to installed seperately.
+
+To train with `tinker` on a CPU-only machine, run:
+
+```bash
+uv pip install -e .[tinker] --torch-backend=cpu
+```
+
+To train with `verl` on a GPU equipped machine with CUDA 12.8, run:
+```bash
+uv pip install -e .[verl] --torch-backend=cu128
+```
+
+> The `verl` extra installs vLLM by default. If you'd rather use SGLang to sample rollouts, you can install it with `uv pip install sglang --torch-backend=cu128`.
+> rLLM with verl supports alternative hardware acceleators, including AMD ROCm and Huawei Ascend. For these platforms, we strong recommend install rLLM op top of verl's official Docker contains for ROCm ([here](https://github.com/volcengine/verl/tree/main/docker/rocm)) and Ascend ([here](https://github.com/volcengine/verl/tree/main/docker/ascend)).
+
+### Activating your enviroment
+
+Be sure to activate the virtual environment before running a job:
+
+```bash
+source ./venv/bin/activate
+python your_script.py
+```
+
+### Editable Verl Installation
+
+If you wish to make changes to verl, you can do an editable install:
+
+```bash 
+git clone https://github.com/volcengine/verl.git
+cd verl
+git checkout v0.6.1
+uv pip install -e .
+```
+
+### Optional Extras
+
+rLLM provides additional optional dependencies for specific agent domains and framework integrations. For example:
+- `web`: Tools for web agents (BrowserGym, Selenium).
+- `code-tools`: Sandboxed code execution (E2B, Together).
+- `smolagents`: Integration with Hugging Face's smolagents.
+
+See the full list of managed extras [here](pyproject.toml).
+
+## Installation without `uv`
+
+While rLLM can also be installed without `uv` (i.e., just using `pip`), it is not recommended and may cause issues if you don't have a compatible PyTorch or CUDA version preinstalled:
+
+```bash
+conda create -n rllm python=3.11
+conda activate rllm
+pip install -e .[verl]
+```
 
 ## Installation with Docker 🐳
 

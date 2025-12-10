@@ -20,10 +20,11 @@ license = {file = "LICENSE"}
 dependencies = [
     # Core ML/AI packages
     "torch",
-    "transformers",
+    "torchvision",
+    "transformers>=4.55.0",
 
     # Data processing
-    "datasets",
+    "datasets>=2.20.0",
     "pandas",
     "polars",
     "pillow",
@@ -49,16 +50,17 @@ dependencies = [
     "PyYAML",
     "pydantic",
     "wrapt",
-    "asgiref>=3.7.0",  # Async/sync conversion utilities
+    "asgiref>=3.7.0",
     "wandb",
+]
 
-    # Development and testing
+[project.optional-dependencies]
+
+dev = [
     "pytest",
     "pre-commit",
     "ruff",
     "mypy",
-
-    # Documentation
     "mkdocs>=1.5.0",
     "mkdocs-material>=9.0.0",
     "mkdocstrings[python]>=0.24.0",
@@ -66,24 +68,18 @@ dependencies = [
     "pymdown-extensions>=10.0.0",
 ]
 
-[project.optional-dependencies]
-
 verl = [
     "verl==0.6.1",
     "torch>=2.8.0",
     "torchvision>=0.23.0",
     "vllm>=0.10.2,<=0.11.0",
-    "flash-attn>=2.8.3",
+    "flash-attn>=2.8.1",
     "qwen-vl-utils",
 ]
 
 tinker = [
-    "tinker",
-    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook",
-]
-
-sglang = [
-    "sglang>=0.5.5",
+    "tinker ; python_version >= '3.11'",
+    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook ; python_version >= '3.11'",
 ]
 
 smolagents = [
@@ -110,6 +106,11 @@ web = [
 code-tools = [
     "e2b_code_interpreter",
     "together>=1.4",
+]
+
+[tool.uv.extra-build-dependencies]
+flash-attn = [
+    { requirement = "torch", match-runtime = true },
 ]
 
 [tool.ruff]
@@ -161,7 +162,6 @@ plugins = ["pydantic.mypy"]
 ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "silent"
-
 exclude = [
     "verl/.*",
     "rllm/rewards/code_utils/.*",

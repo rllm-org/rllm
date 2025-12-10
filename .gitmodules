@@ -1,4 +1,0 @@
-[submodule "verl"]
-	path = verl
-	url = https://github.com/volcengine/verl.git
-	branch = main

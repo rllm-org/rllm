@@ -209,3 +209,6 @@ deepresearch_outputs/*
 examples/deepresearch/hle_outputs/*
 */hle_outputs/*
 examples/deepresearch/HLE_OUTPUT_EVOLUTION.md
+
+# Until we have a good way to handle cuda-version specific pkgs, we ignore uv.lock
+uv.lock
