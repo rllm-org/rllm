@@ -42,6 +42,7 @@ uv pip install -e .[verl] --torch-backend=cu128
 ```
 
 > The `verl` extra installs vLLM by default. If you'd rather use SGLang to sample rollouts, you can install it with `uv pip install sglang --torch-backend=cu128`.
+
 > rLLM with verl supports alternative hardware accelerators, including AMD ROCm and Huawei Ascend. For these platforms, we strongly recommend installing rLLM on top of verl's official Docker containers for ROCm ([here](https://github.com/volcengine/verl/tree/main/docker/rocm)) and Ascend ([here](https://github.com/volcengine/verl/tree/main/docker/ascend)).
 
 ### Activating your environment
