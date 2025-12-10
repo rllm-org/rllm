@@ -11,7 +11,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
 rLLM requires `python>=3.10`, but certain beckends may require a newer installation (e.g., `tinker` requires `python>=3.11`). Ensure that your system has a suitable installation of Python:
-
+ 
 ```bash
 uv python install 3.11
 ```
@@ -28,7 +28,7 @@ uv venv --python 3.11
 uv pip install -e .
 ```
 
-rLLM support muiltiple backend for training, including `verl` and `tinker`, which need to installed seperately.
+rLLM supports multiple backends for training, including `verl` and `tinker`, which need to be installed separately.
 
 To train with `tinker` on a CPU-only machine, run:
 
@@ -36,20 +36,20 @@ To train with `tinker` on a CPU-only machine, run:
 uv pip install -e .[tinker] --torch-backend=cpu
 ```
 
-To train with `verl` on a GPU equipped machine with CUDA 12.8, run:
+To train with `verl` on a GPU-equipped machine with CUDA 12.8, run:
 ```bash
 uv pip install -e .[verl] --torch-backend=cu128
 ```
 
 > The `verl` extra installs vLLM by default. If you'd rather use SGLang to sample rollouts, you can install it with `uv pip install sglang --torch-backend=cu128`.
-> rLLM with verl supports alternative hardware acceleators, including AMD ROCm and Huawei Ascend. For these platforms, we strong recommend install rLLM op top of verl's official Docker contains for ROCm ([here](https://github.com/volcengine/verl/tree/main/docker/rocm)) and Ascend ([here](https://github.com/volcengine/verl/tree/main/docker/ascend)).
+> rLLM with verl supports alternative hardware accelerators, including AMD ROCm and Huawei Ascend. For these platforms, we strongly recommend installing rLLM on top of verl's official Docker containers for ROCm ([here](https://github.com/volcengine/verl/tree/main/docker/rocm)) and Ascend ([here](https://github.com/volcengine/verl/tree/main/docker/ascend)).
 
-### Activating your enviroment
+### Activating your environment
 
 Be sure to activate the virtual environment before running a job:
 
 ```bash
-source ./venv/bin/activate
+source .venv/bin/activate
 python your_script.py
 ```
 
