@@ -6,9 +6,6 @@ from queue import Queue
 
 import numpy as np
 import torch
-
-from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
-from rllm.trainer.verl.agent_ppo_trainer import AgentPPOTrainer
 from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo.metric_utils import compute_data_metrics, compute_timing_metrics
@@ -16,6 +13,9 @@ from verl.trainer.ppo.ray_trainer import compute_advantage
 from verl.trainer.ppo.utils import Role
 from verl.utils.debug import marked_timer
 from verl.utils.metric import reduce_metrics
+
+from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
+from rllm.trainer.verl.agent_ppo_trainer import AgentPPOTrainer
 
 
 class PipelineAgentPPOTrainer(AgentPPOTrainer):
@@ -78,7 +78,6 @@ class PipelineAgentPPOTrainer(AgentPPOTrainer):
         The light-weight advantage computation is done on the driver process.
         """
         from omegaconf import OmegaConf
-
         from verl.utils.tracking import Tracking
 
         logger = Tracking(project_name=self.config.trainer.project_name, experiment_name=self.config.trainer.experiment_name, default_backend=self.config.trainer.logger, config=OmegaConf.to_container(self.config, resolve=True))

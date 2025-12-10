@@ -1,15 +1,15 @@
-# Start from the verl base image
-# Dockerfile.base
-FROM verlai/verl:app-verl0.4-sglang0.4.6.post5-vllm0.8.5-mcore0.12.2-te2.2
+FROM verlai/verl:vllm011.latest
 
 WORKDIR /workspace
 
-# 1) Clone rllm repository with submodules
-RUN git clone --recurse-submodules https://github.com/rllm-org/rllm.git rllm
+RUN git clone https://github.com/volcengine/verl.git
+RUN cd verl && \
+    git checkout v0.6.1 && \
+    pip install -e .
 
-# 2) Install verl and rllm (editable)
+# 2) Install rllm (editable)
+RUN git clone https://github.com/rllm-org/rllm.git
 RUN cd rllm && \
-    pip install --no-deps -e ./verl && \
     pip install -e .
 
 # 3) Install playwright
