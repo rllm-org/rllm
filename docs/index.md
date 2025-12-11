@@ -1,44 +1,39 @@
 # rLLM: Reinforcement Learning for Language Agents
 
-rLLM is a framework for training language agents using reinforcement learning. It enables you to easily define custom language agents and environments, collect agent trajectories, and perform RL training to continuously improve your agents' performance. 
+rLLM is a framework for training language agents with reinforcement learning. It lets you define custom agents and environments, collect trajectories, and run scalable RL training loops to continuously improve your agents' performance.
 
 ## Key Features
 
 rLLM provides:
 
-- **Simple abstractions for building custom agents**: rLLM decouples agent and environment abstractions from the underlying training infrastructure. Users can easily define custom agents and train them with RL without getting entangled in the complexities of the underlying training engine.
-- **Unified interface for agent inference & training**: Training and deploying LLM agents traditionally requires two separate sets of tooling and infrastructure. rLLM provides a unified interface for both training and deploying language agents, enabling continuous evolution and training of agents to "learn from experience."
-- **Efficient trajectory generation & scalable RL training**: rLLM's execution engine supports asynchronous and parallelized generation of agent trajectories. For RL training, rLLM integrates `verl` as its training backend, which supports scalable RL training for language models. Together, rLLM delivers efficient and scalable training for language agents.
+- **Simple abstractions for building and training custom agents**: rLLM cleanly separates agent and environment design from the underlying training infrastructure. You focus on defining agents and environments; rLLM handles the training details.
 
+- **Unified interface for agent inference and training**: Training and deploying LLM agents traditionally requires two separate stacks for serving and training. rLLM provides a single interface for both, making it easy to continuously evolve agents that "learn from experience."
+
+- **Efficient trajectory generation and scalable RL training**: rLLM's execution engine supports asynchronous, parallelized trajectory generation and large-scale RL optimization.
+
+## What's New in v0.2.x
+
+- **Multiple training backends:** In addition to `verl`, rLLM now supports `Tinker` as a training backend. You can use the same abstractions for building agents and easily switch between different backends for training. 
+
+- **Multi-agent training:** rLLM now supports multi-agent training. Check out our [Solver–Judge workflow](examples/solver_judge.md) to see how you can jointly optimize a solver and judge agent with RL.
+
+- **LoRA fine-tuning:** rLLM supports LoRA training in both the `verl` and `Tinker` backends. See the [GSM8K LoRA example](examples/gsm8k_lora.md) for how to enable LoRA training with a single config change.
+
+- **rLLM SDK (preview):** The rLLM SDK enables you to transform agents written in frameworks such as LangGraph, SmolAgent, or Strands into trainable workflows. Check out this [LangGraph RAG example](examples/sdk_langgraph_rag.md), which builds a RAG agent and trains it with the rLLM SDK.
+
+- **VLM training:** rLLM supports Vision-Language Model training with the `verl` backend. See the [Geo3K training example](examples/vlm.md) for reference.
 
 ## Getting Started
 
-To get started with rLLM, check out the [Installation Guide](getting-started/installation.md) and [Quick Start Tutorial](getting-started/quick-start.md).
+To get started with rLLM, see the [Installation Guide](getting-started/installation.md) and [Quick Start tutorial](getting-started/quick-start.md).
 
-## Built-in Agents
+## Examples and Tutorials
 
-rLLM currently supports a variety of built-in agents:
-
-- **General Tool-Using Agents & MCP Environment**: Connect to any MCP servers and train language agents to effectively use tools from the Model Context Protocol (MCP).
-- **Math/Coding Agents**: Train single-turn reasoning models for competition math and coding (like DeepScaleR and DeepCoder), or multi-turn math/coding agents that can iteratively refine their previous answers.
-- **SWEAgent and SWEEnv**: Train SWEAgents that can write software patches and resolve real-world GitHub issues.
-- **Web Agents**: Train LLMs to navigate websites and perform complex web tasks.
-- **Frozenlake Agent**: Train agents to navigate text-based grid world. (useful for testing/debugging RL algorithms)
-
-## 🛠️ Train Your Own Agents & Environments
-rLLM is designed to be extensible. You can easily build and train your own custom agents and environments using our modular API and training engine. Walk through our [core concepts](./core-concepts/overview.md) and [examples](https://github.com/rllm-org/rllm/tree/main/examples) to understand the fundamentals of rLLM and build your own custom agents and environments tailored to your specific use cases.
-
-## 🚀Future Roadmap
-
-We're committed to maintaining rLLM as an evolving open-source platform, and progress along with `verl` as our training backend. Here’s what’s coming next:
-
-- 🧠 **More built-in agents, tools, and environments** — Expand support for more diverse agentic tasks across reasoning, planning, and interaction.
-- 🖼️ **Multimodal support** — Enable agents that understand and reason over both **language and vision**.
-- 🤖🤖 **Multi-agent training** — Support more general agentic workloads such as **multi-agent** training.
-- 🧪 **Extended algorithm suite** — Add more RL algorithms and post-training methods like **SFT,** **DPO** and beyond.
+rLLM is designed to be extensible. You can easily build and train custom agents and environments using our modular API and training engine. Walk through the [core concepts](core-concepts/overview.md) and browse the [examples on GitHub](https://github.com/rllm-org/rllm/tree/main/examples) to understand the fundamentals of rLLM and adapt them to your own use cases.
 
 ## Community & Support
 
 rLLM is an open-source project under active development. We welcome contributions, bug reports, and feature requests from the community.
+Please read our [Contributing guide](contributing.md) before contributing to rLLM.
 
-Check out our [Contribution Guide](contributing.md) before contributing to rLLM. 
