@@ -27,8 +27,9 @@ from rllm.workflows.workflow import TerminationReason
 
 # Avoid hard dependency on verl at import time; only for typing
 if TYPE_CHECKING:
-    from rllm.sdk.tracers import TracerProtocol
     from verl import DataProto
+
+    from rllm.sdk.tracers import TracerProtocol
 
 logger = logging.getLogger(__name__)
 
