@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rllm"
-version = "0.2.0"
+version = "0.2.1"
 description = "Reinforcement Learning for Language Agents"
 authors = [
     {name = "rLLM Team"}
@@ -19,28 +19,18 @@ classifiers = [
 license = {file = "LICENSE"}
 dependencies = [
     # Core ML/AI packages
-    "torch>=2.6",
-    "transformers>=4.5",
-    "sentence-transformers",
+    "torch",
+    "torchvision",
+    "transformers>=4.55.0",
 
     # Data processing
-    "datasets",
+    "datasets>=2.20.0",
     "pandas",
     "polars",
     "pillow",
 
-    # Cloud and infrastructure
-    "google-cloud-aiplatform",
-    "vertexai",
-    "docker",
-    "kubernetes",
+    # Infrastructure
     "ray",
-
-    # Web and automation
-    "gradio",
-    "selenium",
-    "browsergym",
-    "firecrawl",
 
     # Math and science
     "numpy",
@@ -48,41 +38,32 @@ dependencies = [
     "pylatexenc",
     "antlr4-python3-runtime==4.9.3",
 
-    # Code evaluation
-    "swebench",
-    "e2b_code_interpreter",
-    "eval-protocol",
-
     # Tools
     "mcp",
-    "camel-ai",
+
+    # Integration with Eval Protocol
+    "eval-protocol",
 
     # Utilities
     "hydra-core",
     "openai",
-    "fire",
-    "gdown",
-    "together>=1.4",
-    "wandb",
-    "gymnasium",
-    "click",
     "fastapi",
     "uvicorn",
-    "httpx",
-    "jupyter",
     "tqdm",
-    "rich",
     "PyYAML",
     "pydantic",
     "wrapt",
+    "asgiref>=3.7.0",
+    "wandb",
+]
 
-    # Development and testing
+[project.optional-dependencies]
+
+dev = [
     "pytest",
     "pre-commit",
     "ruff",
     "mypy",
-
-    # Documentation
     "mkdocs>=1.5.0",
     "mkdocs-material>=9.0.0",
     "mkdocstrings[python]>=0.24.0",
@@ -90,7 +71,29 @@ dependencies = [
     "pymdown-extensions>=10.0.0",
 ]
 
-[project.optional-dependencies]
+verl = [
+    "verl==0.6.1",
+    "torch>=2.8.0",
+    "torchvision>=0.23.0",
+    "vllm>=0.10.2,<=0.11.0",
+    "flash-attn>=2.8.1",
+    "qwen-vl-utils",
+]
+
+sdk = [
+    "litellm[proxy]",
+    "aiosqlite",
+    "asgiref",
+]
+
+tinker = [
+    "tinker ; python_version >= '3.11'",
+    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook ; python_version >= '3.11'",
+]
+
+opentelemetry = [
+    "opentelemetry-sdk",
+]
 
 smolagents = [
     "smolagents==1.20.0",
@@ -100,11 +103,34 @@ strands = [
     "strands-agents",
 ]
 
+swe = [
+    "docker",
+    "kubernetes",
+    "swebench",
+]
+
+web = [
+    "selenium",
+    "browsergym",
+    "firecrawl",
+    "gymnasium",
+]
+
+code-tools = [
+    "e2b_code_interpreter",
+    "together>=1.4",
+]
+
+[tool.uv.extra-build-dependencies]
+flash-attn = [
+    { requirement = "torch", match-runtime = true },
+]
+
 [tool.ruff]
 line-length = 5000 # TODO: Reduce this to a more reasonable value
 
 [tool.ruff.lint]
-isort = {known-first-party = ["rllm"]}
+isort = {known-first-party = ["rllm"], known-third-party = ["verl"]}
 # c.f. https://github.com/vllm-project/vllm/blob/ce8d6b75fc0586045df75ee1568a5b5f9957251b/pyproject.toml
 select = [
     # pycodestyle
@@ -141,12 +167,14 @@ ignore = [
 where   = ["."]
 include = ["rllm", "rllm.*"]
 
+[tool.setuptools.package-data]
+rllm = ["trainer/config/*.yaml"]
+
 [tool.mypy]
 plugins = ["pydantic.mypy"]
 ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "silent"
-
 exclude = [
     "verl/.*",
     "rllm/rewards/code_utils/.*",

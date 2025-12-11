@@ -197,7 +197,8 @@ class AgentWorkflowEngine:
         Returns:
             DataProto: Transformed results compatible with Verl training.
         """
-        self.rollout_engine.wake_up()
+        await self.rollout_engine.wake_up()
+
         is_validation = batch.meta_info.get("validate", False)
         if is_validation:
             self.rollout_engine.validate = True
@@ -208,8 +209,10 @@ class AgentWorkflowEngine:
         task_ids = batch.non_tensor_batch["task_ids"].tolist()
         results = await self.execute_tasks(tasks, task_ids, **kwargs)  # list of Episodes
         self.rollout_engine.validate = False
+
+        await self.rollout_engine.sleep()
+
         self.current_mode = "train"
-        self.rollout_engine.sleep()
         return self.transform_results_for_verl(results, task_ids)
 
     def transform_results_for_verl(self, episodes: list[Episode], task_ids: np.ndarray) -> "DataProto":
@@ -240,6 +243,7 @@ class AgentWorkflowEngine:
         traj_mask = []
         termination_reasons = []
         metrics = []
+        multi_modal_inputs_list = []
 
         for i, episode in enumerate(episodes):
             total_steps = 0
@@ -275,6 +279,7 @@ class AgentWorkflowEngine:
                         prompts.append(prompt)
                         responses.append(response)
                         traj_mask.append(mask)
+                        multi_modal_inputs_list.append({})  # empty dict
 
                     elif isinstance(trajectory.steps[0].model_output, ModelOutput):
                         step = trajectory.steps[0]
@@ -287,6 +292,7 @@ class AgentWorkflowEngine:
 
                         mask = torch.ones_like(response_ids, dtype=torch.long)
                         traj_mask.append(mask)
+                        multi_modal_inputs_list.append(step.model_output.multi_modal_inputs or {})
 
                     else:
                         chat_completions = trajectory.steps[0].chat_completions
@@ -294,6 +300,7 @@ class AgentWorkflowEngine:
                         prompts.append(prompt)
                         responses.append(response)
                         traj_mask.append(mask)
+                        multi_modal_inputs_list.append({})  # empty dict
 
                     step_rewards.append(trajectory.reward)
                     step_ids.append(trajectory_id)
@@ -310,6 +317,7 @@ class AgentWorkflowEngine:
 
                             mask = torch.ones_like(response_ids, dtype=torch.long)
                             traj_mask.append(mask)
+                            multi_modal_inputs_list.append(step.model_output.multi_modal_inputs or {})
 
                         else:
                             chat_completions = step.chat_completions
@@ -317,6 +325,7 @@ class AgentWorkflowEngine:
                             prompts.append(prompt)
                             responses.append(response)
                             traj_mask.append(mask)
+                            multi_modal_inputs_list.append({})  # empty dict
 
                         step_rewards.append(step.reward)
                         step_ids.append(f"{trajectory_id}_step{step_idx}")  # unique step identifier e.g., 1234567890_solver_step0
@@ -365,7 +374,16 @@ class AgentWorkflowEngine:
         response_mask = resp_pos < response_lengths.unsqueeze(1)
 
         attention_mask = torch.cat([prompt_mask, response_mask], dim=1).long()
-        position_ids = (torch.cumsum(attention_mask, dim=1) - 1) * attention_mask
+
+        if hasattr(self.rollout_engine, "processor") and self.rollout_engine.processor is not None:
+            position_ids = self._handle_multimodal_position_ids(
+                processor=self.rollout_engine.processor,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                multi_modal_inputs=multi_modal_inputs_list,
+            )
+        else:
+            position_ids = (torch.cumsum(attention_mask, dim=1) - 1) * attention_mask
 
         traj_mask = torch.nn.utils.rnn.pad_sequence(traj_mask, batch_first=True, padding_value=0)
         traj_mask = pad_sequence_to_length(traj_mask, max_response_length, 0, left_pad=False)
@@ -390,6 +408,23 @@ class AgentWorkflowEngine:
                 if (cf.mask_max_prompt_length_exceeded and termination_reason == TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED) or (cf.mask_max_response_length_exceeded and termination_reason == TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED) or (cf.mask_env_done and termination_reason == TerminationReason.ENV_DONE) or (cf.mask_max_turns_exceeded and termination_reason == TerminationReason.MAX_TURNS_EXCEEDED) or (cf.mask_timeout and termination_reason == TerminationReason.TIMEOUT) or (cf.mask_unknown and termination_reason == TerminationReason.UNKNOWN) or (cf.mask_error and termination_reason == TerminationReason.ERROR):
                     is_valid[i] = False  # set flag to filter out the episode later (after advantages are computed)
 
+        non_tensors = {
+            "episode_ids": np.array(episode_ids),  # unique identifier for each rollout
+            "trajectory_ids": np.array(trajectory_ids),  # unique identifier for each trajectory (shares prefix with task_id) and shared across rollouts
+            "step_ids": np.array(step_ids),  # unique identifier for each step (shares prefix with task_id) and shared across rollouts
+            "batch_ids": np.array([str(uuid.uuid4())] * len(episode_ids)),  # unique identifier for each batch
+            "step_nums": np.array(step_nums),
+            "is_correct": np.array(is_correct),
+            "termination_reasons": np.array([x.value for x in termination_reasons]),
+            "metrics": np.array(metrics),
+            "is_valid": np.array(is_valid),
+            "is_last_step": np.array(is_last_step),
+            "is_pad_step": np.array([False] * len(episode_ids)),
+        }
+
+        if any(mm_inputs is not None for mm_inputs in multi_modal_inputs_list):
+            non_tensors["multi_modal_inputs"] = np.array(multi_modal_inputs_list, dtype=object)
+
         return DataProto.from_dict(
             tensors={
                 "input_ids": input_ids,
@@ -401,23 +436,46 @@ class AgentWorkflowEngine:
                 "traj_rewards": traj_rewards_batch,
                 "step_rewards": step_rewards_batch,
             },
-            non_tensors={
-                "episode_ids": np.array(episode_ids),  # unique identifier for each rollout
-                "trajectory_ids": np.array(trajectory_ids),  # unique identifier for each trajectory (shares prefix with task_id) and shared across rollouts
-                "step_ids": np.array(step_ids),  # unique identifier for each step (shares prefix with task_id) and shared across rollouts
-                "batch_ids": np.array([str(uuid.uuid4())] * len(episode_ids)),  # unique identifier for each batch
-                "step_nums": np.array(step_nums),
-                "is_correct": np.array(is_correct),
-                "termination_reasons": np.array([x.value for x in termination_reasons]),
-                "metrics": np.array(metrics),
-                "is_valid": np.array(is_valid),
-                "is_last_step": np.array(is_last_step),
-                "is_pad_step": np.array([False] * len(episode_ids)),
-            },
+            non_tensors=non_tensors,
             meta_info={
                 "repeat_counts": repeat_counts,
             },
         )
+
+    def _handle_multimodal_position_ids(self, processor, input_ids: torch.Tensor, attention_mask: torch.Tensor, multi_modal_inputs: list[dict]) -> torch.Tensor:
+        """Handle multimodal position ids calculation. Borrowed from verl.utils.dataset.rl_dataset.py"""
+        batch_size = input_ids.shape[0]
+        position_ids_list = []
+
+        if processor is not None and "Qwen2VLImageProcessor" in processor.image_processor.__class__.__name__:
+            # qwen-vl mrope
+            if "Qwen3VLProcessor" in processor.__class__.__name__:
+                from verl.models.transformers.qwen3_vl import get_rope_index
+            else:
+                from verl.models.transformers.qwen2_vl import get_rope_index
+
+            for i in range(batch_size):
+                model_inputs = multi_modal_inputs[i] if i < len(multi_modal_inputs) else {}
+                vision_position_ids = get_rope_index(
+                    processor,
+                    input_ids=input_ids[i],
+                    image_grid_thw=model_inputs.get("image_grid_thw"),
+                    video_grid_thw=model_inputs.get("video_grid_thw"),
+                    second_per_grid_ts=model_inputs.get("second_per_grid_ts"),
+                    attention_mask=attention_mask[i],
+                )  # (3, seq_length)
+                valid_mask = attention_mask[i].bool()
+                text_position_ids = torch.ones((1, len(input_ids[i])), dtype=torch.long)
+                text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item())
+                position_ids_list.append(torch.cat((text_position_ids, vision_position_ids), dim=0))  # (4, seq_length)
+
+        else:
+            # Fallback: should not reach here if called correctly
+            raise ValueError(f"Unsupported processor type: {processor.__class__.__name__ if processor else None}")
+
+        # Stack all position_ids to form batch: (batch_size, 4, seq_length)
+        position_ids = torch.stack(position_ids_list, dim=0)
+        return position_ids
 
     def shutdown(self):
         """Shutdown the workflow engine and cleanup resources."""

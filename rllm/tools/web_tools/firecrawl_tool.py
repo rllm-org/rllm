@@ -12,8 +12,7 @@ except ImportError:
 
 try:
     from firecrawl import FirecrawlApp
-except ImportError as e:
-    print(e)
+except ImportError:
     FirecrawlApp = None
 
 from rllm.tools.tool_base import Tool, ToolOutput

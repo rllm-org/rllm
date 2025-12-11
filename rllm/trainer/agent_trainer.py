@@ -1,11 +1,9 @@
+from collections.abc import Callable
 from typing import Any, Literal
 
 import ray
 
 from rllm.data import Dataset
-from rllm.trainer.verl.ray_runtime_env import get_ppo_ray_runtime_env
-from rllm.trainer.verl.train_agent_ppo import TaskRunner
-from verl.trainer.constants_ppo import get_ppo_ray_runtime_env as get_fireworks_ray_runtime_env
 
 
 class AgentTrainer:
@@ -29,7 +27,8 @@ class AgentTrainer:
         config: dict[str, Any] | list[str] | None = None,
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
-        backend: Literal["verl", "fireworks"] = "verl",
+        backend: Literal["verl", "fireworks", "tinker"] = "verl",
+        agent_run_func: Callable | None = None,
     ):
         """
         Initialize the AgentTrainer.
@@ -49,8 +48,7 @@ class AgentTrainer:
             backend: Training backend to use ('verl' or 'fireworks'). Default is 'verl'
         """
         # Validate backend
-        if backend not in ["verl", "fireworks"]:
-            raise ValueError(f"backend must be either 'verl' or 'fireworks', got '{backend}'")
+        assert backend in ["verl", "fireworks", "tinker"], f"Unsupported backend: {backend}, must be one of ['verl', 'fireworks', 'tinker']"
 
         self.backend = backend
 
@@ -79,7 +77,12 @@ class AgentTrainer:
         self.agent_args = agent_args or {}
         self.env_args = env_args or {}
 
+        self.agent_run_func = agent_run_func
+
         self.config = config
+        self.train_dataset = train_dataset
+        self.val_dataset = val_dataset
+        self.backend = backend
 
         if train_dataset is not None and self.config is not None and hasattr(self.config, "data"):
             self.config.data.train_files = train_dataset.get_verl_data_path()
@@ -87,21 +90,45 @@ class AgentTrainer:
             self.config.data.val_files = val_dataset.get_verl_data_path()
 
     def train(self):
-        """
-        Start the training process using the specified backend.
-        """
         if self.backend == "verl":
-            self._train_with_verl()
+            self._train_verl()
         elif self.backend == "fireworks":
-            self._train_with_fireworks()
-        else:
-            raise ValueError(f"Unknown backend: {self.backend}")
+            self._train_fireworks()
+        elif self.backend == "tinker":
+            self._train_tinker()
 
-    def _train_with_verl(self):
+    def _train_tinker(self):
+        from rllm.trainer.tinker.tinker_agent_trainer import TinkerAgentTrainer
+        from rllm.trainer.tinker.tinker_workflow_trainer import TinkerWorkflowTrainer
+
+        if self.workflow_class is not None:
+            trainer = TinkerWorkflowTrainer(
+                config=self.config,
+                workflow_class=self.workflow_class,
+                workflow_args=self.workflow_args,
+                train_dataset=self.train_dataset,
+                val_dataset=self.val_dataset,
+            )
+        else:
+            trainer = TinkerAgentTrainer(
+                config=self.config,
+                agent_class=self.agent_class,
+                env_class=self.env_class,
+                agent_args=self.agent_args,
+                env_args=self.env_args,
+                train_dataset=self.train_dataset,
+                val_dataset=self.val_dataset,
+            )
+        trainer.fit_agent()
+
+    def _train_verl(self):
         """
         Train using the standard verl backend.
         Supports both workflow-based and agent/env-based training.
         """
+        from rllm.trainer.verl.ray_runtime_env import get_ppo_ray_runtime_env
+        from rllm.trainer.verl.train_agent_ppo import TaskRunner
+
         # Check if Ray is not initialized
         if not ray.is_initialized():
             # read off all the `ray_init` settings from the config
@@ -122,15 +149,19 @@ class AgentTrainer:
                 env_class=self.env_class,
                 agent_args=self.agent_args,
                 env_args=self.env_args,
+                agent_run_func=self.agent_run_func,
             )
         )
 
-    def _train_with_fireworks(self):
+    def _train_fireworks(self):
         """
         Train using the fireworks (pipeline) backend.
         Optimized for workflow-based training with the Fireworks API.
         """
         if not ray.is_initialized():
+            # TODO: check whether we need a separate function to retrieve the runtime environment (for fireworks)
+            from verl.trainer.constants_ppo import get_ppo_ray_runtime_env as get_fireworks_ray_runtime_env
+
             ray.init(runtime_env=get_fireworks_ray_runtime_env(), num_cpus=self.config.ray_init.num_cpus)
 
         # Lazy import to avoid requiring fireworks package for users who don't use it

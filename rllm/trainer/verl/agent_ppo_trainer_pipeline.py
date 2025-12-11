@@ -6,25 +6,16 @@ from queue import Queue
 
 import numpy as np
 import torch
+from verl import DataProto
+from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
+from verl.trainer.ppo.metric_utils import compute_data_metrics, compute_timing_metrics
+from verl.trainer.ppo.ray_trainer import compute_advantage
+from verl.trainer.ppo.utils import Role
+from verl.utils.debug import marked_timer
+from verl.utils.metric import reduce_metrics
 
 from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
 from rllm.trainer.verl.agent_ppo_trainer import AgentPPOTrainer
-from verl import DataProto
-from verl.single_controller.ray import (
-    RayClassWithInitArgs,
-    RayWorkerGroup,
-)
-from verl.trainer.ppo.ray_trainer import (
-    Role,
-    compute_advantage,
-    compute_data_metrics,
-    compute_timing_metrics,
-    reduce_metrics,
-)
-from verl.trainer.ppo.ray_trainer_pipeline import (
-    Timer,
-    update_metrics,
-)
 
 
 class PipelineAgentPPOTrainer(AgentPPOTrainer):
@@ -87,7 +78,6 @@ class PipelineAgentPPOTrainer(AgentPPOTrainer):
         The light-weight advantage computation is done on the driver process.
         """
         from omegaconf import OmegaConf
-
         from verl.utils.tracking import Tracking
 
         logger = Tracking(project_name=self.config.trainer.project_name, experiment_name=self.config.trainer.experiment_name, default_backend=self.config.trainer.logger, config=OmegaConf.to_container(self.config, resolve=True))
@@ -130,11 +120,11 @@ class PipelineAgentPPOTrainer(AgentPPOTrainer):
 
                 self.init_envs_and_agents(batch)
 
-                with Timer("step", timing_raw):
+                with marked_timer("step", timing_raw):
 
                     def create_replay_queue(generator, q, batch_iter_val, timing_raw_val):
                         uid_to_trajectories = {}  # mapping of environment id (uid) to trajectories. Only put to queue in groups of size self.config.actor_rollout_ref.rollout.n
-                        with Timer("gen", timing_raw_val):
+                        with marked_timer("gen", timing_raw_val):
                             for _, trajectory in enumerate(generator):
                                 # For example, idx=(0,1,2,3), (4,5,6,7) for pass of N=4 belong to the same sample.
                                 uid = trajectory["idx"] // self.config.actor_rollout_ref.rollout.n
@@ -148,6 +138,7 @@ class PipelineAgentPPOTrainer(AgentPPOTrainer):
                     # Get the generator function which will yield results as they complete
                     if self.config.rllm.agent.step_advantage_broadcast:
                         raise Exception("Stepwise advantage broadcasting not supported on pipelined trainer yet")
+
                     gen_seq_generator = self.generate_agent_trajectories_async(timing_raw=timing_raw, meta_info=batch.meta_info)
                     thread = threading.Thread(target=create_replay_queue, args=(gen_seq_generator, replay_queue, batch_iter, timing_raw))
                     thread.start()
@@ -163,7 +154,7 @@ class PipelineAgentPPOTrainer(AgentPPOTrainer):
                         print(f"mini_batch_iter: {mini_batch_iter + 1} / {num_loops}", flush=True)
                         mini_batch_metrics = {}
                         start_time = time.perf_counter()
-                        with Timer("pipeline_gen", timing_raw):
+                        with marked_timer("pipeline_gen", timing_raw):
                             trajectories = []
                             for _ in range(ppo_mini_batch_size):
                                 _, trajes = replay_queue.get()
@@ -177,7 +168,7 @@ class PipelineAgentPPOTrainer(AgentPPOTrainer):
                         if total_mini_batch_iters % ppo_step_minibatch_iter == ppo_step_minibatch_iter - 1:
                             mini_batch.meta_info["last_mini_batch"] = True
 
-                        with Timer("adv", timing_raw):
+                        with marked_timer("adv", timing_raw):
                             reward_tensor = mini_batch.batch["token_level_scores"]  # already computed
                             print("Reward tensor:", reward_tensor.sum(-1))
 
@@ -210,13 +201,13 @@ class PipelineAgentPPOTrainer(AgentPPOTrainer):
                             mini_batch_metrics["batch/solve_partial"] = solve_partial
 
                             # Recompute old_log_probs using Pytorch FSDP.
-                            with Timer("old_log_prob", timing_raw):
+                            with marked_timer("old_log_prob", timing_raw):
                                 old_log_prob = self.actor_wg.compute_log_prob(mini_batch)
                                 mini_batch = mini_batch.union(old_log_prob)
 
                             if self.use_reference_policy:
                                 # compute reference log_prob
-                                with Timer("ref", timing_raw):
+                                with marked_timer("ref", timing_raw):
                                     ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(mini_batch)
                                     mini_batch = mini_batch.union(ref_log_prob)
 
@@ -238,18 +229,18 @@ class PipelineAgentPPOTrainer(AgentPPOTrainer):
                         # update actor
                         start_time = time.perf_counter()
 
-                        with Timer("update_actor", timing_raw):
+                        with marked_timer("update_actor", timing_raw):
                             actor_output = self.actor_wg.update_actor_mini_batch(mini_batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         end_time = time.perf_counter()
                         print(f"Actor update took {end_time - start_time:.2f} seconds", flush=True)
                         mini_batch_metrics.update(actor_output_metrics)
                         training_batch.append(mini_batch)
-                        update_metrics(metrics, mini_batch_metrics)
+                        metrics.update(mini_batch_metrics)
                         total_mini_batch_iters += 1
 
                     # last_iter_mini_batch_iter = (mini_batch_iter + last_iter_mini_batch_iter - 1) % ppo_step_minibatch_iter
-                    with Timer("rollout_model_update", timing_raw):
+                    with marked_timer("rollout_model_update", timing_raw):
                         updated_actor_module_fsdp_ref = self.actor_wg.get_state_dict()
                         if isinstance(updated_actor_module_fsdp_ref, list):
                             updated_actor_module_fsdp_ref = updated_actor_module_fsdp_ref[0]
@@ -258,12 +249,12 @@ class PipelineAgentPPOTrainer(AgentPPOTrainer):
 
                     # Validate
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and self.global_steps % self.config.trainer.test_freq == 0:
-                        with Timer("testing", timing_raw):
+                        with marked_timer("testing", timing_raw):
                             val_metrics: dict = self._validate_agent()
                         metrics.update(val_metrics)
 
                     if self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq == 0:
-                        with Timer("save_checkpoint", timing_raw):
+                        with marked_timer("save_checkpoint", timing_raw):
                             self._save_checkpoint()
 
                 metrics.update(compute_data_metrics(batch=training_batch, use_critic=self.use_critic))
@@ -286,7 +277,7 @@ class PipelineAgentPPOTrainer(AgentPPOTrainer):
                     pprint(f"Final validation metrics: {val_metrics}")
                     logger.log(data=val_metrics, step=self.global_steps)
                     if self.config.trainer.save_freq > 0 and (self.global_steps - 1) % self.config.trainer.save_freq != 0:
-                        with Timer("save_checkpoint", timing_raw):
+                        with marked_timer("save_checkpoint", timing_raw):
                             self._save_checkpoint()
                     return
 

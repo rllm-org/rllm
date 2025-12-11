@@ -9,29 +9,32 @@ from pprint import pprint
 import numpy as np
 import torch
 from omegaconf import OmegaConf
+from verl import DataProto
+from verl.protocol import pad_dataproto_to_divisor
+from verl.single_controller.ray import RayWorkerGroup
+from verl.trainer.ppo.core_algos import (
+    AdvantageEstimator,
+    agg_loss,
+)
+from verl.trainer.ppo.metric_utils import (
+    compute_data_metrics,
+    compute_throughout_metrics,
+    compute_timing_metrics,
+    reduce_metrics,
+)
+from verl.trainer.ppo.ray_trainer import (
+    RayPPOTrainer,
+    ResourcePoolManager,
+    apply_kl_penalty,
+    compute_advantage,
+)
+from verl.trainer.ppo.utils import Role, WorkerType
+from verl.utils.debug import marked_timer
 
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
 from rllm.utils.episode_logger import EpisodeLogger
 from rllm.workflows.workflow import TerminationReason
-from verl import DataProto
-from verl.protocol import pad_dataproto_to_divisor
-from verl.trainer.ppo.ray_trainer import (
-    AdvantageEstimator,
-    RayPPOTrainer,
-    RayWorkerGroup,
-    ResourcePoolManager,
-    Role,
-    WorkerType,
-    agg_loss,
-    apply_kl_penalty,
-    compute_advantage,
-    compute_data_metrics,
-    compute_throughout_metrics,
-    compute_timing_metrics,
-    marked_timer,
-    reduce_metrics,
-)
 
 
 class AgentWorkflowPPOTrainer(RayPPOTrainer):
@@ -41,32 +44,34 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         tokenizer,
         role_worker_mapping: dict[Role, WorkerType],
         resource_pool_manager: ResourcePoolManager,
-        ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
+        ray_worker_group_cls: type[RayWorkerGroup] = RayWorkerGroup,
+        processor=None,
         reward_fn=None,
         val_reward_fn=None,
         workflow_class=None,
         workflow_args=None,
     ):
-        super().__init__(config=config, tokenizer=tokenizer, role_worker_mapping=role_worker_mapping, resource_pool_manager=resource_pool_manager, ray_worker_group_cls=ray_worker_group_cls, reward_fn=reward_fn, val_reward_fn=val_reward_fn)
+        super().__init__(config=config, tokenizer=tokenizer, processor=processor, role_worker_mapping=role_worker_mapping, resource_pool_manager=resource_pool_manager, ray_worker_group_cls=ray_worker_group_cls, reward_fn=reward_fn, val_reward_fn=val_reward_fn)
 
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
+        self._validate_config()
 
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._thread.start()
 
     def _validate_config(self):
+        assert self.workflow_class is not None, "workflow_class is required for agent workflow trainer"
         assert self.config.actor_rollout_ref.hybrid_engine is True, "Only hybrid engine is supported"
         assert self.config.actor_rollout_ref.rollout.mode == "async", "Only async rollout mode is supported"
         assert self.use_rm is False, "Reward models are not supported. Rewards should be assigned using a reward function in the workflow or environment."
         if self.config.rllm.rejection_sample.multiplier != 1:
             assert self.config.rllm.rejection_sample.enable is True, "rejection sampling is disabled, but rejection_sample.multiplier is not 1"
 
+        # TODO: revisit whether this is now supported by Verl
         if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
             raise NotImplementedError("REMAX is not supported yet")
-
-        super()._validate_config()
 
     def init_workers(self):
         super().init_workers()
@@ -75,6 +80,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
             config=self.config,
             rollout_manager=self.async_rollout_manager,
             tokenizer=self.tokenizer,
+            processor=self.processor,
         )
 
         # Create episode logger if enabled in config
@@ -143,7 +149,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         for epoch in range(self.config.trainer.total_epochs):
             pprint(f"epoch {epoch}, step {self.global_steps} started")
             for batch_dict in self.train_dataloader:
-                do_profile = self.global_steps in self.config.trainer.profile_steps if self.config.trainer.profile_steps is not None else False
+                do_profile = self.global_steps in self.config.trainer.profile_steps if self.config.trainer.get("profile_steps") is not None else False
                 with marked_timer("start_profile", timing_raw):
                     self._start_profiling(do_profile)
 
@@ -654,7 +660,9 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
 
     def shutdown(self):
         """A cleanup method to gracefully stop the background event loop."""
-        self.agent_execution_engine.shutdown()
+        if hasattr(self, "agent_execution_engine") and self.agent_execution_engine is not None:
+            self.agent_execution_engine.shutdown()
+            self.agent_execution_engine = None
         if hasattr(self, "_loop") and self._loop is not None and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
         if hasattr(self, "_thread") and self._thread is not None:

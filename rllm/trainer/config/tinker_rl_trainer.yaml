@@ -1,0 +1,79 @@
+# Tinker Backend Configuration for rLLM
+# This config is used when training agents with Tinker backend
+# Unified configuration supporting both workflow and agent training modes
+# Default settings match tinker_cookbook.recipes.math_rl for MATH dataset
+
+# Tinker-specific settings
+tinker_base_url: null  # Tinker service URL (null for local)
+  
+# Model Configuration
+model:
+  name: "Qwen/Qwen3-8B"  # Default model for MATH dataset
+  lora_rank: 32
+  train_unembed: true  # Train LoRA on output embedding layer (set to false for Fireworks compatibility)
+  train_attn: true     # Train LoRA on attention layers
+  train_mlp: true      # Train LoRA on MLP layers
+
+# Training Configuration
+training:
+  group_size: 16  # Number of rollouts per prompt (for GRPO)
+  learning_rate: 2e-5  # 2e-5 for MATH dataset
+  beta1: 0.9
+  beta2: 0.95
+  eps: 1e-8
+  max_length: 32768
+  num_minibatches: 1
+
+# Sampling Configuration
+sampling:
+  temperature: 0.6
+  top_p: 0.95
+
+# Algorithm Configuration (compatible with verl)
+algorithm:
+  adv_estimator: grpo  # REINFORCE, GRPO
+  gamma: 1.0
+  lam: 0.95
+  norm_adv_by_std_in_grpo: false  # math_rl doesn't normalize by std
+  grouping_level: 'trajectory'  # Options: 'trajectory' or 'step'
+
+# Workflow Configuration (for workflow training mode)
+workflow:
+  n_parallel_tasks: 256
+  retry_limit: 3 
+
+# Agent Configuration (for agent training mode)
+agent:
+  max_steps: 1  # Single-turn vs multi-turn
+  agent_args: {}
+
+# Environment Configuration (for agent training mode)
+env:
+  env_args: {}
+
+# Data Configuration
+data:
+  train_files: null
+  val_files: null
+  max_prompt_length: 2048
+  max_response_length: 2048
+  train_batch_size: 64
+  val_batch_size: 32
+
+# Trainer Configuration
+trainer:
+  total_epochs: 10
+  logger: ['console']  # Options: 'console', 'wandb', 'tensorboard'
+  project_name: 'rllm-tinker'
+  experiment_name: 'default'
+  test_freq: 5
+  save_freq: 20
+  val_before_train: true
+  default_local_dir: '/tmp/rllm-tinker-checkpoints'
+  resume_from_tinker_id: null  # Tinker model ID path to resume from (e.g., tinker://uuid/weights/000060)
+
+# Hydra configuration
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
