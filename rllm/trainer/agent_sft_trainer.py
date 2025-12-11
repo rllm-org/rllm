@@ -24,13 +24,12 @@ class AgentSFTTrainer:
             self._train_tinker()
 
     def _train_verl(self):
+        from rllm.trainer.verl.sft_dataset import RLLMSFTDataset
         from verl.trainer.fsdp_sft_trainer import FSDPSFTTrainer
         from verl.utils import hf_tokenizer
         from verl.utils.device import get_device_name
         from verl.utils.distributed import destroy_global_process_group, initialize_global_process_group
         from verl.utils.fs import copy_to_local
-
-        from rllm.trainer.verl.sft_dataset import RLLMSFTDataset
 
         config = self.config
         device_name = get_device_name()

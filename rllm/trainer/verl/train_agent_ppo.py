@@ -10,8 +10,6 @@ import socket
 import hydra
 import ray
 from omegaconf import OmegaConf
-from verl.trainer.ppo.reward import load_reward_manager
-from verl.utils.device import is_cuda_available
 
 from rllm.trainer.env_agent_mappings import AGENT_CLASS_MAPPING, ENV_CLASS_MAPPING
 from rllm.trainer.verl.agent_ppo_trainer import AgentPPOTrainer
@@ -19,6 +17,8 @@ from rllm.trainer.verl.agent_ppo_trainer import AgentPPOTrainer
 # Local application imports
 from rllm.trainer.verl.agent_workflow_trainer import AgentWorkflowPPOTrainer
 from rllm.trainer.verl.ray_runtime_env import get_ppo_ray_runtime_env
+from verl.trainer.ppo.reward import load_reward_manager
+from verl.utils.device import is_cuda_available
 
 
 @hydra.main(config_path="../config", config_name="agent_ppo_trainer", version_base=None)
@@ -74,6 +74,7 @@ class TaskRunner:
         from pprint import pprint
 
         from omegaconf import OmegaConf
+
         from verl.single_controller.ray import RayWorkerGroup
         from verl.utils.fs import copy_to_local
 

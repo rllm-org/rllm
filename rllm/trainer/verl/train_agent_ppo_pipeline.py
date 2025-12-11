@@ -18,14 +18,14 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 import hydra
 import ray
 
+from rllm.trainer.env_agent_mappings import AGENT_CLASS_MAPPING, ENV_CLASS_MAPPING, setup_environment
+from rllm.trainer.verl.agent_ppo_trainer_pipeline import PipelineAgentPPOTrainer
+
 # Local application imports
 from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 from verl.workers.fsdp_workers import ActorRolloutRefWorker
 from verl.workers.reward_manager import NaiveRewardManager
-
-from rllm.trainer.env_agent_mappings import AGENT_CLASS_MAPPING, ENV_CLASS_MAPPING, setup_environment
-from rllm.trainer.verl.agent_ppo_trainer_pipeline import PipelineAgentPPOTrainer
 
 
 @hydra.main(config_path="../config", config_name="agent_ppo_trainer", version_base=None)
@@ -47,6 +47,7 @@ def main_task(config, compute_score=None):
     from pprint import pprint
 
     from omegaconf import OmegaConf
+
     from verl.utils.fs import copy_local_path_from_hdfs
 
     pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values

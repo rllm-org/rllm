@@ -14,6 +14,11 @@ from pprint import pprint
 import numpy as np
 import torch
 from omegaconf import OmegaConf
+
+from rllm.engine.agent_sdk_engine import AgentSdkEngine
+from rllm.engine.rollout.verl_engine import VerlEngine
+from rllm.misc import colorful_print
+from rllm.workflows.workflow import TerminationReason
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
 from verl.single_controller.ray import RayWorkerGroup
@@ -34,11 +39,6 @@ from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_
 from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.debug import marked_timer
 from verl.utils.tracking import Tracking
-
-from rllm.engine.agent_sdk_engine import AgentSdkEngine
-from rllm.engine.rollout.verl_engine import VerlEngine
-from rllm.misc import colorful_print
-from rllm.workflows.workflow import TerminationReason
 
 
 class AgentSdkTrainer(RayPPOTrainer):
@@ -80,6 +80,7 @@ class AgentSdkTrainer(RayPPOTrainer):
     def init_workers(self):
         """Initialize workers with instrumented vLLM servers for distributed rollouts."""
         import ray
+
         from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServerBase, vLLMReplica
 
         # Create an instrumented vLLM HTTP server class

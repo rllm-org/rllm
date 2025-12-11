@@ -16,6 +16,8 @@ try:
 except ImportError as e:
     raise ImportError("The 'fireworks' package is required to use the Fireworks backend. Please install it with: pip install fireworks-ai") from e
 
+from rllm.trainer.verl.agent_workflow_trainer import AgentWorkflowPPOTrainer
+from rllm.workflows.workflow import TerminationReason
 from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo.core_algos import agg_loss
@@ -34,9 +36,6 @@ from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.debug import marked_timer
 from verl.utils.tracking import Tracking
-
-from rllm.trainer.verl.agent_workflow_trainer import AgentWorkflowPPOTrainer
-from rllm.workflows.workflow import TerminationReason
 
 
 class FireworksAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):

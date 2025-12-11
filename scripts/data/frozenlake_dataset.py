@@ -3,9 +3,9 @@ import os
 
 import numpy as np
 import pandas as pd
-from verl.utils.hdfs_io import copy, makedirs
 
 import rllm
+from verl.utils.hdfs_io import copy, makedirs
 
 # Get the directory for rLLM repo (rllm.__file__)
 RLLM_DIR = os.path.dirname(os.path.dirname(os.path.abspath(rllm.__file__)))

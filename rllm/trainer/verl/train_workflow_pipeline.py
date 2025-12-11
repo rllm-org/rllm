@@ -4,14 +4,14 @@ import socket
 import hydra
 import ray
 from omegaconf import OmegaConf
-from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
-from verl.trainer.ppo.reward import load_reward_manager
-from verl.utils.device import is_cuda_available
 
 from rllm.trainer.env_agent_mappings import WORKFLOW_CLASS_MAPPING
 from rllm.trainer.verl.agent_workflow_trainer_fireworks import (
     FireworksAgentWorkflowPPOTrainer,
 )
+from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
+from verl.trainer.ppo.reward import load_reward_manager
+from verl.utils.device import is_cuda_available
 
 
 @hydra.main(config_path="../config", config_name="agent_ppo_trainer", version_base=None)
@@ -71,6 +71,7 @@ class PipelineTaskRunner:
         from pprint import pprint
 
         from omegaconf import OmegaConf
+
         from verl.utils.fs import copy_to_local
 
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
