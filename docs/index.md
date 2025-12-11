@@ -14,15 +14,17 @@ rLLM provides:
 
 ## What's New in v0.2.x
 
-- **Multiple training backends:** In addition to `verl`, rLLM now supports `Tinker` as a training backend. You can use the same abstractions for building agents and easily switch between different backends for training. 
+- **rLLM SDK (preview):** The rLLM SDK enables you to transform agents written in frameworks such as LangGraph, SmolAgent, or Strands into trainable workflows. Check out this [LangGraph RAG example](examples/sdk_langgraph_rag.md), which builds a RAG agent and trains it with the rLLM SDK.
+
+- **Tinker training backend:** In addition to `verl`, rLLM now supports `Tinker` as a training backend. You can use the same abstractions for building agents and easily switch between different backends for training. 
 
 - **Multi-agent training:** rLLM now supports multi-agent training. Check out our [Solver–Judge workflow](examples/solver_judge.md) to see how you can jointly optimize a solver and judge agent with RL.
 
+- **VLM training:** rLLM supports Vision-Language Model training with the `verl` backend. See the [Geo3K training example](examples/vlm.md) for reference.
+
 - **LoRA fine-tuning:** rLLM supports LoRA training in both the `verl` and `Tinker` backends. See the [GSM8K LoRA example](examples/gsm8k_lora.md) for how to enable LoRA training with a single config change.
 
-- **rLLM SDK (preview):** The rLLM SDK enables you to transform agents written in frameworks such as LangGraph, SmolAgent, or Strands into trainable workflows. Check out this [LangGraph RAG example](examples/sdk_langgraph_rag.md), which builds a RAG agent and trains it with the rLLM SDK.
-
-- **VLM training:** rLLM supports Vision-Language Model training with the `verl` backend. See the [Geo3K training example](examples/vlm.md) for reference.
+- **Eval Protocol Integration** We integrate with the [Eval Protocol](https://evalprotocol.io/) from Fireworks AI. Users can now train on any environments supported by the Eval Protocol. See this [example](examples/eval_protocol_frozen_lake.md) that uses Eval Protocol in rLLM to train a Frozenlake agent.
 
 ## Getting Started
 

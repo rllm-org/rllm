@@ -3,20 +3,9 @@ Miscellaneous Utility Functions
 """
 
 import random
-import warnings
 
-import click
 import numpy as np
 from PIL import Image
-
-
-def colorful_print(string: str, *args, **kwargs) -> None:
-    end = kwargs.pop("end", "\n")
-    print(click.style(string, *args, **kwargs), end=end, flush=True)
-
-
-def colorful_warning(string: str, *args, **kwargs) -> None:
-    warnings.warn(click.style(string, *args, **kwargs), stacklevel=2)
 
 
 def get_image(image_path):

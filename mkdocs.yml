@@ -88,6 +88,7 @@ nav:
         - VLM Training on Geo3k dataset: examples/vlm.md
         - Joint Training of Solver-Judge Workflow: examples/solver_judge.md
         - LoRA Training in rLLM (with verl): examples/gsm8k_lora.md
+        - Eval Protocol Integration: core-concepts/eval-protocol.md
       - References:
         - Examples: examples/index.md
         - API Reference: api/index.md
@@ -104,6 +105,7 @@ nav:
       - AgentTrainer for RL Training: core-concepts/training.md
       - RL Algorithms for Agents: core-concepts/rl-algos.md
       - SDK Overview: core-concepts/sdk.md
+      - Eval Protocol Integration: core-concepts/eval-protocol.md
   - Examples:
       - Overview: examples/index.md
       - Math Agent with rLLM SDK: examples/sdk_math.md

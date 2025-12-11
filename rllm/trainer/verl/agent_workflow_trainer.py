@@ -9,6 +9,11 @@ from pprint import pprint
 import numpy as np
 import torch
 from omegaconf import OmegaConf
+
+from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
+from rllm.engine.rollout.verl_engine import VerlEngine
+from rllm.utils.episode_logger import EpisodeLogger
+from rllm.workflows.workflow import TerminationReason
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
 from verl.single_controller.ray import RayWorkerGroup
@@ -30,11 +35,6 @@ from verl.trainer.ppo.ray_trainer import (
 )
 from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.debug import marked_timer
-
-from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
-from rllm.engine.rollout.verl_engine import VerlEngine
-from rllm.utils.episode_logger import EpisodeLogger
-from rllm.workflows.workflow import TerminationReason
 
 
 class AgentWorkflowPPOTrainer(RayPPOTrainer):
@@ -670,13 +670,9 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
 
     def visualize_trajectory_last_step(self, tensor_batch, sample_idx=0, max_samples=1):
         """
-        Visualize last steps from a workflow rollout:
-        - detokenize prompts/responses
-        - show token usage mask
-        - show reward tokens (placed at the last response token)
-        - print Correct/Incorrect using `is_correct` from non_tensors
+        Visualize last steps from a workflow rollout using the shared visualization utility.
         """
-        from rllm.misc import colorful_print
+        from rllm.utils.visualization import visualize_trajectories
 
         # Select only last steps if stepwise-advantage is enabled
         if "is_last_step" in tensor_batch.non_tensor_batch:
@@ -684,112 +680,17 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
             if is_last is not None and len(is_last) == len(tensor_batch):
                 tensor_batch = tensor_batch[is_last]
 
-        prompts = tensor_batch.batch["prompts"]
-        responses = tensor_batch.batch["responses"]
-        # Full attention mask (covers prompt + response); split it into prompt and response parts
-        full_attn_mask = tensor_batch.batch["attention_mask"]
-        prompt_len = prompts.shape[1]
-        resp_len = responses.shape[1]
-        prompt_attn_mask = full_attn_mask[:, :prompt_len]
-        response_attn_mask = full_attn_mask[:, -resp_len:]
+        if len(tensor_batch) == 0:
+            return
 
-        # Loss mask over the response tokens only
-        response_loss_mask = tensor_batch.batch.get("response_mask")
+        end_idx = min(sample_idx + max_samples, len(tensor_batch))
+        indices = list(range(sample_idx, end_idx))
 
-        # Rewards aligned to response tokens
-        token_level_scores = tensor_batch.batch.get("step_rewards" if self.config.rllm.stepwise_advantage.enable and self.config.rllm.stepwise_advantage.mode == "per_step" else "traj_rewards")
-
-        # Optional meta to print outcome
-        is_correct = tensor_batch.non_tensor_batch.get("is_correct", None)
-        term_reasons = tensor_batch.non_tensor_batch.get("termination_reasons", None)
-        episode_ids = tensor_batch.non_tensor_batch.get("episode_ids", None)
-        trajectory_ids = tensor_batch.non_tensor_batch.get("trajectory_ids", None)
-
-        bsz = prompts.shape[0]
-        end_idx = min(sample_idx + max_samples, bsz)
-
-        for i in range(sample_idx, end_idx):
-            colorful_print("\n" + "=" * 60, fg="cyan", bold=True)
-            # Header with ids
-            if episode_ids is not None or trajectory_ids is not None:
-                colorful_print(f"Episode: {episode_ids[i] if episode_ids is not None else '?'}  | Traj: {trajectory_ids[i] if trajectory_ids is not None else '?'}", fg="cyan", bold=True)
-
-            # Outcome line
-            if is_correct is not None:
-                ok = bool(is_correct[i])
-                colorful_print(f"Outcome: {'✓ Correct' if ok else '✗ Incorrect'}", fg=("green" if ok else "red"), bold=True)
-
-            if term_reasons is not None:
-                colorful_print(f"Termination: {term_reasons[i]}", fg="yellow")
-
-            # Legend before the example
-            legend = " ".join(
-                [
-                    "\x1b[37mwhite=masked\x1b[0m",
-                    "\x1b[34mblue=unmasked\x1b[0m",
-                    "\x1b[42m green bg=reward>0 \x1b[0m",
-                    "\x1b[41m red bg=reward<=0 \x1b[0m",
-                ]
-            )
-            print(f"[{legend}]")
-
-            # Detokenize prompt
-            prompt_tokens = prompts[i]
-            prompt_valid_mask = prompt_attn_mask[i].bool()
-            # Build one-line colored prompt (prompt is always masked-from-loss => white)
-            prompt_parts = []
-            for tok_id, is_valid in zip(prompt_tokens.tolist(), prompt_valid_mask.tolist(), strict=False):
-                if not is_valid:
-                    continue
-                tok = self.tokenizer.decode([tok_id]).replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-                prompt_parts.append(f"\x1b[37m{tok}\x1b[0m")  # white
-            print("".join(prompt_parts))
-
-            # Separator line between prompt and response for readability
-            print("----------------")
-
-            # Detokenize response with token-level highlighting
-            resp_tokens = responses[i]
-            resp_valid_mask = response_attn_mask[i].bool()
-            loss_mask = response_loss_mask[i] if response_loss_mask is not None else resp_valid_mask
-            rewards = token_level_scores[i] if token_level_scores is not None else None
-
-            # Pre-compute reward positions (typically only the last valid resp token has nonzero reward)
-            reward_idx = None
-            reward_value = 0.0
-            if rewards is not None:
-                # consider only valid response positions
-                for j, is_valid in enumerate(resp_valid_mask.tolist()):
-                    if not is_valid:
-                        continue
-                    val = float(rewards[j].item()) if hasattr(rewards[j], "item") else float(rewards[j])
-                    if abs(val) > 1e-9:
-                        reward_idx = j
-                        reward_value = val
-
-            # Fallback: if no nonzero reward found, use the last valid response token
-            if reward_idx is None:
-                valid_indices = [idx for idx, v in enumerate(resp_valid_mask.tolist()) if v]
-                if valid_indices:
-                    reward_idx = valid_indices[-1]
-                    if rewards is not None:
-                        val = float(rewards[reward_idx].item()) if hasattr(rewards[reward_idx], "item") else float(rewards[reward_idx])
-                        reward_value = val
-
-            # Colors: white for masked-from-loss; blue for contributes-to-loss; overlay background red/green if reward token
-            response_parts = []
-            for j, tok_id in enumerate(resp_tokens.tolist()):
-                if not bool(resp_valid_mask[j].item() if hasattr(resp_valid_mask[j], "item") else resp_valid_mask[j]):
-                    continue
-                tok = self.tokenizer.decode([tok_id]).replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-
-                contributes = bool(loss_mask[j].item()) if hasattr(loss_mask[j], "item") else bool(loss_mask[j])
-                fg = "\x1b[34m" if contributes else "\x1b[37m"  # blue if in loss, else white
-
-                bg = ""
-                if reward_idx is not None and j == reward_idx:
-                    bg = "\x1b[42m" if reward_value > 0 else "\x1b[41m"  # green background for positive, red for negative/zero
-
-                response_parts.append(f"{bg}{fg}{tok}\x1b[0m")
-
-            print("".join(response_parts))
+        visualize_trajectories(
+            batch=tensor_batch,
+            tokenizer=self.tokenizer,
+            sample_indices=indices,
+            mask_key="response_mask",
+            reward_key="step_rewards" if self.config.rllm.stepwise_advantage.enable and self.config.rllm.stepwise_advantage.mode == "per_step" else "traj_rewards",
+            show_workflow_metadata=True,
+        )

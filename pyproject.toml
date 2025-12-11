@@ -41,6 +41,9 @@ dependencies = [
     # Tools
     "mcp",
 
+    # Integration with Eval Protocol
+    "eval-protocol",
+
     # Utilities
     "hydra-core",
     "openai",

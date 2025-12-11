@@ -31,5 +31,8 @@ Build agents that can search and retrieve information effectively.
 ### 🎮 [Frozenlake Agent](frozenlake.md)
 Classic RL examples using environments like FrozenLake.
 
+### 🧊 [Eval Protocol Integration (FrozenLake)](eval_protocol_frozen_lake.md)
+Use Eval Protocol benchmarks as rLLM workflows for evaluation and RL training.
+
 ### 📚 [Math SFT Training](sft.md)
 Supervised fine-tuning of base math models(e.g. Qwen/Qwen2.5-Math-1.5B) using high-quality trajectories generated from teacher models (e.g. DeepScaleR)
