@@ -122,7 +122,7 @@ def _handle_multimodal_position_ids(processor, input_ids: torch.Tensor, attentio
     return position_ids
 
 
-def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_id: int, max_prompt_length: int, max_response_length: int, stepwise_advantage_mode: str = "broadcast", processor=None) -> "DataProto":
+def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_id: int, max_prompt_length: int, max_response_length: int, processor=None) -> "DataProto":
     """Batches the tensors from an AccumulatedData.
 
     Args:
@@ -183,22 +183,6 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
         "traj_rewards": traj_rewards_batch,
         "step_rewards": step_rewards_batch,
     }
-
-    # Include the advantages and set returns to it as well, if the accumulated data already has them.
-    if len(accumulated.advantages) == len(accumulated.trajectory_ids):
-        advantage_tensor = _build_per_step_advantages(traj_mask, accumulated.advantages)
-        tensors["advantages"] = advantage_tensor
-        tensors["returns"] = advantage_tensor
-        # TODO(listar2000): we should support `token_level_scores` from the `Step` attribute level.
-        # we also need to implement the `kl_penalty` logic used in `verl`.
-        if stepwise_advantage_mode == "per_step":
-            tensors["token_level_scores"] = tensors["step_rewards"]
-            tensors["token_level_rewards"] = tensors["step_rewards"]
-        elif stepwise_advantage_mode == "broadcast":
-            tensors["token_level_scores"] = tensors["traj_rewards"]
-            tensors["token_level_rewards"] = tensors["traj_rewards"]
-        else:
-            raise ValueError(f"Stepwise advantage mode {stepwise_advantage_mode} not supported")
 
     return DataProto.from_dict(
         tensors=tensors,
@@ -307,7 +291,6 @@ def transform_episodes_to_dataproto(
     rollout_engine: VerlEngine,
     max_prompt_length: int,
     max_response_length: int,
-    stepwise_advantage_mode: str = "broadcast",
 ) -> DataProto:
     """
     Transforms a list of episodes (from running a rLLM workflow) into a verl-compatible DataProto.
@@ -332,7 +315,7 @@ def transform_episodes_to_dataproto(
 
     assert hasattr(tokenizer, "pad_token_id"), "Tokenizer must have a pad token ID"
     pad_token_id = tokenizer.pad_token_id
-    return _batch_tensors_and_build_data_proto(accumulated, pad_token_id, max_prompt_length, max_response_length, stepwise_advantage_mode, processor)
+    return _batch_tensors_and_build_data_proto(accumulated, pad_token_id, max_prompt_length, max_response_length, processor)
 
 
 # TODO: extract common logic from transform_episodes_to_dataproto and transform_trajectory_groups_to_dataproto
@@ -357,3 +340,34 @@ def transform_trajectory_groups_to_dataproto(
     assert tokenizer is not None and hasattr(tokenizer, "pad_token_id"), "Tokenizer must have a pad token ID"
     pad_token_id = tokenizer.pad_token_id
     return _batch_tensors_and_build_data_proto(accumulated, pad_token_id, max_prompt_length, max_response_length, processor)
+
+
+def update_dataproto_with_advantages(batch: DataProto, trajectory_groups: list[TrajectoryGroup], mode: str = "broadcast") -> DataProto:
+    """
+    Updates a DataProto with advantages. Useful when we use rLLM-native advantage computation,
+    after which we need to update the DataProto with the advantages.
+    """
+    # flatten the steps in the trajectory groups exactly like how we build it up
+    advantages = []
+    for trajectory_group in trajectory_groups:
+        for trajectory in trajectory_group.trajectories:
+            for step in trajectory.steps:
+                advantages.append(step.advantage)
+
+    assert len(advantages) == len(batch.non_tensor_batch["trajectory_ids"]), "Advantages must have the same length as the number of total steps"
+    advantage_tensor = _build_per_step_advantages(batch.batch["response_mask"], advantages)
+    batch.batch["advantages"] = advantage_tensor
+    batch.batch["returns"] = advantage_tensor
+
+    # TODO(listar2000): we should support `token_level_scores` from the `Step` attribute level.
+    # we also need to implement the `kl_penalty` logic used in `verl`.
+    if mode == "per_step":
+        batch.batch["token_level_scores"] = batch.batch["step_rewards"]
+        batch.batch["token_level_rewards"] = batch.batch["step_rewards"]
+    elif mode == "broadcast":
+        batch.batch["token_level_scores"] = batch.batch["traj_rewards"]
+        batch.batch["token_level_rewards"] = batch.batch["traj_rewards"]
+    else:
+        raise ValueError(f"Stepwise advantage mode {mode} not supported")
+
+    return batch

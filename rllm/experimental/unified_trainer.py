@@ -219,11 +219,11 @@ class UnifiedTrainer:
         trainer_state.backend_batch = self.backend.process_backend_batch(backend_batch)
 
         # stage 6: compute advantages from trajectory groups and update them into the backend batch
-        self.backend.compute_advantages(trainer_state.trajectory_groups, trainer_state.backend_batch, self.algorithm_config)
+        self.backend.compute_advantages(trainer_state, self.algorithm_config)
         assert trainer_state.trajectory_groups[0].trajectories[0].steps[0].advantage is not None, "Advantage is not computed"
 
         # stage 7: backend will update the policy
-        self.backend.update_policy(trainer_state.backend_batch)
+        self.backend.update_policy(trainer_state)
 
         # stage 8: cleanup, logging, visualization, etc.
         if self.tokenizer is not None:

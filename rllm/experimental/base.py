@@ -101,13 +101,14 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
         raise NotImplementedError("Subclasses must implement this method.")
 
     @abstractmethod
-    def compute_advantages(self, trajectory_groups: list[TrajectoryGroup], batch: TBatch, algorithm_config: AlgorithmConfig, **kwargs) -> None:
+    def compute_advantages(self, trainer_state: TrainerState, algorithm_config: AlgorithmConfig, **kwargs) -> None:
         """Compute advantages from trajectory groups and (optionally) info from the backend batch (e.g. entropy)."""
-        compute_advantage_from_trajectory_groups(trajectory_groups, algorithm_config)
+        assert trainer_state.trajectory_groups is not None, "Trajectory groups are not set"
+        compute_advantage_from_trajectory_groups(trainer_state.trajectory_groups, algorithm_config)
         return
 
     @abstractmethod
-    def update_policy(self, batch: TBatch, **kwargs) -> None:
+    def update_policy(self, trainer_state: TrainerState) -> None:
         """Update the policy."""
         raise NotImplementedError("Subclasses must implement this method.")
 
