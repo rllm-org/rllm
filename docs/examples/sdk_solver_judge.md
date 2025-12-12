@@ -1,5 +1,7 @@
 # Multi-Agent Solver-Judge with @trajectory Decorator
 
+![Training Curve](../assets/solver_judge_curve.png)
+
 In this tutorial, you'll build a **two-agent system** where:
 
 - **Solver**: Generates candidate solutions to a problem

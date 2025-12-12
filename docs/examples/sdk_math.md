@@ -1,5 +1,7 @@
 # Train Math Agent with rLLM SDK
 
+![Training Curve](../assets/math_curve.png)
+
 In this tutorial, you'll build and train a single-step agent that solves math problems. This is the simplest way to get started with RL training using rLLM SDK.
 
 ## Overview
