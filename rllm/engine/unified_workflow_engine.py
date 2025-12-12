@@ -151,14 +151,13 @@ class UnifiedWorkflowEngine:
             else:
                 raise Exception(f"[{uid}] Rollout failed permanently after {self.retry_limit} attempts.")
 
-            return task_id, rollout_idx, episode
+            return task_id, rollout_idx, result_idx, episode
 
         finally:
             await self.workflow_queue.put(workflow)
 
     async def execute_tasks(self, tasks: list[dict], task_ids: list[str] | None = None, **kwargs) -> list[Episode]:
         """Run asynchronous workflow execution with retry logic for multiple tasks.
-        TODO(listar2000): refactor this function to get rid of the ugly `task_states` dictionary.
         Args:
             tasks: List of task dictionaries to process.
             task_ids: Optional list of task identifiers. If None, UUIDs are generated.

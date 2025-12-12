@@ -67,7 +67,6 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         self._thread.start()
 
     def _validate_and_setup_configs(self):
-        assert self.config.actor_rollout_ref.hybrid_engine is True, "Only hybrid engine is supported"
         assert self.config.actor_rollout_ref.rollout.mode == "async", "Only async rollout mode is supported"
         assert self.use_rm is False, "Reward models are not supported. Rewards should be assigned using a reward function in the workflow or environment."
         if self.config.rllm.rejection_sample.multiplier != 1:
