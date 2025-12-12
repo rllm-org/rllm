@@ -1,5 +1,7 @@
 # Train LangGraph RAG Agent with rLLM SDK
 
+![Training Curve](../assets/langgraph_curve.png)
+
 In this tutorial, you'll train a retrieval-augmented generation (RAG) agent built with LangGraph. This demonstrates that rLLM SDK works seamlessly with popular agent frameworks—your LangGraph code runs unchanged.
 
 ## Overview
