@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from enum import Enum
+from enum import StrEnum
 from functools import partial
 
 import numpy as np
@@ -13,7 +13,7 @@ from rllm.engine.rollout.rollout_engine import RolloutEngine
 from rllm.environments.base.base_env import BaseEnv
 
 
-class TerminationReason(Enum):
+class TerminationReason(StrEnum):
     MAX_PROMPT_LENGTH_EXCEEDED = "max_prompt_length_exceeded"
     MAX_RESPONSE_LENGTH_EXCEEDED = "max_response_length_exceeded"
     ENV_DONE = "env_done"

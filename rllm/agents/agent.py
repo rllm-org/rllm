@@ -185,7 +185,7 @@ class Episode:
         return cls(
             id=data["id"],
             task=data["task"],
-            termination_reason=TerminationReason(data["termination_reason"]) if data.get("termination_reason") is not None else TerminationReason.UNKNOWN,
+            termination_reason=TerminationReason(data.get("termination_reason", TerminationReason.UNKNOWN)),
             is_correct=data["is_correct"],
             trajectories=[Trajectory.from_dict(trajectory_data) for trajectory_data in data["trajectories"]],
             metrics=data.get("metrics", {}),
