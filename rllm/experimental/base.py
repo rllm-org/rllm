@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 
 from omegaconf import DictConfig
 
-from rllm.agents.agent import Episode, TrajectoryGroup
+from rllm.agents.agent import Episode
 from rllm.data import Dataset
 from rllm.engine.rollout import RolloutEngine
 from rllm.trainer.common.advantage import AlgorithmConfig, compute_advantage_from_trajectory_groups
@@ -93,12 +93,12 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
         raise NotImplementedError("Subclasses must implement this method.")
 
     @abstractmethod
-    def transform_trajectory_groups_to_backend_batch(self, trajectory_groups: list[TrajectoryGroup], **kwargs) -> TBatch:
+    def transform_trajectory_groups_to_backend_batch(self, trainer_state: TrainerState, **kwargs) -> TBatch:
         """Transform trajectory groups to backend-specific batch."""
         raise NotImplementedError("Subclasses must implement this method.")
 
     @abstractmethod
-    def process_backend_batch(self, batch: TBatch, **kwargs) -> TBatch:
+    def process_backend_batch(self, trainer_state: TrainerState, **kwargs) -> None:
         """Process the backend-specific batch."""
         raise NotImplementedError("Subclasses must implement this method.")
 

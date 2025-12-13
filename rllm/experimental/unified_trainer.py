@@ -50,11 +50,11 @@ class TrainerState:
 
     @property
     def has_episodes(self) -> bool:
-        return self.episodes is not None
+        return self.episodes is not None and len(self.episodes) > 0
 
     @property
     def has_trajectory_groups(self) -> bool:
-        return self.trajectory_groups is not None
+        return self.trajectory_groups is not None and len(self.trajectory_groups) > 0
 
     @property
     def has_backend_batch(self) -> bool:
@@ -82,20 +82,7 @@ class UnifiedTrainer:
 
         self._validate_and_setup_configs()
         self._setup_event_loop()  # set up event loop for both agent workflow engine and (optionally) backend
-
-        # create episode logger if enabled in config
-        episode_logger = None
-        if self.config.trainer.get("log_episodes", False):
-            # Get episode log directory from config, default to "logs/my_project/my_experiment"
-            episode_log_dir = self.config.trainer.get("episode_log_dir", f"logs/{self.config.trainer.project_name}/{self.config.trainer.experiment_name}")
-            episode_logger = EpisodeLogger(base_dir=episode_log_dir, subdirectory="episodes")
-
-        self.logger = Tracking(
-            project_name=self.config.trainer.project_name,
-            experiment_name=self.config.trainer.experiment_name,
-            default_backend=self.config.trainer.logger,
-            config=OmegaConf.to_container(self.config, resolve=True),
-        )
+        self._setup_logging()
 
         rollout_engine: RolloutEngine = self.backend.init_rollout_engine()  # obtain rollout engine from backend
         self.agent_workflow_engine = UnifiedWorkflowEngine(
@@ -106,7 +93,7 @@ class UnifiedTrainer:
             n_parallel_tasks=self.config.rllm.workflow.n_parallel_tasks,
             retry_limit=self.config.rllm.workflow.retry_limit,
             raise_on_error=self.config.rllm.workflow.raise_on_error,
-            episode_logger=episode_logger,
+            episode_logger=self.episode_logger,
         )
 
         asyncio.run_coroutine_threadsafe(self.agent_workflow_engine.initialize_pool(), self._loop).result()  # type: ignore
@@ -141,6 +128,7 @@ class UnifiedTrainer:
             estimator=self.config.algorithm.adv_estimator,
             stepwise_advantage_mode=self.config.rllm.stepwise_advantage.mode,
             norm_adv_by_std_in_grpo=self.config.rllm.stepwise_advantage.get("norm_adv_by_std_in_grpo", True),
+            use_rllm=self.config.rllm.stepwise_advantage.get("use_rllm", False),
         )
 
     def _setup_event_loop(self):
@@ -152,6 +140,22 @@ class UnifiedTrainer:
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._thread.start()
+
+    def _setup_logging(self):
+        """Setup up both the tracking and episode logging."""
+        # create episode logger if enabled in config
+        self.episode_logger = None
+        if self.config.trainer.get("log_episodes", False):
+            # Get episode log directory from config, default to "logs/my_project/my_experiment"
+            episode_log_dir = self.config.trainer.get("episode_log_dir", f"logs/{self.config.trainer.project_name}/{self.config.trainer.experiment_name}")
+            self.episode_logger = EpisodeLogger(base_dir=episode_log_dir, subdirectory="episodes")
+
+        self.logger = Tracking(
+            project_name=self.config.trainer.project_name,
+            experiment_name=self.config.trainer.experiment_name,
+            default_backend=self.config.trainer.logger,
+            config=OmegaConf.to_container(self.config, resolve=True),
+        )
 
     # =========================================================================
     # Main training loop methods
@@ -206,6 +210,8 @@ class UnifiedTrainer:
 
         # stage 1: generate episodes
         trainer_state.episodes = self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, loop=self._loop)
+        if not trainer_state.has_episodes:
+            return
 
         # stage 2: transform episodes to trajectory groups
         trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(trainer_state.episodes, self.transform_config)
@@ -217,19 +223,19 @@ class UnifiedTrainer:
         trainer_state.metrics.update(rs_metrics)
         trainer_state.trajectory_groups = filtered_groups
         trainer_state.episodes = filtered_episodes
-
-        if len(filtered_groups) == 0:
+        if not trainer_state.has_trajectory_groups:
             return
 
         # stage 4: transform trajectory groups to backend-specific format
-        backend_batch = self.backend.transform_trajectory_groups_to_backend_batch(trainer_state.trajectory_groups)
+        backend_batch = self.backend.transform_trajectory_groups_to_backend_batch(trainer_state)
+        trainer_state.backend_batch = backend_batch
 
         # stage 5: we perform some backend-specific operations, such as computing reference log probs, critic values, etc.
-        trainer_state.backend_batch = self.backend.process_backend_batch(backend_batch)
+        self.backend.process_backend_batch(trainer_state)
+        assert trainer_state.has_backend_batch, "Backend batch is not transformed or processed successfully"
 
         # stage 6: compute advantages from trajectory groups and update them into the backend batch
         self.backend.compute_advantages(trainer_state, self.algorithm_config)
-        assert trainer_state.trajectory_groups[0].trajectories[0].steps[0].advantage is not None, "Advantage is not computed"
 
         # stage 7: backend will update the policy
         self.backend.update_policy(trainer_state)

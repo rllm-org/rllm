@@ -109,6 +109,7 @@ class AlgorithmConfig:
     estimator: rLLMAdvantageEstimator = rLLMAdvantageEstimator.GRPO
     stepwise_advantage_mode: Literal["broadcast", "per_step"] = "broadcast"
     norm_adv_by_std_in_grpo: bool = True
+    use_rllm: bool = False
 
     @classmethod
     def from_config(cls, config: DictConfig) -> "AlgorithmConfig":
@@ -123,4 +124,5 @@ class AlgorithmConfig:
             estimator=rLLMAdvantageEstimator(config.algorithm.adv_estimator),
             stepwise_advantage_mode=config.rllm.stepwise_advantage.mode,
             norm_adv_by_std_in_grpo=config.rllm.stepwise_advantage.get("norm_adv_by_std_in_grpo", True),
+            use_rllm=config.rllm.stepwise_advantage.get("use_rllm", False),
         )

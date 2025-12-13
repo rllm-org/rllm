@@ -21,12 +21,14 @@ from rllm.data import Dataset
 from rllm.engine.rollout import RolloutEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
 from rllm.experimental.base import BackendProtocol
+from rllm.experimental.verl_advantage import compute_advantage_verl
 from rllm.trainer.common.advantage import AlgorithmConfig, compute_advantage_from_trajectory_groups
 from rllm.trainer.verl.verl_data_processor.transform import transform_trajectory_groups_to_dataproto, update_dataproto_with_advantages
+from rllm.utils import simple_timer
 from verl import DataProto
 from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.core_algos import agg_loss
-from verl.trainer.ppo.ray_trainer import RayPPOTrainer, ResourcePoolManager, apply_kl_penalty, compute_advantage
+from verl.trainer.ppo.ray_trainer import RayPPOTrainer, ResourcePoolManager
 from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.metric import reduce_metrics
 
@@ -36,23 +38,15 @@ if TYPE_CHECKING:
 
 
 class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
-    """Verl backend for the unified trainer.
+    """
+    Verl backend for the unified trainer.
 
     Inherits from both BackendProtocol and RayPPOTrainer to:
-    - Provide the BackendProtocol interface for UnifiedTrainer
-    - Reuse RayPPOTrainer's worker group infrastructure and utilities
-
-    This significantly reduces code duplication by leveraging RayPPOTrainer's:
-    - Worker group creation and management (actor, critic, ref policy)
-    - Async rollout manager
-    - Checkpoint loading/saving
-    - Batch balancing
-    - Profiling utilities
+        - Provide the BackendProtocol interface for UnifiedTrainer
+        - Reuse RayPPOTrainer's worker group infrastructure and utilities (e.g. work group creation, checkpointing)
     """
 
     name: str = "verl"
-    requires_loop: bool = True
-    requires_preprocess_dataset: bool = False
 
     def __init__(
         self,
@@ -193,64 +187,68 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         assert self.rollout_engine is not None, "rollout_engine is not initialized."
         return transform_trajectory_groups_to_dataproto(trajectory_groups, self.rollout_engine, self.config.data.max_prompt_length, self.config.data.max_response_length)
 
-    def process_backend_batch(self, batch: DataProto, **kwargs) -> DataProto:
+    def process_backend_batch(self, trainer_state: TrainerState, **kwargs) -> None:
         """Compute step-level values: old_log_probs, ref_log_probs, critic values.
 
         Reuses logic from AgentWorkflowPPOTrainer._compute_step_level_values.
         """
-        metrics = {}
+        metrics = trainer_state.metrics
+        timing_dict = trainer_state.timing_dict
+        batch: DataProto = trainer_state.backend_batch  # type: ignore[assignment]
 
-        # Compute old_log_probs from actor
-        old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-        entropys = old_log_prob.batch["entropys"]
-        response_masks = batch.batch["response_mask"]
-        loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
-        entropy_agg = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
-        metrics["actor/entropy"] = entropy_agg.detach().item()
-        old_log_prob.batch.pop("entropys")
-        batch = batch.union(old_log_prob)
+        with simple_timer("old_log_probs", timing_dict):
+            # Compute old_log_probs from actor
+            old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+            entropys = old_log_prob.batch["entropys"]
+            response_masks = batch.batch["response_mask"]
+            loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
+            entropy_agg = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
+            metrics["actor/entropy"] = entropy_agg.detach().item()
+            old_log_prob.batch.pop("entropys")
+            batch = batch.union(old_log_prob)
 
-        # Compute rollout log prob diff if available
-        if "rollout_log_probs" in batch.batch.keys():
-            rollout_old_log_probs = batch.batch["rollout_log_probs"]
-            actor_old_log_probs = batch.batch["old_log_probs"]
-            attention_mask = batch.batch["attention_mask"]
-            responses = batch.batch["responses"]
-            response_length = responses.size(1)
-            response_mask = attention_mask[:, -response_length:]
+            # Compute rollout log prob diff if available
+            if "rollout_log_probs" in batch.batch.keys():
+                rollout_old_log_probs = batch.batch["rollout_log_probs"]
+                actor_old_log_probs = batch.batch["old_log_probs"]
+                attention_mask = batch.batch["attention_mask"]
+                responses = batch.batch["responses"]
+                response_length = responses.size(1)
+                response_mask = attention_mask[:, -response_length:]
 
-            rollout_probs = torch.exp(rollout_old_log_probs)
-            actor_probs = torch.exp(actor_old_log_probs)
-            rollout_probs_diff = torch.abs(rollout_probs - actor_probs)
-            rollout_probs_diff = torch.masked_select(rollout_probs_diff, response_mask.bool())
+                rollout_probs = torch.exp(rollout_old_log_probs)
+                actor_probs = torch.exp(actor_old_log_probs)
+                rollout_probs_diff = torch.abs(rollout_probs - actor_probs)
+                rollout_probs_diff = torch.masked_select(rollout_probs_diff, response_mask.bool())
 
-            metrics.update(
-                {
+                rollout_probs_diff_metrics = {
                     "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).detach().item(),
                     "training/rollout_probs_diff_mean": torch.mean(rollout_probs_diff).detach().item(),
                     "training/rollout_probs_diff_std": torch.std(rollout_probs_diff).detach().item(),
                 }
-            )
+                metrics.update(rollout_probs_diff_metrics)
 
         # Compute reference log_probs if using reference policy
         if self.use_reference_policy:
-            if not self.ref_in_actor:
-                ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
-            else:
-                ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
-            batch = batch.union(ref_log_prob)
+            with simple_timer("ref_log_probs", timing_dict):
+                if not self.ref_in_actor:
+                    ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                else:
+                    ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
+                batch = batch.union(ref_log_prob)
 
         # Compute critic values if using critic
         if self.use_critic:
-            values = self.critic_wg.compute_values(batch)
-            batch = batch.union(values)
+            with simple_timer("critic_values", timing_dict):
+                values = self.critic_wg.compute_values(batch)
+                batch = batch.union(values)
 
         # Mask truncated samples if configured
         if self.config.rllm.get("mask_truncated_samples", False):
             mask = batch.batch["attention_mask"][:, -1] == 1
             batch = batch[~mask]  # type: ignore[assignment]
 
-        return batch
+        trainer_state.backend_batch = batch
 
     def compute_advantages(self, trainer_state: TrainerState, algorithm_config: AlgorithmConfig, **kwargs) -> None:
         """Compute advantages from trajectory groups."""
@@ -258,96 +256,15 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         trajectory_groups: list[TrajectoryGroup] = trainer_state.trajectory_groups
         batch: DataProto = trainer_state.backend_batch  # type: ignore[assignment]
 
-        use_rllm_advantage = self.config.rllm.stepwise_advantage.get("use_rllm_advantage", False)
-
-        if use_rllm_advantage:
+        use_rllm = algorithm_config.use_rllm
+        if use_rllm:
             compute_advantage_from_trajectory_groups(trajectory_groups, algorithm_config)
             updated_batch = update_dataproto_with_advantages(batch, trajectory_groups, mode=self.config.rllm.stepwise_advantage.mode)
         else:
-            updated_batch, adv_metrics = self._compute_advantage_verl(batch)  # type: ignore[return-value]
+            updated_batch, adv_metrics = compute_advantage_verl(batch, self.config)  # type: ignore[return-value]
             trainer_state.metrics.update(adv_metrics)
 
         trainer_state.backend_batch = updated_batch
-
-    def _compute_advantage_verl(self, batch: DataProto) -> tuple[DataProto, dict]:
-        """Verl-native advantage computation."""
-        metrics = {}
-        batch.non_tensor_batch["uid"] = batch.non_tensor_batch["trajectory_ids"]
-
-        if self.config.rllm.stepwise_advantage.mode == "per_step":
-            batch.batch["token_level_scores"] = batch.batch["step_rewards"]
-        else:
-            batch.batch["token_level_scores"] = batch.batch["traj_rewards"]
-
-        if self.config.algorithm.use_kl_in_reward:
-            batch, kl_metrics = apply_kl_penalty(
-                batch,
-                kl_ctrl=self.kl_ctrl_in_reward,  # type: ignore[arg-type]
-                kl_penalty=self.config.algorithm.kl_penalty,
-            )
-            metrics.update(kl_metrics)
-        else:
-            batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
-
-        if self.config.rllm.stepwise_advantage.mode == "broadcast":
-            is_last_step = batch.non_tensor_batch["is_last_step"]
-            last_step_indices = np.where(is_last_step == True)[0]
-            not_last_step_indices = np.where(is_last_step == False)[0]
-            non_last_step_batch = batch.select_idxs(not_last_step_indices)
-            batch = batch.select_idxs(last_step_indices)
-        else:
-            batch = self._remove_padding(batch)
-
-        batch = compute_advantage(
-            batch,
-            adv_estimator=self.config.algorithm.adv_estimator,
-            gamma=self.config.algorithm.gamma,
-            lam=self.config.algorithm.lam,
-            num_repeat=self.config.actor_rollout_ref.rollout.n,
-            norm_adv_by_std_in_grpo=self.config.algorithm.norm_adv_by_std_in_grpo,
-            config=self.config.algorithm,
-        )
-
-        if self.config.rllm.stepwise_advantage.mode == "broadcast":
-            self._stepwise_advantage_broadcast(batch, non_last_step_batch)
-            batch = DataProto.concat([batch, non_last_step_batch])
-
-        return batch, metrics
-
-    def _stepwise_advantage_broadcast(self, last_step_batch: DataProto, non_last_step_batch: DataProto) -> None:
-        """Broadcast advantage from last step to all other steps."""
-        src_traj_ids = last_step_batch.non_tensor_batch["trajectory_ids"]
-        src_eps_ids = last_step_batch.non_tensor_batch["episode_ids"]
-        src_steps = last_step_batch.non_tensor_batch["step_nums"]
-        src_mask = last_step_batch.batch["response_mask"]
-        src_advantages = last_step_batch.batch["advantages"]
-
-        tgt_traj_ids = non_last_step_batch.non_tensor_batch["trajectory_ids"]
-        tgt_eps_ids = non_last_step_batch.non_tensor_batch["episode_ids"]
-        tgt_mask = non_last_step_batch.batch["response_mask"]
-
-        traj_ep_to_scalar_adv = {}
-        for i, (traj_id, eps_id) in enumerate(zip(src_traj_ids, src_eps_ids, strict=False)):
-            mask = src_mask[i].bool()
-            scalar = src_advantages[i][mask].mean()
-
-            if self.config.rllm.stepwise_advantage.get("normalize_by_steps", False):
-                scalar = scalar / src_steps[i]
-                last_step_batch.batch["advantages"][i][mask] = scalar
-
-            traj_ep_to_scalar_adv[(traj_id, eps_id)] = scalar
-
-        scalar_rows = torch.stack([torch.full_like(tgt_mask[i], fill_value=traj_ep_to_scalar_adv[(traj_id, eps_id)], dtype=torch.float32) for i, (traj_id, eps_id) in enumerate(zip(tgt_traj_ids, tgt_eps_ids, strict=False))])
-
-        final_advantage = scalar_rows * tgt_mask
-        non_last_step_batch.batch["advantages"] = final_advantage
-        non_last_step_batch.batch["returns"] = final_advantage
-
-    def _remove_padding(self, batch: DataProto) -> DataProto:
-        """Remove padded steps from batch."""
-        is_pad_step = batch.non_tensor_batch["is_pad_step"]
-        non_pad_step_indices = np.where(is_pad_step == False)[0]
-        return batch.select_idxs(non_pad_step_indices)
 
     def update_policy(self, trainer_state: TrainerState) -> None:
         """Update actor and critic policies."""
