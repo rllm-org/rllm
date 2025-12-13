@@ -16,6 +16,7 @@ from rllm.engine.rollout import RolloutEngine
 from rllm.trainer.common.advantage import AlgorithmConfig, compute_advantage_from_trajectory_groups
 
 if TYPE_CHECKING:
+    from rllm.engine.unified_workflow_engine import UnifiedWorkflowEngine
     from rllm.experimental.unified_trainer import TrainerState
 
 TDataset = TypeVar("TDataset", bound=Iterable)  # backend-specific dataset type
@@ -61,14 +62,15 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
         pass
 
     @abstractmethod
-    def get_dataloader(self, dataset: Dataset) -> TDataset:
-        """Preprocess the dataset for the backend.
+    def get_dataloader(self, dataset: Dataset | None, trainer_state: TrainerState) -> TDataset:
+        """Get the dataloader for the backend.
 
         Args:
-            dataset: The dataset to preprocess.
+            dataset: The dataset to get the dataloader from.
+            trainer_state: The trainer state.
 
         Returns:
-            The preprocessed dataset of type TDataset.
+            The dataloader of type TDataset.
         """
         raise NotImplementedError("Subclasses must implement this method.")
 
@@ -86,8 +88,8 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
     # =========================================================================
 
     @abstractmethod
-    def generate_episodes(self, batch: TBatch, **kwargs) -> list[Episode]:
-        """Generate episodes from the batch."""
+    def generate_episodes(self, batch: TBatch, agent_workflow_engine: UnifiedWorkflowEngine, **kwargs) -> list[Episode]:
+        """Generate episodes from the batch using the agent workflow engine."""
         raise NotImplementedError("Subclasses must implement this method.")
 
     @abstractmethod
@@ -147,9 +149,10 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
         pass
 
     @abstractmethod
-    def on_validation_start(self, trainer_state: TrainerState) -> None:
+    def on_validation_start(self, trainer_state: TrainerState) -> bool:
         """Hook method called at the start of validation."""
         trainer_state.is_training = False
+        return True
 
     @abstractmethod
     def on_validation_end(self, trainer_state: TrainerState) -> None:

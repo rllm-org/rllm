@@ -64,7 +64,7 @@ class TrainerState:
 class UnifiedTrainer:
     """Unified trainer for backend-agnostic training."""
 
-    def __init__(self, backend_cls: type[BackendProtocol], config: DictConfig, workflow_class: type[Workflow], train_dataset: Dataset, val_dataset: Dataset | None = None, workflow_args: dict | None = None, backend_args: dict | None = None, **kwargs):
+    def __init__(self, backend_cls: type[BackendProtocol], config: DictConfig, workflow_class: type[Workflow], train_dataset: Dataset | None = None, val_dataset: Dataset | None = None, workflow_args: dict | None = None, backend_args: dict | None = None, **kwargs):
         """
         Initialize the UnifiedTrainer.
         """
@@ -168,7 +168,7 @@ class UnifiedTrainer:
 
         trainer_state.global_step += 1  # we start from step 1
         # (optionally) convert the train dataset to backend-specific format
-        train_dataloader: Iterable = self.backend.get_dataloader(self.train_dataset)
+        train_dataloader: Iterable = self.backend.get_dataloader(self.train_dataset, trainer_state)
 
         for epoch in range(self.config.trainer.total_epochs):
             pprint(f"epoch {epoch}, step {trainer_state.global_step} started")
@@ -181,6 +181,7 @@ class UnifiedTrainer:
                 # optional post-batch hook
                 self.backend.on_batch_end(trainer_state)
 
+                self.logger.log(data=trainer_state.metrics, step=trainer_state.global_step)
                 trainer_state.global_step += 1
 
                 # periodic validation
@@ -190,13 +191,21 @@ class UnifiedTrainer:
             self.backend.on_epoch_end(trainer_state)
             trainer_state.epoch += 1
 
+        # final validation
+        if self.config.trainer.get("val_freq", 0) > 0:
+            self.validate(trainer_state)
+
+        self.backend.on_train_end(trainer_state)
+
     def _train_batch(self, batch: Any, trainer_state: TrainerState) -> None:
         """Train a batch."""
         termination_counts = Counter()
         workflow_metrics = defaultdict(list)
 
+        self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="train", epoch=trainer_state.epoch)
+
         # stage 1: generate episodes
-        trainer_state.episodes = self.backend.generate_episodes(batch, loop=self._loop)
+        trainer_state.episodes = self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, loop=self._loop)
 
         # stage 2: transform episodes to trajectory groups
         trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(trainer_state.episodes, self.transform_config)
@@ -241,25 +250,23 @@ class UnifiedTrainer:
         for r in TerminationReason:
             trainer_state.metrics[f"batch/{r.value}"] = termination_counts[r.value] / total_counts
 
-        self.logger.log(data=trainer_state.metrics, step=trainer_state.global_step)
-
     def validate(self, trainer_state: TrainerState) -> None:
         """Validate the model."""
-        if self.val_dataset is None:
-            return
-
         n_val_samples = self.config.actor_rollout_ref.rollout.val_kwargs.n
 
-        self.backend.on_validation_start(trainer_state)
+        if not self.backend.on_validation_start(trainer_state):  # this function returns a flag indicating whether to continue validation
+            return
+
+        self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="val", epoch=trainer_state.epoch)
 
         # TODO(listar2000): check whether we need to log by "source"
         is_correct_lst, uid_lst, data_source_lst = [], [], []
         workflow_metrics_by_source = defaultdict(lambda: defaultdict(list))
 
-        val_dataloader: Iterable = self.backend.get_dataloader(self.val_dataset)
+        val_dataloader: Iterable = self.backend.get_dataloader(self.val_dataset, trainer_state)
         for batch in val_dataloader:
             self.backend.on_batch_start(trainer_state)
-            val_episodes = self.backend.generate_episodes(batch, loop=self._loop)
+            val_episodes = self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, loop=self._loop)
             is_correct_lst.extend([episode.is_correct for episode in val_episodes])
             uid_lst.extend([episode.id.split(":")[0] for episode in val_episodes])
             data_source_lst.extend([episode.info.get("data_source", "unknown") for episode in val_episodes])

@@ -101,9 +101,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         # Rollout engine - will be created in init_rollout_engine
         self.rollout_engine: VerlEngine | None = None
 
-        # Workflow engine reference - to be set by unified trainer
-        self.workflow_engine: UnifiedWorkflowEngine | None = None
-
     # =========================================================================
     # BackendProtocol interface methods
     # =========================================================================
@@ -133,27 +130,24 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         assert self.config.actor_rollout_ref.rollout.mode == "async", "Only async rollout mode is supported for VerlBackend"
         assert self.use_rm is False, "Reward models are not supported. Rewards should be assigned using a reward function in the workflow or environment."
 
-    def get_dataloader(self, dataset: Dataset) -> Iterable:
-        """Get dataloader from dataset."""
-        # The dataset should implement __iter__ or provide a dataloader
-        # Assuming dataset provides an iterable interface
-        return dataset  # type: ignore[return-value]
+    def get_dataloader(self, dataset: Dataset | None, trainer_state: TrainerState) -> Iterable:
+        """Get dataloader. Note that for Verl backend, the RayPPOTrainer init already creates the dataloaders."""
+        if trainer_state.is_training:
+            return self.train_dataloader
+        elif self.val_dataloader is not None:
+            return self.val_dataloader
+        else:
+            raise ValueError("No validation dataloader available. Please check the configuration.")
 
-    def shutdown(self) -> None:
-        """Shutdown the backend and cleanup resources."""
-        self.rollout_engine = None
-        self.workflow_engine = None
-
-    def set_workflow_engine(self, workflow_engine: UnifiedWorkflowEngine) -> None:
-        """Set the workflow engine reference.
-
-        Args:
-            workflow_engine: The workflow engine to use for episode generation.
-        """
-        self.workflow_engine = workflow_engine
-
-    def generate_episodes(self, batch: Any, **kwargs) -> list[Episode]:
+    def generate_episodes(self, batch: Any, agent_workflow_engine: UnifiedWorkflowEngine, **kwargs) -> list[Episode]:
         """Generate episodes using the workflow engine.
+
+        For Verl backend, this function handles the following procedures:
+
+        1. Build an "interleaved" batch, where each task is repeated `rollout.n` times.
+        2. Extract the tasks and task IDs from the batch.
+        3. Execute the tasks using the agent workflow engine.
+        4. Return the episodes.
 
         Args:
             batch: Input batch (dict format from dataloader).
@@ -165,25 +159,17 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         assert "loop" in kwargs and kwargs["loop"] is not None, "async event loop is required"
         loop = kwargs["loop"]
 
-        if self.workflow_engine is None:
-            raise ValueError("workflow_engine is not set. Call set_workflow_engine() first.")
-
-        # Convert batch to DataProto if needed
+        # Step 1: build interleaved batch
         if isinstance(batch, dict):
             batch = DataProto.from_single_dict(batch)
 
-        # Add task IDs for tracking
         batch.non_tensor_batch["task_ids"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
-
-        # Repeat for multiple rollouts per task
-        n_rollouts = self.config.actor_rollout_ref.rollout.n
-        batch = batch.repeat(repeat_times=n_rollouts)
-
-        # Remove fields not needed for environment-based interaction
+        batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n)
         batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"])
 
-        # Execute tasks using workflow engine
-        coro = self.workflow_engine.execute_tasks_verl(batch)
+        # Step 2: execute tasks using the agent workflow engine
+
+        coro = agent_workflow_engine.execute_tasks_verl(batch, **kwargs)
 
         if loop is not None:
             episodes = asyncio.run_coroutine_threadsafe(coro, loop).result()
@@ -192,17 +178,20 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
 
         return episodes
 
+    async def _execute_tasks_async(self, batch: DataProto, agent_workflow_engine: UnifiedWorkflowEngine, **kwargs) -> list[Episode]:
+        """A Verl-specific helper function to execute tasks asynchronously."""
+        assert self.rollout_engine is not None, "rollout_engine is not initialized."
+        await self.rollout_engine.wake_up()
+        tasks = batch.non_tensor_batch["extra_info"].tolist()
+        task_ids = batch.non_tensor_batch["task_ids"].tolist()
+        episodes = await agent_workflow_engine.execute_tasks(tasks, task_ids, **kwargs)
+        await self.rollout_engine.sleep()
+        return episodes
+
     def transform_trajectory_groups_to_backend_batch(self, trajectory_groups: list[TrajectoryGroup], **kwargs) -> DataProto:
         """Transform trajectory groups to verl DataProto format."""
-        if self.rollout_engine is None:
-            raise ValueError("rollout_engine is not initialized.")
-
-        return transform_trajectory_groups_to_dataproto(
-            trajectory_groups,
-            rollout_engine=self.rollout_engine,
-            max_prompt_length=self.config.data.max_prompt_length,
-            max_response_length=self.config.data.max_response_length,
-        )
+        assert self.rollout_engine is not None, "rollout_engine is not initialized."
+        return transform_trajectory_groups_to_dataproto(trajectory_groups, self.rollout_engine, self.config.data.max_prompt_length, self.config.data.max_response_length)
 
     def process_backend_batch(self, batch: DataProto, **kwargs) -> DataProto:
         """Compute step-level values: old_log_probs, ref_log_probs, critic values.
@@ -407,12 +396,16 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         if self.config.trainer.save_freq > 0 and trainer_state.global_step % self.config.trainer.save_freq == 0:
             self._save_checkpoint()
 
-    def on_validation_start(self, trainer_state: TrainerState) -> None:
+    def on_validation_start(self, trainer_state: TrainerState) -> bool:
         """Called at the start of validation."""
-        trainer_state.is_training = False
-        if self.workflow_engine is not None:
-            self.workflow_engine.set_training_step(trainer_state.global_step, mode="val", epoch=trainer_state.epoch)
+        if self.val_reward_fn is None:
+            return False
+        else:
+            trainer_state.is_training = False
+            self.rollout_engine.validate = True  # type: ignore[attr-defined]
+            return True
 
     def on_validation_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of validation."""
         trainer_state.is_training = True
+        self.rollout_engine.validate = False  # type: ignore[attr-defined]
