@@ -37,7 +37,7 @@ from verl.utils.tracking import Tracking
 
 from rllm.engine.agent_sdk_engine import AgentSdkEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
-from rllm.misc import colorful_print
+from rllm.utils import colorful_print
 from rllm.workflows.workflow import TerminationReason
 
 

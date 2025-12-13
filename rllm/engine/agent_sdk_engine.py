@@ -16,7 +16,7 @@ from tqdm import tqdm
 from rllm.agents.agent import Episode, Trajectory
 from rllm.engine.rollout import ModelOutput, RolloutEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
-from rllm.misc import colorful_print
+from rllm.utils import colorful_print
 from rllm.sdk.data_process import group_steps, trace_to_step
 from rllm.sdk.protocol import Trace, TrajectoryView
 from rllm.sdk.proxy.proxy_manager import VerlProxyManager
