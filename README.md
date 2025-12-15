@@ -25,7 +25,7 @@ rLLM is an open-source framework for post-training language agents via reinforce
 
 ## Releases 📰
 
-<strong>[2025/10/16]</strong> We release rLLM [v0.2.1](https://github.com/rllm-org/rllm/tree/v0.2.1) which comes with support for Tinker backend, LoRA and VLM training, and support for Eval Protocol. 
+<strong>[2025/12/11]</strong> We release rLLM [v0.2.1](https://github.com/rllm-org/rllm/tree/v0.2.1) which comes with support for Tinker backend, LoRA and VLM training, and support for Eval Protocol. We also bumped our `verl` backend to `v0.6.1`. [[SDK Blogpost]](https://rllm-project.com/post.html?post=sdk.md)
 
 <strong>[2025/10/16]</strong> rLLM [v0.2](https://github.com/rllm-org/rllm/tree/v0.2) is now officially released! We introduce `AgentWorkflowEngine` for training over arbitrary agentic programs. It also comes integrated with the official `verl-0.5.0`, featuring support for Megatron training. Check out this [blog post](https://rllm-project.com/post.html?post=rllm_v0.2.md) for more.
 
@@ -37,52 +37,51 @@ rLLM is an open-source framework for post-training language agents via reinforce
 
 ## Getting Started 🎯
 
-### Step 1: Building rLLM
+rLLM requires `Python >= 3.11`. You can install it either directly via pip or build from source.
 
-rLLM requires Python >= 3.11. You can install it either directly via pip or build from source.
+There are three ways that you can install rLLM:
 
-**Option A: Direct Installation**
+### Approach A: Direct Installation
 
 ```bash
-uv pip install "git+https://github.com/rllm-org/rllm.git"
+uv pip install "rllm[verl] @ git+https://github.com/rllm-org/rllm.git"
 ```
 
-**Option B: Building from Source**
+_(or replace the `verl` above for `tinker` to install with tinker backend, see below for more details)_
+
+### Approach B: Building from Source with `uv`
+
+**Step 1: Clone and Setup Environment**
 
 ```bash
 # Clone the repository
 git clone https://github.com/rllm-org/rllm.git
 cd rllm
 
-# Create a conda environment
-conda create -n rllm python=3.11 -y
-conda activate rllm
-
-# Build rLLM from source
-uv pip install -e .
+# Create an uv environment
+uv venv --python 3.11
+source .venv/bin/activate
 ```
 
-### Step 2: Installing Training Backend
+**Step 2: Install rLLM with Training Backend**
 
-rLLM supports two training backends: `verl` and `Tinker`. Choose one based on your needs.
+rLLM supports two training backends: `verl` and `tinker`. Choose one based on your needs.
 
-**Option A: Using `verl` as Training Backend**
+_**Option I:** Using `verl` as Training Backend_
 
 ```bash
-# Initialize and update the verl submodule
-git submodule update --init --recursive
-
-# Install verl
-bash scripts/install_verl.sh
+# can add --torch-backend=auto to automatically detect the CUDA backend
+uv pip install -e .[verl] 
 ```
 
-**Option B: Using `Tinker` as Training Backend**
+_**Option II:** Using `tinker` as Training Backend_
 
-No additional installation needed. `tinker` and `tinker-cookbook` are pre-installed when you install rLLM.
+```bash
+# can add --torch-backend=cpu to train on CPU-only machines
+uv pip install -e .[tinker] 
+```
 
-> **Note:** The direct pip installation (Option A in Step 1) comes with Tinker as the default training backend. If you want to use `verl`, you'll need to build from source (Option B in Step 1) and then install `verl` (Option A in Step 2).
-
-### Installation with Docker 🐳
+### Approach C: Installation with Docker 🐳
 
 For a containerized setup, you can use Docker:
 
@@ -97,6 +96,8 @@ docker start rllm-container
 # Enter the container
 docker exec -it rllm-container bash
 ```
+
+For more detailed installation guide, including using `sglang` for `verl` backend, please refer to our [documentation](https://rllm-project.readthedocs.io/en/latest/getting-started/installation).
 
 ## Awesome Projects using rLLM 🔥
 
