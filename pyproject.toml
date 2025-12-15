@@ -121,6 +121,12 @@ code-tools = [
     "together>=1.4",
 ]
 
+[tool.uv]
+override-dependencies = [
+    "litellm[proxy]>=1.80.0",
+    "rich>=13.9.4",
+]
+
 [tool.uv.extra-build-dependencies]
 flash-attn = [
     { requirement = "torch", match-runtime = true },
