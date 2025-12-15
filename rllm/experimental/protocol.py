@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from rllm.experimental.unified_trainer import TrainerState
 
 TDataset = TypeVar("TDataset", bound=Iterable)  # backend-specific dataset type
-TBatch = TypeVar("TBatch")  # backend-specific batch type
+TBatch = TypeVar("TBatch")  # backend-specific data batch type
 
 
 class BackendProtocol(ABC, Generic[TDataset, TBatch]):

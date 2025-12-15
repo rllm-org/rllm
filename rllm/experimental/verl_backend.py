@@ -20,7 +20,7 @@ from rllm.agents.agent import Episode, TrajectoryGroup
 from rllm.data import Dataset
 from rllm.engine.rollout import RolloutEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
-from rllm.experimental.base import BackendProtocol
+from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.verl_advantage import compute_advantage_verl
 from rllm.trainer.common.advantage import AlgorithmConfig, compute_advantage_from_trajectory_groups
 from rllm.trainer.verl.verl_data_processor.transform import transform_trajectory_groups_to_dataproto, update_dataproto_with_advantages

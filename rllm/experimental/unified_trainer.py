@@ -12,7 +12,7 @@ from rllm.agents.agent import Episode, TrajectoryGroup
 from rllm.data import Dataset
 from rllm.engine.rollout import RolloutEngine
 from rllm.engine.unified_workflow_engine import UnifiedWorkflowEngine
-from rllm.experimental.base import BackendProtocol
+from rllm.experimental.protocol import BackendProtocol
 from rllm.trainer.common import AlgorithmConfig, CompactFilteringConfig, RejectionSamplingConfig, TransformConfig
 from rllm.trainer.common.rejection_sampling import RejectionSamplingState, apply_rejection_sampling_and_filtering
 from rllm.trainer.common.transform import transform_episodes_to_trajectory_groups
