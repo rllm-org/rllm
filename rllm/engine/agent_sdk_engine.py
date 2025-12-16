@@ -16,13 +16,13 @@ from tqdm import tqdm
 from rllm.agents.agent import Episode, Trajectory
 from rllm.engine.rollout import ModelOutput, RolloutEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
-from rllm.utils import colorful_print
 from rllm.sdk.data_process import group_steps, trace_to_step
 from rllm.sdk.protocol import Trace, TrajectoryView
 from rllm.sdk.proxy.proxy_manager import VerlProxyManager
 from rllm.sdk.session import SESSION_BACKEND
 from rllm.sdk.session.base import wrap_with_session_context
 from rllm.sdk.store.sqlite_store import SqliteTraceStore
+from rllm.utils import colorful_print
 from rllm.workflows.workflow import TerminationReason
 
 # Avoid hard dependency on verl at import time; only for typing
