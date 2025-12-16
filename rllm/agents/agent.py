@@ -1,7 +1,12 @@
+from __future__ import annotations
+
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from rllm.engine.rollout import ModelOutput
 
 
 @dataclass
@@ -16,13 +21,31 @@ class Step:
     thought: str = ""
     action: Any = None
     model_response: str = ""
-    model_output: "ModelOutput" = None  # noqa: F821
+    model_output: ModelOutput | None = None
     info: dict = field(default_factory=dict)  # Store any additional info.
 
     # field below are filled by the engine
     reward: float = 0.0
     done: bool = False
     mc_return: float = 0.0
+
+    # field below are filled by the advantage computer
+    advantage: float | None = None
+
+    def __post_init__(self):
+        if self.model_output is None:
+            return
+        # backfill fields like prompt_ids, response_ids, logprobs, etc.
+        if len(self.prompt_ids) == 0 and self.model_output.prompt_ids is not None:
+            self.prompt_ids = self.model_output.prompt_ids
+        if len(self.response_ids) == 0 and self.model_output.completion_ids is not None:
+            self.response_ids = self.model_output.completion_ids
+        if len(self.logprobs) == 0 and self.model_output.logprobs is not None:
+            self.logprobs = self.model_output.logprobs
+
+        # check that the token ids are filled
+        assert len(self.prompt_ids) > 0, "prompt_ids is empty"
+        assert len(self.response_ids) > 0, "response_ids is empty"
 
     def to_dict(self) -> dict:
         return {
@@ -39,10 +62,11 @@ class Step:
             "reward": self.reward,
             "done": self.done,
             "mc_return": self.mc_return,
+            "advantage": self.advantage,
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Step":
+    def from_dict(cls, data: dict) -> Step:
         from rllm.engine.rollout import ModelOutput
 
         return cls(
@@ -59,6 +83,7 @@ class Step:
             reward=data["reward"],
             done=data["done"],
             mc_return=data["mc_return"],
+            advantage=data["advantage"],
         )
 
 
@@ -67,13 +92,16 @@ class Action:
     action: Any = None
 
 
+_DEFAULT_TRAJ_NAME = "default_traj_name"
+
+
 @dataclass
 class Trajectory:
     uid: str = field(default_factory=lambda: str(uuid.uuid4()))  # unique id to deduplicate on
-    name: str = "agent"
+    name: str = _DEFAULT_TRAJ_NAME
     task: Any = None
     steps: list[Step] = field(default_factory=list)
-    reward: float = 0.0
+    reward: float | None = None  # it is possible that the trajectory-level reward does not exist
     info: dict = field(default_factory=dict)
 
     def to_dict(self):
@@ -89,12 +117,12 @@ class Trajectory:
             "name": self.name,
             "task": _sanitize_task(self.task),
             "steps": [step.to_dict() for step in self.steps],
-            "reward": float(self.reward),
+            "reward": float(self.reward) if self.reward is not None else None,
             "info": self.info,
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Trajectory":
+    def from_dict(cls, data: dict) -> Trajectory:
         """Create Trajectory from dictionary, properly deserializing Step objects."""
         return cls(
             uid=data.get("uid", str(uuid.uuid4())),
@@ -125,7 +153,7 @@ class Trajectory:
 class Episode:
     id: str = ""  # rollout id e.g., task_id:rollout_idx
     task: Any = None
-    termination_reason: "TerminationReason" = None  # noqa: F821
+    termination_reason: TerminationReason | None = None  # noqa: F821
     is_correct: bool = False
     trajectories: list[Trajectory] = field(default_factory=list)
     metrics: dict = field(default_factory=dict)
@@ -150,19 +178,39 @@ class Episode:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Episode":
+    def from_dict(cls, data: dict) -> Episode:
         """Create Episode from dictionary, properly deserializing Trajectory objects."""
         from rllm.engine.agent_workflow_engine import TerminationReason
 
         return cls(
             id=data["id"],
             task=data["task"],
-            termination_reason=TerminationReason(data["termination_reason"]) if data.get("termination_reason") is not None else TerminationReason.UNKNOWN,
+            termination_reason=TerminationReason(data.get("termination_reason", TerminationReason.UNKNOWN)),
             is_correct=data["is_correct"],
             trajectories=[Trajectory.from_dict(trajectory_data) for trajectory_data in data["trajectories"]],
             metrics=data.get("metrics", {}),
             info=data.get("info", {}),
         )
+
+
+@dataclass
+class TrajectoryGroup:
+    """
+    A group of trajectories for advantage computation.
+
+    Unlike Episode (which represents raw rollout data), TrajectoryGroup is specifically
+    structured for advantage computation. All trajectories in a group will have their
+    rewards compared to compute advantages (e.g., via GRPO).
+
+    Attributes:
+        trajectories: List of trajectories to compare for advantage computation
+        group_id: Optional identifier for the group (e.g., "task1:agent_0")
+        metadata: List of metadata for each trajectory in the group
+    """
+
+    trajectories: list[Trajectory]
+    group_id: str = None  # noqa: F821
+    metadata: list[dict] = field(default_factory=list)
 
 
 class BaseAgent(ABC):
