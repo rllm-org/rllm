@@ -37,7 +37,7 @@ rLLM is an open-source framework for post-training language agents via reinforce
 
 ## Getting Started 🎯
 
-rLLM requires `Python >= 3.11`. You can install it either directly via pip or build from source.
+rLLM requires `Python >= 3.10` (`3.11` is needed if using `tinker`). You can install it either directly via pip or build from source.
 
 There are three ways that you can install rLLM:
 
@@ -70,7 +70,6 @@ rLLM supports two training backends: `verl` and `tinker`. Choose one based on yo
 _**Option I:** Using `verl` as Training Backend_
 
 ```bash
-# can add --torch-backend=auto to automatically detect the CUDA backend
 uv pip install -e .[verl] 
 ```
 
