@@ -50,13 +50,20 @@ def load_docs(corpus, doc_idxs):
     return results
 
 
-def load_model(model_path: str, use_fp16: bool = False):
+def load_model(model_path: str, use_fp16: bool = False, device: torch.device | None = None):
     """Load transformer model and tokenizer."""
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
     model.eval()
-    model.cuda()
-    if use_fp16:
+    model.to(device)
+
+    if use_fp16 and device.type == "cuda":
         model = model.half()
+    elif use_fp16 and device.type != "cuda":
+        logger.warning("FP16 requested but CUDA is not available; running in FP32 on CPU.")
+
     tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True, trust_remote_code=True)
     return model, tokenizer
 
@@ -88,11 +95,14 @@ class Encoder:
         # Set the device
         if torch.cuda.is_available():
             torch.cuda.set_device(gpu_id)
+            self.device = torch.device(f"cuda:{gpu_id}")
+        else:
+            self.device = torch.device("cpu")
 
-        self.model, self.tokenizer = load_model(model_path=model_path, use_fp16=use_fp16)
+        self.model, self.tokenizer = load_model(model_path=model_path, use_fp16=use_fp16, device=self.device)
         self.model.eval()
 
-        logger.info(f"Encoder initialized: model={model_name}, device=cuda:{gpu_id}, fp16={use_fp16}")
+        logger.info(f"Encoder initialized: model={model_name}, device={self.device}, fp16={use_fp16}")
 
     @torch.no_grad()
     def encode(self, query_list: list[str], is_query: bool = True) -> np.ndarray:
@@ -113,7 +123,7 @@ class Encoder:
                 query_list = [f"Represent this sentence for searching relevant passages: {query}" for query in query_list]
 
         inputs = self.tokenizer(query_list, max_length=self.max_length, padding=True, truncation=True, return_tensors="pt")
-        inputs = {k: v.cuda() for k, v in inputs.items()}
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
         if "T5" in type(self.model).__name__:
             # T5-based retrieval model
@@ -130,7 +140,8 @@ class Encoder:
         query_emb = query_emb.astype(np.float32, order="C")
 
         del inputs, output
-        torch.cuda.empty_cache()
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
 
         return query_emb
 
@@ -305,7 +316,8 @@ class DenseRetriever(BaseRetriever):
             scores.extend(batch_scores)
 
             del batch_emb, batch_scores, batch_idxs, query_batch, flat_idxs, batch_results
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         if return_score:
             return results, scores
