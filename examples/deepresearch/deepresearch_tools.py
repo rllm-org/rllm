@@ -557,132 +557,135 @@ class PythonInterpreterTool(DeepResearchTool):
         timeout = timeout or self.timeout
 
         # Security checks - check for dangerous imports/operations
-        dangerous_patterns = [
-            "import os",
-            "import subprocess",
-            "import sys",
-            "from os import",
-            "from subprocess import",
-            "from sys import",
-            "exec(",
-            "eval(",
-            "compile(",
-            "open(",
-            "file(",
-        ]
+        # dangerous_patterns = [
+        #     "import os",
+        #     "import subprocess",
+        #     "import sys",
+        #     "from os import",
+        #     "from subprocess import",
+        #     "from sys import",
+        #     "exec(",
+        #     "eval(",
+        #     "compile(",
+        #     "open(",
+        #     "file(",
+        # ]
 
-        code_lower = code.lower()
-        for pattern in dangerous_patterns:
-            if pattern in code_lower:
-                return f"[Security Error] '{pattern}' not allowed for safety reasons"
+        # code_lower = code.lower()
+        # for pattern in dangerous_patterns:
+        #     if pattern in code_lower:
+        #         return f"[Security Error] '{pattern}' not allowed for safety reasons"
 
         import io
         import sys
+        import traceback
         from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
         # Setup safe environment
-        allowed_modules = {
-            "math": __import__("math"),
-            "datetime": __import__("datetime"),
-            "json": __import__("json"),
-            "random": __import__("random"),
-            "re": __import__("re"),
-            "collections": __import__("collections"),
-            "itertools": __import__("itertools"),
-            "statistics": __import__("statistics"),
-        }
+        # allowed_modules = {
+        #     "math": __import__("math"),
+        #     "datetime": __import__("datetime"),
+        #     "json": __import__("json"),
+        #     "random": __import__("random"),
+        #     "re": __import__("re"),
+        #     "collections": __import__("collections"),
+        #     "itertools": __import__("itertools"),
+        #     "statistics": __import__("statistics"),
+        # }
 
-        # Add numpy/pandas if available
-        try:
-            import numpy as np
+        # # Add numpy/pandas if available
+        # try:
+        #     import numpy as np
 
-            allowed_modules["numpy"] = np
-            allowed_modules["np"] = np
-        except ImportError:
-            pass
+        #     allowed_modules["numpy"] = np
+        #     allowed_modules["np"] = np
+        # except ImportError:
+        #     pass
 
-        try:
-            import pandas as pd
+        # try:
+        #     import pandas as pd
 
-            allowed_modules["pandas"] = pd
-            allowed_modules["pd"] = pd
-        except ImportError:
-            pass
+        #     allowed_modules["pandas"] = pd
+        #     allowed_modules["pd"] = pd
+        # except ImportError:
+        #     pass
 
-        # Restricted builtins with safe import capability
-        def safe_import(name, *args, **kwargs):
-            """Allow importing only safe modules."""
-            safe_modules = [
-                "math",
-                "datetime",
-                "json",
-                "random",
-                "re",
-                "collections",
-                "itertools",
-                "statistics",
-                "numpy",
-                "pandas",
-                "scipy",
-                "scipy.linalg",  # Add scipy submodules
-                "scipy.optimize",
-                "scipy.signal",
-                "scipy.special",
-                "matplotlib",
-                "matplotlib.pyplot",
-            ]
-            # Check if the module or its parent is allowed
-            if name in safe_modules or any(name.startswith(m + ".") for m in safe_modules):
-                return __import__(name, *args, **kwargs)
-            else:
-                raise ImportError(f"Module '{name}' is not allowed for safety reasons")
+        # # Restricted builtins with safe import capability
+        # def safe_import(name, *args, **kwargs):
+        #     """Allow importing only safe modules."""
+        #     safe_modules = [
+        #         "math",
+        #         "datetime",
+        #         "json",
+        #         "random",
+        #         "re",
+        #         "collections",
+        #         "itertools",
+        #         "statistics",
+        #         "numpy",
+        #         "pandas",
+        #         "scipy",
+        #         "scipy.linalg",  # Add scipy submodules
+        #         "scipy.optimize",
+        #         "scipy.signal",
+        #         "scipy.special",
+        #         "matplotlib",
+        #         "matplotlib.pyplot",
+        #     ]
+        #     # Check if the module or its parent is allowed
+        #     if name in safe_modules or any(name.startswith(m + ".") for m in safe_modules):
+        #         return __import__(name, *args, **kwargs)
+        #     else:
+        #         raise ImportError(f"Module '{name}' is not allowed for safety reasons")
 
-        restricted_builtins = {
-            "abs": abs,
-            "all": all,
-            "any": any,
-            "bin": bin,
-            "bool": bool,
-            "chr": chr,
-            "dict": dict,
-            "enumerate": enumerate,
-            "filter": filter,
-            "float": float,
-            "hex": hex,
-            "int": int,
-            "len": len,
-            "list": list,
-            "map": map,
-            "max": max,
-            "min": min,
-            "oct": oct,
-            "ord": ord,
-            "pow": pow,
-            "print": print,
-            "range": range,
-            "reversed": reversed,
-            "round": round,
-            "set": set,
-            "slice": slice,
-            "sorted": sorted,
-            "str": str,
-            "sum": sum,
-            "tuple": tuple,
-            "type": type,
-            "zip": zip,
-            "__import__": safe_import,  # Allow safe imports
-            # Add exception classes for proper error handling
-            "Exception": Exception,
-            "ImportError": ImportError,
-            "ValueError": ValueError,
-            "TypeError": TypeError,
-            "KeyError": KeyError,
-            "IndexError": IndexError,
-            "AttributeError": AttributeError,
-        }
+        # restricted_builtins = {
+        #     "abs": abs,
+        #     "all": all,
+        #     "any": any,
+        #     "bin": bin,
+        #     "bool": bool,
+        #     "chr": chr,
+        #     "dict": dict,
+        #     "enumerate": enumerate,
+        #     "filter": filter,
+        #     "float": float,
+        #     "hex": hex,
+        #     "int": int,
+        #     "len": len,
+        #     "list": list,
+        #     "map": map,
+        #     "max": max,
+        #     "min": min,
+        #     "oct": oct,
+        #     "ord": ord,
+        #     "pow": pow,
+        #     "print": print,
+        #     "range": range,
+        #     "reversed": reversed,
+        #     "round": round,
+        #     "set": set,
+        #     "slice": slice,
+        #     "sorted": sorted,
+        #     "str": str,
+        #     "sum": sum,
+        #     "tuple": tuple,
+        #     "type": type,
+        #     "zip": zip,
+        #     "__import__": safe_import,  # Allow safe imports
+        #     # Add exception classes for proper error handling
+        #     "Exception": Exception,
+        #     "ImportError": ImportError,
+        #     "ValueError": ValueError,
+        #     "TypeError": TypeError,
+        #     "KeyError": KeyError,
+        #     "IndexError": IndexError,
+        #     "AttributeError": AttributeError,
+        # }
 
-        global_vars = {"__builtins__": restricted_builtins}
-        global_vars.update(allowed_modules)
+        # global_vars = {"__builtins__": restricted_builtins}
+        # global_vars.update(allowed_modules)
+        # local_vars = {}
+        global_vars = {}
         local_vars = {}
 
         # Capture output
@@ -697,8 +700,8 @@ class PythonInterpreterTool(DeepResearchTool):
                 sys.stderr = stderr_buffer
                 exec(code, global_vars, local_vars)
                 return True
-            except Exception as e:
-                stderr_buffer.write(f"Execution error: {e}")
+            except Exception:
+                stderr_buffer.write("Execution Error: " + traceback.format_exc())
                 return False
             finally:
                 sys.stdout = old_stdout

@@ -1,3 +1,14 @@
+#!/bin/bash
+
+#SBATCH --chdir=/fsx/zyhang/rllm/
+#SBATCH --gres=gpu:8
+#SBATCH --mem 500G
+#SBATCH -c 64
+#SBATCH --time=2-00:00:00
+#SBATCH --job-name=train_math_with_tool_qwen3_4b_python_required
+#SBATCH --output=/fsx/zyhang/rllm/examples/math_tool/slurm/train_math_with_tool_qwen3_4b_python_required.stdout
+#SBATCH --error=/fsx/zyhang/rllm/examples/math_tool/slurm/train_math_with_tool_qwen3_4b_python_required.stderr
+
 set -x
 
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
@@ -7,6 +18,10 @@ export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 
 # Find the directory where rllm package is located
+CHECKPOINT_PATH=/checkpoints/zyhang
+DATA_PATH=/fsx/zyhang/rllm/data/datasets
+project_name="algoevolve"
+experiment_name="algoevolve_qwen3_4b_math_tool_python_required"
 RLLM_DIR=$(python3 -c "import rllm; import os; print(os.path.dirname(os.path.dirname(rllm.__file__)))")
 
 python3 -m examples.math_tool.train_math_with_tool \
@@ -15,7 +30,9 @@ python3 -m examples.math_tool.train_math_with_tool \
     data.val_batch_size=500 \
     data.max_prompt_length=2048 \
     data.max_response_length=8192 \
-    actor_rollout_ref.model.path=Qwen/Qwen3-4B \
+    data.train_files=$DATA_PATH/deepscaler_math/train_verl.parquet \
+    data.val_files=$DATA_PATH/aime2024/test_verl.parquet \
+    actor_rollout_ref.model.path=/fsx/zyhang/Qwen/Qwen3-4B \
     actor_rollout_ref.hybrid_engine=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -49,8 +66,9 @@ python3 -m examples.math_tool.train_math_with_tool \
     rllm.mask_truncated_samples=False \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
-    trainer.project_name='rllm-agent' \
-    trainer.experiment_name='4b-math-tool' \
+    trainer.project_name=${project_name} \
+    trainer.experiment_name=${experiment_name} \
+    trainer.default_local_dir=$CHECKPOINT_PATH/${project_name}/${experiment_name} \
     trainer.val_before_train=True \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
