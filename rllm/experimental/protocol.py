@@ -1,5 +1,9 @@
 """
 Base classes for defining a backend protocol to be used by the UnifiedTrainer.
+
+The protocol is async-prioritized to accommodate backends that naturally use
+async operations (like Tinker). Sync backends can implement async methods
+that simply wrap their sync operations.
 """
 
 from __future__ import annotations
@@ -27,13 +31,12 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
     """Protocol for defining a backend.
 
     Attributes:
-        - requires_loop: Whether the backend requires an event loop (often in a different thread).
-        - requires_preprocess_dataset: Whether the backend requires the dataset to be preprocessed.
+        name: Backend identifier for config lookup.
+        requires_loop: Whether the backend requires an event loop (often in a different thread).
     """
 
     name: str = "base_backend"
     requires_loop: bool = False
-    requires_preprocess_dataset: bool = False
 
     def __init__(self, config: DictConfig, **kwargs):
         """Initialize the backend.
@@ -50,15 +53,11 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
         Returns:
             The rollout engine.
         """
-        raise NotImplementedError("Subclasses must implement this method to return a UnifiedWorkflowEngine.")
+        raise NotImplementedError("Subclasses must implement this method to return a RolloutEngine.")
 
     @abstractmethod
     def validate_config(self) -> None:
-        """Validate and setup the backend configuration.
-
-        Args:
-            config: The backend configuration.
-        """
+        """Validate and setup the backend configuration."""
         pass
 
     @abstractmethod
@@ -76,85 +75,147 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
 
     @abstractmethod
     def shutdown(self) -> None:
-        """Shutdown the backend.
-
-        Args:
-            config: The backend configuration.
-        """
+        """Shutdown the backend and cleanup resources."""
         pass
 
     # =========================================================================
-    # Required methods for the training/validation loop (must implement)
+    # Required async methods for the training/validation loop
     # =========================================================================
 
     @abstractmethod
-    def generate_episodes(self, batch: TBatch, agent_workflow_engine: UnifiedWorkflowEngine, **kwargs) -> list[Episode]:
-        """Generate episodes from the batch using the agent workflow engine."""
+    async def generate_episodes(
+        self,
+        batch: TBatch,
+        agent_workflow_engine: UnifiedWorkflowEngine,
+        **kwargs,
+    ) -> list[Episode]:
+        """Generate episodes from the batch using the agent workflow engine.
+
+        Args:
+            batch: The input batch.
+            agent_workflow_engine: The workflow engine to use.
+            **kwargs: Additional arguments.
+
+        Returns:
+            List of generated episodes.
+        """
         raise NotImplementedError("Subclasses must implement this method.")
 
     @abstractmethod
-    def transform_trajectory_groups_to_backend_batch(self, trainer_state: TrainerState, **kwargs) -> TBatch:
-        """Transform trajectory groups to backend-specific batch."""
+    def transform_trajectory_groups_to_backend_batch(
+        self,
+        trainer_state: TrainerState,
+        **kwargs,
+    ) -> TBatch:
+        """Transform trajectory groups to backend-specific batch.
+
+        This is typically a sync operation as it's just data transformation.
+
+        Args:
+            trainer_state: The trainer state containing trajectory_groups.
+            **kwargs: Additional arguments.
+
+        Returns:
+            Backend-specific batch.
+        """
         raise NotImplementedError("Subclasses must implement this method.")
 
     @abstractmethod
-    def process_backend_batch(self, trainer_state: TrainerState, **kwargs) -> None:
-        """Process the backend-specific batch."""
+    async def process_backend_batch(
+        self,
+        trainer_state: TrainerState,
+        **kwargs,
+    ) -> None:
+        """Process the backend-specific batch.
+
+        This may include computing log probs, critic values, running forward pass, etc.
+        This is async to accommodate backends that use async operations.
+
+        Args:
+            trainer_state: The trainer state.
+            **kwargs: Additional arguments.
+        """
         raise NotImplementedError("Subclasses must implement this method.")
 
     @abstractmethod
-    def compute_advantages(self, trainer_state: TrainerState, algorithm_config: AlgorithmConfig, **kwargs) -> None:
-        """Compute advantages from trajectory groups and (optionally) info from the backend batch (e.g. entropy)."""
+    async def compute_advantages(
+        self,
+        trainer_state: TrainerState,
+        algorithm_config: AlgorithmConfig,
+        **kwargs,
+    ) -> None:
+        """Compute advantages from trajectory groups.
+
+        Default implementation uses rLLM-native advantage computation.
+        Backends can override for custom advantage computation.
+
+        Args:
+            trainer_state: The trainer state.
+            algorithm_config: Algorithm configuration.
+            **kwargs: Additional arguments.
+        """
         assert trainer_state.trajectory_groups is not None, "Trajectory groups are not set"
         compute_advantage_from_trajectory_groups(trainer_state.trajectory_groups, algorithm_config)
-        return
 
     @abstractmethod
-    def update_policy(self, trainer_state: TrainerState) -> None:
-        """Update the policy."""
+    async def update_policy(
+        self,
+        trainer_state: TrainerState,
+        **kwargs,
+    ) -> None:
+        """Update the policy.
+
+        Args:
+            trainer_state: The trainer state.
+            **kwargs: Additional arguments.
+        """
         raise NotImplementedError("Subclasses must implement this method.")
 
     # =========================================================================
-    # Hook methods for the training/validation loop
+    # Async hook methods for the training/validation loop
     # =========================================================================
 
     @abstractmethod
-    def on_train_start(self, trainer_state: TrainerState) -> None:
+    async def on_train_start(self, trainer_state: TrainerState) -> None:
         """Hook method called at the start of training."""
         pass
 
     @abstractmethod
-    def on_train_end(self, trainer_state: TrainerState) -> None:
+    async def on_train_end(self, trainer_state: TrainerState) -> None:
         """Hook method called at the end of training."""
         pass
 
     @abstractmethod
-    def on_batch_start(self, trainer_state: TrainerState) -> None:
+    async def on_batch_start(self, trainer_state: TrainerState) -> None:
         """Hook method called at the start of a batch."""
         pass
 
     @abstractmethod
-    def on_batch_end(self, trainer_state: TrainerState) -> None:
+    async def on_batch_end(self, trainer_state: TrainerState) -> None:
         """Hook method called at the end of a batch."""
         pass
 
     @abstractmethod
-    def on_epoch_start(self, trainer_state: TrainerState) -> None:
+    async def on_epoch_start(self, trainer_state: TrainerState) -> None:
         """Hook method called at the start of an epoch."""
         pass
 
     @abstractmethod
-    def on_epoch_end(self, trainer_state: TrainerState) -> None:
+    async def on_epoch_end(self, trainer_state: TrainerState) -> None:
         """Hook method called at the end of an epoch."""
         pass
 
     @abstractmethod
-    def on_validation_start(self, trainer_state: TrainerState) -> bool:
-        """Hook method called at the start of validation."""
+    async def on_validation_start(self, trainer_state: TrainerState) -> bool:
+        """Hook method called at the start of validation.
+
+        Returns:
+            bool: True if validation should proceed, False to skip.
+        """
         trainer_state.is_training = False
         return True
 
     @abstractmethod
-    def on_validation_end(self, trainer_state: TrainerState) -> None:
+    async def on_validation_end(self, trainer_state: TrainerState) -> None:
         """Hook method called at the end of validation."""
         trainer_state.is_training = True

@@ -8,7 +8,7 @@ from functools import partial
 import numpy as np
 
 from rllm.agents.agent import TrajectoryGroup
-from rllm.trainer.common.config import AlgorithmConfig, rLLMAdvantageEstimator
+from rllm.experimental.common.config import AlgorithmConfig, rLLMAdvantageEstimator
 
 logger = logging.getLogger(__name__)
 

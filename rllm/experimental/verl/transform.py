@@ -7,7 +7,7 @@ from verl.utils.torch_functional import pad_sequence_to_length
 
 from rllm.agents.agent import Episode, Trajectory, TrajectoryGroup
 from rllm.engine.rollout import ModelOutput, VerlEngine
-from rllm.trainer.verl.verl_data_processor.dataclass import AccumulatedData, ProcessedStepData
+from rllm.experimental.verl.dataclass import AccumulatedData, ProcessedStepData
 
 
 def _pad_sequence_batch(sequences: list[torch.Tensor], pad_token_id: int, max_length: int, left_pad: bool = True) -> torch.Tensor:

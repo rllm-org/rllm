@@ -1,9 +1,10 @@
 import asyncio
+import threading
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pprint import pprint
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
@@ -63,17 +64,32 @@ class TrainerState:
 
 
 class UnifiedTrainer:
-    """Unified trainer for backend-agnostic training."""
+    """Unified trainer for backend-agnostic training.
 
-    def __init__(self, backend_cls: type[BackendProtocol], config: DictConfig, workflow_class: type[Workflow], train_dataset: Dataset | None = None, val_dataset: Dataset | None = None, workflow_args: dict | None = None, backend_args: dict | None = None, **kwargs):
-        """
-        Initialize the UnifiedTrainer.
-        """
+    This trainer uses an async-prioritized design where the core pipeline methods
+    are async. This accommodates backends that naturally use async operations
+    (like Tinker) while still supporting sync backends.
+
+    The main `fit()` method remains sync for ease of use, but internally runs
+    the async training loop in a dedicated event loop thread.
+    """
+
+    def __init__(
+        self,
+        backend_cls: type[BackendProtocol],
+        config: DictConfig,
+        workflow_class: type[Workflow],
+        train_dataset: Dataset | None = None,
+        val_dataset: Dataset | None = None,
+        workflow_args: dict | None = None,
+        backend_args: dict | None = None,
+        **kwargs,
+    ):
+        """Initialize the UnifiedTrainer."""
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
-        self.backend = backend_cls(config=self.backend_config, **(backend_args or {}))
 
         self.tokenizer = kwargs.get("tokenizer")
 
@@ -81,11 +97,18 @@ class UnifiedTrainer:
         self.config = config
         self.backend_config = config.get(backend_cls.name, DictConfig({}))
 
+        # Initialize event loop before backend (some backends may need it)
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._setup_event_loop()
+
+        # Initialize backend
+        self.backend = backend_cls(config=config, **(backend_args or {}))
+
         self._validate_and_setup_configs()
-        self._setup_event_loop()  # set up event loop for both agent workflow engine and (optionally) backend
         self._setup_logging()
 
-        rollout_engine: RolloutEngine = self.backend.init_rollout_engine()  # obtain rollout engine from backend
+        rollout_engine: RolloutEngine = self.backend.init_rollout_engine()
         self.agent_workflow_engine = UnifiedWorkflowEngine(
             workflow_cls=self.workflow_class,
             workflow_args=self.workflow_args,
@@ -97,7 +120,14 @@ class UnifiedTrainer:
             episode_logger=self.episode_logger,
         )
 
-        asyncio.run_coroutine_threadsafe(self.agent_workflow_engine.initialize_pool(), self._loop).result()  # type: ignore
+        # Initialize workflow pool
+        self._run_async(self.agent_workflow_engine.initialize_pool())
+
+    def _run_async(self, coro):
+        """Run an async coroutine in the event loop thread and wait for result."""
+        assert self._loop is not None, "Event loop is not initialized"
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return future.result()
 
     def _validate_and_setup_configs(self):
         """Validate and setup common configs."""
@@ -133,11 +163,7 @@ class UnifiedTrainer:
         )
 
     def _setup_event_loop(self):
-        """Setup the event loop for the backend. Only invoke this if the backend requires a loop."""
-        import threading
-
-        assert self._loop is None and self._thread is None, "Event loop already set up. _setup_event_loop should not be called twice."
-
+        """Setup the event loop in a background thread."""
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._thread.start()
@@ -147,8 +173,10 @@ class UnifiedTrainer:
         # create episode logger if enabled in config
         self.episode_logger = None
         if self.config.trainer.get("log_episodes", False):
-            # Get episode log directory from config, default to "logs/my_project/my_experiment"
-            episode_log_dir = self.config.trainer.get("episode_log_dir", f"logs/{self.config.trainer.project_name}/{self.config.trainer.experiment_name}")
+            episode_log_dir = self.config.trainer.get(
+                "episode_log_dir",
+                f"logs/{self.config.trainer.project_name}/{self.config.trainer.experiment_name}",
+            )
             self.episode_logger = EpisodeLogger(base_dir=episode_log_dir, subdirectory="episodes")
 
         self.logger = Tracking(
@@ -161,68 +189,79 @@ class UnifiedTrainer:
     # =========================================================================
     # Main training loop methods
     # =========================================================================
-    def fit(self):
-        """Main training loop."""
-        trainer_state = TrainerState()
-        if self.backend.requires_loop:  # if the backend requires a loop, we need to set the loop in the trainer state
-            trainer_state.extra_info["loop"] = self._loop
 
-        self.backend.on_train_start(trainer_state)
+    def fit(self):
+        """Main training loop (sync entry point).
+
+        This runs the async training loop in the background event loop thread.
+        """
+        self._run_async(self._fit_entry_async())
+
+    async def _fit_entry_async(self) -> None:
+        """Async entry point for the full training process."""
+        trainer_state = TrainerState()
+
+        await self.backend.on_train_start(trainer_state)
 
         if self.config.trainer.get("val_before_train", True):
-            self.validate(trainer_state)
+            await self._validate_async(trainer_state)
             if self.config.trainer.get("val_only", False):
                 return
 
         trainer_state.global_step += 1  # we start from step (1 + original start batch index)
-        # (optionally) convert the train dataset to backend-specific format
+
+        # Run the training loop
+        await self._fit_async(trainer_state)
+
+        await self.backend.on_train_end(trainer_state)
+
+    async def _fit_async(self, trainer_state: TrainerState) -> None:
+        """Async main training loop."""
         train_dataloader: Iterable = self.backend.get_dataloader(self.train_dataset, trainer_state)
 
         for epoch in range(self.config.trainer.total_epochs):
             pprint(f"epoch {epoch}, step {trainer_state.global_step} started")
-            self.backend.on_epoch_start(trainer_state)
+            trainer_state.epoch = epoch
+            await self.backend.on_epoch_start(trainer_state)
+
             for batch in train_dataloader:
                 trainer_state.reset_batch()
-                # optional pre-batch hook: manage things like start profiling, etc.
-                self.backend.on_batch_start(trainer_state)
-                self._train_batch(batch, trainer_state)
-                # optional post-batch hook
-                self.backend.on_batch_end(trainer_state)
+                await self.backend.on_batch_start(trainer_state)
 
+                await self._train_batch_async(batch, trainer_state)
+
+                await self.backend.on_batch_end(trainer_state)
                 self.logger.log(data=trainer_state.metrics, step=trainer_state.global_step)
                 trainer_state.global_step += 1
 
                 # periodic validation
                 if self.config.trainer.get("val_freq", 0) > 0 and trainer_state.global_step % self.config.trainer.val_freq == 0:
-                    self.validate(trainer_state)
+                    await self._validate_async(trainer_state)
 
-            self.backend.on_epoch_end(trainer_state)
-            trainer_state.epoch += 1
+            await self.backend.on_epoch_end(trainer_state)
 
         # final validation
         if self.config.trainer.get("val_freq", 0) > 0:
-            self.validate(trainer_state)
+            await self._validate_async(trainer_state)
 
-        self.backend.on_train_end(trainer_state)
-
-    def _train_batch(self, batch: Any, trainer_state: TrainerState) -> None:
-        """Train a batch."""
+    async def _train_batch_async(self, batch: Any, trainer_state: TrainerState) -> None:
+        """Train a batch (async implementation)."""
         termination_counts = Counter()
         workflow_metrics = defaultdict(list)
 
         self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="train", epoch=trainer_state.epoch)
 
-        # stage 1: generate episodes
-        trainer_state.episodes = self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, loop=self._loop)
+        # stage 1: generate episodes (async)
+        trainer_state.episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine)
         if not trainer_state.has_episodes:
             return
 
-        # stage 2: transform episodes to trajectory groups
+        # stage 2: transform episodes to trajectory groups (sync)
         trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(trainer_state.episodes, self.transform_config)
         trainer_state.trajectory_groups = trajectory_groups
         trainer_state.metrics.update(transform_metrics)
 
-        # stage 3: apply rejection sampling
+        # stage 3: apply rejection sampling (sync)
         filtered_groups, filtered_episodes, rs_metrics = apply_rejection_sampling_and_filtering(trainer_state.episodes, trainer_state.trajectory_groups, self.rs_config, trainer_state.rs_state)
         trainer_state.metrics.update(rs_metrics)
         trainer_state.trajectory_groups = filtered_groups
@@ -230,21 +269,21 @@ class UnifiedTrainer:
         if not trainer_state.has_trajectory_groups:
             return
 
-        # stage 4: transform trajectory groups to backend-specific format
+        # stage 4: transform trajectory groups to backend-specific format (sync)
         backend_batch = self.backend.transform_trajectory_groups_to_backend_batch(trainer_state)
         trainer_state.backend_batch = backend_batch
 
-        # stage 5: we perform some backend-specific operations, such as computing reference log probs, critic values, etc.
-        self.backend.process_backend_batch(trainer_state)
+        # stage 5: process backend batch (async) - compute log probs, critic values, etc.
+        await self.backend.process_backend_batch(trainer_state)
         assert trainer_state.has_backend_batch, "Backend batch is not transformed or processed successfully"
 
-        # stage 6: compute advantages from trajectory groups and update them into the backend batch
-        self.backend.compute_advantages(trainer_state, self.algorithm_config)
+        # stage 6: compute advantages (async)
+        await self.backend.compute_advantages(trainer_state, self.algorithm_config)
 
-        # stage 7: backend will update the policy
-        self.backend.update_policy(trainer_state)
+        # stage 7: update policy (async)
+        await self.backend.update_policy(trainer_state)
 
-        # stage 8: cleanup, logging, visualization, etc.
+        # stage 8: cleanup, logging, visualization, etc. (sync)
         if self.tokenizer is not None:
             visualize_trajectory_last_steps(
                 trainer_state.trajectory_groups,
@@ -260,27 +299,29 @@ class UnifiedTrainer:
         for r in TerminationReason:
             trainer_state.metrics[f"batch/{r.value}"] = termination_counts[r.value] / total_counts
 
-    def validate(self, trainer_state: TrainerState) -> None:
-        """Validate the model."""
+    async def _validate_async(self, trainer_state: TrainerState) -> None:
+        """Validate the model (async implementation)."""
         n_val_samples = self.config.actor_rollout_ref.rollout.val_kwargs.n
 
-        if not self.backend.on_validation_start(trainer_state):  # this function returns a flag indicating whether to continue validation
+        if not await self.backend.on_validation_start(trainer_state):
             return
 
         self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="val", epoch=trainer_state.epoch)
 
-        # TODO(listar2000): check whether we need to log by "source"
         is_correct_lst, uid_lst, data_source_lst = [], [], []
         workflow_metrics_by_source = defaultdict(lambda: defaultdict(list))
 
         val_dataloader: Iterable = self.backend.get_dataloader(self.val_dataset, trainer_state)
         for batch in val_dataloader:
-            self.backend.on_batch_start(trainer_state)
-            val_episodes = self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, loop=self._loop)
+            await self.backend.on_batch_start(trainer_state)
+
+            # Generate episodes (async)
+            val_episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine)
+
             is_correct_lst.extend([episode.is_correct for episode in val_episodes])
             uid_lst.extend([episode.id.split(":")[0] for episode in val_episodes])
             data_source_lst.extend([episode.info.get("data_source", "unknown") for episode in val_episodes])
-            self.backend.on_batch_end(trainer_state)
+            await self.backend.on_batch_end(trainer_state)
 
             for episode, data_source in zip(val_episodes, data_source_lst, strict=True):
                 for key, value in episode.metrics.items():
@@ -307,11 +348,11 @@ class UnifiedTrainer:
             # Add workflow metrics for this data source
             if data_source in workflow_metrics_by_source:
                 for key, values in workflow_metrics_by_source[data_source].items():
-                    if values:  # Only add if we have values
+                    if values:
                         val_metrics[f"val/{data_source}/{key}"] = np.mean(values)
 
         self.logger.log(data=val_metrics, step=trainer_state.global_step)
-        self.backend.on_validation_end(trainer_state)
+        await self.backend.on_validation_end(trainer_state)
 
     def shutdown(self):
         """Shutdown the trainer and cleanup resources."""
@@ -322,3 +363,49 @@ class UnifiedTrainer:
         if hasattr(self, "agent_workflow_engine") and self.agent_workflow_engine is not None:
             self.agent_workflow_engine.shutdown()
         self.backend.shutdown()
+
+
+class AgentTrainer:
+    """
+    An experimental version of the `rllm.trainer.AgentTrainer` that uses the `UnifiedTrainer` under the hood.
+
+    TODO(listar2000): add support to non-workflow training (e.g. agent/env classes), `fireworks` backend, and SDK.
+    """
+
+    def __init__(
+        self,
+        config: DictConfig,
+        workflow_class: type[Workflow],
+        backend: Literal["verl", "tinker"] = "verl",
+        train_dataset: Dataset | None = None,
+        val_dataset: Dataset | None = None,
+        workflow_args: dict | None = None,
+        backend_args: dict | None = None,
+        **kwargs,
+    ):
+        """Initialize the AgentTrainer."""
+        assert backend in ["verl", "tinker"], f"Unsupported backend: {backend}, must be one of ['verl', 'tinker']"
+
+        self.backend = backend
+
+        self.config = config
+        self.workflow_class = workflow_class
+        self.workflow_args = workflow_args or {}
+        self.train_dataset = train_dataset
+        self.val_dataset = val_dataset
+        self.backend_args = backend_args or {}
+        self.kwargs = kwargs
+
+        if self.backend == "verl":
+            self.train_verl()
+        elif self.backend == "tinker":
+            self.train_tinker()
+
+    def train_verl(self):
+        raise NotImplementedError("Training with the 'verl' backend is not implemented yet")
+
+    def train_tinker(self):
+        from rllm.experimental.tinker.tinker_backend import TinkerBackend
+
+        trainer = UnifiedTrainer(backend_cls=TinkerBackend, config=self.config, workflow_class=self.workflow_class, train_dataset=self.train_dataset, val_dataset=self.val_dataset, workflow_args=self.workflow_args, backend_args=self.backend_args, **self.kwargs)
+        trainer.fit()

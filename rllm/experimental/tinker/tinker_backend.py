@@ -7,7 +7,6 @@ Tinker-specific implementations for the unified training pipeline.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import uuid
@@ -54,6 +53,8 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         - Tinker-specific rollout engine (TinkerEngine)
         - Policy training via TinkerPolicyTrainer
         - Checkpoint management via Tinker's checkpoint utilities
+
+    The backend uses async methods naturally to match Tinker's async API.
     """
 
     name: str = "tinker"
@@ -70,7 +71,6 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             config: The full configuration object.
             **kwargs: Additional arguments.
         """
-        # Initialize BackendProtocol
         BackendProtocol.__init__(self, config, **kwargs)
 
         # Store full config reference
@@ -95,6 +95,9 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         self._training_datums: list[tinker.Datum] = []
         self._training_logprobs: list[torch.Tensor] = []
 
+        # Store algorithm config for use in process_backend_batch
+        self._algorithm_config: AlgorithmConfig | None = None
+
     # =========================================================================
     # BackendProtocol interface methods
     # =========================================================================
@@ -109,7 +112,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             base_url=self.full_config.tinker_base_url,
             model_name=self.full_config.model.name,
             service_client=self.service_client,
-            tokenizer=self.service_client.get_tokenizer(self.full_config.model.name),
+            tokenizer=self.tokenizer,
             max_prompt_length=self.full_config.data.max_prompt_length,
             max_response_length=self.full_config.data.max_response_length,
             sampling_params=self.full_config.sampling,
@@ -161,7 +164,11 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Tinker cleanup is handled automatically
         pass
 
-    def generate_episodes(
+    # =========================================================================
+    # Async pipeline methods
+    # =========================================================================
+
+    async def generate_episodes(
         self,
         batch: Any,
         agent_workflow_engine: UnifiedWorkflowEngine,
@@ -177,14 +184,11 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         Args:
             batch: Input batch (list of task dicts from dataloader).
             agent_workflow_engine: The workflow engine to use for episode generation.
-            **kwargs: Additional arguments including 'loop' for async execution.
+            **kwargs: Additional arguments.
 
         Returns:
             List of generated episodes.
         """
-        assert "loop" in kwargs and kwargs["loop"] is not None, "async event loop is required"
-        loop = kwargs["loop"]
-
         assert self.rollout_engine is not None, "rollout_engine is not initialized"
         assert self.sampling_client is not None, "sampling_client is not initialized"
 
@@ -198,13 +202,8 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Extract task IDs
         task_ids = [item["uid"] for item in interleaved_batch]
 
-        # Execute tasks using the agent workflow engine
-        coro = agent_workflow_engine.execute_tasks(interleaved_batch, task_ids, **kwargs)
-
-        if loop is not None:
-            episodes = asyncio.run_coroutine_threadsafe(coro, loop).result()
-        else:
-            episodes = asyncio.run(coro)
+        # Execute tasks using the agent workflow engine (async)
+        episodes = await agent_workflow_engine.execute_tasks(interleaved_batch, task_ids, **kwargs)
 
         return episodes
 
@@ -215,23 +214,26 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
     ) -> list[tinker.Datum]:
         """Transform trajectory groups to Tinker Datum format.
 
-        Note: For Tinker, advantage computation is done during this transformation step
-        via transform_trajectory_groups_to_datums, which calls compute_advantage internally.
+        Note: For Tinker, the actual transformation and advantage computation
+        is done in process_backend_batch via TinkerPolicyTrainer.
+        This method returns an empty placeholder.
 
         Args:
             trainer_state: The trainer state containing trajectory_groups.
             **kwargs: Additional arguments.
 
         Returns:
-            List of Tinker Datum objects.
+            Empty list (placeholder - actual datums created in process_backend_batch).
         """
         assert trainer_state.trajectory_groups is not None, "Trajectory groups are not set"
-
-        # For Tinker, we don't compute advantages here - it's done in the combined transform
-        # Just return an empty list as placeholder; actual datums are created in process_backend_batch
+        # Return empty list as placeholder; actual datums are created in process_backend_batch
         return []
 
-    def process_backend_batch(self, trainer_state: TrainerState, **kwargs) -> None:
+    async def process_backend_batch(
+        self,
+        trainer_state: TrainerState,
+        **kwargs,
+    ) -> None:
         """Process the backend batch by running forward-backward pass.
 
         For Tinker, this performs:
@@ -244,37 +246,16 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             **kwargs: Additional arguments.
         """
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
-        assert self.policy_trainer.training_client is not None, "training_client is not initialized"
         assert trainer_state.trajectory_groups is not None, "Trajectory groups are not set"
 
         # Clear previous training data
         self._training_datums = []
         self._training_logprobs = []
 
-        # Get the event loop from extra_info if available
-        loop = trainer_state.extra_info.get("loop")
-        if loop is None:
-            raise RuntimeError("Event loop not found in trainer_state.extra_info")
-
-        # Run the forward-backward pass asynchronously
-        coro = self._process_backend_batch_async(trainer_state)
-        asyncio.run_coroutine_threadsafe(coro, loop).result()
-
-    async def _process_backend_batch_async(self, trainer_state: TrainerState) -> None:
-        """Async implementation of process_backend_batch.
-
-        Delegates to TinkerPolicyTrainer.forward_backward_from_trajectory_groups.
-        """
-        assert self.policy_trainer is not None
-        trajectory_groups = trainer_state.trajectory_groups
-
-        # Get algorithm config from trainer state or use default
-        algorithm_config = trainer_state.extra_info.get("algorithm_config")
-
         # Use TinkerPolicyTrainer's method for forward-backward
         training_datums, training_logprobs = await self.policy_trainer.forward_backward_from_trajectory_groups(
-            trajectory_groups,
-            algorithm_config=algorithm_config,
+            trainer_state.trajectory_groups,
+            algorithm_config=self._algorithm_config,
         )
 
         # Store for metrics computation
@@ -284,7 +265,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Store datums as backend batch
         trainer_state.backend_batch = training_datums
 
-    def compute_advantages(
+    async def compute_advantages(
         self,
         trainer_state: TrainerState,
         algorithm_config: AlgorithmConfig,
@@ -293,13 +274,20 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         """Compute advantages from trajectory groups.
 
         For Tinker, advantage computation is done in process_backend_batch via
-        transform_trajectory_groups_to_datums. This method is a no-op but stores
-        the algorithm config for use in process_backend_batch.
+        transform_trajectory_groups_to_datums. This method stores the algorithm
+        config for use in process_backend_batch.
+
+        Note: This is called BEFORE process_backend_batch in the pipeline,
+        so we just store the config here.
         """
         # Store algorithm config for use in process_backend_batch
-        trainer_state.extra_info["algorithm_config"] = algorithm_config
+        self._algorithm_config = algorithm_config
 
-    def update_policy(self, trainer_state: TrainerState) -> None:
+    async def update_policy(
+        self,
+        trainer_state: TrainerState,
+        **kwargs,
+    ) -> None:
         """Update the policy via optimizer step.
 
         For Tinker, this performs the optimizer step after forward-backward.
@@ -309,14 +297,19 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         """
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
-        # Get the event loop from extra_info
-        loop = trainer_state.extra_info.get("loop")
-        if loop is None:
-            raise RuntimeError("Event loop not found in trainer_state.extra_info")
+        learning_rate = self.full_config.training.learning_rate
+        beta1 = self.full_config.training.get("beta1", 0.9)
+        beta2 = self.full_config.training.get("beta2", 0.95)
+        eps = self.full_config.training.get("eps", 1e-8)
 
-        # Run the optimizer step asynchronously
-        coro = self._update_policy_async(trainer_state)
-        asyncio.run_coroutine_threadsafe(coro, loop).result()
+        # Optimizer step (async)
+        optim_step_future = await self.policy_trainer.optim_step_future(
+            learning_rate=learning_rate,
+            beta1=beta1,
+            beta2=beta2,
+            eps=eps,
+        )
+        await optim_step_future.result_async()
 
         # Compute KL metrics if we have training data
         if self._training_datums and self._training_logprobs:
@@ -326,29 +319,11 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             )
             trainer_state.metrics.update(kl_metrics)
 
-    async def _update_policy_async(self, trainer_state: TrainerState) -> None:
-        """Async implementation of update_policy."""
-        assert self.policy_trainer is not None
-
-        learning_rate = self.full_config.training.learning_rate
-        beta1 = self.full_config.training.get("beta1", 0.9)
-        beta2 = self.full_config.training.get("beta2", 0.95)
-        eps = self.full_config.training.get("eps", 1e-8)
-
-        # Optimizer step
-        optim_step_future = await self.policy_trainer.optim_step_future(
-            learning_rate=learning_rate,
-            beta1=beta1,
-            beta2=beta2,
-            eps=eps,
-        )
-        await optim_step_future.result_async()
-
     # =========================================================================
-    # Hook methods
+    # Async hook methods
     # =========================================================================
 
-    def on_train_start(self, trainer_state: TrainerState) -> None:
+    async def on_train_start(self, trainer_state: TrainerState) -> None:
         """Called at the start of training.
 
         Initializes the policy trainer and loads checkpoints if available.
@@ -356,73 +331,65 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Ensure checkpoint directory exists
         os.makedirs(self.full_config.trainer.default_local_dir, exist_ok=True)
 
-        # Get the event loop from extra_info
-        loop = trainer_state.extra_info.get("loop")
-        if loop is None:
-            raise RuntimeError("Event loop not found in trainer_state.extra_info. The UnifiedTrainer should set this.")
-
         # Initialize policy trainer
-        self.policy_trainer = TinkerPolicyTrainer(
+        policy_trainer = TinkerPolicyTrainer(
             config=self.full_config,
             service_client=self.service_client,
         )
+        self.policy_trainer = policy_trainer
+        self.tokenizer = policy_trainer.get_tokenizer()
 
         # Initialize training client and load checkpoint
-        coro = self.policy_trainer.initialize_async(resume_from_checkpoint=True)
-        start_batch, self.sampling_client = asyncio.run_coroutine_threadsafe(coro, loop).result()
+        start_batch, self.sampling_client = await policy_trainer.initialize_async(resume_from_checkpoint=True)
 
         # Update trainer state with the start batch from checkpoint
         self._start_batch = start_batch
         trainer_state.global_step = start_batch
 
-    def on_train_end(self, trainer_state: TrainerState) -> None:
+    async def on_train_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of training."""
-        # Final checkpoint save
-        loop = trainer_state.extra_info.get("loop")
-        if loop is not None and self.policy_trainer is not None:
-            coro = self.policy_trainer.save_checkpoint_async(trainer_state.global_step, kind="state")
-            asyncio.run_coroutine_threadsafe(coro, loop).result()
+        if self.policy_trainer is None:
+            return
 
-    def on_batch_start(self, trainer_state: TrainerState) -> None:
-        """Called at the start of each batch. Nothing to do for Tinker."""
-        pass
+        # Save final checkpoint if we didn't just save it in the last batch
+        if trainer_state.global_step % self.full_config.trainer.get("save_freq", 0) != 0:
+            logger.info(f"Saving final checkpoint at step {trainer_state.global_step}")
+            await self.policy_trainer.save_checkpoint_async(trainer_state.global_step, kind="state")
 
-    def on_batch_end(self, trainer_state: TrainerState) -> None:
+    async def on_batch_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of each batch.
 
-        Saves checkpoint and updates sampling client.
+        Saves checkpoint, updates sampling client, and prints metrics.
         """
-        loop = trainer_state.extra_info.get("loop")
-        if loop is None or self.policy_trainer is None:
+        if self.policy_trainer is None:
             return
 
         global_step = trainer_state.global_step
 
         # Save sampler checkpoint after each batch
-        coro = self.policy_trainer.save_checkpoint_async(global_step, kind="sampler")
-        path_dict = asyncio.run_coroutine_threadsafe(coro, loop).result()
+        path_dict = await self.policy_trainer.save_checkpoint_async(global_step, kind="sampler")
         self.sampling_client = self.policy_trainer.create_sampling_client(path_dict["sampler_path"])
 
         # Save full state checkpoint periodically
         save_freq = self.full_config.trainer.get("save_freq", 0)
+
         if save_freq > 0 and global_step % save_freq == 0:
             logger.info(f"Saving state checkpoint at step {global_step}")
-            coro = self.policy_trainer.save_checkpoint_async(global_step, kind="state")
-            asyncio.run_coroutine_threadsafe(coro, loop).result()
+            await self.policy_trainer.save_checkpoint_async(global_step, kind="state")
 
         # Print metrics table
         if trainer_state.metrics:
             print_metrics_table(trainer_state.metrics, global_step)
 
-    def on_epoch_start(self, trainer_state: TrainerState) -> None:
+    async def on_epoch_start(self, trainer_state: TrainerState) -> None:
         """Called at the start of an epoch."""
         logger.info(f"Starting epoch {trainer_state.epoch}")
 
-    def on_epoch_end(self, trainer_state: TrainerState) -> None:
+    async def on_epoch_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of an epoch."""
         logger.info(f"Completed epoch {trainer_state.epoch}")
 
-    def on_validation_start(self, trainer_state: TrainerState) -> bool:
+    async def on_validation_start(self, trainer_state: TrainerState) -> bool:
         """Called at the start of validation.
 
         Returns:
@@ -431,6 +398,6 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         trainer_state.is_training = False
         return True
 
-    def on_validation_end(self, trainer_state: TrainerState) -> None:
+    async def on_validation_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of validation."""
         trainer_state.is_training = True

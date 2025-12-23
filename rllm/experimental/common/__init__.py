@@ -13,6 +13,7 @@ from rllm.experimental.common.config import (
     rLLMAdvantageEstimator,
 )
 from rllm.experimental.common.metrics import reduce_reward_metrics_by_trajectory_name
+from rllm.experimental.common.performance import marked_timer, simple_timer
 from rllm.experimental.common.rejection_sampling import (
     RejectionSamplingMetrics,
     RejectionSamplingState,
@@ -47,4 +48,7 @@ __all__ = [
     "compute_advantage_from_trajectory_groups",
     # Metrics
     "reduce_reward_metrics_by_trajectory_name",
+    # Performance
+    "simple_timer",
+    "marked_timer",
 ]

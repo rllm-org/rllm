@@ -8,7 +8,7 @@ tracking episode-level correctness metrics while filtering based on reward varia
 from dataclasses import dataclass, field
 
 from rllm.agents.agent import Episode, TrajectoryGroup
-from rllm.trainer.common.config import RejectionSamplingConfig
+from rllm.experimental.common.config import RejectionSamplingConfig
 
 
 @dataclass
