@@ -21,6 +21,7 @@ class OpenAIEngine(RolloutEngine):
         self.sampling_params = sampling_params or {}
         self.tools = tools or []
         self.accumulate_reasoning = accumulate_reasoning
+        self.reasoning_effort = self.sampling_params.pop("reasoning_effort", "medium")
 
         self.tokenizer = tokenizer
         if self.tokenizer is not None:
@@ -88,6 +89,7 @@ class OpenAIEngine(RolloutEngine):
                     prompt_ids=[],
                     completion_ids=[],
                     logprobs=[],
+                    prompt_logprobs=[],
                     prompt_length=prompt_length,
                     completion_length=completion_length,
                     finish_reason=finish_reason,
@@ -107,7 +109,7 @@ class OpenAIEngine(RolloutEngine):
                 print(f"Error: {e}, retrying...")
                 await asyncio.sleep(1)
 
-    async def completion(self, prompt: str, **kwargs) -> ModelOutput:
+    async def completion(self, prompt: str | list[int], **kwargs) -> ModelOutput:
         kwargs.pop("application_id", None)
         kwargs.pop("validate", None)
         kwargs.pop("model", None)
@@ -116,26 +118,48 @@ class OpenAIEngine(RolloutEngine):
         sampling_params = self.sampling_params.copy()
         sampling_params.update(kwargs)
 
-        prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
-        prompt_length = len(prompt_ids)
+        if isinstance(prompt, list):
+            prompt_ids = prompt
+        else:
+            prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
 
+        prompt_length = len(prompt_ids)
         if enforce_max_prompt_length and (prompt_length > self.max_prompt_length or prompt_length > self.max_model_length):
             raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
 
         create_params = self._prepare_max_tokens_param(sampling_params, prompt_length)
+        sampling_params.update(create_params)
 
         retries = self.api_retries
         while retries > 0:
             try:
-                response = await self.client.completions.create(model=self.model, prompt=prompt, timeout=3600, **create_params, **sampling_params)
-
+                response = await self.client.completions.create(model=self.model, prompt=prompt, **sampling_params)
                 text = response.choices[0].text
-                completion_ids = self.tokenizer.encode(text, add_special_tokens=False)
+                try:
+                    completion_ids = response.choices[0].token_ids
+                    assert completion_ids is not None
+                except Exception:
+                    completion_ids = self.tokenizer.encode(text, add_special_tokens=False)
+
                 parsed_output = self.chat_parser.parse_completion(completion_ids)
 
                 prompt_length = response.usage.prompt_tokens
                 completion_length = response.usage.completion_tokens
                 finish_reason = response.choices[0].finish_reason
+
+                try:
+                    assert response.choices[0].logprobs is not None
+                    logprobs = response.choices[0].logprobs.token_logprobs
+                except Exception:
+                    logprobs = []
+
+                try:
+                    assert response.choices[0].prompt_logprobs is not None
+                    prompt_logprobs: list[float] = [None]
+                    for tid, lp in zip(prompt_ids[1:], response.choices[0].prompt_logprobs[1:], strict=False):
+                        prompt_logprobs.append(float(lp[str(tid)]["logprob"]))
+                except Exception:
+                    prompt_logprobs = []
 
                 return ModelOutput(
                     text=text,
@@ -144,7 +168,8 @@ class OpenAIEngine(RolloutEngine):
                     tool_calls=parsed_output["tool_calls"],
                     prompt_ids=prompt_ids,
                     completion_ids=completion_ids,
-                    logprobs=[],
+                    logprobs=logprobs,
+                    prompt_logprobs=prompt_logprobs,
                     prompt_length=prompt_length,
                     completion_length=completion_length,
                     finish_reason=finish_reason,
@@ -173,5 +198,6 @@ class OpenAIEngine(RolloutEngine):
         else:
             tools = kwargs.pop("tools", self.tools)
             accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
-            prompt = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, tools=tools, accumulate_reasoning=accumulate_reasoning)
+            reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
+            prompt = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, tools=tools, accumulate_reasoning=accumulate_reasoning, reasoning_effort=reasoning_effort)
             return await self.completion(prompt, **kwargs)
