@@ -124,6 +124,7 @@ def print_metrics_table(metrics: dict, step: int):
         print("=" * 60)
 
 
+# TODO: is this dead code?
 def print_trajectories(
     trajectories: list[list[dict]],
     advantage_computer: Any,

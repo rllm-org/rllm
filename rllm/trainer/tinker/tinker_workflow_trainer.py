@@ -67,11 +67,15 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
             shuffle=True,
             collate_fn=lambda x: x,  # Return batches as lists
         )
-        self.val_dataloader = torch.utils.data.DataLoader(
-            val_dataset,
-            batch_size=self.config.data.val_batch_size,
-            shuffle=False,
-            collate_fn=lambda x: x,  # Return batches as lists
+        self.val_dataloader = (
+            torch.utils.data.DataLoader(
+                val_dataset,
+                batch_size=self.config.data.val_batch_size,
+                shuffle=False,
+                collate_fn=lambda x: x,  # Return batches as lists
+            )
+            if val_dataset is not None
+            else None
         )
 
         service_client = tinker.ServiceClient(base_url=self.config.tinker_base_url)
@@ -91,6 +95,7 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
             max_prompt_length=self.config.data.max_prompt_length,
             max_response_length=self.config.data.max_response_length,
             sampling_params=sampling_params,
+            **self.config.rollout_engine,
         )
         self.agent_execution_engine = AgentWorkflowEngine(
             workflow_cls=self.workflow_class,

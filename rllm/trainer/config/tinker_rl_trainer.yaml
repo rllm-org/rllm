@@ -31,11 +31,19 @@ sampling:
 
 # Algorithm Configuration (compatible with verl)
 algorithm:
-  adv_estimator: grpo  # REINFORCE, GRPO
+  adv_estimator: grpo  # REINFORCE, GRPO, distill
   gamma: 1.0
   lam: 0.95
   norm_adv_by_std_in_grpo: false  # math_rl doesn't normalize by std
   grouping_level: 'trajectory'  # Options: 'trajectory' or 'step'
+  remove_constant_reward_groups: false
+  shared_tokenizer: False
+  teacher_rollout_args:
+    model: "deepseek-ai/DeepSeek-Math-V2"
+    base_url: "http://localhost:8000/v1"
+    api_key: "EMPTY"
+    max_prompt_length: 32768
+    
 
 # Workflow Configuration (for workflow training mode)
 workflow:
@@ -50,6 +58,12 @@ agent:
 # Environment Configuration (for agent training mode)
 env:
   env_args: {}
+
+rollout_engine:
+  reasoning_effort: "medium"
+  accumulate_reasoning: false
+  disable_thinking: false
+  bypass_render_with_parser: false
 
 # Data Configuration
 data:

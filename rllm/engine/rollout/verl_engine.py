@@ -30,12 +30,14 @@ class VerlEngine(RolloutEngine):
             temperature=0.0 if config.actor_rollout_ref.rollout.do_sample is False else config.actor_rollout_ref.rollout.temperature,
             top_k=config.actor_rollout_ref.rollout.top_k,
             top_p=config.actor_rollout_ref.rollout.top_p,
+            logprobs=1,
         )
 
         self.val_sampling_params = dict(
             temperature=0.0 if config.actor_rollout_ref.rollout.val_kwargs.do_sample is False else config.actor_rollout_ref.rollout.val_kwargs.temperature,
             top_k=config.actor_rollout_ref.rollout.val_kwargs.top_k,
             top_p=config.actor_rollout_ref.rollout.val_kwargs.top_p,
+            logprobs=1,
         )
 
         print(f"train_sampling_params: {self.train_sampling_params}")
@@ -77,11 +79,13 @@ class VerlEngine(RolloutEngine):
 
         token_output: TokenOutput = await self.server_manager.generate(request_id=application_id, prompt_ids=request_prompt_ids, image_data=image_data, sampling_params=sampling_params)  # type: ignore
         completion_ids: list[int] = token_output.token_ids
+        logprobs: list[float] = token_output.log_probs
 
         finish_reason = "stop"
         if len(completion_ids) >= max_tokens:
             finish_reason = "length"
             completion_ids = completion_ids[:max_tokens]
+            logprobs = logprobs[:max_tokens]
 
         completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
         # TODO: implement parse_completion for the standard parser
@@ -95,7 +99,7 @@ class VerlEngine(RolloutEngine):
             prompt_ids=prompt_ids,
             completion_ids=completion_ids,
             multi_modal_inputs=multi_modal_inputs,
-            logprobs=[],
+            logprobs=logprobs,
             prompt_length=prompt_length,
             completion_length=len(completion_ids),
             finish_reason=finish_reason,
