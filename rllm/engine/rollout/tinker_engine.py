@@ -12,7 +12,7 @@ class TinkerEngine(RolloutEngine):
     Uses Tinker's renderer system for response parsing instead of ChatTemplateParser.
     """
 
-    def __init__(self, base_url: str, model_name: str, tokenizer, service_client: tinker.ServiceClient, max_prompt_length: int = 4096, max_response_length: int = 4096, sampling_params: dict | None = None, **kwargs):
+    def __init__(self, base_url: str, model_name: str, tokenizer, service_client: tinker.ServiceClient, max_prompt_length: int = 4096, max_response_length: int = 4096, sampling_params: dict | None = None, image_processor=None, **kwargs):
         """
         Initialize TinkerEngine.
 
@@ -20,9 +20,11 @@ class TinkerEngine(RolloutEngine):
             base_url: Tinker service base URL
             model_name: Name of the model to use
             tokenizer: Tokenizer for encoding/decoding
+            service_client: Tinker ServiceClient instance
             max_prompt_length: Maximum prompt length in tokens
             max_response_length: Maximum response length in tokens
             sampling_params: Default sampling parameters (temperature, top_p, etc.)
+            image_processor: Optional image processor for vision-language models
         """
         self.base_url = base_url
         self.model_name = model_name
@@ -36,7 +38,7 @@ class TinkerEngine(RolloutEngine):
 
         # Initialize renderer using model info
         renderer_name = model_info.get_recommended_renderer_name(self.model_name)
-        self.renderer = renderers.get_renderer(renderer_name, self.tokenizer)
+        self.renderer = renderers.get_renderer(renderer_name, self.tokenizer, image_processor=image_processor)
 
         # Set up sampling parameters
         self.sampling_params = tinker.types.SamplingParams(

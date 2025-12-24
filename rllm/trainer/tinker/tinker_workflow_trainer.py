@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 import tinker
 import torch
-from transformers import AutoTokenizer
+from transformers import AutoProcessor, AutoTokenizer
 
 from rllm.agents.agent import Episode
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
@@ -81,6 +81,19 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
         )
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.model.name)
+        # Load image processor for vision-language models if needed
+        # Only attempt loading for models that likely need it (VL models)
+        image_processor = None
+        model_name_lower = self.config.model.name.lower()
+        if "vl" in model_name_lower or "vision" in model_name_lower:
+            try:
+                processor = AutoProcessor.from_pretrained(self.config.model.name, trust_remote_code=True)
+                if hasattr(processor, 'image_processor') and processor.image_processor is not None:
+                    image_processor = processor.image_processor
+            except Exception:
+                # If processor loading fails, continue without it
+                pass
+        
         sampling_params = self.config.sampling
         assert sampling_params.get("temperature", 1.0) == 1.0 and sampling_params.get("top_p", 1.0) == 1.0, "temperature and top_p must be 1.0 for tinker workflow trainer"
         self.rollout_engine = TinkerEngine(
@@ -91,6 +104,7 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
             max_prompt_length=self.config.data.max_prompt_length,
             max_response_length=self.config.data.max_response_length,
             sampling_params=sampling_params,
+            image_processor=image_processor,
         )
         self.agent_execution_engine = AgentWorkflowEngine(
             workflow_cls=self.workflow_class,
