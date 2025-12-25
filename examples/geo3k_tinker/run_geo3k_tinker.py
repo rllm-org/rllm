@@ -5,16 +5,16 @@ import sys
 from copy import deepcopy
 
 import tinker
-from transformers import AutoTokenizer
+from transformers import AutoProcessor, AutoTokenizer
 
 # Import geo3k-specific modules
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "geo3k"))
 
-from geo3k_workflow import Geo3KWorkflow
-from rllm.data.dataset import DatasetRegistry
-from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
-from rllm.engine.rollout.tinker_engine import TinkerEngine
-from rllm.rewards.reward_fn import math_reward_fn
+from geo3k_workflow import Geo3KWorkflow  # noqa: E402
+from rllm.data.dataset import DatasetRegistry  # noqa: E402
+from rllm.engine.agent_workflow_engine import AgentWorkflowEngine  # noqa: E402
+from rllm.engine.rollout.tinker_engine import TinkerEngine  # noqa: E402
+from rllm.rewards.reward_fn import math_reward_fn  # noqa: E402
 
 
 def load_data(n: int = 1):
@@ -76,6 +76,18 @@ if __name__ == "__main__":
     service_client = tinker.ServiceClient(base_url=base_url)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
+    # Load image processor for vision-language models if needed
+    image_processor = None
+    model_name_lower = model_name.lower()
+    if "vl" in model_name_lower or "vision" in model_name_lower:
+        try:
+            processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+            if hasattr(processor, "image_processor") and processor.image_processor is not None:
+                image_processor = processor.image_processor
+        except Exception:
+            # If processor loading fails, continue without it
+            pass
+
     rollout_engine = TinkerEngine(
         base_url=base_url,
         model_name=model_name,
@@ -84,6 +96,7 @@ if __name__ == "__main__":
         max_prompt_length=1024,
         max_response_length=2048,
         sampling_params={"temperature": 1.0, "top_p": 1.0},
+        image_processor=image_processor,
     )
 
     # Create a training client and sampling client for inference.
