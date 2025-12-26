@@ -188,7 +188,7 @@ class TinkerEngine(RolloutEngine):
             # Use Tinker renderer (original behavior)
             # Build prompt using renderer (converts messages to Tinker prompt)
             tinker_prompt = self.renderer.build_generation_prompt(messages)
-            
+
             # For VLM prompts with ImageChunks, to_ints() may not be supported
             try:
                 prompt_ids = tinker_prompt.to_ints()

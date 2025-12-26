@@ -97,7 +97,7 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
             except Exception:
                 # If processor loading fails, continue without it
                 pass
-        
+
         sampling_params = self.config.sampling
         assert sampling_params.get("temperature", 1.0) == 1.0 and sampling_params.get("top_p", 1.0) == 1.0, "temperature and top_p must be 1.0 for tinker workflow trainer"
         self.rollout_engine = TinkerEngine(

@@ -15,7 +15,7 @@ def main(config):
         workflow_class=Geo3KWorkflow,
         workflow_args={
             "reward_function": math_reward_fn,
-            "encode_as_base64": False, 
+            "encode_as_base64": False,
         },
         config=config,
         train_dataset=train_dataset,

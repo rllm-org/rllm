@@ -10,11 +10,11 @@ from transformers import AutoProcessor, AutoTokenizer
 # Import geo3k-specific modules
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "geo3k"))
 
-from geo3k_workflow import Geo3KWorkflow  
-from rllm.data.dataset import DatasetRegistry 
-from rllm.engine.agent_workflow_engine import AgentWorkflowEngine 
-from rllm.engine.rollout.tinker_engine import TinkerEngine 
-from rllm.rewards.reward_fn import math_reward_fn 
+from geo3k_workflow import Geo3KWorkflow
+from rllm.data.dataset import DatasetRegistry
+from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
+from rllm.engine.rollout.tinker_engine import TinkerEngine
+from rllm.rewards.reward_fn import math_reward_fn
 
 
 def load_data(n: int = 1):
@@ -116,7 +116,7 @@ if __name__ == "__main__":
         workflow_cls=Geo3KWorkflow,
         workflow_args={
             "reward_function": math_reward_fn,
-            "encode_as_base64": False, 
+            "encode_as_base64": False,
         },
         rollout_engine=rollout_engine,
         config=None,
