@@ -25,6 +25,7 @@ from rllm.experimental.common.transform import (
     transform_episodes_to_trajectory_groups,
     validate_and_propagate_rewards,
 )
+from rllm.experimental.common.visualization import VisualizationConfig, colorful_print, colorful_warning, visualize_trajectory_last_steps
 
 __all__ = [
     # Config
@@ -51,4 +52,9 @@ __all__ = [
     # Performance
     "simple_timer",
     "marked_timer",
+    # Visualization
+    "VisualizationConfig",
+    "colorful_print",
+    "colorful_warning",
+    "visualize_trajectory_last_steps",
 ]

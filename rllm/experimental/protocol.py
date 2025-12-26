@@ -47,8 +47,11 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
         self.config = config
 
     @abstractmethod
-    def init_rollout_engine(self) -> RolloutEngine:
+    def init_rollout_engine(self, **kwargs) -> RolloutEngine:
         """Initialize the workflow engine.
+
+        Args:
+            **kwargs: Additional arguments, including the various configurations
 
         Returns:
             The rollout engine.
@@ -175,37 +178,30 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
     # Async hook methods for the training/validation loop
     # =========================================================================
 
-    @abstractmethod
     async def on_train_start(self, trainer_state: TrainerState) -> None:
         """Hook method called at the start of training."""
         pass
 
-    @abstractmethod
     async def on_train_end(self, trainer_state: TrainerState) -> None:
         """Hook method called at the end of training."""
         pass
 
-    @abstractmethod
     async def on_batch_start(self, trainer_state: TrainerState) -> None:
         """Hook method called at the start of a batch."""
         pass
 
-    @abstractmethod
     async def on_batch_end(self, trainer_state: TrainerState) -> None:
         """Hook method called at the end of a batch."""
         pass
 
-    @abstractmethod
     async def on_epoch_start(self, trainer_state: TrainerState) -> None:
         """Hook method called at the start of an epoch."""
         pass
 
-    @abstractmethod
     async def on_epoch_end(self, trainer_state: TrainerState) -> None:
         """Hook method called at the end of an epoch."""
         pass
 
-    @abstractmethod
     async def on_validation_start(self, trainer_state: TrainerState) -> bool:
         """Hook method called at the start of validation.
 
@@ -215,7 +211,6 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
         trainer_state.is_training = False
         return True
 
-    @abstractmethod
     async def on_validation_end(self, trainer_state: TrainerState) -> None:
         """Hook method called at the end of validation."""
         trainer_state.is_training = True

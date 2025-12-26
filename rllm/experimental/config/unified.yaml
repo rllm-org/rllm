@@ -1,0 +1,15 @@
+# The main entrance point for unified trainer configs
+# This file does the following important things:
+# 1. Glue and integrate multiple backend-specific/agnostic configs together into a single piece
+# 2. **Selectively** instantitate backend-specific configs based on the `backend` setting
+
+defaults:
+  - rllm: base
+  - rllm/backend: verl
+  - _self_
+
+# Hydra configuration
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+

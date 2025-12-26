@@ -16,9 +16,10 @@ from rllm.experimental.common.advantage import AlgorithmConfig
 from rllm.experimental.common.config import CompactFilteringConfig, RejectionSamplingConfig, TransformConfig
 from rllm.experimental.common.rejection_sampling import RejectionSamplingState, apply_rejection_sampling_and_filtering
 from rllm.experimental.common.transform import transform_episodes_to_trajectory_groups
+from rllm.experimental.common.visualization import visualize_trajectory_last_steps
 from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
 from rllm.experimental.protocol import BackendProtocol
-from rllm.utils import EpisodeLogger, Tracking, visualize_trajectory_last_steps
+from rllm.utils import EpisodeLogger, Tracking
 from rllm.workflows.workflow import TerminationReason, Workflow
 
 
@@ -95,7 +96,7 @@ class UnifiedTrainer:
 
         # initializing and validating common configs
         self.config = config
-        self.backend_config = config.get(backend_cls.name, DictConfig({}))
+        self.rllm_config = config.rllm
 
         # Initialize event loop before backend (some backends may need it)
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -108,15 +109,20 @@ class UnifiedTrainer:
         self._validate_and_setup_configs()
         self._setup_logging()
 
-        rollout_engine: RolloutEngine = self.backend.init_rollout_engine()
+        rollout_engine: RolloutEngine = self.backend.init_rollout_engine(
+            cf_config=self.cf_config,
+            transform_config=self.transform_config,
+            rs_config=self.rs_config,
+            algorithm_config=self.algorithm_config,
+        )
         self.agent_workflow_engine = UnifiedWorkflowEngine(
             workflow_cls=self.workflow_class,
             workflow_args=self.workflow_args,
             rollout_engine=rollout_engine,
             config=self.config,
-            n_parallel_tasks=self.config.rllm.workflow.n_parallel_tasks,
-            retry_limit=self.config.rllm.workflow.retry_limit,
-            raise_on_error=self.config.rllm.workflow.raise_on_error,
+            n_parallel_tasks=self.rllm_config.workflow.n_parallel_tasks,
+            retry_limit=self.rllm_config.workflow.retry_limit,
+            raise_on_error=self.rllm_config.workflow.raise_on_error,
             episode_logger=self.episode_logger,
         )
 
@@ -132,34 +138,36 @@ class UnifiedTrainer:
     def _validate_and_setup_configs(self):
         """Validate and setup common configs."""
         # validate common, backend-agnostic configs
-        if self.config.rllm.rejection_sample.multiplier != 1:
-            assert self.config.rllm.rejection_sample.enable is True, "rejection sampling is disabled, but rejection_sample.multiplier is not 1"
+        assert self.rllm_config is not None, "rLLM config is not set"
+
+        if self.rllm_config.rejection_sample.multiplier != 1:
+            assert self.rllm_config.rejection_sample.enable is True, "rejection sampling is disabled, but rejection_sample.multiplier is not 1"
 
         # validate backend-specific configs
         self.backend.validate_config()
 
         # TODO(listar2000): add these configurations to the hydra config
         # compact filtering config (used for filtering out episodes that are not valid)
-        self.cf_config = CompactFilteringConfig.from_config(self.config.rllm.compact_filtering)
+        self.cf_config = CompactFilteringConfig.from_config(self.rllm_config.compact_filtering)
 
         # transform config (used for transforming episodes to trajectory groups)
-        self.transform_config = TransformConfig(broadcast=self.config.rllm.stepwise_advantage.mode == "broadcast")
+        self.transform_config = TransformConfig(broadcast=self.rllm_config.stepwise_advantage.mode == "broadcast")
 
         # rejection sampling config (used for rejection sampling)
-        rs_mode = "episode" if self.config.rllm.rejection_sample.enable else "none"
+        rs_mode = "episode" if self.rllm_config.rejection_sample.enable else "none"
 
         self.rs_config = RejectionSamplingConfig(
             mode=rs_mode,
-            min_partial_solve_tasks=self.config.rllm.rejection_sample.min_partial_solve_tasks,
-            min_trajs_per_group=self.config.rllm.rejection_sample.min_trajs_per_group,
+            min_partial_solve_tasks=self.rllm_config.rejection_sample.min_partial_solve_tasks,
+            min_trajs_per_group=self.rllm_config.rejection_sample.min_trajs_per_group,
         )
 
         # algorithm config (used for rLLM-native advantage computation)
         self.algorithm_config = AlgorithmConfig(
-            estimator=self.config.algorithm.adv_estimator,
-            stepwise_advantage_mode=self.config.rllm.stepwise_advantage.mode,
-            norm_adv_by_std_in_grpo=self.config.rllm.stepwise_advantage.get("norm_adv_by_std_in_grpo", True),
-            use_rllm=self.config.rllm.stepwise_advantage.get("use_rllm", False),
+            estimator=self.rllm_config.algorithm.adv_estimator,
+            stepwise_advantage_mode=self.rllm_config.stepwise_advantage.mode,
+            norm_adv_by_std_in_grpo=self.rllm_config.stepwise_advantage.get("norm_adv_by_std_in_grpo", True),
+            use_rllm=self.rllm_config.algorithm.get("use_rllm", False),
         )
 
     def _setup_event_loop(self):
@@ -172,18 +180,18 @@ class UnifiedTrainer:
         """Setup up both the tracking and episode logging."""
         # create episode logger if enabled in config
         self.episode_logger = None
-        if self.config.trainer.get("log_episodes", False):
-            episode_log_dir = self.config.trainer.get(
+        if self.rllm_config.episode_logging.get("log_episodes", False):
+            episode_log_dir = self.rllm_config.episode_logging.get(
                 "episode_log_dir",
-                f"logs/{self.config.trainer.project_name}/{self.config.trainer.experiment_name}",
+                f"logs/{self.rllm_config.trainer.project_name}/{self.rllm_config.trainer.experiment_name}",
             )
             self.episode_logger = EpisodeLogger(base_dir=episode_log_dir, subdirectory="episodes")
 
         self.logger = Tracking(
-            project_name=self.config.trainer.project_name,
-            experiment_name=self.config.trainer.experiment_name,
-            default_backend=self.config.trainer.logger,
-            config=OmegaConf.to_container(self.config, resolve=True),
+            project_name=self.rllm_config.trainer.project_name,
+            experiment_name=self.rllm_config.trainer.experiment_name,
+            default_backend=self.rllm_config.trainer.logger,
+            config=OmegaConf.to_container(self.rllm_config, resolve=True),
         )
 
     # =========================================================================
@@ -203,9 +211,9 @@ class UnifiedTrainer:
 
         await self.backend.on_train_start(trainer_state)
 
-        if self.config.trainer.get("val_before_train", True):
+        if self.rllm_config.trainer.get("val_before_train", True):
             await self._validate_async(trainer_state)
-            if self.config.trainer.get("val_only", False):
+            if self.rllm_config.trainer.get("val_only", False):
                 return
 
         trainer_state.global_step += 1  # we start from step (1 + original start batch index)
@@ -219,7 +227,7 @@ class UnifiedTrainer:
         """Async main training loop."""
         train_dataloader: Iterable = self.backend.get_dataloader(self.train_dataset, trainer_state)
 
-        for epoch in range(self.config.trainer.total_epochs):
+        for epoch in range(self.rllm_config.trainer.total_epochs):
             pprint(f"epoch {epoch}, step {trainer_state.global_step} started")
             trainer_state.epoch = epoch
             await self.backend.on_epoch_start(trainer_state)
@@ -232,16 +240,21 @@ class UnifiedTrainer:
 
                 await self.backend.on_batch_end(trainer_state)
                 self.logger.log(data=trainer_state.metrics, step=trainer_state.global_step)
+
+                # if the config specifies the `total_batches` parameter > 0, then we check if we should stop
+                if self.rllm_config.trainer.get("total_batches", 0) > 0 and trainer_state.global_step >= self.rllm_config.trainer.total_batches:
+                    break
+
                 trainer_state.global_step += 1
 
                 # periodic validation
-                if self.config.trainer.get("val_freq", 0) > 0 and trainer_state.global_step % self.config.trainer.val_freq == 0:
+                if self.rllm_config.trainer.get("val_freq", 0) > 0 and trainer_state.global_step % self.rllm_config.trainer.val_freq == 0:
                     await self._validate_async(trainer_state)
 
             await self.backend.on_epoch_end(trainer_state)
 
         # final validation
-        if self.config.trainer.get("val_freq", 0) > 0:
+        if self.rllm_config.trainer.get("val_freq", 0) > 0:
             await self._validate_async(trainer_state)
 
     async def _train_batch_async(self, batch: Any, trainer_state: TrainerState) -> None:
@@ -301,7 +314,7 @@ class UnifiedTrainer:
 
     async def _validate_async(self, trainer_state: TrainerState) -> None:
         """Validate the model (async implementation)."""
-        n_val_samples = self.config.actor_rollout_ref.rollout.val_kwargs.n
+        n_val_samples = self.rllm_config.rollout.n_val
 
         if not await self.backend.on_validation_start(trainer_state):
             return
@@ -367,7 +380,8 @@ class UnifiedTrainer:
 
 class AgentTrainer:
     """
-    An experimental version of the `rllm.trainer.AgentTrainer` that uses the `UnifiedTrainer` under the hood.
+    A unified agent trainer that is used as the entrance to selecting different backends, etc.
+    Adapted directly from `rllm.trainer.agent_trainer.AgentTrainer`.
 
     TODO(listar2000): add support to non-workflow training (e.g. agent/env classes), `fireworks` backend, and SDK.
     """
@@ -396,6 +410,7 @@ class AgentTrainer:
         self.backend_args = backend_args or {}
         self.kwargs = kwargs
 
+    def train(self):
         if self.backend == "verl":
             self.train_verl()
         elif self.backend == "tinker":
@@ -408,4 +423,8 @@ class AgentTrainer:
         from rllm.experimental.tinker.tinker_backend import TinkerBackend
 
         trainer = UnifiedTrainer(backend_cls=TinkerBackend, config=self.config, workflow_class=self.workflow_class, train_dataset=self.train_dataset, val_dataset=self.val_dataset, workflow_args=self.workflow_args, backend_args=self.backend_args, **self.kwargs)
-        trainer.fit()
+
+        try:
+            trainer.fit()
+        finally:
+            trainer.shutdown()

@@ -27,6 +27,8 @@ from rllm.experimental.tinker.tinker_metrics_utils import compute_kl_and_entropy
 from rllm.experimental.tinker.tinker_policy_trainer import TinkerPolicyTrainer
 
 if TYPE_CHECKING:
+    from transformers.tokenization_utils import PreTrainedTokenizer
+
     from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
     from rllm.experimental.unified_trainer import TrainerState
 
@@ -79,8 +81,9 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Tinker service client
         self.service_client = tinker.ServiceClient(base_url=config.tinker_base_url)
 
-        # Policy trainer - handles gradient updates and checkpointing
+        # Initialize policy trainer (filled during init_rollout_engine)
         self.policy_trainer: TinkerPolicyTrainer | None = None
+        self.tokenizer: PreTrainedTokenizer | None = None
 
         # Rollout engine - will be created in init_rollout_engine
         self.rollout_engine: TinkerEngine | None = None
@@ -102,12 +105,25 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
     # BackendProtocol interface methods
     # =========================================================================
 
-    def init_rollout_engine(self) -> RolloutEngine:
+    def init_rollout_engine(self, **kwargs) -> RolloutEngine:
         """Initialize the TinkerEngine rollout engine.
+
+        Args:
+            **kwargs: Additional arguments, including the various configurations
 
         Returns:
             TinkerEngine: The initialized rollout engine.
         """
+        assert self.policy_trainer is not None, "policy_trainer is not initialized"
+        self.policy_trainer = TinkerPolicyTrainer(
+            config=self.full_config,
+            service_client=self.service_client,
+            cf_config=kwargs.get("cf_config"),
+            transform_config=kwargs.get("transform_config"),
+            algorithm_config=kwargs.get("algorithm_config"),
+        )
+        self.tokenizer = self.policy_trainer.get_tokenizer()
+
         self.rollout_engine = TinkerEngine(
             base_url=self.full_config.tinker_base_url,
             model_name=self.full_config.model.name,
@@ -161,8 +177,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
     def shutdown(self) -> None:
         """Shutdown the backend and cleanup resources."""
-        # Tinker cleanup is handled automatically
-        pass
+        super().shutdown()
 
     # =========================================================================
     # Async pipeline methods
@@ -328,19 +343,12 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
         Initializes the policy trainer and loads checkpoints if available.
         """
+        assert self.policy_trainer is not None, "policy_trainer is not initialized"
         # Ensure checkpoint directory exists
-        os.makedirs(self.full_config.trainer.default_local_dir, exist_ok=True)
-
-        # Initialize policy trainer
-        policy_trainer = TinkerPolicyTrainer(
-            config=self.full_config,
-            service_client=self.service_client,
-        )
-        self.policy_trainer = policy_trainer
-        self.tokenizer = policy_trainer.get_tokenizer()
+        os.makedirs(self.full_config.training.default_local_dir, exist_ok=True)
 
         # Initialize training client and load checkpoint
-        start_batch, self.sampling_client = await policy_trainer.initialize_async(resume_from_checkpoint=True)
+        start_batch, self.sampling_client = await self.policy_trainer.initialize_async(resume_from_checkpoint=True)
 
         # Update trainer state with the start batch from checkpoint
         self._start_batch = start_batch
@@ -348,8 +356,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
     async def on_train_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of training."""
-        if self.policy_trainer is None:
-            return
+        assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
         # Save final checkpoint if we didn't just save it in the last batch
         if trainer_state.global_step % self.full_config.trainer.get("save_freq", 0) != 0:
@@ -361,8 +368,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
         Saves checkpoint, updates sampling client, and prints metrics.
         """
-        if self.policy_trainer is None:
-            return
+        assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
         global_step = trainer_state.global_step
 

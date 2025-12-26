@@ -271,7 +271,7 @@ class TinkerPolicyTrainer:
         path_dict = await checkpoint_utils.save_checkpoint_async(
             training_client=self.training_client,
             name=f"{batch_idx:06d}",
-            log_path=self.config.trainer.default_local_dir,
+            log_path=self.config.training.default_local_dir,
             kind=kind,
             loop_state={"batch": batch_idx},
         )
@@ -297,7 +297,7 @@ class TinkerPolicyTrainer:
         Returns:
             Resume info dictionary or None if no checkpoint exists
         """
-        return checkpoint_utils.get_last_checkpoint(self.config.trainer.default_local_dir)
+        return checkpoint_utils.get_last_checkpoint(self.config.training.default_local_dir)
 
     @require_training_client
     def get_tokenizer(self) -> Tokenizer:

@@ -1,0 +1,42 @@
+# @package _global_
+
+# Verl Backend Configuration for rLLM
+# This config largely follows from the `verl.trainer.config.ppo_trainer.yaml`
+# with the additional "overriding" of rLLM-common config with Verl-specific ones (backward compatibility)
+
+# Identity
+rllm:
+  backend: verl
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+actor_rollout_ref:
+  rollout:
+    mode: async
+    agent:
+      num_workers: 0
+    val_kwargs:
+      do_sample: True
+      n: 1
+
+data:
+  gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
+  return_multi_modal_inputs: False
+
+# Overriding the rLLM-common config with Verl-specific ones
+# Only override if the algorithm values are not None, otherwise still use the rLLM-common config
+rllm:
+  algorithm:
+    adv_estimator: ${oc.select:algorithm.adv_estimator,${rllm.algorithm.adv_estimator}}
+    gamma: ${oc.select:algorithm.gamma,${rllm.algorithm.gamma}}
+    lam: ${oc.select:algorithm.lam,${rllm.algorithm.lam}}
+    norm_adv_by_std_in_grpo: ${oc.select:algorithm.norm_adv_by_std_in_grpo,${rllm.algorithm.norm_adv_by_std_in_grpo}}
+
+  rollout:
+    n_val: ${oc.select:actor_rollout_ref.rollout.val_kwargs.n,${rllm.rollout.n_val}}
