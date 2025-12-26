@@ -5,7 +5,7 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:False"
 export VLLM_USE_V1=1
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 python3 -m examples.countdown.train_countdown \
     data.train_batch_size=64 \
     data.max_prompt_length=2048 \
@@ -51,14 +51,19 @@ python3 -m examples.countdown.train_countdown \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='rllm-agent' \
-    trainer.experiment_name='countdown' \
+    trainer.experiment_name='countdown-distill' \
     trainer.val_before_train=True \
-    trainer.n_gpus_per_node=8 \
+    trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=1000 \
     trainer.test_freq=10 \
     trainer.default_hdfs_dir=null \
     trainer.total_epochs=100 \
-    rllm.workflow.use_workflow=True
+    rllm.workflow.use_workflow=True \
+    rllm.distill.enable=True \
+    rllm.distill.shared_tokenizer=True \
+    rllm.distill.teacher_rollout_args.model=kylemontgomery/countdown-solver-0.6b \
+    rllm.distill.teacher_rollout_args.base_url=http://localhost:32000/v1 \
+    rllm.distill.teacher_rollout_args.api_key=EMPTY
 
 pkill -9 -f 'ray::WorkerDict' 

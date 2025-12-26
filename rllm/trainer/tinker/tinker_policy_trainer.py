@@ -58,10 +58,8 @@ class TinkerPolicyTrainer:
         self.config = config
         self.service_client = service_client
         self.training_client = None
-
-        # Initialize data processors
-        self.advantage_computer = TinkerAdvantageComputer(config.algorithm)
-        self.trajectory_filter = TinkerTrajectoryFilter(config.algorithm)
+        self.advantage_computer = None
+        self.trajectory_filter = None
 
     async def initialize_async(self, resume_from_checkpoint: bool = True):
         """
@@ -114,6 +112,8 @@ class TinkerPolicyTrainer:
                 logger.error(f"Failed to resume from checkpoint: {e}")
                 raise
 
+            self._initialize_data_processors()
+
             if "sampler_path" in resume_info:
                 logger.info(f"Using sampler checkpoint: {resume_info['sampler_path']}")
                 sampling_client = self.create_sampling_client(resume_info["sampler_path"])
@@ -145,10 +145,47 @@ class TinkerPolicyTrainer:
                 train_mlp=train_mlp,
             )
             logger.info(f"Starting training from scratch with model: {self.config.model.name}")
+
+            self._initialize_data_processors()
+
             sampler_future = await self.training_client.save_weights_for_sampler_async(name="000000")
             sampler_result = await sampler_future.result_async()
             sampling_client = self.create_sampling_client(sampler_result.path)
             return 0, sampling_client
+
+    def _initialize_data_processors(self):
+        """Initialize data processors (teacher engine, advantage computer, filter) after training_client is ready."""
+
+        self.student_tokenizer = self.training_client.get_tokenizer()
+
+        # Initialize teacher engine if distillation is enabled
+        distill_enabled = self.config.algorithm.adv_estimator == "distill"
+        self.teacher_engine = None
+        self.teacher_tokenizer = None
+        if distill_enabled:
+            from transformers import AutoTokenizer
+
+            from rllm.engine.rollout.openai_engine import OpenAIEngine
+
+            teacher_rollout_args = self.config.algorithm.get("teacher_rollout_args", {})
+            teacher_model = teacher_rollout_args.get("model", "")
+            if not teacher_model:
+                raise ValueError("model must be specified in algorithm.teacher_rollout_args when using distill adv_estimator")
+
+            self.teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_model)
+            self.teacher_engine = OpenAIEngine(
+                **teacher_rollout_args,
+                tokenizer=self.teacher_tokenizer,
+            )
+
+        # Initialize advantage computer and filter
+        self.advantage_computer = TinkerAdvantageComputer(
+            self.config.algorithm,
+            teacher_engine=self.teacher_engine,
+            student_tokenizer=self.student_tokenizer,
+            teacher_tokenizer=self.teacher_tokenizer,
+        )
+        self.trajectory_filter = TinkerTrajectoryFilter(self.config.algorithm)
 
     def _remove_mask(self, datum: tinker.Datum) -> tinker.Datum:
         """Remove mask from datum (not needed by forward_backward)."""
@@ -189,7 +226,7 @@ class TinkerPolicyTrainer:
             learning_rate = self.config.training.learning_rate
 
         # Step 1: Process to datums (includes filtering and advantage computation)
-        training_datums, grouping_metrics = process_episodes(
+        training_datums, grouping_metrics = await process_episodes(
             episodes,
             self.advantage_computer,
             self.trajectory_filter,
@@ -230,6 +267,7 @@ class TinkerPolicyTrainer:
         # Return logprobs, datums (with masks for metrics), and grouping metrics
         return training_logprobs_D, training_datums, grouping_metrics
 
+    # TODO: is this dead code?
     async def forward_backward_future(self, episodes: list):
         training_datums, grouping_metrics = process_episodes(
             episodes,

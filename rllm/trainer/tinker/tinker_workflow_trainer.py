@@ -67,11 +67,15 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
             shuffle=True,
             collate_fn=lambda x: x,  # Return batches as lists
         )
-        self.val_dataloader = torch.utils.data.DataLoader(
-            val_dataset,
-            batch_size=self.config.data.val_batch_size,
-            shuffle=False,
-            collate_fn=lambda x: x,  # Return batches as lists
+        self.val_dataloader = (
+            torch.utils.data.DataLoader(
+                val_dataset,
+                batch_size=self.config.data.val_batch_size,
+                shuffle=False,
+                collate_fn=lambda x: x,  # Return batches as lists
+            )
+            if val_dataset is not None
+            else None
         )
 
         service_client = tinker.ServiceClient(base_url=self.config.tinker_base_url)
@@ -104,7 +108,8 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
             max_prompt_length=self.config.data.max_prompt_length,
             max_response_length=self.config.data.max_response_length,
             sampling_params=sampling_params,
-            image_processor=image_processor,
+            **self.config.rollout_engine,
+            image_processor=image_processor,  # VLM support - explicit after spread to ensure it's used
         )
         self.agent_execution_engine = AgentWorkflowEngine(
             workflow_cls=self.workflow_class,
@@ -225,7 +230,8 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
                     if not step.logprobs:
                         step.logprobs = model_output.logprobs
 
-        assert step.prompt_ids, "prompt_ids is None"
+        # For VLM prompts, prompt_ids may be empty list (to_ints() not supported for ImageChunks)
+        assert step.prompt_ids is not None, "prompt_ids is None"
         assert step.response_ids, "response_ids is None"
         assert step.logprobs, "logprobs is None"
 

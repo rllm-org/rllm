@@ -62,6 +62,14 @@ rllm:
   rejection_sample:
     enable: False
     multiplier: 1
+  distill:
+    enable: False
+    shared_tokenizer: False
+    teacher_rollout_args:
+      model: "default"
+      base_url: "http://localhost:8000/v1"
+      api_key: "EMPTY"
+      max_prompt_length: 32768
   sdk:
     store:
       path: ~/.rllm/traces.db

@@ -12,7 +12,8 @@ class ModelOutput:
     prompt_ids: list[int] | None = None
     completion_ids: list[int] | None = None
     multi_modal_inputs: dict[str, list] | None = None
-    logprobs: list[float] | None = None
+    logprobs: list[float] | None = None  # completion logprobs
+    prompt_logprobs: list[float] | None = None  # prompt logprobs aligned to prompt_ids
     prompt_length: int = 0
     completion_length: int = 0
     finish_reason: str | None = None
@@ -27,6 +28,7 @@ class ModelOutput:
             "completion_ids": self.completion_ids,
             "multi_modal_inputs": self.multi_modal_inputs,
             "logprobs": self.logprobs,
+            "prompt_logprobs": self.prompt_logprobs,
             "prompt_length": self.prompt_length,
             "completion_length": self.completion_length,
             "finish_reason": self.finish_reason,
@@ -43,6 +45,7 @@ class ModelOutput:
             completion_ids=data.get("completion_ids"),
             multi_modal_inputs=data.get("multi_modal_inputs"),
             logprobs=data.get("logprobs"),
+            prompt_logprobs=data.get("prompt_logprobs"),
             prompt_length=data.get("prompt_length", 0),
             completion_length=data.get("completion_length", 0),
             finish_reason=data.get("finish_reason"),
