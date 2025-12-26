@@ -11,7 +11,7 @@ python3 -m examples.geo3k_tinker.train_geo3k_tinker \
   data.val_batch_size=64 \
   workflow.n_parallel_tasks=256 \
   trainer.total_epochs=10 \
-  trainer.logger=['console','wandb'] \
+  trainer.logger="['console','wandb']" \
   trainer.project_name='geo3k-tinker' \
   trainer.experiment_name='geo3k-tinker-full' \
   trainer.val_before_train=True

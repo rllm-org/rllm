@@ -10,11 +10,11 @@ from transformers import AutoProcessor, AutoTokenizer
 # Import geo3k-specific modules
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "geo3k"))
 
-from geo3k_workflow import Geo3KWorkflow  # noqa: E402
-from rllm.data.dataset import DatasetRegistry  # noqa: E402
-from rllm.engine.agent_workflow_engine import AgentWorkflowEngine  # noqa: E402
-from rllm.engine.rollout.tinker_engine import TinkerEngine  # noqa: E402
-from rllm.rewards.reward_fn import math_reward_fn  # noqa: E402
+from geo3k_workflow import Geo3KWorkflow  
+from rllm.data.dataset import DatasetRegistry 
+from rllm.engine.agent_workflow_engine import AgentWorkflowEngine 
+from rllm.engine.rollout.tinker_engine import TinkerEngine 
+from rllm.rewards.reward_fn import math_reward_fn 
 
 
 def load_data(n: int = 1):
@@ -76,7 +76,8 @@ if __name__ == "__main__":
     service_client = tinker.ServiceClient(base_url=base_url)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    # Load image processor for vision-language models if needed
+    # Load processor for vision-language models
+    processor = None
     image_processor = None
     model_name_lower = model_name.lower()
     if "vl" in model_name_lower or "vision" in model_name_lower:
@@ -97,6 +98,7 @@ if __name__ == "__main__":
         max_response_length=2048,
         sampling_params={"temperature": 1.0, "top_p": 1.0},
         image_processor=image_processor,
+        processor=processor,  # Full processor for VLM support
     )
 
     # Create a training client and sampling client for inference.
@@ -114,7 +116,7 @@ if __name__ == "__main__":
         workflow_cls=Geo3KWorkflow,
         workflow_args={
             "reward_function": math_reward_fn,
-            "encode_as_base64": True,
+            "encode_as_base64": False, 
         },
         rollout_engine=rollout_engine,
         config=None,
