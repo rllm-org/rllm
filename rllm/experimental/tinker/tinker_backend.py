@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from omegaconf import DictConfig
+from transformers import AutoTokenizer
 
 import tinker
 from rllm.agents.agent import Episode
@@ -114,7 +115,6 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         Returns:
             TinkerEngine: The initialized rollout engine.
         """
-        assert self.policy_trainer is not None, "policy_trainer is not initialized"
         self.policy_trainer = TinkerPolicyTrainer(
             config=self.full_config,
             service_client=self.service_client,
@@ -122,7 +122,8 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             transform_config=kwargs.get("transform_config"),
             algorithm_config=kwargs.get("algorithm_config"),
         )
-        self.tokenizer = self.policy_trainer.get_tokenizer()
+        # we need to get it from `AutoTokenizer` since the `policy_trainer` has not been initialized yet
+        self.tokenizer = AutoTokenizer.from_pretrained(self.full_config.model.name)
 
         self.rollout_engine = TinkerEngine(
             base_url=self.full_config.tinker_base_url,
@@ -359,7 +360,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
         # Save final checkpoint if we didn't just save it in the last batch
-        if trainer_state.global_step % self.full_config.trainer.get("save_freq", 0) != 0:
+        if trainer_state.global_step % self.full_config.rllm.trainer.get("save_freq", 0) != 0:
             logger.info(f"Saving final checkpoint at step {trainer_state.global_step}")
             await self.policy_trainer.save_checkpoint_async(trainer_state.global_step, kind="state")
 
@@ -377,7 +378,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         self.sampling_client = self.policy_trainer.create_sampling_client(path_dict["sampler_path"])
 
         # Save full state checkpoint periodically
-        save_freq = self.full_config.trainer.get("save_freq", 0)
+        save_freq = self.full_config.rllm.trainer.get("save_freq", 0)
 
         if save_freq > 0 and global_step % save_freq == 0:
             logger.info(f"Saving state checkpoint at step {global_step}")

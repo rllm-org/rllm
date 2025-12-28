@@ -27,6 +27,7 @@ workflow:
     reward_bonus_coeff: 0.0 # no reward shaping
   n_parallel_tasks: 256
   retry_limit: 3
+  raise_on_error: true
 
 # Rollout Configuration (note: this is just for logging purpose, the actual rollout configs are backend-specific)
 rollout:
