@@ -92,7 +92,7 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
         if "vl" in model_name_lower or "vision" in model_name_lower:
             try:
                 processor = AutoProcessor.from_pretrained(self.config.model.name, trust_remote_code=True)
-                if hasattr(processor, 'image_processor') and processor.image_processor is not None:
+                if hasattr(processor, "image_processor") and processor.image_processor is not None:
                     image_processor = processor.image_processor
             except Exception:
                 # If processor loading fails, continue without it

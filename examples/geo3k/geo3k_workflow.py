@@ -19,7 +19,6 @@ class Geo3KWorkflow(Workflow):
         self.agent = SimpleAgent()
         self.reward_fn: RewardFunction = reward_function or math_reward_fn
 
-
     async def run(self, task: dict, uid: str, **kwargs) -> Episode:
         self.reset(task, uid)
 
@@ -31,16 +30,10 @@ class Geo3KWorkflow(Workflow):
             image = Image.open(BytesIO(image["bytes"]))
         assert isinstance(image, Image.Image) or image is None, f"Image must be a PIL.Image.Image, but got {type(image)}"
 
+        # Standard format: content is text, images is list[PIL.Image]
+        # Conversion to backend-specific format happens in rollout engine/renderer
         if image is not None:
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": image},
-                        {"type": "text", "text": question},
-                    ],
-                }
-            ]
+            messages = [{"role": "user", "content": question, "images": [image]}]
         else:
             messages = [{"role": "user", "content": question}]
 

@@ -12,7 +12,24 @@ class TinkerEngine(RolloutEngine):
     RolloutEngine implementation using Tinker for model inference.
     """
 
-    def __init__(self, base_url: str, model_name: str, tokenizer, service_client: tinker.ServiceClient, max_prompt_length: int = 4096, max_response_length: int = 4096, max_model_length: int | None = None, sampling_params: dict | None = None, bypass_render_with_parser: bool = False, processor=None, image_processor=None, disable_thinking: bool = False, accumulate_reasoning: bool = False, reasoning_effort: str = "medium", **kwargs):
+    def __init__(
+        self,
+        base_url: str,
+        model_name: str,
+        tokenizer,
+        service_client: tinker.ServiceClient,
+        max_prompt_length: int = 4096,
+        max_response_length: int = 4096,
+        max_model_length: int | None = None,
+        sampling_params: dict | None = None,
+        bypass_render_with_parser: bool = False,
+        processor=None,
+        image_processor=None,
+        disable_thinking: bool = False,
+        accumulate_reasoning: bool = False,
+        reasoning_effort: str = "medium",
+        **kwargs,
+    ):
         """
         Initialize TinkerEngine.
 

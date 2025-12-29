@@ -11,6 +11,7 @@ from transformers import AutoProcessor, AutoTokenizer
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "geo3k"))
 
 from geo3k_workflow import Geo3KWorkflow
+
 from rllm.data.dataset import DatasetRegistry
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.tinker_engine import TinkerEngine
@@ -138,4 +139,3 @@ if __name__ == "__main__":
         json.dump([episode.to_dict() for episode in results], f, indent=4)
 
     print(f"\nResults saved to {output_path}")
-
