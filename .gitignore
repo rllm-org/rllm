@@ -215,3 +215,6 @@ uv.lock
 
 # Legacy issue: we will ignore the "verl" folder, which was installed by many as submodule before
 /verl/
+
+# Ignore Skyrl 
+/skyrl/
