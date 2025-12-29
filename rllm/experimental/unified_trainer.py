@@ -213,28 +213,18 @@ class UnifiedTrainer:
         if self._thread is not None:
             self._thread.join(timeout=5.0)  # Wait up to 5 seconds for thread to stop
 
-        # Clean up the logger (this will e.g. call wandb.finish() if wandb was initialized)
-        if hasattr(self, "logger") and self.logger is not None:
-            # Explicitly trigger cleanup by deleting the logger
-            # The Tracking.__del__ method handles wandb.finish(), etc.
-            try:
-                del self.logger
-            except Exception:
-                pass  # Ignore errors during cleanup
-
-        # Clean up the backend if it was initialized
-        if hasattr(self, "backend"):
-            try:
+        try:
+            # Clean up the logger (this will call finish() which handles wandb.finish(), etc.)
+            if hasattr(self, "logger") and self.logger is not None:
+                self.logger.finish()
+            # Clean up the backend if it was initialized
+            if hasattr(self, "backend"):
                 self.backend.shutdown()
-            except Exception:
-                pass
-
-        # Clean up the workflow engine if it was initialized
-        if hasattr(self, "agent_workflow_engine"):
-            try:
+            # Clean up the workflow engine if it was initialized
+            if hasattr(self, "agent_workflow_engine"):
                 self.agent_workflow_engine.shutdown()
-            except Exception:
-                pass
+        except Exception:
+            pass  # Ignore errors during cleanup
 
     # =========================================================================
     # Main training loop methods
@@ -424,6 +414,10 @@ class UnifiedTrainer:
         if hasattr(self, "agent_workflow_engine") and self.agent_workflow_engine is not None:
             self.agent_workflow_engine.shutdown()
         self.backend.shutdown()
+
+        # Explicitly finish the logger to prevent hang in __del__ during garbage collection
+        if hasattr(self, "logger") and self.logger is not None:
+            self.logger.finish()
 
 
 class AgentTrainer:
