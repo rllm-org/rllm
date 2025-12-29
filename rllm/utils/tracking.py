@@ -91,6 +91,7 @@ class Tracking:
                 assert backend in self.supported_backend, f"{backend} is not supported"
 
         self.logger = {}
+        self._finished = False  # Track whether finish() has been called
 
         if "tracking" in default_backend or "wandb" in default_backend:
             import wandb
@@ -182,7 +183,15 @@ class Tracking:
             if backend is None or default_backend in backend:
                 logger_instance.log(data=data, step=step)
 
-    def __del__(self):
+    def finish(self):
+        """Explicitly finish and cleanup all loggers.
+
+        This method should be called during controlled shutdown to ensure proper cleanup.
+        It's safe to call multiple times - subsequent calls will be no-ops.
+        """
+        if self._finished:
+            return
+
         if "wandb" in self.logger:
             self.logger["wandb"].finish(exit_code=0)
         if "swanlab" in self.logger:
@@ -197,6 +206,17 @@ class Tracking:
             self.logger["trackio"].finish()
         if "file" in self.logger:
             self.logger["file"].finish()
+
+        self.logger.clear()
+        self._finished = True
+
+    def __del__(self):
+        """Destructor that ensures cleanup if finish() wasn't called explicitly.
+
+        Note: Prefer calling finish() explicitly during shutdown rather than relying
+        on __del__, as garbage collection timing can be unpredictable.
+        """
+        self.finish()
 
 
 class ClearMLLogger:
