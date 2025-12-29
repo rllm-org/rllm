@@ -98,6 +98,34 @@ class TinkerEngine(RolloutEngine):
         """
         self.sampling_client = sampling_client
 
+    def _convert_images_to_content_list(self, messages: list[dict]) -> list[dict]:
+        """
+        Convert messages from standard format to Tinker renderer format.
+
+        Standard format: {"role": "user", "content": "text", "images": [PIL.Image]}
+        Tinker format:   {"role": "user", "content": [{"type": "image", "image": img}, {"type": "text", "text": "..."}]}
+
+        Args:
+            messages: List of messages in standard format
+
+        Returns:
+            List of messages in Tinker renderer format
+        """
+        converted = []
+        for msg in messages:
+            if "images" in msg and msg["images"]:
+                # Convert to content list format
+                content_list = []
+                for img in msg["images"]:
+                    content_list.append({"type": "image", "image": img})
+                content_list.append({"type": "text", "text": msg.get("content", "")})
+                converted.append({**msg, "content": content_list})
+                # Remove the images key since it's now in content
+                del converted[-1]["images"]
+            else:
+                converted.append(msg)
+        return converted
+
     def _prepare_max_tokens(self, requested_max_tokens: int, prompt_length: int) -> int:
         """
         Prepare max_tokens parameter, adjusting for max_model_length if needed.
@@ -203,8 +231,10 @@ class TinkerEngine(RolloutEngine):
             completion_text = self.tokenizer.decode(response_tokens, skip_special_tokens=True)
         else:
             # Use Tinker renderer (original behavior)
+            # Convert standard image format to Tinker renderer format
+            converted_messages = self._convert_images_to_content_list(messages)
             # Build prompt using renderer (converts messages to Tinker prompt)
-            tinker_prompt = self.renderer.build_generation_prompt(messages)
+            tinker_prompt = self.renderer.build_generation_prompt(converted_messages)
 
             # For VLM prompts with ImageChunks, to_ints() may not be supported
             try:
