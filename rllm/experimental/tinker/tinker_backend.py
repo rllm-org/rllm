@@ -3,6 +3,9 @@ Tinker backend implementation for the UnifiedTrainer.
 
 This backend implements the BackendProtocol interface to provide
 Tinker-specific implementations for the unified training pipeline.
+
+TODO(listar2000): in the future, when implementing PPO mini-batching for Tinker, we should be careful
+about the update of self.sampling_client (currently update only once per batch).
 """
 
 from __future__ import annotations

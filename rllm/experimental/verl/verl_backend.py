@@ -108,9 +108,12 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         Returns:
             VerlEngine: The initialized rollout engine.
         """
-        if not hasattr(self, "async_rollout_manager") or self.async_rollout_manager is None:
-            raise ValueError("async_rollout_manager is not available. Make sure init_workers() is called before init_rollout_engine().")
+        # Step 1: call RayPPOTrainer's `init_workers()` function to obtain the async_rollout_manager
+        RayPPOTrainer.init_workers(self)
 
+        assert self.async_rollout_manager is not None, "async_rollout_manager is not available. Issues with RayPPOTrainer's `init_workers()` function."
+
+        # Step 2: initialize the rollout engine
         self.rollout_engine = VerlEngine(
             config=self.config,
             rollout_manager=self.async_rollout_manager,
@@ -283,6 +286,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             actor_output = self.actor_rollout_wg.update_actor(batch)
             actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
             trainer_state.metrics.update(actor_output_metrics)
+
+    def shutdown(self) -> None:
+        """Placeholder, just use the parent class's shutdown method."""
+        pass
 
     # =========================================================================
     # Async hook methods - leverage RayPPOTrainer utilities where possible
