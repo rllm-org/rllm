@@ -12,4 +12,6 @@ defaults:
 hydra:
   run:
     dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  searchpath:
+    - pkg://verl.trainer.config
 
