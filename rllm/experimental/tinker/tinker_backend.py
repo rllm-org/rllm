@@ -92,9 +92,6 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Sampling client - updated after each checkpoint save
         self.sampling_client: tinker.SamplingClient | None = None
 
-        # Training state
-        self._start_batch: int = 0
-
         # Store training datums and logprobs for KL metrics computation
         self._training_datums: list[tinker.Datum] = []
         self._training_logprobs: list[torch.Tensor] = []
@@ -352,7 +349,6 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         start_batch, self.sampling_client = await self.policy_trainer.initialize_async(resume_from_checkpoint=True)
 
         # Update trainer state with the start batch from checkpoint
-        self._start_batch = start_batch
         trainer_state.global_step = start_batch
 
     async def on_train_end(self, trainer_state: TrainerState) -> None:

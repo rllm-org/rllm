@@ -1,10 +1,11 @@
 import asyncio
 import threading
+from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pprint import pprint
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
@@ -92,8 +93,6 @@ class UnifiedTrainer:
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
 
-        self.tokenizer = kwargs.get("tokenizer")
-
         # initializing and validating common configs
         self.config = config
         self.rllm_config = config.rllm
@@ -130,10 +129,14 @@ class UnifiedTrainer:
 
             # Initialize workflow pool
             self._run_async(self.agent_workflow_engine.initialize_pool())
-        except Exception:
+        except Exception as e:
             # Clean up any resources that were initialized before the error
             self._cleanup_on_init_failure()
-            raise
+            raise e
+
+        self.tokenizer = None
+        if hasattr(self.backend, "tokenizer"):
+            self.tokenizer = self.backend.tokenizer  # type: ignore[attr-defined]
 
     def _run_async(self, coro):
         """Run an async coroutine in the event loop thread and wait for result."""
@@ -420,10 +423,12 @@ class UnifiedTrainer:
             self.logger.finish()
 
 
-class AgentTrainer:
+class TrainerLauncher(ABC):
     """
-    A unified agent trainer that is used as the entrance to selecting different backends, etc.
-    Adapted directly from `rllm.trainer.agent_trainer.AgentTrainer`.
+    A unified agent trainer launcher that directly interfaces with the user script to launch training jobs.
+
+    It handles the necessary environment setup (e.g. ray init for `verl`) for different backends. This is an abstract
+    class that each backend must implement.
 
     TODO(listar2000): add support to non-workflow training (e.g. agent/env classes), `fireworks` backend, and SDK.
     """
@@ -432,45 +437,19 @@ class AgentTrainer:
         self,
         config: DictConfig,
         workflow_class: type[Workflow],
-        backend: Literal["verl", "tinker"] = "verl",
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
-        backend_args: dict | None = None,
         **kwargs,
     ):
-        """Initialize the AgentTrainer."""
-        assert backend in ["verl", "tinker"], f"Unsupported backend: {backend}, must be one of ['verl', 'tinker']"
-
-        self.backend = backend
-
+        """Initialize the TrainerLauncher."""
         self.config = config
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
-        self.backend_args = backend_args or {}
         self.kwargs = kwargs
 
+    @abstractmethod
     def train(self):
-        if self.backend == "verl":
-            self.train_verl()
-        elif self.backend == "tinker":
-            self.train_tinker()
-
-    def train_verl(self):
-        raise NotImplementedError("Training with the 'verl' backend is not implemented yet")
-
-    def train_tinker(self):
-        from rllm.experimental.tinker.tinker_backend import TinkerBackend
-
-        trainer = None
-        try:
-            trainer = UnifiedTrainer(backend_cls=TinkerBackend, config=self.config, workflow_class=self.workflow_class, train_dataset=self.train_dataset, val_dataset=self.val_dataset, workflow_args=self.workflow_args, backend_args=self.backend_args, **self.kwargs)
-            trainer.fit()
-        except Exception as e:
-            print(f"Error training Tinker: {e}")
-            raise e
-        finally:
-            if trainer is not None:
-                trainer.shutdown()
+        raise NotImplementedError("Train method of the trainer launcher is not implemented")
