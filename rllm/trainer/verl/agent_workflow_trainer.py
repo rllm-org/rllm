@@ -129,7 +129,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         """
         The training loop of PPO. Adapted to train the underlying model of agent.
         """
-        from verl.utils.tracking import Tracking
+        from rllm.utils.tracking import Tracking
 
         logger = Tracking(
             project_name=self.config.trainer.project_name,
@@ -490,6 +490,12 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         val_metrics = self._validate_agent()
                         pprint(f"Final validation metrics: {val_metrics}")
                         logger.log(data=val_metrics, step=self.global_steps)
+
+                    try:
+                        logger.finish()
+                    except Exception:
+                        pass  # skip errors during cleanup
+
                     return
 
     def _validate_agent(self):
