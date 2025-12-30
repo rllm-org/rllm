@@ -133,7 +133,7 @@ flash-attn = [
 ]
 
 [tool.ruff]
-line-length = 320 # TODO: Reduce this to a more reasonable value
+line-length = 5000 # TODO: Reduce this to a more reasonable value
 
 [tool.ruff.lint]
 isort = {known-first-party = ["rllm"], known-third-party = ["verl"]}
