@@ -24,7 +24,6 @@ from rllm.experimental.protocol import BackendProtocol
 
 if TYPE_CHECKING:
     from skyrl_train.training_batch import TrainingInputBatch
-    from skyrl_train.trainer import RayPPOTrainer
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
     from skyrl_train.generators.base import GeneratorInterface
 
@@ -32,18 +31,6 @@ if TYPE_CHECKING:
     from rllm.experimental.unified_trainer import TrainerState
 
 logger = logging.getLogger(__name__)
-
-
-def _build_interleave_batch(batch: list[dict], group_size: int) -> list[dict]:
-    """Build an interleaved batch where each task is repeated `group_size` times."""
-    interleave_batch = []
-    batch_with_uid = []
-    for batch_item in batch:
-        batch_with_uid.append({**batch_item, "uid": str(uuid.uuid4())})
-
-    for batch_item in batch_with_uid:
-        interleave_batch.extend([batch_item for _ in range(group_size)])
-    return interleave_batch
 
 
 class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch]):
@@ -64,12 +51,18 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch]):
     def __init__(
         self,
         config: DictConfig,
+        skyrl_trainer=None,
+        inference_engine_client=None,
+        tokenizer=None,
         **kwargs,
     ):
         """Initialize the SkyRLBackend.
 
         Args:
             config: The full configuration object.
+            skyrl_trainer: Initialized SkyrlTrainer instance (required).
+            inference_engine_client: Initialized InferenceEngineClient instance (required).
+            tokenizer: Tokenizer instance (required).
             **kwargs: Additional arguments.
         """
         BackendProtocol.__init__(self, config, **kwargs)
@@ -77,14 +70,24 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch]):
         # Store full config reference
         self.full_config = config
 
-        # SkyRL components - will be initialized in init_rollout_engine and on_train_start
-        self.skyrl_trainer: RayPPOTrainer | None = None
-        self.inference_engine_client: InferenceEngineClient | None = None
-        self.generator: GeneratorInterface | None = None
-        self.tokenizer: AutoTokenizer | None = None
+        # SkyRL components - must be provided by launcher
+        self.skyrl_trainer = skyrl_trainer
+        self.inference_engine_client = inference_engine_client
+        self.tokenizer = tokenizer
+
+        # Validate required components
+        if self.skyrl_trainer is None:
+            raise ValueError("skyrl_trainer must be provided. Initialize it in the launcher.")
+        if self.inference_engine_client is None:
+            raise ValueError("inference_engine_client must be provided. Initialize it in the launcher.")
+        if self.tokenizer is None:
+            raise ValueError("tokenizer must be provided. Initialize it in the launcher.")
 
         # Rollout engine - will be created in init_rollout_engine
         self.rollout_engine: RolloutEngine | None = None
+
+        # Store workflow engine (passed from UnifiedTrainer)
+        self.workflow_engine: UnifiedWorkflowEngine | None = None
 
         # Store algorithm config for use in process_backend_batch
         self._algorithm_config: AlgorithmConfig | None = None
@@ -96,9 +99,6 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch]):
     def init_rollout_engine(self, **kwargs) -> RolloutEngine:
         """Initialize the SkyRL-compatible rollout engine.
 
-        For SkyRL, we need to set up the inference engine client and generator.
-        The actual rollout engine will be a wrapper that uses SkyRL's components.
-
         Args:
             **kwargs: Additional arguments, including the various configurations
 
@@ -108,15 +108,14 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch]):
         # Import here to avoid hard dependency
         from rllm.engine.rollout.skyrl_engine import SkyRLEngine
 
-        # Initialize tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(self.full_config.model.name)
-
-        # The rollout engine will be fully initialized in on_train_start
-        # when we have access to the SkyRL trainer components
+        # Create rollout engine with provided components
+        # Note: inference_engine_client is already set in __init__, so no need for set_skyrl_components
         self.rollout_engine = SkyRLEngine(
-            config=self.full_config,
+            inference_engine_client=self.inference_engine_client,
             tokenizer=self.tokenizer,
+            config=self.full_config,
         )
+
         return self.rollout_engine
 
     def validate_config(self) -> None:
@@ -156,10 +155,11 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch]):
     def shutdown(self) -> None:
         """Shutdown the backend and cleanup resources."""
         super().shutdown()
-        # Cleanup SkyRL components if needed
-        if self.skyrl_trainer is not None:
-            # SkyRL trainer cleanup if needed
-            pass
+        # Teardown inference engine client (async operation in sync method)
+        # UnifiedTrainer.shutdown() stops the event loop, so we create a new one for teardown
+        if self.inference_engine_client is not None:
+            import asyncio
+            asyncio.run(self.inference_engine_client.teardown())
 
     # =========================================================================
     # Async pipeline methods
@@ -171,31 +171,120 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch]):
         agent_workflow_engine: UnifiedWorkflowEngine,
         **kwargs,
     ) -> list[Episode]:
-        """Generate episodes using the workflow engine.
+        """Generate episodes using SkyrlTrainer's generator.
 
-        For SkyRL backend, this function handles:
-        1. Building an interleaved batch (each task repeated `group_size` times)
-        2. Executing tasks using the agent workflow engine
+        For SkyRL backend, this function:
+        1. Builds interleaved batch (each task repeated `group_size` times)
+        2. Uses SkyrlTrainer.generate() which internally uses RLLMGenerator
+        3. Converts GeneratorOutput to Episodes (for compatibility with unified trainer)
 
         Args:
             batch: Input batch (list of task dicts from dataloader).
-            agent_workflow_engine: The workflow engine to use for episode generation.
-            **kwargs: Additional arguments.
+            agent_workflow_engine: UnifiedWorkflowEngine for running workflows.
+            **kwargs: Additional arguments including trainer_state for global_step.
 
         Returns:
             List of generated episodes.
         """
-        assert self.rollout_engine is not None, "rollout_engine is not initialized"
+        from skyrl_train.generators.base import GeneratorInput, GeneratorOutput, BatchMetadata, TrajectoryID
+        from skyrl_train.generators.utils import prepare_generator_input
+        from rllm.agents.agent import Episode, Trajectory, Step
+        from rllm.engine.rollout import ModelOutput
 
-        # Build interleaved batch
+        # Store workflow engine for reference
+        self.workflow_engine = agent_workflow_engine
+        
+        # Update generator's workflow engine if it's an RLLMGenerator
+        # (The generator was created in the launcher, but the workflow engine is only available now)
+        if hasattr(self.skyrl_trainer, 'generator') and hasattr(self.skyrl_trainer.generator, 'workflow_engine'):
+            self.skyrl_trainer.generator.workflow_engine = agent_workflow_engine
+
+        # Get global step from kwargs (passed by unified trainer)
+        global_step = kwargs.get("global_step", 0)
+        is_training = kwargs.get("is_training", True)
+        training_phase = "train" if is_training else "eval"
+
+        # Get sampling params from config
+        sampling_params = self.full_config.get("sampling", {})
+        default_env_class = self.full_config.get("environment", {}).get("env_class", "BaseTextEnv")
         group_size = self.full_config.training.get("group_size", 1)
-        interleaved_batch = _build_interleave_batch(batch, group_size)
 
-        # Extract task IDs
-        task_ids = [item["uid"] for item in interleaved_batch]
+        # Build interleaved batch (each task repeated `group_size` times) - inline like Verl
+        batch_with_uid = []
+        for batch_item in batch:
+            batch_with_uid.append({**batch_item, "uid": str(uuid.uuid4())})
+        
+        interleaved_batch = []
+        for batch_item in batch_with_uid:
+            interleaved_batch.extend([batch_item for _ in range(group_size)])
 
-        # Execute tasks using the agent workflow engine (async)
-        episodes = await agent_workflow_engine.execute_tasks(interleaved_batch, task_ids, **kwargs)
+        # Prepare GeneratorInput from interleaved batch
+        generator_input, uids = prepare_generator_input(
+            prompts=interleaved_batch,
+            n_samples_per_prompt=1,  # Already interleaved, so 1 sample per prompt
+            sampling_params=sampling_params,
+            default_env_class=default_env_class,
+            training_phase=training_phase,
+            global_step=global_step,
+        )
+
+        # Call SkyrlTrainer.generate() which uses RLLMGenerator internally
+        generator_output: GeneratorOutput = await self.skyrl_trainer.generate(generator_input)
+
+        # Convert GeneratorOutput to Episodes (for unified trainer compatibility)
+        episodes = []
+        prompt_token_ids = generator_output["prompt_token_ids"]
+        response_ids = generator_output["response_ids"]
+        rewards = generator_output["rewards"]
+        loss_masks = generator_output["loss_masks"]
+        rollout_logprobs = generator_output.get("rollout_logprobs")
+
+        for i, (prompt_tokens, response_tokens, reward, loss_mask) in enumerate(
+            zip(prompt_token_ids, response_ids, rewards, loss_masks)
+        ):
+            # Get trajectory_id if available
+            trajectory_id = generator_input.get("trajectory_ids", [None] * len(prompt_token_ids))[i]
+            if trajectory_id:
+                task_id = trajectory_id.instance_id
+                rollout_idx = trajectory_id.repetition_id
+                episode_id = f"{task_id}:{rollout_idx}"
+            else:
+                episode_id = uids[i] if i < len(uids) else f"task_{i}:0"
+
+            # Create Step from GeneratorOutput
+            step = Step(
+                prompt_ids=prompt_tokens,
+                response_ids=response_tokens,
+                logprobs=rollout_logprobs[i] if rollout_logprobs and i < len(rollout_logprobs) else [],
+                reward=reward if isinstance(reward, (int, float)) else reward[-1] if isinstance(reward, list) and len(reward) > 0 else 0.0,
+                done=True,
+            )
+
+            # Create ModelOutput for the step
+            step.model_output = ModelOutput(
+                prompt_ids=prompt_tokens,
+                completion_ids=response_tokens,
+                logprobs=rollout_logprobs[i] if rollout_logprobs and i < len(rollout_logprobs) else None,
+            )
+
+            # Create Trajectory
+            trajectory = Trajectory(
+                uid=episode_id,
+                name="default_traj_name",
+                task=interleaved_batch[i] if i < len(interleaved_batch) else {},
+                steps=[step],
+                reward=reward if isinstance(reward, (int, float)) else reward[-1] if isinstance(reward, list) and len(reward) > 0 else 0.0,
+            )
+
+            # Create Episode
+            episode = Episode(
+                id=episode_id,
+                task=interleaved_batch[i] if i < len(interleaved_batch) else {},
+                trajectories=[trajectory],
+                is_correct=reward > 0.0 if isinstance(reward, (int, float)) else (reward[-1] > 0.0 if isinstance(reward, list) and len(reward) > 0 else False),
+            )
+
+            episodes.append(episode)
 
         return episodes
 
@@ -295,6 +384,7 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch]):
         """Update the policy via optimizer step.
 
         For SkyRL, this performs the optimizer step after forward-backward.
+        After training, we sync weights to inference engines (following SkyRL's pattern).
 
         Args:
             trainer_state: The trainer state.
@@ -316,50 +406,10 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch]):
     async def on_train_start(self, trainer_state: TrainerState) -> None:
         """Called at the start of training.
 
-        Initializes the SkyRL trainer and related components.
+        Sets global_step from the SkyrlTrainer if available.
         """
-        # Import here to avoid hard dependency
-        from skyrl_train.trainer import RayPPOTrainer
-        from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-        from skyrl_train.utils.tracking import Tracking
-
-        # Initialize tokenizer if not already done
-        if self.tokenizer is None:
-            self.tokenizer = AutoTokenizer.from_pretrained(self.full_config.model.name)
-
-        # Initialize SkyRL components
-        # Note: This is a simplified initialization - you may need to adjust
-        # based on your specific SkyRL setup and configuration structure
-        # The actual initialization should be done based on your SkyRL config structure
-
-        # For now, we'll defer full initialization until the components are actually needed
-        # This allows for more flexible setup based on your specific SkyRL configuration
-        # You should implement the actual initialization based on:
-        # - config.inference_engine settings for InferenceEngineClient
-        # - config.generator settings for GeneratorInterface
-        # - Your specific SkyRL setup
-
-        # Placeholder - you'll need to implement based on your SkyRL config
-        logger.warning(
-            "SkyRLBackend.on_train_start() needs to be fully implemented based on "
-            "your SkyRL configuration structure. You'll need to initialize: "
-            "1. InferenceEngineClient from config.inference_engine "
-            "2. GeneratorInterface (or use UnifiedWorkflowEngine) "
-            "3. RayPPOTrainer with appropriate arguments"
-        )
-
-        # Update rollout engine with SkyRL components
-        if self.rollout_engine is not None:
-            self.rollout_engine.set_skyrl_components(
-                inference_engine_client=self.inference_engine_client,
-                trainer=self.skyrl_trainer,
-            )
-
-        # Load checkpoint if resuming
-        if self.full_config.trainer.get("resume_mode", "none") != "none":
-            self.skyrl_trainer.global_step = self.skyrl_trainer.load_checkpoints()
-
-        trainer_state.global_step = self.skyrl_trainer.global_step
+        if self.skyrl_trainer is not None:
+            trainer_state.global_step = self.skyrl_trainer.global_step
 
     async def on_train_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of training."""
@@ -373,7 +423,9 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch]):
     async def on_batch_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of each batch.
 
-        Saves checkpoint and syncs weights if needed.
+        Saves checkpoint and syncs weights to inference engines.
+        This follows the pattern where batch-level operations (like checkpointing in Verl)
+        happen in on_batch_end.
         """
         if self.skyrl_trainer is None:
             return
@@ -386,11 +438,25 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch]):
             logger.info(f"Saving checkpoint at step {global_step}")
             self.skyrl_trainer.save_checkpoints()
 
-        # Sync weights to inference engines if needed
-        if self.full_config.trainer.get("colocate_all", False):
-            # Sync policy weights to inference engines
-            import ray
-            ray.get(self.skyrl_trainer.sync_policy_weights_to_inference_engines())
+        # Sync weights to inference engines after training (following SkyRL's pattern)
+        # This ensures inference engines use the latest policy weights for the next batch's generation
+        colocate_all = self.full_config.trainer.get("colocate_all", False)
+        
+        if colocate_all:
+            # Offload policy model optimizer to CPU (keep model on GPU for now)
+            self.skyrl_trainer.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
+            # Wake up inference engines for weight loading
+            await self.inference_engine_client.wake_up(tags=["weights"])
+        
+        # Sync weights from policy model to inference engines (always, not just for colocated)
+        import ray
+        ray.get(self.skyrl_trainer.sync_policy_weights_to_inference_engines())
+        
+        if colocate_all:
+            # Offload policy model to CPU (free GPU for inference)
+            self.skyrl_trainer.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
+            # Wake up inference engines for KV cache loading
+            await self.inference_engine_client.wake_up(tags=["kv_cache"])
 
     async def on_epoch_start(self, trainer_state: TrainerState) -> None:
         """Called at the start of an epoch."""

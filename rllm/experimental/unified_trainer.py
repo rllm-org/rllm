@@ -438,7 +438,7 @@ class AgentTrainer:
         self,
         config: DictConfig,
         workflow_class: type[Workflow],
-        backend: Literal["verl", "tinker"] = "verl",
+        backend: Literal["verl", "tinker", "skyrl"] = "verl",
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
@@ -446,7 +446,7 @@ class AgentTrainer:
         **kwargs,
     ):
         """Initialize the AgentTrainer."""
-        assert backend in ["verl", "tinker"], f"Unsupported backend: {backend}, must be one of ['verl', 'tinker']"
+        assert backend in ["verl", "tinker", "skyrl"], f"Unsupported backend: {backend}, must be one of ['verl', 'tinker', 'skyrl']"
 
         self.backend = backend
 
@@ -463,6 +463,8 @@ class AgentTrainer:
             self.train_verl()
         elif self.backend == "tinker":
             self.train_tinker()
+        elif self.backend == "skyrl":
+            self.train_skyrl()
 
     def train_verl(self):
         raise NotImplementedError("Training with the 'verl' backend is not implemented yet")
@@ -476,6 +478,20 @@ class AgentTrainer:
             trainer.fit()
         except Exception as e:
             print(f"Error training Tinker: {e}")
+            raise e
+        finally:
+            if trainer is not None:
+                trainer.shutdown()
+
+    def train_skyrl(self):
+        from rllm.experimental.skyrl.skyrl_backend import SkyRLBackend
+
+        trainer = None
+        try:
+            trainer = UnifiedTrainer(backend_cls=SkyRLBackend, config=self.config, workflow_class=self.workflow_class, train_dataset=self.train_dataset, val_dataset=self.val_dataset, workflow_args=self.workflow_args, backend_args=self.backend_args, **self.kwargs)
+            trainer.fit()
+        except Exception as e:
+            print(f"Error training SkyRL: {e}")
             raise e
         finally:
             if trainer is not None:
