@@ -99,8 +99,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
     # =========================================================================
     # BackendProtocol interface methods
     # =========================================================================
-
-    def init_rollout_engine(self) -> RolloutEngine:
+    def init_rollout_engine(self, **kwargs) -> RolloutEngine:
         """Initialize the VerlEngine rollout engine.
 
         Note: This should be called after init_workers() to ensure
