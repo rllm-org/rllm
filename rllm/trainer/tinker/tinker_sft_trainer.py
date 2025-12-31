@@ -317,7 +317,10 @@ class TinkerSFTTrainer:
             logger.info("Training was already complete; nothing to do")
 
         self.tracking_logger.log(data={"status": "completed"}, step=total_steps)
-        del self.tracking_logger
+        try:
+            self.tracking_logger.finish()
+        except Exception:
+            pass  # skip errors during cleanup
         logger.info("Training completed successfully")
 
     async def validate(self, val_dataset) -> dict[str, float]:

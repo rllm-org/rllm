@@ -299,7 +299,11 @@ class TinkerAgentTrainer:
         if batch_idx % self.config.trainer.save_freq != 0:
             logger.info(f"Saving final checkpoint at batch {batch_idx}")
             await self.trainer.save_checkpoint_async(batch_idx, kind="state")
-        del tracking_logger
+
+        try:
+            tracking_logger.finish()
+        except Exception:
+            pass  # skip errors during cleanup
 
     def init_envs_and_agents(self, batch):
         """
