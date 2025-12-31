@@ -323,8 +323,8 @@ class UnifiedTrainer:
         if not trainer_state.has_trajectory_groups:
             return
 
-        # stage 4: transform trajectory groups to backend-specific format (sync)
-        backend_batch = self.backend.transform_trajectory_groups_to_backend_batch(trainer_state)
+        # stage 4: transform rllm-native data structures to backend-specific format (sync)
+        backend_batch = self.backend.transform_to_backend_batch(trainer_state)
         trainer_state.backend_batch = backend_batch
 
         # stage 5: process backend batch (async) - compute log probs, critic values, etc.

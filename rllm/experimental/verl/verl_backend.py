@@ -31,7 +31,7 @@ from rllm.experimental.common import (
     simple_timer,
 )
 from rllm.experimental.protocol import BackendProtocol
-from rllm.experimental.verl import compute_advantage_verl, transform_trajectory_groups_to_dataproto, update_dataproto_with_advantages
+from rllm.experimental.verl import compute_advantage_verl, transform_episodes_to_dataproto, update_dataproto_with_advantages
 
 if TYPE_CHECKING:
     from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
@@ -177,12 +177,12 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         await self.rollout_engine.sleep()
         return episodes
 
-    def transform_trajectory_groups_to_backend_batch(self, trainer_state: TrainerState, **kwargs) -> DataProto:
-        """Transform trajectory groups to verl DataProto format."""
-        assert trainer_state.trajectory_groups is not None, "Trajectory groups are not set"
-        trajectory_groups: list[TrajectoryGroup] = trainer_state.trajectory_groups
+    def transform_to_backend_batch(self, trainer_state: TrainerState, **kwargs) -> DataProto:
+        """Transform rllm-native data structures to verl DataProto format."""
+        assert trainer_state.episodes is not None, "Episodes are not set"
+        episodes: list[Episode] = trainer_state.episodes
         assert self.rollout_engine is not None, "rollout_engine is not initialized."
-        return transform_trajectory_groups_to_dataproto(trajectory_groups, self.rollout_engine, self.config.data.max_prompt_length, self.config.data.max_response_length)
+        return transform_episodes_to_dataproto(episodes, self.rollout_engine, self.config.data.max_prompt_length, self.config.data.max_response_length)
 
     async def process_backend_batch(self, trainer_state: TrainerState, **kwargs) -> None:
         """Compute step-level values: old_log_probs, ref_log_probs, critic values.

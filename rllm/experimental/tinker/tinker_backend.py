@@ -223,19 +223,19 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
         return episodes
 
-    def transform_trajectory_groups_to_backend_batch(
+    def transform_to_backend_batch(
         self,
         trainer_state: TrainerState,
         **kwargs,
     ) -> list[tinker.Datum]:
-        """Transform trajectory groups to Tinker Datum format.
+        """Transform rllm-native data structures to Tinker Datum format.
 
         Note: For Tinker, the actual transformation and advantage computation
         is done in process_backend_batch via TinkerPolicyTrainer.
         This method returns an empty placeholder.
 
         Args:
-            trainer_state: The trainer state containing trajectory_groups.
+            trainer_state: The trainer state containing rllm-native data structures.
             **kwargs: Additional arguments.
 
         Returns:

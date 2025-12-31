@@ -8,6 +8,7 @@ from verl.utils.torch_functional import pad_sequence_to_length
 from rllm.agents.agent import Episode, Trajectory, TrajectoryGroup
 from rllm.engine.rollout import ModelOutput, VerlEngine
 from rllm.experimental.verl.dataclass import AccumulatedData, ProcessedStepData
+from rllm.workflows.workflow import TerminationReason
 
 
 def _pad_sequence_batch(sequences: list[torch.Tensor], pad_token_id: int, max_length: int, left_pad: bool = True) -> torch.Tensor:
@@ -159,10 +160,14 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
     step_rewards_batch, traj_rewards_batch = _build_step_and_trajectory_rewards(accumulated.step_rewards, accumulated.traj_rewards, responses_batch, accumulated.responses)  # shape: [bs, max_response_length]
 
     non_tensors = {
+        "episode_ids": np.array(accumulated.episode_ids),  # unique identifier for each rollout
         "trajectory_ids": np.array(accumulated.trajectory_ids),
         "step_ids": np.array(accumulated.step_ids),
         "batch_ids": np.array([str(uuid.uuid4())] * len(accumulated.trajectory_ids)),
         "step_nums": np.array(accumulated.step_nums),
+        "is_correct": np.array(accumulated.is_correct),
+        "termination_reasons": np.array([x.value for x in accumulated.termination_reasons]),
+        "metrics": np.array(accumulated.metrics, dtype=object),
         "is_valid": np.ones(len(accumulated.trajectory_ids), dtype=bool),
         "is_last_step": np.array(accumulated.is_last_step),
         # The padding is done after the transform (in `_pad_dataproto_to_world_size`), so we simply set all to False here
@@ -274,6 +279,13 @@ def _process_episode(episode: Episode, task_id: str, accumulated: AccumulatedDat
         n_steps = _process_trajectory(trajectory, task_id, accumulated)
         total_steps += n_steps
 
+    # Extend episode-level data for all steps in this episode
+    accumulated.episode_ids.extend([episode.id] * total_steps)
+    accumulated.is_correct.extend([episode.is_correct] * total_steps)
+    termination_reason = episode.termination_reason if episode.termination_reason is not None else TerminationReason.UNKNOWN
+    accumulated.termination_reasons.extend([termination_reason] * total_steps)
+    accumulated.metrics.extend([episode.metrics] * total_steps)
+
     return total_steps
 
 
@@ -283,6 +295,16 @@ def _process_trajectory_group(trajectory_group: TrajectoryGroup, task_id: str, a
     for trajectory in trajectory_group.trajectories:
         n_steps = _process_trajectory(trajectory, task_id, accumulated)
         total_steps += n_steps
+
+    # Extend episode-level data for all steps in this trajectory group
+    # TrajectoryGroup doesn't have episode-level metadata, so we use reasonable defaults
+    # TODO(listar2000): check whether and how we should supplement these info from trajectory groups.
+    group_id = trajectory_group.group_id if trajectory_group.group_id else task_id
+    accumulated.episode_ids.extend([group_id] * total_steps)
+    accumulated.is_correct.extend([False] * total_steps)  # default to False for trajectory groups
+    accumulated.termination_reasons.extend([TerminationReason.UNKNOWN] * total_steps)
+    accumulated.metrics.extend([{}] * total_steps)  # empty metrics for trajectory groups
+
     return total_steps
 
 
