@@ -40,10 +40,14 @@ class AccumulatedData:
     # ID tracking (parallel to tensor lists)
     trajectory_ids: list[str] = field(default_factory=list)
     step_ids: list[str] = field(default_factory=list)
+    episode_ids: list[str] = field(default_factory=list)  # unique identifier for each rollout
 
     # Metadata (parallel to tensor lists)
     step_nums: list[int] = field(default_factory=list)  # number of steps in the trajectory
     is_last_step: list[bool] = field(default_factory=list)
+    is_correct: list[bool] = field(default_factory=list)  # whether the episode was correct
+    termination_reasons: list = field(default_factory=list)  # termination reason for each episode (TerminationReason enum)
+    metrics: list[dict] = field(default_factory=list)  # episode-level metrics
 
     # Multimodal data (parallel to tensor lists)
     multi_modal_inputs: list[dict] = field(default_factory=list)  # Optional multimodal inputs per step

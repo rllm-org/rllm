@@ -105,17 +105,17 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
         raise NotImplementedError("Subclasses must implement this method.")
 
     @abstractmethod
-    def transform_trajectory_groups_to_backend_batch(
+    def transform_to_backend_batch(
         self,
         trainer_state: TrainerState,
         **kwargs,
     ) -> TBatch:
-        """Transform trajectory groups to backend-specific batch.
+        """Transform rllm-native data structures to backend-specific batch.
 
         This is typically a sync operation as it's just data transformation.
 
         Args:
-            trainer_state: The trainer state containing trajectory_groups.
+            trainer_state: The trainer state containing rllm-native data structures (episodes, trajectory groups, etc.).
             **kwargs: Additional arguments.
 
         Returns:
