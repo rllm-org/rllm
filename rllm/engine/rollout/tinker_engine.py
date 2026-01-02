@@ -12,7 +12,24 @@ class TinkerEngine(RolloutEngine):
     RolloutEngine implementation using Tinker for model inference.
     """
 
-    def __init__(self, base_url: str, model_name: str, tokenizer, service_client: tinker.ServiceClient, max_prompt_length: int = 4096, max_response_length: int = 4096, max_model_length: int | None = None, sampling_params: dict | None = None, bypass_render_with_parser: bool = False, processor=None, disable_thinking: bool = False, accumulate_reasoning: bool = False, reasoning_effort: str = "medium", **kwargs):
+    def __init__(
+        self,
+        base_url: str,
+        model_name: str,
+        tokenizer,
+        service_client: tinker.ServiceClient,
+        max_prompt_length: int = 4096,
+        max_response_length: int = 4096,
+        max_model_length: int | None = None,
+        sampling_params: dict | None = None,
+        bypass_render_with_parser: bool = False,
+        processor=None,
+        image_processor=None,
+        disable_thinking: bool = False,
+        accumulate_reasoning: bool = False,
+        reasoning_effort: str = "medium",
+        **kwargs,
+    ):
         """
         Initialize TinkerEngine.
 
@@ -27,6 +44,7 @@ class TinkerEngine(RolloutEngine):
             sampling_params: Default sampling parameters (temperature, top_p, etc.)
             bypass_render_with_parser: If True, use ChatTemplateParser instead of Tinker's renderer
             processor: Optional processor for multimodal models (used when bypass_render_with_parser=True)
+            image_processor: Optional image processor for vision-language models (used with renderer)
             disable_thinking: Whether to disable thinking in generation prompt (used when bypass_render_with_parser=True)
             accumulate_reasoning: Whether to accumulate reasoning (used when bypass_render_with_parser=True)
         """
@@ -55,7 +73,8 @@ class TinkerEngine(RolloutEngine):
                 raise ValueError("No stop sequences found for tokenizer or chat parser")
         else:
             renderer_name = model_info.get_recommended_renderer_name(self.model_name)
-            self.renderer = renderers.get_renderer(renderer_name, self.tokenizer)
+            # Pass image_processor for VLM support with Tinker renderer
+            self.renderer = renderers.get_renderer(renderer_name, self.tokenizer, image_processor=image_processor)
             self.chat_parser = None
             self.stop_sequences = self.renderer.get_stop_sequences()
 
@@ -78,6 +97,34 @@ class TinkerEngine(RolloutEngine):
             sampling_client: Tinker SamplingClient instance
         """
         self.sampling_client = sampling_client
+
+    def _convert_images_to_content_list(self, messages: list[dict]) -> list[dict]:
+        """
+        Convert messages from standard format to Tinker renderer format.
+
+        Standard format: {"role": "user", "content": "text", "images": [PIL.Image]}
+        Tinker format:   {"role": "user", "content": [{"type": "image", "image": img}, {"type": "text", "text": "..."}]}
+
+        Args:
+            messages: List of messages in standard format
+
+        Returns:
+            List of messages in Tinker renderer format
+        """
+        converted = []
+        for msg in messages:
+            if "images" in msg and msg["images"]:
+                # Convert to content list format
+                content_list = []
+                for img in msg["images"]:
+                    content_list.append({"type": "image", "image": img})
+                content_list.append({"type": "text", "text": msg.get("content", "")})
+                converted.append({**msg, "content": content_list})
+                # Remove the images key since it's now in content
+                del converted[-1]["images"]
+            else:
+                converted.append(msg)
+        return converted
 
     def _prepare_max_tokens(self, requested_max_tokens: int, prompt_length: int) -> int:
         """
@@ -184,18 +231,27 @@ class TinkerEngine(RolloutEngine):
             completion_text = self.tokenizer.decode(response_tokens, skip_special_tokens=True)
         else:
             # Use Tinker renderer (original behavior)
+            # Convert standard image format to Tinker renderer format
+            converted_messages = self._convert_images_to_content_list(messages)
             # Build prompt using renderer (converts messages to Tinker prompt)
-            tinker_prompt = self.renderer.build_generation_prompt(messages)
-            prompt_ids = tinker_prompt.to_ints()
-            prompt_length = len(prompt_ids)
+            tinker_prompt = self.renderer.build_generation_prompt(converted_messages)
 
-            # Check prompt length
-            if enforce_max_prompt_length and (prompt_length > self.max_prompt_length or prompt_length > self.max_model_length):
+            # For VLM prompts with ImageChunks, to_ints() may not be supported
+            try:
+                prompt_ids = tinker_prompt.to_ints()
+                prompt_length = len(prompt_ids)
+            except ValueError:
+                # Prompt contains ImageChunks - skip length enforcement for VLM
+                prompt_ids = []
+                prompt_length = 0
+
+            # Check prompt length (only for text-only prompts)
+            if prompt_length > 0 and enforce_max_prompt_length and (prompt_length > self.max_prompt_length or prompt_length > self.max_model_length):
                 raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
 
             # Dynamically adjust max_tokens based on prompt length
             requested_max_tokens = kwargs.get("max_tokens", kwargs.get("max_new_tokens", self.max_response_length))
-            max_tokens = self._prepare_max_tokens(requested_max_tokens, prompt_length)
+            max_tokens = self._prepare_max_tokens(requested_max_tokens, prompt_length) if prompt_length > 0 else requested_max_tokens
 
             # Prepare sampling params (override defaults with kwargs)
             sampling_params = tinker.types.SamplingParams(
