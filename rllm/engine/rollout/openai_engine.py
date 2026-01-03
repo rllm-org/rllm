@@ -1,8 +1,11 @@
 import asyncio
+import base64
 import logging
 import os
+from io import BytesIO
 
 import openai
+from PIL import Image
 
 from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine
 from rllm.globals import THOUGHT_DELIMITER_END, THOUGHT_DELIMITER_START
@@ -35,6 +38,29 @@ class OpenAIEngine(RolloutEngine):
         self.client = openai.AsyncOpenAI(base_url=base_url, api_key=api_key)
         logging.getLogger("httpx").setLevel(logging.WARNING)
 
+    @staticmethod
+    def _pil_to_base64(image: Image.Image) -> str:
+        """Convert PIL Image to base64 string."""
+        buffered = BytesIO()
+        image.save(buffered, format="PNG")
+        return base64.b64encode(buffered.getvalue()).decode()
+
+    def _convert_messages_to_openai_format(self, messages: list[dict]) -> list[dict]:
+        """Convert messages from rllm format to OpenAI multimodal format."""
+        converted_messages = []
+        for message in messages:
+            if "images" in message and message["images"]:
+                content = [{"type": "text", "text": message["content"]}]
+                for img in message["images"]:
+                    base64_image = self._pil_to_base64(img)
+                    content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}})
+
+                converted_messages.append({"role": message["role"], "content": content})
+            else:
+                converted_messages.append(message)
+
+        return converted_messages
+
     def _prepare_max_tokens_param(self, sampling_params: dict, prompt_length: int = None) -> dict:
         """Prepare max tokens parameter for API call (supports O3's max_completion_tokens)."""
         if "max_completion_tokens" in sampling_params:
@@ -61,11 +87,12 @@ class OpenAIEngine(RolloutEngine):
         sampling_params.update(kwargs)
 
         create_params = self._prepare_max_tokens_param(sampling_params)
+        converted_messages = self._convert_messages_to_openai_format(messages)
 
         retries = self.api_retries
         while retries > 0:
             try:
-                response = await self.client.chat.completions.create(model=self.model, messages=messages, timeout=3600, **create_params, **sampling_params)
+                response = await self.client.chat.completions.create(model=self.model, messages=converted_messages, timeout=3600, **create_params, **sampling_params)
 
                 content = response.choices[0].message.content
                 reasoning = response.choices[0].message.reasoning if hasattr(response.choices[0].message, "reasoning") and isinstance(response.choices[0].message.reasoning, str) else ""
