@@ -25,7 +25,7 @@ from rllm.workflows.workflow import Workflow
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.generators.base import GeneratorInterface
 from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.utils.utils import get_ray_pg_ready_with_timeout
+from skyrl_train.utils.utils import get_ray_pg_ready_with_timeout, initialize_ray
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.entrypoints.main_base import (
     create_ray_wrapped_inference_engines_from_config,
@@ -114,14 +114,14 @@ class SkyRLExp:
         Returns:
             GeneratorInterface: The generator.
         """
-        from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
+        from rllm.experimental.skyrl.rllm_generator import RLLMGenerator
 
-        return SkyRLGymGenerator(
-            generator_cfg=cfg.generator,
-            skyrl_gym_cfg=cfg.environment.get("skyrl_gym", {}),
-            inference_engine_client=inference_engine_client,
+        max_response_length = cfg.data.get("max_response_length", 4096)
+        # workflow_engine will be set later in the backend when it's available
+        return RLLMGenerator(
+            workflow_engine=None,
             tokenizer=tokenizer,
-            model_name=cfg.trainer.policy.model.path,
+            max_response_length=max_response_length,
         )
 
     def get_tracker(self):
@@ -178,22 +178,6 @@ class SkyRLExp:
 
         generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
 
-        # Create SkyRL trainer (RayPPOTrainer) for building models
-        # Note: We don't pass train_dataset/eval_dataset here as UnifiedTrainer handles that
-        skyrl_trainer = RayPPOTrainer(
-            cfg=self.cfg,
-            tracker=tracker,
-            tokenizer=tokenizer,
-            train_dataset=None,  # UnifiedTrainer handles dataset loading
-            eval_dataset=None,  # UnifiedTrainer handles dataset loading
-            inference_engine_client=inference_engine_client,
-            generator=generator,
-            colocate_pg=self.colocate_pg,
-        )
-
-        # Build the models (policy, critic, ref)
-        skyrl_trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
-
         # Assemble backend-specific arguments for initializing the SkyRL backend
         backend_args = {
             "tokenizer": tokenizer,
@@ -205,6 +189,7 @@ class SkyRLExp:
             "tracker": tracker,
         }
 
+        # Create UnifiedTrainer (which creates SkyRLBackend)
         trainer = UnifiedTrainer(
             backend_cls=SkyRLBackend,
             config=self.cfg,
@@ -215,6 +200,10 @@ class SkyRLExp:
             backend_args=backend_args,
             **self.kwargs,
         )
+
+        # Build the models (policy, critic, ref) on the backend
+        # SkyRLBackend inherits from RayPPOTrainer, so it has build_models method
+        trainer.backend.build_models(PolicyWorker, CriticWorker, RefWorker)
 
         return trainer
 
@@ -273,26 +262,14 @@ class SkyRLTrainerLauncher(TrainerLauncher):
         """
         super().__init__(config, workflow_class, train_dataset, val_dataset, workflow_args, **kwargs)
 
-        # For SkyRL, datasets can be passed as Dataset objects (like Tinker) or via config.data paths.
-        # When Dataset objects are provided, they are used directly by UnifiedTrainer (no conversion needed).
-        # The workflow engine expects generic dicts, so no SkyRL-specific format conversion is required.
+
 
     def train(self):
         """Launch the training process."""
         # Initialize Ray if not already initialized
+        # Use SkyRL's initialize_ray() which handles runtime_env setup and sync_registries()
         if not ray.is_initialized():
-            # Read ray_init settings from config
-            if self.config is not None and hasattr(self.config, "ray_init"):
-                ray_init_settings = {k: v for k, v in self.config.ray_init.items() if v is not None}
-            else:
-                ray_init_settings = {}
-
-            # Initialize Ray with default settings if no runtime_env is specified
-            if "runtime_env" not in ray_init_settings:
-                # Use a basic runtime env - SkyRL may have its own requirements
-                ray_init_settings["runtime_env"] = {}
-
-            ray.init(**ray_init_settings)
+            initialize_ray(self.config)
 
         # Launch the training via Ray remote entrypoint
         ray.get(
