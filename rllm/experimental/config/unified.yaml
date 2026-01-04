@@ -5,7 +5,7 @@
 
 defaults:
   - rllm: base
-  - rllm/backend: verl
+  - rllm/backend: verl # Change to 'skyrl' and 'tinker'
   - _self_
 
 # Hydra configuration
@@ -14,4 +14,5 @@ hydra:
     dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
   searchpath:
     - pkg://verl.trainer.config
+    - pkg://skyrl_train.config # Add SkyRL config search path
 

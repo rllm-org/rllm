@@ -1,0 +1,88 @@
+# @package _global_
+
+# SkyRL Backend Configuration for rLLM
+# This config follows the verl pattern:
+# 1. Includes SkyRL's native config (ppo_base_config.yaml) via defaults
+# 2. Maps rLLM-common configs to SkyRL-specific configs
+# 3. Allows overriding SkyRL configs via rLLM config structure
+
+defaults:
+  - /ppo_base_config # Include SkyRL's native config (resolves to skyrl_train.config.ppo_base_config)
+  - _self_
+
+# Map rLLM common configs to SkyRL config structure
+# SkyRL's config is structured differently - it uses trainer.*, generator.*, etc.
+# We need to map rLLM's algorithm.* to SkyRL's trainer.algorithm.*
+
+rllm:
+  backend: skyrl
+
+  # Algorithm configuration mapping
+  algorithm:
+    # Map rLLM advantage estimator names to SkyRL names
+    # rLLM: grpo, reinforce, gae
+    # SkyRL: grpo, reinforce++, gae, rloo
+    adv_estimator: ${oc.select:algorithm.adv_estimator, grpo}
+    gamma: ${oc.select:algorithm.gamma, 1.0}
+    lambd: ${oc.select:algorithm.lam, 1.0} # Note: SkyRL uses 'lambd', rLLM uses 'lam'
+    norm_adv_by_std_in_grpo: ${oc.select:algorithm.norm_adv_by_std_in_grpo, true}
+    use_rllm: ${oc.select:algorithm.use_rllm, false} # Whether to use rLLM-native advantage computation
+
+  # Stepwise advantage configuration
+  stepwise_advantage:
+    enable: ${oc.select:stepwise_advantage.enable, false}
+    mode: ${oc.select:stepwise_advantage.mode, broadcast} # broadcast or per_step
+    normalize_by_steps: ${oc.select:stepwise_advantage.normalize_by_steps, false}
+
+  # Trainer configuration mapping
+  trainer:
+    total_epochs: ${oc.select:trainer.total_epochs, 10}
+    total_batches: ${oc.select:trainer.total_batches, -1}
+    logger: ${oc.select:trainer.logger, ['console']}
+    project_name: ${oc.select:trainer.project_name, 'rllm-training'}
+    experiment_name: ${oc.select:trainer.experiment_name, 'default'}
+    test_freq: ${oc.select:trainer.test_freq, 5}
+    save_freq: ${oc.select:trainer.save_freq, 20}
+    val_before_train: ${oc.select:trainer.val_before_train, true}
+    val_only: ${oc.select:trainer.val_only, false}
+
+  # Rollout configuration
+  rollout:
+    n_val: ${oc.select:rollout.n_val, 1}
+
+# SkyRL-specific configs that need to be set
+# These will be merged with SkyRL's ppo_base_config.yaml
+trainer:
+  # Basic training settings
+  epochs: ${rllm.trainer.total_epochs}
+  eval_before_train: ${rllm.trainer.val_before_train}
+  eval_interval: ${rllm.trainer.test_freq}
+  project_name: ${rllm.trainer.project_name}
+  run_name: ${rllm.trainer.experiment_name}
+  logger: ${rllm.trainer.logger[0]} # SkyRL expects string, not list
+
+  # Algorithm settings
+  algorithm:
+    advantage_estimator: ${rllm.algorithm.adv_estimator}
+    gamma: ${rllm.algorithm.gamma}
+    lambd: ${rllm.algorithm.lambd}
+    grpo_norm_by_std: ${rllm.algorithm.norm_adv_by_std_in_grpo}
+
+  # Checkpoint settings
+  ckpt_interval: ${rllm.trainer.save_freq}
+  resume_mode: latest
+
+# Generator settings (for rollout)
+generator:
+  n_samples_per_prompt: 1 # For single trajectory per prompt
+  eval_n_samples_per_prompt: ${rllm.rollout.n_val}
+
+# Data settings - will be overridden by dataset objects passed to launcher
+data:
+  max_prompt_length: 512
+  max_response_length: 1024
+
+# Environment settings
+environment:
+  env_class: BaseTextEnv # Default, can be overridden
+
