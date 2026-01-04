@@ -27,9 +27,9 @@ from rllm.workflows.workflow import Workflow
 # Import SkyRL components
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.generators.base import GeneratorInterface
-from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils.utils import get_ray_pg_ready_with_timeout, initialize_ray
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl_train.utils.tracking import Tracking
 from skyrl_train.entrypoints.main_base import (
     create_ray_wrapped_inference_engines_from_config,
     create_remote_inference_engines_from_config,
@@ -203,19 +203,6 @@ class SkyRLExp:
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
 
-        if self.cfg.trainer.strategy == "deepspeed":
-            from skyrl_train.workers.deepspeed.deepspeed_worker import (
-                PolicyWorker,
-                CriticWorker,
-                RefWorker,
-            )
-        elif self.cfg.trainer.strategy in ("fsdp", "fsdp2"):
-            from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, CriticWorker, RefWorker
-        elif self.cfg.trainer.strategy == "megatron":
-            from skyrl_train.workers.megatron.megatron_worker import PolicyWorker, CriticWorker, RefWorker
-        else:
-            raise ValueError(f"Unknown strategy type: {self.cfg.trainer.strategy}")
-
         tokenizer = self.tokenizer
         if self.cfg.generator.get("run_engines_locally", True):
             inference_engines = create_ray_wrapped_inference_engines_from_config(self.cfg, self.colocate_pg, tokenizer)
@@ -253,8 +240,18 @@ class SkyRLExp:
                     num_workers=8,
                 )
 
+        # Create tracker for RayPPOTrainer (SkyRL's Tracking, not rLLM's)
+        tracker = Tracking(
+            project_name=self.cfg.trainer.project_name,
+            experiment_name=self.cfg.trainer.run_name,
+            backends=self.cfg.trainer.logger,
+            config=self.cfg,
+        )
+
         # Assemble backend-specific arguments for initializing the SkyRL backend
+        # SkyRLBackend inherits from RayPPOTrainer, so it needs all RayPPOTrainer init parameters
         backend_args = {
+            "tracker": tracker,
             "tokenizer": tokenizer,
             "train_dataset": train_prompt_dataset,
             "eval_dataset": eval_prompt_dataset,
@@ -264,6 +261,7 @@ class SkyRLExp:
         }
 
         # Create UnifiedTrainer (which creates SkyRLBackend)
+        # SkyRLBackend inherits from RayPPOTrainer, so it IS the trainer
         trainer = UnifiedTrainer(
             backend_cls=SkyRLBackend,
             config=self.cfg,
@@ -276,7 +274,20 @@ class SkyRLExp:
         )
 
         # Build the models (policy, critic, ref) on the backend
-        # SkyRLBackend inherits from RayPPOTrainer, so it has build_models method
+        # This must be called after backend initialization
+        if self.cfg.trainer.strategy == "deepspeed":
+            from skyrl_train.workers.deepspeed.deepspeed_worker import (
+                PolicyWorker,
+                CriticWorker,
+                RefWorker,
+            )
+        elif self.cfg.trainer.strategy in ("fsdp", "fsdp2"):
+            from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, CriticWorker, RefWorker
+        elif self.cfg.trainer.strategy == "megatron":
+            from skyrl_train.workers.megatron.megatron_worker import PolicyWorker, CriticWorker, RefWorker
+        else:
+            raise ValueError(f"Unknown strategy type: {self.cfg.trainer.strategy}")
+        
         trainer.backend.build_models(PolicyWorker, CriticWorker, RefWorker)
 
         return trainer
