@@ -127,21 +127,6 @@ class SkyRLExp:
             max_response_length=max_response_length,
         )
 
-    def get_tracker(self):
-        """Initializes the tracker for experiment tracking.
-
-        Returns:
-            Tracking: The tracker.
-        """
-        from skyrl_train.utils.tracking import Tracking
-
-        return Tracking(
-            project_name=self.cfg.trainer.project_name,
-            experiment_name=self.cfg.trainer.run_name,
-            backends=self.cfg.trainer.logger,
-            config=self.cfg,
-        )
-
     def _convert_rllm_dataset_to_skyrl_file(self, rllm_dataset: Dataset | None) -> str | None:
         """Convert rLLM Dataset to SkyRL format and save to file.
         
@@ -231,10 +216,6 @@ class SkyRLExp:
         else:
             raise ValueError(f"Unknown strategy type: {self.cfg.trainer.strategy}")
 
-        # NOTE (sumanthrh): Instantiate tracker before trainer init.
-        # We have custom validation before this step to give better error messages.
-        tracker = self.get_tracker()
-
         tokenizer = self.tokenizer
         if self.cfg.generator.get("run_engines_locally", True):
             inference_engines = create_ray_wrapped_inference_engines_from_config(self.cfg, self.colocate_pg, tokenizer)
@@ -280,7 +261,6 @@ class SkyRLExp:
             "inference_engine_client": inference_engine_client,
             "generator": generator,
             "colocate_pg": self.colocate_pg,
-            "tracker": tracker,
         }
 
         # Create UnifiedTrainer (which creates SkyRLBackend)

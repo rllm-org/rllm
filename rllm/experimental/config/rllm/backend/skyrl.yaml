@@ -38,7 +38,7 @@ rllm:
   trainer:
     total_epochs: ${oc.select:trainer.total_epochs, 10}
     total_batches: ${oc.select:trainer.total_batches, -1}
-    logger: ${oc.select:trainer.logger, ['console']}
+    logger: ${oc.select:trainer.logger, ['console', 'wandb']}
     project_name: ${oc.select:trainer.project_name, 'rllm-training'}
     experiment_name: ${oc.select:trainer.experiment_name, 'default'}
     test_freq: ${oc.select:trainer.test_freq, 5}
@@ -59,7 +59,6 @@ trainer:
   eval_interval: ${rllm.trainer.test_freq}
   project_name: ${rllm.trainer.project_name}
   run_name: ${rllm.trainer.experiment_name}
-  logger: ${rllm.trainer.logger[0]} # SkyRL expects string, not list
 
   # Algorithm settings
   algorithm:
