@@ -12,6 +12,9 @@ import json
 import re
 import time
 from datetime import datetime
+from pathlib import Path
+import os
+import sys
 
 # rLLM imports
 from rllm.engine.rollout import RolloutEngine
@@ -59,6 +62,22 @@ MAX_LLM_CALL_PER_RUN = 100
 def today_date():
     """Get today's date in YYYY-MM-DD format."""
     return datetime.now().date().strftime("%Y-%m-%d")
+
+
+class _Tee:
+    """Simple tee to duplicate stdout/stderr to a log file."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+            stream.flush()
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
 
 
 def build_text_completion_prompt(messages: list[dict], allow_special: bool = True) -> str:
@@ -144,6 +163,30 @@ class MultiTurnReactAgent:
         # Auto-detect context limit based on model capabilities
         # This ensures we don't hit limits too early for capable models
         self.max_context_tokens = self._get_model_context_limit(rollout_engine)
+        self._setup_logging()
+
+    def _setup_logging(self):
+        """
+        Tee stdout/stderr to a timestamped output directory (set in custom_evaluate).
+        Uses DEEPRESEARCH_OUTPUT_DIR env var and only initializes once per process.
+        """
+        if getattr(MultiTurnReactAgent, "_logging_initialized", False):
+            return
+
+        output_dir = Path(os.environ.get("DEEPRESEARCH_OUTPUT_DIR", Path.cwd()))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        log_path = output_dir / "trajectory.log"
+
+        # Preserve original streams
+        self._orig_stdout = sys.stdout
+        self._orig_stderr = sys.stderr
+
+        # Redirect to tee so prints are saved and still visible
+        sys.stdout = _Tee(sys.stdout, open(log_path, "a", encoding="utf-8"))
+        sys.stderr = _Tee(sys.stderr, open(log_path, "a", encoding="utf-8"))
+
+        print(f"[DeepResearch] Logging stdout/stderr to {log_path}")
+        MultiTurnReactAgent._logging_initialized = True
 
     def _get_model_context_limit(self, rollout_engine) -> int:
         """
@@ -449,7 +492,8 @@ class MultiTurnReactAgent:
                             print(f"Round {round}: 🔧 Calling {tool_name} with args: {args_str}")
                         else:
                             print(f"Round {round}: 🔧 Calling {tool_name}")
-                    except Exception:
+                    except Exception as e:
+                        print(f"Error parsing tool call: {e}")
                         print(f"Round {round}: 🔧 Tool call")
                 else:
                     print(f"Round {round}: 🔧 Tool call")
@@ -518,6 +562,7 @@ class MultiTurnReactAgent:
                             }
                         )
                         tool_responses.append({"role": "tool", "tool_call_id": tool_id, "content": result})
+                        print(f"Round {round}: 🛠️ [Native] Tool {tool_name} returned: {str(result)}")
 
                     except Exception as e:
                         print(f"Error processing native tool call: {e}")
@@ -564,12 +609,14 @@ class MultiTurnReactAgent:
                         tool_name = tool_call.get("name", "")
                         tool_args = tool_call.get("arguments", {})
                         result = await self.custom_call_tool(tool_name, tool_args)
+                        print(f"Round {round}: 🛠️ Tool {tool_name} returned: {str(result)}")
 
                 except Exception:
                     result = 'Error: Tool call is not a valid JSON. Tool call must contain a valid "name" and "arguments" field.'
 
                 # Add tool response in ReAct format
                 tool_response = f"<tool_response>\n{result}\n</tool_response>"
+                print(f"Round {round}: Tool response: {tool_response}")
                 messages.append({"role": "user", "content": tool_response})
 
             # Priority 3: No tool call, just reasoning or answer

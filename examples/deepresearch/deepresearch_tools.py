@@ -12,7 +12,12 @@ Now supports both:
 import http.client
 import json
 import os
+import asyncio
+import subprocess
 from abc import ABC, abstractmethod
+from collections import deque
+from datetime import datetime
+from pathlib import Path
 
 from rllm.tools.tool_base import Tool as RLLMTool
 
@@ -537,6 +542,91 @@ class FileParserTool(DeepResearchTool):
         return "\n\n=======\n\n".join(all_results)
 
 
+class ScoreTool(DeepResearchTool):
+    """Evaluate submission.csv with mlebench grader."""
+
+    def __init__(self):
+        super().__init__(
+            name="Score",
+            description="Grade submission.csv for Spaceship Titanic using mlebench",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Optional path to submission.csv; defaults to DEEPRESEARCH_OUTPUT_DIR/submission.csv",
+                    }
+                },
+                "required": [],
+            },
+        )
+
+    async def call(self, competition_id: str, path: str | None = None, **kwargs) -> str:
+        """Run mlebench grader and return metrics as a JSON string."""
+        # Locate submission
+        output_dir = Path(os.environ.get("DEEPRESEARCH_OUTPUT_DIR", Path.cwd()))
+        submission_path = Path(path) if path else output_dir / "submission.csv"
+        if not submission_path.exists():
+            return f"[Error] submission file not found at {submission_path}"
+
+        cmd = [
+            "mlebench",
+            "grade-sample",
+            str(submission_path),
+            competition_id,
+            "--data-dir",
+            "/fsx/zyhang/mle-bench-data/",
+        ]
+
+        try:
+            grade_proc = await asyncio.create_task(
+                asyncio.to_thread(
+                    subprocess.run,
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                )
+            )
+        except FileNotFoundError as e:
+            return f"[Error] mlebench not found: {e}"
+        except Exception as e:
+            return f"[Error] Failed to start grading: {e}"
+
+        output = (grade_proc.stderr or "") + "\n" + (grade_proc.stdout or "")
+        output = output.strip()
+
+        if grade_proc.returncode != 0:
+            return f"[Error] Grading failed with code {grade_proc.returncode}: {output}"
+
+        metrics = {}
+
+        def parse_number(key: str, text: str):
+            if key in text:
+                try:
+                    return float(text.split(f'"{key}": ')[-1].split(",")[0].strip())
+                except Exception:
+                    return None
+            return None
+
+        score = parse_number("score", output)
+        metrics["score_primary (main competition metric for current code)"] = score
+
+        # is_lower_better
+        if '"is_lower_better":' in output:
+            val = output.split('"is_lower_better": ')[-1].split(",")[0].strip().lower()
+            metrics["metric_lower_is_better (true means lower score is better)"] = val == "true"
+
+        # Thresholds: minimum score needed to reach each medal/median tier
+        metrics["threshold_gold (score needed for gold tier)"] = parse_number("gold_threshold", output)
+        metrics["threshold_silver (score needed for silver tier)"] = parse_number("silver_threshold", output)
+        metrics["threshold_bronze (score needed for bronze tier)"] = parse_number("bronze_threshold", output)
+        metrics["threshold_median (median submission score)"] = parse_number("median_threshold", output)
+
+        # metrics["raw_output_text"] = output
+        metrics["submission_path"] = str(submission_path)
+        return json.dumps(metrics)
+
+
 class PythonInterpreterTool(DeepResearchTool):
     """Safe Python code execution (from existing implementation)."""
 
@@ -550,187 +640,95 @@ class PythonInterpreterTool(DeepResearchTool):
                 "required": ["code"],
             },
         )
-        self.timeout = 50
+        self.timeout = 1800
 
     async def call(self, code: str, timeout: int = None, **kwargs) -> str:
-        """Execute Python code safely with timeout."""
+        """
+        Execute Python code by writing it to main.py and launching via srun.
+        Captures stdout/stderr to both memory and a log file under the per-run output dir.
+        """
         timeout = timeout or self.timeout
 
-        # Security checks - check for dangerous imports/operations
-        # dangerous_patterns = [
-        #     "import os",
-        #     "import subprocess",
-        #     "import sys",
-        #     "from os import",
-        #     "from subprocess import",
-        #     "from sys import",
-        #     "exec(",
-        #     "eval(",
-        #     "compile(",
-        #     "open(",
-        #     "file(",
-        # ]
+        # Resolve run directory under DEEPRESEARCH_OUTPUT_DIR so outputs align with submission/logs
+        run_dir = Path(os.environ.get("DEEPRESEARCH_OUTPUT_DIR", Path.cwd()))
+        run_dir.mkdir(parents=True, exist_ok=True)
 
-        # code_lower = code.lower()
-        # for pattern in dangerous_patterns:
-        #     if pattern in code_lower:
-        #         return f"[Security Error] '{pattern}' not allowed for safety reasons"
+        # Use timestamped filenames to avoid collisions while keeping them in the same folder
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        script_filename = f"main_{ts}.py"
+        script_path = run_dir / script_filename
+        log_path = run_dir / f"main_{ts}.log"
 
-        import io
-        import sys
-        import traceback
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError
+        script_path.write_text(code, encoding="utf-8")
 
-        # Setup safe environment
-        # allowed_modules = {
-        #     "math": __import__("math"),
-        #     "datetime": __import__("datetime"),
-        #     "json": __import__("json"),
-        #     "random": __import__("random"),
-        #     "re": __import__("re"),
-        #     "collections": __import__("collections"),
-        #     "itertools": __import__("itertools"),
-        #     "statistics": __import__("statistics"),
-        # }
+        # Run via srun and activate the requested conda env before executing Python
+        conda_env = os.environ.get("DEEPRESEARCH_CONDA_ENV", "algoevolve")
+        bash_cmd = f"source ~/miniconda3/bin/activate && conda activate {conda_env} && python -u {script_filename}"
+        cmd = [
+            "srun",
+            "--gres=gpu:1",
+            "--ntasks=1",
+            "--cpus-per-task=64",
+            "--time=2-00:00:00",
+            "bash",
+            "-lc",
+            bash_cmd,
+        ]
 
-        # # Add numpy/pandas if available
-        # try:
-        #     import numpy as np
+        async def _stream_output(stream, log_fp, buf: deque, prefix: str = ""):
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                text = prefix + line.decode(errors="replace")
+                log_fp.write(text)
+                log_fp.flush()
+                buf.append(text)
 
-        #     allowed_modules["numpy"] = np
-        #     allowed_modules["np"] = np
-        # except ImportError:
-        #     pass
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(run_dir),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as e:
+            return f"[Error] srun not found: {e}"
+        except Exception as e:
+            return f"[Error] Failed to start srun: {e}"
 
-        # try:
-        #     import pandas as pd
+        stdout_buf = deque(maxlen=200)
+        stderr_buf = deque(maxlen=200)
+        timed_out = False
 
-        #     allowed_modules["pandas"] = pd
-        #     allowed_modules["pd"] = pd
-        # except ImportError:
-        #     pass
+        with open(log_path, "w", encoding="utf-8") as log_fp:
+            stdout_task = asyncio.create_task(_stream_output(proc.stdout, log_fp, stdout_buf))
+            stderr_task = asyncio.create_task(_stream_output(proc.stderr, log_fp, stderr_buf, prefix="[stderr] "))
 
-        # # Restricted builtins with safe import capability
-        # def safe_import(name, *args, **kwargs):
-        #     """Allow importing only safe modules."""
-        #     safe_modules = [
-        #         "math",
-        #         "datetime",
-        #         "json",
-        #         "random",
-        #         "re",
-        #         "collections",
-        #         "itertools",
-        #         "statistics",
-        #         "numpy",
-        #         "pandas",
-        #         "scipy",
-        #         "scipy.linalg",  # Add scipy submodules
-        #         "scipy.optimize",
-        #         "scipy.signal",
-        #         "scipy.special",
-        #         "matplotlib",
-        #         "matplotlib.pyplot",
-        #     ]
-        #     # Check if the module or its parent is allowed
-        #     if name in safe_modules or any(name.startswith(m + ".") for m in safe_modules):
-        #         return __import__(name, *args, **kwargs)
-        #     else:
-        #         raise ImportError(f"Module '{name}' is not allowed for safety reasons")
-
-        # restricted_builtins = {
-        #     "abs": abs,
-        #     "all": all,
-        #     "any": any,
-        #     "bin": bin,
-        #     "bool": bool,
-        #     "chr": chr,
-        #     "dict": dict,
-        #     "enumerate": enumerate,
-        #     "filter": filter,
-        #     "float": float,
-        #     "hex": hex,
-        #     "int": int,
-        #     "len": len,
-        #     "list": list,
-        #     "map": map,
-        #     "max": max,
-        #     "min": min,
-        #     "oct": oct,
-        #     "ord": ord,
-        #     "pow": pow,
-        #     "print": print,
-        #     "range": range,
-        #     "reversed": reversed,
-        #     "round": round,
-        #     "set": set,
-        #     "slice": slice,
-        #     "sorted": sorted,
-        #     "str": str,
-        #     "sum": sum,
-        #     "tuple": tuple,
-        #     "type": type,
-        #     "zip": zip,
-        #     "__import__": safe_import,  # Allow safe imports
-        #     # Add exception classes for proper error handling
-        #     "Exception": Exception,
-        #     "ImportError": ImportError,
-        #     "ValueError": ValueError,
-        #     "TypeError": TypeError,
-        #     "KeyError": KeyError,
-        #     "IndexError": IndexError,
-        #     "AttributeError": AttributeError,
-        # }
-
-        # global_vars = {"__builtins__": restricted_builtins}
-        # global_vars.update(allowed_modules)
-        # local_vars = {}
-        global_vars = {}
-        local_vars = {}
-
-        # Capture output
-        old_stdout = sys.stdout
-        old_stderr = sys.stderr
-        stdout_buffer = io.StringIO()
-        stderr_buffer = io.StringIO()
-
-        def execute_with_timeout():
             try:
-                sys.stdout = stdout_buffer
-                sys.stderr = stderr_buffer
-                exec(code, global_vars, local_vars)
-                return True
-            except Exception:
-                stderr_buffer.write("Execution Error: " + traceback.format_exc())
-                return False
+                returncode = await asyncio.wait_for(proc.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                timed_out = True
+                proc.kill()
+                returncode = await proc.wait()
             finally:
-                sys.stdout = old_stdout
-                sys.stderr = old_stderr
+                await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
 
-        # Execute with timeout
-        with ThreadPoolExecutor() as executor:
-            try:
-                future = executor.submit(execute_with_timeout)
-                future.result(timeout=timeout)
+        stdout_tail = "".join(stdout_buf).strip()
+        stderr_tail = "".join(stderr_buf).strip()
 
-                stdout_content = stdout_buffer.getvalue()
-                stderr_content = stderr_buffer.getvalue()
+        if timed_out:
+            return f"[Timeout] Exceeded {timeout}s. Logs: {log_path}"
 
-                if stderr_content:
-                    return f"[Error]\n{stderr_content}"
-                elif stdout_content:
-                    return f"[Output]\n{stdout_content.rstrip()}"
-                else:
-                    meaningful_vars = {k: v for k, v in local_vars.items() if not k.startswith("_") and k not in allowed_modules}
-                    if meaningful_vars:
-                        return f"[Variables]\n{meaningful_vars}"
-                    else:
-                        return "[Success] Code executed (no output)"
+        if returncode != 0:
+            err_msg = stderr_tail or f"Process exited with code {returncode}"
+            return f"[Error] {err_msg}\nLogs: {log_path}"
 
-            except TimeoutError:
-                return f"[Timeout] Execution exceeded {timeout}s"
-
-        return "[Error] Unexpected execution error"
+        if stdout_tail:
+            return f"[Output]\n{stdout_tail}\nLogs: {log_path}"
+        if stderr_tail:
+            return f"[Warning] No stdout. Stderr:\n{stderr_tail}\nLogs: {log_path}"
+        return f"[Success] Completed with no output. Logs: {log_path}"
 
 
 # Tool registry
@@ -739,6 +737,7 @@ DEEPRESEARCH_TOOLS = {
     "Scholar": ScholarTool(),
     "Visit": VisitTool(),
     "FileParser": FileParserTool(),
+    "Score": ScoreTool(),
     "PythonInterpreter": PythonInterpreterTool(),
 }
 
