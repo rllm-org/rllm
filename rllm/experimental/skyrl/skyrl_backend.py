@@ -7,6 +7,7 @@ SkyRL-specific implementations for the unified training pipeline.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Iterable
@@ -165,11 +166,9 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
 
     def shutdown(self) -> None:
         """Shutdown the backend and cleanup resources."""
-        super().shutdown()
         # Teardown inference engine client (async operation in sync method)
         # UnifiedTrainer.shutdown() stops the event loop, so we create a new one for teardown
         if self.inference_engine_client is not None:
-            import asyncio
             asyncio.run(self.inference_engine_client.teardown())
 
     # =========================================================================
@@ -339,7 +338,6 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         3. Store results back in trainer_state.backend_batch
 
         Reuses logic from SkyRL's RayPPOTrainer.
-        Note: This is async for protocol compatibility but operations are sync (blocking)
 
         Args:
             trainer_state: The trainer state.
@@ -351,7 +349,8 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
 
         # Use SkyRL's forward/backward pass
         # This computes log probs, values, and processes rewards
-        processed = self.fwd_logprobs_values_reward(training_input)
+        # Wrap in asyncio.to_thread() to avoid blocking the event loop
+        processed = await asyncio.to_thread(self.fwd_logprobs_values_reward, training_input)
 
         trainer_state.backend_batch = processed
 
@@ -377,7 +376,8 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
 
         # Use SkyRL's advantage computation
         # This updates the training_input with advantages and returns
-        training_input = self.compute_advantages_and_returns(training_input)
+        # Wrap in asyncio.to_thread() to avoid blocking the event loop
+        training_input = await asyncio.to_thread(self.compute_advantages_and_returns, training_input)
 
         # Remove rewards key as it's no longer needed after advantage computation
         if "rewards" in training_input:
@@ -405,7 +405,8 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
 
         # Use SkyRL's training step
         # This updates both critic and policy
-        self.train_critic_and_policy(training_input)
+        # Wrap in asyncio.to_thread() to avoid blocking the event loop (contains ray.get() calls)
+        await asyncio.to_thread(self.train_critic_and_policy, training_input)
 
     # =========================================================================
     # Async hook methods
@@ -424,7 +425,8 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         save_freq = self.full_config.rllm.trainer.get("save_freq", 0)
         if save_freq > 0 and trainer_state.global_step % save_freq != 0:
             logger.info(f"Saving final checkpoint at step {trainer_state.global_step}")
-            self.save_checkpoints()
+            # Wrap in asyncio.to_thread() to avoid blocking the event loop (I/O operation)
+            await asyncio.to_thread(self.save_checkpoints)
 
     async def on_batch_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of each batch.
@@ -439,23 +441,25 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         save_freq = self.full_config.rllm.trainer.get("save_freq", 0)
         if save_freq > 0 and global_step % save_freq == 0:
             logger.info(f"Saving checkpoint at step {global_step}")
-            self.save_checkpoints()
+            # Wrap in asyncio.to_thread() to avoid blocking the event loop (I/O operation)
+            await asyncio.to_thread(self.save_checkpoints)
 
         # Sync weights to inference engines after training (following SkyRL's pattern)
         # This ensures inference engines use the latest policy weights for the next batch's generation
-        colocate_all = self.full_config.trainer.get("colocate_all", False)
-        
-        if colocate_all:
+        # Use self.colocate_all which is set by RayPPOTrainer.__init__ from cfg.trainer.placement.colocate_all
+        if self.colocate_all:
             # Offload policy model optimizer to CPU (keep model on GPU for now)
             self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
             # Wake up inference engines for weight loading
             await self.inference_engine_client.wake_up(tags=["weights"])
         
         # Sync weights from policy model to inference engines (always, not just for colocated)
+        # Wrap ray.get() in asyncio.to_thread() to avoid blocking the event loop
         import ray
-        ray.get(self.sync_policy_weights_to_inference_engines())
+        weight_sync_refs = self.sync_policy_weights_to_inference_engines()
+        await asyncio.to_thread(ray.get, weight_sync_refs)
         
-        if colocate_all:
+        if self.colocate_all:
             # Offload policy model to CPU (free GPU for inference)
             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
             # Wake up inference engines for KV cache loading
