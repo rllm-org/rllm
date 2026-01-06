@@ -21,7 +21,7 @@ from verl.trainer.ppo.ray_trainer import RayPPOTrainer, ResourcePoolManager
 from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.metric import reduce_metrics
 
-from rllm.agents.agent import Episode, TrajectoryGroup
+from rllm.agents.agent import Episode
 from rllm.data import Dataset
 from rllm.engine.rollout import RolloutEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
@@ -184,6 +184,43 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         assert self.rollout_engine is not None, "rollout_engine is not initialized."
         return transform_episodes_to_dataproto(episodes, self.rollout_engine, self.config.data.max_prompt_length, self.config.data.max_response_length)
 
+    def _pad_dataproto_to_world_size(self, batch: DataProto) -> DataProto:
+        import math
+        from functools import reduce
+
+        from verl.protocol import pad_dataproto_to_divisor
+
+        world_sizes = []
+        if self.use_critic and self.critic_wg.world_size != 0:
+            world_sizes.append(self.critic_wg.world_size)
+        if self.use_reference_policy and self.ref_policy_wg.world_size != 0:
+            world_sizes.append(self.ref_policy_wg.world_size)
+        if self.use_rm and self.rm_wg.world_size != 0:
+            world_sizes.append(self.rm_wg.world_size)
+        if self.hybrid_engine:
+            if self.actor_rollout_wg.world_size != 0:
+                world_sizes.append(self.actor_rollout_wg.world_size)
+        else:
+            if hasattr(self, "actor_wg") and self.actor_wg.world_size != 0:
+                world_sizes.append(self.actor_wg.world_size)
+            if hasattr(self, "rollout_wg") and self.rollout_wg.world_size != 0:
+                world_sizes.append(self.rollout_wg.world_size)
+        if not world_sizes:
+            return batch
+
+        world_size = reduce(math.lcm, world_sizes)
+
+        batch = self._remove_padding(batch)  # Remove any padded steps from the batch (just in case)
+        original_batch_size = batch.batch["prompts"].shape[0]
+        batch, pad_size = pad_dataproto_to_divisor(batch, world_size)
+
+        # for the padded dataproto, make the traj mask to 0. is_last_step also False
+        pad_start, pad_end = original_batch_size, original_batch_size + pad_size
+        batch.non_tensor_batch["is_last_step"][pad_start:pad_end] = False
+        batch.non_tensor_batch["is_pad_step"][pad_start:pad_end] = True
+        batch.non_tensor_batch["is_valid"][pad_start:pad_end] = False
+        return batch
+
     async def process_backend_batch(self, trainer_state: TrainerState, **kwargs) -> None:
         """Compute step-level values: old_log_probs, ref_log_probs, critic values.
 
@@ -193,6 +230,17 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         metrics = trainer_state.metrics
         timing_dict = trainer_state.timing_dict
         batch: DataProto = trainer_state.backend_batch  # type: ignore[assignment]
+
+        # Balance the number of valid tokens across DP ranks.
+        # NOTE: This usually changes the order of data in the `batch`,
+        # which won't affect the advantage calculation (since it's based on uid),
+        # but might affect the loss calculation (due to the change of mini-batching).
+        if self.config.trainer.balance_batch:
+            # pad batch size to world size for batch balancing
+            batch = self._pad_dataproto_to_world_size(batch=batch)
+            self._balance_batch(batch, metrics=metrics)
+
+        batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
         with simple_timer("old_log_probs", timing_dict):
             # Compute old_log_probs from actor
@@ -253,14 +301,15 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
 
         Note: This is async for protocol compatibility but operations are sync.
         """
+        assert trainer_state.episodes is not None, "Episodes are not set"
         assert trainer_state.trajectory_groups is not None, "Trajectory groups are not set"
-        trajectory_groups: list[TrajectoryGroup] = trainer_state.trajectory_groups
+        episodes, trajectory_groups = trainer_state.episodes, trainer_state.trajectory_groups
         batch: DataProto = trainer_state.backend_batch  # type: ignore[assignment]
 
         use_rllm = algorithm_config.use_rllm
         if use_rllm:
             compute_advantage_from_trajectory_groups(trajectory_groups, algorithm_config)
-            updated_batch = update_dataproto_with_advantages(batch, trajectory_groups, mode=self.config.rllm.stepwise_advantage.mode)
+            updated_batch = update_dataproto_with_advantages(batch, episodes, mode=self.config.rllm.stepwise_advantage.mode)
         else:
             updated_batch, adv_metrics = compute_advantage_verl(batch, self.config)  # type: ignore[return-value]
             trainer_state.metrics.update(adv_metrics)
