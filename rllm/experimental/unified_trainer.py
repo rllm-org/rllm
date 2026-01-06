@@ -262,6 +262,7 @@ class UnifiedTrainer:
         """Async main training loop."""
         train_dataloader: Iterable = self.backend.get_dataloader(self.train_dataset, trainer_state)
         break_via_total_batches = False  # used to break the training loop via the `total_batches` parameter
+        use_total_batches = self.rllm_config.trainer.get("total_batches") is not None and self.rllm_config.trainer.total_batches > 0
 
         for epoch in range(self.rllm_config.trainer.total_epochs):
             # recursively break through the outer loop
@@ -281,8 +282,8 @@ class UnifiedTrainer:
                 await self.backend.on_batch_end(trainer_state)
                 self.logger.log(data=trainer_state.metrics, step=trainer_state.global_step)
 
-                # if the config specifies the `total_batches` parameter > 0, then we check if we should stop
-                if self.rllm_config.trainer.get("total_batches", 0) > 0 and trainer_state.global_step >= self.rllm_config.trainer.total_batches:
+                # if the config specifies the `total_batches` parameter, then we check if we should stop
+                if use_total_batches and trainer_state.global_step >= self.rllm_config.trainer.total_batches:
                     break_via_total_batches = True
                     break
 

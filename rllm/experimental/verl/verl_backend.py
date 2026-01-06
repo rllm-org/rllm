@@ -184,6 +184,13 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         assert self.rollout_engine is not None, "rollout_engine is not initialized."
         return transform_episodes_to_dataproto(episodes, self.rollout_engine, self.config.data.max_prompt_length, self.config.data.max_response_length)
 
+    def _remove_padding(self, batch: DataProto) -> DataProto:
+        """Removes padded steps from the batch"""
+        is_pad_step = batch.non_tensor_batch["is_pad_step"]
+        non_pad_step_indices = np.where(is_pad_step == False)[0]
+        batch = batch.select_idxs(non_pad_step_indices)  # This batch only has non_pad steps
+        return batch
+
     def _pad_dataproto_to_world_size(self, batch: DataProto) -> DataProto:
         import math
         from functools import reduce
