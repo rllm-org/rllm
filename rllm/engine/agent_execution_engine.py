@@ -250,7 +250,7 @@ class AgentExecutionEngine:
                 "prompt": self.chat_parser.parse(prompt_messages, add_generation_prompt=True, is_first_msg=True),
                 "response": response,
                 "prompt_ids": model_output.prompt_ids,
-                "response_ids": model_output.completion_ids,
+                "completion_ids": model_output.completion_ids,
                 "logprobs": model_output.logprobs,
             }
             episode_steps.append(prompt_response_pair)
