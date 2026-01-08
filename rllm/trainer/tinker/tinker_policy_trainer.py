@@ -187,6 +187,7 @@ class TinkerPolicyTrainer:
                     tokenizer=self.teacher_tokenizer,
                     service_client=teacher_service_client,
                     sampling_client=teacher_sampling_client,
+                    bypass_render_with_parser=True,
                 )
             else:
                 raise ValueError(f"Unsupported teacher backend: {teacher_backend}, must be one of ['openai', 'tinker']")
