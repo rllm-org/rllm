@@ -17,12 +17,14 @@ model:
 # Training Configuration
 training:
   group_size: 16  # Number of rollouts per prompt (for GRPO)
+  val_group_size: 1  # Number of rollouts per validation prompt
   learning_rate: 2e-5  # 2e-5 for MATH dataset
   beta1: 0.9
   beta2: 0.95
   eps: 1e-8
   max_length: 32768
   num_minibatches: 1
+  rollout_timeout: null  # Timeout for training rollouts in seconds (null = no timeout)
 
 # Sampling Configuration
 sampling:
@@ -39,16 +41,17 @@ algorithm:
   remove_constant_reward_groups: false
   shared_tokenizer: False
   teacher_rollout_args:
+    backend: openai # openai, tinker (either way we assume it either shares a tokenizer with the student or if not we need a chat parser for the teacher)
     model: "deepseek-ai/DeepSeek-Math-V2"
     base_url: "http://localhost:8000/v1"
     api_key: "EMPTY"
-    max_prompt_length: 32768
+    max_prompt_length: ${training.max_length}
     
 
 # Workflow Configuration (for workflow training mode)
 workflow:
   n_parallel_tasks: 256
-  retry_limit: 3 
+  retry_limit: 3
 
 # Agent Configuration (for agent training mode)
 agent:

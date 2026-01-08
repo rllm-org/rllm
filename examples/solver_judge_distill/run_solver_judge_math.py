@@ -23,15 +23,8 @@ def load_data(n_samples: int = 1):
 
     data = []
     for idx, example in enumerate(dataset):
-        task = {
-            "question": example["question"],
-            "ground_truth": example["ground_truth"],
-            "data_source": example.get("data_source", "math"),
-            "idx": idx,
-        }
-        # Optionally repeat each task n_samples times
         for _ in range(n_samples):
-            data.append(task.copy())
+            data.append(example.copy())
     return data
 
 
@@ -90,7 +83,7 @@ if __name__ == "__main__":
     os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
     # Configuration
-    n_parallel_tasks = 32
+    n_parallel_tasks = 256
     model_name = "Qwen/Qwen3-8B"
     base_url = "http://localhost:30000/v1"
 
@@ -101,8 +94,9 @@ if __name__ == "__main__":
     rollout_engine = OpenAIEngine(
         model=model_name,
         tokenizer=tokenizer,
-        max_prompt_length=2048,
-        max_response_length=2048,
+        max_prompt_length=32768,
+        max_response_length=32768,
+        max_model_length=32768,
         base_url=base_url,
         api_key="EMPTY",
         sampling_params={"temperature": 0.6, "top_p": 0.95},
@@ -121,7 +115,7 @@ if __name__ == "__main__":
     )
 
     # Load test data
-    tasks = load_data(n_samples=1)
+    tasks = load_data(n_samples=4)
     if tasks is None:
         exit(1)
 
@@ -136,7 +130,7 @@ if __name__ == "__main__":
 
     # Save results
     os.makedirs("logs", exist_ok=True)
-    output_path = "logs/solver_judge_math_baseline.json"
+    output_path = "logs/solver_judge_math_8b_baseline.json"
 
     with open(output_path, "w") as f:
         json.dump(

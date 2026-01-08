@@ -1,4 +1,4 @@
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 
 from rllm.data.dataset import DatasetRegistry
 
@@ -14,20 +14,24 @@ def prepare_math_data():
         tuple: (train_dataset, test_dataset)
     """
     # Load datasets from HuggingFace
-    train_dataset = load_dataset("agentica-org/DeepScaleR-Preview-Dataset", split="train")
-    test_dataset = load_dataset("HuggingFaceH4/aime_2024", split="train")
+    train_dataset = load_dataset("POLARIS-Project/Polaris-Dataset-53K", split="train")
+    test_dataset1 = load_dataset("HuggingFaceH4/aime_2024", split="train")
+    test_dataset2 = load_dataset("MathArena/aime_2025", split="train")
 
     def preprocess_fn(example, idx):
         """Convert dataset format to solver-judge expected format."""
         return {
+            "idx": idx,
             "question": example["problem"],
-            "ground_truth": example["answer"],
+            "ground_truth": str(example["answer"]),
             "data_source": "math",
         }
 
     # Apply preprocessing
-    train_dataset = train_dataset.map(preprocess_fn, with_indices=True)
-    test_dataset = test_dataset.map(preprocess_fn, with_indices=True)
+    train_dataset = train_dataset.map(preprocess_fn, with_indices=True, remove_columns=train_dataset.column_names)
+    test_dataset1 = test_dataset1.map(preprocess_fn, with_indices=True, remove_columns=test_dataset1.column_names)
+    test_dataset2 = test_dataset2.map(preprocess_fn, with_indices=True, remove_columns=test_dataset2.column_names)
+    test_dataset = concatenate_datasets([test_dataset1, test_dataset2])
 
     # Register datasets
     train_dataset = DatasetRegistry.register_dataset("solver_judge_math", train_dataset, "train")

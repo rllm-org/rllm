@@ -108,12 +108,12 @@ class TinkerAgentTrainer:
             env_class=env_class,
             env_args=env_args,
             rollout_engine_args={
-                "base_url": None,
                 "model_name": self.config.model.name,
                 "tokenizer": self.tokenizer,
                 "service_client": service_client,
                 "max_prompt_length": self.config.data.max_prompt_length,
                 "max_response_length": self.config.data.max_response_length,
+                "max_model_length": self.config.training.max_length,
                 "sampling_params": sampling_params,
             },
         )
@@ -207,7 +207,9 @@ class TinkerAgentTrainer:
                 # Stream: train on each minibatch as it arrives
                 train_step_start = time.time()
                 all_grouping_metrics = []
-                async for minibatch_episodes in self.generate_agent_episodes(group_size=self.config.training.group_size, minibatch_size=minibatch_size):
+                # Pass rollout timeout for training (if configured)
+                rollout_timeout = self.config.training.get('rollout_timeout', None)
+                async for minibatch_episodes in self.generate_agent_episodes(group_size=self.config.training.group_size, minibatch_size=minibatch_size, timeout=rollout_timeout):
                     episodes.extend(minibatch_episodes)
                     minibatch_count += 1
 
@@ -237,7 +239,7 @@ class TinkerAgentTrainer:
                 time_metrics["time/one_batch_generate_and_train"] = time.time() - train_step_start
 
                 # Print episodes
-                print_episodes(episodes, self.tokenizer, num_episodes_to_print=2)
+                # print_episodes(episodes, self.tokenizer, num_episodes_to_print=2)
 
                 # Step 4: Compute and log metrics
                 time_metrics["time/total"] = time.time() - t_start
@@ -342,12 +344,13 @@ class TinkerAgentTrainer:
 
     async def validate_agent(self, dataloader, sampling_client):
         episodes_ls = []
+        val_group_size = self.config.training.get('val_group_size', 1)
         self.agent_execution_engine.rollout_engine.set_sampling_client(sampling_client)
         for batch in dataloader:
-            batch = self.build_interleave_batch(batch, 1)
+            batch = self.build_interleave_batch(batch, val_group_size)
             self.init_envs_and_agents(batch)
             # For validation, collect all episodes from generator
-            async for episode_batch in self.generate_agent_episodes(group_size=1, minibatch_size=1):
+            async for episode_batch in self.generate_agent_episodes(group_size=val_group_size, minibatch_size=1):
                 episodes_ls.extend(episode_batch)
 
         all_trajectories = []
@@ -367,7 +370,7 @@ class TinkerAgentTrainer:
             "val/turns_mean": mean_turns,
         }
 
-    async def generate_agent_episodes(self, timing_raw=None, meta_info=None, group_size: int = None, minibatch_size: int = None):
+    async def generate_agent_episodes(self, timing_raw=None, meta_info=None, group_size: int = None, minibatch_size: int = None, **kwargs):
         """
         Generate episodes in minibatches with overlapping generation and training.
 

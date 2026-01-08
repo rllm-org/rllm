@@ -101,12 +101,12 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
         sampling_params = self.config.sampling
         assert sampling_params.get("temperature", 1.0) == 1.0 and sampling_params.get("top_p", 1.0) == 1.0, "temperature and top_p must be 1.0 for tinker workflow trainer"
         self.rollout_engine = TinkerEngine(
-            base_url=self.config.tinker_base_url,
             model_name=self.config.model.name,
             tokenizer=self.tokenizer,
             service_client=service_client,
             max_prompt_length=self.config.data.max_prompt_length,
             max_response_length=self.config.data.max_response_length,
+            max_model_length=self.config.training.max_length,
             sampling_params=sampling_params,
             **self.config.rollout_engine,
             image_processor=image_processor,  # VLM support - explicit after spread to ensure it's used
@@ -139,12 +139,13 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
     async def validate_agent(self, dataloader, sampling_client):
         all_episodes = []
         all_episode_metrics = {}  # episode_id -> episode.metrics dict
+        val_group_size = self.config.training.get('val_group_size', 1)
         self.agent_execution_engine.rollout_engine.set_sampling_client(sampling_client)
         for batch in dataloader:
-            batch = self.build_interleave_batch(batch, 1)
+            batch = self.build_interleave_batch(batch, val_group_size)
             self.init_envs_and_agents(batch)
             # For validation, collect all episodes from generator
-            async for episodes, episode_metrics in self.generate_agent_episodes(group_size=1, minibatch_size=1, return_metrics=True):
+            async for episodes, episode_metrics in self.generate_agent_episodes(group_size=val_group_size, minibatch_size=1, return_metrics=True):
                 all_episodes.extend(episodes)
                 all_episode_metrics.update(episode_metrics)
 
@@ -181,13 +182,14 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
 
         return metrics
 
-    async def generate_agent_episodes(self, timing_raw=None, meta_info=None, group_size=None, minibatch_size=None, return_metrics=False):
+    async def generate_agent_episodes(self, timing_raw=None, meta_info=None, group_size=None, minibatch_size=None, return_metrics=False, timeout=None):
         """
         Generate episodes from workflow execution.
 
         Args:
             return_metrics: If True, yields (episodes, metrics) tuple where metrics is
                           {episode_id: {metric_name: value, ...}}. If False, yields only episodes.
+            timeout: Optional timeout override for workflow execution. If None, uses workflow default.
 
         Yields:
             list[Episode] or tuple[list[Episode], dict] depending on return_metrics
@@ -200,7 +202,12 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
         current_batch = self.current_batch
         task_ids = [item["uid"] for item in current_batch]
 
-        episodes = await self.agent_execution_engine.execute_tasks(current_batch, task_ids)
+        # Pass timeout to execute_tasks if provided
+        kwargs = {}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+
+        episodes = await self.agent_execution_engine.execute_tasks(current_batch, task_ids, **kwargs)
         episodes = self.make_sure_contain_token_and_logprob(episodes)
 
         # Update trajectory-level rewards from step-level rewards

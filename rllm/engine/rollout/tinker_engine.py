@@ -14,13 +14,13 @@ class TinkerEngine(RolloutEngine):
 
     def __init__(
         self,
-        base_url: str,
         model_name: str,
         tokenizer,
         service_client: tinker.ServiceClient,
+        sampling_client: tinker.SamplingClient = None,
         max_prompt_length: int = 4096,
         max_response_length: int = 4096,
-        max_model_length: int | None = None,
+        max_model_length: int = 32768,
         sampling_params: dict | None = None,
         bypass_render_with_parser: bool = False,
         processor=None,
@@ -34,10 +34,10 @@ class TinkerEngine(RolloutEngine):
         Initialize TinkerEngine.
 
         Args:
-            base_url: Tinker service base URL
             model_name: Name of the model to use
             tokenizer: Tokenizer for encoding/decoding
             service_client: Tinker ServiceClient instance
+            sampling_client: Tinker SamplingClient instance
             max_prompt_length: Maximum prompt length in tokens
             max_response_length: Maximum response length in tokens
             max_model_length: Maximum total length (prompt + response) in tokens
@@ -48,11 +48,10 @@ class TinkerEngine(RolloutEngine):
             disable_thinking: Whether to disable thinking in generation prompt (used when bypass_render_with_parser=True)
             accumulate_reasoning: Whether to accumulate reasoning (used when bypass_render_with_parser=True)
         """
-        self.base_url = base_url
         self.model_name = model_name
         self.max_prompt_length = max_prompt_length
         self.max_response_length = max_response_length
-        self.max_model_length = max_model_length - 1 if max_model_length is not None else max_prompt_length + max_response_length - 1
+        self.max_model_length = max_model_length - 1  # Reserve 1 token for logprob computation
         self.tokenizer = tokenizer
         self.default_sampling_params = sampling_params or {}
         self.bypass_render_with_parser = bypass_render_with_parser
@@ -86,8 +85,8 @@ class TinkerEngine(RolloutEngine):
             top_p=self.default_sampling_params.get("top_p", 1.0),
         )
 
-        # Sampling client will be set via set_sampling_client()
-        self.sampling_client = None
+        # Sampling client can be set later via set_sampling_client()
+        self.sampling_client = sampling_client
 
     def set_sampling_client(self, sampling_client):
         """
@@ -305,3 +304,6 @@ class TinkerEngine(RolloutEngine):
             completion_length=len(response_tokens),
             finish_reason=finish_reason,
         )
+
+    async def compute_logprobs(self, ids: list[int]) -> list[float]:
+        return await self.sampling_client.compute_logprobs_async(ModelInput.from_ints(ids))

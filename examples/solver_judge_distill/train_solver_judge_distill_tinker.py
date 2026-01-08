@@ -1,9 +1,7 @@
 import hydra
 
-from examples.solver_judge_distill.solver_judge_math_workflow import (
-    SolverJudgeMathWorkflow,
-    math_reward_fn,
-)
+from examples.solver_judge_distill.solver_judge_math_workflow import SolverJudgeMathWorkflow
+from rllm.rewards.reward_fn import math_reward_fn
 from rllm.data.dataset import DatasetRegistry
 from rllm.trainer import AgentTrainer
 

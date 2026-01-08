@@ -163,20 +163,33 @@ class TinkerPolicyTrainer:
         self.teacher_engine = None
         self.teacher_tokenizer = None
         if distill_enabled:
-            from transformers import AutoTokenizer
-
-            from rllm.engine.rollout.openai_engine import OpenAIEngine
-
-            teacher_rollout_args = self.config.algorithm.get("teacher_rollout_args", {})
-            teacher_model = teacher_rollout_args.get("model", "")
+            teacher_rollout_args = self.config.algorithm.get("teacher_rollout_args")
+            teacher_model = teacher_rollout_args.get("model")
             if not teacher_model:
                 raise ValueError("model must be specified in algorithm.teacher_rollout_args when using distill adv_estimator")
-
+            
+            from transformers import AutoTokenizer
             self.teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_model)
-            self.teacher_engine = OpenAIEngine(
-                **teacher_rollout_args,
-                tokenizer=self.teacher_tokenizer,
-            )
+
+            teacher_backend = teacher_rollout_args.get("backend")
+            if teacher_backend == "openai":
+                from rllm.engine.rollout.openai_engine import OpenAIEngine
+                self.teacher_engine = OpenAIEngine(
+                    **teacher_rollout_args,
+                    tokenizer=self.teacher_tokenizer,
+                )
+            elif teacher_backend == "tinker":
+                from rllm.engine.rollout.tinker_engine import TinkerEngine
+                teacher_service_client = tinker.ServiceClient()
+                teacher_sampling_client = teacher_service_client.create_sampling_client(base_model=teacher_model)
+                self.teacher_engine = TinkerEngine(
+                    model_name=teacher_model,
+                    tokenizer=self.teacher_tokenizer,
+                    service_client=teacher_service_client,
+                    sampling_client=teacher_sampling_client,
+                )
+            else:
+                raise ValueError(f"Unsupported teacher backend: {teacher_backend}, must be one of ['openai', 'tinker']")
 
         # Initialize advantage computer and filter
         self.advantage_computer = TinkerAdvantageComputer(

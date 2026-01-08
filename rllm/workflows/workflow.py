@@ -69,11 +69,14 @@ class Workflow(ABC):
         Args:
             task: The task to execute.
             uid: The unique identifier for the task.
-            **kwargs: Additional keyword arguments.
+            **kwargs: Additional keyword arguments (including optional 'timeout' to override self.timeout).
         """
+        # Extract timeout from kwargs, default to self.timeout
+        timeout = kwargs.pop("timeout", self.timeout)
+
         try:
             coro = self.run(task, uid, **kwargs)
-            output = await asyncio.wait_for(coro, timeout=self.timeout)
+            output = await asyncio.wait_for(coro, timeout=timeout)
             if output is not None and isinstance(output, Episode):
                 return output  # we assume it's already postprocessed
             return self.postprocess_episode(self.collect_trajectories(), TerminationReason.UNKNOWN)

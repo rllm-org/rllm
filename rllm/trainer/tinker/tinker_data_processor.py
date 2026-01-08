@@ -549,9 +549,9 @@ async def process_episodes(
             if not step.model_output or not step.model_output.completion_ids or not step.model_output.logprobs:
                 raise ValueError("Missing model_output with completion_ids or logprobs for distillation.")
 
-            prompt_ids = step.prompt_ids or step.model_output.prompt_ids
-            if not prompt_ids:
-                raise ValueError("Missing prompt_ids in step for distillation.")
+            student_prompt_ids = step.prompt_ids or step.model_output.prompt_ids
+            if not student_prompt_ids:
+                raise ValueError("Missing student's prompt_ids in step for distillation.")
 
             student_completion_ids = step.model_output.completion_ids
             student_logprobs = step.model_output.logprobs
@@ -559,19 +559,10 @@ async def process_episodes(
             if advantage_computer.shared_tokenizer:
                 # Fast path: student and teacher use the same tokenizer
                 # Directly use student token IDs for teacher query
-                student_prompt_ids = prompt_ids
                 teacher_ids = student_prompt_ids + student_completion_ids
                 teacher_prompt_length = len(student_prompt_ids)
-
-                teacher_resp = await advantage_computer.teacher_engine.completion(
-                    teacher_ids,
-                    max_tokens=1,
-                    extra_body={"prompt_logprobs": 1},
-                )
-                if not teacher_resp.prompt_logprobs:
-                    raise ValueError("Teacher missing prompt_logprobs.")
-
-                aligned_teacher_logprobs = teacher_resp.prompt_logprobs[teacher_prompt_length:]
+                teacher_full_logprobs = await advantage_computer.teacher_engine.compute_logprobs(teacher_ids)
+                aligned_teacher_logprobs = teacher_full_logprobs[teacher_prompt_length:]
 
             else:
                 # Slow path: different tokenizers, need byte-level alignment
@@ -607,20 +598,14 @@ async def process_episodes(
                 )
                 if teacher_completion.startswith(teacher_chat_parser.generation_prompt):
                     teacher_completion = teacher_completion[len(teacher_chat_parser.generation_prompt) :]
+                teacher_completion_ids = advantage_computer.teacher_tokenizer.encode(teacher_completion, add_special_tokens=False)
 
                 # Query teacher for logprobs (async)
-                teacher_full_prompt = teacher_prompt + teacher_completion
-                teacher_resp = await advantage_computer.teacher_engine.completion(
-                    teacher_full_prompt,
-                    max_tokens=1,
-                    extra_body={"prompt_logprobs": 1},
-                )
-                if not teacher_resp.prompt_logprobs:
-                    raise ValueError("Teacher missing prompt_logprobs.")
+                teacher_ids = teacher_prompt_ids + teacher_completion_ids
+                teacher_full_logprobs = await advantage_computer.teacher_engine.compute_logprobs(teacher_ids)
 
                 teacher_prompt_len = len(teacher_prompt_ids)
-                teacher_completion_ids = teacher_resp.prompt_ids[teacher_prompt_len:]
-                teacher_logprobs = teacher_resp.prompt_logprobs[teacher_prompt_len:]
+                teacher_logprobs = teacher_full_logprobs[teacher_prompt_len:]
 
                 # Align teacher logprobs to student tokens
                 aligned_teacher_logprobs = align_teacher_logprobs(
@@ -657,7 +642,7 @@ async def process_episodes(
             )
 
             datum = TinkerDatumBuilder.build_distillation_datum(
-                prompt_ids=prompt_ids,
+                prompt_ids=student_prompt_ids,
                 response_ids=student_completion_ids,
                 logprobs=student_logprobs,
                 advantages=advantages,
