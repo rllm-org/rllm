@@ -222,7 +222,7 @@ class AgentSdkEngine:
                         return task_id, rollout_idx, retry_attempt, (float(payload), metrics), session_uid
                     elif isinstance(payload, list):
                         assert all(isinstance(t, TrajectoryView) for t in payload), "Must be a list of TrajectoryView"
-                        return task_id, rollout_idx, retry_attempt, payload, session_uid
+                        return task_id, rollout_idx, retry_attempt, (payload, metrics), session_uid
                     else:
                         raise ValueError(f"Invalid output type: {type(output)}")
                 if retry_attempt < self.retry_limit:
