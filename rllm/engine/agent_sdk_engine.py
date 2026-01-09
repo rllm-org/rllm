@@ -214,6 +214,17 @@ class AgentSdkEngine:
                 elif success and isinstance(output, list):
                     assert all(isinstance(t, TrajectoryView) for t in output), "Must be a list of TrajectoryView"
                     return task_id, rollout_idx, retry_attempt, output, session_uid
+                elif success and isinstance(output, tuple):
+                    assert len(output) == 2, "Must be a tuple of (payload, metrics)"
+                    payload, metrics = output
+                    if isinstance(payload, float | int | bool):
+                        colorful_print(f"[{uid}] Rollout completed with reward: {float(payload)}", fg="green" if float(payload) > 0 else "yellow")
+                        return task_id, rollout_idx, retry_attempt, (float(payload), metrics), session_uid
+                    elif isinstance(payload, list):
+                        assert all(isinstance(t, TrajectoryView) for t in payload), "Must be a list of TrajectoryView"
+                        return task_id, rollout_idx, retry_attempt, payload, session_uid
+                    else:
+                        raise ValueError(f"Invalid output type: {type(output)}")
                 if retry_attempt < self.retry_limit:
                     print(f"[{uid}] Rollout failed on attempt {retry_attempt}/{self.retry_limit}, retrying...")
                     continue
@@ -301,7 +312,13 @@ class AgentSdkEngine:
             task_id = session_name.split(":")[0]
             retry_attempt = int(session_name.split(":")[2])
 
-            output = outputs[session_name]
+            output_or_tuple = outputs[session_name]
+            if isinstance(output_or_tuple, tuple):
+                output, metrics = output_or_tuple
+            else:
+                output = output_or_tuple
+                metrics = {}
+
             if isinstance(output, float):
                 trajectories = group_steps(steps, by=self.groupby_key, name_key=self.traj_name_key)
                 # fill reward for each trajectory using the final reward
@@ -333,22 +350,23 @@ class AgentSdkEngine:
             all_response_lens = [len(step.model_output.completion_ids) for trajectory in trajectories for step in trajectory.steps]
             all_prompt_lens = [len(step.model_output.prompt_ids) for trajectory in trajectories for step in trajectory.steps]
 
-            metrics = {
-                "retry_attempt": retry_attempt,
-                "empty": int(len(steps) == 0),
-                "flush_success": int(flush_success),
-                "num_trajectories": len(trajectories),
-                "steps_collected": len(steps),
-                "steps_used": steps_used,
-                "mean_response_len": sum(all_response_lens) / len(all_response_lens) if all_response_lens else 0,
-                "max_response_len": max(all_response_lens, default=0),
-                "min_response_len": min(all_response_lens, default=0),
-                "max_prompt_len": max(all_prompt_lens, default=0),
-                "min_prompt_len": min(all_prompt_lens, default=0),
-                "collect_sqlite_time": collect_sqlite_time,
-                "flush_time": flush_time,
-            }
-
+            metrics.update(
+                {
+                    "retry_attempt": retry_attempt,
+                    "empty": int(len(steps) == 0),
+                    "flush_success": int(flush_success),
+                    "num_trajectories": len(trajectories),
+                    "steps_collected": len(steps),
+                    "steps_used": steps_used,
+                    "mean_response_len": sum(all_response_lens) / len(all_response_lens) if all_response_lens else 0,
+                    "max_response_len": max(all_response_lens, default=0),
+                    "min_response_len": min(all_response_lens, default=0),
+                    "max_prompt_len": max(all_prompt_lens, default=0),
+                    "min_prompt_len": min(all_prompt_lens, default=0),
+                    "collect_sqlite_time": collect_sqlite_time,
+                    "flush_time": flush_time,
+                }
+            )
             episode = Episode(id=session_name, is_correct=is_correct, trajectories=trajectories, metrics=metrics)
             task_states[task_id]["episodes"].append(episode)
 
