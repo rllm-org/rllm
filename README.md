@@ -121,7 +121,7 @@ Our work is done as part of [Berkeley Sky Computing Lab](https://sky.cs.berkeley
   author={Sijun Tan and Michael Luo and Colin Cai and Tarun Venkat and Kyle Montgomery and Aaron Hao and Tianhao Wu and Arnav Balyan and Manan Roongta and Chenguang Wang and Li Erran Li and Raluca Ada Popa and Ion Stoica},
   year={2025},
   howpublished={\url{https://pretty-radio-b75.notion.site/rLLM-A-Framework-for-Post-Training-Language-Agents-21b81902c146819db63cd98a54ba5f31}},
-  note={Notion Blog}
+  note={Notion Blog},
   year={2025}
 }
 ```
