@@ -88,6 +88,8 @@ class AgentTrainer:
             self.config.data.train_files = train_dataset.get_verl_data_path()
         if val_dataset is not None and self.config is not None and hasattr(self.config, "data"):
             self.config.data.val_files = val_dataset.get_verl_data_path()
+        
+        print(self.config.data)
 
     def train(self):
         if self.backend == "verl":

@@ -162,7 +162,9 @@ class DeepResearchWorkflow(Workflow):
         episode.task = task
         episode.termination_reason = termination_reason
         episode.is_correct = is_correct
-        episode.trajectories = [("deepresearch_agent", trajectory)]
+        trajectory.name = "deepresearch_agent"
+        trajectory.reward = 1.0 if is_correct else 0.0
+        episode.trajectories = [trajectory]
         episode.metrics = {
             "rounds": result.get("rounds", 0),
             "time_taken": result.get("time_taken", 0),

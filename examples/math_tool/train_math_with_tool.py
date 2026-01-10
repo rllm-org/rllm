@@ -1,4 +1,5 @@
 import hydra
+import weave
 
 from rllm.agents import ToolAgent
 from rllm.data.dataset import DatasetRegistry
@@ -12,7 +13,7 @@ def main(config):
     train_dataset = DatasetRegistry.load_dataset("deepscaler_math", "train")
     test_dataset = DatasetRegistry.load_dataset("aime2024", "test")
 
-    agent_args = {"tools": ["python"], "parser_name": "qwen", "system_prompt": "You are a math assistant that can write python to solve math problems."}
+    agent_args = {"tools": ["python"], "parser_name": "qwen", "system_prompt": "You are a math and coding assistant. You must write python code to solve math problems."}
     env_args = {
         "tools": ["python"],
         "reward_fn": math_reward_fn,

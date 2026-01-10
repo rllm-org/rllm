@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 
 from transformers import AutoTokenizer
 
@@ -7,7 +8,24 @@ from rllm.data.dataset import DatasetRegistry
 from rllm.engine.agent_execution_engine import AgentExecutionEngine
 from rllm.environments.tools.tool_env import ToolEnvironment
 from rllm.rewards.reward_fn import math_reward_fn
-from rllm.utils import compute_pass_at_k
+from rllm.utils.compute_pass_at_k import compute_pass_at_k, save_trajectories
+
+
+def print_trajectory_examples(results, num_examples: int = 5, max_chars: int = 240):
+    """Print a few trajectory snippets for quick inspection."""
+    print("\n=== Sample trajectories ===")
+    for idx, trajectory in enumerate(results[:num_examples]):
+        task = trajectory.task
+        question = task.get("question") if isinstance(task, dict) else str(task)
+        print(f"[{idx}] reward={trajectory.reward} steps={len(trajectory.steps)} question={question}")
+        print("=== Model responses ===")
+
+        for step_idx, step in enumerate(trajectory.steps):
+            response = step.model_response.replace("\n", " ").strip()
+            print(f"step {step_idx}: {response}")
+
+    print("=== End samples ===\n")
+
 
 if __name__ == "__main__":
     import os
@@ -34,7 +52,7 @@ if __name__ == "__main__":
         env_class=ToolEnvironment,
         env_args=env_args,
         engine_name="openai",
-        rollout_engine_args={"base_url": "http://localhost:30000/v1", "api_key": "None"},
+        rollout_engine_args={"base_url": "http://h200-013-092:8001/v1", "api_key": "None"},
         tokenizer=tokenizer,
         sampling_params=sampling_params,
         max_response_length=16384,
@@ -52,4 +70,8 @@ if __name__ == "__main__":
     tasks = test_dataset.repeat(n=8)  # repeat to evaluate pass@k
 
     results = asyncio.run(engine.execute_tasks(tasks))
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_trajectories(results, save_dir="./trajectories/math_tool", filename=f"math_tool_trajectories_{len(tasks)}_{timestamp}.pt")
+    print_trajectory_examples(results)
     compute_pass_at_k(results)
