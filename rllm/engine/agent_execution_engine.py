@@ -422,6 +422,7 @@ class AgentExecutionEngine:
                 "trajectory_reward": trajectory.reward,
                 "idx": env.idx,
                 "mc_returns": [step.mc_return for step in trajectory.steps][: len(episode_steps)],
+                "termination_reason": termination_reason,
             }
             return steps_result
         else:
