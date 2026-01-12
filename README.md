@@ -108,6 +108,7 @@ For more detailed installation guide, including using `sglang` for `verl` backen
 * [Cogito, Ergo Ludo](https://www.arxiv.org/abs/2509.25052): An Agent that Learns to Play by Reasoning and Planning
 * [PettingLLMs](https://pettingllms-ai.github.io/): Using On-Policy Reinforcement Learning for Stronger Multi-Agent System [![GitHub Repo stars](https://img.shields.io/github/stars/pettingllms-ai/PettingLLMs)](https://github.com/pettingllms-ai/PettingLLMs)
 * [Cut the Bill, Keep the Turns](https://agate-slipper-ef0.notion.site/Cut-the-Bill-Keep-the-Turns-Affordable-Multi-Turn-Search-RL-003f78214a4d451fb06f453d084e666c): Affordable Multi-Turn Search RL
+* [SETA](https://eigent-ai.notion.site/SETA-Scaling-Environment-for-Terminal-Agent-2d2511c70ba280a9b7c0fe3e7f1b6ab8): Scaling Environments for Terminal Agents [![GitHub Repo stars](https://img.shields.io/github/stars/camel-ai/seta)](https://github.com/camel-ai/seta)
 
 
 
