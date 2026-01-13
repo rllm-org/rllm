@@ -67,23 +67,42 @@ class RLLMGenerator(GeneratorInterface):
 
         # Extract data from GeneratorInput
         prompts = input_batch["prompts"]
+        env_extras_list = input_batch.get("env_extras", [])
         trajectory_ids = input_batch.get("trajectory_ids", [])
         batch_metadata = input_batch.get("batch_metadata")
 
         # Convert GeneratorInput to tasks for UnifiedWorkflowEngine
-        # Each prompt becomes a task
+        # Reconstruct original rLLM format from prompts + env_extras
         tasks = []
         task_ids = []
         for i, prompt in enumerate(prompts):
-            # Create task dict from prompt
-            # The prompt might be a ConversationType or a dict
-            if isinstance(prompt, list):
-                # ConversationType format
-                task = {"prompt": prompt}
-            elif isinstance(prompt, dict):
-                task = prompt
+            # Get env_extras for this item (if available)
+            env_extras = env_extras_list[i] if i < len(env_extras_list) else {}
+            
+            # Reconstruct original rLLM format task
+            task = {}
+            
+            # Check if we have original prompt info stored in env_extras
+            original_prompt_key = env_extras.get("_rllm_original_prompt_key")
+            original_prompt_value = env_extras.get("_rllm_original_prompt_value")
+            
+            if original_prompt_key and original_prompt_value is not None:
+                # Restore original prompt as string in original key
+                task[original_prompt_key] = original_prompt_value
+            elif isinstance(prompt, list) and len(prompt) > 0:
+                # Extract string from chat format: [{"role": "user", "content": "..."}]
+                # Default to "question" if we can't determine the original key
+                content = prompt[0].get("content", "")
+                task["question"] = content
             else:
-                task = {"prompt": prompt}
+                # Fallback: use prompt as-is
+                task["prompt"] = prompt
+            
+            # Copy all other fields from env_extras (excluding internal metadata)
+            # Also exclude "messages" to avoid conflicts - we reconstruct from the original prompt key
+            for key, value in env_extras.items():
+                if not key.startswith("_rllm_") and key != "messages":
+                    task[key] = value
 
             # Get task ID from trajectory_id if available
             if i < len(trajectory_ids) and trajectory_ids[i]:

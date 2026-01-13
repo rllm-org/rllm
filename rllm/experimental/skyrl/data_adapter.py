@@ -83,9 +83,17 @@ def adapt_single_item(item: Dict[str, Any]) -> Dict[str, Any]:
         if key not in RESERVED_KEYS and key != prompt_key:
             env_extras[key] = value
     
+    # Store original prompt info in env_extras for reconstruction in RLLMGenerator
+    # This allows us to convert back to rLLM format for the workflow
+    if prompt_key:
+        env_extras["_rllm_original_prompt_key"] = prompt_key
+        # Store original string value if it was a string
+        if isinstance(item[prompt_key], str):
+            env_extras["_rllm_original_prompt_value"] = item[prompt_key]
+    
     # Build the adapted item
     adapted_item = {
-        "prompt": prompt,
+        "prompt": prompt,  # SkyRL expects this in chat format
         "env_extras": env_extras,
     }
     
