@@ -86,7 +86,7 @@ fireworks:
   deployment_id: null
   model_id_prefix: test-model
   concurrency: 32
-  return_token_ids: False
+  return_token_ids: True
 
 trainer:
   log_episodes: false
