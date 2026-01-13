@@ -85,3 +85,12 @@ data:
 environment:
   env_class: BaseTextEnv # Default, can be overridden
 
+# Ray initialization settings
+# These are passed directly to ray.init()
+# See Ray documentation for available options
+ray_init:
+  include_dashboard: false # Disable dashboard/metrics exporter to avoid connection errors
+  num_cpus: null # Auto-detect, or set to specific number
+  num_gpus: null # Auto-detect, or set to specific number
+  timeline_json_file: null # Optional: path to save Ray timeline for profiling
+

@@ -357,7 +357,21 @@ class SkyRLTrainerLauncher(TrainerLauncher):
         # Initialize Ray if not already initialized
         # Use SkyRL's initialize_ray() which handles runtime_env setup and sync_registries()
         if not ray.is_initialized():
-            initialize_ray(self.config)
+            # If Ray was previously initialized but is in a bad state, try to reset it
+            try:
+                initialize_ray(self.config)
+            except Exception as e:
+                # If initialization fails, try shutting down and reinitializing
+                logger.warning(f"Ray initialization failed: {e}. Attempting to reset Ray...")
+                try:
+                    ray.shutdown()
+                except Exception:
+                    pass  # Ignore errors during shutdown
+                # Wait a moment for cleanup
+                import time
+                time.sleep(1)
+                # Retry initialization
+                initialize_ray(self.config)
 
         # Launch the training via Ray remote entrypoint
         ray.get(
