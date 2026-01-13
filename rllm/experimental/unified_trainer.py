@@ -278,10 +278,10 @@ class UnifiedTrainer:
             for batch in train_dataloader:
                 trainer_state.reset_batch()
 
+                await self.backend.on_batch_start(trainer_state)
                 with simple_timer("step", trainer_state.timing_dict):
-                    await self.backend.on_batch_start(trainer_state)
                     await self._train_batch_async(batch, trainer_state)
-                    await self.backend.on_batch_end(trainer_state)
+                await self.backend.on_batch_end(trainer_state)
 
                 self.logger.log(data=trainer_state.metrics, step=trainer_state.global_step)
 
