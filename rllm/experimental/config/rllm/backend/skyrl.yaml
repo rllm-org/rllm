@@ -14,41 +14,42 @@ defaults:
 # SkyRL's config is structured differently - it uses trainer.*, generator.*, etc.
 # We need to map rLLM's algorithm.* to SkyRL's trainer.algorithm.*
 
+# rLLM config - source of truth, override via rllm.* keys
+# Example: rllm.algorithm.adv_estimator=gae
 rllm:
   backend: skyrl
 
-  # Algorithm configuration mapping
+  # Algorithm configuration (direct defaults, no oc.select to avoid cycles)
   algorithm:
-    # Map rLLM advantage estimator names to SkyRL names
-    # rLLM: grpo, reinforce, gae
-    # SkyRL: grpo, reinforce++, gae, rloo
-    adv_estimator: ${oc.select:algorithm.adv_estimator, grpo}
-    gamma: ${oc.select:algorithm.gamma, 1.0}
-    lambd: ${oc.select:algorithm.lam, 1.0} # Note: SkyRL uses 'lambd', rLLM uses 'lam'
-    norm_adv_by_std_in_grpo: ${oc.select:algorithm.norm_adv_by_std_in_grpo, true}
-    use_rllm: ${oc.select:algorithm.use_rllm, false} # Whether to use rLLM-native advantage computation
+    adv_estimator: grpo  # Options: grpo, reinforce++, gae, rloo
+    gamma: 1.0
+    lambd: 1.0
+    norm_adv_by_std_in_grpo: true
+    use_rllm: false
 
   # Stepwise advantage configuration
   stepwise_advantage:
-    enable: ${oc.select:stepwise_advantage.enable, false}
-    mode: ${oc.select:stepwise_advantage.mode, broadcast} # broadcast or per_step
-    normalize_by_steps: ${oc.select:stepwise_advantage.normalize_by_steps, false}
+    enable: false
+    mode: broadcast  # broadcast or per_step
+    normalize_by_steps: false
 
-  # Trainer configuration mapping
+  # Trainer configuration
   trainer:
-    total_epochs: ${oc.select:trainer.total_epochs, 10}
-    total_batches: ${oc.select:trainer.total_batches, -1}
-    logger: ${oc.select:trainer.logger, ['console', 'wandb']}
-    project_name: ${oc.select:trainer.project_name, 'rllm-training'}
-    experiment_name: ${oc.select:trainer.experiment_name, 'default'}
-    test_freq: ${oc.select:trainer.test_freq, 5}
-    save_freq: ${oc.select:trainer.save_freq, 20}
-    val_before_train: ${oc.select:trainer.val_before_train, true}
-    val_only: ${oc.select:trainer.val_only, false}
+    total_epochs: 10
+    total_batches: -1
+    logger:
+      - console
+      - wandb
+    project_name: rllm-training
+    experiment_name: default
+    test_freq: 5
+    save_freq: 20
+    val_before_train: true
+    val_only: false
 
   # Rollout configuration
   rollout:
-    n_val: ${oc.select:rollout.n_val, 1}
+    n_val: 1
 
 # SkyRL-specific configs that need to be set
 # These will be merged with SkyRL's ppo_base_config.yaml
