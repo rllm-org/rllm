@@ -8,6 +8,8 @@ agent:
   agent_args: {}
   engine_args: {}
 
+data:
+  train_batch_size: 4
 # Environment Configuration
 env:
   name: custom

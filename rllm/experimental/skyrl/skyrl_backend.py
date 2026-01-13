@@ -23,8 +23,10 @@ from rllm.engine.rollout import RolloutEngine
 from rllm.experimental.common.advantage import AlgorithmConfig
 from rllm.experimental.protocol import BackendProtocol
 
+# Moved this OUT OF TYPE CHECKING
+from skyrl_train.training_batch import TrainingInputBatch
+
 if TYPE_CHECKING:
-    from skyrl_train.training_batch import TrainingInputBatch
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
     from skyrl_train.generators.base import GeneratorInterface
 
@@ -163,6 +165,19 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
             shuffle=shuffle,
             collate_fn=lambda x: x,  # Return batches as lists
         )
+    
+    def transform_to_backend_batch(self, trainer_state, **kwargs) -> TrainingInputBatch:
+        """Transform rllm-native data structures to SkyRL TrainingInputBatch format.
+
+        This method expects `trainer_state.trajectory_groups` to be set by the
+        previous pipeline stage and delegates the actual conversion to
+        `transform_trajectory_groups_to_backend_batch` which handles the
+        construction of a SkyRL `TrainingInputBatch`.
+        """
+        assert trainer_state.trajectory_groups is not None, "Trajectory groups are not set"
+        assert self.rollout_engine is not None, "rollout_engine is not initialized."
+
+        return self.transform_trajectory_groups_to_backend_batch(trainer_state, **kwargs)
 
     def shutdown(self) -> None:
         """Shutdown the backend and cleanup resources."""
@@ -217,7 +232,7 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         # Get sampling params from config
         sampling_params = self.full_config.get("sampling", {})
         default_env_class = self.full_config.get("environment", {}).get("env_class", "BaseTextEnv")
-        group_size = self.full_config.training.get("group_size", 1)
+        group_size = self.full_config.trainer.get("group_size", 1)
 
         # Build interleaved batch (each task repeated `group_size` times) - inline like Verl
         batch_with_uid = []
@@ -228,6 +243,8 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         for batch_item in batch_with_uid:
             interleaved_batch.extend([batch_item for _ in range(group_size)])
 
+        import pdb
+        pdb.set_trace()
         # Prepare GeneratorInput from interleaved batch
         generator_input, uids = prepare_generator_input(
             prompts=interleaved_batch,

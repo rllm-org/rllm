@@ -15,9 +15,7 @@ if skyrl_train_path.exists():
     sys.path.insert(0, str(skyrl_train_path))
 
 from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine
-
-if TYPE_CHECKING:
-    from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 
 
 class SkyRLEngine(RolloutEngine):
@@ -29,7 +27,7 @@ class SkyRLEngine(RolloutEngine):
 
     def __init__(
         self,
-        inference_engine_client: "InferenceEngineClient" | None = None,
+        inference_engine_client: InferenceEngineClient | None = None,
         tokenizer=None,
         max_prompt_length: int = 4096,
         max_response_length: int = 4096,
@@ -64,7 +62,7 @@ class SkyRLEngine(RolloutEngine):
 
     def set_skyrl_components(
         self,
-        inference_engine_client: "InferenceEngineClient" | None = None,
+        inference_engine_client: InferenceEngineClient | None = None,
         trainer=None,
     ):
         """Set SkyRL components after initialization.

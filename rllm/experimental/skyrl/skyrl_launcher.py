@@ -294,6 +294,9 @@ class SkyRLExp:
 
     def run(self):
         """Run the training loop."""
+        print("Starting training loop")
+        print("train dataset is ", self.train_dataset)
+        print("val dataset is ", self.val_dataset)
         trainer = self._setup_trainer()
         try:
             # Start the training loop
