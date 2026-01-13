@@ -5,7 +5,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pprint import pprint
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
@@ -15,6 +15,7 @@ from rllm.data import Dataset
 from rllm.engine.rollout import RolloutEngine
 from rllm.experimental.common.advantage import AlgorithmConfig
 from rllm.experimental.common.config import CompactFilteringConfig, RejectionSamplingConfig, TransformConfig
+from rllm.experimental.common.performance import simple_timer
 from rllm.experimental.common.rejection_sampling import RejectionSamplingState, apply_rejection_sampling_and_filtering
 from rllm.experimental.common.transform import transform_episodes_to_trajectory_groups
 from rllm.experimental.common.visualization import visualize_trajectory_last_steps
@@ -247,7 +248,8 @@ class UnifiedTrainer:
         await self.backend.on_train_start(trainer_state)
 
         if self.rllm_config.trainer.get("val_before_train", True):
-            await self._validate_async(trainer_state)
+            val_metrics = await self._validate_async(trainer_state)
+            pprint(f"Initial validation metrics: {val_metrics}")
             if self.rllm_config.trainer.get("val_only", False):
                 return
 
@@ -275,11 +277,12 @@ class UnifiedTrainer:
 
             for batch in train_dataloader:
                 trainer_state.reset_batch()
-                await self.backend.on_batch_start(trainer_state)
 
-                await self._train_batch_async(batch, trainer_state)
+                with simple_timer("step", trainer_state.timing_dict):
+                    await self.backend.on_batch_start(trainer_state)
+                    await self._train_batch_async(batch, trainer_state)
+                    await self.backend.on_batch_end(trainer_state)
 
-                await self.backend.on_batch_end(trainer_state)
                 self.logger.log(data=trainer_state.metrics, step=trainer_state.global_step)
 
                 # if the config specifies the `total_batches` parameter, then we check if we should stop
@@ -291,13 +294,15 @@ class UnifiedTrainer:
 
                 # periodic validation
                 if self.rllm_config.trainer.get("val_freq", 0) > 0 and trainer_state.global_step % self.rllm_config.trainer.val_freq == 0:
-                    await self._validate_async(trainer_state)
+                    with simple_timer("testing", trainer_state.timing_dict):
+                        await self._validate_async(trainer_state)
 
             await self.backend.on_epoch_end(trainer_state)
 
-        # final validation
+        # final validation after training
         if self.rllm_config.trainer.get("val_freq", 0) > 0:
-            await self._validate_async(trainer_state)
+            val_metrics = await self._validate_async(trainer_state)
+            pprint(f"Final validation metrics: {val_metrics}")
 
     async def _train_batch_async(self, batch: Any, trainer_state: TrainerState) -> None:
         """Train a batch (async implementation)."""
@@ -354,12 +359,12 @@ class UnifiedTrainer:
         for r in TerminationReason:
             trainer_state.metrics[f"batch/{r.value}"] = termination_counts[r.value] / total_counts
 
-    async def _validate_async(self, trainer_state: TrainerState) -> None:
+    async def _validate_async(self, trainer_state: TrainerState) -> dict:
         """Validate the model (async implementation)."""
         n_val_samples = self.rllm_config.rollout.n_val
 
         if not await self.backend.on_validation_start(trainer_state):
-            return
+            return {}
 
         self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="val", epoch=trainer_state.epoch)
 
@@ -408,6 +413,7 @@ class UnifiedTrainer:
 
         self.logger.log(data=val_metrics, step=trainer_state.global_step)
         await self.backend.on_validation_end(trainer_state)
+        return val_metrics
 
     def shutdown(self):
         """Shutdown the trainer and cleanup resources."""
@@ -454,3 +460,34 @@ class TrainerLauncher(ABC):
     @abstractmethod
     def train(self):
         raise NotImplementedError("Train method of the trainer launcher is not implemented")
+
+
+class AgentTrainer:
+    """
+    A unified agent trainer launcher that directly interfaces with the user script to launch training jobs.
+    Adapted directly from `rllm.trainer.agent_trainer.AgentTrainer`.
+
+    This trainer will simply delegate the task to the corresponding launcher class.
+    """
+
+    def __init__(
+        self,
+        config: DictConfig,
+        workflow_class: type[Workflow],
+        train_dataset: Dataset | None = None,
+        val_dataset: Dataset | None = None,
+        workflow_args: dict | None = None,
+        backend: Literal["verl", "tinker"] = "verl",
+        **kwargs,
+    ):
+        if backend == "verl":
+            from rllm.experimental.verl.verl_launcher import VerlTrainerLauncher
+
+            self.launcher = VerlTrainerLauncher(config=config, workflow_class=workflow_class, train_dataset=train_dataset, val_dataset=val_dataset, workflow_args=workflow_args, **kwargs)
+        elif backend == "tinker":
+            from rllm.experimental.tinker.tinker_launcher import TinkerTrainerLauncher
+
+            self.launcher = TinkerTrainerLauncher(config=config, workflow_class=workflow_class, train_dataset=train_dataset, val_dataset=val_dataset, workflow_args=workflow_args, **kwargs)
+
+    def train(self):
+        self.launcher.train()

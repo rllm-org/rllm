@@ -17,6 +17,11 @@ from omegaconf import DictConfig
 from verl import DataProto
 from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.core_algos import agg_loss
+from verl.trainer.ppo.metric_utils import (
+    compute_data_metrics,
+    compute_throughout_metrics,
+    compute_timing_metrics,
+)
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer, ResourcePoolManager
 from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.metric import reduce_metrics
@@ -283,7 +288,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
 
         # Compute reference log_probs if using reference policy
         if self.use_reference_policy:
-            with simple_timer("ref_log_probs", timing_dict):
+            with simple_timer("ref", timing_dict):
                 if not self.ref_in_actor:
                     ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
                 else:
@@ -292,7 +297,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
 
         # Compute critic values if using critic
         if self.use_critic:
-            with simple_timer("critic_values", timing_dict):
+            with simple_timer("values", timing_dict):
                 values = self.critic_wg.compute_values(batch)
                 batch = batch.union(values)
 
@@ -314,12 +319,14 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         batch: DataProto = trainer_state.backend_batch  # type: ignore[assignment]
 
         use_rllm = algorithm_config.use_rllm
-        if use_rllm:
-            compute_advantage_from_trajectory_groups(trajectory_groups, algorithm_config)
-            updated_batch = update_dataproto_with_advantages(batch, episodes, mode=self.config.rllm.stepwise_advantage.mode)
-        else:
-            updated_batch, adv_metrics = compute_advantage_verl(batch, self.config)  # type: ignore[return-value]
-            trainer_state.metrics.update(adv_metrics)
+
+        with simple_timer("adv", trainer_state.timing_dict):
+            if use_rllm:
+                compute_advantage_from_trajectory_groups(trajectory_groups, algorithm_config)
+                updated_batch = update_dataproto_with_advantages(batch, episodes, mode=self.config.rllm.stepwise_advantage.mode)
+            else:
+                updated_batch, adv_metrics = compute_advantage_verl(batch, self.config)  # type: ignore[return-value]
+                trainer_state.metrics.update(adv_metrics)
 
         trainer_state.backend_batch = updated_batch
 
@@ -333,13 +340,15 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
 
         # Update critic
         if self.use_critic:
-            critic_output = self.critic_wg.update_critic(batch)
+            with simple_timer("update_critic", trainer_state.timing_dict):
+                critic_output = self.critic_wg.update_critic(batch)
             critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
             trainer_state.metrics.update(critic_output_metrics)
 
         # Update actor (after critic warmup)
         if self.config.trainer.get("critic_warmup", 0) <= global_steps:
-            actor_output = self.actor_rollout_wg.update_actor(batch)
+            with simple_timer("update_actor", trainer_state.timing_dict):
+                actor_output = self.actor_rollout_wg.update_actor(batch)
             actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
             trainer_state.metrics.update(actor_output_metrics)
 
@@ -364,18 +373,30 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         # Start profiling if configured
         do_profile = trainer_state.is_training and trainer_state.global_step in self.config.trainer.profile_steps if self.config.trainer.get("profile_steps") is not None else False
         if do_profile:
-            self._start_profiling(do_profile)
+            with simple_timer("start_profile", trainer_state.timing_dict):
+                self._start_profiling(do_profile)
 
     async def on_batch_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of each batch."""
         # Stop profiling
         do_profile = trainer_state.is_training and trainer_state.global_step in self.config.trainer.profile_steps if self.config.trainer.get("profile_steps") is not None else False
         if do_profile:
-            self._stop_profiling(do_profile)
+            with simple_timer("stop_profile", trainer_state.timing_dict):
+                self._stop_profiling(do_profile)
+
+        # collect metrics
+        metrics = trainer_state.metrics
+        metrics.update({"training/global_step": trainer_state.global_step, "training/epoch": trainer_state.epoch})
+        metrics.update(compute_data_metrics(batch=trainer_state.backend_batch, use_critic=self.use_critic))
+        metrics.update(compute_timing_metrics(batch=trainer_state.backend_batch, timing_raw=trainer_state.timing_dict))
+
+        n_gpus = self.resource_pool_manager.get_n_gpus()
+        metrics.update(compute_throughout_metrics(batch=trainer_state.backend_batch, timing_raw=trainer_state.timing_dict, n_gpus=n_gpus))
 
         # Save checkpoint if configured
         if self.config.trainer.save_freq > 0 and trainer_state.global_step % self.config.trainer.save_freq == 0:
-            self._save_checkpoint()
+            with simple_timer("save_checkpoint", trainer_state.timing_dict):
+                self._save_checkpoint()
 
     async def on_validation_start(self, trainer_state: TrainerState) -> bool:
         """Called at the start of validation."""

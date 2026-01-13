@@ -83,7 +83,7 @@ def _visualize_metadata(trajectory: Trajectory, metadata: dict, config: Visualiz
     if "episode_id" in metadata:
         task_id, rollout_idx = metadata["episode_id"].split(":")
         header_parts.append(f"Task ID: {task_id}")
-        header_parts.append(f"Rollout #: {rollout_idx}")
+        header_parts.append(f"Rollout: #{rollout_idx}")
     header_parts.append(f"Trajectory: {trajectory.name}")
     colorful_print(" | ".join(header_parts), **config.header_style)
 

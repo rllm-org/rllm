@@ -1,7 +1,7 @@
 import hydra
 
 from rllm.data.dataset import DatasetRegistry
-from rllm.experimental.verl.verl_launcher import VerlTrainerLauncher
+from rllm.experimental.unified_trainer import AgentTrainer
 from rllm.rewards.reward_fn import math_reward_fn
 from rllm.workflows.simple_workflow import SimpleWorkflow
 
@@ -11,7 +11,7 @@ def main(config):
     train_dataset = DatasetRegistry.load_dataset("hendrycks_math", "train")
     test_dataset = DatasetRegistry.load_dataset("math500", "test")
 
-    trainer = VerlTrainerLauncher(
+    trainer = AgentTrainer(
         workflow_class=SimpleWorkflow,
         workflow_args={
             "reward_function": math_reward_fn,
@@ -19,6 +19,7 @@ def main(config):
         config=config,
         train_dataset=train_dataset,
         val_dataset=test_dataset,
+        backend="verl",
     )
     trainer.train()
 
