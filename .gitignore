@@ -196,7 +196,9 @@ rllm/registry/
 
 # Coding assistant local rules ignore
 .cursor/rules/*
+claude/*
 CLAUDE.md
+.claude/*
 
 # Strands outputs ignore
 examples/strands_outputs/*
