@@ -216,7 +216,7 @@ examples/deepresearch/HLE_OUTPUT_EVOLUTION.md
 uv.lock
 
 # Legacy issue: we will ignore the "verl" folder, which was installed by many as submodule before
-/verl/
+/verl
 
 # Ignore Skyrl 
-/skyrl/
+/skyrl

@@ -22,6 +22,7 @@ from rllm.data import Dataset
 from rllm.engine.rollout import RolloutEngine
 from rllm.experimental.common.advantage import AlgorithmConfig
 from rllm.experimental.protocol import BackendProtocol
+from rllm.experimental.skyrl.data_adapter import adapt_rllm_batch_to_skyrl
 
 # Moved this OUT OF TYPE CHECKING
 from skyrl_train.training_batch import TrainingInputBatch
@@ -234,17 +235,20 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         default_env_class = self.full_config.get("environment", {}).get("env_class", "BaseTextEnv")
         group_size = self.full_config.trainer.get("group_size", 1)
 
-        # Build interleaved batch (each task repeated `group_size` times) - inline like Verl
+        # Adapt batch to SkyRL format
+        adapted_batch = adapt_rllm_batch_to_skyrl(batch)
+
+        # Ensure each item has a uid
         batch_with_uid = []
-        for batch_item in batch:
-            batch_with_uid.append({**batch_item, "uid": str(uuid.uuid4())})
-        
+        for batch_item in adapted_batch:
+            if batch_item.get("uid") is None:
+                batch_item = {**batch_item, "uid": str(uuid.uuid4())}
+            batch_with_uid.append(batch_item)
+
         interleaved_batch = []
         for batch_item in batch_with_uid:
             interleaved_batch.extend([batch_item for _ in range(group_size)])
 
-        import pdb
-        pdb.set_trace()
         # Prepare GeneratorInput from interleaved batch
         generator_input, uids = prepare_generator_input(
             prompts=interleaved_batch,
