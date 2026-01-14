@@ -39,6 +39,9 @@ def main(config):
 
     # Registering during train time since for some environments, creating some datasets for verifiers environments needs resources to spin up.
 
+    # Get max_samples limit (for testing with smaller datasets)
+    max_samples = OmegaConf.select(config, "verifiers.max_samples", default=None)
+
     if DatasetRegistry.dataset_exists(vf_env_id, "train"):
         train_dataset = DatasetRegistry.load_dataset(vf_env_id, "train")
         test_dataset = DatasetRegistry.load_dataset(vf_env_id, "test")
@@ -53,6 +56,11 @@ def main(config):
         test_dataset = DatasetRegistry.register_dataset(
             vf_env_id, vf_eval_dataset, "test"
         )
+
+    # Limit dataset size if max_samples specified
+    if max_samples:
+        train_dataset = train_dataset.select(range(min(max_samples, len(train_dataset))))
+        test_dataset = test_dataset.select(range(min(max_samples, len(test_dataset))))
 
     # Get backend from config (default: verl)
     backend = OmegaConf.select(config, "backend", default="verl")
