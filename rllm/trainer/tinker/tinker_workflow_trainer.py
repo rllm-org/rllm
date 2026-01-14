@@ -237,9 +237,9 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
                     if not step.logprobs:
                         step.logprobs = model_output.logprobs
 
-        # For VLM prompts, prompt_ids may be empty list (to_ints() not supported for ImageChunks)
-        assert step.prompt_ids is not None, "prompt_ids is None"
-        assert step.response_ids, "response_ids is None"
-        assert step.logprobs, "logprobs is None"
+                    # For VLM prompts, prompt_ids may be empty list (to_ints() not supported for ImageChunks)
+                    assert step.prompt_ids is not None, "prompt_ids is None"
+                    assert step.response_ids, "response_ids is None"
+                    assert step.logprobs, "logprobs is None"
 
         return episodes
