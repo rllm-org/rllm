@@ -173,7 +173,7 @@ class TinkerPolicyTrainer:
             episodes,
             transform_config=self.transform_config,
             compact_filtering_config=self.cf_config,
-            log_n_warnings=1,
+            metrics_prefix="grouping",
         )
         training_datums = transform_trajectory_groups_to_datums(
             trajectory_groups,

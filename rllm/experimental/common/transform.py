@@ -12,6 +12,7 @@ The pipeline handles:
 
 import logging
 from collections import defaultdict
+from collections.abc import Callable
 
 import numpy as np
 
@@ -20,9 +21,10 @@ from rllm.experimental.common.config import CompactFilteringConfig, TransformCon
 from rllm.workflows.workflow import TerminationReason
 
 logger = logging.getLogger(__name__)
+LOG_N_WARNINGS = 1
 
 
-def impute_trajectory_names(
+def _impute_trajectory_names(
     episodes: list[Episode],
     config: TransformConfig,
 ) -> list[str]:
@@ -58,7 +60,7 @@ def impute_trajectory_names(
     return warnings
 
 
-def validate_and_propagate_rewards(
+def _validate_and_propagate_rewards(
     groups: list[TrajectoryGroup],
     config: TransformConfig,
 ) -> list[str]:
@@ -98,7 +100,7 @@ def validate_and_propagate_rewards(
     return warnings
 
 
-def build_trajectory_groups(episodes: list[Episode], compact_filtering_config: CompactFilteringConfig | None = None) -> list[TrajectoryGroup]:
+def _build_trajectory_groups(episodes: list[Episode], compact_filtering_config: CompactFilteringConfig | None = None) -> list[TrajectoryGroup]:
     """
     Build TrajectoryGroups from episodes based on the configured grouping strategy.
 
@@ -141,11 +143,58 @@ def build_trajectory_groups(episodes: list[Episode], compact_filtering_config: C
     return groups
 
 
+"""
+Functionalities related to transforming episodes to trajectory groups. We will provide a default implementation with clear documentations
+on the transformation logic. At the same time, we also allow user-defined "hooks" to override the default behaviors.
+"""
+
+
+def _get_transform_metrics(episodes: list[Episode], groups: list[TrajectoryGroup], prefix: str = "grouping") -> dict:
+    """
+    Get metrics for the transformation pipeline.
+    """
+    group_sizes_before = np.array([len(episode.trajectories) for episode in episodes])
+    group_sizes = np.array([len(group.trajectories) for group in groups])
+    metrics = dict()
+    metrics[f"{prefix}/num_trajs_before_filter"] = group_sizes_before.sum()
+    metrics[f"{prefix}/num_trajs_after_filter"] = group_sizes.sum()
+    metrics[f"{prefix}/num_groups"] = len(groups)
+    metrics[f"{prefix}/avg_group_size"] = group_sizes.mean()
+    metrics[f"{prefix}/max_group_size"] = group_sizes.max()
+    metrics[f"{prefix}/min_group_size"] = group_sizes.min()
+    return metrics
+
+
+def _default_trajectory_grouping_hook(episodes: list[Episode], transform_config: TransformConfig | None = None, compact_filtering_config: CompactFilteringConfig | None = None) -> list[TrajectoryGroup]:
+    """
+    Default trajectory grouping hook.
+
+    A trajectory grouping hook needs to take care of two major things:
+    1. Creation of a list of trajectory groups from a list of episodes
+    2. Validation and propagation of rewards for the trajectory groups
+
+    Note: the `Trajectory` objects, when passed from within the episodes to the trajectory groups,
+    should not be copied (i.e. only reference is passed). This is explicitly enforced & checked in the
+    `transform_episodes_to_trajectory_groups` function.
+    """
+    trajectory_groups = _build_trajectory_groups(episodes, compact_filtering_config)  # part 1
+    reward_warnings = _validate_and_propagate_rewards(trajectory_groups, transform_config)  # part 2
+
+    for warning in reward_warnings[:LOG_N_WARNINGS]:
+        logger.warning(warning)
+
+    if len(reward_warnings) > LOG_N_WARNINGS:
+        logger.warning(f"Skipping {len(reward_warnings) - LOG_N_WARNINGS} more similar warnings with reward validation")
+
+    return trajectory_groups
+
+
 def transform_episodes_to_trajectory_groups(
     episodes: list[Episode],
     transform_config: TransformConfig | None = None,
     compact_filtering_config: CompactFilteringConfig | None = None,
-    log_n_warnings: int = 1,
+    metrics_prefix: str = "grouping",
+    trajectory_grouping_hook: Callable[[list[Episode], TransformConfig | None, CompactFilteringConfig | None], list[TrajectoryGroup]] = _default_trajectory_grouping_hook,
 ) -> tuple[list[TrajectoryGroup], dict]:
     """
     Transform a list of Episodes into a list of TrajectoryGroups for advantage computation.
@@ -157,8 +206,10 @@ def transform_episodes_to_trajectory_groups(
 
     Args:
         episodes: List of Episodes from workflow execution
-        config: Transform configuration (uses defaults if not provided)
-        log_n_warnings: Number of warnings to log
+        transform_config: Transform configuration (uses defaults if not provided)
+        compact_filtering_config: Compact filtering configuration (uses defaults if not provided)
+        metrics_prefix: Prefix for the metrics generated in this pipeline
+        trajectory_grouping_hook: A hook function to override the default trajectory grouping logic
 
     Returns:
         Tuple of (list of TrajectoryGroups, metrics)
@@ -179,35 +230,18 @@ def transform_episodes_to_trajectory_groups(
         transform_config = TransformConfig()
 
     # Step 1: Name imputation
-    rename_warnings = impute_trajectory_names(episodes, transform_config)
+    rename_warnings = _impute_trajectory_names(episodes, transform_config)
 
-    for warning in rename_warnings[:log_n_warnings]:
+    for warning in rename_warnings[:LOG_N_WARNINGS]:
         logger.warning(warning)
 
-    if len(rename_warnings) > log_n_warnings:
-        logger.warning(f"Skipping {len(rename_warnings) - log_n_warnings} more similar warnings with trajectory names")
+    if len(rename_warnings) > LOG_N_WARNINGS:
+        logger.warning(f"Skipping {len(rename_warnings) - LOG_N_WARNINGS} more similar warnings with trajectory names")
 
-    # Step 2: Build trajectory groups
-    groups = build_trajectory_groups(episodes, compact_filtering_config)
+    # Step 2: Invoke the trajectory grouping hook
+    groups = trajectory_grouping_hook(episodes, transform_config, compact_filtering_config)
 
-    # Step 3: Validate and propagate rewards
-    reward_warnings = validate_and_propagate_rewards(groups, transform_config)
-
-    for warning in reward_warnings[:log_n_warnings]:
-        logger.warning(warning)
-
-    if len(reward_warnings) > log_n_warnings:
-        logger.warning(f"Skipping {len(reward_warnings) - log_n_warnings} more similar warnings with reward validation")
-
-    # return metrics
-    group_sizes_before = [len(episode.trajectories) for episode in episodes]
-    group_sizes = [len(group.trajectories) for group in groups]
-    metrics = dict()
-    metrics["grouping/num_trajs_before_filter"] = sum(group_sizes_before)
-    metrics["grouping/num_trajs_after_filter"] = sum(group_sizes)
-    metrics["grouping/num_groups"] = len(groups)
-    metrics["grouping/avg_group_size"] = np.mean(group_sizes)
-    metrics["grouping/max_group_size"] = np.max(group_sizes)
-    metrics["grouping/min_group_size"] = np.min(group_sizes)
+    # Step 3: Get metrics
+    metrics = _get_transform_metrics(episodes, groups, prefix=metrics_prefix)
 
     return groups, metrics

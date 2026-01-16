@@ -102,6 +102,9 @@ class UnifiedTrainer:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
 
+        # Read user-defined hooks from kwargs
+        self.trajectory_grouping_hook = kwargs.get("trajectory_grouping_hook")
+
         try:
             self._setup_event_loop()
 
@@ -317,7 +320,7 @@ class UnifiedTrainer:
             return
 
         # stage 2: transform episodes to trajectory groups (sync)
-        trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(trainer_state.episodes, self.transform_config)
+        trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(trainer_state.episodes, self.transform_config, self.trajectory_grouping_hook)
         trainer_state.trajectory_groups = trajectory_groups
         trainer_state.metrics.update(transform_metrics)
 
@@ -373,15 +376,12 @@ class UnifiedTrainer:
 
         val_dataloader: Iterable = self.backend.get_dataloader(self.val_dataset, trainer_state)
         for batch in val_dataloader:
-            await self.backend.on_batch_start(trainer_state)
-
             # Generate episodes (async)
             val_episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine)
 
             is_correct_lst.extend([episode.is_correct for episode in val_episodes])
             uid_lst.extend([episode.id.split(":")[0] for episode in val_episodes])
             data_source_lst.extend([episode.info.get("data_source", "unknown") for episode in val_episodes])
-            await self.backend.on_batch_end(trainer_state)
 
             for episode, data_source in zip(val_episodes, data_source_lst, strict=True):
                 for key, value in episode.metrics.items():
