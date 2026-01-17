@@ -29,6 +29,7 @@ from rllm.trainer.tinker.tinker_metrics_utils import (
     print_metrics_table,
 )
 from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer
+from rllm.utils import extract_source_metadata
 
 if TYPE_CHECKING:
     pass
@@ -137,40 +138,14 @@ class TinkerAgentTrainer:
             logger_backend = [logger_backend]
 
         # Extract source code for UI logger
-        # Uses hasattr to support both TinkerAgentTrainer (agent_class, env_args)
-        # and TinkerWorkflowTrainer (workflow_class, workflow_args) via inheritance
         source_metadata = {}
         if 'ui' in logger_backend:
-            import inspect
-
-            def extract_source(obj, name_key, source_key, default_name):
-                """Extract source code from a class or function."""
-                if obj is None:
-                    return
-                try:
-                    source_metadata[source_key] = inspect.getsource(obj)
-                    source_metadata[name_key] = obj.__name__
-                except Exception:
-                    source_metadata[name_key] = getattr(obj, '__name__', default_name)
-                    if source_metadata[name_key] == '<lambda>':
-                        source_metadata[source_key] = "# Lambda function - source not available"
-
-            # Extract workflow class source
-            if hasattr(self, 'workflow_class') and self.workflow_class:
-                extract_source(self.workflow_class, 'workflow_class', 'workflow_source', 'Workflow')
-
-            # Extract reward function (from workflow_args or env_args)
-            reward_fn = None
-            if hasattr(self, 'workflow_args') and self.workflow_args:
-                reward_fn = self.workflow_args.get('reward_function')
-            if reward_fn is None and self.env_args:
-                reward_fn = self.env_args.get('reward_fn')
-            if reward_fn:
-                extract_source(reward_fn, 'reward_fn_name', 'reward_fn_source', 'reward_fn')
-
-            # Extract agent class source
-            if hasattr(self, 'agent_class') and self.agent_class:
-                extract_source(self.agent_class, 'agent_class', 'agent_source', 'Agent')
+            source_metadata = extract_source_metadata(
+                workflow_class=getattr(self, 'workflow_class', None),
+                agent_class=getattr(self, 'agent_class', None),
+                workflow_args=getattr(self, 'workflow_args', None),
+                env_args=getattr(self, 'env_args', None),
+            )
 
         tracking_logger = Tracking(
             project_name=self.config.trainer.project_name,
