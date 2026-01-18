@@ -5,11 +5,10 @@ Main entry point for the API backend.
 
 from contextlib import asynccontextmanager
 
+from database import init_db
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
-from database import init_db
-from routers import health, sessions, metrics, sse, episodes
+from routers import episodes, health, metrics, sessions, sse
 
 
 @asynccontextmanager
@@ -44,4 +43,3 @@ app.include_router(sessions.router)
 app.include_router(metrics.router)
 app.include_router(sse.router)
 app.include_router(episodes.router)
-

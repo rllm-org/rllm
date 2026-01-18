@@ -2,11 +2,10 @@
 
 import json
 import uuid
-from datetime import datetime, UTC
-
-from fastapi import APIRouter, HTTPException
+from datetime import UTC, datetime
 
 from database import get_db
+from fastapi import APIRouter, HTTPException
 from models import SessionCreate, SessionResponse
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -33,11 +32,11 @@ def create_session(session: SessionCreate):
             ),
         )
         conn.commit()
-        
+
         # Fetch the created session
         cursor.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
         row = cursor.fetchone()
-    
+
     return _row_to_session(row)
 
 
@@ -48,7 +47,7 @@ def list_sessions():
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM sessions ORDER BY created_at DESC")
         rows = cursor.fetchall()
-    
+
     return [_row_to_session(row) for row in rows]
 
 
@@ -59,10 +58,10 @@ def get_session(session_id: str):
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
         row = cursor.fetchone()
-    
+
     if row is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     return _row_to_session(row)
 
 
@@ -71,12 +70,12 @@ def complete_session(session_id: str):
     """Mark a session as completed."""
     with get_db() as conn:
         cursor = conn.cursor()
-        
+
         # Check if session exists
         cursor.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
         if cursor.fetchone() is None:
             raise HTTPException(status_code=404, detail="Session not found")
-        
+
         # Update session
         now = datetime.now(UTC).isoformat()
         cursor.execute(
@@ -88,11 +87,11 @@ def complete_session(session_id: str):
             (now, session_id),
         )
         conn.commit()
-        
+
         # Fetch updated session
         cursor.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
         row = cursor.fetchone()
-    
+
     return _row_to_session(row)
 
 

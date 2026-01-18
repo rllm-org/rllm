@@ -1,7 +1,6 @@
 """Health check router."""
 
 from fastapi import APIRouter
-
 from models import HealthResponse
 
 router = APIRouter(prefix="/api", tags=["health"])

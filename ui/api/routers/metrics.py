@@ -1,11 +1,9 @@
 """Metrics router."""
 
 import json
-from datetime import datetime
-
-from fastapi import APIRouter, HTTPException
 
 from database import get_db
+from fastapi import APIRouter, HTTPException
 from models import MetricsCreate, MetricsResponse
 
 router = APIRouter(prefix="/api", tags=["metrics"])
@@ -16,12 +14,12 @@ def create_metrics(metrics: MetricsCreate):
     """Receive and store metrics from training."""
     with get_db() as conn:
         cursor = conn.cursor()
-        
+
         # Check if session exists
         cursor.execute("SELECT id FROM sessions WHERE id = ?", (metrics.session_id,))
         if cursor.fetchone() is None:
             raise HTTPException(status_code=404, detail="Session not found")
-        
+
         # Insert metrics
         cursor.execute(
             """
@@ -31,12 +29,12 @@ def create_metrics(metrics: MetricsCreate):
             (metrics.session_id, metrics.step, json.dumps(metrics.data)),
         )
         conn.commit()
-        
+
         # Get the created record
         metrics_id = cursor.lastrowid
         cursor.execute("SELECT * FROM metrics WHERE id = ?", (metrics_id,))
         row = cursor.fetchone()
-    
+
     return _row_to_metrics(row)
 
 
@@ -45,19 +43,19 @@ def get_session_metrics(session_id: str):
     """Get all metrics for a session."""
     with get_db() as conn:
         cursor = conn.cursor()
-        
+
         # Check if session exists
         cursor.execute("SELECT id FROM sessions WHERE id = ?", (session_id,))
         if cursor.fetchone() is None:
             raise HTTPException(status_code=404, detail="Session not found")
-        
+
         # Get metrics
         cursor.execute(
             "SELECT * FROM metrics WHERE session_id = ? ORDER BY step",
             (session_id,),
         )
         rows = cursor.fetchall()
-    
+
     return [_row_to_metrics(row) for row in rows]
 
 

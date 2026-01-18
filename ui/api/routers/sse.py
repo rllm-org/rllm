@@ -2,12 +2,11 @@
 
 import asyncio
 import json
-from typing import AsyncGenerator
-
-from fastapi import APIRouter
-from fastapi.responses import StreamingResponse
+from collections.abc import AsyncGenerator
 
 from database import get_db
+from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
 
 router = APIRouter(prefix="/api", tags=["sse"])
 
@@ -20,7 +19,7 @@ _last_seen_metrics: dict[str, int] = {}
 async def metrics_event_generator(session_id: str) -> AsyncGenerator[str, None]:
     """Generate SSE events for new metrics."""
     last_id = _last_seen_metrics.get(session_id, 0)
-    
+
     while True:
         # Check for new metrics
         with get_db() as conn:
@@ -34,7 +33,7 @@ async def metrics_event_generator(session_id: str) -> AsyncGenerator[str, None]:
                 (session_id, last_id),
             )
             rows = cursor.fetchall()
-        
+
         # Send new metrics as SSE events
         for row in rows:
             data = {
@@ -45,9 +44,9 @@ async def metrics_event_generator(session_id: str) -> AsyncGenerator[str, None]:
             }
             last_id = row["id"]
             _last_seen_metrics[session_id] = last_id
-            
+
             yield f"data: {json.dumps(data)}\n\n"
-        
+
         # Wait before polling again
         await asyncio.sleep(0.5)
 
@@ -55,9 +54,9 @@ async def metrics_event_generator(session_id: str) -> AsyncGenerator[str, None]:
 @router.get("/sessions/{session_id}/metrics/stream")
 async def stream_metrics(session_id: str):
     """Stream metrics for a session via SSE.
-    
+
     Connect to this endpoint with EventSource to receive real-time metrics.
-    
+
     Example:
         const eventSource = new EventSource('/api/sessions/abc123/metrics/stream');
         eventSource.onmessage = (event) => {

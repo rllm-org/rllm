@@ -1,9 +1,8 @@
 """Pytest fixtures for API tests."""
 
 import pytest
-from fastapi.testclient import TestClient
-
 from database import reset_db
+from fastapi.testclient import TestClient
 
 
 @pytest.fixture(autouse=True)
@@ -18,5 +17,5 @@ def client():
     """Create test client for API."""
     # Import here to ensure database is reset first
     from main import app
-    
+
     return TestClient(app)
