@@ -9,7 +9,7 @@ Type alias for TokenOutput and TokenInput -- need to take different backends int
 # Tinker types. See https://github.com/thinking-machines-lab/tinker-cookbook/blob/main/tinker_cookbook/rl/data_processing.py
 # for the rationale behind "FlatObElem" and "FlatOb" types.
 try:
-    from tinker.types import ModelInput, ModelInputChunk, SampledSequence
+    from tinker.types import ModelInputChunk, SampledSequence
 
     TinkerFlatObElem: TypeAlias = ModelInputChunk | int
     TinkerTokenOutput: TypeAlias = SampledSequence
@@ -18,7 +18,7 @@ except ImportError:  # avoid cases when the tinker backend is not used
     TinkerTokenOutput: TypeAlias = Any
 
 TinkerFlatOb: TypeAlias = list[TinkerFlatObElem]
-TinkerTokenInput: TypeAlias = ModelInput | TinkerFlatOb
+TinkerTokenInput: TypeAlias = TinkerFlatOb
 
 # Verl types
 VerlTokenInput: TypeAlias = list[int]

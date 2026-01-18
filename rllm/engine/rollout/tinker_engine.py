@@ -17,8 +17,6 @@ https://github.com/thinking-machines-lab/tinker-cookbook/blob/main/tinker_cookbo
 
 def _flat_token_input_to_model_input(token_input: TinkerTokenInput) -> ModelInput:
     """Convert a flat token input to a ModelInput."""
-    if isinstance(token_input, ModelInput):
-        return token_input
     if not token_input:  # empty list
         return ModelInput(chunks=[])
 
@@ -43,8 +41,6 @@ def _flat_token_input_to_model_input(token_input: TinkerTokenInput) -> ModelInpu
 
 def _flat_token_input_length(token_input: TinkerTokenInput) -> int:
     """Get the length of a flat token input. This nicely handles both text and image inputs"""
-    if isinstance(token_input, ModelInput):
-        return token_input.length
     length = 0
     for elem in token_input:
         if isinstance(elem, int):
@@ -229,6 +225,7 @@ class TinkerEngine(RolloutEngine):
         # return sampled sequence from sample response
         return sample_response.sequences[0]
 
+    @override
     async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         """
         Generate model response for a given set of messages.
@@ -270,8 +267,8 @@ class TinkerEngine(RolloutEngine):
             # Use Tinker renderer
             # Convert standard image format to Tinker renderer format
             converted_messages = self._convert_images_to_content_list(messages)
-            # Build prompt using renderer (converts messages to Tinker prompt)
-            token_input = self.renderer.build_generation_prompt(converted_messages)  # type: ignore
+            # Build prompt using renderer
+            token_input: TinkerTokenInput = self.renderer.build_generation_prompt(converted_messages).chunks  # type: ignore
             prompt_length = _flat_token_input_length(token_input)
 
         sampled_sequence = await self.get_token_output_from_token_input(token_input=token_input, **kwargs.copy())
