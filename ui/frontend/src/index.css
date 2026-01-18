@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background-color: #f9fafb;
+  color: #111827;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+#root {
+  height: 100%;
+  width: 100%;
+  display: flex;
+  overflow: hidden;
+}
+
+/* Remove focus outline from chart elements */
+.recharts-wrapper,
+.recharts-wrapper *,
+.recharts-wrapper svg,
+.recharts-surface,
+.recharts-layer,
+svg[role="application"] {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.recharts-wrapper:focus,
+.recharts-wrapper:focus-visible,
+.recharts-wrapper *:focus,
+.recharts-wrapper *:focus-visible,
+.recharts-wrapper svg:focus,
+.recharts-surface:focus,
+.recharts-layer:focus,
+svg[role="application"]:focus,
+svg[role="application"]:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+  border: none !important;
+}
