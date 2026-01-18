@@ -6,28 +6,36 @@ from rllm.experimental.common import AlgorithmConfig, compute_advantage_from_tra
 from tinker.types.tensor_data import TensorData
 
 
-def _validate_and_build_datum(all_tokens: list[int], prompt_tokens: list[int], logprobs: list[float], advantage: float) -> tinker.Datum:
+def _validate_and_build_datum(all_tokens: list[int], prompt_token_length: int, logprobs: list[float], advantage: float | list[float]) -> tinker.Datum:
     """
     Helper function to validate and build a Tinker Datum using numpy.
     """
-    input_tokens = all_tokens[:-1]  # no need to convert to numpy array
-    target_tokens = np.array(all_tokens[1:], dtype=np.int32)
-    # Create `all_logprobs` by padding `logprobs` with `prompt_tokens` - 1 length zeros to the left
-    ob_len = len(prompt_tokens) - 1
-    all_logprobs = np.pad(logprobs, (ob_len, 0), mode="constant", constant_values=0.0)
-    # Create `all_advantages` by concatenating `ob_len` zeros with `advantage` for the response length
-    all_advantages = np.concatenate([np.zeros(ob_len, dtype=np.float32), np.full(len(input_tokens) - ob_len, advantage, dtype=np.float32)])
-    # Create `all_mask` by concatenating `ob_len` zeros and `len(input_tokens) - ob_len` ones
-    all_mask = np.concatenate([np.zeros(ob_len, dtype=np.float32), np.full(len(input_tokens) - ob_len, 1.0, dtype=np.float32)])
+    input_tokens, target_tokens = all_tokens[:-1], all_tokens[1:]
+    ob_len = prompt_token_length - 1
+    unmasked_len = len(input_tokens) - ob_len
 
-    # Validate that all arrays have the same length
-    assert len(input_tokens) == len(target_tokens) == len(all_logprobs) == len(all_advantages) == len(all_mask), f"Length mismatch: input={len(input_tokens)}, target={len(target_tokens)}, logprobs={len(all_logprobs)}, advantages={len(all_advantages)}, mask={len(all_mask)}"
+    assert unmasked_len == len(logprobs), f"length mismatch between unmasked_len and logprobs, got {unmasked_len}, {len(logprobs)}"
+
+    # Create `all_logprobs` by padding `logprobs` with `ob_len` (i.e. `prompt_tokens` - 1) zeros to the left
+    all_logprobs = np.pad(logprobs, (ob_len, 0), mode="constant", constant_values=0.0)
+
+    # Create `all_advantages` by concatenating `ob_len` zeros with `advantage` for the response length
+    if isinstance(advantage, float):  # Case 1: advantage is a float
+        fill_advantages = np.full(unmasked_len, advantage, dtype=np.float32)
+    else:  # Case 2: advantage is a list
+        fill_advantages = np.array(advantage, dtype=np.float32)
+    all_advantages = np.concatenate([np.zeros(ob_len, dtype=np.float32), fill_advantages])
+
+    assert len(all_advantages) == len(input_tokens), f"length mismatch between all_advantages and input_tokens, got {len(all_advantages)}, {len(input_tokens)}"
+
+    # Create `all_mask` by concatenating `ob_len` zeros and `unmasked_len` ones
+    all_mask = np.concatenate([np.zeros(ob_len, dtype=np.float32), np.full(unmasked_len, 1.0, dtype=np.float32)])
 
     # Create Datum
     return tinker.types.Datum(
         model_input=tinker.types.ModelInput.from_ints(tokens=input_tokens),
         loss_fn_inputs={
-            "target_tokens": TensorData.from_numpy(target_tokens),
+            "target_tokens": TensorData(data=target_tokens, dtype="int64"),
             "logprobs": TensorData.from_numpy(all_logprobs),
             "advantages": TensorData.from_numpy(all_advantages),
             "mask": TensorData.from_numpy(all_mask),
@@ -51,7 +59,7 @@ def build_datum_from_step(step: Step) -> tinker.Datum:
 
     # Combine prompt and response
     all_tokens = prompt_tokens + response_tokens
-    return _validate_and_build_datum(all_tokens, prompt_tokens, step.logprobs, step.advantage)
+    return _validate_and_build_datum(all_tokens, len(prompt_tokens), step.logprobs, step.advantage)
 
 
 def transform_trajectory_groups_to_datums(

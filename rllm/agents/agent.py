@@ -6,13 +6,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from rllm.engine.rollout import ModelOutput
+    from rllm.engine.rollout import ModelOutput, TokenInput, TokenOutput
+    from rllm.workflows.workflow import TerminationReason
 
 
 @dataclass
 class Step:
-    prompt_ids: list[int] = field(default_factory=list)
-    response_ids: list[int] = field(default_factory=list)
+    prompt_ids: TokenInput = field(default_factory=list)
+    response_ids: TokenOutput = field(default_factory=list)
     logprobs: list[float] = field(default_factory=list)
 
     chat_completions: list[dict[str, str]] = field(default_factory=list)
@@ -29,8 +30,9 @@ class Step:
     done: bool = False
     mc_return: float = 0.0
 
-    # field below are filled by the advantage computer
-    advantage: float | None = None
+    # field below are filled by the advantage computer. Note when advantage is a list, it is per-token advantages.
+    # TODO: potentially rename this as "advantages" so its clearer that it allows a generic list.
+    advantage: list[float] | float | None = None
 
     def __post_init__(self):
         if self.model_output is None:
@@ -46,6 +48,9 @@ class Step:
         # check that the token ids are filled
         assert len(self.prompt_ids) > 0, "prompt_ids is empty"
         assert len(self.response_ids) > 0, "response_ids is empty"
+
+        # check that the lengths would match up
+        assert len(self.prompt_ids) == len(self.response_ids) == len(self.logprobs), "length mismatch between prompt_ids, response_ids, logprobs, and advantage"
 
     def to_dict(self) -> dict:
         return {
@@ -209,7 +214,7 @@ class TrajectoryGroup:
     """
 
     trajectories: list[Trajectory]
-    group_id: str = None  # noqa: F821
+    group_id: str = ""
     metadata: list[dict] = field(default_factory=list)
 
 

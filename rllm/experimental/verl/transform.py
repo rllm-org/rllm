@@ -71,9 +71,11 @@ def _build_step_and_trajectory_rewards(step_rewards: list[float], trajectory_rew
     return step_rewards_batch, trajectory_rewards_batch
 
 
-def _build_per_step_advantages(response_mask: torch.Tensor, advantages: list[float]) -> torch.Tensor:
+def _build_per_step_advantages(response_mask: torch.Tensor, advantages: list[float | list[float]]) -> torch.Tensor:
     """Builds the per-step advantages for a batch of prompts/responses."""
     assert response_mask.shape[0] == len(advantages), "response_mask and advantages must have the same length"
+    if isinstance(advantages[0], list):  # TODO(listar2000): support list-based advantages
+        raise NotImplementedError("Verl per-step advantages are not supported for list-based advantages yet")
     advantages_tensor = torch.tensor(advantages, dtype=torch.float32)
     return advantages_tensor.unsqueeze(-1) * response_mask
 

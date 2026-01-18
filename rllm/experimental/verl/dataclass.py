@@ -18,7 +18,7 @@ class ProcessedStepData:
     step_reward: float
     step_id: str
     multi_modal_inputs: dict = field(default_factory=dict)  # Optional multimodal inputs (e.g., image_grid_thw for Qwen-VL)
-    advantage: float | None = None
+    advantage: float | list[float] | None = None
 
 
 @dataclass
@@ -56,7 +56,7 @@ class AccumulatedData:
     repeat_counts: list[int] = field(default_factory=list)  # number of batch rows per episode
 
     # Advantage data (not None if stepwise advantages are already computed)
-    advantages: list[float] = field(default_factory=list)
+    advantages: list[float | list[float]] = field(default_factory=list)
 
     def add_step(self, step_data: ProcessedStepData, trajectory_id: str, traj_reward: float, step_num: int, is_last: bool):
         """Add a single processed step to all accumulator lists.
