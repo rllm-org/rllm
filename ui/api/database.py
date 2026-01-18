@@ -1,6 +1,5 @@
 """SQLite database setup and connection management."""
 
-import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -29,7 +28,7 @@ def init_db():
     # Migration: Add source_metadata column if it doesn't exist
     cursor.execute("PRAGMA table_info(sessions)")
     columns = [col[1] for col in cursor.fetchall()]
-    if 'source_metadata' not in columns:
+    if "source_metadata" not in columns:
         cursor.execute("ALTER TABLE sessions ADD COLUMN source_metadata JSON")
 
     # Metrics table

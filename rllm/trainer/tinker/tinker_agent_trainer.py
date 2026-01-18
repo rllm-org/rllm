@@ -139,12 +139,12 @@ class TinkerAgentTrainer:
 
         # Extract source code for UI logger
         source_metadata = {}
-        if 'ui' in logger_backend:
+        if "ui" in logger_backend:
             source_metadata = extract_source_metadata(
-                workflow_class=getattr(self, 'workflow_class', None),
-                agent_class=getattr(self, 'agent_class', None),
-                workflow_args=getattr(self, 'workflow_args', None),
-                env_args=getattr(self, 'env_args', None),
+                workflow_class=getattr(self, "workflow_class", None),
+                agent_class=getattr(self, "agent_class", None),
+                workflow_args=getattr(self, "workflow_args", None),
+                env_args=getattr(self, "env_args", None),
             )
 
         tracking_logger = Tracking(

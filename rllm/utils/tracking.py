@@ -261,12 +261,7 @@ class UILogger:
             # Create session with source metadata
             response = self.client.post(
                 "/api/sessions",
-                json={
-                    "project": project_name,
-                    "experiment": experiment_name,
-                    "config": config,
-                    "source_metadata": source_metadata or {}
-                },
+                json={"project": project_name, "experiment": experiment_name, "config": config, "source_metadata": source_metadata or {}},
             )
             self.session_id = response.json()["id"]
             self.logger.info(f"UILogger initialized with session_id: {self.session_id}")
@@ -310,7 +305,7 @@ class UILogger:
                         "is_correct": bool(episode.is_correct),
                         "reward": float(episode.trajectories[0].reward) if episode.trajectories else None,
                         "trajectories": [self._serialize_trajectory(t) for t in episode.trajectories],
-                        "info": episode.info if hasattr(episode, 'info') and episode.info else {},
+                        "info": episode.info if hasattr(episode, "info") and episode.info else {},
                     }
                     # Serialize to handle numpy types
                     episode_json = json.loads(json.dumps(episode_data, default=self._json_serializer))
@@ -319,6 +314,7 @@ class UILogger:
             except Exception as e:
                 self.logger.warning(f"Failed to send episodes to UI: {e}")
                 import traceback
+
                 self.logger.warning(f"Traceback: {traceback.format_exc()}")
 
     def _json_serializer(self, obj):
@@ -683,5 +679,3 @@ class ValidationGenerationsLogger:
         self.writer.add_text("val/generations", text_content, step)
         # Flush to ensure data is written
         self.writer.flush()
-
-

@@ -1,11 +1,9 @@
 """Episodes router - handles episode/trajectory data."""
 
 import json
-from datetime import datetime
-
-from fastapi import APIRouter, HTTPException, Query
 
 from database import get_db
+from fastapi import APIRouter, HTTPException, Query
 from models import EpisodeCreate, EpisodeResponse
 
 router = APIRouter(prefix="/api", tags=["episodes"])
@@ -23,10 +21,7 @@ def create_episode(episode: EpisodeCreate):
             raise HTTPException(status_code=404, detail="Session not found")
 
         # Serialize trajectories and create full data object
-        data = {
-            "trajectories": [traj.model_dump() for traj in episode.trajectories],
-            "info": episode.info if hasattr(episode, 'info') else {}
-        }
+        data = {"trajectories": [traj.model_dump() for traj in episode.trajectories], "info": episode.info if hasattr(episode, "info") else {}}
 
         # Insert episode
         cursor.execute(
