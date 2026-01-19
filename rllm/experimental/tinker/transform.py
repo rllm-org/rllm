@@ -9,7 +9,7 @@ from tinker_cookbook.supervised.common import create_rightshifted_model_input_an
 
 import tinker
 from rllm.agents.agent import Trajectory, TrajectoryGroup
-from rllm.engine.rollout.rollout_engine import TinkerTokenInput, TinkerTokenOutput
+from rllm.engine.rollout.rollout_engine import TinkerTokenInput
 from rllm.engine.rollout.tinker_engine import _flat_token_input_length, _flat_token_input_to_model_input
 from rllm.experimental.common import AlgorithmConfig, compute_advantage_from_trajectory_groups
 from tinker.types.tensor_data import TensorData
@@ -90,16 +90,17 @@ def trajectory_to_data(traj: Trajectory) -> list[tinker.Datum]:
     for step in traj.steps:
         token_input = cast(TinkerTokenInput, step.prompt_ids)
         token_input_flat = _flatten_token_input(token_input)
-        token_output = cast(TinkerTokenOutput, step.response_ids)
-        assert token_output.logprobs is not None, "token_output.logprobs is None. Cannot build Tinker Datum for training."
+
+        output_token_ids, output_logprobs = step.response_ids, step.logprobs
+        assert len(output_logprobs) > 0, "output_logprobs is empty. Cannot build Tinker Datum for training."
         assert step.advantage is not None, "step.advantage is None. This indicates that advantage computation has not been performed yet."
 
         # build advantage list -- match length of token_output.tokens
         if isinstance(step.advantage, list):
-            assert len(step.advantage) == len(token_output.tokens), "length mismatch between step.advantage and token_output.tokens"
+            assert len(step.advantage) == len(output_token_ids), "length mismatch between step.advantage and token_output.tokens"
             advantages = step.advantage
         else:  # float
-            advantages = [step.advantage] * len(token_output.tokens)
+            advantages = [step.advantage] * len(output_token_ids)
 
         if len(SequenceAccumulator.full_sequence) == 0:
             delta_token_input_flat = token_input_flat
@@ -112,10 +113,10 @@ def trajectory_to_data(traj: Trajectory) -> list[tinker.Datum]:
 
         delta_token_input_length = _flat_token_input_length(delta_token_input_flat)
         SequenceAccumulator.full_sequence.extend(delta_token_input_flat)
-        SequenceAccumulator.full_sequence.extend(token_output.tokens)
-        SequenceAccumulator.sampled_logprobs.extend([0.0] * delta_token_input_length + token_output.logprobs)
+        SequenceAccumulator.full_sequence.extend(output_token_ids)
+        SequenceAccumulator.sampled_logprobs.extend([0.0] * delta_token_input_length + output_logprobs)
         SequenceAccumulator.advantages.extend([0] * delta_token_input_length + advantages)
-        SequenceAccumulator.mask.extend([0.0] * delta_token_input_length + [1.0] * len(token_output.tokens))
+        SequenceAccumulator.mask.extend([0.0] * delta_token_input_length + [1.0] * len(output_token_ids))
 
     if SequenceAccumulator.full_sequence:
         data.append(make_datum_from_state())

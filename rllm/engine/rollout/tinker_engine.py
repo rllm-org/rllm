@@ -272,8 +272,7 @@ class TinkerEngine(RolloutEngine):
             prompt_length = _flat_token_input_length(token_input)
 
         sampled_sequence = await self.get_token_output_from_token_input(token_input=token_input, **kwargs.copy())
-        response_tokens = sampled_sequence.tokens
-        logprobs = sampled_sequence.logprobs
+        response_tokens, logprobs = sampled_sequence.tokens, sampled_sequence.logprobs
 
         # Parse response using renderer
         response_dict, _ = self.renderer.parse_response(response_tokens)
@@ -291,10 +290,8 @@ class TinkerEngine(RolloutEngine):
         # Decode full text
         completion_text = self.tokenizer.decode(response_tokens, skip_special_tokens=True)
 
-        # Determine finish reason
-        requested_max_tokens = kwargs.get("max_tokens", kwargs.get("max_new_tokens", self.max_response_length))
-        max_tokens = self._prepare_max_tokens(requested_max_tokens, prompt_length) if prompt_length > 0 else requested_max_tokens
-        finish_reason = "length" if len(response_tokens) >= max_tokens else "stop"
+        # Determine finish reason from the sampled sequence
+        finish_reason = sampled_sequence.stop_reason
 
         return ModelOutput(
             text=completion_text,

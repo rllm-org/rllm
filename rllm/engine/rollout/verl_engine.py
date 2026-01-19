@@ -47,6 +47,10 @@ class VerlEngine(RolloutEngine):
 
         self.validate = False  # flag enabled/disabled by AgentWorkflowEngine.execute_tasks_verl
 
+    @property
+    def supports_token_in_token_out(self) -> bool:
+        return True
+
     @override
     async def get_token_output_from_token_input(self, token_input: TokenInput, **kwargs) -> VerlTokenOutput:
         token_input = cast(list[int], token_input)

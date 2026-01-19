@@ -41,7 +41,7 @@ class ModelOutput:
     reasoning: str | None = None
     tool_calls: list[ToolCall] | None = None
     prompt_ids: TokenInput | None = None
-    completion_ids: TokenOutput | None = None
+    completion_ids: list[int] | None = None
     multi_modal_inputs: dict[str, list] | None = None
     logprobs: list[float] | None = None  # completion logprobs
     prompt_logprobs: list[float] | None = None  # prompt logprobs aligned to prompt_ids

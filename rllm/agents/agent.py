@@ -6,14 +6,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from rllm.engine.rollout import ModelOutput, TokenInput, TokenOutput
+    from rllm.engine.rollout import ModelOutput, TokenInput
     from rllm.workflows.workflow import TerminationReason
 
 
 @dataclass
 class Step:
     prompt_ids: TokenInput = field(default_factory=list)
-    response_ids: TokenOutput = field(default_factory=list)
+    response_ids: list[int] = field(default_factory=list)
     logprobs: list[float] = field(default_factory=list)
 
     chat_completions: list[dict[str, str]] = field(default_factory=list)
@@ -50,7 +50,8 @@ class Step:
         assert len(self.response_ids) > 0, "response_ids is empty"
 
         # check that the lengths would match up
-        assert len(self.prompt_ids) == len(self.response_ids) == len(self.logprobs), "length mismatch between prompt_ids, response_ids, logprobs, and advantage"
+        if len(self.logprobs) > 0:
+            assert len(self.response_ids) == len(self.logprobs), f"length mismatch between response_ids and logprobs, got {len(self.response_ids)}, {len(self.logprobs)}"
 
     def to_dict(self) -> dict:
         return {

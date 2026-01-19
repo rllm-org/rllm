@@ -1,11 +1,13 @@
 # Avoid importing concrete engines at module import time to prevent circular imports
-from .rollout_engine import ModelOutput, RolloutEngine
+from .rollout_engine import ModelOutput, RolloutEngine, TokenInput, TokenOutput
 
 __all__ = [
     "ModelOutput",
     "RolloutEngine",
     "OpenAIEngine",
     "VerlEngine",
+    "TokenInput",
+    "TokenOutput",
 ]
 
 
