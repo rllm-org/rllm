@@ -5,7 +5,7 @@ python -m examples.solver_judge_distill.train_solver_judge_distill_tinker \
     model.lora_rank=32 \
     training.group_size=1 \
     training.val_group_size=4 \
-    training.learning_rate=5e-4 \
+    training.learning_rate=4e-5 \
     sampling.temperature=1.0 \
     sampling.top_p=1.0 \
     algorithm.adv_estimator=distill \
