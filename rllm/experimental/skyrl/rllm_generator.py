@@ -10,12 +10,11 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
+from skyrl_train.generators.base import GeneratorInput, GeneratorInterface, GeneratorOutput
 
 if TYPE_CHECKING:
     from rllm.agents.agent import Episode
     from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
-    from rllm.workflows.workflow import Workflow
 
 logger = logging.getLogger(__name__)
 
@@ -49,27 +48,26 @@ class RLLMGenerator(GeneratorInterface):
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         """Generate trajectories using rLLM workflows via UnifiedWorkflowEngine.
-        
+
         Args:
             input_batch: SkyRL's GeneratorInput with prompts and environment info
 
         Returns:
             GeneratorOutput: Tensor data ready for SkyRL training
-        
+
         Raises:
             RuntimeError: If workflow_engine is not set.
         """
         if self.workflow_engine is None:
             raise RuntimeError("workflow_engine must be set before calling generate(). Set it via the backend or directly.")
-        from rllm.agents.agent import Episode, Trajectory, Step
-        from rllm.engine.rollout import ModelOutput
         from skyrl_train.generators.utils import get_rollout_metrics
+
+        from rllm.engine.rollout import ModelOutput
 
         # Extract data from GeneratorInput
         prompts = input_batch["prompts"]
         env_extras_list = input_batch.get("env_extras", [])
         trajectory_ids = input_batch.get("trajectory_ids", [])
-        batch_metadata = input_batch.get("batch_metadata")
 
         # Convert GeneratorInput to tasks for UnifiedWorkflowEngine
         # Reconstruct original rLLM format from prompts + env_extras
@@ -78,14 +76,14 @@ class RLLMGenerator(GeneratorInterface):
         for i, prompt in enumerate(prompts):
             # Get env_extras for this item (if available)
             env_extras = env_extras_list[i] if i < len(env_extras_list) else {}
-            
+
             # Reconstruct original rLLM format task
             task = {}
-            
+
             # Check if we have original prompt info stored in env_extras
             original_prompt_key = env_extras.get("_rllm_original_prompt_key")
             original_prompt_value = env_extras.get("_rllm_original_prompt_value")
-            
+
             if original_prompt_key and original_prompt_value is not None:
                 # Restore original prompt as string in original key
                 task[original_prompt_key] = original_prompt_value
@@ -97,7 +95,7 @@ class RLLMGenerator(GeneratorInterface):
             else:
                 # Fallback: use prompt as-is
                 task["prompt"] = prompt
-            
+
             # Copy all other fields from env_extras (excluding internal metadata)
             # Also exclude "messages" to avoid conflicts - we reconstruct from the original prompt key
             for key, value in env_extras.items():
@@ -135,15 +133,15 @@ class RLLMGenerator(GeneratorInterface):
         rollout_logprobs: list[list[float]] | None = []
 
         # Process each prompt/task and only include those with valid responses
-        for i, (task, task_id) in enumerate(zip(tasks, task_ids)):
+        for i, (task, task_id) in enumerate(zip(tasks, task_ids, strict=False)):
             # Find corresponding episode (may not exist if workflow failed)
             episode = episode_map.get(task_id)
-            
+
             # Skip prompts that don't have valid episodes/responses
             if episode is None:
                 logger.warning(f"Episode {task_id} not found (workflow may have failed), skipping prompt")
                 continue
-                
+
             if not episode.trajectories:
                 logger.warning(f"Episode {task_id} has no trajectories, skipping prompt")
                 continue
@@ -152,7 +150,7 @@ class RLLMGenerator(GeneratorInterface):
             # Each trajectory becomes a separate response, but they share the same prompt
             # This matches the pattern used in transform.py where all trajectories are processed
             valid_trajectories = [t for t in episode.trajectories if t.steps and len(t.steps) > 0]
-            
+
             if not valid_trajectories:
                 logger.warning(f"Episode {task_id} has no valid trajectories with steps, skipping prompt")
                 continue
@@ -163,8 +161,6 @@ class RLLMGenerator(GeneratorInterface):
             if not isinstance(first_step.model_output, ModelOutput):
                 logger.warning(f"First step in episode {task_id} has no model_output, skipping prompt")
                 continue
-
-            base_prompt_tokens = first_step.model_output.prompt_ids
 
             # Process each trajectory as a separate response (one response per trajectory)
             for trajectory in valid_trajectories:
@@ -204,9 +200,7 @@ class RLLMGenerator(GeneratorInterface):
                 loss_masks.append(loss_mask_list)
 
                 # Reward: use trajectory reward if available, otherwise last step reward
-                reward = trajectory.reward if trajectory.reward is not None else (
-                    trajectory.steps[-1].reward if trajectory.steps else 0.0
-                )
+                reward = trajectory.reward if trajectory.reward is not None else (trajectory.steps[-1].reward if trajectory.steps else 0.0)
                 rewards.append(reward)
 
                 # Stop reason: use termination reason from episode
@@ -237,4 +231,3 @@ class RLLMGenerator(GeneratorInterface):
         }
 
         return generator_output
-

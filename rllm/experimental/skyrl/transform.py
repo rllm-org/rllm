@@ -6,8 +6,6 @@ Follows the same pattern as verl/transform.py.
 
 from __future__ import annotations
 
-from transformers import PreTrainedTokenizer
-
 from rllm.agents.agent import TrajectoryGroup
 from rllm.engine.rollout import ModelOutput
 
@@ -32,12 +30,11 @@ def transform_trajectory_groups_to_training_input(
     Returns:
         TrainingInputBatch: The TrainingInputBatch built from the trajectory groups.
     """
-    from skyrl_train.training_batch import TrainingInputBatch
     from skyrl_train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
+    from skyrl_train.training_batch import TrainingInputBatch
 
     tokenizer = rollout_engine.tokenizer
     assert tokenizer is not None and hasattr(tokenizer, "pad_token_id"), "Tokenizer must have a pad token ID"
-    pad_token_id = tokenizer.pad_token_id
 
     # Extract data from trajectory groups
     prompt_token_ids: list[list[int]] = []
@@ -49,19 +46,19 @@ def transform_trajectory_groups_to_training_input(
 
     for trajectory_group in trajectory_groups:
         task_id = trajectory_group.group_id.split(":")[0]
-        
+
         for trajectory in trajectory_group.trajectories:
             if len(trajectory.steps) == 0:
                 continue
-            
+
             # Extract prompt tokens from the first step
             first_step = trajectory.steps[0]
             if not isinstance(first_step.model_output, ModelOutput):
                 raise TypeError(f"Step must have a valid model output, but got {type(first_step.model_output)}")
-            
+
             prompt_tokens = first_step.model_output.prompt_ids
             prompt_token_ids.append(prompt_tokens)
-            
+
             # Store uid for this trajectory (used by SkyRL's compute_advantages_and_returns)
             uids.append(task_id)
 
@@ -74,7 +71,7 @@ def transform_trajectory_groups_to_training_input(
             for step in trajectory.steps:
                 if not isinstance(step.model_output, ModelOutput):
                     raise TypeError(f"Step must have a valid model output, but got {type(step.model_output)}")
-                
+
                 step_response = step.model_output.completion_ids
                 response_tokens_list.extend(step_response)
 
@@ -141,4 +138,3 @@ def transform_trajectory_groups_to_training_input(
     }
 
     return training_input
-

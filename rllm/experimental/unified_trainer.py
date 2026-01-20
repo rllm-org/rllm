@@ -279,7 +279,7 @@ class UnifiedTrainer:
                 await self._train_batch_async(batch, trainer_state)
 
                 await self.backend.on_batch_end(trainer_state)
-                
+
                 self.logger.log(data=trainer_state.metrics, step=trainer_state.global_step)
 
                 # if the config specifies the `total_batches` parameter > 0, then we check if we should stop

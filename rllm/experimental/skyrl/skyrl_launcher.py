@@ -9,32 +9,30 @@ Follows the BasePPOExp pattern from skyrl_train.entrypoints.main_base.
 
 import os
 import socket
+import tempfile
 from pprint import pprint
 
 import ray
+from loguru import logger
 from omegaconf import DictConfig, OmegaConf
-from ray.util.placement_group import placement_group, PlacementGroup
-from transformers import AutoTokenizer
-
-import tempfile
-import os
-
-from rllm.data import Dataset
-from rllm.experimental.unified_trainer import TrainerLauncher, UnifiedTrainer
-from rllm.experimental.skyrl.skyrl_backend import SkyRLBackend
-from rllm.workflows.workflow import Workflow
-
-# Import SkyRL components
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.generators.base import GeneratorInterface
-from skyrl_train.utils.utils import get_ray_pg_ready_with_timeout, initialize_ray
-from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
-from skyrl_train.utils.tracking import Tracking
+from ray.util.placement_group import PlacementGroup, placement_group
 from skyrl_train.entrypoints.main_base import (
     create_ray_wrapped_inference_engines_from_config,
     create_remote_inference_engines_from_config,
 )
-from loguru import logger
+from skyrl_train.generators.base import GeneratorInterface
+
+# Import SkyRL components
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl_train.utils.tracking import Tracking
+from skyrl_train.utils.utils import get_ray_pg_ready_with_timeout, initialize_ray
+from transformers import AutoTokenizer
+
+from rllm.data import Dataset
+from rllm.experimental.skyrl.skyrl_backend import SkyRLBackend
+from rllm.experimental.unified_trainer import TrainerLauncher, UnifiedTrainer
+from rllm.workflows.workflow import Workflow
 
 
 class SkyRLExp:
@@ -99,11 +97,7 @@ class SkyRLExp:
         """
         if self.cfg.trainer.placement.get("colocate_all", False):
             pg = placement_group(
-                [{"GPU": 1, "CPU": 1}]
-                * self.cfg.generator.num_inference_engines
-                * self.cfg.generator.inference_engine_tensor_parallel_size
-                * self.cfg.generator.inference_engine_pipeline_parallel_size
-                * self.cfg.generator.inference_engine_data_parallel_size,
+                [{"GPU": 1, "CPU": 1}] * self.cfg.generator.num_inference_engines * self.cfg.generator.inference_engine_tensor_parallel_size * self.cfg.generator.inference_engine_pipeline_parallel_size * self.cfg.generator.inference_engine_data_parallel_size,
                 strategy="PACK",
             )
             get_ray_pg_ready_with_timeout(pg, timeout=timeout)
@@ -129,32 +123,32 @@ class SkyRLExp:
 
     def _convert_rllm_dataset_to_skyrl_file(self, rllm_dataset: Dataset | None) -> str | None:
         """Convert rLLM Dataset to SkyRL format and save to file.
-        
+
         Following Verl pattern: save to file and return path.
-        
+
         Note: PromptDataset will load the data into memory (keep_in_memory=True) when created,
         so the file is only needed during PromptDataset initialization. The dataloader state
         checkpointing is separate and handled by StatefulDataLoader.
-        
+
         Args:
             rllm_dataset: rLLM Dataset object or None
-            
+
         Returns:
             File path to saved dataset or None
         """
         if rllm_dataset is None:
             return None
-            
+
         import pandas as pd
-        
+
         # Convert rLLM Dataset data to format expected by PromptDataset
         # PromptDataset expects: prompt (chat format), env_class, and other fields
         data = rllm_dataset.get_data()
-        
+
         # Save to temporary parquet file
-        temp_fd, temp_path = tempfile.mkstemp(suffix='.parquet')
+        temp_fd, temp_path = tempfile.mkstemp(suffix=".parquet")
         os.close(temp_fd)  # Close file descriptor, we'll use pandas to write
-        
+
         try:
             # Convert data to DataFrame and save
             # Ensure data has required fields for PromptDataset
@@ -169,7 +163,7 @@ class SkyRLExp:
                     prompt = [{"role": "user", "content": item["prompt"]}]
                 else:
                     prompt = item["prompt"]
-                
+
                 df_item = {
                     "prompt": prompt,
                     "env_class": item.get("env_class", self.cfg.environment.get("env_class", "BaseTextEnv")),
@@ -178,12 +172,12 @@ class SkyRLExp:
                 for key, value in item.items():
                     if key not in ["prompt", "env_class"]:
                         df_item[key] = value
-                
+
                 df_data.append(df_item)
-            
+
             df = pd.DataFrame(df_data)
             df.to_parquet(temp_path)
-            
+
             return temp_path
         except Exception as e:
             # Clean up temp file on error
@@ -216,10 +210,10 @@ class SkyRLExp:
         # Convert rLLM Datasets to SkyRL format and build PromptDatasets
         # SkyRL's RayPPOTrainer expects PromptDataset objects (unlike Verl which reads from config)
         from skyrl_train.dataset.dataset import PromptDataset
-        
+
         train_prompt_dataset = None
         eval_prompt_dataset = None
-        
+
         if self.train_dataset is not None:
             train_file_path = self._convert_rllm_dataset_to_skyrl_file(self.train_dataset)
             if train_file_path is not None:
@@ -229,7 +223,7 @@ class SkyRLExp:
                     max_prompt_length=self.cfg.data.max_prompt_length,
                     num_workers=8,
                 )
-        
+
         if self.val_dataset is not None:
             val_file_path = self._convert_rllm_dataset_to_skyrl_file(self.val_dataset)
             if val_file_path is not None:
@@ -281,17 +275,17 @@ class SkyRLExp:
         # This must be called after backend initialization
         if self.cfg.trainer.strategy == "deepspeed":
             from skyrl_train.workers.deepspeed.deepspeed_worker import (
-                PolicyWorker,
                 CriticWorker,
+                PolicyWorker,
                 RefWorker,
             )
         elif self.cfg.trainer.strategy in ("fsdp", "fsdp2"):
-            from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, CriticWorker, RefWorker
+            from skyrl_train.workers.fsdp.fsdp_worker import CriticWorker, PolicyWorker, RefWorker
         elif self.cfg.trainer.strategy == "megatron":
-            from skyrl_train.workers.megatron.megatron_worker import PolicyWorker, CriticWorker, RefWorker
+            from skyrl_train.workers.megatron.megatron_worker import CriticWorker, PolicyWorker, RefWorker
         else:
             raise ValueError(f"Unknown strategy type: {self.cfg.trainer.strategy}")
-        
+
         trainer.backend.build_models(PolicyWorker, CriticWorker, RefWorker)
 
         return trainer
@@ -354,8 +348,6 @@ class SkyRLTrainerLauncher(TrainerLauncher):
         """
         super().__init__(config, workflow_class, train_dataset, val_dataset, workflow_args, **kwargs)
 
-
-
     def train(self):
         """Launch the training process."""
         # Initialize Ray if not already initialized
@@ -373,6 +365,7 @@ class SkyRLTrainerLauncher(TrainerLauncher):
                     pass  # Ignore errors during shutdown
                 # Wait a moment for cleanup
                 import time
+
                 time.sleep(1)
                 # Retry initialization
                 initialize_ray(self.config)
@@ -388,4 +381,3 @@ class SkyRLTrainerLauncher(TrainerLauncher):
                 **self.kwargs,
             )
         )
-
