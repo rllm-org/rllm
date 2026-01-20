@@ -11,7 +11,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 # Use both GPUs (0 and 1)
-export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_VISIBLE_DEVICES=4,5
 
 python3 -m rllm.experimental.test.test_skyrl_simple_math \
     rllm/backend=skyrl \

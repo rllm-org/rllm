@@ -91,6 +91,11 @@ tinker = [
     "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook ; python_version >= '3.11'",
 ]
 
+skyrl = [
+    "skyrl-gym==0.1.1",
+    "skyrl-train==0.3.0",
+]
+
 opentelemetry = [
     "opentelemetry-sdk",
 ]
