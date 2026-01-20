@@ -22,41 +22,34 @@ dependencies = [
     "torch>=2.6",
     "transformers>=4.5",
     "sentence-transformers",
-
     # Data processing
     "datasets",
     "pandas",
     "polars",
     "pillow",
-
     # Cloud and infrastructure
     "google-cloud-aiplatform",
     "vertexai",
     "docker",
     "kubernetes",
     # "ray",
-
     # Web and automation
     "gradio",
     "selenium",
     "browsergym",
     "firecrawl",
-
     # Math and science
     "numpy",
     "sympy",
     "pylatexenc",
     "antlr4-python3-runtime==4.9.3",
-
     # Code evaluation
     "swebench",
     "e2b_code_interpreter",
     "eval-protocol",
-
     # Tools
     "mcp",
     "camel-ai",
-
     # Utilities
     "hydra-core",
     "openai",
@@ -75,19 +68,18 @@ dependencies = [
     "PyYAML",
     "pydantic",
     "wrapt",
-
     # Development and testing
     "pytest",
     "pre-commit",
     "ruff",
     "mypy",
-
     # Documentation
     "mkdocs>=1.5.0",
     "mkdocs-material>=9.0.0",
     "mkdocstrings[python]>=0.24.0",
     "mkdocs-autorefs>=0.5.0",
     "pymdown-extensions>=10.0.0",
+    "arl-env>=0.1.3",
 ]
 
 [project.optional-dependencies]
