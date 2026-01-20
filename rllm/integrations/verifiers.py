@@ -28,9 +28,7 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import time
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -43,6 +41,7 @@ from rllm.sdk.store.sqlite_store import SqliteTraceStore
 if TYPE_CHECKING:
     from verifiers import Environment
     from verifiers.types import State
+    from verl import DataProto
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +106,7 @@ class VerifiersIntegration:
 
     async def generate(
         self,
-        env: "Environment",
+        env: Environment,
         n_rollouts: int = 8,
         sampling_args: dict | None = None,
         max_concurrent: int = 64,
@@ -132,9 +131,7 @@ class VerifiersIntegration:
         if dataset is None:
             raise ValueError("Environment has no dataset")
 
-        logger.info(
-            f"Generating rollouts: {len(dataset)} examples × {n_rollouts} rollouts"
-        )
+        logger.info(f"Generating rollouts: {len(dataset)} examples × {n_rollouts} rollouts")
 
         # Use Verifiers' generate() - it handles everything
         # generate() returns list of States with rewards already computed
@@ -153,7 +150,7 @@ class VerifiersIntegration:
 
         return episodes
 
-    def _states_to_episodes(self, states: list["State"]) -> list[Episode]:
+    def _states_to_episodes(self, states: list[State]) -> list[Episode]:
         """Convert Verifiers States to rLLM Episodes.
 
         Each State contains:
@@ -194,7 +191,7 @@ class VerifiersIntegration:
 
         return episodes
 
-    def _trajectory_to_steps(self, state: "State") -> list[Step]:
+    def _trajectory_to_steps(self, state: State) -> list[Step]:
         """Convert Verifiers trajectory to rLLM Steps."""
         steps = []
         trajectory = state.get("trajectory", [])
@@ -216,16 +213,8 @@ class VerifiersIntegration:
 
                 if prompt_ids and completion_ids:
                     content = ""
-                    if (
-                        completion
-                        and isinstance(completion, list)
-                        and len(completion) > 0
-                    ):
-                        content = (
-                            completion[-1].get("content", "")
-                            if isinstance(completion[-1], dict)
-                            else str(completion[-1])
-                        )
+                    if completion and isinstance(completion, list) and len(completion) > 0:
+                        content = completion[-1].get("content", "") if isinstance(completion[-1], dict) else str(completion[-1])
 
                     model_output = ModelOutput(
                         text="",
@@ -259,7 +248,7 @@ def transform_episodes_for_verl(
     tokenizer: Any,
     max_prompt_length: int = 2048,
     max_response_length: int = 2048,
-) -> "DataProto":
+) -> DataProto:
     """Transform Episodes to VERL DataProto format.
 
     Args:
@@ -298,21 +287,15 @@ def transform_episodes_for_verl(
                 if step.model_output is None:
                     continue
 
-                prompt_ids = torch.tensor(
-                    step.model_output.prompt_ids, dtype=torch.long
-                )
+                prompt_ids = torch.tensor(step.model_output.prompt_ids, dtype=torch.long)
 
                 # Skip overlong prompts
                 if len(prompt_ids) > max_prompt_length:
-                    logger.warning(
-                        f"Skipping step: prompt {len(prompt_ids)} > {max_prompt_length}"
-                    )
+                    logger.warning(f"Skipping step: prompt {len(prompt_ids)} > {max_prompt_length}")
                     continue
 
                 prompts.append(prompt_ids)
-                response_ids = torch.tensor(
-                    step.model_output.completion_ids, dtype=torch.long
-                )
+                response_ids = torch.tensor(step.model_output.completion_ids, dtype=torch.long)
                 responses.append(response_ids)
                 traj_mask.append(torch.ones_like(response_ids, dtype=torch.long))
 
@@ -320,9 +303,7 @@ def transform_episodes_for_verl(
                 if logprobs:
                     rollout_logprobs.append(torch.tensor(logprobs, dtype=torch.float32))
                 else:
-                    rollout_logprobs.append(
-                        torch.zeros(len(response_ids), dtype=torch.float32)
-                    )
+                    rollout_logprobs.append(torch.zeros(len(response_ids), dtype=torch.float32))
 
                 # Reward on last step only
                 is_last = step_idx == len(trajectory.steps) - 1
@@ -339,20 +320,12 @@ def transform_episodes_for_verl(
     # Pad sequences
     pad_id = getattr(tokenizer, "pad_token_id", 0) or 0
 
-    input_ids = pad_sequence_to_length(
-        prompts, max_prompt_length, pad_id, left_pad=True
-    )
+    input_ids = pad_sequence_to_length(prompts, max_prompt_length, pad_id, left_pad=True)
     attention_mask = (input_ids != pad_id).long()
     position_ids = torch.clamp(attention_mask.cumsum(dim=-1) - 1, min=0)
-    response_tensors = pad_sequence_to_length(
-        responses, max_response_length, pad_id, left_pad=False
-    )
-    response_mask = pad_sequence_to_length(
-        traj_mask, max_response_length, 0, left_pad=False
-    )
-    logprobs_tensor = pad_sequence_to_length(
-        rollout_logprobs, max_response_length, 0.0, left_pad=False
-    )
+    response_tensors = pad_sequence_to_length(responses, max_response_length, pad_id, left_pad=False)
+    response_mask = pad_sequence_to_length(traj_mask, max_response_length, 0, left_pad=False)
+    logprobs_tensor = pad_sequence_to_length(rollout_logprobs, max_response_length, 0.0, left_pad=False)
 
     batch = {
         "input_ids": input_ids,
