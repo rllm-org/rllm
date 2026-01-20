@@ -22,28 +22,22 @@ dependencies = [
     "torch",
     "torchvision",
     "transformers>=4.55.0",
-
     # Data processing
     "datasets>=2.20.0",
     "pandas",
     "polars",
     "pillow",
-
     # Infrastructure
     "ray",
-
     # Math and science
     "numpy",
     "sympy",
     "pylatexenc",
     "antlr4-python3-runtime==4.9.3",
-
     # Tools
     "mcp",
-
     # Integration with Eval Protocol
     "eval-protocol",
-
     # Utilities
     "hydra-core",
     "openai",
@@ -89,6 +83,10 @@ sdk = [
 tinker = [
     "tinker ; python_version >= '3.11'",
     "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook ; python_version >= '3.11'",
+]
+
+verifiers = [
+    "verifiers==0.1.9"
 ]
 
 opentelemetry = [
@@ -163,7 +161,7 @@ ignore = [
     # `.log()` statement uses f-string
     "G004",
     # equality check using x == True
-    "E712", 
+    "E712",
 ]
 
 [tool.ruff.lint.per-file-ignores]

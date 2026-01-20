@@ -112,6 +112,7 @@ nav:
       - Solver-Judge Workflow with rLLM SDK: examples/sdk_solver_judge.md
       - LangGraph RAG Agent with rLLM SDK: examples/sdk_langgraph_rag.md
       - RL Training with Tinker: examples/tinker_rl.md
+      - Verifiers (Prime Intellect Hub): examples/verifiers.md
       - LoRA Training in rLLM (with verl): examples/gsm8k_lora.md
       - Solver-Judge Workflow: examples/solver_judge.md
       - Vision-Language Models (VLM): examples/vlm.md
