@@ -116,7 +116,17 @@ class RLLMGenerator(GeneratorInterface):
         # Execute workflows using UnifiedWorkflowEngine
         episodes: list[Episode] = await self.workflow_engine.execute_tasks(tasks, task_ids)
 
+        # Create a mapping from task_id to episode for easier lookup
+        # Episodes have IDs like "task_id:rollout_idx", so we need to match by task_id
+        episode_map: dict[str, Episode] = {}
+        for episode in episodes:
+            task_id = episode.id.split(":")[0]
+            # If multiple episodes for same task_id, keep the first one (or could use last)
+            if task_id not in episode_map:
+                episode_map[task_id] = episode
+
         # Convert Episodes to GeneratorOutput
+        # Filter out prompts that don't have valid responses to maintain 1:1 correspondence
         prompt_token_ids: list[list[int]] = []
         response_ids: list[list[int]] = []
         rewards: list[float] = []
@@ -124,27 +134,50 @@ class RLLMGenerator(GeneratorInterface):
         stop_reasons: list[str] = []
         rollout_logprobs: list[list[float]] | None = []
 
-        for episode in episodes:
+        # Process each prompt/task and only include those with valid responses
+        for i, (task, task_id) in enumerate(zip(tasks, task_ids)):
+            # Find corresponding episode (may not exist if workflow failed)
+            episode = episode_map.get(task_id)
+            
+            # Skip prompts that don't have valid episodes/responses
+            if episode is None:
+                logger.warning(f"Episode {task_id} not found (workflow may have failed), skipping prompt")
+                continue
+                
             if not episode.trajectories:
-                logger.warning(f"Episode {episode.id} has no trajectories, skipping")
+                logger.warning(f"Episode {task_id} has no trajectories, skipping prompt")
                 continue
 
-            # For each trajectory in the episode
-            for trajectory in episode.trajectories:
-                if not trajectory.steps:
-                    logger.warning(f"Trajectory {trajectory.uid} has no steps, skipping")
-                    continue
+            # Process ALL trajectories in the episode (not just the first one)
+            # Each trajectory becomes a separate response, but they share the same prompt
+            # This matches the pattern used in transform.py where all trajectories are processed
+            valid_trajectories = [t for t in episode.trajectories if t.steps and len(t.steps) > 0]
+            
+            if not valid_trajectories:
+                logger.warning(f"Episode {task_id} has no valid trajectories with steps, skipping prompt")
+                continue
 
-                # Get prompt from first step
-                first_step = trajectory.steps[0]
-                if not isinstance(first_step.model_output, ModelOutput):
+            # Get prompt from the first valid trajectory's first step (all trajectories should share the same prompt)
+            first_trajectory = valid_trajectories[0]
+            first_step = first_trajectory.steps[0]
+            if not isinstance(first_step.model_output, ModelOutput):
+                logger.warning(f"First step in episode {task_id} has no model_output, skipping prompt")
+                continue
+
+            base_prompt_tokens = first_step.model_output.prompt_ids
+
+            # Process each trajectory as a separate response (one response per trajectory)
+            for trajectory in valid_trajectories:
+                # Get prompt from first step of this trajectory (should match base_prompt_tokens, but use this for consistency)
+                traj_first_step = trajectory.steps[0]
+                if not isinstance(traj_first_step.model_output, ModelOutput):
                     logger.warning(f"Step in trajectory {trajectory.uid} has no model_output, skipping")
                     continue
 
-                prompt_tokens = first_step.model_output.prompt_ids
+                prompt_tokens = traj_first_step.model_output.prompt_ids
                 prompt_token_ids.append(prompt_tokens)
 
-                # Concatenate all response tokens from all steps
+                # Concatenate all response tokens from all steps in this trajectory
                 response_tokens_list: list[int] = []
                 response_logprobs_list: list[float] = []
                 loss_mask_list: list[int] = []

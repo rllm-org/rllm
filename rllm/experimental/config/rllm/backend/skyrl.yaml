@@ -35,7 +35,7 @@ rllm:
 
   # Trainer configuration
   trainer:
-    total_epochs: 10
+    total_epochs: 1
     total_batches: -1
     logger:
       - console
@@ -67,13 +67,15 @@ trainer:
     gamma: ${rllm.algorithm.gamma}
     lambd: ${rllm.algorithm.lambd}
     grpo_norm_by_std: ${rllm.algorithm.norm_adv_by_std_in_grpo}
+    # we set it explicitly as a fallback to avoid struct access errors for skyrl
+    max_seq_len: 1536  # Default: max_prompt_length (512) + max_response_length (1024)
 
   # Checkpoint settings
   ckpt_interval: ${rllm.trainer.save_freq}
   resume_mode: latest
 
 # Generator settings (for rollout)
-generator:
++generator:
   n_samples_per_prompt: 1 # For single trajectory per prompt
   eval_n_samples_per_prompt: ${rllm.rollout.n_val}
 
@@ -84,11 +86,9 @@ data:
 
 # Environment settings
 environment:
-  env_class: BaseTextEnv # Default, can be overridden
+  env_class: BaseTextEnv # Default
 
 # Ray initialization settings
-# These are passed directly to ray.init()
-# See Ray documentation for available options
 ray_init:
   include_dashboard: false # Disable dashboard/metrics exporter to avoid connection errors
   num_cpus: null # Auto-detect, or set to specific number

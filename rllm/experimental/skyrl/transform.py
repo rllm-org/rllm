@@ -45,6 +45,7 @@ def transform_trajectory_groups_to_training_input(
     rewards: list[list[float]] = []
     loss_masks: list[list[int]] = []
     rollout_logprobs: list[list[float]] | None = []
+    uids: list[str] = []  # Collect uids for each trajectory
 
     for trajectory_group in trajectory_groups:
         task_id = trajectory_group.group_id.split(":")[0]
@@ -60,6 +61,9 @@ def transform_trajectory_groups_to_training_input(
             
             prompt_tokens = first_step.model_output.prompt_ids
             prompt_token_ids.append(prompt_tokens)
+            
+            # Store uid for this trajectory (used by SkyRL's compute_advantages_and_returns)
+            uids.append(task_id)
 
             # Concatenate all response tokens from all steps
             response_tokens_list: list[int] = []
@@ -129,9 +133,11 @@ def transform_trajectory_groups_to_training_input(
     )
 
     # Add metadata
+    # SkyRL's compute_advantages_and_returns expects uids in metadata
     training_input.metadata = {
         "response_length": response_masks_tensor.shape[1],
         "avg_response_length": sum(len(r) for r in response_ids) / len(response_ids) if response_ids else 0,
+        "uids": uids,  # Required by SkyRL's compute_advantages_and_returns
     }
 
     return training_input

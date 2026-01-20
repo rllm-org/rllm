@@ -241,10 +241,14 @@ class SkyRLExp:
                 )
 
         # Create tracker for RayPPOTrainer (SkyRL's Tracking, not rLLM's)
+        # NOTE: We disable wandb here to avoid duplicate logging - rLLM's UnifiedTrainer
+        # will handle all wandb logging via its own Tracking instance.
+        # SkyRL's tracker is still needed for RayPPOTrainer initialization, but we only
+        # use console logging to avoid duplicate wandb runs.
         tracker = Tracking(
             project_name=self.cfg.trainer.project_name,
             experiment_name=self.cfg.trainer.run_name,
-            backends=self.cfg.trainer.logger,
+            backends=["console"],  # Only console, wandb is handled by UnifiedTrainer
             config=self.cfg,
         )
 

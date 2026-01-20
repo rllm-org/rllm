@@ -135,7 +135,7 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
 
     def validate_config(self) -> None:
         """Validate SkyRL-specific configuration settings."""
-        # Add any SkyRL-specific validation here
+        # Validation done during initialization. #TODO: add assert for async or rewards?
         pass
 
     def get_dataloader(self, dataset: Dataset | None, trainer_state: TrainerState) -> Iterable:
@@ -188,6 +188,70 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
             asyncio.run(self.inference_engine_client.teardown())
 
     # =========================================================================
+    # Override RayPPOTrainer.generate() to handle validation correctly
+    # =========================================================================
+
+    @torch.no_grad()
+    async def generate(
+        self,
+        input_batch: "GeneratorInput",
+    ) -> "GeneratorOutput":
+        """
+        Generate rollouts using RLLMGenerator with UnifiedWorkflowEngine.
+        
+        Overrides RayPPOTrainer.generate() to validate with actual response count
+        instead of prompt count, since some prompts may be filtered out if workflows fail.
+
+        If colocate_all is enabled:
+        - before calling this method, the policy model should be on CPU and inference engine should
+            be awake (i.e. on GPU).
+        - after calling this method, the same model placement still holds.
+        """
+        from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
+        from skyrl_train.utils.trainer_utils import validate_generator_output
+        
+        # Initialize UnifiedWorkflowEngine pool if generator uses it and pool is not initialized
+        # RLLMGenerator exposes workflow_engine attribute
+        if hasattr(self.generator, 'workflow_engine') and self.generator.workflow_engine is not None:
+            if self.generator.workflow_engine.workflow_queue is None:
+                await self.generator.workflow_engine.initialize_pool()
+            
+            # Set training step for episode logging (rLLM abstraction)
+            # Calculate epoch from global_step and dataloader length
+            batch_metadata = input_batch.get("batch_metadata")
+            if batch_metadata:
+                global_step = batch_metadata.global_step if hasattr(batch_metadata, 'global_step') else self.global_step
+                training_phase = batch_metadata.training_phase if hasattr(batch_metadata, 'training_phase') else "train"
+            else:
+                global_step = self.global_step
+                training_phase = "train"
+            
+            # Calculate epoch: epoch = global_step // steps_per_epoch
+            # Note: global_step starts at 1, so we subtract 1 before dividing
+            steps_per_epoch = len(self.train_dataloader) if self.train_dataloader else 1
+            epoch = (global_step - 1) // steps_per_epoch if global_step > 0 else 0
+            
+            self.generator.workflow_engine.set_training_step(global_step, mode=training_phase, epoch=epoch)
+        
+        # Call parent's generate method via generator directly (bypassing RayPPOTrainer.generate validation)
+        # NOTE: we assume that .generate returns samples in the same order as passed in
+        # Here RLLMGenerator would return output from UnifiedWorkflowEngine
+        generator_output: GeneratorOutput = await self.generator.generate(input_batch)
+
+        # Add rollout metrics to self.all_metrics
+        if generator_output.get("rollout_metrics") is not None:
+            if not hasattr(self, "all_metrics"):
+                self.all_metrics = {}
+            self.all_metrics.update(generator_output["rollout_metrics"])
+
+        # Validate output - use actual number of responses (some prompts may be filtered out if workflows failed)
+        # The generator filters out prompts that don't have valid responses, so we validate against the actual response count
+        num_responses = len(generator_output["response_ids"])
+        validate_generator_output(num_responses, generator_output)
+
+        return generator_output
+
+    # =========================================================================
     # Async pipeline methods
     # =========================================================================
 
@@ -218,11 +282,9 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         from rllm.engine.rollout import ModelOutput
 
         # Store workflow engine for reference
-        self.workflow_engine = agent_workflow_engine
+        self.workflow_engine = agent_workflow_engine # TODO: remove since redundant.
         
-        # Set the workflow engine on the generator (RLLMGenerator)
-        # The generator was created in the launcher with workflow_engine=None,
-        # but the workflow engine is only available now from UnifiedTrainer
+        # Set the workflow engine for the RLLMGenerator
         self.generator.workflow_engine = agent_workflow_engine
 
         # Get global step from kwargs (passed by unified trainer)
@@ -427,7 +489,103 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         # Use SkyRL's training step
         # This updates both critic and policy
         # Wrap in asyncio.to_thread() to avoid blocking the event loop (contains ray.get() calls)
-        await asyncio.to_thread(self.train_critic_and_policy, training_input)
+        policy_status = await asyncio.to_thread(self.train_critic_and_policy, training_input)
+        
+        # Ensure all_metrics exists (RayPPOTrainer should initialize it, but be safe)
+        if not hasattr(self, "all_metrics"):
+            self.all_metrics = {}
+        
+        # Extract metrics from SkyRL's all_metrics (populated by train_critic_and_policy)
+        # SkyRL's train_critic_and_policy updates self.all_metrics with:
+        # - critic/* metrics from critic_statuses[0].metadata["train_status"]
+        # - policy/* metrics from policy_statuses[0].metadata["train_status"]
+        # Convert SkyRL metrics to rLLM logger format (training/ prefix for training metrics)
+        if self.all_metrics:
+            for key, value in self.all_metrics.items():
+                # Skip non-scalar values and None
+                if value is None:
+                    continue
+                
+                # Convert value to scalar
+                if isinstance(value, (int, float)):
+                    scalar_value = value
+                elif hasattr(value, "item"):  # torch.Tensor
+                    try:
+                        scalar_value = value.item()
+                    except (ValueError, RuntimeError):
+                        continue
+                else:
+                    continue
+                
+                # Map SkyRL metric keys to rLLM logger format
+                # SkyRL uses: policy/*, critic/*, loss/*, reward/*
+                # rLLM format: training/policy/*, training/critic/*, training/loss/*, reward/* (unchanged)
+                if key.startswith("policy/") or key.startswith("critic/") or key.startswith("loss/"):
+                    # Add training/ prefix for training-related metrics
+                    rllm_key = f"training/{key}"
+                elif key.startswith("reward/"):
+                    # Keep reward metrics as-is (already in rLLM format)
+                    rllm_key = key
+                elif key.startswith("trainer/"):
+                    # Map trainer/* to training/*
+                    rllm_key = key.replace("trainer/", "training/", 1)
+                else:
+                    # For other metrics, add training/ prefix by default
+                    rllm_key = f"training/{key}"
+                
+                trainer_state.metrics[rllm_key] = scalar_value
+            
+            # Clear all_metrics after extracting (SkyRL will repopulate on next batch)
+            self.all_metrics.clear()
+        
+        # Add reward metrics from episodes/trajectory_groups if available
+        # This ensures we have reward metrics even if all_metrics is empty
+        if hasattr(trainer_state, "trajectory_groups") and trainer_state.trajectory_groups:
+            import numpy as np
+            from rllm.experimental.common.metrics import reduce_reward_metrics_by_trajectory_name
+            
+            # Add reward metrics from trajectory groups
+            reward_metrics = reduce_reward_metrics_by_trajectory_name(trainer_state.trajectory_groups, prefix="reward")
+            trainer_state.metrics.update(reward_metrics)
+            
+            # Also compute basic reward stats
+            all_rewards = []
+            for group in trainer_state.trajectory_groups:
+                for traj in group.trajectories:
+                    if traj.reward is not None:
+                        all_rewards.append(traj.reward)
+            
+            if all_rewards:
+                trainer_state.metrics["reward/mean"] = np.mean(all_rewards)
+                trainer_state.metrics["reward/max"] = np.max(all_rewards)
+                trainer_state.metrics["reward/min"] = np.min(all_rewards)
+                trainer_state.metrics["reward/std"] = np.std(all_rewards)
+        
+        # Add basic training metrics that should always be present (rLLM format)
+        # Get learning rate from optimizer if available
+        if hasattr(self, "policy_model") and hasattr(self.policy_model, "optimizer"):
+            optimizer = self.policy_model.optimizer
+            if optimizer is not None and len(optimizer.param_groups) > 0:
+                trainer_state.metrics["optim/lr"] = optimizer.param_groups[0].get("lr", 0.0)
+        
+        # Add global step and epoch (always present, rLLM format)
+        trainer_state.metrics["training/global_step"] = trainer_state.global_step
+        trainer_state.metrics["training/epoch"] = trainer_state.epoch
+        
+        # Debug logging to verify metrics are being populated
+        num_training_metrics = len([k for k in trainer_state.metrics.keys() if k.startswith("training/") or k.startswith("reward/") or k.startswith("optim/")])
+        logger.info(
+            f"Step {trainer_state.global_step}: Extracted {num_training_metrics} training metrics. "
+            f"Keys: {sorted(trainer_state.metrics.keys())}"
+        )
+        
+        # Log warning if no metrics were found (for debugging)
+        if len(trainer_state.metrics) <= 3:  # Only global_step, epoch, and maybe lr
+            logger.warning(
+                f"Step {trainer_state.global_step}: No training metrics found in all_metrics. "
+                f"all_metrics keys were: {list(self.all_metrics.keys()) if hasattr(self, 'all_metrics') and self.all_metrics else 'empty'}. "
+                f"Available trainer_state.metrics: {list(trainer_state.metrics.keys())}"
+            )
 
     # =========================================================================
     # Async hook methods
@@ -446,7 +604,6 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         save_freq = self.full_config.rllm.trainer.get("save_freq", 0)
         if save_freq > 0 and trainer_state.global_step % save_freq != 0:
             logger.info(f"Saving final checkpoint at step {trainer_state.global_step}")
-            # Wrap in asyncio.to_thread() to avoid blocking the event loop (I/O operation)
             await asyncio.to_thread(self.save_checkpoints)
 
     async def on_batch_end(self, trainer_state: TrainerState) -> None:
@@ -462,7 +619,6 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         save_freq = self.full_config.rllm.trainer.get("save_freq", 0)
         if save_freq > 0 and global_step % save_freq == 0:
             logger.info(f"Saving checkpoint at step {global_step}")
-            # Wrap in asyncio.to_thread() to avoid blocking the event loop (I/O operation)
             await asyncio.to_thread(self.save_checkpoints)
 
         # Sync weights to inference engines after training (following SkyRL's pattern)
@@ -474,11 +630,22 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
             # Wake up inference engines for weight loading
             await self.inference_engine_client.wake_up(tags=["weights"])
         
-        # Sync weights from policy model to inference engines (always, not just for colocated)
-        # Wrap ray.get() in asyncio.to_thread() to avoid blocking the event loop
-        import ray
-        weight_sync_refs = self.sync_policy_weights_to_inference_engines()
-        await asyncio.to_thread(ray.get, weight_sync_refs)
+        # Sync weights from policy model to inference engines
+        # Only sync when colocate_all=true (weight transfer sender is only initialized in that mode)
+        # When colocate_all=false, inference engines load weights from checkpoints separately
+        if self.colocate_all:
+            import ray
+            try:
+                weight_sync_refs = self.sync_policy_weights_to_inference_engines()
+                await asyncio.to_thread(ray.get, weight_sync_refs)
+            except AttributeError as e:
+                if "_weight_transfer_sender" in str(e):
+                    logger.warning(
+                        "Weight transfer sender not initialized. Skipping weight sync. "
+                        "Inference engines may use stale weights."
+                    )
+                else:
+                    raise
         
         if self.colocate_all:
             # Offload policy model to CPU (free GPU for inference)
@@ -500,6 +667,7 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         Returns:
             bool: True if validation should proceed, False otherwise.
         """
+        # TODO: add validation logic here and follow VERL backend pattern. 
         trainer_state.is_training = False
         return True
 

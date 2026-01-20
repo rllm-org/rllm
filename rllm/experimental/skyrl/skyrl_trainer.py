@@ -1,26 +1,16 @@
 """
-SkyRL Trainer for rLLM workflows integration.
+SkyRL Trainer for rLLM workflows integration (Legacy).
 
-This trainer uses rLLM's UnifiedWorkflowEngine to execute workflows with SkyRL's training infrastructure.
+This trainer uses rLLM's UnifiedWorkflowEngine to execute workflows with SkyRL's native training loop.
 The key integration point is the generate() method which sets up episode logging metadata.
+# TODO: We can completely remove this implementation.
 
-Usage:
+Explanation:
     SkyrlTrainer is used when you want to use SkyRL's native training loop (RayPPOTrainer.train())
     with rLLM workflows. It extends RayPPOTrainer and overrides the generate() method to use
     RLLMGenerator, which wraps UnifiedWorkflowEngine.
 
-    This is different from SkyRLBackend, which is used with the unified trainer pattern.
-    SkyRLBackend uses TrainingInputBatch and follows the BackendProtocol interface.
-
-    When to use SkyrlTrainer:
-    - You want to use SkyRL's native training loop (BasePPOExp pattern)
-    - You want to use rLLM workflows for episode generation
-    - You don't need the unified trainer's rejection sampling or other features
-
-    When to use SkyRLBackend:
-    - You want to use the unified trainer pattern
-    - You need rejection sampling, trajectory grouping, etc.
-    - You want backend-agnostic training code
+    It's NOT following the unified trainer pattern.
 """
 
 import asyncio
@@ -32,50 +22,6 @@ from skyrl_train.utils.trainer_utils import validate_generator_output
 
 
 class SkyrlTrainer(RayPPOTrainer):
-    """PPO Trainer for rLLM workflows using SkyRL infrastructure.
-    
-    This trainer integrates rLLM's UnifiedWorkflowEngine with SkyRL's training pipeline.
-    The generator (RLLMGenerator) uses UnifiedWorkflowEngine to execute workflows and
-    transform results to SkyRL's GeneratorOutput format.
-    
-    This trainer is used with SkyRL's native training loop (BasePPOExp pattern).
-    It extends RayPPOTrainer and overrides the generate() method to use RLLMGenerator.
-    
-    For advantage computation, this trainer uses the standard advantage estimators
-    from skyrl_train.utils.ppo_utils via the AdvantageEstimatorRegistry. The advantage
-    estimator is specified in the config (e.g., "grpo", "rloo", "gae", "reinforce++").
-    
-    Example usage:
-        from rllm.experimental.skyrl.skyrl_trainer import SkyrlTrainer
-        from rllm.experimental.skyrl.rllm_generator import RLLMGenerator
-        from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
-        
-        # Create UnifiedWorkflowEngine
-        workflow_engine = UnifiedWorkflowEngine(...)
-        
-        # Create RLLMGenerator
-        generator = RLLMGenerator(
-            workflow_engine=workflow_engine,
-            tokenizer=tokenizer,
-            max_response_length=4096,
-        )
-        
-        # Create trainer
-        trainer = SkyrlTrainer(
-            cfg=config,
-            tracker=tracker,
-            tokenizer=tokenizer,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            inference_engine_client=inference_engine_client,
-            generator=generator,
-            colocate_pg=colocate_pg,
-        )
-        
-        # Train using SkyRL's native loop
-        trainer.train()
-    """
-    
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Note: Base class already builds dataloaders, but we can override if needed for reproducibility
@@ -125,8 +71,10 @@ class SkyrlTrainer(RayPPOTrainer):
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
 
-        # Validate output - base function takes num_prompts, not input_batch
-        validate_generator_output(len(input_batch["prompts"]), generator_output)
+        # Validate output - use actual number of responses (some prompts may be filtered out if workflows failed)
+        # The generator filters out prompts that don't have valid responses, so we validate against the actual response count
+        num_responses = len(generator_output["response_ids"])
+        validate_generator_output(num_responses, generator_output)
 
         return generator_output
 

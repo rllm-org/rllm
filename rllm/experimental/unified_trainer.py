@@ -279,23 +279,29 @@ class UnifiedTrainer:
                 await self._train_batch_async(batch, trainer_state)
 
                 await self.backend.on_batch_end(trainer_state)
+                
                 self.logger.log(data=trainer_state.metrics, step=trainer_state.global_step)
 
                 # if the config specifies the `total_batches` parameter > 0, then we check if we should stop
-                if self.rllm_config.trainer.get("total_batches", 0) > 0 and trainer_state.global_step >= self.rllm_config.trainer.total_batches:
+                total_batches = self.rllm_config.trainer.get("total_batches", 0)
+                if total_batches > 0 and trainer_state.global_step >= total_batches:
                     break_via_total_batches = True
                     break
 
                 trainer_state.global_step += 1
 
                 # periodic validation
-                if self.rllm_config.trainer.get("val_freq", 0) > 0 and trainer_state.global_step % self.rllm_config.trainer.val_freq == 0:
+                # Use val_freq if set, otherwise fall back to test_freq (for backward compatibility)
+                val_freq = self.rllm_config.trainer.get("val_freq") or self.rllm_config.trainer.get("test_freq", 0)
+                if val_freq > 0 and trainer_state.global_step % val_freq == 0:
                     await self._validate_async(trainer_state)
 
             await self.backend.on_epoch_end(trainer_state)
 
         # final validation
-        if self.rllm_config.trainer.get("val_freq", 0) > 0:
+        # Use val_freq if set, otherwise fall back to test_freq (for backward compatibility)
+        val_freq = self.rllm_config.trainer.get("val_freq") or self.rllm_config.trainer.get("test_freq", 0)
+        if val_freq > 0:
             await self._validate_async(trainer_state)
 
     async def _train_batch_async(self, batch: Any, trainer_state: TrainerState) -> None:
@@ -377,7 +383,9 @@ class UnifiedTrainer:
             data_source_lst.extend([episode.info.get("data_source", "unknown") for episode in val_episodes])
             await self.backend.on_batch_end(trainer_state)
 
-            for episode, data_source in zip(val_episodes, data_source_lst, strict=True):
+            # Process workflow metrics - iterate directly over episodes (changed from zip to deal with ValueError in zip mismatch)
+            for episode in val_episodes:
+                data_source = episode.info.get("data_source", "unknown")
                 for key, value in episode.metrics.items():
                     workflow_metrics_by_source[data_source][key].append(float(value))
 
