@@ -26,9 +26,7 @@ def main(config):
     )
 
     # Get sampling args for verifiers rollouts
-    vf_sampling_args_raw = OmegaConf.select(
-        config, "verifiers.sampling_args", default=None
-    )
+    vf_sampling_args_raw = OmegaConf.select(config, "verifiers.sampling_args", default=None)
     vf_sampling_args: dict[str, Any] | None = (
         OmegaConf.to_container(vf_sampling_args_raw, resolve=True)  # type: ignore[assignment]
         if vf_sampling_args_raw is not None
@@ -49,13 +47,9 @@ def main(config):
         vf_train_dataset = vf_env.get_dataset()
         vf_eval_dataset = vf_env.get_eval_dataset()
 
-        train_dataset = DatasetRegistry.register_dataset(
-            vf_env_id, vf_train_dataset, "train"
-        )
+        train_dataset = DatasetRegistry.register_dataset(vf_env_id, vf_train_dataset, "train")
 
-        test_dataset = DatasetRegistry.register_dataset(
-            vf_env_id, vf_eval_dataset, "test"
-        )
+        test_dataset = DatasetRegistry.register_dataset(vf_env_id, vf_eval_dataset, "test")
 
     # Limit dataset size if max_samples specified
     if max_samples:

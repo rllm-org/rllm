@@ -63,9 +63,7 @@ class VerifiersWorkflow(Workflow):
 
         # Create verifiers-compatible client from rllm's rollout engine
         # TinkerEngine uses model_name, OpenAIEngine uses model
-        model = getattr(self.rollout_engine, "model", None) or getattr(
-            self.rollout_engine, "model_name", "unknown"
-        )
+        model = getattr(self.rollout_engine, "model", None) or getattr(self.rollout_engine, "model_name", "unknown")
         client = RolloutEngineAsyncClient(
             rollout_engine=self.rollout_engine,
             model=model,

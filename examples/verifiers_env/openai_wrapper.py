@@ -76,12 +76,8 @@ class ChatCompletions:
                 # rllm ToolCall dataclass or dict
                 else:
                     tc_id = getattr(tc, "id", None) or f"call_{i}"
-                    tc_name = getattr(tc, "name", None) or (
-                        tc.get("name") if isinstance(tc, dict) else ""
-                    )
-                    tc_args = getattr(tc, "arguments", None) or (
-                        tc.get("arguments") if isinstance(tc, dict) else {}
-                    )
+                    tc_name = getattr(tc, "name", None) or (tc.get("name") if isinstance(tc, dict) else "")
+                    tc_args = getattr(tc, "arguments", None) or (tc.get("arguments") if isinstance(tc, dict) else {})
                     # arguments can be dict or string
                     if isinstance(tc_args, dict):
                         tc_args = json.dumps(tc_args)
@@ -133,8 +129,7 @@ class ChatCompletions:
             usage=CompletionUsage(
                 prompt_tokens=output.prompt_length or 0,
                 completion_tokens=output.completion_length or 0,
-                total_tokens=(output.prompt_length or 0)
-                + (output.completion_length or 0),
+                total_tokens=(output.prompt_length or 0) + (output.completion_length or 0),
             ),
         )
 
