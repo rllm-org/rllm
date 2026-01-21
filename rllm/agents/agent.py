@@ -6,13 +6,13 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from rllm.engine.rollout import ModelOutput, TokenInput
+    from rllm.engine.rollout import ModelOutput
     from rllm.workflows.workflow import TerminationReason
 
 
 @dataclass
 class Step:
-    prompt_ids: TokenInput = field(default_factory=list)
+    prompt_ids: list[int] = field(default_factory=list)
     response_ids: list[int] = field(default_factory=list)
     logprobs: list[float] = field(default_factory=list)
 
@@ -46,6 +46,7 @@ class Step:
             self.logprobs = self.model_output.logprobs
 
         # check that the token ids are filled
+        # TODO(listar2000): this might cause compatibility issue. Double check if we should make these assertions.
         assert len(self.prompt_ids) > 0, "prompt_ids is empty"
         assert len(self.response_ids) > 0, "response_ids is empty"
 

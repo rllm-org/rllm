@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+from rllm.experimental.rollout.types import TokenInput, TokenOutput
 from rllm.tools.tool_base import ToolCall
 
 
@@ -9,7 +10,7 @@ class ModelOutput:
     content: str | None = None
     reasoning: str | None = None
     tool_calls: list[ToolCall] | None = None
-    prompt_ids: list[int] | None = None
+    prompt_ids: TokenInput | None = None
     completion_ids: list[int] | None = None
     multi_modal_inputs: dict[str, list] | None = None
     logprobs: list[float] | None = None  # completion logprobs
@@ -59,8 +60,17 @@ class RolloutEngine:
     async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         raise NotImplementedError("get_model_response is not implemented")
 
+    async def get_token_output_from_token_input(self, token_input: TokenInput, **kwargs) -> TokenOutput:
+        """Obtain the token output from the given token input."""
+        raise NotImplementedError("get_token_output_from_token_input is not implemented")
+
     async def wake_up(self):
         pass
 
     async def sleep(self):
         pass
+
+    @property
+    def supports_token_in_token_out(self) -> bool:
+        """Whether the engine supports token-in-token-out (TITO) generation. Defaults to false."""
+        return False
