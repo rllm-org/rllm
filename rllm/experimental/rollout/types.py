@@ -2,7 +2,20 @@
 Type alias for TokenOutput and TokenInput -- need to take different backends into account.
 """
 
-from typing import Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizer, ProcessorMixin
+    from transformers.image_processing_utils import BaseImageProcessor
+
+    Tokenizer: TypeAlias = PreTrainedTokenizer
+    Processor: TypeAlias = ProcessorMixin
+    ImageProcessor: TypeAlias = BaseImageProcessor
+else:
+    # make it importable from other files as a type in runtime
+    Tokenizer: TypeAlias = Any
+    Processor: TypeAlias = Any
+    ImageProcessor: TypeAlias = Any
 
 # Tinker types. See https://github.com/thinking-machines-lab/tinker-cookbook/blob/main/tinker_cookbook/rl/data_processing.py
 # for the rationale behind "FlatObElem" and "FlatOb" types.

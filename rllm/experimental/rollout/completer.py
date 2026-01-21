@@ -14,7 +14,8 @@ from typing import Any
 from transformers import PreTrainedTokenizer
 
 from rllm.agents.agent import Step
-from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine, TokenInput, TokenOutput
+from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
+from rllm.experimental.rollout.types import TokenInput, TokenOutput
 from rllm.parser import ChatTemplateParser
 
 
@@ -49,13 +50,13 @@ class Completer:
         chat_completions = messages + [{"role": "assistant", "content": model_output.content or "", "reasoning": model_output.reasoning or ""}]
         action = action_hook(model_output) if action_hook is not None else None
         return Step(
-            prompt_ids=model_output.prompt_ids or [],
+            prompt_ids=model_output.prompt_ids or [],  # type: ignore
             response_ids=model_output.completion_ids or [],
             logprobs=model_output.logprobs or [],
             chat_completions=chat_completions,
             thought=model_output.reasoning or "",
             action=action,
-            model_output=model_output,
+            model_output=model_output,  # type: ignore
         )
 
 

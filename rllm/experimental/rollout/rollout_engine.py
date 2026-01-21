@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
-from rllm.experimental.rollout.types import TokenInput, TokenOutput
+from rllm.experimental.rollout.types import TokenInput, Tokenizer, TokenOutput
+from rllm.parser import ChatTemplateParser
 from rllm.tools.tool_base import ToolCall
 
 
@@ -54,11 +55,20 @@ class ModelOutput:
 
 
 class RolloutEngine:
+    chat_parser: ChatTemplateParser | None = None
+    tokenizer: Tokenizer | None = None
+
     def __init__(self, *args, **kwargs):
         pass
 
     async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         raise NotImplementedError("get_model_response is not implemented")
+
+    async def assemble_model_output(self, token_output: TokenOutput) -> ModelOutput:
+        """
+        Assemble model output from a token output.
+        """
+        raise NotImplementedError("assemble_model_output is not implemented")
 
     async def get_token_output_from_token_input(self, token_input: TokenInput, **kwargs) -> TokenOutput:
         """Obtain the token output from the given token input."""
@@ -74,3 +84,11 @@ class RolloutEngine:
     def supports_token_in_token_out(self) -> bool:
         """Whether the engine supports token-in-token-out (TITO) generation. Defaults to false."""
         return False
+
+    @property
+    def has_chat_parser(self) -> bool:
+        return self.chat_parser is not None
+
+    @property
+    def has_tokenizer(self) -> bool:
+        return self.tokenizer is not None

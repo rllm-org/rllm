@@ -2,18 +2,19 @@ import asyncio
 import uuid
 from typing import cast
 
+from omegaconf import DictConfig
 from typing_extensions import override
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager, AsyncLLMServerManager
 from verl.workers.rollout.replica import TokenOutput
 
 from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
-from rllm.experimental.rollout.types import TokenInput, VerlTokenOutput
+from rllm.experimental.rollout.types import TokenInput, Tokenizer, VerlTokenOutput
 from rllm.parser import ChatTemplateParser
 from rllm.workflows import TerminationEvent, TerminationReason
 
 
 class VerlEngine(RolloutEngine):
-    def __init__(self, config, rollout_manager, tokenizer, processor=None, **kwargs):
+    def __init__(self, config: DictConfig, rollout_manager: AgentLoopManager, tokenizer: Tokenizer, processor=None, **kwargs):
         self.config = config
 
         if config.actor_rollout_ref.rollout.name not in ["vllm", "sglang"]:

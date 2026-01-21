@@ -6,7 +6,7 @@ from tinker_cookbook import model_info, renderers
 from typing_extensions import override  # need to use typing_extensions for python < 3.12
 
 from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
-from rllm.experimental.rollout.types import TinkerTokenInput, TinkerTokenOutput, TokenInput
+from rllm.experimental.rollout.types import ImageProcessor, Processor, TinkerTokenInput, TinkerTokenOutput, TokenInput, Tokenizer, TokenOutput
 from rllm.parser import ChatTemplateParser
 from rllm.workflows import TerminationEvent, TerminationReason
 
@@ -60,15 +60,15 @@ class TinkerEngine(RolloutEngine):
         self,
         base_url: str,
         model_name: str,
-        tokenizer,
+        tokenizer: Tokenizer,
         service_client: tinker.ServiceClient,
         max_prompt_length: int = 4096,
         max_response_length: int = 4096,
         max_model_length: int | None = None,
         sampling_params: dict | None = None,
         bypass_render_with_parser: bool = False,
-        processor=None,
-        image_processor=None,
+        processor: Processor | None = None,
+        image_processor: ImageProcessor | None = None,
         disable_thinking: bool = False,
         accumulate_reasoning: bool = False,
         reasoning_effort: str = "medium",
@@ -106,9 +106,13 @@ class TinkerEngine(RolloutEngine):
         # Initialize Tinker service client
         self.service_client = service_client
 
+        # Initialize the renderer
+        renderer_name = model_info.get_recommended_renderer_name(self.model_name)
+        # Pass image_processor for VLM support with Tinker renderer
+        self.renderer = renderers.get_renderer(renderer_name, self.tokenizer, image_processor=image_processor)
+
         if bypass_render_with_parser:
             self.chat_parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=disable_thinking)
-            self.renderer = None
             if hasattr(self.chat_parser, "stop_sequences") and self.chat_parser.stop_sequences:
                 self.stop_sequences = self.chat_parser.stop_sequences
             elif hasattr(tokenizer, "eos_token") and tokenizer.eos_token:
@@ -116,9 +120,6 @@ class TinkerEngine(RolloutEngine):
             else:
                 raise ValueError("No stop sequences found for tokenizer or chat parser")
         else:
-            renderer_name = model_info.get_recommended_renderer_name(self.model_name)
-            # Pass image_processor for VLM support with Tinker renderer
-            self.renderer = renderers.get_renderer(renderer_name, self.tokenizer, image_processor=image_processor)
             self.chat_parser = None
             self.stop_sequences = self.renderer.get_stop_sequences()
 
@@ -227,6 +228,37 @@ class TinkerEngine(RolloutEngine):
         return sample_response.sequences[0]
 
     @override
+    def assemble_model_output(self, token_output: TokenOutput) -> ModelOutput:
+        """
+        Assemble model output from a sampled sequence.
+        """
+        assert isinstance(self.renderer, renderers.Renderer), "Renderer must be a Tinker Renderer"
+        sampled_sequence = cast(TinkerTokenOutput, token_output)
+        response_tokens, logprobs = sampled_sequence.tokens, sampled_sequence.logprobs
+
+        response_dict, status = self.renderer.parse_response(response_tokens)
+        # obtain content, reasoning, and tool calls
+        content = response_dict.get("content", "")
+        reasoning = response_dict.get("reasoning", "")
+        tool_calls = response_dict.get("tool_calls", [])
+        # decode full text
+        completion_text = self.tokenizer.decode(response_tokens, skip_special_tokens=True)  # type: ignore
+        finish_reason = sampled_sequence.stop_reason
+
+        return ModelOutput(
+            text=completion_text,
+            content=str(content),
+            reasoning=reasoning,
+            tool_calls=tool_calls,
+            prompt_ids=token_output.tokens,
+            completion_ids=response_tokens,
+            logprobs=logprobs,
+            prompt_length=len(token_output.tokens),
+            completion_length=len(response_tokens),
+            finish_reason=finish_reason,
+        )
+
+    @override
     async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         """
         Generate model response for a given set of messages.
@@ -254,7 +286,7 @@ class TinkerEngine(RolloutEngine):
 
         if self.bypass_render_with_parser:
             # Use ChatTemplateParser
-            prompt = self.chat_parser.parse(
+            prompt = self.chat_parser.parse(  # type: ignore
                 messages,
                 add_generation_prompt=True,
                 is_first_msg=True,
@@ -262,7 +294,7 @@ class TinkerEngine(RolloutEngine):
                 reasoning_effort=reasoning_effort,
                 accumulate_reasoning=accumulate_reasoning,
             )
-            token_input: list[int] = self.tokenizer.encode(prompt, add_special_tokens=False)
+            token_input: list[int] = self.tokenizer.encode(prompt, add_special_tokens=False)  # type: ignore
             prompt_length = len(token_input)
         else:
             # Use Tinker renderer
@@ -276,7 +308,7 @@ class TinkerEngine(RolloutEngine):
         response_tokens, logprobs = sampled_sequence.tokens, sampled_sequence.logprobs
 
         # Parse response using renderer
-        response_dict, _ = self.renderer.parse_response(response_tokens)
+        response_dict, _ = self.renderer.parse_response(response_tokens)  # type: ignore
 
         # Extract content from response
         if isinstance(response_dict, dict):
@@ -289,7 +321,7 @@ class TinkerEngine(RolloutEngine):
             tool_calls = []
 
         # Decode full text
-        completion_text = self.tokenizer.decode(response_tokens, skip_special_tokens=True)
+        completion_text = self.tokenizer.decode(response_tokens, skip_special_tokens=True)  # type: ignore
 
         # Determine finish reason from the sampled sequence
         finish_reason = sampled_sequence.stop_reason
