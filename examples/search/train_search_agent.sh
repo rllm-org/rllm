@@ -6,7 +6,12 @@ export VLLM_USE_V1=1
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 
-RLLM_DIR=$(python3 -c "import rllm; import os; print(os.path.dirname(os.path.dirname(rllm.__file__)))")
+
+CHECKPOINT_PATH=/checkpoints/zyhang
+DATA_PATH=/fsx/zyhang/rllm/data/datasets
+project_name="algoevolve"
+experiment_name="algoevolve_qwen3_4b_search_agent_rloo"
+
 
 # Run the training script with the specified configuration
 python3 -m examples.search.train_search_agent \
@@ -15,7 +20,9 @@ python3 -m examples.search.train_search_agent \
     data.val_batch_size=128 \
     data.max_prompt_length=2048 \
     data.max_response_length=2048 \
-    actor_rollout_ref.model.path=Qwen/Qwen3-4B \
+    data.train_files=$DATA_PATH/hotpotqa/train_verl.parquet \
+    data.val_files=$DATA_PATH/hotpotqa/test_verl.parquet \
+    actor_rollout_ref.model.path=/fsx/zyhang/Qwen/Qwen3-4B \
     actor_rollout_ref.hybrid_engine=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -37,7 +44,7 @@ python3 -m examples.search.train_search_agent \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.temperature=0.7 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.85 \
-    actor_rollout_ref.rollout.n=8 \
+    actor_rollout_ref.rollout.n=4 \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.7 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.8 \
@@ -50,13 +57,14 @@ python3 -m examples.search.train_search_agent \
     rllm.mask_truncated_samples=False \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
-    trainer.project_name='deepscaler-agent' \
-    trainer.experiment_name='7b-loop-drgrpo-search_agent' \
+    trainer.project_name=${project_name} \
+    trainer.experiment_name=${experiment_name} \
+    trainer.default_local_dir=$CHECKPOINT_PATH/${project_name}/${experiment_name} \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node=1\
     trainer.nnodes=1 \
-    trainer.save_freq=40 \
-    trainer.test_freq=10 \
+    trainer.save_freq=5 \
+    trainer.test_freq=5 \
     trainer.default_hdfs_dir=null \
     rllm.agent.max_steps=10 \
-    trainer.total_epochs=100 
+    trainer.total_epochs=100 > /fsx/zyhang/rllm/examples/search/slurm/train_search_agent_rloo_qwen3_4b.stdout 2>/fsx/zyhang/rllm/examples/search/slurm/train_search_agent_rloo_qwen3_4b.stderr

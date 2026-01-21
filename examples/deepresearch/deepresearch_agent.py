@@ -9,8 +9,12 @@ Original: https://github.com/Alibaba-NLP/DeepResearch/blob/main/inference/react_
 
 import asyncio
 import json
+import re
 import time
 from datetime import datetime
+from pathlib import Path
+import os
+import sys
 
 # rLLM imports
 from rllm.engine.rollout import RolloutEngine
@@ -21,43 +25,59 @@ OBS_END = "\n</tool_response>"
 MAX_LLM_CALL_PER_RUN = 100
 
 # System prompt adapted from DeepResearch
-DEEPRESEARCH_SYSTEM_PROMPT = """You are a deep research assistant. Your core function is to conduct thorough, multi-source investigations into any topic. You MUST use the provided tools to research and verify information before answering. Do NOT answer directly from memory - always use tools to gather current, accurate information.
+# DEEPRESEARCH_SYSTEM_PROMPT = """You are a deep research assistant. Your core function is to conduct thorough, multi-source investigations into any topic. You MUST use the provided tools to research and verify information before answering. Do NOT answer directly from memory - always use tools to gather current, accurate information.
 
-IMPORTANT: You are REQUIRED to use at least one tool before providing any answer. Even if you think you know the answer, you must verify it using the appropriate tools. Direct answers without tool use are not acceptable.
+# IMPORTANT: You are REQUIRED to use at least one tool before providing any answer. Even if you think you know the answer, you must verify it using the appropriate tools. Direct answers without tool use are not acceptable.
 
-When you have gathered sufficient information through tool use and are ready to provide the definitive response, you must enclose the entire final answer within <answer></answer> tags.
+# When you have gathered sufficient information through tool use and are ready to provide the definitive response, you must enclose the entire final answer within <answer></answer> tags.
 
-# Tools
+# # Tools
 
-You MUST use one or more of the following tools to research the query:
+# You MUST use one or more of the following tools to research the query:
 
-You are provided with the following tools:
-- Search: for web searches to find current information
-- Scholar: for academic research and paper searches
-- Visit: for visiting and analyzing web pages
-- PythonInterpreter: for running Python code and calculations
-- FileParser: for reading and analyzing files
+# You are provided with the following tools:
+# - Search: for web searches to find current information
+# - Scholar: for academic research and paper searches
+# - Visit: for visiting and analyzing web pages
+# - PythonInterpreter: for running Python code and calculations
+# - FileParser: for reading and analyzing files
 
-For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
-<tool_call>
-{"name": <function-name>, "arguments": <args-json-object>}
-</tool_call>
+# For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+# <tool_call>
+# {"name": <function-name>, "arguments": <args-json-object>}
+# </tool_call>
 
-For Python code execution, use:
-<tool_call>
-python
-<code>
-# Your Python code here
-print("Hello World")
-</code>
-</tool_call>
+# For Python code execution, use:
+# <tool_call>
+# python
+# <code>
+# # Your Python code here
+# print("Hello World")
+# </code>
+# </tool_call>
 
-Current date: """
+# Current date: """
 
 
 def today_date():
     """Get today's date in YYYY-MM-DD format."""
     return datetime.now().date().strftime("%Y-%m-%d")
+
+
+class _Tee:
+    """Simple tee to duplicate stdout/stderr to a log file."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+            stream.flush()
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
 
 
 def build_text_completion_prompt(messages: list[dict], allow_special: bool = True) -> str:
@@ -143,6 +163,30 @@ class MultiTurnReactAgent:
         # Auto-detect context limit based on model capabilities
         # This ensures we don't hit limits too early for capable models
         self.max_context_tokens = self._get_model_context_limit(rollout_engine)
+        self._setup_logging()
+
+    def _setup_logging(self):
+        """
+        Tee stdout/stderr to a timestamped output directory (set in custom_evaluate).
+        Uses DEEPRESEARCH_OUTPUT_DIR env var and only initializes once per process.
+        """
+        if getattr(MultiTurnReactAgent, "_logging_initialized", False):
+            return
+
+        output_dir = Path(os.environ.get("DEEPRESEARCH_OUTPUT_DIR", Path.cwd()))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        log_path = output_dir / "trajectory.log"
+
+        # Preserve original streams
+        self._orig_stdout = sys.stdout
+        self._orig_stderr = sys.stderr
+
+        # Redirect to tee so prints are saved and still visible
+        sys.stdout = _Tee(sys.stdout, open(log_path, "a", encoding="utf-8"))
+        sys.stderr = _Tee(sys.stderr, open(log_path, "a", encoding="utf-8"))
+
+        print(f"[DeepResearch] Logging stdout/stderr to {log_path}")
+        MultiTurnReactAgent._logging_initialized = True
 
     def _get_model_context_limit(self, rollout_engine) -> int:
         """
@@ -253,9 +297,9 @@ class MultiTurnReactAgent:
                 # Model-specific parameter configuration
                 model_name = self.rollout_engine.model.lower()
 
-                if "o3" in model_name or "o1" in model_name:
-                    # O3/O1: Very limited parameter support
-                    api_params["max_completion_tokens"] = 4096
+                if "o3" in model_name or "o1" in model_name or "gpt-5" in model_name:
+                    # O3/O1/GPT-5: Very limited parameter support
+                    api_params["max_completion_tokens"] = 8192
                 elif "gpt-4" in model_name:
                     # GPT-4: Full parameter support
                     api_params.update(
@@ -269,11 +313,22 @@ class MultiTurnReactAgent:
                     )
                 elif "qwen" in model_name:
                     # Qwen models
+                    print("🧠 Using Qwen-specific OpenRouter API parameters")
                     api_params.update(
                         {
                             "temperature": 0.6,
                             "top_p": 0.95,
                             "max_tokens": 4096,
+                        }
+                    )
+                elif "claude" in model_name:
+                    # Claude models
+                    print("🧠 Using Claude-specific OpenRouter API parameters")
+                    api_params.update(
+                        {
+                            "temperature": 0.6,
+                            "top_p": 0.95,
+                            "max_tokens": 8192,
                         }
                     )
                 else:
@@ -342,7 +397,8 @@ class MultiTurnReactAgent:
         start_time = time.time()
 
         # Setup system prompt with current date
-        system_prompt = (self.system_prompt or DEEPRESEARCH_SYSTEM_PROMPT) + today_date()
+        system_prompt = self.system_prompt + today_date()
+        print(f"📜 System Prompt:\n{system_prompt}\n")
 
         # Construct initial user message (multimodal if images present)
         if images:
@@ -422,6 +478,7 @@ class MultiTurnReactAgent:
                 # Extract tool name for display
                 if "python" in content.lower() and "<code>" in content:
                     print(f"Round {round}: 🐍 Executing Python code")
+                    print(f"Model response: {content}")
                 elif '"name":' in content:
                     try:
                         import json5
@@ -435,21 +492,22 @@ class MultiTurnReactAgent:
                             print(f"Round {round}: 🔧 Calling {tool_name} with args: {args_str}")
                         else:
                             print(f"Round {round}: 🔧 Calling {tool_name}")
-                    except Exception:
+                    except Exception as e:
+                        print(f"Error parsing tool call: {e}")
                         print(f"Round {round}: 🔧 Tool call")
                 else:
                     print(f"Round {round}: 🔧 Tool call")
             elif "<answer>" in content:
                 # Final answer
                 answer_preview = content.split("<answer>")[1].split("</answer>")[0]
-                print(f"Round {round}: ✅ Final answer: {truncate(answer_preview, 100)}")
+                print(f"Round {round}: ✅ Final answer: {content}")
             else:
                 # Show internal reasoning if available, otherwise show content
                 if hasattr(response, "reasoning") and response.reasoning:
                     reasoning_preview = truncate(response.reasoning, 300)
                     print(f"Round {round}: 💭 [Internal] {reasoning_preview}")
                 elif content:
-                    print(f"Round {round}: 💭 Reasoning: {truncate(content)}")
+                    print(f"Round {round}: 💭 Reasoning: {content}")
 
             # Clean up content if it contains tool_response
             if "<tool_response>" in content:
@@ -504,6 +562,7 @@ class MultiTurnReactAgent:
                             }
                         )
                         tool_responses.append({"role": "tool", "tool_call_id": tool_id, "content": result})
+                        print(f"Round {round}: 🛠️ [Native] Tool {tool_name} returned: {str(result)}")
 
                     except Exception as e:
                         print(f"Error processing native tool call: {e}")
@@ -536,8 +595,12 @@ class MultiTurnReactAgent:
                     if "python" in tool_call_text.lower():
                         try:
                             # Extract code from the original content (not just tool_call_text)
-                            code_raw = content.split("<tool_call>")[1].split("</tool_call>")[0].split("<code>")[1].split("</code>")[0].strip()
-                            result = await self.execute_python(code_raw)
+                            code_blocks = re.findall(r"<code>(.*?)</code>", content, flags=re.DOTALL | re.IGNORECASE)
+                            if not code_blocks:
+                                raise ValueError("No <code> blocks found in tool call.")
+                            merged_code = "\n\n".join(block.strip() for block in code_blocks if block.strip())
+                            result = await self.execute_python(merged_code)
+                            print(f"Round {round}: 🐍 Python execution result: {result}")
                         except Exception:
                             result = "[Python Interpreter Error]: Formatting error."
                     else:
@@ -546,12 +609,14 @@ class MultiTurnReactAgent:
                         tool_name = tool_call.get("name", "")
                         tool_args = tool_call.get("arguments", {})
                         result = await self.custom_call_tool(tool_name, tool_args)
+                        print(f"Round {round}: 🛠️ Tool {tool_name} returned: {str(result)}")
 
                 except Exception:
                     result = 'Error: Tool call is not a valid JSON. Tool call must contain a valid "name" and "arguments" field.'
 
                 # Add tool response in ReAct format
                 tool_response = f"<tool_response>\n{result}\n</tool_response>"
+                print(f"Round {round}: Tool response: {tool_response}")
                 messages.append({"role": "user", "content": tool_response})
 
             # Priority 3: No tool call, just reasoning or answer
@@ -572,48 +637,48 @@ class MultiTurnReactAgent:
                     messages[-1]["content"] = "Sorry, the number of llm calls exceeds the limit."
 
             # Handle context length limit using actual API consumption
-            total_tokens_used = self.get_total_tokens_used()
+            # total_tokens_used = self.get_total_tokens_used()
 
-            if total_tokens_used > self.max_context_tokens:
-                # Instead of replacing the last message, add a clear instruction
-                final_instruction = {
-                    "role": "user",
-                    "content": "You have reached the maximum context length. Based on all the information above, please provide your best answer now in the format: <think>your final thinking</think>\n<answer>your answer</answer>",
-                }
+            # if total_tokens_used > self.max_context_tokens:
+            #     # Instead of replacing the last message, add a clear instruction
+            #     final_instruction = {
+            #         "role": "user",
+            #         "content": "You have reached the maximum context length. Based on all the information above, please provide your best answer now in the format: <think>your final thinking</think>\n<answer>your answer</answer>",
+            #     }
 
-                # Truncate conversation history to make room for final answer
-                # Keep system prompt, original question, and recent context
-                if len(messages) > 4:  # system + user + at least 2 exchanges
-                    # Keep first 2 messages (system + original question) and last 2 meaningful exchanges
-                    truncated_messages = messages[:2]  # system + original question
-                    recent_messages = messages[-4:]  # last 4 messages for context
-                    truncated_messages.extend(recent_messages)
-                    messages = truncated_messages
+            #     # Truncate conversation history to make room for final answer
+            #     # Keep system prompt, original question, and recent context
+            #     if len(messages) > 4:  # system + user + at least 2 exchanges
+            #         # Keep first 2 messages (system + original question) and last 2 meaningful exchanges
+            #         truncated_messages = messages[:2]  # system + original question
+            #         recent_messages = messages[-4:]  # last 4 messages for context
+            #         truncated_messages.extend(recent_messages)
+            #         messages = truncated_messages
 
-                messages.append(final_instruction)
+            #     messages.append(final_instruction)
 
-                # Note: After truncation, we'll let the next API call handle any remaining limits
-                print(f"Round {round + 1}: ⚠️ Context limit reached, requesting final answer")
+            #     # Note: After truncation, we'll let the next API call handle any remaining limits
+            #     print(f"Round {round + 1}: ⚠️ Context limit reached, requesting final answer")
 
-                response = await self.call_server(messages)
-                content = response.text if hasattr(response, "text") and response.text else ""
-                messages.append({"role": "assistant", "content": content.strip()})
+            #     response = await self.call_server(messages)
+            #     content = response.text if hasattr(response, "text") and response.text else ""
+            #     messages.append({"role": "assistant", "content": content.strip()})
 
-                if "<answer>" in content and "</answer>" in content:
-                    prediction = content.split("<answer>")[1].split("</answer>")[0].strip()
-                    termination = "answer generated due to token limit"
-                else:
-                    prediction = content.strip()
-                    termination = "response generated due to token limit (no answer format)"
+            #     if "<answer>" in content and "</answer>" in content:
+            #         prediction = content.split("<answer>")[1].split("</answer>")[0].strip()
+            #         termination = "answer generated due to token limit"
+            #     else:
+            #         prediction = content.strip()
+            #         termination = "response generated due to token limit (no answer format)"
 
-                result = {
-                    "question": question,
-                    "answer": answer,
-                    "messages": messages,
-                    "prediction": prediction,
-                    "termination": termination,
-                }
-                return result
+            #     result = {
+            #         "question": question,
+            #         "answer": answer,
+            #         "messages": messages,
+            #         "prediction": prediction,
+            #         "termination": termination,
+            #     }
+            #     return result
 
         # Final validation logic from original Tongyi implementation
         # Handle both native function calling and ReAct text format
