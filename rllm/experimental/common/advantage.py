@@ -55,13 +55,15 @@ def compute_advantage_from_trajectory_groups(
     rewards_by_group = defaultdict(list)
     # TODO(listar2000): in the future, we should support per-trajectory-group advantage modes
     for group in groups:
+        # extract the role of the group (e.g. "solver" or "judge") or assign the default name
+        group_role = group.group_id.split(":")[1] if ":" in group.group_id[:-1] else "all_groups"
         if algorithm_config.stepwise_advantage_mode == "broadcast":
             assert all(traj.reward is not None for traj in group.trajectories), "Trajectory reward cannot be None in broadcast mode"
             traj_rewards = np.array([traj.reward for traj in group.trajectories])
             advantages = advantage_fn(traj_rewards)
 
-            rewards_by_group[group.group_id].extend(traj_rewards)
-            advantages_by_group[group.group_id].extend(advantages)
+            rewards_by_group[group_role].extend(traj_rewards)
+            advantages_by_group[group_role].extend(advantages)
             # broadcast the advantage to all steps in the trajectory
             for traj, advantage in zip(group.trajectories, advantages, strict=False):
                 for step in traj.steps:
@@ -76,22 +78,22 @@ def compute_advantage_from_trajectory_groups(
                 for step, advantage in zip(steps, advantages, strict=False):
                     step.advantage = advantage
 
-                rewards_by_group[f"{group.group_id}_step_{step_idx}"].extend(step_rewards)
-                advantages_by_group[f"{group.group_id}_step_{step_idx}"].extend(advantages)
+                rewards_by_group[f"{group_role}_step_{step_idx}"].extend(step_rewards)
+                advantages_by_group[f"{group_role}_step_{step_idx}"].extend(advantages)
 
     # reduce metrics by group
     final_metrics = {}
-    for group_id, rewards in rewards_by_group.items():
-        final_metrics[f"reward/{group_id}/mean"] = np.mean(rewards)
-        final_metrics[f"reward/{group_id}/std"] = np.std(rewards)
-        final_metrics[f"reward/{group_id}/max"] = np.max(rewards)
-        final_metrics[f"reward/{group_id}/min"] = np.min(rewards)
+    for group_role, rewards in rewards_by_group.items():
+        final_metrics[f"reward/{group_role}/mean"] = np.mean(rewards)
+        final_metrics[f"reward/{group_role}/std"] = np.std(rewards)
+        final_metrics[f"reward/{group_role}/max"] = np.max(rewards)
+        final_metrics[f"reward/{group_role}/min"] = np.min(rewards)
 
-    for group_id, advantages in advantages_by_group.items():
-        final_metrics[f"advantage/{group_id}/mean"] = np.mean(advantages)
-        final_metrics[f"advantage/{group_id}/std"] = np.std(advantages)
-        final_metrics[f"advantage/{group_id}/max"] = np.max(advantages)
-        final_metrics[f"advantage/{group_id}/min"] = np.min(advantages)
-        final_metrics[f"advantage/{group_id}/fraction_zero"] = np.sum(np.abs(advantages) < 1e-8) / len(advantages)
+    for group_role, advantages in advantages_by_group.items():
+        final_metrics[f"advantage/{group_role}/mean"] = np.mean(advantages)
+        final_metrics[f"advantage/{group_role}/std"] = np.std(advantages)
+        final_metrics[f"advantage/{group_role}/max"] = np.max(advantages)
+        final_metrics[f"advantage/{group_role}/min"] = np.min(advantages)
+        final_metrics[f"advantage/{group_role}/fraction_zero"] = np.sum(np.abs(advantages) < 1e-8) / len(advantages)
 
     return final_metrics
