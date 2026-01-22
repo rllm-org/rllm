@@ -1,5 +1,6 @@
 import asyncio
 import threading
+import time
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Iterable
@@ -12,7 +13,6 @@ from omegaconf import DictConfig, OmegaConf
 
 from rllm.agents.agent import Episode, TrajectoryGroup
 from rllm.data import Dataset
-from rllm.engine.rollout import RolloutEngine
 from rllm.experimental.common.advantage import AlgorithmConfig
 from rllm.experimental.common.config import CompactFilteringConfig, RejectionSamplingConfig, TransformConfig
 from rllm.experimental.common.performance import simple_timer
@@ -21,6 +21,7 @@ from rllm.experimental.common.transform import transform_episodes_to_trajectory_
 from rllm.experimental.common.visualization import visualize_trajectory_last_steps
 from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
 from rllm.experimental.protocol import BackendProtocol
+from rllm.experimental.rollout import RolloutEngine
 from rllm.utils import EpisodeLogger, Tracking
 from rllm.workflows.workflow import TerminationReason, Workflow
 
@@ -282,7 +283,7 @@ class UnifiedTrainer:
                 trainer_state.reset_batch()
 
                 await self.backend.on_batch_start(trainer_state)
-                with simple_timer("step", trainer_state.timing_dict):
+                with simple_timer("total_step", trainer_state.timing_dict):
                     await self._train_batch_async(batch, trainer_state)
                 await self.backend.on_batch_end(trainer_state)
 
@@ -293,12 +294,11 @@ class UnifiedTrainer:
                     break_via_total_batches = True
                     break
 
-                trainer_state.global_step += 1
-
                 # periodic validation
                 if self.rllm_config.trainer.get("val_freq", 0) > 0 and trainer_state.global_step % self.rllm_config.trainer.val_freq == 0:
-                    with simple_timer("testing", trainer_state.timing_dict):
-                        await self._validate_async(trainer_state)
+                    await self._validate_async(trainer_state)
+
+                trainer_state.global_step += 1
 
             await self.backend.on_epoch_end(trainer_state)
 
@@ -368,7 +368,8 @@ class UnifiedTrainer:
 
         if not await self.backend.on_validation_start(trainer_state):
             return {}
-
+        # manually manage the testing time
+        test_begin = time.perf_counter()
         self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="val", epoch=trainer_state.epoch)
 
         is_correct_lst, uid_lst, data_source_lst = [], [], []
@@ -387,7 +388,8 @@ class UnifiedTrainer:
                 for key, value in episode.metrics.items():
                     workflow_metrics_by_source[data_source][key].append(float(value))
 
-        val_metrics = {}
+        test_end = time.perf_counter()
+        val_metrics = {"time/testing": test_end - test_begin}
         is_correct_array = np.array(is_correct_lst)
         uid_array = np.array(uid_lst)
         data_source_array = np.array(data_source_lst)

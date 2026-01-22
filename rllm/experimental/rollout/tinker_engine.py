@@ -86,7 +86,7 @@ class TinkerEngine(RolloutEngine):
         max_response_length: int = 4096,
         max_model_length: int | None = None,
         sampling_params: dict | None = None,
-        bypass_render_with_parser: bool = False,
+        bypass_render_with_parser: bool = True,  # default to True now
         processor: Processor | None = None,
         image_processor: ImageProcessor | None = None,
         disable_thinking: bool = False,

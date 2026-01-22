@@ -28,14 +28,13 @@ from verl.utils.metric import reduce_metrics
 
 from rllm.agents.agent import Episode
 from rllm.data import Dataset
-from rllm.engine.rollout import RolloutEngine
-from rllm.engine.rollout.verl_engine import VerlEngine
 from rllm.experimental.common import (
     AlgorithmConfig,
     compute_advantage_from_trajectory_groups,
     simple_timer,
 )
 from rllm.experimental.protocol import BackendProtocol
+from rllm.experimental.rollout import RolloutEngine, VerlEngine
 from rllm.experimental.verl import compute_advantage_verl, transform_episodes_to_dataproto, update_dataproto_with_advantages
 
 if TYPE_CHECKING:

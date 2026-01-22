@@ -108,41 +108,20 @@ class TITOCompleter(Completer):
     async def complete(self, messages: list[dict], action_hook: Callable[[ModelOutput], Any] | None = None, **kwargs) -> Step:
         is_prefix, token_input_delta = self._parse_message_delta(messages)
 
+        # current token input should be the previous token input plus the token input delta
         curr_token_input = self._prev_token_input + token_input_delta
         curr_token_output: TokenOutput = await self.rollout_engine.get_token_output_from_token_input(curr_token_input, **kwargs)
 
-        """
-        Part below can be refactored cleaner by changing the rollout engine API
-        """
-        response_tokens, logprobs = curr_token_output.tokens, curr_token_output.logprobs
-
-        response_dict = self.chat_parser.parse_completion(response_tokens)
-        content = response_dict.get("content", "")
-        reasoning = response_dict.get("reasoning", "")
-        tool_calls = response_dict.get("tool_calls", [])
-
-        response_text = self.tokenizer.decode(response_tokens, skip_special_tokens=True)
-
-        model_output = ModelOutput(
-            prompt_ids=curr_token_input,
-            completion_ids=response_tokens,
-            logprobs=logprobs or [],
-            content=content,
-            reasoning=reasoning,
-            tool_calls=tool_calls,
-        )
-        """
-        Part above can be refactored cleaner by changing the rollout engine API
-        """
+        model_output = self.rollout_engine.assemble_model_output(curr_token_input, curr_token_output)
 
         action = action_hook(model_output) if action_hook is not None else None
         return Step(
-            prompt_ids=curr_token_input,
-            response_ids=response_tokens,
-            logprobs=logprobs or [],
-            chat_completions=messages + [{"role": "assistant", "content": content, "reasoning": reasoning}],
-            thought=reasoning,
+            prompt_ids=model_output.prompt_ids or [],  # type: ignore
+            response_ids=model_output.completion_ids or [],
+            logprobs=model_output.logprobs or [],
+            chat_completions=messages + [{"role": "assistant", "content": model_output.content, "reasoning": model_output.reasoning}],
+            thought=model_output.reasoning or "",
             action=action,
-            model_response=response_text,
-            model_output=model_output,
+            model_response=model_output.content or "",
+            model_output=model_output,  # type: ignore
         )

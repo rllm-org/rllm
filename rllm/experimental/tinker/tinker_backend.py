@@ -23,11 +23,10 @@ from transformers import AutoTokenizer
 import tinker
 from rllm.agents.agent import Episode
 from rllm.data import Dataset
-from rllm.engine.rollout import RolloutEngine
-from rllm.engine.rollout.tinker_engine import TinkerEngine
-from rllm.experimental.common.advantage import AlgorithmConfig
+from rllm.experimental.common import AlgorithmConfig, simple_timer
 from rllm.experimental.protocol import BackendProtocol
-from rllm.experimental.tinker.tinker_metrics_utils import compute_kl_and_entropy_metrics, print_metrics_table
+from rllm.experimental.rollout import RolloutEngine, TinkerEngine
+from rllm.experimental.tinker.tinker_metrics_utils import print_metrics_table, update_training_metrics
 from rllm.experimental.tinker.tinker_policy_trainer import TinkerPolicyTrainer
 
 if TYPE_CHECKING:
@@ -88,17 +87,13 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Initialize policy trainer (filled during init_rollout_engine)
         self.policy_trainer: TinkerPolicyTrainer | None = None
         self.tokenizer: PreTrainedTokenizer | None = None
+        self.learning_rate = self.full_config.training.learning_rate
 
         # Rollout engine - will be created in init_rollout_engine
         self.rollout_engine: TinkerEngine | None = None
 
         # Sampling client - updated after each checkpoint save
         self.sampling_client: tinker.SamplingClient | None = None
-
-        # Store training datums and logprobs for KL metrics computation
-        self._training_datums: list[tinker.Datum] = []
-        self._training_logprobs: list[torch.Tensor] = []
-
         # Store algorithm config for use in process_backend_batch
         self._algorithm_config: AlgorithmConfig | None = None
 
@@ -264,22 +259,19 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
         assert trainer_state.trajectory_groups is not None, "Trajectory groups are not set"
 
-        # Clear previous training data
-        self._training_datums = []
-        self._training_logprobs = []
-
         # Use TinkerPolicyTrainer's method for forward-backward
-        training_datums, training_logprobs = await self.policy_trainer.forward_backward_from_trajectory_groups(
-            trainer_state.trajectory_groups,
-            algorithm_config=self._algorithm_config,
-        )
-
-        # Store for metrics computation
-        self._training_datums = training_datums
-        self._training_logprobs = training_logprobs
+        with simple_timer("forward_backward", trainer_state.timing_dict):
+            training_datums, training_logprobs, adv_metrics = await self.policy_trainer.forward_backward_from_trajectory_groups(
+                trainer_state.trajectory_groups,
+                algorithm_config=self._algorithm_config,
+            )
 
         # Store datums as backend batch
         trainer_state.backend_batch = training_datums
+        # Also store the training logprobs
+        trainer_state.extra_info["training_logprobs"] = training_logprobs
+        # Also store the advantage metrics
+        trainer_state.metrics.update(adv_metrics)
 
     async def compute_advantages(
         self,
@@ -313,27 +305,19 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         """
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
-        learning_rate = self.full_config.training.learning_rate
         beta1 = self.full_config.training.get("beta1", 0.9)
         beta2 = self.full_config.training.get("beta2", 0.95)
         eps = self.full_config.training.get("eps", 1e-8)
 
         # Optimizer step (async)
-        optim_step_future = await self.policy_trainer.optim_step_future(
-            learning_rate=learning_rate,
-            beta1=beta1,
-            beta2=beta2,
-            eps=eps,
-        )
-        await optim_step_future.result_async()
-
-        # Compute KL metrics if we have training data
-        if self._training_datums and self._training_logprobs:
-            kl_metrics = compute_kl_and_entropy_metrics(
-                self._training_datums,
-                self._training_logprobs,
+        with simple_timer("optim_step", trainer_state.timing_dict):
+            optim_step_future = await self.policy_trainer.optim_step_future(
+                learning_rate=self.learning_rate,
+                beta1=beta1,
+                beta2=beta2,
+                eps=eps,
             )
-            trainer_state.metrics.update(kl_metrics)
+            await optim_step_future.result_async()
 
     # =========================================================================
     # Async hook methods
@@ -371,10 +355,10 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
         global_step = trainer_state.global_step
-
         # Save sampler checkpoint after each batch
-        path_dict = await self.policy_trainer.save_checkpoint_async(global_step, kind="sampler")
-        self.sampling_client = self.policy_trainer.create_sampling_client(path_dict["sampler_path"])
+        with simple_timer("save_sampler", trainer_state.timing_dict):
+            path_dict = await self.policy_trainer.save_checkpoint_async(global_step, kind="sampler")
+            self.sampling_client = self.policy_trainer.create_sampling_client(path_dict["sampler_path"])
 
         # Save full state checkpoint periodically
         save_freq = self.full_config.rllm.trainer.get("save_freq", 0)
@@ -382,6 +366,10 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         if save_freq > 0 and global_step % save_freq == 0:
             logger.info(f"Saving state checkpoint at step {global_step}")
             await self.policy_trainer.save_checkpoint_async(global_step, kind="state")
+
+        # Update metrics
+        total_batches = self.full_config.rllm.trainer.get("total_batches", None)
+        update_training_metrics(trainer_state, self.learning_rate, total_batches)
 
         # Print metrics table
         if trainer_state.metrics:

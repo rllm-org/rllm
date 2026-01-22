@@ -194,7 +194,7 @@ class TinkerPolicyTrainer:
         self,
         trajectory_groups: list[TrajectoryGroup],
         algorithm_config: AlgorithmConfig | None = None,
-    ) -> tuple[list[tinker.Datum], list[torch.Tensor]]:
+    ) -> tuple[list[tinker.Datum], list[torch.Tensor], dict]:
         """
         Run forward-backward pass from trajectory groups (skipping episode transformation).
 
@@ -206,15 +206,16 @@ class TinkerPolicyTrainer:
             algorithm_config: Algorithm config for advantage computation (uses self.algorithm_config if None)
 
         Returns:
-            Tuple of (training_datums, training_logprobs)
+            Tuple of (training_datums, training_logprobs, adv_metrics)
             - training_datums: List of datums WITH masks for metrics
             - training_logprobs: List of training logprobs from forward-backward
+            - adv_metrics: Dictionary of advantage metrics (rewards + advantages summary for each trajectory group)
         """
         if algorithm_config is None:
             algorithm_config = self.algorithm_config
 
         # Transform trajectory groups to datums (includes advantage computation)
-        training_datums = transform_trajectory_groups_to_datums(
+        training_datums, adv_metrics = transform_trajectory_groups_to_datums(
             trajectory_groups,
             algorithm_config=algorithm_config,
         )
@@ -237,7 +238,7 @@ class TinkerPolicyTrainer:
             logprobs = output["logprobs"].to_torch()
             training_logprobs.append(logprobs)
 
-        return training_datums, training_logprobs
+        return training_datums, training_logprobs, adv_metrics
 
     @require_training_client
     async def optim_step_future(self, learning_rate: float | None = None, beta1: float = 0.9, beta2: float = 0.95, eps: float = 1e-8):

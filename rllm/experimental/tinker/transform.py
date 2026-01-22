@@ -9,9 +9,9 @@ from tinker_cookbook.supervised.common import create_rightshifted_model_input_an
 
 import tinker
 from rllm.agents.agent import Trajectory, TrajectoryGroup
-from rllm.engine.rollout.rollout_engine import TinkerTokenInput
-from rllm.engine.rollout.tinker_engine import _flat_token_input_length, _flat_token_input_to_model_input
 from rllm.experimental.common import AlgorithmConfig, compute_advantage_from_trajectory_groups
+from rllm.experimental.rollout.tinker_engine import _flat_token_input_length, _flat_token_input_to_model_input
+from rllm.experimental.rollout.types import TinkerTokenInput
 from tinker.types.tensor_data import TensorData
 
 
@@ -127,7 +127,7 @@ def trajectory_to_data(traj: Trajectory) -> list[tinker.Datum]:
 def transform_trajectory_groups_to_datums(
     trajectory_groups: list[TrajectoryGroup],
     algorithm_config: AlgorithmConfig,
-) -> list[tinker.Datum]:
+) -> tuple[list[tinker.Datum], dict]:
     """
     Transform a list of TrajectoryGroup objects to a list of Tinker Datum objects. Two things are done here:
     1. Compute the advantages for each group
@@ -135,7 +135,7 @@ def transform_trajectory_groups_to_datums(
     """
     # step 1: compute the advantages for each group using the common functionality
     # this fills the `advantage` attribute of all the steps in the trajectory groups
-    compute_advantage_from_trajectory_groups(trajectory_groups, algorithm_config)
+    adv_metrics = compute_advantage_from_trajectory_groups(trajectory_groups, algorithm_config)
 
     # step 2: iterate over all steps and build the Tinker Datum objects
     datums = []
@@ -143,4 +143,4 @@ def transform_trajectory_groups_to_datums(
         for trajectory in group.trajectories:
             datums.extend(trajectory_to_data(trajectory))
 
-    return datums
+    return datums, adv_metrics
