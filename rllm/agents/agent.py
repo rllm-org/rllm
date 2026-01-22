@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from rllm.engine.rollout import ModelOutput
+    from rllm.workflows.workflow import TerminationReason
 
 
 @dataclass
@@ -29,8 +30,9 @@ class Step:
     done: bool = False
     mc_return: float = 0.0
 
-    # field below are filled by the advantage computer
-    advantage: float | None = None
+    # field below are filled by the advantage computer. Note when advantage is a list, it is per-token advantages.
+    # TODO: potentially rename this as "advantages" so its clearer that it allows a generic list.
+    advantage: list[float] | float | None = None
 
     def __post_init__(self):
         if self.model_output is None:
@@ -44,8 +46,13 @@ class Step:
             self.logprobs = self.model_output.logprobs
 
         # check that the token ids are filled
+        # TODO(listar2000): this might cause compatibility issue. Double check if we should make these assertions.
         assert len(self.prompt_ids) > 0, "prompt_ids is empty"
         assert len(self.response_ids) > 0, "response_ids is empty"
+
+        # check that the lengths would match up
+        if len(self.logprobs) > 0:
+            assert len(self.response_ids) == len(self.logprobs), f"length mismatch between response_ids and logprobs, got {len(self.response_ids)}, {len(self.logprobs)}"
 
     def to_dict(self) -> dict:
         return {
@@ -209,7 +216,7 @@ class TrajectoryGroup:
     """
 
     trajectories: list[Trajectory]
-    group_id: str = None  # noqa: F821
+    group_id: str = ""
     metadata: list[dict] = field(default_factory=list)
 
 
