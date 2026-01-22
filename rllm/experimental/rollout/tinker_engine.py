@@ -1,8 +1,9 @@
-from typing import cast
+from typing import Any, cast
 
 import tinker
 from tinker.types import ModelInput
 from tinker_cookbook import model_info, renderers
+from tinker_cookbook.renderers import Message
 from typing_extensions import override  # need to use typing_extensions for python < 3.12
 
 from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
@@ -40,7 +41,7 @@ def _flat_token_input_to_model_input(token_input: TinkerTokenInput) -> ModelInpu
     return tinker.ModelInput(chunks=out)
 
 
-def _flat_token_input_length(token_input: TinkerTokenInput) -> int:
+def _flat_token_input_length(token_input: TokenInput) -> int:
     """Get the length of a flat token input. This nicely handles both text and image inputs"""
     length = 0
     for elem in token_input:
@@ -49,6 +50,25 @@ def _flat_token_input_length(token_input: TinkerTokenInput) -> int:
         else:
             length += elem.length
     return length
+
+
+def _parse_tinker_message(message: Message) -> tuple[str, str, list[Any]]:
+    tinker_content = message["content"]
+    if isinstance(tinker_content, list):
+        text_parts, think_parts = [], []
+        for part in tinker_content:
+            if part["type"] == "text":
+                text_parts.append(part)
+            elif part["type"] == "thinking":
+                think_parts.append(part)
+        content = "\n".join([text["text"] for text in text_parts])
+        reasoning = "\n".join([think["thinking"] for think in think_parts])
+    else:  # no reasoning parsed
+        content = tinker_content
+        reasoning = ""
+    # TODO(listar2000): the Tinker tool_calls is not fully compatible with the rLLM one
+    tool_calls = message.get("tool_calls", [])
+    return content, reasoning, tool_calls
 
 
 class TinkerEngine(RolloutEngine):
@@ -228,19 +248,17 @@ class TinkerEngine(RolloutEngine):
         return sample_response.sequences[0]
 
     @override
-    def assemble_model_output(self, token_output: TokenOutput) -> ModelOutput:
+    def assemble_model_output(self, token_input: TokenInput, token_output: TokenOutput) -> ModelOutput:
         """
         Assemble model output from a sampled sequence.
         """
-        assert isinstance(self.renderer, renderers.Renderer), "Renderer must be a Tinker Renderer"
+        assert isinstance(self.renderer, renderers.Renderer), "self.renderer must be a valid Tinker Renderer"
         sampled_sequence = cast(TinkerTokenOutput, token_output)
         response_tokens, logprobs = sampled_sequence.tokens, sampled_sequence.logprobs
 
-        response_dict, status = self.renderer.parse_response(response_tokens)
+        response_message, _ = self.renderer.parse_response(response_tokens)
         # obtain content, reasoning, and tool calls
-        content = response_dict.get("content", "")
-        reasoning = response_dict.get("reasoning", "")
-        tool_calls = response_dict.get("tool_calls", [])
+        content, reasoning, tool_calls = _parse_tinker_message(response_message)
         # decode full text
         completion_text = self.tokenizer.decode(response_tokens, skip_special_tokens=True)  # type: ignore
         finish_reason = sampled_sequence.stop_reason
@@ -250,10 +268,10 @@ class TinkerEngine(RolloutEngine):
             content=str(content),
             reasoning=reasoning,
             tool_calls=tool_calls,
-            prompt_ids=token_output.tokens,
+            prompt_ids=token_input,
             completion_ids=response_tokens,
             logprobs=logprobs,
-            prompt_length=len(token_output.tokens),
+            prompt_length=_flat_token_input_length(token_input),
             completion_length=len(response_tokens),
             finish_reason=finish_reason,
         )
@@ -294,47 +312,13 @@ class TinkerEngine(RolloutEngine):
                 reasoning_effort=reasoning_effort,
                 accumulate_reasoning=accumulate_reasoning,
             )
-            token_input: list[int] = self.tokenizer.encode(prompt, add_special_tokens=False)  # type: ignore
-            prompt_length = len(token_input)
+            token_input = self.tokenizer.encode(prompt, add_special_tokens=False)  # type: ignore
         else:
             # Use Tinker renderer
             # Convert standard image format to Tinker renderer format
             converted_messages = self._convert_images_to_content_list(messages)
             # Build prompt using renderer
             token_input: TinkerTokenInput = self.renderer.build_generation_prompt(converted_messages).chunks  # type: ignore
-            prompt_length = _flat_token_input_length(token_input)
 
-        sampled_sequence = await self.get_token_output_from_token_input(token_input=token_input, **kwargs.copy())
-        response_tokens, logprobs = sampled_sequence.tokens, sampled_sequence.logprobs
-
-        # Parse response using renderer
-        response_dict, _ = self.renderer.parse_response(response_tokens)  # type: ignore
-
-        # Extract content from response
-        if isinstance(response_dict, dict):
-            content = response_dict.get("content", "")
-            reasoning = response_dict.get("reasoning", "")
-            tool_calls = response_dict.get("tool_calls", [])
-        else:
-            content = response_dict if isinstance(response_dict, str) else ""
-            reasoning = ""
-            tool_calls = []
-
-        # Decode full text
-        completion_text = self.tokenizer.decode(response_tokens, skip_special_tokens=True)  # type: ignore
-
-        # Determine finish reason from the sampled sequence
-        finish_reason = sampled_sequence.stop_reason
-
-        return ModelOutput(
-            text=completion_text,
-            content=content,
-            reasoning=reasoning,
-            tool_calls=tool_calls,
-            prompt_ids=token_input,
-            completion_ids=response_tokens,
-            logprobs=logprobs,
-            prompt_length=prompt_length,
-            completion_length=len(response_tokens),
-            finish_reason=finish_reason,
-        )
+        sampled_sequence = await self.get_token_output_from_token_input(token_input=token_input, **kwargs)
+        return self.assemble_model_output(token_input=token_input, token_output=sampled_sequence)

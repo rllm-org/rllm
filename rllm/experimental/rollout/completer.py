@@ -62,7 +62,15 @@ class Completer:
 
 class TITOCompleter(Completer):
     """
-    Completer that ensures the "token-in-token-out" property.
+    Completer that ensures the "token-in-token-out" property. This is achieved by caching the previous messages and token input, and when
+    a new message contains the previous messages as a prefix, we only compute the token ids for the "delta" (difference) part of the new message.
+    And the new token id is the concatenation of the previous token id and the "delta" token id.
+
+    Args:
+        rollout_engine: The rollout engine to use.
+        kwargs: Additional kwargs to pass to the rollout engine.
+    Returns:
+        A single step with most information filled in.
     """
 
     chat_parser: ChatTemplateParser
@@ -78,16 +86,11 @@ class TITOCompleter(Completer):
         if not self.rollout_engine.supports_token_in_token_out:
             cls_name = self.rollout_engine.__class__.__name__
             raise ValueError(f"The rollout engine {cls_name} does not support token-in-token-out")
-        # we also require the rollout engine has a chat parser
-        chat_parser = getattr(self.rollout_engine, "chat_parser", None)
-        if not chat_parser or not isinstance(chat_parser, ChatTemplateParser):
-            raise ValueError("The rollout engine must have a chat parser")
-
-        tokenizer = getattr(self.rollout_engine, "tokenizer", None)
-        if not tokenizer or not isinstance(tokenizer, PreTrainedTokenizer):
-            raise ValueError("The rollout engine must have a tokenizer")
-        self.tokenizer = tokenizer
-        self.chat_parser = chat_parser
+        # we also require the rollout engine has a chat parser and a tokenizer
+        if rollout_engine.chat_parser is None or rollout_engine.tokenizer is None:
+            raise ValueError("The rollout engine must have a chat parser and a tokenizer")
+        self.tokenizer = rollout_engine.tokenizer
+        self.chat_parser = rollout_engine.chat_parser
 
     def _parse_message_delta(self, messages: list[dict]) -> tuple[bool, TokenInput]:
         cur_messages_str = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True)
