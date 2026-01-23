@@ -353,7 +353,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
         # Save final checkpoint if we didn't just save it in the last batch
-        if trainer_state.global_step % self.full_config.rllm.trainer.get("save_freq", 0) != 0:
+        if trainer_state.global_step % self.full_config.rllm.trainer.save_freq != 0:
             logger.info(f"Saving final checkpoint at step {trainer_state.global_step}")
             await self.policy_trainer.save_checkpoint_async(trainer_state.global_step, kind="state")
 
@@ -366,16 +366,11 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
         global_step = trainer_state.global_step
         # Save sampler checkpoint after each batch
-        with simple_timer("save_sampler", trainer_state.timing_dict):
-            path_dict = await self.policy_trainer.save_checkpoint_async(global_step, kind="sampler")
-            self.sampling_client = self.policy_trainer.create_sampling_client(path_dict["sampler_path"])
-
-        # Save full state checkpoint periodically
-        save_freq = self.full_config.rllm.trainer.get("save_freq", 0)
-
-        if save_freq > 0 and global_step % save_freq == 0:
-            logger.info(f"Saving state checkpoint at step {global_step}")
-            await self.policy_trainer.save_checkpoint_async(global_step, kind="state")
+        with simple_timer("save_checkpoint", trainer_state.timing_dict):
+            logger.info(f"Saving state checkpoint and sampler at step {global_step}")
+            save_freq = self.full_config.rllm.trainer.save_freq
+            do_save = save_freq > 0 and global_step % save_freq == 0
+            self.sampling_client = await self.policy_trainer.save_checkpoint_and_get_sampling_client(global_step, kind="both", do_save=do_save)
 
         # Update metrics
         total_batches = self.full_config.rllm.trainer.get("total_batches", None)

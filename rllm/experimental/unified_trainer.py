@@ -268,7 +268,8 @@ class UnifiedTrainer:
             if self.rllm_config.trainer.get("val_only", False):
                 return
 
-        trainer_state.global_step += 1  # we start from step (1 + original start batch index)
+        # we start from step (1 + original start batch index)
+        trainer_state.global_step += 1
 
         # Run the training loop
         await self._fit_async(trainer_state)
@@ -306,7 +307,7 @@ class UnifiedTrainer:
                     break
 
                 # periodic validation
-                if self.rllm_config.trainer.get("val_freq", 0) > 0 and trainer_state.global_step % self.rllm_config.trainer.val_freq == 0:
+                if self.rllm_config.trainer.test_freq > 0 and trainer_state.global_step % self.rllm_config.trainer.test_freq == 0:
                     await self._validate_async(trainer_state)
 
                 trainer_state.global_step += 1
@@ -314,7 +315,7 @@ class UnifiedTrainer:
             await self.backend.on_epoch_end(trainer_state)
 
         # final validation after training
-        if self.rllm_config.trainer.get("val_freq", 0) > 0:
+        if self.rllm_config.trainer.test_freq > 0:
             val_metrics = await self._validate_async(trainer_state)
             pprint(f"Final validation metrics: {val_metrics}")
 

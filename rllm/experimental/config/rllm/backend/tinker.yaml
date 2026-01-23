@@ -5,10 +5,6 @@
 # Unified configuration supporting both workflow and agent training modes
 # Default settings match tinker_cookbook.recipes.math_rl for MATH dataset
 
-# Identity
-rllm:
-  backend: tinker
-
 # Tinker-specific settings
 tinker_base_url: null  # Tinker service URL (null for local)
   
@@ -64,6 +60,7 @@ data:
 # Overriding the rLLM-common config with Tinker-specific ones
 # Only override if the algorithm values are not None, otherwise still use the rLLM-common config
 rllm:
+  backend: tinker
   rollout:
     n: ${oc.select:training.group_size, 8}
     n_val: ${oc.select:validation.group_size, 1}

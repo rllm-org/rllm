@@ -17,7 +17,12 @@ from tinker_cookbook.tokenizer_utils import Tokenizer
 
 import tinker
 from rllm.agents.agent import Episode, TrajectoryGroup
-from rllm.experimental.common import AlgorithmConfig, CompactFilteringConfig, TransformConfig, transform_episodes_to_trajectory_groups
+from rllm.experimental.common import (
+    AlgorithmConfig,
+    CompactFilteringConfig,
+    TransformConfig,
+    transform_episodes_to_trajectory_groups,
+)
 from rllm.experimental.tinker.transform import transform_trajectory_groups_to_datums
 from tinker.types import AdamParams
 
@@ -241,7 +246,13 @@ class TinkerPolicyTrainer:
         return training_datums, training_logprobs, adv_metrics
 
     @require_training_client
-    async def optim_step_future(self, learning_rate: float | None = None, beta1: float = 0.9, beta2: float = 0.95, eps: float = 1e-8):
+    async def optim_step_future(
+        self,
+        learning_rate: float | None = None,
+        beta1: float = 0.9,
+        beta2: float = 0.95,
+        eps: float = 1e-8,
+    ):
         if learning_rate is None:
             learning_rate = self.config.training.learning_rate or 1e-6
 
@@ -254,29 +265,35 @@ class TinkerPolicyTrainer:
         optim_step_future = await self.training_client.optim_step_async(adam_params)  # type: ignore[attr-defined]
         return optim_step_future
 
-    async def save_checkpoint_async(
+    @require_training_client
+    async def save_checkpoint_and_get_sampling_client(
         self,
         batch_idx: int,
-        kind: str = "sampler",
-    ) -> dict:
+        kind: str = "both",
+        do_save: bool = False,
+    ) -> tinker.SamplingClient:
         """
         Save checkpoint and return paths.
 
         Args:
             batch_idx: Current batch index
             kind: Checkpoint kind ("state", "sampler", or "both")
+            do_save: Whether to save the checkpoint
 
         Returns:
             Dictionary with checkpoint paths
         """
-        path_dict = await checkpoint_utils.save_checkpoint_async(
-            training_client=self.training_client,
-            name=f"{batch_idx:06d}",
-            log_path=self.config.training.default_local_dir,
-            kind=kind,
-            loop_state={"batch": batch_idx},
-        )
-        return path_dict
+        if do_save:
+            path_dict = await checkpoint_utils.save_checkpoint_async(
+                training_client=self.training_client,
+                name=f"{batch_idx:06d}",
+                log_path=self.config.training.default_local_dir,
+                kind=kind,
+                loop_state={"batch": batch_idx},
+            )
+            return self.training_client.create_sampling_client(path_dict["sampler_path"])
+        else:
+            return await self.training_client.save_weights_and_get_sampling_client_async()
 
     @require_training_client
     def create_sampling_client(self, sampler_path: str) -> tinker.SamplingClient:
