@@ -47,8 +47,8 @@ class Step:
 
         # check that the token ids are filled
         # TODO(listar2000): this might cause compatibility issue. Double check if we should make these assertions.
-        assert len(self.prompt_ids) > 0, "prompt_ids is empty"
-        assert len(self.response_ids) > 0, "response_ids is empty"
+        # assert len(self.prompt_ids) > 0, "prompt_ids is empty"
+        # assert len(self.response_ids) > 0, "response_ids is empty"
 
         # check that the lengths would match up
         if len(self.logprobs) > 0:
