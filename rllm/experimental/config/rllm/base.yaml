@@ -31,6 +31,7 @@ workflow:
 
 # Rollout Configuration (note: this is just for logging purpose, the actual rollout configs are backend-specific)
 rollout:
+  n: 8
   n_val: 1  # number of validation samples per prompt
 
 # Trainer Configuration

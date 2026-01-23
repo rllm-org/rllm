@@ -265,7 +265,7 @@ class TinkerEngine(RolloutEngine):
 
         return ModelOutput(
             text=completion_text,
-            content=str(content),
+            content=content,
             reasoning=reasoning,
             tool_calls=tool_calls,
             prompt_ids=token_input,

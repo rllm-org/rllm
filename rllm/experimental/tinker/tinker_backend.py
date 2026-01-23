@@ -207,7 +207,10 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         self.rollout_engine.set_sampling_client(self.sampling_client)
 
         # Build interleaved batch
-        group_size = self.full_config.training.group_size
+        if agent_workflow_engine.current_mode == "train":
+            group_size = self.full_config.training.group_size
+        else:
+            group_size = self.full_config.validation.group_size
         interleaved_batch = _build_interleave_batch(batch, group_size)
 
         # Extract task IDs

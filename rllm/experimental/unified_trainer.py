@@ -13,8 +13,9 @@ from omegaconf import DictConfig, OmegaConf
 
 from rllm.agents.agent import Episode, TrajectoryGroup
 from rllm.data import Dataset
-from rllm.experimental.common.advantage import AlgorithmConfig
+from rllm.experimental.common.advantage import AlgorithmConfig, collect_reward_and_advantage_from_trajectory_groups
 from rllm.experimental.common.config import CompactFilteringConfig, RejectionSamplingConfig, TransformConfig
+from rllm.experimental.common.metrics import reduce_metrics_lists
 from rllm.experimental.common.performance import simple_timer
 from rllm.experimental.common.rejection_sampling import RejectionSamplingState, apply_rejection_sampling_and_filtering
 from rllm.experimental.common.transform import transform_episodes_to_trajectory_groups
@@ -365,6 +366,7 @@ class UnifiedTrainer:
     async def _validate_async(self, trainer_state: TrainerState) -> dict:
         """Validate the model (async implementation)."""
         n_val_samples = self.rllm_config.rollout.n_val
+        val_metrics = defaultdict(list)
 
         if not await self.backend.on_validation_start(trainer_state):
             return {}
@@ -377,8 +379,10 @@ class UnifiedTrainer:
 
         val_dataloader: Iterable = self.backend.get_dataloader(self.val_dataset, trainer_state)
         for batch in val_dataloader:
-            # Generate episodes (async)
+            # Generate episodes and transform to trajectory groups
             val_episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine)
+            val_trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(val_episodes, self.transform_config, self.trajectory_grouping_hook)
+            reward_metrics = collect_reward_and_advantage_from_trajectory_groups(val_trajectory_groups, self.algorithm_config, collect_advantage=False)
 
             is_correct_lst.extend([episode.is_correct for episode in val_episodes])
             uid_lst.extend([episode.id.split(":")[0] for episode in val_episodes])
@@ -388,8 +392,11 @@ class UnifiedTrainer:
                 for key, value in episode.metrics.items():
                     workflow_metrics_by_source[data_source][key].append(float(value))
 
+            for key, value in (transform_metrics | reward_metrics).items():
+                val_metrics[f"val/{key}"].append(value)
+
         test_end = time.perf_counter()
-        val_metrics = {"time/testing": test_end - test_begin}
+        val_metrics["time/testing"] = test_end - test_begin
         is_correct_array = np.array(is_correct_lst)
         uid_array = np.array(uid_lst)
         data_source_array = np.array(data_source_lst)
@@ -413,6 +420,8 @@ class UnifiedTrainer:
                     if values:
                         val_metrics[f"val/{data_source}/{key}"] = np.mean(values)
 
+        # post-process the val metrics to reduce any "list values" into scalars
+        reduce_metrics_lists(val_metrics)
         self.logger.log(data=val_metrics, step=trainer_state.global_step)
         await self.backend.on_validation_end(trainer_state)
         return val_metrics

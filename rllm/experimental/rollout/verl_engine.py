@@ -5,10 +5,9 @@ from typing import cast
 from omegaconf import DictConfig
 from typing_extensions import override
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager, AsyncLLMServerManager
-from verl.workers.rollout.replica import TokenOutput
 
 from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
-from rllm.experimental.rollout.types import TokenInput, Tokenizer, VerlTokenOutput
+from rllm.experimental.rollout.types import TokenInput, Tokenizer, TokenOutput, VerlTokenOutput
 from rllm.parser import ChatTemplateParser
 from rllm.workflows import TerminationEvent, TerminationReason
 
@@ -94,9 +93,17 @@ class VerlEngine(RolloutEngine):
             multi_modal_inputs = None
             prompt_ids = request_prompt_ids
 
-        prompt_length = len(prompt_ids)
-
         token_output: TokenOutput = await self.get_token_output_from_token_input(token_input=request_prompt_ids, **kwargs)
+        extra_kwargs = dict(prompt_ids=prompt_ids, multi_modal_inputs=multi_modal_inputs)
+        return self.assemble_model_output(token_input=request_prompt_ids, token_output=token_output, **extra_kwargs)
+
+    @override
+    def assemble_model_output(self, token_input: TokenInput, token_output: TokenOutput, **kwargs) -> ModelOutput:
+        prompt_ids = kwargs.pop("prompt_ids", None)
+        multi_modal_inputs = kwargs.pop("multi_modal_inputs", None)
+        prompt_length = len(prompt_ids) if prompt_ids is not None else 0
+
+        token_output = cast(VerlTokenOutput, token_output)
         completion_ids = token_output.token_ids
         logprobs = token_output.log_probs
 

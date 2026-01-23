@@ -16,7 +16,7 @@ from omegaconf import DictConfig
 
 from rllm.agents.agent import Episode
 from rllm.data import Dataset
-from rllm.experimental.common.advantage import AlgorithmConfig, compute_advantage_from_trajectory_groups
+from rllm.experimental.common.advantage import AlgorithmConfig, collect_reward_and_advantage_from_trajectory_groups
 from rllm.experimental.rollout import RolloutEngine
 
 if TYPE_CHECKING:
@@ -158,7 +158,7 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
             **kwargs: Additional arguments.
         """
         assert trainer_state.trajectory_groups is not None, "Trajectory groups are not set"
-        adv_metrics = compute_advantage_from_trajectory_groups(trainer_state.trajectory_groups, algorithm_config)
+        adv_metrics = collect_reward_and_advantage_from_trajectory_groups(trainer_state.trajectory_groups, algorithm_config)
         trainer_state.metrics.update(adv_metrics)
 
     @abstractmethod

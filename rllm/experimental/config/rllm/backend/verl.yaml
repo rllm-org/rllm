@@ -50,6 +50,7 @@ rllm:
     norm_adv_by_std_in_grpo: ${oc.select:algorithm.norm_adv_by_std_in_grpo, true}
 
   rollout:
+    n: ${oc.select:actor_rollout_ref.rollout.n, 8}
     n_val: ${oc.select:actor_rollout_ref.rollout.val_kwargs.n, 1}
 
   trainer:

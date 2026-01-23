@@ -76,7 +76,6 @@ class TITOCompleter(Completer):
     chat_parser: ChatTemplateParser
     tokenizer: PreTrainedTokenizer
     # stateful data taht this completer tracks over `complete` calls
-    _prev_messages: list[dict] = field(default_factory=list)
     _prev_messages_str: str = ""  # the messages after applying chat template
     _prev_token_input: TokenInput = field(default_factory=list)
 
@@ -115,6 +114,11 @@ class TITOCompleter(Completer):
         model_output = self.rollout_engine.assemble_model_output(curr_token_input, curr_token_output)
 
         action = action_hook(model_output) if action_hook is not None else None
+
+        # update the previous messages and token input
+        self._prev_messages_str = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True)
+        self._prev_token_input = curr_token_input + curr_token_output.completion_ids
+
         return Step(
             prompt_ids=model_output.prompt_ids or [],  # type: ignore
             response_ids=model_output.completion_ids or [],

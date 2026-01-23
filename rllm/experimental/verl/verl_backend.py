@@ -30,7 +30,7 @@ from rllm.agents.agent import Episode
 from rllm.data import Dataset
 from rllm.experimental.common import (
     AlgorithmConfig,
-    compute_advantage_from_trajectory_groups,
+    collect_reward_and_advantage_from_trajectory_groups,
     simple_timer,
 )
 from rllm.experimental.protocol import BackendProtocol
@@ -163,7 +163,11 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             batch = DataProto.from_single_dict(batch)
 
         batch.non_tensor_batch["task_ids"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
-        batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n)
+        if agent_workflow_engine.current_mode == "train":
+            repeat_times = self.full_config.actor_rollout_ref.rollout.n
+        else:
+            repeat_times = self.full_config.actor_rollout_ref.rollout.val_kwargs.n
+        batch = batch.repeat(repeat_times=repeat_times)
         batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"])
 
         # Step 2: execute tasks using the agent workflow engine (async)
@@ -321,7 +325,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
 
         with simple_timer("adv", trainer_state.timing_dict):
             if use_rllm:
-                compute_advantage_from_trajectory_groups(trajectory_groups, algorithm_config)
+                collect_reward_and_advantage_from_trajectory_groups(trajectory_groups, algorithm_config)
                 updated_batch = update_dataproto_with_advantages(batch, episodes, mode=self.config.rllm.stepwise_advantage.mode)
             else:
                 updated_batch, adv_metrics = compute_advantage_verl(batch, self.config)  # type: ignore[return-value]

@@ -4,7 +4,7 @@ Common utilities for rLLM trainers.
 This module provides shared functionality across different trainer backends (verl, tinker, etc.).
 """
 
-from rllm.experimental.common.advantage import compute_advantage_from_trajectory_groups
+from rllm.experimental.common.advantage import collect_reward_and_advantage_from_trajectory_groups
 from rllm.experimental.common.config import (
     AlgorithmConfig,
     CompactFilteringConfig,
@@ -12,7 +12,7 @@ from rllm.experimental.common.config import (
     TransformConfig,
     rLLMAdvantageEstimator,
 )
-from rllm.experimental.common.metrics import reduce_reward_metrics_by_trajectory_name
+from rllm.experimental.common.metrics import reduce_metrics_by_trajectory_name, reduce_metrics_lists
 from rllm.experimental.common.performance import marked_timer, simple_timer
 from rllm.experimental.common.rejection_sampling import (
     RejectionSamplingMetrics,
@@ -41,9 +41,10 @@ __all__ = [
     "apply_rejection_sampling_and_filtering",
     # Advantage computation
     "rLLMAdvantageEstimator",
-    "compute_advantage_from_trajectory_groups",
+    "collect_reward_and_advantage_from_trajectory_groups",
     # Metrics
-    "reduce_reward_metrics_by_trajectory_name",
+    "reduce_metrics_by_trajectory_name",
+    "reduce_metrics_lists",
     # Performance
     "simple_timer",
     "marked_timer",
