@@ -376,7 +376,9 @@ class UnifiedTrainer:
             await self.backend.on_batch_start(trainer_state)
 
             # Generate episodes (async)
-            val_episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine)
+            val_episodes = await self.backend.generate_episodes(
+                batch, agent_workflow_engine=self.agent_workflow_engine
+            )
 
             is_correct_lst.extend([episode.is_correct for episode in val_episodes])
             uid_lst.extend([episode.id.split(":")[0] for episode in val_episodes])

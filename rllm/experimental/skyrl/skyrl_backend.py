@@ -264,10 +264,14 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         2. Uses SkyrlTrainer.generate() which internally uses RLLMGenerator
         3. Converts GeneratorOutput to Episodes (for compatibility with unified trainer)
 
+        Note: Uses `group_size` for both training and validation (consistent with VERL
+        backend using `rollout.n` for both). The training phase is determined from the
+        workflow engine's current mode.
+
         Args:
             batch: Input batch (list of task dicts from dataloader).
             agent_workflow_engine: UnifiedWorkflowEngine for running workflows.
-            **kwargs: Additional arguments including trainer_state for global_step.
+            **kwargs: Additional arguments including global_step.
 
         Returns:
             List of generated episodes.
@@ -285,12 +289,15 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
 
         # Get global step from kwargs (passed by unified trainer)
         global_step = kwargs.get("global_step", 0)
-        is_training = kwargs.get("is_training", True)
-        training_phase = "train" if is_training else "eval"
+        
+        # Determine training phase from workflow engine mode (consistent with VERL approach)
+        training_phase = agent_workflow_engine.current_mode if hasattr(agent_workflow_engine, "current_mode") else "train"
 
         # Get sampling params from config
         sampling_params = self.full_config.get("sampling", {})
         default_env_class = self.full_config.get("environment", {}).get("env_class", "BaseTextEnv")
+        
+        # Use group_size for both training and validation (consistent with VERL using rollout.n for both)
         group_size = self.full_config.trainer.get("group_size", 1)
 
         # Adapt batch to SkyRL format
