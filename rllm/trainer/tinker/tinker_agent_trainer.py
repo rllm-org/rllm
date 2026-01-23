@@ -29,7 +29,6 @@ from rllm.trainer.tinker.tinker_metrics_utils import (
     print_metrics_table,
 )
 from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer
-from rllm.utils import extract_source_metadata
 
 if TYPE_CHECKING:
     pass
@@ -137,22 +136,11 @@ class TinkerAgentTrainer:
         if isinstance(logger_backend, str):
             logger_backend = [logger_backend]
 
-        # Extract source code for UI logger
-        source_metadata = {}
-        if "ui" in logger_backend:
-            source_metadata = extract_source_metadata(
-                workflow_class=getattr(self, "workflow_class", None),
-                agent_class=getattr(self, "agent_class", None),
-                workflow_args=getattr(self, "workflow_args", None),
-                env_args=getattr(self, "env_args", None),
-            )
-
         tracking_logger = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
             default_backend=logger_backend,
             config=OmegaConf.to_container(self.config, resolve=True),
-            source_metadata=source_metadata,
         )
 
         # Initialize or resume training client
@@ -278,7 +266,7 @@ class TinkerAgentTrainer:
                             aggregated_grouping_metrics[key] = np.mean(values)
                     metrics.update(aggregated_grouping_metrics)
 
-                tracking_logger.log(data=metrics, step=batch_idx, episodes=episodes)
+                tracking_logger.log(data=metrics, step=batch_idx)
                 print_metrics_table(metrics, batch_idx)
 
                 # Validation
