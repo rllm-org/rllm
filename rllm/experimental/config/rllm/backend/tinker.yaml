@@ -22,7 +22,7 @@ model:
 
 # Training Configuration (tinker-specific)
 training:
-  group_size: 16  # Number of rollouts per prompt (for GRPO)
+  group_size: ???  # Number of rollouts per prompt (for GRPO)
   learning_rate: 2e-5  # 2e-5 for MATH dataset
   beta1: 0.9
   beta2: 0.95
@@ -34,7 +34,7 @@ training:
 
 # Validation Configuration
 validation:
-  group_size: 1
+  group_size: ???
 
 # Sampling Configuration
 sampling:
@@ -59,3 +59,11 @@ data:
   max_response_length: 2048
   train_batch_size: 64
   val_batch_size: 32
+
+
+# Overriding the rLLM-common config with Tinker-specific ones
+# Only override if the algorithm values are not None, otherwise still use the rLLM-common config
+rllm:
+  rollout:
+    n: ${oc.select:training.group_size, 8}
+    n_val: ${oc.select:validation.group_size, 1}

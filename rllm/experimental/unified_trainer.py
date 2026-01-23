@@ -13,11 +13,21 @@ from omegaconf import DictConfig, OmegaConf
 
 from rllm.agents.agent import Episode, TrajectoryGroup
 from rllm.data import Dataset
-from rllm.experimental.common.advantage import AlgorithmConfig, collect_reward_and_advantage_from_trajectory_groups
-from rllm.experimental.common.config import CompactFilteringConfig, RejectionSamplingConfig, TransformConfig
+from rllm.experimental.common.advantage import (
+    AlgorithmConfig,
+    collect_reward_and_advantage_from_trajectory_groups,
+)
+from rllm.experimental.common.config import (
+    CompactFilteringConfig,
+    RejectionSamplingConfig,
+    TransformConfig,
+)
 from rllm.experimental.common.metrics import reduce_metrics_lists
 from rllm.experimental.common.performance import simple_timer
-from rllm.experimental.common.rejection_sampling import RejectionSamplingState, apply_rejection_sampling_and_filtering
+from rllm.experimental.common.rejection_sampling import (
+    RejectionSamplingState,
+    apply_rejection_sampling_and_filtering,
+)
 from rllm.experimental.common.transform import transform_episodes_to_trajectory_groups
 from rllm.experimental.common.visualization import visualize_trajectory_last_steps
 from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
@@ -142,7 +152,7 @@ class UnifiedTrainer:
 
         self.tokenizer = None
         if hasattr(self.backend, "tokenizer"):
-            self.tokenizer = self.backend.tokenizer  # type: ignore[attr-defined]
+            self.tokenizer = self.backend.tokenizer
 
     def _run_async(self, coro):
         """Run an async coroutine in the event loop thread and wait for result."""
@@ -326,7 +336,12 @@ class UnifiedTrainer:
         trainer_state.metrics.update(transform_metrics)
 
         # stage 3: apply rejection sampling (sync)
-        filtered_groups, filtered_episodes, rs_metrics = apply_rejection_sampling_and_filtering(trainer_state.episodes, trainer_state.trajectory_groups, self.rs_config, trainer_state.rs_state)
+        filtered_groups, filtered_episodes, rs_metrics = apply_rejection_sampling_and_filtering(
+            trainer_state.episodes,
+            trainer_state.trajectory_groups,
+            self.rs_config,
+            trainer_state.rs_state,
+        )
         trainer_state.metrics.update(rs_metrics)
         trainer_state.trajectory_groups = filtered_groups
         trainer_state.episodes = filtered_episodes
@@ -386,9 +401,11 @@ class UnifiedTrainer:
 
             is_correct_lst.extend([episode.is_correct for episode in val_episodes])
             uid_lst.extend([episode.id.split(":")[0] for episode in val_episodes])
-            data_source_lst.extend([episode.info.get("data_source", "unknown") for episode in val_episodes])
 
-            for episode, data_source in zip(val_episodes, data_source_lst, strict=True):
+            data_sources = [episode.info.get("data_source", "unknown") for episode in val_episodes]
+            data_source_lst.extend(data_sources)
+
+            for episode, data_source in zip(val_episodes, data_sources, strict=True):
                 for key, value in episode.metrics.items():
                     workflow_metrics_by_source[data_source][key].append(float(value))
 
@@ -494,11 +511,25 @@ class AgentTrainer:
         if backend == "verl":
             from rllm.experimental.verl.verl_launcher import VerlTrainerLauncher
 
-            self.launcher = VerlTrainerLauncher(config=config, workflow_class=workflow_class, train_dataset=train_dataset, val_dataset=val_dataset, workflow_args=workflow_args, **kwargs)
+            self.launcher = VerlTrainerLauncher(
+                config=config,
+                workflow_class=workflow_class,
+                train_dataset=train_dataset,
+                val_dataset=val_dataset,
+                workflow_args=workflow_args,
+                **kwargs,
+            )
         elif backend == "tinker":
             from rllm.experimental.tinker.tinker_launcher import TinkerTrainerLauncher
 
-            self.launcher = TinkerTrainerLauncher(config=config, workflow_class=workflow_class, train_dataset=train_dataset, val_dataset=val_dataset, workflow_args=workflow_args, **kwargs)
+            self.launcher = TinkerTrainerLauncher(
+                config=config,
+                workflow_class=workflow_class,
+                train_dataset=train_dataset,
+                val_dataset=val_dataset,
+                workflow_args=workflow_args,
+                **kwargs,
+            )
 
     def train(self):
         self.launcher.train()

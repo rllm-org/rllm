@@ -164,9 +164,9 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
 
         batch.non_tensor_batch["task_ids"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
         if agent_workflow_engine.current_mode == "train":
-            repeat_times = self.full_config.actor_rollout_ref.rollout.n
+            repeat_times = self.full_config.rllm.rollout.n
         else:
-            repeat_times = self.full_config.actor_rollout_ref.rollout.val_kwargs.n
+            repeat_times = self.full_config.rllm.rollout.n_val
         batch = batch.repeat(repeat_times=repeat_times)
         batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"])
 

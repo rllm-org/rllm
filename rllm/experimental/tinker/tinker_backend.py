@@ -26,7 +26,10 @@ from rllm.data import Dataset
 from rllm.experimental.common import AlgorithmConfig, simple_timer
 from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.rollout import RolloutEngine, TinkerEngine
-from rllm.experimental.tinker.tinker_metrics_utils import print_metrics_table, update_training_metrics
+from rllm.experimental.tinker.tinker_metrics_utils import (
+    print_metrics_table,
+    update_training_metrics,
+)
 from rllm.experimental.tinker.tinker_policy_trainer import TinkerPolicyTrainer
 
 if TYPE_CHECKING:
@@ -208,9 +211,9 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
         # Build interleaved batch
         if agent_workflow_engine.current_mode == "train":
-            group_size = self.full_config.training.group_size
+            group_size = self.full_config.rllm.rollout.n
         else:
-            group_size = self.full_config.validation.group_size
+            group_size = self.full_config.rllm.rollout.n_val
         interleaved_batch = _build_interleave_batch(batch, group_size)
 
         # Extract task IDs
@@ -264,7 +267,11 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
         # Use TinkerPolicyTrainer's method for forward-backward
         with simple_timer("forward_backward", trainer_state.timing_dict):
-            training_datums, training_logprobs, adv_metrics = await self.policy_trainer.forward_backward_from_trajectory_groups(
+            (
+                training_datums,
+                training_logprobs,
+                adv_metrics,
+            ) = await self.policy_trainer.forward_backward_from_trajectory_groups(
                 trainer_state.trajectory_groups,
                 algorithm_config=self._algorithm_config,
             )

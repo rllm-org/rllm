@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from tqdm import tqdm
 
 from rllm.agents.agent import Episode
-from rllm.engine.rollout import RolloutEngine, VerlEngine
+from rllm.experimental.rollout import RolloutEngine, VerlEngine
 from rllm.utils import colorful_print
 from rllm.workflows.workflow import TerminationReason, Workflow
 
@@ -94,7 +94,11 @@ class UnifiedWorkflowEngine:
             return
         self.workflow_queue = asyncio.Queue(maxsize=self.n_parallel_tasks)
         for i in range(self.n_parallel_tasks):
-            workflow = self.workflow_cls(rollout_engine=self.rollout_engine, executor=self.executor, **self.workflow_args)
+            workflow = self.workflow_cls(
+                rollout_engine=self.rollout_engine,
+                executor=self.executor,
+                **self.workflow_args,
+            )
             assert workflow.is_multithread_safe(), "Workflows must contain only thread-save environments"
             self.workflow_queue.put_nowait(workflow)
 
@@ -134,7 +138,10 @@ class UnifiedWorkflowEngine:
                     elif len(traj.steps) > 0:
                         reward = f"{traj.steps[-1].reward:.1f}"
                     reward_strs.append(f"{traj.name}: {reward}")
-                colorful_print(f"[{uid}] Rollout completed. Rewards: [{', '.join(reward_strs)}], Termination: {episode.termination_reason}", fg="green" if episode.is_correct else "yellow")
+                colorful_print(
+                    f"[{uid}] Rollout completed. Rewards: [{', '.join(reward_strs)}], Termination: {episode.termination_reason}",
+                    fg="green" if episode.is_correct else "yellow",
+                )
 
                 if episode.termination_reason != TerminationReason.ERROR:
                     return task_id, rollout_idx, result_idx, episode
@@ -195,7 +202,12 @@ class UnifiedWorkflowEngine:
         if self.episode_logger is not None:
             try:
                 logger.info(f"Logging {len(ordered_results)} episodes to step={self.current_step}, mode={self.current_mode}, epoch={self.current_epoch}")
-                self.episode_logger.log_episodes_batch(ordered_results, self.current_step, self.current_mode, self.current_epoch)
+                self.episode_logger.log_episodes_batch(
+                    ordered_results,
+                    self.current_step,
+                    self.current_mode,
+                    self.current_epoch,
+                )
             except Exception as e:
                 logger.error(f"Failed to log episodes: {e}")
                 import traceback
