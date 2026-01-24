@@ -7,14 +7,9 @@ import { WorkflowDiagram } from './WorkflowDiagram';
 import { ProgressBar } from './ProgressBar';
 import {
   TimelineIcon,
-  BarChartIcon,
   WarningIcon,
-  AssignmentIcon,
   ChevronLeftIcon,
   InfoIcon,
-  TuneIcon,
-  SettingsIcon,
-  SmartToyIcon,
   AccountTreeIcon,
 } from './icons';
 
@@ -62,6 +57,15 @@ interface TrajectoryStep {
   chat_completions?: any;
   model_response?: any;
 }
+
+// Helper function to format config values for display
+const formatConfigValue = (value: any): string => {
+  if (value === null || value === undefined) return 'N/A';
+  if (typeof value === 'boolean') return value ? 'True' : 'False';
+  if (Array.isArray(value)) return value.join(', ');
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+};
 
 export const TrainingRunDetail: React.FC = () => {
   const { sessionId } = useParams<{ sessionId: string }>();
@@ -178,20 +182,24 @@ export const TrainingRunDetail: React.FC = () => {
           <code className="text-sm text-gray-600">
             Session ID: {session.id}
           </code>
-          {/* Core metadata */}
+          {/* Core metadata from rllm_config */}
           <div className="flex flex-wrap gap-4 mt-3">
-            <div className="flex items-center gap-1.5 text-sm">
-              <span className="text-gray-500">Model:</span>
-              <span className="text-black font-medium">
-                {session.config?.model?.name || 'N/A'}
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5 text-sm">
-              <span className="text-gray-500">Adv Estimator:</span>
-              <span className="text-black font-medium">
-                {session.config?.algorithm?.adv_estimator || 'N/A'}
-              </span>
-            </div>
+            {session.config?.algorithm?.adv_estimator && (
+              <div className="flex items-center gap-1.5 text-sm">
+                <span className="text-gray-500">Algorithm:</span>
+                <span className="text-black font-medium">
+                  {session.config.algorithm.adv_estimator}
+                </span>
+              </div>
+            )}
+            {session.config?.backend && (
+              <div className="flex items-center gap-1.5 text-sm">
+                <span className="text-gray-500">Backend:</span>
+                <span className="text-black font-medium">
+                  {session.config.backend}
+                </span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -305,159 +313,34 @@ export const TrainingRunDetail: React.FC = () => {
           </div>
         ) : activeTab === 'metadata' ? (
           <div className="space-y-6">
-            {/* Session Information Card - Full width */}
-            <div className="bg-white border border-gray-200 rounded-xl p-6">
-              <h3 className="text-lg font-semibold text-black mb-4 flex items-center gap-2">
-                <InfoIcon sx={{ fontSize: 20 }} className="text-black" />
-                Session Information
-              </h3>
-              <dl className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <dt className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Session ID</dt>
-                  <dd className="text-sm text-black">{session.id}</dd>
-                </div>
-                <div>
-                  <dt className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Project</dt>
-                  <dd className="text-sm text-black">{session.project}</dd>
-                </div>
-                <div>
-                  <dt className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Experiment</dt>
-                  <dd className="text-sm text-black">{session.experiment}</dd>
-                </div>
-                <div>
-                  <dt className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Created At</dt>
-                  <dd className="text-sm text-black">{new Date(session.created_at).toLocaleString()}</dd>
-                </div>
-                {session.completed_at && (
-                  <div>
-                    <dt className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Completed At</dt>
-                    <dd className="text-sm text-black">{new Date(session.completed_at).toLocaleString()}</dd>
-                  </div>
-                )}
-              </dl>
-            </div>
-
             {session.config ? (
               <>
-                {/* 2-column grid for config sections */}
+                {/* Dynamic config sections - renders all top-level keys */}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                  {/* Model Configuration */}
-                  {session.config.model && (
-                    <div className="bg-white border border-gray-200 rounded-xl p-6">
-                      <h3 className="text-lg font-semibold text-black mb-4 flex items-center gap-2">
-                        <SmartToyIcon sx={{ fontSize: 20 }} className="text-black" />
-                        Model Configuration
-                      </h3>
-                      <dl className="space-y-3">
-                        {Object.entries(session.config.model).map(([key, value]) => (
-                          <div key={key} className="flex justify-between items-start">
-                            <dt className="text-sm font-medium text-gray-600">{key}</dt>
-                            <dd className="text-sm text-black">{String(value)}</dd>
-                          </div>
-                        ))}
-                      </dl>
-                    </div>
-                  )}
+                  {Object.entries(session.config).map(([sectionKey, sectionValue]) => {
+                    // Skip non-object sections (they'll be shown in raw config)
+                    if (typeof sectionValue !== 'object' || sectionValue === null) {
+                      return null;
+                    }
 
-                  {/* Training Parameters */}
-                  {session.config.training && (
-                    <div className="bg-white border border-gray-200 rounded-xl p-6">
-                      <h3 className="text-lg font-semibold text-black mb-4 flex items-center gap-2">
-                        <BarChartIcon sx={{ fontSize: 20 }} className="text-black" />
-                        Training Parameters
-                      </h3>
-                      <dl className="space-y-3">
-                        {Object.entries(session.config.training).map(([key, value]) => (
-                          <div key={key} className="flex justify-between items-start">
-                            <dt className="text-sm font-medium text-gray-600">{key}</dt>
-                            <dd className="text-sm text-black">{String(value)}</dd>
-                          </div>
-                        ))}
-                      </dl>
-                    </div>
-                  )}
-
-                  {/* Algorithm Settings */}
-                  {session.config.algorithm && (
-                    <div className="bg-white border border-gray-200 rounded-xl p-6">
-                      <h3 className="text-lg font-semibold text-black mb-4 flex items-center gap-2">
-                        <TuneIcon sx={{ fontSize: 20 }} className="text-black" />
-                        Algorithm Settings
-                      </h3>
-                      <dl className="space-y-3">
-                        {Object.entries(session.config.algorithm).map(([key, value]) => (
-                          <div key={key} className="flex justify-between items-start">
-                            <dt className="text-sm font-medium text-gray-600">{key}</dt>
-                            <dd className="text-sm">
-                              {typeof value === 'boolean' ? (
-                                <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-black border border-gray-300">
-                                  {value ? 'True' : 'False'}
-                                </span>
-                              ) : (
-                                <span className="text-black">{String(value)}</span>
-                              )}
-                            </dd>
-                          </div>
-                        ))}
-                      </dl>
-                    </div>
-                  )}
-
-                  {/* Data Configuration */}
-                  {session.config.data && (
-                    <div className="bg-white border border-gray-200 rounded-xl p-6">
-                      <h3 className="text-lg font-semibold text-black mb-4 flex items-center gap-2">
-                        <AssignmentIcon sx={{ fontSize: 20 }} className="text-black" />
-                        Data Configuration
-                      </h3>
-                      <dl className="space-y-3">
-                        {Object.entries(session.config.data).map(([key, value]) => (
-                          <div key={key} className="flex justify-between items-start">
-                            <dt className="text-sm font-medium text-gray-600">{key}</dt>
-                            <dd className="text-sm text-black">{String(value)}</dd>
-                          </div>
-                        ))}
-                      </dl>
-                    </div>
-                  )}
-
-                  {/* Sampling Settings */}
-                  {session.config.sampling && (
-                    <div className="bg-white border border-gray-200 rounded-xl p-6">
-                      <h3 className="text-lg font-semibold text-black mb-4 flex items-center gap-2">
-                        <TimelineIcon sx={{ fontSize: 20 }} className="text-black" />
-                        Sampling Settings
-                      </h3>
-                      <dl className="space-y-3">
-                        {Object.entries(session.config.sampling).map(([key, value]) => (
-                          <div key={key} className="flex justify-between items-start">
-                            <dt className="text-sm font-medium text-gray-600">{key}</dt>
-                            <dd className="text-sm text-black">{String(value)}</dd>
-                          </div>
-                        ))}
-                      </dl>
-                    </div>
-                  )}
-
-                  {/* Trainer Settings */}
-                  {session.config.trainer && (
-                    <div className="bg-white border border-gray-200 rounded-xl p-6">
-                      <h3 className="text-lg font-semibold text-black mb-4 flex items-center gap-2">
-                        <SettingsIcon sx={{ fontSize: 20 }} className="text-black" />
-                        Trainer Settings
-                      </h3>
-                      <dl className="space-y-3">
-                        {Object.entries(session.config.trainer).map(([key, value]) => (
-                          <div key={key} className="flex justify-between items-start">
-                            <dt className="text-sm font-medium text-gray-600">{key}</dt>
-                            <dd className="text-sm text-black">
-                              {Array.isArray(value) ? value.join(', ') : String(value)}
-                            </dd>
-                          </div>
-                        ))}
-                      </dl>
-                    </div>
-                  )}
+                    return (
+                      <div key={sectionKey} className="bg-white border border-gray-200 rounded-xl p-6">
+                        <h3 className="text-lg font-semibold text-black mb-4 capitalize">
+                          {sectionKey.replace(/_/g, ' ')}
+                        </h3>
+                        <dl className="space-y-3">
+                          {Object.entries(sectionValue).map(([key, value]) => (
+                            <div key={key} className="flex justify-between items-start">
+                              <dt className="text-sm font-medium text-gray-600">{key}</dt>
+                              <dd className="text-sm text-black">
+                                {formatConfigValue(value)}
+                              </dd>
+                            </div>
+                          ))}
+                        </dl>
+                      </div>
+                    );
+                  })}
                 </div>
 
                 {/* Raw Config - Collapsible */}

@@ -223,4 +223,4 @@ ui/frontend/dist/
 
 # UI backend
 ui/api/rllm_ui.db
-ui/api/__pycache__/
+ui/api/__pycache__/ui/api/*.db
