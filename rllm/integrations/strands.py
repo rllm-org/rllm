@@ -1,4 +1,5 @@
 import json
+import re
 from collections.abc import AsyncGenerator, AsyncIterable
 from typing import Any, TypeVar
 
@@ -111,8 +112,22 @@ class RLLMModel(Model):
             tools_param = self._convert_tool_specs_to_openai_format(tool_specs)
             kwargs["tools"] = tools_param
 
+            # Force tool use when tools available
+            kwargs.setdefault("tool_choice", "required")
+
+        # Disable Qwen3 thinking mode for faster rollouts
+        if "extra_body" not in kwargs:
+            kwargs["extra_body"] = {}
+        if "chat_template_kwargs" not in kwargs["extra_body"]:
+            kwargs["extra_body"]["chat_template_kwargs"] = {}
+        kwargs["extra_body"]["chat_template_kwargs"]["enable_thinking"] = False
+
+        # Filter out Strands-specific kwargs
+        strands_only_params = ["system_prompt_content", "tool_execution_handler", "event_handler"]
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k not in strands_only_params}
+
         # Call rollout engine
-        model_output: ModelOutput = await self.rollout_engine.get_model_response(chat_messages, **kwargs)
+        model_output: ModelOutput = await self.rollout_engine.get_model_response(chat_messages, **filtered_kwargs)
 
         # Generate standard StreamEvents
         yield {"messageStart": {"role": "assistant"}}
@@ -138,15 +153,36 @@ class RLLMModel(Model):
 
             yield {"messageStop": {"stopReason": "tool_use"}}
         else:
-            # Generate text content events
+            # Try fallback text parsing for Qwen3 plain text tool calls
             response_text = model_output.text or ""
-            yield {"contentBlockStart": {"start": {}}}
-            yield {"contentBlockDelta": {"delta": {"text": response_text}}}
-            yield {"contentBlockStop": {}}
+            fallback_tool_calls = self._parse_tool_calls_from_text(response_text)
 
-            # Determine stop reason
-            stop_reason = getattr(model_output, "finish_reason", "end_turn")
-            yield {"messageStop": {"stopReason": stop_reason}}
+            if fallback_tool_calls:
+                # Process tool calls found in plain text
+                for tc in fallback_tool_calls:
+                    tool_call_info = {
+                        "id": tc["id"],
+                        "name": tc["name"],
+                        "input": tc["arguments"]
+                    }
+
+                    if hasattr(self, "agent") and hasattr(self.agent, "_record_tool_call_info"):
+                        self.agent._record_tool_call_info(tool_call_info)
+
+                    yield {"contentBlockStart": {"start": {"toolUse": {"toolUseId": tool_call_info["id"], "name": tool_call_info["name"]}}}}
+                    input_str = json.dumps(tool_call_info["input"])
+                    yield {"contentBlockDelta": {"delta": {"toolUse": {"input": input_str}}}}
+                    yield {"contentBlockStop": {}}
+
+                yield {"messageStop": {"stopReason": "tool_use"}}
+            else:
+                # No tool calls found, return text response
+                yield {"contentBlockStart": {"start": {}}}
+                yield {"contentBlockDelta": {"delta": {"text": response_text}}}
+                yield {"contentBlockStop": {}}
+
+                stop_reason = getattr(model_output, "finish_reason", "end_turn")
+                yield {"messageStop": {"stopReason": stop_reason}}
 
     def _convert_tool_specs_to_openai_format(self, tool_specs: list[ToolSpec]) -> list[dict]:
         """Convert tool specs to OpenAI tools format for model use."""
@@ -268,6 +304,46 @@ class RLLMModel(Model):
             return {"id": tool_id, "name": fname or "tool", "input": fargs}
         except Exception:
             return {"id": "unknown", "name": "unknown", "input": {}}
+
+    def _parse_tool_calls_from_text(self, text: str) -> list[dict]:
+        """
+        Fallback parser for Qwen3 plain text tool calls.
+
+        Detects JSON tool patterns like: {"name": "retrieve", "arguments": {...}}
+        """
+        tool_calls = []
+
+        # Match {"name": ..., "arguments": ...} pattern
+        pattern = r'\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})\s*\}'
+
+        for match in re.finditer(pattern, text):
+            try:
+                data = json.loads(match.group(0))
+                if "name" in data and "arguments" in data:
+                    tool_calls.append({
+                        "id": f"fallback_call_{len(tool_calls)}",
+                        "name": data["name"],
+                        "arguments": data["arguments"]
+                    })
+            except json.JSONDecodeError:
+                continue
+
+        # Try alternate pattern with arguments before name
+        if not tool_calls:
+            pattern_alt = r'\{\s*"arguments"\s*:\s*(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})\s*,\s*"name"\s*:\s*"([^"]+)"\s*\}'
+            for match in re.finditer(pattern_alt, text):
+                try:
+                    data = json.loads(match.group(0))
+                    if "name" in data and "arguments" in data:
+                        tool_calls.append({
+                            "id": f"fallback_call_{len(tool_calls)}",
+                            "name": data["name"],
+                            "arguments": data["arguments"]
+                        })
+                except json.JSONDecodeError:
+                    continue
+
+        return tool_calls
 
     def _convert_messages_to_chat_format(self, messages: Messages, system_prompt: str | None = None) -> list[dict[str, str]]:
         """Convert Strands messages to chat completion format.
