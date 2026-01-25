@@ -307,17 +307,17 @@ class UnifiedTrainer:
                     await self._train_batch_async(batch, trainer_state)
                 await self.backend.on_batch_end(trainer_state)
 
-                if "total_step" in trainer_state.timing_dict:
-                    with open("/Users/chanbinpark/Desktop/rllm/rllm/experimental/test_examples/train_tinker_solver_judge_logs", "a") as f:
-                        f.write(f"[UnifiedTrainer] Batch {trainer_state.global_step} training time: {trainer_state.timing_dict['total_step']:.4f}s\n")
+                # if "total_step" in trainer_state.timing_dict:
+                #     with open("/Users/chanbinpark/Desktop/rllm/rllm/experimental/test_examples/train_tinker_solver_judge_logs", "a") as f:
+                #         f.write(f"[UnifiedTrainer] Batch {trainer_state.global_step} training time: {trainer_state.timing_dict['total_step']:.4f}s\n")
 
-                t_log_start = time.time()
+                # t_log_start = time.time()
                 self.logger.log(data=trainer_state.metrics, step=trainer_state.global_step, episodes=trainer_state.episodes)
-                t_log_end = time.time()
+                # t_log_end = time.time()
 
-                log_time = t_log_end - t_log_start
-                with open("/Users/chanbinpark/Desktop/rllm/rllm/experimental/test_examples/train_tinker_solver_judge_logs", "a") as f:
-                    f.write(f"[UnifiedTrainer] Batch {trainer_state.global_step} logging time: {log_time:.4f}s\n")
+                # log_time = t_log_end - t_log_start
+                # with open("/Users/chanbinpark/Desktop/rllm/rllm/experimental/test_examples/train_tinker_solver_judge_logs", "a") as f:
+                #    f.write(f"[UnifiedTrainer] Batch {trainer_state.global_step} logging time: {log_time:.4f}s\n")
 
                 # if the config specifies the `total_batches` parameter, then we check if we should stop
                 if use_total_batches and trainer_state.global_step >= self.rllm_config.trainer.total_batches:

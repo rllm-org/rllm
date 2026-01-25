@@ -310,7 +310,7 @@ class UILogger:
                     # Serialize to handle numpy types
                     episode_json = json.loads(json.dumps(episode_data, default=self._json_serializer))
                     response = self.client.post("/api/episodes", json=episode_json)
-                    self.logger.info(f"Episode {episode.id} sent, status: {response.status_code}")
+                    self.logger.debug(f"Episode {episode.id} sent, status: {response.status_code}")
             except Exception as e:
                 self.logger.warning(f"Failed to send episodes to UI: {e}")
                 import traceback

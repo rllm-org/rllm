@@ -220,6 +220,7 @@ uv.lock
 # UI frontend
 ui/frontend/node_modules/
 ui/frontend/dist/
+ui/frontend/.vite/
 
 # UI backend
 ui/api/rllm_ui.db
