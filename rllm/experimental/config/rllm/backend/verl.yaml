@@ -1,0 +1,65 @@
+# @package _global_
+
+# Verl Backend Configuration for rLLM
+# This config largely follows from the `verl.trainer.config.ppo_trainer.yaml`
+# with the additional "overriding" of rLLM-common config with Verl-specific ones (backward compatibility)
+
+defaults:
+  - /ppo_trainer
+  - _self_
+
+actor_rollout_ref:
+  rollout:
+    mode: async
+    agent:
+      num_workers: 0
+    val_kwargs:
+      do_sample: True
+      n: ???
+
+data:
+  gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
+  return_multi_modal_inputs: False
+
+# First we need to set the verl-native config to missing -- so we can try to override them with the rLLM-common config
+algorithm:
+  adv_estimator: ???
+  gamma: ???
+  lam: ???
+  norm_adv_by_std_in_grpo: ???
+
+trainer:
+  total_epochs: ???
+  total_training_steps: ???
+  logger: ???
+  project_name: ???
+  experiment_name: ???
+  test_freq: ???
+  save_freq: ???
+  val_before_train: ???
+  val_only: ???
+
+# Overriding the rLLM-common config with Verl-specific ones
+# Only override if the algorithm values are not None, otherwise still use the rLLM-common config
+rllm:
+  backend: verl
+  algorithm:
+    adv_estimator: ${oc.select:algorithm.adv_estimator, grpo}
+    gamma: ${oc.select:algorithm.gamma, 1.0}
+    lam: ${oc.select:algorithm.lam, 0.95}
+    norm_adv_by_std_in_grpo: ${oc.select:algorithm.norm_adv_by_std_in_grpo, true}
+
+  rollout:
+    n: ${oc.select:actor_rollout_ref.rollout.n, 8}
+    n_val: ${oc.select:actor_rollout_ref.rollout.val_kwargs.n, 1}
+
+  trainer:
+    total_epochs: ${oc.select:trainer.total_epochs, 10}
+    total_batches: ${oc.select:trainer.total_training_steps, -1}  # note the difference notations
+    logger: ${oc.select:trainer.logger, ['console']}
+    project_name: ${oc.select:trainer.project_name, 'rllm-training'}
+    experiment_name: ${oc.select:trainer.experiment_name, 'default'}
+    test_freq: ${oc.select:trainer.test_freq, 5}
+    save_freq: ${oc.select:trainer.save_freq, 20}
+    val_before_train: ${oc.select:trainer.val_before_train, true}
+    val_only: ${oc.select:trainer.val_only, false}
