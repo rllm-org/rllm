@@ -366,7 +366,6 @@ class AgentSdkTrainer(RayPPOTrainer):
                                         rollout_corr_config=rollout_corr_config,
                                     )
                                     metrics.update(is_metrics)
-                                print(f"Rollout correction metrics: {is_metrics}")
 
                     if self.use_reference_policy:
                         # compute reference log_prob

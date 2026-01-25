@@ -10,6 +10,9 @@ Train agents using the rLLM SDK, including tutorials for a math agent, solver-ju
 ### 🚀 [RL Training with Tinker](tinker_rl.md)
 Train a solver‑judge RL workflow using Tinker's hosted GPU service.
 
+### 🧪 [Verifiers (Prime Intellect Hub)](verifiers.md)
+Train agents using environments from Prime Intellect's Environment Hub with the verifiers library.
+
 ### 💡 [LoRA Training with Verl](gsm8k_lora.md)
 Fine-tune a math reasoning agent on GSM8K with LoRA using `verl` as training backend.
 

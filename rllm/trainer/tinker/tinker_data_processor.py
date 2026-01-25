@@ -53,7 +53,8 @@ class TinkerAdvantageComputer:
 
     def compute_grpo_advantages(self, group_rewards: list[float]) -> list[float]:
         """
-        GRPO: advantage = reward - mean(group_rewards)
+        GRPO: advantage = (reward - mean(group_rewards)) / std(group_rewards)
+        For any group_reward that is None, we set it to the smallest advantage possible in this group.
 
         Args:
             group_rewards: List of rewards for the group
@@ -64,23 +65,27 @@ class TinkerAdvantageComputer:
         if not group_rewards:
             return []
 
-        if len(group_rewards) == 1:
-            return group_rewards
+        def calculate_mean_and_std(valid_group_rewards: list[float]) -> tuple[float, float]:
+            if len(valid_group_rewards) == 1:
+                return 0.0, 1.0
 
-        mean_reward = sum(group_rewards) / len(group_rewards)
-        advantages = [r - mean_reward for r in group_rewards]
+            mean_reward = sum(valid_group_rewards) / len(valid_group_rewards)
+            std_reward = np.std(valid_group_rewards)
+            return mean_reward, float(std_reward)
 
-        # Optional: normalize by std
-        if self.norm_by_std and len(advantages) > 1:
-            std = np.std(advantages)
-            if std > 1e-8:
-                advantages = [a / std for a in advantages]
+        valid_group_rewards = [r for r in group_rewards if r is not None]
+        mean_reward, std_reward = calculate_mean_and_std(valid_group_rewards)
 
+        advantages = [(r - mean_reward) / std_reward if r is not None else float("inf") for r in group_rewards]
+        # we take any entry with "inf" as the lowest advantage possible in this group.
+        lowest_advantage = min(advantages)
+        advantages = [a if a != float("inf") else lowest_advantage for a in advantages]
         return advantages
 
     def compute_reinforce_advantages(self, group_rewards: list[float]) -> list[float]:
         """
         REINFORCE: advantage = reward (no baseline)
+        For any group_reward that is None, we set it to the smallest advantage possible in this group.
 
         Args:
             group_rewards: List of rewards
@@ -88,7 +93,10 @@ class TinkerAdvantageComputer:
         Returns:
             List of advantages (same as rewards)
         """
-        return group_rewards
+        valid_group_rewards = [r for r in group_rewards if r is not None]
+        lowest_reward = min(valid_group_rewards)
+        advantages = [r if r is not None else lowest_reward for r in group_rewards]
+        return advantages
 
     def compute(self, group_rewards: list[float]) -> list[float]:
         """
