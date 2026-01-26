@@ -544,10 +544,10 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         if hasattr(trainer_state, "trajectory_groups") and trainer_state.trajectory_groups:
             import numpy as np
 
-            from rllm.experimental.common.metrics import reduce_reward_metrics_by_trajectory_name
+            from rllm.experimental.common.metrics import reduce_metrics_by_trajectory_name
 
             # Add reward metrics from trajectory groups
-            reward_metrics = reduce_reward_metrics_by_trajectory_name(trainer_state.trajectory_groups, prefix="reward")
+            reward_metrics = reduce_metrics_by_trajectory_name(trainer_state.trajectory_groups, prefix="reward")
             trainer_state.metrics.update(reward_metrics)
 
             # Also compute basic reward stats
