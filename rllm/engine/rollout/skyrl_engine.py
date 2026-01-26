@@ -15,6 +15,7 @@ if skyrl_train_path.exists():
     sys.path.insert(0, str(skyrl_train_path))
 
 from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine
+from rllm.parser import ChatTemplateParser
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 
 
@@ -61,6 +62,14 @@ class SkyRLEngine(RolloutEngine):
         self.skyrl_trainer = None  # Can be set later via set_skyrl_components
         self.validate = False  # Flag enabled/disabled by SkyRLBackend validation hooks
 
+        # Add ChatTemplateParser (matching VerlEngine pattern)
+        disable_thinking = config.get("rllm", {}).get("disable_thinking", False) if config else False
+        self.chat_parser = ChatTemplateParser.get_parser(
+            tokenizer,
+            processor=None,
+            disable_thinking=disable_thinking,
+        )
+
     def set_skyrl_components(
         self,
         inference_engine_client: InferenceEngineClient | None = None,
@@ -103,13 +112,19 @@ class SkyRLEngine(RolloutEngine):
         validate = self.validate or kwargs.get("validate", False)
         enforce_max_prompt_length = kwargs.get("enforce_max_prompt_length", True)
 
-        # Convert messages to token IDs
-        prompt_text = self.tokenizer.apply_chat_template(
+        # Extract kwargs for parser
+        tools = kwargs.pop("tools", [])
+        accumulate_reasoning = kwargs.pop("accumulate_reasoning", False)
+
+        # Use chat_parser for proper formatting (matching VerlEngine)
+        prompt_text = self.chat_parser.parse(
             messages,
-            tokenize=False,
-            add_generation_prompt=True
+            add_generation_prompt=True,
+            is_first_msg=True,
+            tools=tools,
+            accumulate_reasoning=accumulate_reasoning,
         )
-        prompt_ids = self.tokenizer.encode(prompt_text)
+        prompt_ids = self.tokenizer.encode(prompt_text, add_special_tokens=False)
         prompt_length = len(prompt_ids)
 
         # Enforce prompt length limit
@@ -138,11 +153,11 @@ class SkyRLEngine(RolloutEngine):
         stop_reason = output["stop_reasons"][0]
         logprobs = output.get("response_logprobs", [None])[0] if output.get("response_logprobs") else None
 
-        # Parse response for structured content
-        # TODO: Implement parsing logic for reasoning and tool calls if needed
-        content = response_text
-        reasoning = ""
-        tool_calls = []
+        # Use chat_parser to extract reasoning and tool_calls (matching VerlEngine)
+        parsed_output = self.chat_parser.parse_completion(response_ids)
+        content = parsed_output["content"]
+        reasoning = parsed_output["reasoning"]
+        tool_calls = parsed_output["tool_calls"]
 
         # Determine finish reason
         finish_reason = stop_reason

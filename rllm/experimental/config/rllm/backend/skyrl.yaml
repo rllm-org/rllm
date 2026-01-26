@@ -18,6 +18,7 @@ defaults:
 # Example: rllm.algorithm.adv_estimator=gae
 rllm:
   backend: skyrl
+  disable_thinking: true  # Disable thinking tags in generation prompt
 
   # Algorithm configuration (direct defaults, no oc.select to avoid cycles)
   algorithm:
