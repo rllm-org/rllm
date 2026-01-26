@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from tqdm import tqdm
 
 from rllm.agents.agent import Episode
-from rllm.experimental.rollout import RolloutEngine, VerlEngine
+from rllm.experimental.rollout import RolloutEngine
 from rllm.utils import colorful_print
 from rllm.workflows.workflow import TerminationReason, Workflow
 
