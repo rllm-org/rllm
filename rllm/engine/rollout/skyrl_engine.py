@@ -59,6 +59,7 @@ class SkyRLEngine(RolloutEngine):
         self.max_response_length = max_response_length
         self.config = config
         self.skyrl_trainer = None  # Can be set later via set_skyrl_components
+        self.validate = False  # Flag enabled/disabled by SkyRLBackend validation hooks
 
     def set_skyrl_components(
         self,
@@ -99,7 +100,7 @@ class SkyRLEngine(RolloutEngine):
 
         # Extract parameters
         sampling_params = kwargs.get("sampling_params", {})
-        validate = kwargs.get("validate", False)
+        validate = self.validate or kwargs.get("validate", False)
         enforce_max_prompt_length = kwargs.get("enforce_max_prompt_length", True)
 
         # Convert messages to token IDs

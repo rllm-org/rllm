@@ -264,8 +264,8 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         2. Uses SkyrlTrainer.generate() which internally uses RLLMGenerator
         3. Converts GeneratorOutput to Episodes (for compatibility with unified trainer)
 
-        Note: Uses `group_size` for both training and validation (consistent with VERL
-        backend using `rollout.n` for both). The training phase is determined from the
+        Note: Uses `rllm.rollout.n` for training and `rllm.rollout.n_val` for validation
+        (consistent with VERL backend pattern). The training phase is determined from the
         workflow engine's current mode.
 
         Args:
@@ -297,8 +297,11 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         sampling_params = self.full_config.get("sampling", {})
         default_env_class = self.full_config.get("environment", {}).get("env_class", "BaseTextEnv")
         
-        # Use group_size for both training and validation (consistent with VERL using rollout.n for both)
-        group_size = self.full_config.trainer.get("group_size", 1)
+        # Use rllm.rollout.n for training, rllm.rollout.n_val for validation (VERL pattern)
+        if training_phase == "train":
+            group_size = self.full_config.rllm.rollout.n
+        else:
+            group_size = self.full_config.rllm.rollout.n_val
 
         # Adapt batch to SkyRL format
         adapted_batch = adapt_rllm_batch_to_skyrl(batch)
@@ -657,13 +660,22 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
     async def on_validation_start(self, trainer_state: TrainerState) -> bool:
         """Called at the start of validation.
 
+        Sets validation mode on both trainer_state and rollout_engine.
+        Following VERL backend pattern for consistency.
+
         Returns:
             bool: True if validation should proceed, False otherwise.
         """
-        # TODO: add validation logic here and follow VERL backend pattern.
         trainer_state.is_training = False
+        if self.rollout_engine is not None:
+            self.rollout_engine.validate = True
         return True
 
     async def on_validation_end(self, trainer_state: TrainerState) -> None:
-        """Called at the end of validation."""
+        """Called at the end of validation.
+
+        Resets validation mode on both trainer_state and rollout_engine.
+        """
         trainer_state.is_training = True
+        if self.rollout_engine is not None:
+            self.rollout_engine.validate = False

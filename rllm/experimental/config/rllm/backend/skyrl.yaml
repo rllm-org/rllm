@@ -49,7 +49,8 @@ rllm:
 
   # Rollout configuration
   rollout:
-    n_val: 1
+    n: ${oc.select:trainer.group_size, 8}  # Training rollouts per task (maps from SkyRL's trainer.group_size)
+    n_val: 1  # Validation rollouts per task (usually 1 for deterministic evaluation)
 
 # SkyRL-specific configs that need to be set
 # These will be merged with SkyRL's ppo_base_config.yaml
