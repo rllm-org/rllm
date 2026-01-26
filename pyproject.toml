@@ -89,6 +89,11 @@ verifiers = [
     "verifiers==0.1.9"
 ]
 
+skyrl = [
+    "skyrl-gym==0.1.1",
+    "skyrl-train==0.3.0",
+]
+
 opentelemetry = [
     "opentelemetry-sdk",
 ]

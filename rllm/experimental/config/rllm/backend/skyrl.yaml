@@ -1,0 +1,97 @@
+# @package _global_
+
+# SkyRL Backend Configuration for rLLM
+# This config follows the verl pattern:
+# 1. Includes SkyRL's native config (ppo_base_config.yaml) via defaults
+# 2. Maps rLLM-common configs to SkyRL-specific configs
+# 3. Allows overriding SkyRL configs via rLLM config structure
+
+defaults:
+  - /ppo_base_config # Include SkyRL's native config (resolves to skyrl_train.config.ppo_base_config)
+  - _self_
+
+# Map rLLM common configs to SkyRL config structure
+# SkyRL's config is structured differently - it uses trainer.*, generator.*, etc.
+# We need to map rLLM's algorithm.* to SkyRL's trainer.algorithm.*
+
+# rLLM config - source of truth, override via rllm.* keys
+# Example: rllm.algorithm.adv_estimator=gae
+rllm:
+  backend: skyrl
+
+  # Algorithm configuration (direct defaults, no oc.select to avoid cycles)
+  algorithm:
+    adv_estimator: grpo  # Options: grpo, reinforce++, gae, rloo
+    gamma: 1.0
+    lambd: 1.0
+    norm_adv_by_std_in_grpo: true
+    use_rllm: false
+
+  # Stepwise advantage configuration
+  stepwise_advantage:
+    enable: false
+    mode: broadcast  # broadcast or per_step
+    normalize_by_steps: false
+
+  # Trainer configuration
+  trainer:
+    total_epochs: 1
+    total_batches: -1
+    logger:
+      - console
+      - wandb
+    project_name: rllm-training
+    experiment_name: default
+    test_freq: 5
+    save_freq: 20
+    val_before_train: true
+    val_only: false
+
+  # Rollout configuration
+  rollout:
+    n_val: 1
+
+# SkyRL-specific configs that need to be set
+# These will be merged with SkyRL's ppo_base_config.yaml
+trainer:
+  # Basic training settings
+  epochs: ${rllm.trainer.total_epochs}
+  eval_before_train: ${rllm.trainer.val_before_train}
+  eval_interval: ${rllm.trainer.test_freq}
+  project_name: ${rllm.trainer.project_name}
+  run_name: ${rllm.trainer.experiment_name}
+
+  # Algorithm settings
+  algorithm:
+    advantage_estimator: ${rllm.algorithm.adv_estimator}
+    gamma: ${rllm.algorithm.gamma}
+    lambd: ${rllm.algorithm.lambd}
+    grpo_norm_by_std: ${rllm.algorithm.norm_adv_by_std_in_grpo}
+    # we set it explicitly as a fallback to avoid struct access errors for skyrl
+    max_seq_len: 1536  # Default: max_prompt_length (512) + max_response_length (1024)
+
+  # Checkpoint settings
+  ckpt_interval: ${rllm.trainer.save_freq}
+  resume_mode: latest
+
+# Generator settings (for rollout)
++generator:
+  n_samples_per_prompt: 1 # For single trajectory per prompt
+  eval_n_samples_per_prompt: ${rllm.rollout.n_val}
+
+# Data settings - will be overridden by dataset objects passed to launcher
+data:
+  max_prompt_length: 512
+  max_response_length: 1024
+
+# Environment settings
+environment:
+  env_class: BaseTextEnv # Default
+
+# Ray initialization settings
+ray_init:
+  include_dashboard: false # Disable dashboard/metrics exporter to avoid connection errors
+  num_cpus: null # Auto-detect, or set to specific number
+  num_gpus: null # Auto-detect, or set to specific number
+  timeline_json_file: null # Optional: path to save Ray timeline for profiling
+
