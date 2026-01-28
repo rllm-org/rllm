@@ -77,9 +77,10 @@ class Tracking:
         "clearml",
         "trackio",
         "file",
+        "ui",
     ]
 
-    def __init__(self, project_name, experiment_name, default_backend: str | list[str] = "console", config=None):
+    def __init__(self, project_name, experiment_name, default_backend: str | list[str] = "console", config=None, source_metadata=None):
         if isinstance(default_backend, str):
             default_backend = [default_backend]
         for backend in default_backend:
@@ -178,10 +179,24 @@ class Tracking:
         if "file" in default_backend:
             self.logger["file"] = FileLogger(project_name, experiment_name)
 
-    def log(self, data, step, backend=None):
+        if "ui" in default_backend:
+            self.logger["ui"] = UILogger(project_name, experiment_name, config, source_metadata=source_metadata)
+
+    def log(self, data, step, backend=None, episodes=None):
+        """Log metrics and optionally episodes to configured backends.
+
+        Args:
+            data: Dictionary of metrics to log
+            step: Current training step
+            backend: Optional list of backends to log to (default: all)
+            episodes: Optional list of Episode objects (only used by UILogger)
+        """
         for default_backend, logger_instance in self.logger.items():
             if backend is None or default_backend in backend:
-                logger_instance.log(data=data, step=step)
+                if default_backend == "ui" and episodes is not None:
+                    logger_instance.log(data=data, step=step, episodes=episodes)
+                else:
+                    logger_instance.log(data=data, step=step)
 
     def finish(self):
         """Explicitly finish and cleanup all loggers.
@@ -206,6 +221,8 @@ class Tracking:
             self.logger["trackio"].finish()
         if "file" in self.logger:
             self.logger["file"].finish()
+        if "ui" in self.logger:
+            self.logger["ui"].finish()
 
         self.logger.clear()
         self._finished = True
@@ -217,6 +234,135 @@ class Tracking:
         on __del__, as garbage collection timing can be unpredictable.
         """
         self.finish()
+
+
+class UILogger:
+    """Logger that sends training data to the rLLM UI backend via HTTP.
+
+    This logger sends both aggregated metrics and detailed episode data (including
+    trajectories and step-by-step execution) to a FastAPI backend for visualization.
+
+    Args:
+        project_name: Name of the project
+        experiment_name: Name of the experiment/run
+        config: Training configuration dict
+    """
+
+    def __init__(self, project_name: str, experiment_name: str, config, source_metadata=None):
+        import logging
+
+        import httpx
+
+        self.logger = logging.getLogger(__name__)
+        self.ui_url = os.getenv("RLLM_UI_URL", "http://localhost:3000")
+        self.client = httpx.Client(base_url=self.ui_url, timeout=5.0)
+
+        try:
+            # Create session with source metadata
+            response = self.client.post(
+                "/api/sessions",
+                json={"project": project_name, "experiment": experiment_name, "config": config, "source_metadata": source_metadata or {}},
+            )
+            self.session_id = response.json()["id"]
+            self.logger.info(f"UILogger initialized with session_id: {self.session_id}")
+        except Exception as e:
+            self.logger.warning(f"Failed to initialize UILogger: {e}")
+            self.session_id = None
+
+    def log(self, data, step, episodes=None):
+        """Log metrics and optionally episodes.
+
+        Args:
+            data: Dictionary of metrics to log
+            step: Current training step
+            episodes: Optional list of Episode objects with trajectory data
+        """
+        if self.session_id is None:
+            return
+
+        import json
+
+        # Send metrics (always) - convert numpy types to native Python
+        try:
+            metrics_json = json.loads(json.dumps(data, default=self._json_serializer))
+            self.client.post(
+                "/api/metrics",
+                json={"session_id": self.session_id, "step": step, "data": metrics_json},
+            )
+        except Exception as e:
+            self.logger.warning(f"Failed to send metrics to UI: {e}")
+
+        # Send episodes (if provided)
+        if episodes:
+            try:
+                self.logger.info(f"Sending {len(episodes)} episodes to UI")
+                for episode in episodes:
+                    episode_data = {
+                        "session_id": self.session_id,
+                        "step": step,
+                        "episode_id": episode.id,
+                        "task": episode.task,
+                        "is_correct": bool(episode.is_correct),
+                        "reward": float(episode.trajectories[0].reward) if episode.trajectories else None,
+                        "trajectories": [self._serialize_trajectory(t) for t in episode.trajectories],
+                        "info": episode.info if hasattr(episode, "info") and episode.info else {},
+                    }
+                    # Serialize to handle numpy types
+                    episode_json = json.loads(json.dumps(episode_data, default=self._json_serializer))
+                    response = self.client.post("/api/episodes", json=episode_json)
+                    self.logger.debug(f"Episode {episode.id} sent, status: {response.status_code}")
+            except Exception as e:
+                self.logger.warning(f"Failed to send episodes to UI: {e}")
+                import traceback
+
+                self.logger.warning(f"Traceback: {traceback.format_exc()}")
+
+    def _json_serializer(self, obj):
+        """Convert numpy types and other non-JSON types to native Python."""
+        import numpy as np
+
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
+        elif hasattr(obj, "__dict__"):
+            return str(obj)
+        else:
+            return str(obj)
+
+    def _serialize_trajectory(self, traj):
+        """Serialize a trajectory object to JSON-compatible dict."""
+        return {
+            "uid": traj.uid,
+            "name": traj.name,  # e.g., "solver", "judge"
+            "reward": float(traj.reward) if traj.reward is not None else None,
+            "steps": [
+                {
+                    "observation": step.observation,
+                    "action": step.action,
+                    "reward": float(step.reward) if step.reward is not None else None,
+                    "done": bool(step.done) if step.done is not None else None,
+                    "chat_completions": step.chat_completions,
+                    "model_response": step.model_response,
+                }
+                for step in traj.steps
+            ],
+        }
+
+    def finish(self):
+        """Mark the session as complete and close HTTP client."""
+        if self.session_id is None:
+            return
+        try:
+            self.client.post(f"/api/sessions/{self.session_id}/complete")
+        except Exception as e:
+            self.logger.warning(f"Failed to complete session: {e}")
+        finally:
+            self.client.close()
 
 
 class ClearMLLogger:

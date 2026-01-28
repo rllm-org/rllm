@@ -33,7 +33,7 @@ from rllm.experimental.common.visualization import visualize_trajectory_last_ste
 from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
 from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.rollout import RolloutEngine
-from rllm.utils import EpisodeLogger, Tracking
+from rllm.utils import EpisodeLogger, Tracking, extract_source_metadata
 from rllm.workflows.workflow import TerminationReason, Workflow
 
 
@@ -212,11 +212,19 @@ class UnifiedTrainer:
             )
             self.episode_logger = EpisodeLogger(base_dir=episode_log_dir, subdirectory="episodes")
 
+        source_metadata = extract_source_metadata(
+            workflow_class=self.workflow_class,
+            workflow_args=self.workflow_args,
+        )
+
+        # TODO: Add more info to the config for UI display, such as model_name,
+        # backend-specific settings (training, sampling, data), etc.
         self.logger = Tracking(
             project_name=self.rllm_config.trainer.project_name,
             experiment_name=self.rllm_config.trainer.experiment_name,
             default_backend=self.rllm_config.trainer.logger,
             config=OmegaConf.to_container(self.rllm_config, resolve=True),
+            source_metadata=source_metadata,
         )
 
     def _cleanup_on_init_failure(self):
@@ -299,7 +307,17 @@ class UnifiedTrainer:
                     await self._train_batch_async(batch, trainer_state)
                 await self.backend.on_batch_end(trainer_state)
 
-                self.logger.log(data=trainer_state.metrics, step=trainer_state.global_step)
+                # if "total_step" in trainer_state.timing_dict:
+                #     with open("/Users/chanbinpark/Desktop/rllm/rllm/experimental/test_examples/train_tinker_solver_judge_logs", "a") as f:
+                #         f.write(f"[UnifiedTrainer] Batch {trainer_state.global_step} training time: {trainer_state.timing_dict['total_step']:.4f}s\n")
+
+                # t_log_start = time.time()
+                self.logger.log(data=trainer_state.metrics, step=trainer_state.global_step, episodes=trainer_state.episodes)
+                # t_log_end = time.time()
+
+                # log_time = t_log_end - t_log_start
+                # with open("/Users/chanbinpark/Desktop/rllm/rllm/experimental/test_examples/train_tinker_solver_judge_logs", "a") as f:
+                #    f.write(f"[UnifiedTrainer] Batch {trainer_state.global_step} logging time: {log_time:.4f}s\n")
 
                 # if the config specifies the `total_batches` parameter, then we check if we should stop
                 if use_total_batches and trainer_state.global_step >= self.rllm_config.trainer.total_batches:

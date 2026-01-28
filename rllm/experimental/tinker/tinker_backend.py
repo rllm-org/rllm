@@ -376,6 +376,10 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         total_batches = self.full_config.rllm.trainer.get("total_batches", None)
         update_training_metrics(trainer_state, self.learning_rate, total_batches)
 
+        # Update metrics
+        total_batches = self.full_config.rllm.trainer.get("total_batches", None)
+        update_training_metrics(trainer_state, self.learning_rate, total_batches)
+
         # Print metrics table
         if trainer_state.metrics:
             print_metrics_table(trainer_state.metrics, global_step)

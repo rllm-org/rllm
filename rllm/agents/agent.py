@@ -54,6 +54,10 @@ class Step:
         if len(self.logprobs) > 0:
             assert len(self.response_ids) == len(self.logprobs), f"length mismatch between response_ids and logprobs, got {len(self.response_ids)}, {len(self.logprobs)}"
 
+        # check that the lengths would match up
+        if len(self.logprobs) > 0:
+            assert len(self.response_ids) == len(self.logprobs), f"length mismatch between response_ids and logprobs, got {len(self.response_ids)}, {len(self.logprobs)}"
+
     def to_dict(self) -> dict:
         return {
             "prompt_ids": self.prompt_ids,

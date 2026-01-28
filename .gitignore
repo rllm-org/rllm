@@ -197,6 +197,7 @@ rllm/registry/
 # Coding assistant local rules ignore
 .cursor/rules/*
 CLAUDE.md
+.claude/
 
 # Strands outputs ignore
 examples/strands_outputs/*
@@ -215,3 +216,12 @@ uv.lock
 
 # Legacy issue: we will ignore the "verl" folder, which was installed by many as submodule before
 /verl/
+
+# UI frontend
+ui/frontend/node_modules/
+ui/frontend/dist/
+ui/frontend/.vite/
+
+# UI backend
+ui/api/rllm_ui.db
+ui/api/__pycache__/ui/api/*.db
