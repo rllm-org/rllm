@@ -1,9 +1,38 @@
 import json
+import tarfile
 
 import pandas as pd
+from huggingface_hub import hf_hub_download
 from rllm.data.dataset import DatasetRegistry
 
 from projects.finqa import constants as C
+
+HF_REPO_ID = "rLLM/finqa"
+HF_FILENAME = "data.tar.gz"
+
+
+def download_data():
+    """Download and extract finqa data from HuggingFace if not present."""
+    data_dir = C.DATA_DIR
+
+    # Check if data already exists
+    if data_dir.exists() and (data_dir / "train_finqa.csv").exists():
+        print(f"Data already exists at {data_dir}")
+        return
+
+    print(f"Downloading finqa data from {HF_REPO_ID}...")
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    # Download tar.gz from HuggingFace
+    tar_path = hf_hub_download(repo_id=HF_REPO_ID, filename=HF_FILENAME, repo_type="dataset")
+
+    # Extract to parent directory (tar contains data/ prefix)
+    print(f"Extracting to {data_dir}...")
+    with tarfile.open(tar_path, "r:gz") as tar:
+        tar.extractall(path=data_dir.parent)
+
+    print("Done.")
+
 
 def _load_csv(path: str) -> pd.DataFrame:
     return pd.read_csv(path)
@@ -89,6 +118,7 @@ def prepare_finqa_data():
 
 
 if __name__ == "__main__":
+    download_data()
     train_dataset, val_dataset, test_dataset = prepare_finqa_data()
     print(f"Train dataset size: {len(train_dataset)}")
     print(f"Validation dataset size: {len(val_dataset)}")
