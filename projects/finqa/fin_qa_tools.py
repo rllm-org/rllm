@@ -4,7 +4,6 @@ import json
 import os
 import re
 import sqlite3
-import sys
 import threading
 import warnings
 from typing import Dict
@@ -15,11 +14,7 @@ from pandas.api.types import is_numeric_dtype
 from asteval import Interpreter
 from rllm.tools.tool_base import Tool
 
-# Relative Imports
-BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
-sys.path.append(BASE_DIR)
-
-from src.constants import TABLES_ROOT, TABLES_CLEANED_ALL_COMPANIES_FILE_NAME
+from .constants import TABLES_ROOT, TABLES_CLEANED_ALL_COMPANIES_FILE_NAME
 
 # =============================================================================
 # GLOBAL CACHES (populated once at module import)

@@ -1,6 +1,5 @@
 # Standard library imports
 import json
-import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -11,11 +10,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 from openai import OpenAI
 
-# Relative imports
-BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
-sys.path.append(BASE_DIR)
-
-from src.constants import (
+from projects.finqa.constants import (
     COMPANY_SPLIT_PATH,
     FIN_QA_QUESTION_GENERATION_SYSTEM_PROMPT_PATH,
     FIN_QA_QUESTION_VERIFICATION_SYSTEM_PROMPT_PATH,

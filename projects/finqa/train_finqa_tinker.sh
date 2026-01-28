@@ -1,16 +1,9 @@
 #!/bin/bash
 set -x
 
-# export PORTKEY_API_KEY=${PORTKEY_API_KEY:-}
-# export OPENAI_API_KEY=${OPENAI_API_KEY:-}
-export TINKER_API_KEY="tml-N8IQ0KxflWeRU7O6klRxeCD2SRSfe7pNgwR2YoN5f2DlU9fPTQeBq4yEBezybv5F7DAAAA"
-
-export WANDB_RUN_ID=x4fnjwk0
-export WANDB_RESUME=must
-
 MODEL_PATH=Qwen/Qwen3-30B-A3B-Instruct-2507
 
-python3 -m src.train_finqa_with_tool_tinker \
+python3 -m projects.finqa.train_finqa_tinker \
     model.name=$MODEL_PATH \
     model.lora_rank=32 \
     training.group_size=16 \
@@ -32,4 +25,4 @@ python3 -m src.train_finqa_with_tool_tinker \
     trainer.val_before_train=True \
     trainer.test_freq=5 \
     trainer.save_freq=5 \
-    trainer.default_local_dir='/data/home/manan/finqa-rllm/checkpoints/tinker/30b-finqa-setting-one'
+    trainer.default_local_dir='checkpoints/finqa-tinker'

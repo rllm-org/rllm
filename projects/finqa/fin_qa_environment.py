@@ -1,17 +1,12 @@
 # Standard imports
-import os
-import sys
 import json
 
 # Third Party Imports
 from rllm.environments.tools.tool_env import ToolEnvironment
 
-# Relative Imports
-BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
-sys.path.append(BASE_DIR)
-
-from src.fin_qa_reward_function import fin_qa_reward_function
-from src.fin_qa_tools import Calculator, GetTableInfo, GetTableNames, SQLQuery
+# Local imports
+from .fin_qa_reward import fin_qa_reward_function
+from .fin_qa_tools import Calculator, GetTableInfo, GetTableNames, SQLQuery
 
 
 class FinQAEnvironment(ToolEnvironment):

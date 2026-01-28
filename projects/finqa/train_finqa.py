@@ -1,20 +1,14 @@
 import hydra
 
+from rllm.agents.agent import Episode
 from rllm.data.dataset import DatasetRegistry
+from rllm.engine.rollout.rollout_engine import ModelOutput
 from rllm.trainer.agent_trainer import AgentTrainer
 from rllm.workflows.multi_turn_workflow import MultiTurnWorkflow
-from rllm.agents.agent import Episode
-from rllm.engine.rollout.rollout_engine import ModelOutput
 from rllm.workflows.workflow import TerminationEvent, TerminationReason
 
-# Relative Imports
-import os
-import sys
-BASE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.append(BASE_DIR)
-
-from src.fin_qa_agent import FinQAAgent
-from src.fin_qa_environment import FinQAEnvironment
+from .fin_qa_agent import FinQAAgent
+from .fin_qa_environment import FinQAEnvironment
 
 
 class FinQAWorkflow(MultiTurnWorkflow):

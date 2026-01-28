@@ -1,19 +1,9 @@
 import json
-import os
-import sys
+
 import pandas as pd
-
-BASE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if BASE_DIR not in sys.path:
-    sys.path.append(BASE_DIR)
-
-RLLM_DIR = os.path.join(BASE_DIR, "rllm")
-if RLLM_DIR not in sys.path:
-    sys.path.append(RLLM_DIR)
-
 from rllm.data.dataset import DatasetRegistry
 
-from src import constants as C
+from projects.finqa import constants as C
 
 def _load_csv(path: str) -> pd.DataFrame:
     return pd.read_csv(path)

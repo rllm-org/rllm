@@ -1,32 +1,25 @@
 # Standard library imports
 import argparse
-import re
 import os
-import sys
+import re
 import time
-
-from datetime import datetime
 from copy import deepcopy
+from datetime import datetime
+from pathlib import Path
 
 # Third-party imports
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
 from bs4 import BeautifulSoup
-from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
-# Relative Imports
-BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
-sys.path.append(BASE_DIR)
-
-from src.constants import SCRAPED_DATA_DIR, SCRAPED_DATA_URLS_PATH
+from projects.finqa.constants import SCRAPED_DATA_DIR, SCRAPED_DATA_URLS_PATH
 
 
 def load_sec_content(url, user_agent):

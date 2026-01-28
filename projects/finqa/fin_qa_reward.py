@@ -1,22 +1,15 @@
 # Standard imports
-import os
-import sys
 import json
+import os
 import re
-import time
 from pathlib import Path
-import httpx
 
-# Third Party Imports
+import httpx
 import openai
 from portkey_ai import PORTKEY_GATEWAY_URL, createHeaders
 from rllm.rewards.reward_types import RewardOutput
 
-# Relative Imports
-BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
-sys.path.append(BASE_DIR)
-
-from src.constants import (
+from .constants import (
     FIN_QA_CORRECTNESS_SYSTEM_PROMPT_PATH,
     FIN_QA_MULTI_TABLE_CORRECTNESS_SYSTEM_PROMPT_PATH,
 )

@@ -4,20 +4,15 @@ import asyncio
 import hashlib
 import json
 import os
-import sys
 from collections import defaultdict
 
 from transformers import AutoTokenizer
 from rllm.data.dataset import DatasetRegistry
 from rllm.engine.agent_execution_engine import AgentExecutionEngine
+from rllm.trajectory_visualizer import save_trajectories
 
-# Relative Imports
-BASE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.append(BASE_DIR)
-
-from src.fin_qa_agent import FinQAAgent
-from src.fin_qa_environment import FinQAEnvironment
-from src.trajectory_visualizer import save_trajectories
+from projects.finqa.fin_qa_agent import FinQAAgent
+from projects.finqa.fin_qa_environment import FinQAEnvironment
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -55,7 +50,7 @@ if __name__ == "__main__":
     test_dataset = DatasetRegistry.load_dataset("finqa_benchmark", "test")
     if test_dataset is None:
         print("Dataset not found, preparing dataset...")
-        from src.prepare_finqa_dataset import prepare_finqa_data
+        from projects.finqa.prepare_finqa_data import prepare_finqa_data
         _, _, test_dataset = prepare_finqa_data()
 
     tasks = test_dataset.repeat(n=args.n)

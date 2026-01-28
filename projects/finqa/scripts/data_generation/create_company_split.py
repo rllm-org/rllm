@@ -1,13 +1,12 @@
 import json
 import random
-import sys
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parents[2]
-if str(BASE_DIR) not in sys.path:
-    sys.path.append(str(BASE_DIR))
-
-from src.constants import (COMPANY_SPLIT_PATH,TABLES_CLEANED_ALL_COMPANIES_FILE_NAME,TABLES_ROOT,)
+from projects.finqa.constants import (
+    COMPANY_SPLIT_PATH,
+    TABLES_CLEANED_ALL_COMPANIES_FILE_NAME,
+    TABLES_ROOT,
+)
 
 
 def load_companies(tables_root: Path) -> list[str]:

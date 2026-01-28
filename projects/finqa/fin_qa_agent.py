@@ -1,16 +1,9 @@
-# Standard imports
-import os
-import sys
-
 # Third Party Imports
 from rllm.agents.tool_agent import ToolAgent
 
-# Relative Imports
-BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
-sys.path.append(BASE_DIR)
-
-from src.fin_qa_tools import Calculator, GetTableInfo, GetTableNames, SQLQuery
-from src.constants import FIN_QA_REACT_SYSTEM_PROMPT_PATH
+# Local Imports
+from .fin_qa_tools import Calculator, GetTableInfo, GetTableNames, SQLQuery
+from .constants import FIN_QA_REACT_SYSTEM_PROMPT_PATH
 
 # Load ReAct system prompt
 with open(FIN_QA_REACT_SYSTEM_PROMPT_PATH, 'r', encoding='utf-8') as f:

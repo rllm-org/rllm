@@ -1,22 +1,17 @@
-from openai import OpenAI  # Changed from: from anthropic import Anthropic
 import argparse
-import json
-import pandas as pd
-from io import StringIO
-from bs4 import BeautifulSoup
-import glob
 import asyncio
 import functools
-from tqdm.asyncio import tqdm
-import pandas as pd
+import glob
+import json
 import os
-import sys
+from io import StringIO
 
-# Relative Imports
-BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
-sys.path.append(BASE_DIR)
+import pandas as pd
+from bs4 import BeautifulSoup
+from openai import OpenAI
+from tqdm.asyncio import tqdm
 
-from src.constants import TABLES_CLEANED_ALL_COMPANIES_FILE_NAME
+from projects.finqa.constants import TABLES_CLEANED_ALL_COMPANIES_FILE_NAME
 
 COMPANY_CONCURRENCY = 2
 FILE_CONCURRENCY = 5

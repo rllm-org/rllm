@@ -3,9 +3,9 @@ import hydra
 from rllm.data.dataset import DatasetRegistry
 from rllm.trainer import AgentTrainer
 
-from src.train_finqa_with_tool import FinQAWorkflow
-from src.fin_qa_agent import FinQAAgent
-from src.fin_qa_environment import FinQAEnvironment
+from .train_finqa import FinQAWorkflow
+from .fin_qa_agent import FinQAAgent
+from .fin_qa_environment import FinQAEnvironment
 
 
 @hydra.main(

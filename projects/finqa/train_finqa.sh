@@ -22,7 +22,7 @@ if [ -d "/scratch" ] && [ -d "data/company_tables" ]; then
 fi
 # ----------------------
 
-python3 -m src.train_finqa_with_tool \
+python3 -m projects.finqa.train_finqa \
     algorithm.adv_estimator=grpo \
     data.train_batch_size=256 \
     data.val_batch_size=256 \
