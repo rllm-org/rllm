@@ -36,7 +36,9 @@ def split_companies(companies: list[str]) -> dict[str, list[str]]:
 def count_tables(company_dir: Path) -> int:
     tables_file = company_dir / TABLES_CLEANED_ALL_COMPANIES_FILE_NAME
     if not tables_file.is_file():
-        raise FileNotFoundError(f"Missing tables file for company {company_dir.name}: {tables_file}")
+        raise FileNotFoundError(
+            f"Missing tables file for company {company_dir.name}: {tables_file}"
+        )
 
     with tables_file.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
@@ -48,7 +50,11 @@ def count_tables(company_dir: Path) -> int:
     raise ValueError(f"Unsupported tables format in {tables_file}")
 
 
-def write_metadata(splits: dict[str, list[str]], table_counts: dict[str, int], metadata_path: Path,) -> None:
+def write_metadata(
+    splits: dict[str, list[str]],
+    table_counts: dict[str, int],
+    metadata_path: Path,
+) -> None:
     lines = [f"Total companies: {len(table_counts)}"]
     for split_name in ("train", "val", "test"):
         names = splits.get(split_name, [])
@@ -66,12 +72,16 @@ def write_metadata(splits: dict[str, list[str]], table_counts: dict[str, int], m
 def main() -> None:
     tables_root = Path(TABLES_ROOT)
     companies = load_companies(tables_root)
-    table_counts = {company: count_tables(tables_root / company) for company in companies}
+    table_counts = {
+        company: count_tables(tables_root / company) for company in companies
+    }
     splits = split_companies(companies)
 
     split_path = Path(COMPANY_SPLIT_PATH)
     split_path.parent.mkdir(parents=True, exist_ok=True)
-    split_path.write_text(json.dumps(splits, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    split_path.write_text(
+        json.dumps(splits, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
     metadata_path = split_path.with_name("metadata.txt")
     write_metadata(splits, table_counts, metadata_path)

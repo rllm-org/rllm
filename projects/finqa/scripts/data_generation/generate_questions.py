@@ -4,7 +4,7 @@ import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 # Third-party imports
 import pandas as pd
@@ -12,8 +12,8 @@ from openai import OpenAI
 
 from projects.finqa.constants import (
     COMPANY_SPLIT_PATH,
-    FIN_QA_QUESTION_GENERATION_SYSTEM_PROMPT_PATH,
-    FIN_QA_QUESTION_VERIFICATION_SYSTEM_PROMPT_PATH,
+    QUESTION_GENERATION_PROMPT_PATH,
+    QUESTION_VERIFICATION_PROMPT_PATH,
     TABLES_CLEANED_ALL_COMPANIES_FILE_NAME,
     TABLES_ROOT,
     TEST_QUESTIONS_PATH,
@@ -100,28 +100,49 @@ def _normalize_token(text: str) -> str:
     return text.strip("_")
 
 
-def normalize_table_references(columns: List[str], rows: List[str], table: pd.DataFrame):
+def normalize_table_references(
+    columns: list[str], rows: list[str], table: pd.DataFrame
+):
     """Align loosely formatted column and row references with table values"""
     column_candidates = [str(value).strip() for value in columns if str(value).strip()]
     row_candidates = [str(value).strip() for value in rows if str(value).strip()]
 
     column_lookup = {_normalize_token(col): str(col) for col in table.columns}
     cell_values = table.fillna("").astype(str).values.flatten()
-    row_lookup = {_normalize_token(value): value.strip() for value in cell_values if value and value.strip()}
+    row_lookup = {
+        _normalize_token(value): value.strip()
+        for value in cell_values
+        if value and value.strip()
+    }
 
-    normalized_columns = [column_lookup.get(_normalize_token(col), col) for col in column_candidates]
-    normalized_rows = [row_lookup.get(_normalize_token(row), row) for row in row_candidates]
+    normalized_columns = [
+        column_lookup.get(_normalize_token(col), col) for col in column_candidates
+    ]
+    normalized_rows = [
+        row_lookup.get(_normalize_token(row), row) for row in row_candidates
+    ]
     return normalized_columns, normalized_rows
 
 
-def clean_question(question: Any, table: pd.DataFrame) -> Optional[Dict[str, Any]]:
+def clean_question(question: Any, table: pd.DataFrame) -> dict[str, Any] | None:
     """Validate required fields from the generator and tidy each value"""
     if not isinstance(question, dict):
         return None
     try:
-        cleaned = {key: str(question[key]).strip() for key in ("question_type", "question", "explanation", "answer")}
-        columns_used = [value for value in (str(item).strip() for item in question["columns_used"]) if value]
-        rows_used = [value for value in (str(item).strip() for item in question["rows_used"]) if value]
+        cleaned = {
+            key: str(question[key]).strip()
+            for key in ("question_type", "question", "explanation", "answer")
+        }
+        columns_used = [
+            value
+            for value in (str(item).strip() for item in question["columns_used"])
+            if value
+        ]
+        rows_used = [
+            value
+            for value in (str(item).strip() for item in question["rows_used"])
+            if value
+        ]
     except (KeyError, TypeError):
         return None
 
@@ -133,15 +154,23 @@ def clean_question(question: Any, table: pd.DataFrame) -> Optional[Dict[str, Any
     return {**cleaned, "columns_used": columns_used, "rows_used": rows_used}
 
 
-def validate_references(columns_used: List[str], rows_used: List[str], table: pd.DataFrame) -> bool:
+def validate_references(
+    columns_used: list[str], rows_used: list[str], table: pd.DataFrame
+) -> bool:
     """Confirm the referenced columns and row values exist in the table"""
     if any(col not in table.columns for col in columns_used):
         return False
-    table_values = {cell.strip().lower() for cell in table.fillna("").astype(str).values.flatten() if cell and cell.strip()}
+    table_values = {
+        cell.strip().lower()
+        for cell in table.fillna("").astype(str).values.flatten()
+        if cell and cell.strip()
+    }
     return all(str(row).strip().lower() in table_values for row in rows_used)
 
 
-def generate_question(client: OpenAI, system_prompt: str, payload: str) -> Optional[Dict[str, Any]]:
+def generate_question(
+    client: OpenAI, system_prompt: str, payload: str
+) -> dict[str, Any] | None:
     """Call the generator model with the guided schema and parse the response"""
     completion = client.chat.completions.create(
         model="Qwen/Qwen3-30B-A3B-Instruct-2507",
@@ -161,7 +190,13 @@ def generate_question(client: OpenAI, system_prompt: str, payload: str) -> Optio
         return None
 
 
-def verify_question(client: OpenAI, verification_prompt: str, table: Dict, question: Dict, table_name: str) -> bool:
+def verify_question(
+    client: OpenAI,
+    verification_prompt: str,
+    table: dict,
+    question: dict,
+    table_name: str,
+) -> bool:
     """Ask the verifier model to confirm the question/answer fits the table"""
     user_message = (
         f"Table Name: {table_name}\n\n"
@@ -186,7 +221,14 @@ def verify_question(client: OpenAI, verification_prompt: str, table: Dict, quest
         return False
 
 
-def process_table(client: OpenAI, system_prompt: str, verification_prompt: str, company: str, split_name: str, table_path: Path) -> Optional[Dict]:
+def process_table(
+    client: OpenAI,
+    system_prompt: str,
+    verification_prompt: str,
+    company: str,
+    split_name: str,
+    table_path: Path,
+) -> dict | None:
     """Generate and verify one question for a company table"""
     table_name = table_path.stem
     table_json = json.loads(table_path.read_text())
@@ -227,23 +269,37 @@ def process_table(client: OpenAI, system_prompt: str, verification_prompt: str, 
     }
 
 
-def process_company(client: OpenAI, system_prompt: str, verification_prompt: str, company: str, split_name: str) -> List[Dict]:
+def process_company(
+    client: OpenAI,
+    system_prompt: str,
+    verification_prompt: str,
+    company: str,
+    split_name: str,
+) -> list[dict]:
     """Iterate through a company's tables and collect verified question rows"""
     company_dir = Path(TABLES_ROOT) / company
     if not company_dir.is_dir():
         print(f"{split_name}/{company}: missing directory")
         return []
 
-    table_paths = [path for path in sorted(company_dir.glob("*.json")) if path.name != TABLES_CLEANED_ALL_COMPANIES_FILE_NAME]
+    table_paths = [
+        path
+        for path in sorted(company_dir.glob("*.json"))
+        if path.name != TABLES_CLEANED_ALL_COMPANIES_FILE_NAME
+    ]
     if not table_paths:
         print(f"{split_name}/{company}: no table files found")
         return []
 
-    print(f"{split_name}/{company}: processing {len(table_paths)} tables...", flush=True)
+    print(
+        f"{split_name}/{company}: processing {len(table_paths)} tables...", flush=True
+    )
 
     def run(path):
         try:
-            return process_table(client, system_prompt, verification_prompt, company, split_name, path)
+            return process_table(
+                client, system_prompt, verification_prompt, company, split_name, path
+            )
         except Exception as exc:
             print(f"{split_name}/{company}/{path.stem}: error {exc}")
             return None
@@ -254,13 +310,17 @@ def process_company(client: OpenAI, system_prompt: str, verification_prompt: str
     return rows
 
 
-def finalize_split(split_name: str, rows: List[Dict], output_path: Path) -> None:
+def finalize_split(split_name: str, rows: list[dict], output_path: Path) -> None:
     """Write the split CSV with deterministic IDs when we have any rows"""
     if not rows:
         print(f"{split_name}: no questions")
         return
 
-    df = pd.DataFrame(rows).sort_values(["company", "table_name", "question"]).reset_index(drop=True)
+    df = (
+        pd.DataFrame(rows)
+        .sort_values(["company", "table_name", "question"])
+        .reset_index(drop=True)
+    )
     df["id"] = df.index
     df = df[OUTPUT_COLUMNS]
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -268,10 +328,10 @@ def finalize_split(split_name: str, rows: List[Dict], output_path: Path) -> None
     print(f"{split_name}: wrote {len(df)} rows to {output_path}")
 
 
-def main(target_split: Optional[str] = None) -> None:
+def main(target_split: str | None = None) -> None:
     split_manifest = json.loads(Path(COMPANY_SPLIT_PATH).read_text())
-    system_prompt = Path(FIN_QA_QUESTION_GENERATION_SYSTEM_PROMPT_PATH).read_text()
-    verification_prompt = Path(FIN_QA_QUESTION_VERIFICATION_SYSTEM_PROMPT_PATH).read_text()
+    system_prompt = Path(QUESTION_GENERATION_PROMPT_PATH).read_text()
+    verification_prompt = Path(QUESTION_VERIFICATION_PROMPT_PATH).read_text()
     client = OpenAI(base_url="http://localhost:30000/v1", api_key="dummy")
 
     splits = VALID_SPLITS if target_split is None else (target_split,)
@@ -281,7 +341,6 @@ def main(target_split: Optional[str] = None) -> None:
         return
 
     for split in splits:
-
         companies = split_manifest.get(split, [])
         if not companies:
             print(f"{split}: no companies in split file")
@@ -293,7 +352,19 @@ def main(target_split: Optional[str] = None) -> None:
             futures = []
             for index, company in enumerate(companies, 1):
                 print(f"{split}: [{index}/{total_companies}] {company}", flush=True)
-                futures.append((company, executor.submit(process_company, client, system_prompt, verification_prompt, company, split)))
+                futures.append(
+                    (
+                        company,
+                        executor.submit(
+                            process_company,
+                            client,
+                            system_prompt,
+                            verification_prompt,
+                            company,
+                            split,
+                        ),
+                    )
+                )
             for _, future in futures:
                 rows.extend(future.result())
 

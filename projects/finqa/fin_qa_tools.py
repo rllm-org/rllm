@@ -6,27 +6,26 @@ import re
 import sqlite3
 import threading
 import warnings
-from typing import Dict
 
 import pandas as pd
+from asteval import Interpreter
 from pandas.api.types import is_numeric_dtype
 
-from asteval import Interpreter
 from rllm.tools.tool_base import Tool
 
-from .constants import TABLES_ROOT, TABLES_CLEANED_ALL_COMPANIES_FILE_NAME
+from .constants import TABLES_CLEANED_ALL_COMPANIES_FILE_NAME, TABLES_ROOT
 
 # =============================================================================
 # GLOBAL CACHES (populated once at module import)
 # =============================================================================
 
 _DB_CONN: sqlite3.Connection | None = None
-_TABLE_INFO_CACHE: Dict[tuple, str] = {}  # (company, table) -> JSON string
-_COMPANY_TABLES: Dict[str, list] = {}     # company -> [table1, table2, ...]
-_SQL_NAMES: Dict[tuple, str] = {}         # (company, table) -> sql_table_name
-_TABLE_NAME_MAP: Dict[tuple, str] = {}    # (company, table_lower) -> original_table_name
+_TABLE_INFO_CACHE: dict[tuple, str] = {}  # (company, table) -> JSON string
+_COMPANY_TABLES: dict[str, list] = {}  # company -> [table1, table2, ...]
+_SQL_NAMES: dict[tuple, str] = {}  # (company, table) -> sql_table_name
+_TABLE_NAME_MAP: dict[tuple, str] = {}  # (company, table_lower) -> original_table_name
 _PRELOADED: bool = False
-_DB_LOCK = threading.Lock()               # Lock for thread-safe SQL queries
+_DB_LOCK = threading.Lock()  # Lock for thread-safe SQL queries
 
 
 def _normalize_company(company_name: str) -> str:
@@ -37,7 +36,7 @@ def _normalize_company(company_name: str) -> str:
 def _normalize_table(company: str, table_name: str) -> str | None:
     """Look up original table name from case-insensitive input. Returns None if not found."""
     table_name = table_name.strip()
-    if table_name.endswith('.json'):
+    if table_name.endswith(".json"):
         table_name = table_name[:-5]
     return _TABLE_NAME_MAP.get((company, table_name.lower()))
 
@@ -52,7 +51,7 @@ def _safe_json_value(val):
     """Convert value to JSON-serializable form."""
     if pd.isna(val):
         return None
-    if hasattr(val, 'isoformat'):  # datetime/Timestamp
+    if hasattr(val, "isoformat"):  # datetime/Timestamp
         return str(val)
     return val
 
@@ -61,7 +60,7 @@ def _sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Ensure all columns have valid non-empty names."""
     new_cols = []
     for i, col in enumerate(df.columns):
-        if not col or str(col).strip() == '':
+        if not col or str(col).strip() == "":
             new_cols.append(f"col_{i}")
         else:
             new_cols.append(str(col))
@@ -111,7 +110,9 @@ def _compute_table_info(table: str, metadata: dict, df: pd.DataFrame) -> str:
         name = index_info["name"]
         table_payload["index"] = {
             "name": name,
-            "values": table_payload["unique_vals_per_col"].get(name, index_info["values"]),
+            "values": table_payload["unique_vals_per_col"].get(
+                name, index_info["values"]
+            ),
         }
 
     return json.dumps(table_payload, indent=0).replace("\n", "")
@@ -121,16 +122,21 @@ def _preload_company(company: str) -> tuple:
     """Load all tables for a company into caches. Returns (loaded, skipped) counts."""
     global _DB_CONN
 
-    metadata_path = os.path.join(TABLES_ROOT, company, TABLES_CLEANED_ALL_COMPANIES_FILE_NAME)
+    metadata_path = os.path.join(
+        TABLES_ROOT, company, TABLES_CLEANED_ALL_COMPANIES_FILE_NAME
+    )
     if not os.path.exists(metadata_path):
         _COMPANY_TABLES[company] = []
         return 0, 0
 
     try:
-        with open(metadata_path, "r") as f:
+        with open(metadata_path) as f:
             all_tables = json.load(f)
     except json.JSONDecodeError as e:
-        warnings.warn(f"Skipping company '{company}': malformed JSON in metadata file - {e}")
+        warnings.warn(
+            f"Skipping company '{company}': malformed JSON in metadata file - {e}",
+            stacklevel=2,
+        )
         _COMPANY_TABLES[company] = []
         return 0, 0
 
@@ -153,10 +159,12 @@ def _preload_company(company: str) -> tuple:
 
             sql_name = _get_sql_name(company, table)
             _SQL_NAMES[(company, table)] = sql_name
-            df.to_sql(sql_name, _DB_CONN, index=False, if_exists='replace')
+            df.to_sql(sql_name, _DB_CONN, index=False, if_exists="replace")
             loaded += 1
         except ValueError as e:
-            warnings.warn(f"Skipping table '{table}' for company '{company}': {e}")
+            warnings.warn(
+                f"Skipping table '{table}' for company '{company}': {e}", stacklevel=2
+            )
 
     _COMPANY_TABLES[company] = valid_tables
     return loaded, skipped
@@ -169,7 +177,7 @@ def _preload_all():
     if _PRELOADED:
         return
 
-    _DB_CONN = sqlite3.connect(':memory:', check_same_thread=False)
+    _DB_CONN = sqlite3.connect(":memory:", check_same_thread=False)
 
     # Get all company directories
     if not os.path.exists(TABLES_ROOT):
@@ -177,7 +185,8 @@ def _preload_all():
         return
 
     companies = [
-        name for name in os.listdir(TABLES_ROOT)
+        name
+        for name in os.listdir(TABLES_ROOT)
         if os.path.isdir(os.path.join(TABLES_ROOT, name))
     ]
 
@@ -192,6 +201,7 @@ def _preload_all():
 
 # Pre-load everything at module import
 _preload_all()
+
 
 class GetTableNames(Tool):
     """A tool to get a list of possible tables for a given company."""
@@ -212,9 +222,7 @@ Example:
 
     def __init__(self, name: str = NAME, description: str = DESCRIPTION):
         super().__init__(
-            name=name,
-            description=description,
-            function=self.get_table_names
+            name=name, description=description, function=self.get_table_names
         )
         # No filesystem operations - data already pre-loaded into _COMPANY_TABLES
 
@@ -222,7 +230,7 @@ Example:
         """Return table identifiers available for the provided company."""
         company = _normalize_company(company_name)
         if company not in _COMPANY_TABLES:
-            return f'Error: Company name {company_name} not found, use a valid company name.'
+            return f"Error: Company name {company_name} not found, use a valid company name."
         # Only return tables that can actually be queried (loaded into SQLite)
         return [t for t in _COMPANY_TABLES[company] if (company, t) in _SQL_NAMES]
 
@@ -256,9 +264,7 @@ Example:
 
     def __init__(self, name: str = NAME, description: str = DESCRIPTION):
         super().__init__(
-            name=name,
-            description=description,
-            function=self.get_table_info
+            name=name, description=description, function=self.get_table_info
         )
         # No filesystem operations - data already pre-loaded into _TABLE_INFO_CACHE
 
@@ -298,51 +304,60 @@ Example:
     Input  -> {"company_name": "apple", "table_name": "us_gaap_ScheduleOfMaturitiesOfLongTermDebtTableTextBlock", "query": "SELECT debt_category, amount FROM us_gaap_ScheduleOfMaturitiesOfLongTermDebtTableTextBlock WHERE amount != '' LIMIT 3"}
     Output -> "[{\"debt_category\": ...}, ...]"
     """
+
     def __init__(self, name: str = NAME, description: str = DESCRIPTION):
-        super().__init__(
-            name=name,
-            description=description,
-            function=self.sql_query
-        )
-
-
+        super().__init__(name=name, description=description, function=self.sql_query)
 
     def sql_query(self, company_name: str, table_name: str, query: str) -> str:
-
         if not query or not query.strip():
-            return 'Error : query must not be empty.'
+            return "Error : query must not be empty."
 
         # Normalize company and table names (case-insensitive)
         company = _normalize_company(company_name)
         table = _normalize_table(company, table_name)
         if table is None:
-            return f'Error: table {table_name} for company {company_name} could not be found.'
+            return f"Error: table {table_name} for company {company_name} could not be found."
 
-        query_upper = re.sub(r'(\\r|\\n|\\t|[\r\n\t])+', ' ', query).upper()
-        if 'SELECT *' in query_upper:
+        query_upper = re.sub(r"(\\r|\\n|\\t|[\r\n\t])+", " ", query).upper()
+        if "SELECT *" in query_upper:
             return (
                 'Error : "SELECT *" is not allowed. Please list columns explicitly, '
-                f'e.g., SELECT column1, column2 FROM {table} LIMIT 5.'
+                f"e.g., SELECT column1, column2 FROM {table} LIMIT 5."
             )
 
         # Require at least one filter or limiting clause to keep queries efficient
         sql_filters = (
-            ' WHERE ', ' HAVING ', ' GROUP BY ', ' ORDER BY ', ' LIMIT ', ' OFFSET ',
-            ' IN ', ' NOT IN ', ' EXISTS ', ' NOT EXISTS ', ' LIKE ', ' BETWEEN ', ' FILTER ',
-            ' COUNT(', ' MAX(', ' MIN(', ' SUM(', ' AVG('
+            " WHERE ",
+            " HAVING ",
+            " GROUP BY ",
+            " ORDER BY ",
+            " LIMIT ",
+            " OFFSET ",
+            " IN ",
+            " NOT IN ",
+            " EXISTS ",
+            " NOT EXISTS ",
+            " LIKE ",
+            " BETWEEN ",
+            " FILTER ",
+            " COUNT(",
+            " MAX(",
+            " MIN(",
+            " SUM(",
+            " AVG(",
         )
         if not any(clause in query_upper for clause in sql_filters):
-            return 'Error: Query needs a filter (WHERE, LIMIT, GROUP BY) or aggregate (COUNT, SUM, AVG, MIN, MAX).'
+            return "Error: Query needs a filter (WHERE, LIMIT, GROUP BY) or aggregate (COUNT, SUM, AVG, MIN, MAX)."
 
         # Check for missing FROM clause
-        if 'SELECT' in query_upper and 'FROM' not in query_upper:
-            return f'Error: Missing FROM clause. Use: SELECT ... FROM {table_name} ...'
+        if "SELECT" in query_upper and "FROM" not in query_upper:
+            return f"Error: Missing FROM clause. Use: SELECT ... FROM {table_name} ..."
 
         # Get pre-loaded SQL table name
         sql_name = _SQL_NAMES.get((company, table))
         if not sql_name:
             cleaned_table_name = os.path.splitext(os.path.basename(table_name))[0]
-            return f'Error: table {cleaned_table_name} for company {company_name} could not be loaded.'
+            return f"Error: table {cleaned_table_name} for company {company_name} could not be loaded."
 
         # QUOTED for SQLite compatibility - fixes table names starting with digits (e.g., "3m")
         quoted_sql_name = f'"{sql_name}"'
@@ -350,40 +365,42 @@ Example:
         # SINGLE REGEX handles: backticks, quotes, case-insensitivity,
         # column collision, and string literal issues (only replaces after FROM/JOIN)
         pattern = rf'(FROM|JOIN)\s+[`"\']?{re.escape(table_name)}[`"\']?(?=\s|$|;|,|\))'
-        query_for_execution = re.sub(pattern, rf'\1 {quoted_sql_name}', query, flags=re.IGNORECASE)
+        query_for_execution = re.sub(
+            pattern, rf"\1 {quoted_sql_name}", query, flags=re.IGNORECASE
+        )
 
         try:
             with _DB_LOCK:  # 2x faster + fixes race condition
                 resp = pd.read_sql_query(query_for_execution, _DB_CONN)
         except Exception as e:
             err_msg = str(e)
-            if 'no such column' in err_msg.lower():
+            if "no such column" in err_msg.lower():
                 try:
                     cursor = _DB_CONN.cursor()
-                    cursor.execute(f'PRAGMA table_info({quoted_sql_name})')
+                    cursor.execute(f"PRAGMA table_info({quoted_sql_name})")
                     columns = [row[1] for row in cursor.fetchall()]
                     return (
-                        'Error : Column not found in table. Available columns are: '
-                        + ', '.join(columns)
+                        "Error : Column not found in table. Available columns are: "
+                        + ", ".join(columns)
                     )
-                except:
+                except Exception:
                     pass
-            return f'Error: {err_msg}'
+            return f"Error: {err_msg}"
 
         # Detect fake columns (SQLite returns column name as value for non-existent double-quoted columns)
         if not resp.empty:
             cursor = _DB_CONN.cursor()
-            cursor.execute(f'PRAGMA table_info({quoted_sql_name})')
+            cursor.execute(f"PRAGMA table_info({quoted_sql_name})")
             valid_cols = {row[1].lower() for row in cursor.fetchall()}
 
             for col in resp.columns:
-                col_clean = col.strip('"\'`')
+                col_clean = col.strip("\"'`")
                 # If column value equals column name, it's a fake column echoed back
                 if col_clean.lower() not in valid_cols:
                     if len(resp) > 0 and str(resp[col].iloc[0]) == col_clean:
                         return f'Error: Column "{col_clean}" not found. Available columns are: {", ".join(sorted(valid_cols))}'
 
-        return resp.to_json(orient='records')
+        return resp.to_json(orient="records")
 
 
 class Calculator(Tool):
@@ -407,14 +424,9 @@ Example:
 """
 
     def __init__(self, name: str = NAME, description: str = DESCRIPTION):
-        super().__init__(
-            name=name,
-            description=description,
-            function=self.calculator
-        )
+        super().__init__(name=name, description=description, function=self.calculator)
 
     def calculator(self, expression: str) -> float | str:
-
         if not isinstance(expression, str):
             return "Error: Input expression must be a string."
 
@@ -424,33 +436,35 @@ Example:
         expr = expr.strip()
 
         # 2. Normalize newlines (fixes silent wrong results: "100\n+50" returned 50!)
-        expr = expr.replace('\n', ' ').replace('\r', ' ')
+        expr = expr.replace("\n", " ").replace("\r", " ")
 
         # 3. CRITICAL: Convert ^ to ** (fixes XOR vs power: "2^3" returned 1 instead of 8!)
-        expr = expr.replace('^', '**')
+        expr = expr.replace("^", "**")
 
         # 4. Remove currency symbols
-        expr = expr.replace('$', '').replace('€', '').replace('£', '')
+        expr = expr.replace("$", "").replace("€", "").replace("£", "")
 
         # 5. Normalize whitespace (non-breaking space U+00A0)
-        expr = expr.replace('\u00a0', ' ')
+        expr = expr.replace("\u00a0", " ")
 
         # 6. Normalize dashes to minus (en-dash, em-dash, unicode minus sign)
-        expr = expr.replace('–', '-').replace('—', '-').replace('−', '-')
+        expr = expr.replace("–", "-").replace("—", "-").replace("−", "-")
 
         # 7. Unicode math symbols (fullwidth parens, multiply, divide)
-        for old, new in {'（': '(', '）': ')', '×': '*', '÷': '/'}.items():
+        for old, new in {"（": "(", "）": ")", "×": "*", "÷": "/"}.items():
             expr = expr.replace(old, new)
 
         # 8. Fullwidth digits (Japanese/Chinese input methods)
-        for i, fw in enumerate('０１２３４５６７８９'):
+        for i, fw in enumerate("０１２３４５６７８９"):
             expr = expr.replace(fw, str(i))
 
         # 9. Percentage to decimal (no \s* before % - would break modulo operator!)
-        expr = re.sub(r'(\d+(?:\.\d+)?)%', r'(\1/100)', expr)
+        expr = re.sub(r"(\d+(?:\.\d+)?)%", r"(\1/100)", expr)
 
         # 10. Thousand separators (safe pattern - preserves function calls like max(1, 2))
-        expr = re.sub(r'\d{1,3}(?:,\d{3})+', lambda m: m.group(0).replace(',', ''), expr)
+        expr = re.sub(
+            r"\d{1,3}(?:,\d{3})+", lambda m: m.group(0).replace(",", ""), expr
+        )
 
         try:
             aeval = Interpreter()

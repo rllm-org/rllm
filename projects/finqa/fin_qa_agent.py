@@ -1,12 +1,13 @@
 # Third Party Imports
 from rllm.agents.tool_agent import ToolAgent
 
+from .constants import REACT_SYSTEM_PROMPT_PATH
+
 # Local Imports
 from .fin_qa_tools import Calculator, GetTableInfo, GetTableNames, SQLQuery
-from .constants import FIN_QA_REACT_SYSTEM_PROMPT_PATH
 
 # Load ReAct system prompt
-with open(FIN_QA_REACT_SYSTEM_PROMPT_PATH, 'r', encoding='utf-8') as f:
+with open(REACT_SYSTEM_PROMPT_PATH, encoding="utf-8") as f:
     FINQA_REACT_SYSTEM_PROMPT = f.read().strip()
 
 
@@ -21,21 +22,21 @@ class FinQAAgent(ToolAgent):
         parser_name="qwen",
     ):
         """
-            Initialize the FinQAAgent.
+        Initialize the FinQAAgent.
 
-            Args:
-                system_prompt: System prompt for the agent.
-                    Default: FINQA_REACT_SYSTEM_PROMPT 
-                parser_name: Name of the parser to use for tool calls.
-                    Default: "qwen", same default as ToolAgent.
+        Args:
+            system_prompt: System prompt for the agent.
+                Default: FINQA_REACT_SYSTEM_PROMPT
+            parser_name: Name of the parser to use for tool calls.
+                Default: "qwen", same default as ToolAgent.
         """
-        
+
         # Initialize the tool map.
         fin_qa_tool_map = {
             "calculator": Calculator,
             "get_table_info": GetTableInfo,
             "get_table_names": GetTableNames,
-            "sql_query": SQLQuery
+            "sql_query": SQLQuery,
         }
 
         # Initialize the ToolAgent.
