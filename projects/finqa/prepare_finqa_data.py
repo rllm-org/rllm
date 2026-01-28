@@ -1,0 +1,108 @@
+import json
+import os
+import sys
+import pandas as pd
+
+BASE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
+
+RLLM_DIR = os.path.join(BASE_DIR, "rllm")
+if RLLM_DIR not in sys.path:
+    sys.path.append(RLLM_DIR)
+
+from rllm.data.dataset import DatasetRegistry
+
+from src import constants as C
+
+def _load_csv(path: str) -> pd.DataFrame:
+    return pd.read_csv(path)
+
+def _parse_json_list(value):
+    """Decode columns stored as JSON strings, defaulting to [] for empty values."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return []
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            parsed = stripped
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, str):
+            cleaned = parsed.strip()
+            return [cleaned] if cleaned else []
+        return []
+    return []
+
+
+def prepare_finqa_data():
+    single_train = _load_csv(C.TRAIN_QUESTIONS_PATH)
+    single_val = _load_csv(C.VAL_QUESTIONS_PATH)
+    single_test = _load_csv(C.TEST_QUESTIONS_PATH)
+
+    multi_train = _load_csv(C.MULTI_TABLE_TRAIN_PATH)
+    multi_val = _load_csv(C.MULTI_TABLE_VAL_PATH)
+    multi_test = _load_csv(C.MULTI_TABLE_TEST_PATH)
+
+    # Setting 8: single-table only
+    merged_train = pd.concat([single_train, single_val], ignore_index=True)
+    merged_val = pd.concat([single_val], ignore_index=True)
+    merged_test = pd.concat([single_test], ignore_index=True).sample(n=min(250, len(single_test)), random_state=42)
+
+    # # --- Setting 10: 30% multi + 70% single ---
+    # # All multi-table (train + val) as 30%
+    # all_multi = pd.concat([multi_train, multi_val], ignore_index=True)
+    # # Sample from single-table pool (train + val) to get 70%
+    # single_pool = pd.concat([single_train, single_val], ignore_index=True)
+    # n_single_needed = int(len(all_multi) * (70 / 30))
+    # sampled_single = single_pool.sample(n=n_single_needed, random_state=42)
+    # # Merge and shuffle
+    # merged_train = pd.concat([all_multi, sampled_single], ignore_index=True)
+    # merged_train = merged_train.sample(frac=1, random_state=42).reset_index(drop=True)
+
+    # # Val: single val + multi val
+    # merged_val = pd.concat([single_val, multi_val], ignore_index=True)
+
+    # # Test: random shuffle, take up to 250
+    # merged_test = pd.concat([single_test, multi_test], ignore_index=True).sample(
+    #     n=min(250, len(single_test) + len(multi_test)), random_state=42
+    # )
+
+    def preprocess_fn(example):
+        return {
+            "question": example["user_query"],
+            "ground_truth": example["answer"],
+            "data_source": "finqa",
+            "company": example["company"],
+            "question_id": str(example["id"]),
+            "question_type": example["question_type"],
+            "core_question": example["question"],
+            "table_name": _parse_json_list(example.get("table_name")),
+            "columns_used": _parse_json_list(example.get("columns_used_json")),
+            "rows_used": _parse_json_list(example.get("rows_used_json")),
+            "explanation": example["explanation"],
+        }
+
+    train_processed = [preprocess_fn(row) for _, row in merged_train.iterrows()]
+    val_processed = [preprocess_fn(row) for _, row in merged_val.iterrows()]
+    test_processed = [preprocess_fn(row) for _, row in merged_test.iterrows()]
+
+    train_dataset = DatasetRegistry.register_dataset("finqa", train_processed, "train")
+    val_dataset = DatasetRegistry.register_dataset("finqa", val_processed, "val")
+    test_dataset = DatasetRegistry.register_dataset("finqa", test_processed, "test")
+    return train_dataset, val_dataset, test_dataset
+
+
+
+if __name__ == "__main__":
+    train_dataset, val_dataset, test_dataset = prepare_finqa_data()
+    print(f"Train dataset size: {len(train_dataset)}")
+    print(f"Validation dataset size: {len(val_dataset)}")
+    print(f"Test dataset size: {len(test_dataset)}")
+    print(f"Train dataset path: {train_dataset.get_data_path()}")
+    print(f"Validation dataset path: {val_dataset.get_data_path()}")
+    print(f"Test dataset path: {test_dataset.get_data_path()}")
