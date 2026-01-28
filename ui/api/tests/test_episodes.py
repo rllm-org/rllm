@@ -1,21 +1,10 @@
 """Tests for episode endpoints."""
 
 import pytest
-from database import reset_db
-from fastapi.testclient import TestClient
-from main import app
-
-client = TestClient(app)
-
-
-@pytest.fixture(autouse=True)
-def reset_database():
-    """Reset database before each test."""
-    reset_db()
 
 
 @pytest.fixture
-def test_session():
+def test_session(client):
     """Create a test session."""
     response = client.post(
         "/api/sessions",
@@ -24,7 +13,7 @@ def test_session():
     return response.json()
 
 
-def test_post_episode_stores_trajectory(test_session):
+def test_post_episode_stores_trajectory(client, test_session):
     """POST /api/episodes should store episode with trajectories."""
     episode_data = {
         "session_id": test_session["id"],
@@ -68,7 +57,7 @@ def test_post_episode_stores_trajectory(test_session):
     assert len(data["data"]["trajectories"]) == 1
 
 
-def test_post_episode_requires_valid_session():
+def test_post_episode_requires_valid_session(client):
     """POST /api/episodes should fail if session doesn't exist."""
     episode_data = {
         "session_id": "nonexistent",
@@ -84,7 +73,7 @@ def test_post_episode_requires_valid_session():
     assert "Session not found" in response.json()["detail"]
 
 
-def test_get_episodes_returns_all_for_session(test_session):
+def test_get_episodes_returns_all_for_session(client, test_session):
     """GET /api/episodes should return all episodes for a session."""
     # Create multiple episodes
     for i in range(3):
@@ -106,16 +95,16 @@ def test_get_episodes_returns_all_for_session(test_session):
 
     episodes = response.json()
     assert len(episodes) == 3
-    assert episodes[0]["episode_id"] == "task0:0" or episodes[0]["id"] == "task0:0"
+    assert episodes[0]["id"] == "task0:0"
 
 
-def test_get_episodes_requires_session_id():
+def test_get_episodes_requires_session_id(client):
     """GET /api/episodes should require session_id parameter."""
     response = client.get("/api/episodes")
     assert response.status_code == 422  # Validation error
 
 
-def test_get_episode_by_id_returns_full_data(test_session):
+def test_get_episode_by_id_returns_full_data(client, test_session):
     """GET /api/episodes/{id} should return full trajectory data."""
     episode_data = {
         "session_id": test_session["id"],
@@ -160,8 +149,105 @@ def test_get_episode_by_id_returns_full_data(test_session):
     assert len(episode["data"]["trajectories"][0]["steps"]) == 2
 
 
-def test_get_episode_not_found():
+def test_get_episode_not_found(client):
     """GET /api/episodes/{id} should return 404 for nonexistent episode."""
     response = client.get("/api/episodes/nonexistent")
     assert response.status_code == 404
     assert "Episode not found" in response.json()["detail"]
+
+
+def test_search_episodes(client, test_session):
+    """GET /api/episodes/search should find episodes by text content."""
+    # Create episodes with distinct searchable text
+    client.post(
+        "/api/episodes",
+        json={
+            "session_id": test_session["id"],
+            "step": 1,
+            "episode_id": "search-python",
+            "task": {"question": "What is Python?"},
+            "is_correct": True,
+            "reward": 1.0,
+            "trajectories": [
+                {
+                    "uid": "t1",
+                    "reward": 1.0,
+                    "steps": [
+                        {
+                            "observation": "Question about Python",
+                            "action": "Python is a programming language",
+                            "reward": 1.0,
+                            "done": True,
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    client.post(
+        "/api/episodes",
+        json={
+            "session_id": test_session["id"],
+            "step": 2,
+            "episode_id": "search-java",
+            "task": {"question": "What is Java?"},
+            "is_correct": True,
+            "reward": 1.0,
+            "trajectories": [
+                {
+                    "uid": "t2",
+                    "reward": 1.0,
+                    "steps": [
+                        {
+                            "observation": "Question about Java",
+                            "action": "Java is also a programming language",
+                            "reward": 1.0,
+                            "done": True,
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    # Search for "Python" - should find only the Python episode
+    response = client.get("/api/episodes/search?q=Python")
+    assert response.status_code == 200
+    results = response.json()
+    assert len(results) == 1
+    assert results[0]["id"] == "search-python"
+
+    # Search for "programming" - should find both
+    response = client.get("/api/episodes/search?q=programming")
+    assert response.status_code == 200
+    results = response.json()
+    assert len(results) == 2
+
+
+def test_search_episodes_with_session_filter(client, test_session):
+    """GET /api/episodes/search should filter by session_id."""
+    # Create an episode
+    client.post(
+        "/api/episodes",
+        json={
+            "session_id": test_session["id"],
+            "step": 1,
+            "episode_id": "filter-test",
+            "task": {"question": "unique query text xyz123"},
+            "is_correct": True,
+            "trajectories": [],
+        },
+    )
+
+    # Search with session filter
+    response = client.get(f"/api/episodes/search?q=xyz123&session_id={test_session['id']}")
+    assert response.status_code == 200
+    results = response.json()
+    assert len(results) == 1
+
+    # Search with wrong session filter
+    response = client.get("/api/episodes/search?q=xyz123&session_id=nonexistent")
+    assert response.status_code == 200
+    results = response.json()
+    assert len(results) == 0

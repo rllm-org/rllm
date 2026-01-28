@@ -4,8 +4,8 @@ import asyncio
 import json
 from collections.abc import AsyncGenerator
 
-from database import get_db
-from fastapi import APIRouter
+from datastore.base import DataStore
+from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 router = APIRouter(prefix="/api", tags=["sse"])
@@ -16,43 +16,29 @@ router = APIRouter(prefix="/api", tags=["sse"])
 _last_seen_metrics: dict[str, int] = {}
 
 
-async def metrics_event_generator(session_id: str) -> AsyncGenerator[str, None]:
+async def metrics_event_generator(session_id: str, store: DataStore) -> AsyncGenerator[str, None]:
     """Generate SSE events for new metrics."""
     last_id = _last_seen_metrics.get(session_id, 0)
 
     while True:
-        # Check for new metrics
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT * FROM metrics 
-                WHERE session_id = ? AND id > ?
-                ORDER BY id
-                """,
-                (session_id, last_id),
-            )
-            rows = cursor.fetchall()
+        # Check for new metrics using DataStore
+        new_metrics = store.get_new_metrics(session_id, last_id)
 
         # Send new metrics as SSE events
-        for row in rows:
-            data = {
-                "id": row["id"],
-                "step": row["step"],
-                "data": json.loads(row["data"]),
-                "created_at": row["created_at"],
-            }
-            last_id = row["id"]
+        for metric in new_metrics:
+            last_id = metric["id"]
             _last_seen_metrics[session_id] = last_id
 
-            yield f"data: {json.dumps(data)}\n\n"
+            # Format explicitly or pass through. The router returned id, step, data, created_at.
+            # Our store returns exactly these standard columns.
+            yield f"data: {json.dumps(metric)}\n\n"
 
         # Wait before polling again
         await asyncio.sleep(0.5)
 
 
 @router.get("/sessions/{session_id}/metrics/stream")
-async def stream_metrics(session_id: str):
+async def stream_metrics(request: Request, session_id: str):
     """Stream metrics for a session via SSE.
 
     Connect to this endpoint with EventSource to receive real-time metrics.
@@ -64,8 +50,9 @@ async def stream_metrics(session_id: str):
             console.log(metrics);
         };
     """
+    store = request.app.state.store
     return StreamingResponse(
-        metrics_event_generator(session_id),
+        metrics_event_generator(session_id, store),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -5,7 +5,7 @@ Main entry point for the API backend.
 
 from contextlib import asynccontextmanager
 
-from database import init_db
+from datastore.factory import get_datastore
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers import episodes, health, metrics, sessions, sse
@@ -15,7 +15,8 @@ from routers import episodes, health, metrics, sessions, sse
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
     # Startup
-    init_db()
+    app.state.store = get_datastore()
+    app.state.store.init_db()
     yield
     # Shutdown (nothing to do)
 

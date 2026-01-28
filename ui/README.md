@@ -47,6 +47,85 @@ npm run dev
 
 Open http://localhost:5173
 
+## Database Setup
+
+The UI supports two database backends: **SQLite** (default) and **PostgreSQL**.
+
+### SQLite (Default)
+
+SQLite requires no additional setup. The database file (`rllm_ui.db`) is created automatically in the `ui/api/` directory.
+
+```bash
+# Just start the server - SQLite is used by default
+cd ui/api
+uvicorn main:app --reload --port 3000
+```
+
+**Pros:** Zero configuration, great for local development
+**Cons:** Basic substring search only (no stemming)
+
+### PostgreSQL
+
+PostgreSQL provides advanced full-text search with stemming and relevance ranking.
+
+#### Option 1: Docker (Recommended)
+
+```bash
+# Start PostgreSQL container
+docker run -d \
+  --name rllm-postgres \
+  -e POSTGRES_PASSWORD=secret \
+  -e POSTGRES_DB=rllm \
+  -p 5433:5432 \
+  postgres:15
+
+# Start the backend with PostgreSQL
+cd ui/api
+DATABASE_URL="postgresql://postgres:secret@localhost:5433/rllm" uvicorn main:app --reload --port 3000
+```
+
+#### Option 2: Local PostgreSQL
+
+```bash
+# Create database
+createdb rllm
+
+# Start with local PostgreSQL
+DATABASE_URL="postgresql://localhost/rllm" uvicorn main:app --reload --port 3000
+```
+
+#### Option 3: Environment File
+
+Create a `.env` file in `ui/api/`:
+
+```bash
+# ui/api/.env
+DATABASE_URL=postgresql://postgres:secret@localhost:5433/rllm
+```
+
+Then start normally:
+```bash
+cd ui/api
+uvicorn main:app --reload --port 3000
+```
+
+### Search Feature Comparison
+
+| Feature | SQLite | PostgreSQL |
+|---------|--------|------------|
+| Substring matching | ✓ | ✓ |
+| Stemming ("subtract" matches "subtraction") | ✗ | ✓ |
+| Relevance ranking | ✗ | ✓ |
+| Boolean queries | ✗ | ✓ |
+
+### Verify Database Connection
+
+Check which database is active:
+```bash
+curl http://localhost:3000/api/health
+# Returns: {"status": "ok", "datastore": "SQLiteStore"} or "PostgresStore"
+```
+
 ### Using with Training
 
 To enable UI logging during training, add `"ui"` to your logger backend:

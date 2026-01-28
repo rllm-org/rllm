@@ -94,13 +94,23 @@ export const TrainingRunDetail: React.FC = () => {
   // Poll for new episodes while connected (live training)
   useEffect(() => {
     if (!sessionId || !isConnected) return;
-    
+
     const interval = setInterval(() => {
       fetchEpisodes();
     }, 3000); // Poll every 3 seconds
-    
+
     return () => clearInterval(interval);
   }, [sessionId, isConnected]);
+
+  // Auto-select first available metric when metrics change
+  useEffect(() => {
+    if (metrics.length > 0) {
+      const available = getAvailableMetrics(metrics);
+      if (available.length > 0 && !available.includes(selectedMetric)) {
+        setSelectedMetric(available[0]);
+      }
+    }
+  }, [metrics, selectedMetric]);
 
   const fetchSessionDetails = async () => {
     try {
@@ -130,7 +140,7 @@ export const TrainingRunDetail: React.FC = () => {
     }
   };
 
-  const handleStepClick = (step: number) => {
+  const handleStepClick = (step: number | null) => {
     setSelectedStep(step);
   };
 
@@ -265,50 +275,51 @@ export const TrainingRunDetail: React.FC = () => {
         {activeTab === 'training' ? (
           <div className="w-full">
             <div className="flex flex-col lg:flex-row gap-6">
-            {/* Chart Panel */}
-            <div className="w-full lg:w-1/2">
-              <div className="mb-4">
-                <select
-                  value={selectedMetric}
-                  onChange={(e) => setSelectedMetric(e.target.value)}
-                  className="text-sm font-medium border border-gray-300 rounded-lg px-3 py-2 bg-white text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                >
-                  {getAvailableMetrics(metrics).map((metric) => (
-                    <option key={metric} value={metric}>
-                      {metric}
-                    </option>
-                  ))}
-                </select>
+              {/* Chart Panel - 40% width */}
+              <div className="w-full lg:w-2/5">
+                <div className="mb-3">
+                  <select
+                    value={selectedMetric}
+                    onChange={(e) => setSelectedMetric(e.target.value)}
+                    className="text-sm font-medium border border-gray-300 rounded-lg px-3 py-1.5 bg-white text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  >
+                    {getAvailableMetrics(metrics).map((metric) => (
+                      <option key={metric} value={metric}>
+                        {metric}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-3">
+                  <div className="h-[320px] outline-none focus:outline-none [&_*]:outline-none">
+                    <RewardChart
+                      metrics={metrics}
+                      selectedMetric={selectedMetric}
+                      selectedStep={selectedStep}
+                      onStepClick={handleStepClick}
+                    />
+                  </div>
+                </div>
               </div>
-              <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-4">
-                <div className="h-[400px] outline-none focus:outline-none [&_*]:outline-none">
-                  <RewardChart
-                    metrics={metrics}
-                    selectedMetric={selectedMetric}
+
+              {/* Episodes Panel - 60% width */}
+              <div className="w-full lg:w-3/5">
+                <div className="mb-3 flex items-center justify-between">
+                  <h2 className="text-base font-semibold text-black">
+                    Episodes
+                  </h2>
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-black border border-gray-300">
+                    {episodes.length} total
+                  </span>
+                </div>
+                <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden h-[600px]">
+                  <EpisodePanel
+                    episodes={episodes}
                     selectedStep={selectedStep}
-                    onStepClick={handleStepClick}
+                    sessionId={sessionId}
                   />
                 </div>
               </div>
-            </div>
-
-            {/* Episodes Panel */}
-            <div className="w-full lg:w-1/2">
-              <div className="mb-4 flex items-center justify-between">
-                <h2 className="text-lg font-semibold text-black">
-                  Episodes
-                </h2>
-                <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-black border border-gray-300">
-                  {episodes.length} total
-                </span>
-              </div>
-              <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden h-[450px]">
-                <EpisodePanel
-                  episodes={episodes}
-                  selectedStep={selectedStep}
-                />
-              </div>
-            </div>
             </div>
           </div>
         ) : activeTab === 'metadata' ? (

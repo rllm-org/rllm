@@ -1,108 +1,41 @@
 """Sessions router."""
 
-import json
-import uuid
-from datetime import UTC, datetime
-
-from database import get_db
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from models import SessionCreate, SessionResponse
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 
 @router.post("", response_model=SessionResponse)
-def create_session(session: SessionCreate):
+def create_session(request: Request, session: SessionCreate):
     """Create a new training session."""
-    session_id = str(uuid.uuid4())
-
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO sessions (id, project, experiment, config, source_metadata)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                session_id,
-                session.project,
-                session.experiment,
-                json.dumps(session.config) if session.config else None,
-                json.dumps(session.source_metadata) if session.source_metadata else None,
-            ),
-        )
-        conn.commit()
-
-        # Fetch the created session
-        cursor.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
-        row = cursor.fetchone()
-
-    return _row_to_session(row)
+    store = request.app.state.store
+    session_id = store.create_session(project=session.project, experiment=session.experiment, config=session.config, source_metadata=session.source_metadata)
+    return store.get_session(session_id)
 
 
 @router.get("", response_model=list[SessionResponse])
-def list_sessions():
+def list_sessions(request: Request):
     """List all sessions."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM sessions ORDER BY created_at DESC")
-        rows = cursor.fetchall()
-
-    return [_row_to_session(row) for row in rows]
+    store = request.app.state.store
+    return store.get_all_sessions()
 
 
 @router.get("/{session_id}", response_model=SessionResponse)
-def get_session(session_id: str):
+def get_session(request: Request, session_id: str):
     """Get a specific session by ID."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
-        row = cursor.fetchone()
-
-    if row is None:
+    store = request.app.state.store
+    session = store.get_session(session_id)
+    if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
-
-    return _row_to_session(row)
+    return session
 
 
 @router.post("/{session_id}/complete", response_model=SessionResponse)
-def complete_session(session_id: str):
+def complete_session(request: Request, session_id: str):
     """Mark a session as completed."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-
-        # Check if session exists
-        cursor.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
-        if cursor.fetchone() is None:
-            raise HTTPException(status_code=404, detail="Session not found")
-
-        # Update session
-        now = datetime.now(UTC).isoformat()
-        cursor.execute(
-            """
-            UPDATE sessions
-            SET completed_at = ?
-            WHERE id = ?
-            """,
-            (now, session_id),
-        )
-        conn.commit()
-
-        # Fetch updated session
-        cursor.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
-        row = cursor.fetchone()
-
-    return _row_to_session(row)
-
-
-def _row_to_session(row) -> dict:
-    """Convert a database row to a session dict."""
-    return {
-        "id": row["id"],
-        "project": row["project"],
-        "experiment": row["experiment"],
-        "config": json.loads(row["config"]) if row["config"] else None,
-        "source_metadata": json.loads(row["source_metadata"]) if row["source_metadata"] else None,
-        "created_at": row["created_at"],
-        "completed_at": row["completed_at"],
-    }
+    store = request.app.state.store
+    session = store.complete_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session

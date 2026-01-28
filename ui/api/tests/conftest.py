@@ -1,21 +1,15 @@
 """Pytest fixtures for API tests."""
 
 import pytest
-from database import reset_db
 from fastapi.testclient import TestClient
-
-
-@pytest.fixture(autouse=True)
-def reset_database():
-    """Reset database before each test."""
-    reset_db()
-    yield
+from main import app
 
 
 @pytest.fixture
 def client():
-    """Create test client for API."""
-    # Import here to ensure database is reset first
-    from main import app
-
-    return TestClient(app)
+    """Create test client for API with proper lifespan handling."""
+    with TestClient(app) as test_client:
+        # Reset database for clean test state
+        if hasattr(app.state, "store"):
+            app.state.store.reset()
+        yield test_client

@@ -76,6 +76,14 @@ class EpisodeResponse(BaseModel):
     reward: float | None
     data: dict[str, Any]  # Full episode data including trajectories
     created_at: datetime
+    rank: float | None = None  # Relevance score from PostgreSQL full-text search
+
+
+class EpisodeSearchResponse(BaseModel):
+    """Response for episode search endpoint."""
+
+    episodes: list[EpisodeResponse]
+    matched_terms: list[str]  # Stemmed terms (PostgreSQL) or original query terms (SQLite)
 
 
 # Health check

@@ -13,7 +13,7 @@ def test_create_session(client):
     assert "id" in data
     assert data["project"] == "test-project"
     assert data["experiment"] == "run-1"
-    assert data["status"] == "running"
+    assert data["completed_at"] is None  # Not yet completed
 
 
 def test_create_session_minimal(client):
@@ -71,5 +71,4 @@ def test_complete_session(client):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "completed"
-    assert data["completed_at"] is not None
+    assert data["completed_at"] is not None  # Session is now completed

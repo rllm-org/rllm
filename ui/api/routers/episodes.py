@@ -1,97 +1,74 @@
 """Episodes router - handles episode/trajectory data."""
 
-import json
-
-from database import get_db
-from fastapi import APIRouter, HTTPException, Query
-from models import EpisodeCreate, EpisodeResponse
+from fastapi import APIRouter, HTTPException, Query, Request
+from models import EpisodeCreate, EpisodeResponse, EpisodeSearchResponse
 
 router = APIRouter(prefix="/api", tags=["episodes"])
 
 
 @router.post("/episodes", response_model=EpisodeResponse)
-def create_episode(episode: EpisodeCreate):
+def create_episode(request: Request, episode: EpisodeCreate):
     """Receive and store episode data with trajectories."""
-    with get_db() as conn:
-        cursor = conn.cursor()
+    store = request.app.state.store
 
-        # Check if session exists
-        cursor.execute("SELECT id FROM sessions WHERE id = ?", (episode.session_id,))
-        if cursor.fetchone() is None:
-            raise HTTPException(status_code=404, detail="Session not found")
+    # Check if session exists (store handles this internally or we let FK fail?
+    # SQLiteStore doesn't strictly enforce in create logic unless we added it.
+    # But usually we want to return 404 if session missing.
+    # The original code checked explicitly. DataStore should optionally check or we rely on logic.
+    # Let's assume store handles basic validation, but SQLiteStore didn't explicitly check session existence in append_episode.
+    # We can add check here if we want strictness, via store.get_session.
 
-        # Serialize trajectories and create full data object
-        data = {"trajectories": [traj.model_dump() for traj in episode.trajectories], "info": episode.info if hasattr(episode, "info") else {}}
+    session = store.get_session(episode.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
 
-        # Insert episode
-        cursor.execute(
-            """
-            INSERT INTO episodes (id, session_id, step, task, is_correct, reward, data)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                episode.episode_id,
-                episode.session_id,
-                episode.step,
-                json.dumps(episode.task),
-                episode.is_correct,
-                episode.reward,
-                json.dumps(data),
-            ),
-        )
-        conn.commit()
+    # Pass the full dict
+    episode_data = episode.model_dump(mode="json")
+    store.append_episode(episode.session_id, episode_data)
 
-        # Get the created record
-        cursor.execute("SELECT * FROM episodes WHERE id = ?", (episode.episode_id,))
-        row = cursor.fetchone()
-
-    return _row_to_episode(row)
+    return store.get_episode(episode.episode_id)
 
 
 @router.get("/episodes", response_model=list[EpisodeResponse])
-def get_episodes(session_id: str = Query(..., description="Filter episodes by session ID")):
+def get_episodes(request: Request, session_id: str = Query(..., description="Filter episodes by session ID")):
     """Query episodes by session ID."""
-    with get_db() as conn:
-        cursor = conn.cursor()
+    store = request.app.state.store
 
-        # Check if session exists
-        cursor.execute("SELECT id FROM sessions WHERE id = ?", (session_id,))
-        if cursor.fetchone() is None:
-            raise HTTPException(status_code=404, detail="Session not found")
+    # Check session
+    session = store.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
 
-        # Get episodes for this session
-        cursor.execute(
-            "SELECT * FROM episodes WHERE session_id = ? ORDER BY created_at",
-            (session_id,),
-        )
-        rows = cursor.fetchall()
+    return store.get_episodes(session_id)
 
-    return [_row_to_episode(row) for row in rows]
+
+@router.get("/episodes/search", response_model=EpisodeSearchResponse)
+def search_episodes(
+    request: Request,
+    q: str = Query(..., description="Search query"),
+    session_id: str | None = Query(None, description="Optional session ID to filter results"),
+    step: int | None = Query(None, description="Optional step number to filter results"),
+    limit: int = Query(50, ge=1, le=100, description="Maximum results to return"),
+):
+    """Search episodes by text content.
+
+    Searches through task descriptions, observations, actions, and model responses.
+    PostgreSQL backend provides full-text search with stemming and relevance ranking.
+
+    Returns:
+        EpisodeSearchResponse with:
+        - episodes: List of matching episodes (PostgreSQL includes rank field)
+        - matched_terms: Stemmed terms (PostgreSQL) or original query terms (SQLite)
+    """
+    store = request.app.state.store
+    return store.search_episodes(q, session_id, limit, step)
 
 
 @router.get("/episodes/{episode_id}", response_model=EpisodeResponse)
-def get_episode(episode_id: str):
+def get_episode(request: Request, episode_id: str):
     """Get a single episode with full trajectory data."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM episodes WHERE id = ?", (episode_id,))
-        row = cursor.fetchone()
-
-    if row is None:
+    store = request.app.state.store
+    episode = store.get_episode(episode_id)
+    if episode is None:
         raise HTTPException(status_code=404, detail="Episode not found")
-
-    return _row_to_episode(row)
-
-
-def _row_to_episode(row) -> dict:
-    """Convert a database row to an episode dict."""
-    return {
-        "id": row["id"],
-        "session_id": row["session_id"],
-        "step": row["step"],
-        "task": json.loads(row["task"]),
-        "is_correct": bool(row["is_correct"]),
-        "reward": row["reward"],
-        "data": json.loads(row["data"]),
-        "created_at": row["created_at"],
-    }
+    return episode

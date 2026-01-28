@@ -21,7 +21,7 @@ interface MetricChartProps {
   metrics: Metric[];
   selectedMetric: string;
   selectedStep: number | null;
-  onStepClick: (step: number) => void;
+  onStepClick: (step: number | null) => void;
 }
 
 /**
@@ -56,17 +56,21 @@ export const RewardChart: React.FC<MetricChartProps> = ({
 
   // Custom click handler for the chart area
   const handleChartClick = (data: any) => {
-    // Try activePayload first
+    // Try activePayload first (clicked on data point)
     if (data && data.activePayload && data.activePayload.length > 0) {
       const step = data.activePayload[0].payload.step;
       onStepClick(step);
       return;
     }
-    
+
     // Fallback to activeLabel (which is the step value on x-axis)
     if (data && data.activeLabel !== undefined) {
       onStepClick(data.activeLabel);
+      return;
     }
+
+    // Clicked on empty area (background) - deselect step
+    onStepClick(null);
   };
 
   // Click handler for individual dots

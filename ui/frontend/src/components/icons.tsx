@@ -23,4 +23,7 @@ export {
   KeyboardDoubleArrowLeft as ChevronLeftIcon,
   // Workflow diagram icon
   AccountTree as AccountTreeIcon,
+  // Search result icons
+  CheckCircleOutline,
+  CancelOutlined,
 } from '@mui/icons-material';
