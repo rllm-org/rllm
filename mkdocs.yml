@@ -91,6 +91,7 @@ nav:
         - Eval Protocol Integration: core-concepts/eval-protocol.md
       - References:
         - Examples: examples/index.md
+        - Projects: projects/index.md
         - API Reference: api/index.md
         - Contributing: contributing.md
         - Blogs: https://rllm-project.com/blog.html
@@ -125,6 +126,9 @@ nav:
   - Experimental:
       - Experimental Features: experimental/index.md
       - Configuration: experimental/rllm-and-backend-config.md
+  - Projects:
+      - Overview: projects/index.md
+      - FinQA: projects/finqa.md
   - API Reference:
       - Overview: api/index.md
       - Agents:
