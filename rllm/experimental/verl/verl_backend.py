@@ -140,7 +140,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         else:
             raise ValueError("No validation dataloader available. Please check the configuration.")
 
-    async def generate_episodes(self, batch: Any, agent_workflow_engine: UnifiedWorkflowEngine, **kwargs) -> list[Episode]:
+    async def generate_episodes(self, batch: Any, agent_workflow_engine: UnifiedWorkflowEngine, is_validation: bool = False, **kwargs) -> list[Episode]:
         """Generate episodes using the workflow engine.
 
         For Verl backend, this function handles the following procedures:
@@ -163,10 +163,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             batch = DataProto.from_single_dict(batch)
 
         batch.non_tensor_batch["task_ids"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
-        if agent_workflow_engine.current_mode == "train":
-            repeat_times = self.full_config.rllm.rollout.n
-        else:
+        if is_validation:
             repeat_times = self.full_config.rllm.rollout.n_val
+        else:
+            repeat_times = self.full_config.rllm.rollout.n
         batch = batch.repeat(repeat_times=repeat_times)
         batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"])
 

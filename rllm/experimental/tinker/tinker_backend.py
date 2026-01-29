@@ -123,15 +123,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # we need to get it from `AutoTokenizer` since the `policy_trainer` has not been initialized yet
         self.tokenizer = AutoTokenizer.from_pretrained(self.full_config.model.name)
 
-        self.rollout_engine = TinkerEngine(
-            base_url=self.full_config.tinker_base_url,
-            model_name=self.full_config.model.name,
-            service_client=self.service_client,
-            tokenizer=self.tokenizer,
-            max_prompt_length=self.full_config.data.max_prompt_length,
-            max_response_length=self.full_config.data.max_response_length,
-            sampling_params=self.full_config.sampling,
-        )
+        self.rollout_engine = TinkerEngine(base_url=self.full_config.tinker_base_url, model_name=self.full_config.model.name, service_client=self.service_client, tokenizer=self.tokenizer, max_prompt_length=self.full_config.data.max_prompt_length, max_response_length=self.full_config.data.max_response_length, sampling_params=self.full_config.sampling, **self.full_config.rollout_engine)
         return self.rollout_engine
 
     def validate_config(self) -> None:
@@ -186,6 +178,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         self,
         batch: Any,
         agent_workflow_engine: UnifiedWorkflowEngine,
+        is_validation: bool = False,
         **kwargs,
     ) -> list[Episode]:
         """Generate episodes using the workflow engine.
@@ -198,6 +191,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         Args:
             batch: Input batch (list of task dicts from dataloader).
             agent_workflow_engine: The workflow engine to use for episode generation.
+            is_validation: Whether the generation is for validation.
             **kwargs: Additional arguments.
 
         Returns:
@@ -210,17 +204,17 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         self.rollout_engine.set_sampling_client(self.sampling_client)
 
         # Build interleaved batch
-        if agent_workflow_engine.current_mode == "train":
-            group_size = self.full_config.rllm.rollout.n
-        else:
+        if is_validation:
             group_size = self.full_config.rllm.rollout.n_val
+        else:
+            group_size = self.full_config.rllm.rollout.n
         interleaved_batch = _build_interleave_batch(batch, group_size)
 
         # Extract task IDs
         task_ids = [item["uid"] for item in interleaved_batch]
 
         # Execute tasks using the agent workflow engine (async)
-        episodes = await agent_workflow_engine.execute_tasks(interleaved_batch, task_ids, **kwargs)
+        episodes = await agent_workflow_engine.execute_tasks(interleaved_batch, task_ids, is_validation=is_validation, **kwargs)
 
         return episodes
 

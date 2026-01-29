@@ -34,8 +34,14 @@ validation:
 
 # Sampling Configuration
 sampling:
-  temperature: 0.6
-  top_p: 0.95
+  train:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+  val:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
 
 # Workflow Configuration (for workflow training mode)
 workflow:
@@ -47,6 +53,13 @@ agent:
   max_steps: 1  # Single-turn vs multi-turn
   agent_args: {}
 
+# Tinker Engine Configuration
+rollout_engine:
+  reasoning_effort: "medium"
+  accumulate_reasoning: false
+  disable_thinking: false
+  bypass_render_with_parser: false
+
 # Data Configuration
 data:
   train_files: null
@@ -55,7 +68,6 @@ data:
   max_response_length: 2048
   train_batch_size: 64
   val_batch_size: 32
-
 
 # Overriding the rLLM-common config with Tinker-specific ones
 # Only override if the algorithm values are not None, otherwise still use the rLLM-common config
