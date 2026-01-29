@@ -260,15 +260,26 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         assert trainer_state.trajectory_groups is not None, "Trajectory groups are not set"
 
         # Use TinkerPolicyTrainer's method for forward-backward
-        with simple_timer("forward_backward", trainer_state.timing_dict):
-            (
-                training_datums,
-                training_logprobs,
-                adv_metrics,
-            ) = await self.policy_trainer.forward_backward_from_trajectory_groups(
-                trainer_state.trajectory_groups,
-                algorithm_config=self._algorithm_config,
-            )
+        if not self.full_config.fuse_forward_backward_and_optim_step:  # perform forward_backward and optim_step separately
+            with simple_timer("forward_backward", trainer_state.timing_dict):
+                (
+                    training_datums,
+                    training_logprobs,
+                    adv_metrics,
+                ) = await self.policy_trainer.forward_backward_from_trajectory_groups(
+                    trainer_state.trajectory_groups,
+                    algorithm_config=self._algorithm_config,
+                )
+        else:
+            with simple_timer("fused_forward_backward_and_optim_step", trainer_state.timing_dict):
+                (
+                    training_datums,
+                    training_logprobs,
+                    adv_metrics,
+                ) = await self.policy_trainer.fused_forward_backward_and_optim_step(
+                    trainer_state.trajectory_groups,
+                    algorithm_config=self._algorithm_config,
+                )
 
         # Store datums as backend batch
         trainer_state.backend_batch = training_datums
@@ -307,6 +318,9 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         Args:
             trainer_state: The trainer state.
         """
+        if self.full_config.fuse_forward_backward_and_optim_step:  # optim_step already performed
+            return
+
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
         beta1 = self.full_config.training.get("beta1", 0.9)
@@ -349,7 +363,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Save final checkpoint if we didn't just save it in the last batch
         if trainer_state.global_step % self.full_config.rllm.trainer.save_freq != 0:
             logger.info(f"Saving final checkpoint at step {trainer_state.global_step}")
-            await self.policy_trainer.save_checkpoint_async(trainer_state.global_step, kind="state")
+            await self.policy_trainer.save_checkpoint_and_get_sampling_client(trainer_state.global_step, kind="state", do_save=True)
 
     async def on_batch_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of each batch.

@@ -7,6 +7,7 @@
 
 # Tinker-specific settings
 tinker_base_url: null  # Tinker service URL (null for local)
+fuse_forward_backward_and_optim_step: false
   
 # Model Configuration
 model:
