@@ -266,8 +266,8 @@ class TinkerPolicyTrainer:
         )
         optim_step_future = await self.optim_step_future(learning_rate=learning_rate, beta1=beta1, beta2=beta2, eps=eps)
         # Retrieve the results together
-        fwd_bwd_result = await fwd_bwd_future
-        await optim_step_future
+        fwd_bwd_result = await fwd_bwd_future.result_async()
+        await optim_step_future.result_async()
 
         training_logprobs = []
         for output in fwd_bwd_result.loss_fn_outputs:
