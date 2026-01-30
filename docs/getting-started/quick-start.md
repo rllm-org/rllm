@@ -51,15 +51,18 @@ python -m vllm.entrypoints.openai.api_server \
     --model Qwen/Qwen3-4B \
     --host 0.0.0.0 \
     --port 30000 \
-    --dtype bfloat16
+    --dtype bfloat16 \
+    --tensor-parallel-size 1
+# For multi-GPU: set --tensor-parallel-size to the number of GPUs (e.g., 4 for 4 GPUs)
 ```
 
-### Option B: SGLang Server  
+### Option B: SGLang Server
 ```bash
 python -m sglang_router.launch_server \
     --model-path Qwen/Qwen3-4B \
     --dp-size 1 \
     --dtype bfloat16
+# increase dp_size to enable data-parallel processing on multi-GPU
 ```
 
 The server provides an OpenAI-compatible API at `http://localhost:30000/v1`.
