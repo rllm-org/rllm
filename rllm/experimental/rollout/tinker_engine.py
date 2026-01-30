@@ -118,11 +118,12 @@ class TinkerEngine(RolloutEngine):
         self.max_response_length = max_response_length
         self.max_model_length = max_model_length - 1 if max_model_length is not None else max_prompt_length + max_response_length - 1
         self.tokenizer = tokenizer
-        self.default_sampling_params = sampling_params or {}
         self.bypass_render_with_parser = bypass_render_with_parser
         self.accumulate_reasoning = accumulate_reasoning
         self.reasoning_effort = reasoning_effort
 
+        self.train_sampling_params = sampling_params.get("train", {}) if sampling_params else {}
+        self.val_sampling_params = sampling_params.get("val", {}) if sampling_params else {}
         # Initialize Tinker service client
         self.service_client = service_client
 
@@ -229,19 +230,26 @@ class TinkerEngine(RolloutEngine):
         max_tokens = self._prepare_max_tokens(requested_max_tokens, input_length)
 
         # prepare sampling params
-        sampling_params = tinker.types.SamplingParams(
+        sampling_params = self.val_sampling_params.copy() if self.is_validation else self.train_sampling_params.copy()
+        # override with kwargs
+        if "temperature" in kwargs:
+            sampling_params["temperature"] = kwargs["temperature"]
+        if "top_p" in kwargs:
+            sampling_params["top_p"] = kwargs["top_p"]
+        if "top_k" in kwargs:
+            sampling_params["top_k"] = kwargs["top_k"]
+
+        tinker_sampling_params = tinker.types.SamplingParams(
             max_tokens=max_tokens,
             stop=self.stop_sequences,  # type: ignore
-            temperature=kwargs.get("temperature", self.default_sampling_params.get("temperature", 1.0)),
-            top_p=kwargs.get("top_p", self.default_sampling_params.get("top_p", 1.0)),
+            **sampling_params,
         )
-
         # call sampling client
         model_input = _flat_token_input_to_model_input(token_input)
         sample_response: tinker.SampleResponse = await self.sampling_client.sample_async(
             prompt=model_input,
             num_samples=1,
-            sampling_params=sampling_params,
+            sampling_params=tinker_sampling_params,
         )
 
         # return sampled sequence from sample response
@@ -285,7 +293,6 @@ class TinkerEngine(RolloutEngine):
             messages: List of message dictionaries (OpenAI format)
             **kwargs: Additional parameters including:
                 - application_id: Session/application ID for tracing
-                - validate: Whether this is validation (for greedy decoding)
                 - enforce_max_prompt_length: Whether to enforce max prompt length
                 - tools: List of tools (used when bypass_render_with_parser=True)
                 - accumulate_reasoning: Whether to accumulate reasoning (used when bypass_render_with_parser=True)
@@ -295,7 +302,6 @@ class TinkerEngine(RolloutEngine):
         """
         # Extract unused kwargs
         kwargs.pop("application_id", None)
-        kwargs.pop("validate", False)
 
         # Extract parser-specific kwargs
         tools = kwargs.pop("tools", [])

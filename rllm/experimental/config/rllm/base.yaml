@@ -53,6 +53,8 @@ algorithm:
   lam: 0.95
   norm_adv_by_std_in_grpo: true
   use_rllm: false
+  # for tinker backend only (avaiable options: importance_sampling, ppo, cispo, dro, cross_entropy)
+  loss_fn: null
 
 # Stepwise advantage
 stepwise_advantage:

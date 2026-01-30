@@ -366,7 +366,7 @@ def transform_trajectory_groups_to_dataproto(
     return _batch_tensors_and_build_data_proto(accumulated, pad_token_id, max_prompt_length, max_response_length, processor)
 
 
-def update_dataproto_with_advantages(batch: DataProto, container: list[Episode | TrajectoryGroup], mode: str = "broadcast") -> DataProto:
+def update_dataproto_with_advantages(batch: DataProto, container: list[Episode] | list[TrajectoryGroup], mode: str = "broadcast") -> DataProto:
     """
     Updates a DataProto with advantages. Useful when we use rLLM-native advantage computation,
     after which we need to update the DataProto with the advantages.

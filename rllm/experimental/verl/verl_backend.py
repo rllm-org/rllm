@@ -140,7 +140,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         else:
             raise ValueError("No validation dataloader available. Please check the configuration.")
 
-    async def generate_episodes(self, batch: Any, agent_workflow_engine: UnifiedWorkflowEngine, **kwargs) -> list[Episode]:
+    async def generate_episodes(self, batch: Any, agent_workflow_engine: UnifiedWorkflowEngine, is_validation: bool = False, **kwargs) -> list[Episode]:
         """Generate episodes using the workflow engine.
 
         For Verl backend, this function handles the following procedures:
@@ -163,10 +163,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             batch = DataProto.from_single_dict(batch)
 
         batch.non_tensor_batch["task_ids"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
-        if agent_workflow_engine.current_mode == "train":
-            repeat_times = self.full_config.rllm.rollout.n
-        else:
+        if is_validation:
             repeat_times = self.full_config.rllm.rollout.n_val
+        else:
+            repeat_times = self.full_config.rllm.rollout.n
         batch = batch.repeat(repeat_times=repeat_times)
         batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"])
 
@@ -321,16 +321,14 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         episodes, trajectory_groups = trainer_state.episodes, trainer_state.trajectory_groups
         batch: DataProto = trainer_state.backend_batch  # type: ignore[assignment]
 
-        use_rllm = algorithm_config.use_rllm
-
         with simple_timer("adv", trainer_state.timing_dict):
-            if use_rllm:
-                collect_reward_and_advantage_from_trajectory_groups(trajectory_groups, algorithm_config)
+            if algorithm_config.use_rllm:
+                adv_metrics = collect_reward_and_advantage_from_trajectory_groups(trajectory_groups, algorithm_config)
                 updated_batch = update_dataproto_with_advantages(batch, episodes, mode=self.config.rllm.stepwise_advantage.mode)
             else:
-                updated_batch, adv_metrics = compute_advantage_verl(batch, self.config)  # type: ignore[return-value]
-                trainer_state.metrics.update(adv_metrics)
+                updated_batch, adv_metrics = compute_advantage_verl(batch, self.config)
 
+        trainer_state.metrics.update(adv_metrics)
         trainer_state.backend_batch = updated_batch
 
     async def update_policy(self, trainer_state: TrainerState, **kwargs) -> None:
@@ -356,7 +354,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             trainer_state.metrics.update(actor_output_metrics)
 
     def shutdown(self) -> None:
-        """Placeholder, just use the parent class's shutdown method."""
+        """Placeholder, just use the BackendProtocol's default shutdown method."""
         pass
 
     # =========================================================================
@@ -387,7 +385,12 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             with simple_timer("stop_profile", trainer_state.timing_dict):
                 self._stop_profiling(do_profile)
 
-        # collect metrics
+        # Save checkpoint if configured
+        if self.config.trainer.save_freq > 0 and trainer_state.global_step % self.config.trainer.save_freq == 0:
+            with simple_timer("save_checkpoint", trainer_state.timing_dict):
+                self._save_checkpoint()
+
+        # Update metrics
         metrics = trainer_state.metrics
         metrics.update({"training/global_step": trainer_state.global_step, "training/epoch": trainer_state.epoch})
         metrics.update(compute_data_metrics(batch=trainer_state.backend_batch, use_critic=self.use_critic))
@@ -395,11 +398,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
 
         n_gpus = self.resource_pool_manager.get_n_gpus()
         metrics.update(compute_throughout_metrics(batch=trainer_state.backend_batch, timing_raw=trainer_state.timing_dict, n_gpus=n_gpus))
-
-        # Save checkpoint if configured
-        if self.config.trainer.save_freq > 0 and trainer_state.global_step % self.config.trainer.save_freq == 0:
-            with simple_timer("save_checkpoint", trainer_state.timing_dict):
-                self._save_checkpoint()
 
     async def on_validation_start(self, trainer_state: TrainerState) -> bool:
         """Called at the start of validation."""
