@@ -50,6 +50,10 @@ class TinkerAdvantageComputer:
         self.student_tokenizer = student_tokenizer
         self.teacher_tokenizer = teacher_tokenizer
         self.shared_tokenizer = algorithm_config.get("shared_tokenizer", False)
+        # Advantage clipping for distillation to stabilize training (off by default to not affect other training)
+        self.clip_advantages = algorithm_config.get("clip_advantages", False)
+        self.adv_clip_min = algorithm_config.get("adv_clip_min", -5.0)
+        self.adv_clip_max = algorithm_config.get("adv_clip_max", 5.0)
 
     def compute_grpo_advantages(self, group_rewards: list[float]) -> list[float]:
         """
@@ -129,12 +133,30 @@ class TinkerAdvantageComputer:
             teacher_logprobs: Aligned teacher logprobs for each completion token (same length as student)
 
         Returns:
-            List of per-token advantages
+            List of per-token advantages (optionally clipped to stabilize training)
         """
         if len(student_logprobs) != len(teacher_logprobs):
             raise ValueError(f"Length mismatch: student_logprobs={len(student_logprobs)}, teacher_logprobs={len(teacher_logprobs)}")
 
         advantages = [t_lp - s_lp for t_lp, s_lp in zip(teacher_logprobs, student_logprobs, strict=False)]
+
+        # Apply advantage clipping to stabilize training (recommended by Kyle for on-policy distillation)
+        if self.clip_advantages:
+            clipped_count = 0
+            clipped_advantages = []
+            for adv in advantages:
+                if adv < self.adv_clip_min:
+                    clipped_advantages.append(self.adv_clip_min)
+                    clipped_count += 1
+                elif adv > self.adv_clip_max:
+                    clipped_advantages.append(self.adv_clip_max)
+                    clipped_count += 1
+                else:
+                    clipped_advantages.append(adv)
+            if clipped_count > 0:
+                logger.debug(f"Clipped {clipped_count}/{len(advantages)} advantages to [{self.adv_clip_min}, {self.adv_clip_max}]")
+            advantages = clipped_advantages
+
         return advantages
 
 
@@ -543,7 +565,7 @@ async def process_episodes(
                 raise ValueError("Teacher engine does not have a chat_parser.")
             teacher_chat_parser = advantage_computer.teacher_engine.chat_parser
 
-        async def process_step(global_idx: int, step: Step) -> tuple[tinker.Datum, float]:
+        async def process_step(global_idx: int, step: Step) -> tuple[tinker.Datum, float] | None:
             """
             Process a single step: query teacher, align, compute advantages, build datum.
 
@@ -552,7 +574,7 @@ async def process_episodes(
                 step: The step to process
 
             Returns:
-                Tuple of (datum, avg_advantage)
+                Tuple of (datum, avg_advantage) or None if step should be skipped
             """
             if not step.model_output or not step.model_output.completion_ids or not step.model_output.logprobs:
                 raise ValueError("Missing model_output with completion_ids or logprobs for distillation.")
@@ -585,7 +607,15 @@ async def process_episodes(
                 reasoning_str = teacher_completion_messages[0].get("reasoning", "")
                 content_str = teacher_completion_messages[0].get("content", "")
                 if not reasoning_str and not content_str:
-                    raise ValueError("Missing both reasoning and content in teacher completion message.")
+                    # Skip steps where teacher returned empty response (likely due to timeout/error)
+                    # Log warning and return None to skip this step
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(
+                        f"Skipping step with empty teacher response (no reasoning or content). "
+                        f"This may indicate a teacher model timeout or error."
+                    )
+                    return None  # Return None (not tuple) so filtering works correctly
 
                 # Build teacher prompt and completion
                 teacher_prompt = teacher_chat_parser.parse(
@@ -677,10 +707,33 @@ async def process_episodes(
 
         print(f"[Distillation] Processing complete in {time.time() - start_time:.2f} seconds.")
 
-        # Collect results
-        for datum, avg_advantage in results:
+        # Collect results (filter out None values from skipped steps)
+        skipped_count = 0
+        for result in results:
+            if result is None:
+                skipped_count += 1
+                continue
+            datum, avg_advantage = result
             training_datums.append(datum)
             all_advantages.append(avg_advantage)
+        
+        if skipped_count > 0:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"Skipped {skipped_count}/{len(results)} steps due to empty teacher responses. "
+                f"Proceeding with {len(training_datums)} valid steps."
+            )
+        
+        if len(training_datums) == 0:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(
+                "All steps were skipped due to empty teacher responses. "
+                "This batch cannot be processed. Check teacher model connectivity/health."
+            )
+            # Return empty datums and empty metrics dict to match expected return type
+            return [], {}
     else:
         # Standard RL mode: group trajectories and compute advantages from rewards
         grouping_level = algorithm_config.get("grouping_level", "episode")

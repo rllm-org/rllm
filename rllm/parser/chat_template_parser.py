@@ -173,15 +173,19 @@ class ChatTemplateParser:
 
 
 class DeepseekQwenChatTemplateParser(ChatTemplateParser):
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer, disable_thinking=False):
         super().__init__(tokenizer)
 
+        self.disable_thinking = disable_thinking
         self.bos_token = tokenizer.bos_token
         self.eos_token = tokenizer.eos_token
         self.system_token = ""
         self.user_token = "<｜User｜>"
         self.assistant_token = "<｜Assistant｜>"
-        self.generation_prompt = self.assistant_token + "<think>\n"
+        if disable_thinking:
+            self.generation_prompt = self.assistant_token + "</think>\n"
+        else:
+            self.generation_prompt = self.assistant_token + "<think>\n"
 
         from rllm.parser.tool_parser import R1ToolParser
 

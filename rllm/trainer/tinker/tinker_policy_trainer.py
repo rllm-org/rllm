@@ -153,6 +153,53 @@ class TinkerPolicyTrainer:
             sampling_client = self.create_sampling_client(sampler_result.path)
             return 0, sampling_client
 
+    def _validate_tokenizer_compatibility(self, student_tokenizer, teacher_tokenizer, shared_tokenizer: bool):
+        """Validate that student and teacher tokenizers are compatible when shared_tokenizer=True.
+        
+        This helps catch subtle tokenizer mismatches that could cause issues in distillation.
+        """
+        if not shared_tokenizer:
+            return  # No validation needed for cross-tokenizer distillation
+        
+        issues = []
+        
+        # Check vocabulary size
+        student_vocab_size = len(student_tokenizer)
+        teacher_vocab_size = len(teacher_tokenizer)
+        if student_vocab_size != teacher_vocab_size:
+            issues.append(f"Vocabulary size mismatch: student={student_vocab_size}, teacher={teacher_vocab_size}")
+        
+        # Check special tokens
+        special_tokens = ['bos_token_id', 'eos_token_id', 'pad_token_id', 'unk_token_id']
+        for token_name in special_tokens:
+            student_id = getattr(student_tokenizer, token_name, None)
+            teacher_id = getattr(teacher_tokenizer, token_name, None)
+            if student_id != teacher_id:
+                issues.append(f"{token_name} mismatch: student={student_id}, teacher={teacher_id}")
+        
+        # Check encoding of a sample text
+        test_texts = [
+            "Hello, world!",
+            "The answer is 42.",
+            "Let me think step by step.",
+        ]
+        for text in test_texts:
+            student_ids = student_tokenizer.encode(text, add_special_tokens=False)
+            teacher_ids = teacher_tokenizer.encode(text, add_special_tokens=False)
+            if student_ids != teacher_ids:
+                issues.append(f"Encoding mismatch for '{text}': student={student_ids[:10]}..., teacher={teacher_ids[:10]}...")
+                break  # One mismatch is enough to flag
+        
+        if issues:
+            issues_str = "\n".join(f"  - {issue}" for issue in issues)
+            logger.warning(
+                "[Tokenizer Validation] shared_tokenizer=True but tokenizers may not be fully compatible:\n"
+                "%s\n  Consider setting algorithm.shared_tokenizer=False for cross-tokenizer distillation.",
+                issues_str
+            )
+        else:
+            logger.info("[Tokenizer Validation] Student and teacher tokenizers are compatible (shared_tokenizer=True).")
+
     def _initialize_data_processors(self):
         """Initialize data processors (teacher engine, advantage computer, filter) after training_client is ready."""
 
@@ -170,6 +217,10 @@ class TinkerPolicyTrainer:
             
             from transformers import AutoTokenizer
             self.teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_model)
+            
+            # Validate tokenizer compatibility
+            shared_tokenizer = self.config.algorithm.get("shared_tokenizer", False)
+            self._validate_tokenizer_compatibility(self.student_tokenizer, self.teacher_tokenizer, shared_tokenizer)
 
             teacher_backend = teacher_rollout_args.get("backend")
             if teacher_backend == "openai":

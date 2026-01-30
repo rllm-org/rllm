@@ -2,7 +2,7 @@ from rllm.agents.agent import Action, Episode, Step, Trajectory
 from rllm.engine import ModelOutput, RolloutEngine
 from rllm.rewards.math_reward import rllm_reward_fn_math
 from rllm.rewards.reward_fn import RewardFunction
-from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflow
+from rllm.workflows.workflow import TerminationReason, Workflow
 
 
 def _get_full_response(output: ModelOutput) -> str:
@@ -67,7 +67,14 @@ class SimpleMathWorkflow(Workflow):
         # Evaluate with reward function
         reward_result = self.reward_function(task, full_response)
         
-        # Create single trajectory
+        # Check for length exceeded FIRST - if exceeded, count as wrong (reward=0)
+        is_length_exceeded = output.finish_reason == "length"
+        
+        # If length exceeded, override the reward to 0 (wrong answer)
+        final_reward = 0.0 if is_length_exceeded else reward_result.reward
+        final_is_correct = False if is_length_exceeded else reward_result.is_correct
+        
+        # Create single trajectory (always include it, even if length exceeded)
         trajectory = Trajectory(
             name="solver",
             steps=[
@@ -77,23 +84,25 @@ class SimpleMathWorkflow(Workflow):
                     ],
                     thought=output.reasoning,
                     action=Action(full_response),
-                    reward=reward_result.reward,
+                    reward=final_reward,
                     model_output=output,
                 )
             ],
-            reward=reward_result.reward,
+            reward=final_reward,
         )
         
-        # Check for length exceeded
-        if output.finish_reason == "length":
-            raise TerminationEvent(TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED)
-        
-        # Return episode with single trajectory
-        return Episode(
+        # Return episode with single trajectory (including termination reason if applicable)
+        episode = Episode(
             id=uid,
             task=task,
             trajectories=[trajectory],
-            is_correct=reward_result.is_correct,
-            metrics={"accuracy": float(reward_result.is_correct)},
+            is_correct=final_is_correct,
+            metrics={"accuracy": float(final_is_correct)},
         )
+        
+        # Set termination reason if length exceeded (but still return the episode)
+        if is_length_exceeded:
+            episode.termination_reason = TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED
+        
+        return episode
 
