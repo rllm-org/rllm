@@ -199,7 +199,7 @@ class TinkerPolicyTrainer:
         # Forward-backward pass
         loss_fn = algorithm_config.loss_fn or ADV_TO_LOSS_FN_AUTO_MAP[algorithm_config.estimator]
         fwd_bwd_future = await self.training_client.forward_backward_async(  # type: ignore[attr-defined]
-            training_datums,
+            [self._remove_mask(datum) for datum in training_datums],
             loss_fn=loss_fn,
         )
 
@@ -261,7 +261,7 @@ class TinkerPolicyTrainer:
         # Forward-backward and optimizer future together
         loss_fn = algorithm_config.loss_fn or ADV_TO_LOSS_FN_AUTO_MAP[algorithm_config.estimator]
         fwd_bwd_future = await self.training_client.forward_backward_async(  # type: ignore[attr-defined]
-            training_datums,
+            [self._remove_mask(datum) for datum in training_datums],
             loss_fn=loss_fn,
         )
         optim_step_future = await self.optim_step_future(learning_rate=learning_rate, beta1=beta1, beta2=beta2, eps=eps)
