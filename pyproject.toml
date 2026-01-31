@@ -49,6 +49,7 @@ dependencies = [
     "wrapt",
     "asgiref>=3.7.0",
     "wandb",
+    "codetiming",  # for timing tracking
 ]
 
 [project.optional-dependencies]
