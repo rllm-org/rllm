@@ -34,6 +34,7 @@ docs/
 │   ├── examples/      # Example guides
 │   ├── getting-started/ # Getting started guides
 │   └── core-concepts/ # Core concept explanations
+|   └── experimental/  # Experimental features
 └── site/              # Generated static site (after build)
 ```
 
