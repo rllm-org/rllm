@@ -19,7 +19,9 @@ python -m vllm.entrypoints.openai.api_server \
     --model Qwen/Qwen3-4B \
     --host 0.0.0.0 \
     --port 30000 \
-    --dtype bfloat16 
+    --dtype bfloat16 \
+    --tensor-parallel-size 1
+# For multi-GPU: set --tensor-parallel-size to the number of GPUs (e.g., 4 for 4 GPUs)
 ```
 
 ### Option 2: Using SGLang
