@@ -5,18 +5,19 @@ SkyRLEngine: Adapts SkyRL's InferenceEngineClient to rLLM's RolloutEngine interf
 This adapter allows rLLM workflows to use SkyRL's inference backends
 (vLLM, SGLang, etc.) transparently during trajectory generation.
 """
+
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 # Add skyrl-train to Python path
 skyrl_train_path = Path(__file__).parent.parent.parent.parent / "skyrl" / "skyrl-train"
 if skyrl_train_path.exists():
     sys.path.insert(0, str(skyrl_train_path))
 
-from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine
-from rllm.parser import ChatTemplateParser
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient  # noqa: E402
+
+from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine  # noqa: E402
+from rllm.parser import ChatTemplateParser  # noqa: E402
 
 
 class SkyRLEngine(RolloutEngine):
@@ -47,13 +48,13 @@ class SkyRLEngine(RolloutEngine):
             **kwargs: Additional arguments
         """
         super().__init__()
-        
+
         # Extract max lengths from config if provided
         if config is not None:
             if hasattr(config, "data"):
                 max_prompt_length = config.data.get("max_prompt_length", max_prompt_length)
                 max_response_length = config.data.get("max_response_length", max_response_length)
-        
+
         self.inference_engine = inference_engine_client
         self.tokenizer = tokenizer
         self.max_prompt_length = max_prompt_length
@@ -100,6 +101,7 @@ class SkyRLEngine(RolloutEngine):
             ModelOutput: Structured model response with token IDs and metadata
         """
         from skyrl_train.inference_engines.base import InferenceEngineInput
+
         from rllm.workflows import TerminationEvent, TerminationReason
 
         if self.inference_engine is None:
@@ -135,12 +137,7 @@ class SkyRLEngine(RolloutEngine):
         inference_input: InferenceEngineInput = {
             "prompts": [messages],
             "prompt_token_ids": None,
-            "sampling_params": {
-                "max_tokens": sampling_params.get("max_tokens", self.max_response_length),
-                "temperature": 0.0 if validate else sampling_params.get("temperature", 1.0),
-                "top_p": sampling_params.get("top_p", 1.0),
-                **{k: v for k, v in sampling_params.items() if k not in ["max_tokens", "temperature", "top_p"]}
-            },
+            "sampling_params": {"max_tokens": sampling_params.get("max_tokens", self.max_response_length), "temperature": 0.0 if validate else sampling_params.get("temperature", 1.0), "top_p": sampling_params.get("top_p", 1.0), **{k: v for k, v in sampling_params.items() if k not in ["max_tokens", "temperature", "top_p"]}},
             "session_ids": None,
         }
 
@@ -179,7 +176,7 @@ class SkyRLEngine(RolloutEngine):
 
     async def wake_up(self, tags=None):
         """Wake up the inference engine (for colocated training).
-        
+
         Args:
             tags: Optional list of tags for multi-stage wake up (e.g., ["weights"], ["kv_cache"])
         """
@@ -188,7 +185,7 @@ class SkyRLEngine(RolloutEngine):
 
     async def sleep(self, tags=None):
         """Put the inference engine to sleep (for colocated training).
-        
+
         Args:
             tags: Optional list of tags for multi-stage sleep
         """
@@ -197,9 +194,8 @@ class SkyRLEngine(RolloutEngine):
 
     async def shutdown(self):
         """Shutdown the inference engine (final cleanup).
-        
+
         This should be called when the engine is no longer needed.
         """
         if self.inference_engine is not None:
             await self.inference_engine.teardown()
-

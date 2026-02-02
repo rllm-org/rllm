@@ -289,14 +289,14 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
 
         # Get global step from kwargs (passed by unified trainer)
         global_step = kwargs.get("global_step", 0)
-        
+
         # Determine training phase from workflow engine mode (consistent with VERL approach)
         training_phase = agent_workflow_engine.current_mode if hasattr(agent_workflow_engine, "current_mode") else "train"
 
         # Get sampling params from config
         sampling_params = self.full_config.get("sampling", {})
         default_env_class = self.full_config.get("environment", {}).get("env_class", "BaseTextEnv")
-        
+
         # Use rllm.rollout.n for training, rllm.rollout.n_val for validation (VERL pattern)
         if training_phase == "train":
             group_size = self.full_config.rllm.rollout.n

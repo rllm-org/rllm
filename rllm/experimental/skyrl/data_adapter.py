@@ -5,8 +5,7 @@ This module provides functions to adapt rLLM dataset batches to the format
 expected by SkyRL's prepare_generator_input function.
 """
 
-from typing import Any, Dict, List
-
+from typing import Any
 
 # Priority order for prompt keys
 PROMPT_KEYS = ["prompt", "question", "problem"]
@@ -15,7 +14,7 @@ PROMPT_KEYS = ["prompt", "question", "problem"]
 RESERVED_KEYS = {"prompt", "question", "problem", "env_class", "uid", "unique_id", "data_source"}
 
 
-def adapt_single_item(item: Dict[str, Any]) -> Dict[str, Any]:
+def adapt_single_item(item: dict[str, Any]) -> dict[str, Any]:
     """Adapt a single rLLM dataset item to SkyRL format.
 
     This function:
@@ -38,19 +37,16 @@ def adapt_single_item(item: Dict[str, Any]) -> Dict[str, Any]:
     # Find the prompt
     prompt = None
     prompt_key = None
-    
+
     for key in PROMPT_KEYS:
         if key in item and item[key] is not None:
             prompt = item[key]
             prompt_key = key
             break
-    
+
     if prompt is None:
-        raise ValueError(
-            f"Cannot find prompt in item. Expected one of {PROMPT_KEYS}, "
-            f"but found keys: {list(item.keys())}"
-        )
-    
+        raise ValueError(f"Cannot find prompt in item. Expected one of {PROMPT_KEYS}, but found keys: {list(item.keys())}")
+
     # Convert prompt to chat format if it's a string
     if isinstance(prompt, str):
         prompt = [{"role": "user", "content": prompt}]
@@ -58,31 +54,26 @@ def adapt_single_item(item: Dict[str, Any]) -> Dict[str, Any]:
         # Already in chat format, pass through
         # Validate it's a list of dicts with role/content
         if not all(isinstance(msg, dict) and "role" in msg and "content" in msg for msg in prompt):
-            raise ValueError(
-                f"Prompt in list format must be a list of dicts with 'role' and 'content' keys. "
-                f"Got: {prompt}"
-            )
+            raise ValueError(f"Prompt in list format must be a list of dicts with 'role' and 'content' keys. Got: {prompt}")
     else:
-        raise ValueError(
-            f"Prompt must be either a string or a list of dicts. Got type: {type(prompt)}, value: {prompt}"
-        )
-    
+        raise ValueError(f"Prompt must be either a string or a list of dicts. Got type: {type(prompt)}, value: {prompt}")
+
     # Extract env_class from env_class or data_source
     env_class = item.get("env_class")
     if env_class is None:
         env_class = item.get("data_source")
-    
+
     # Extract uid from uid or unique_id
     uid = item.get("uid")
     if uid is None:
         uid = item.get("unique_id")
-    
+
     # Put all other fields into env_extras
     env_extras = {}
     for key, value in item.items():
         if key not in RESERVED_KEYS and key != prompt_key:
             env_extras[key] = value
-    
+
     # Store original prompt info in env_extras for reconstruction in RLLMGenerator
     # This allows us to convert back to rLLM format for the workflow
     if prompt_key:
@@ -90,25 +81,25 @@ def adapt_single_item(item: Dict[str, Any]) -> Dict[str, Any]:
         # Store original string value if it was a string
         if isinstance(item[prompt_key], str):
             env_extras["_rllm_original_prompt_value"] = item[prompt_key]
-    
+
     # Build the adapted item
     adapted_item = {
         "prompt": prompt,  # SkyRL expects this in chat format
         "env_extras": env_extras,
     }
-    
+
     # Add env_class if available
     if env_class is not None:
         adapted_item["env_class"] = env_class
-    
+
     # Add uid if available
     if uid is not None:
         adapted_item["uid"] = uid
-    
+
     return adapted_item
 
 
-def adapt_rllm_batch_to_skyrl(batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def adapt_rllm_batch_to_skyrl(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Adapt a batch of rLLM dataset items to SkyRL format.
 
     This function processes each item in the batch using adapt_single_item.
@@ -131,6 +122,5 @@ def adapt_rllm_batch_to_skyrl(batch: List[Dict[str, Any]]) -> List[Dict[str, Any
     """
     if not batch:
         return []
-    
-    return [adapt_single_item(item) for item in batch]
 
+    return [adapt_single_item(item) for item in batch]
