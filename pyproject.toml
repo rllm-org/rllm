@@ -90,8 +90,18 @@ verifiers = [
 ]
 
 skyrl = [
+    # Core SkyRL packages
     "skyrl-gym==0.1.1",
     "skyrl-train==0.3.0",
+    # Inference engine
+    "vllm>=0.11.0,<0.12",
+    # Training framework
+    "verl>=0.5.0",
+    # GPU acceleration
+    "flash-attn>=2.8.0",
+    # PyTorch ecosystem
+    "torch>=2.8.0",
+    "torchvision>=0.23.0",
 ]
 
 opentelemetry = [
