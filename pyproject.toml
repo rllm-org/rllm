@@ -91,7 +91,8 @@ verifiers = [
 
 skyrl = [
     # Core SkyRL package 
-    "skyrl @ git+https://github.com/NovaSky-AI/SkyRL.git",
+    "skyrl @ git+https://github.com/zhenga1/rllm-skyrl.git",
+    "skyrl-train @ git+https://github.com/zhenga1/rllm-skyrl.git#subdirectory=skyrl-train",
     # Inference engine
     "vllm>=0.11.0,<0.12",
     # Training framework
