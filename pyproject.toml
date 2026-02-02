@@ -90,9 +90,9 @@ verifiers = [
 ]
 
 skyrl = [
-    # Core SkyRL packages
-    "skyrl-gym==0.1.1",
-    "skyrl-train==0.3.0",
+    # Core SkyRL packages (from NovaSky-AI/SkyRL monorepo)
+    "skyrl-gym @ git+https://github.com/NovaSky-AI/SkyRL.git#subdirectory=skyrl-gym",
+    "skyrl-train @ git+https://github.com/NovaSky-AI/SkyRL.git#subdirectory=skyrl-train",
     # Inference engine
     "vllm>=0.11.0,<0.12",
     # Training framework
