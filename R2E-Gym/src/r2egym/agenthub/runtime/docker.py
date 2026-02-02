@@ -105,6 +105,21 @@ class DockerRuntime(ExecutionEnvironment):
         else:
             raise ValueError(f"No docker image found in ds: {self.ds}")
         self.docker_image = ds_image if not docker_image else docker_image
+        
+        # Add Chinese mirror prefix if configured via environment variable
+        mirror_prefix = os.environ.get("DOCKER_MIRROR_PREFIX", "").strip()
+        if mirror_prefix and self.docker_image:
+            # Only add prefix if the image doesn't already have a registry
+            # (i.e., doesn't contain a dot before the first slash, indicating no domain)
+            if "/" in self.docker_image:
+                first_part = self.docker_image.split("/")[0]
+                # If first part doesn't contain a dot, it's not a registry domain
+                if "." not in first_part:
+                    self.docker_image = f"{mirror_prefix}/{self.docker_image}"
+            else:
+                # Image name without any slashes (e.g., "ubuntu:latest")
+                self.docker_image = f"{mirror_prefix}/library/{self.docker_image}"
+        
         self.swebench_verified = "swebench" in self.docker_image
         self.swesmith = "swesmith" in self.docker_image
         if self.swesmith:
@@ -255,7 +270,7 @@ class DockerRuntime(ExecutionEnvironment):
                     }
                 ],
                 "imagePullSecrets": [{"name": "dockerhub-pro"}],
-                "nodeSelector": {"karpenter.sh/nodepool": "bigcpu-standby"},
+                # "nodeSelector": {"karpenter.sh/nodepool": "bigcpu-standby"},
                 "tolerations": [
                     {
                         "key": "node.kubernetes.io/disk-pressure",
@@ -578,6 +593,9 @@ class DockerRuntime(ExecutionEnvironment):
 
             # move all skip files (if present) to /root
             for skip_file in SKIP_FILES_NEW:
+                # Skip r2e_tests as it's handled separately below
+                if skip_file == "r2e_tests":
+                    continue
                 self.run(f"mv {self.repo_path}/{skip_file} {self.alt_path}/{skip_file}")
 
             # r2e_tests are in the / directory, move them to /root
@@ -623,6 +641,7 @@ class DockerRuntime(ExecutionEnvironment):
                     self.container_name,
                     DEFAULT_NAMESPACE,
                     command=full_command,
+                    container=self.container_name,  # Specify container name for multi-container pods
                     stderr=True,
                     stdin=False,
                     stdout=True,
@@ -808,6 +827,7 @@ class DockerRuntime(ExecutionEnvironment):
                     self.container_name,
                     DEFAULT_NAMESPACE,
                     command=exec_command,
+                    container=self.container_name,  # Specify container name for multi-container pods
                     stderr=True,
                     stdin=True,
                     stdout=True,

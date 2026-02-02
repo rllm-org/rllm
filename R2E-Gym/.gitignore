@@ -1,9 +1,45 @@
-PKG-INFO
-requires.txt
+new_prompts
+repo_datasets
+validate_logs
+commit_data
+test_data
+prompts_cache
+temp_dockerfiles
+datasets*
+hf_datasets*
+final_dockers.jsonl
+run_logs
 traj/
-cursor
-*.json
-chat_completions/
+traj2/
+finaltraj/
+qwentraj/
+mergetraj*/
+majvote*/
+debug*/
+traj_testgen/
+success_rate.png
+cummulative_num_solved.png
+traj_ablation/
+accuracy_by_steps*.png
+*filtered*.jsonl
+test_traj
+# filtered*.jsonl
+traj_testgen/
+traj_testverifier/
+v1
+v2
+*.txt
+agentless_swebench_verified
+sb-cli-reports
+traj_edit_with_generatedtests/
+traj_debug/
+traj_ablations/
+traj_ablations_data_quality/
+traj_lite/
+traj_swebv/
+traj_testgen_final/
+traj_testverifier_r2e/
+notebooks/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -32,7 +68,6 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-*.pyc
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -169,8 +204,3 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 # src/r2e_edits/agenthub/train/results_traj_verifier-14B-v2.csv
-
-*.png
-
-# Notebooks from other branches
-notebooks/agent-training.ipynb

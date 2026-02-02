@@ -12,24 +12,22 @@ from threading import Thread
 import numpy as np
 import torch
 from omegaconf import OmegaConf
-
-from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor
+from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.core_algos import agg_loss
+from verl.trainer.ppo.metric_utils import compute_data_metrics, compute_timing_metrics
 from verl.trainer.ppo.ray_trainer import (
     RayPPOTrainer,
-    RayWorkerGroup,
     ResourcePoolManager,
-    Role,
-    WorkerType,
     compute_advantage,
-    compute_data_metrics,
     compute_response_mask,
-    compute_timing_metrics,
-    marked_timer,
-    reduce_metrics,
 )
+from verl.trainer.ppo.utils import Role, WorkerType
+from verl.utils.debug import marked_timer
+from verl.utils.metric import reduce_metrics
+
+from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
 
 
 class AgentPPOTrainer(RayPPOTrainer):
@@ -39,7 +37,7 @@ class AgentPPOTrainer(RayPPOTrainer):
         tokenizer,
         role_worker_mapping: dict[Role, WorkerType],
         resource_pool_manager: ResourcePoolManager,
-        ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
+        ray_worker_group_cls: type[RayWorkerGroup] = RayWorkerGroup,
         reward_fn=None,
         val_reward_fn=None,
         env_class=None,
@@ -93,6 +91,7 @@ class AgentPPOTrainer(RayPPOTrainer):
         """
         Initialize environment depending on env_class with the necessary extra_info, also set uid of the batch.
         """
+        assert self.agent_class is not None and self.env_class is not None, "Agent and environment classes must be provided"
         env_args = batch.non_tensor_batch["extra_info"].tolist()
 
         full_agent_args = dict(self.config.rllm.agent.get("agent_args", {})) | self.agent_args
@@ -768,6 +767,9 @@ class AgentPPOTrainer(RayPPOTrainer):
     def _transform_agent_steps(self, steps: list[dict], uids: np.ndarray):
         from verl.utils.torch_functional import pad_sequence_to_length
 
+        overlong_filter = self.config.rllm.agent.get("overlong_filter", False)
+        overlong_reasons = {"TRUNCATION", "MAX_STEPS", "TIMEOUT"}
+
         all_prompts_list = []
         all_responses_list = []
 
@@ -776,6 +778,7 @@ class AgentPPOTrainer(RayPPOTrainer):
         all_steps_is_last_step_list = []
         all_steps_step_num = []  # total number of steps the trajectory this step belongs to have
         all_steps_step_ids = []
+        all_steps_masked_out = []  # whether this step should be masked out due to overlong filter
         training_rewards = []
         all_mc_returns = []  # Monte Carlo returns for each episode
         # the last step will have reward assigned and be used for advantage calculation
@@ -785,6 +788,10 @@ class AgentPPOTrainer(RayPPOTrainer):
             idx = episode["idx"]
             training_reward = episode["trajectory_reward"]
             mc_returns = episode["mc_returns"]
+            termination_reason = episode.get("termination_reason")
+
+            # Mask out overlong trajectories
+            masked_out = overlong_filter and termination_reason in overlong_reasons
 
             all_prompts_list.extend([torch.tensor(self.tokenizer.encode(s["prompt"], add_special_tokens=False), dtype=torch.long) for s in episode_steps])
             all_responses_list.extend([torch.tensor(self.tokenizer.encode(s["response"], add_special_tokens=False), dtype=torch.long) for s in episode_steps])
@@ -799,6 +806,7 @@ class AgentPPOTrainer(RayPPOTrainer):
 
             all_steps_step_num.extend([len(episode_steps) for _ in range(len(episode_steps))])
             all_steps_step_ids.extend([f"{uids[idx]}_step{i}" for i in range(len(episode_steps))])
+            all_steps_masked_out.extend([masked_out for _ in range(len(episode_steps))])
 
         # left pad prompts
         max_prompt_length = self.config.data.max_prompt_length
@@ -836,6 +844,10 @@ class AgentPPOTrainer(RayPPOTrainer):
 
         # loss mask
         traj_mask = attention_mask[:, max_prompt_length:]
+        # apply overlong filter by zeroing out masked trajectories
+        if overlong_filter:
+            overlong_mask = torch.tensor(all_steps_masked_out, dtype=torch.bool).unsqueeze(1)
+            traj_mask = traj_mask * (~overlong_mask).long()
 
         # position_ids
         position_ids = (torch.cumsum(attention_mask, dim=1) - 1) * attention_mask

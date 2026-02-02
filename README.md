@@ -25,6 +25,8 @@ rLLM is an open-source framework for post-training language agents via reinforce
 
 ## Releases 📰
 
+<strong>[2025/12/11]</strong> We release rLLM [v0.2.1](https://github.com/rllm-org/rllm/tree/v0.2.1) which comes with support for Tinker backend, LoRA and VLM training, and support for Eval Protocol. We also bumped our `verl` backend to `v0.6.1`. [[SDK Blogpost]](https://rllm-project.com/post.html?post=sdk.md)
+
 <strong>[2025/10/16]</strong> rLLM [v0.2](https://github.com/rllm-org/rllm/tree/v0.2) is now officially released! We introduce `AgentWorkflowEngine` for training over arbitrary agentic programs. It also comes integrated with the official `verl-0.5.0`, featuring support for Megatron training. Check out this [blog post](https://rllm-project.com/post.html?post=rllm_v0.2.md) for more.
 
 <strong>[2025/07/01]</strong> We release [`DeepSWE-Preview`](https://pretty-radio-b75.notion.site/DeepSWE-Training-a-Fully-Open-sourced-State-of-the-Art[…]-by-Scaling-RL-22281902c1468193aabbe9a8c59bbe33?pvs=73), a 32B software engineering agent (SWE) trained with purely RL that achieves 59% on SWEBench-Verified with test-time scaling,(42.2% Pass@1), topping the SWEBench leaderboard for open-weight models.
@@ -35,30 +37,64 @@ rLLM is an open-source framework for post-training language agents via reinforce
 
 ## Getting Started 🎯
 
-### Installation
+rLLM requires `Python >= 3.10` (`3.11` is needed if using `tinker`). You can install it either directly via pip or build from source.
+
+There are three ways that you can install rLLM:
+
+### Approach A: Direct Installation
+
+```bash
+uv pip install "rllm[verl] @ git+https://github.com/rllm-org/rllm.git"
+```
+
+_(or replace the `verl` above for `tinker` to install with tinker backend, see below for more details)_
+
+### Approach B: Building from Source with `uv`
+
+**Step 1: Clone and Setup Environment**
 
 ```bash
 # Clone the repository
-git clone --recurse-submodules https://github.com/rllm-org/rllm.git
+git clone https://github.com/rllm-org/rllm.git
 cd rllm
 
-# Create a conda environment
-conda create -n rllm python=3.10 -y
-conda activate rllm
-
-# Install verl
-bash scripts/install_verl.sh
-
-# Install rLLM
-pip install -e .
+# Create an uv environment
+uv venv --python 3.11
+source .venv/bin/activate
 ```
 
-### Installation with Docker 🐳
+**Step 2: Install rLLM with Training Backend**
+
+rLLM supports two training backends: `verl` and `tinker`. Choose one based on your needs.
+
+_**Option I:** Using `verl` as Training Backend_
+
+```bash
+uv pip install -e ".[verl]"
+```
+
+For CPU-only machines (e.g., macOS), use:
+```bash
+uv pip install -e ".[verl-cpu]"
+```
+
+For ByteDance Cluster, use:
+```bash
+uv pip install -e ".[verl-byted]"
+```
+
+_**Option II:** Using `tinker` as Training Backend_
+
+```bash
+# can add --torch-backend=cpu to train on CPU-only machines
+uv pip install -e .[tinker] 
+```
+
+### Approach C: Installation with Docker 🐳
 
 For a containerized setup, you can use Docker:
 
 ```bash
-
 # Build the Docker image
 docker build -t rllm .
 
@@ -70,6 +106,8 @@ docker start rllm-container
 docker exec -it rllm-container bash
 ```
 
+For more detailed installation guide, including using `sglang` for `verl` backend, please refer to our [documentation](https://rllm-project.readthedocs.io/en/latest/getting-started/installation).
+
 ## Awesome Projects using rLLM 🔥
 
 * [DeepScaleR](https://pretty-radio-b75.notion.site/DeepScaleR-Surpassing-O1-Preview-with-a-1-5B-Model-by-Scaling-RL-19681902c1468005bed8ca303013a4e2): Surpassing O1-Preview with a 1.5B Model by Scaling RL
@@ -79,6 +117,8 @@ docker exec -it rllm-container bash
 * [Terminal-Bench-RL](https://github.com/Danau5tin/terminal-bench-rl): Training Long-Horizon Terminal Agents with Reinforcement Learning [![GitHub Repo stars](https://img.shields.io/github/stars/Danau5tin/terminal-bench-rl)](https://github.com/Danau5tin/terminal-bench-rl)
 * [Cogito, Ergo Ludo](https://www.arxiv.org/abs/2509.25052): An Agent that Learns to Play by Reasoning and Planning
 * [PettingLLMs](https://pettingllms-ai.github.io/): Using On-Policy Reinforcement Learning for Stronger Multi-Agent System [![GitHub Repo stars](https://img.shields.io/github/stars/pettingllms-ai/PettingLLMs)](https://github.com/pettingllms-ai/PettingLLMs)
+* [Cut the Bill, Keep the Turns](https://agate-slipper-ef0.notion.site/Cut-the-Bill-Keep-the-Turns-Affordable-Multi-Turn-Search-RL-003f78214a4d451fb06f453d084e666c): Affordable Multi-Turn Search RL
+* [SETA](https://eigent-ai.notion.site/SETA-Scaling-Environment-for-Terminal-Agent-2d2511c70ba280a9b7c0fe3e7f1b6ab8): Scaling Environments for Terminal Agents [![GitHub Repo stars](https://img.shields.io/github/stars/camel-ai/seta)](https://github.com/camel-ai/seta)
 
 
 
@@ -92,7 +132,7 @@ Our work is done as part of [Berkeley Sky Computing Lab](https://sky.cs.berkeley
   author={Sijun Tan and Michael Luo and Colin Cai and Tarun Venkat and Kyle Montgomery and Aaron Hao and Tianhao Wu and Arnav Balyan and Manan Roongta and Chenguang Wang and Li Erran Li and Raluca Ada Popa and Ion Stoica},
   year={2025},
   howpublished={\url{https://pretty-radio-b75.notion.site/rLLM-A-Framework-for-Post-Training-Language-Agents-21b81902c146819db63cd98a54ba5f31}},
-  note={Notion Blog}
+  note={Notion Blog},
   year={2025}
 }
 ```

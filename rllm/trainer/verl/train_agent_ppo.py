@@ -1,5 +1,6 @@
-# Copyright under Agentica Project.
 """
+Copyright under Agentica Project.
+
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
 
@@ -9,15 +10,15 @@ import socket
 import hydra
 import ray
 from omegaconf import OmegaConf
+from verl.trainer.ppo.reward import load_reward_manager
+from verl.utils.device import is_cuda_available
 
-from rllm.trainer.env_agent_mappings import AGENT_CLASS_MAPPING, ENV_CLASS_MAPPING, WORKFLOW_CLASS_MAPPING
+from rllm.trainer.env_agent_mappings import AGENT_CLASS_MAPPING, ENV_CLASS_MAPPING
 from rllm.trainer.verl.agent_ppo_trainer import AgentPPOTrainer
 
 # Local application imports
 from rllm.trainer.verl.agent_workflow_trainer import AgentWorkflowPPOTrainer
 from rllm.trainer.verl.ray_runtime_env import get_ppo_ray_runtime_env
-from verl.trainer.ppo.reward import load_reward_manager
-from verl.utils.device import is_cuda_available
 
 
 @hydra.main(config_path="../config", config_name="agent_ppo_trainer", version_base=None)
@@ -59,7 +60,7 @@ class TaskRunner:
     to enable distributed execution across multiple nodes and GPUs.
     """
 
-    def run(self, config, workflow_class=None, workflow_args=None, agent_class=None, env_class=None, agent_args=None, env_args=None):
+    def run(self, config, workflow_class=None, workflow_args=None, agent_class=None, env_class=None, agent_args=None, env_args=None, agent_run_func=None):
         """Execute the main PPO training workflow.
 
         This method sets up the distributed training environment, initializes
@@ -73,7 +74,7 @@ class TaskRunner:
         from pprint import pprint
 
         from omegaconf import OmegaConf
-
+        from verl.single_controller.ray import RayWorkerGroup
         from verl.utils.fs import copy_to_local
 
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
@@ -86,17 +87,18 @@ class TaskRunner:
         local_path = copy_to_local(config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False))
 
         # Instantiate the tokenizer and processor.
-        from verl.utils import hf_tokenizer
+        from verl.utils import hf_processor, hf_tokenizer
 
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         # Used for multimodal LLM, could be None
-        # processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+        processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
+        # Starting from verl 0.6.1, this cls has been standardized for both fsdp and megatron backends.
+        ray_worker_group_cls = RayWorkerGroup
         # Define worker classes based on the actor strategy.
         if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
             assert config.critic.strategy in {"fsdp", "fsdp2"}
-            from verl.single_controller.ray import RayWorkerGroup
             from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker
 
             use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
@@ -113,16 +115,12 @@ class TaskRunner:
                 raise ValueError(f"Invalid use_legacy_worker_impl: {use_legacy_worker_impl}")
 
             actor_rollout_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
-            ray_worker_group_cls = RayWorkerGroup
 
         elif config.actor_rollout_ref.actor.strategy == "megatron":
             assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-            from verl.single_controller.ray.megatron import NVMegatronRayWorkerGroup
             from verl.workers.megatron_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker
 
             actor_rollout_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
-            ray_worker_group_cls = NVMegatronRayWorkerGroup
-
         else:
             raise NotImplementedError
 
@@ -155,9 +153,20 @@ class TaskRunner:
         val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {}))
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
-        if config.rllm.workflow.use_workflow:
-            if workflow_class is None:
-                workflow_class = WORKFLOW_CLASS_MAPPING[config.rllm.workflow.name]
+        # if config.rllm.workflow.use_workflow:
+        if agent_run_func is not None:
+            print("IMPORTANT: Using AgentSdkTrainer")
+            from rllm.trainer.verl.agent_sdk_trainer import AgentSdkTrainer
+
+            trainer = AgentSdkTrainer(
+                config=config,
+                tokenizer=tokenizer,
+                role_worker_mapping=role_worker_mapping,
+                resource_pool_manager=resource_pool_manager,
+                ray_worker_group_cls=ray_worker_group_cls,
+                agent_run_func=agent_run_func,
+            )
+        elif workflow_class is not None:
             workflow_args = workflow_args or {}
             if config.rllm.workflow.get("workflow_args") is not None:
                 for key, value in config.rllm.workflow.get("workflow_args").items():
@@ -170,6 +179,7 @@ class TaskRunner:
             trainer = AgentWorkflowPPOTrainer(
                 config=config,
                 tokenizer=tokenizer,
+                processor=processor,
                 role_worker_mapping=role_worker_mapping,
                 resource_pool_manager=resource_pool_manager,
                 ray_worker_group_cls=ray_worker_group_cls,

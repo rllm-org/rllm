@@ -31,7 +31,7 @@ python3 -m examples.countdown.train_countdown \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.mode="async" \
     actor_rollout_ref.rollout.enforce_eager=False \
-    actor_rollout_ref.rollout.temperature=0.6 \
+    actor_rollout_ref.rollout.temperature=1.0 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.rollout.val_kwargs.n=1 \

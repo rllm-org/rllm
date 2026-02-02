@@ -16,25 +16,27 @@ try:
 except ImportError as e:
     raise ImportError("The 'fireworks' package is required to use the Fireworks backend. Please install it with: pip install fireworks-ai") from e
 
-from rllm.trainer.verl.agent_workflow_trainer import AgentWorkflowPPOTrainer
-from rllm.workflows.workflow import TerminationReason
 from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
-from verl.trainer.ppo.ray_trainer import (
-    ResourcePoolManager,
-    Role,
-    WorkerType,
-    agg_loss,
-    apply_kl_penalty,
-    compute_advantage,
+from verl.trainer.ppo.core_algos import agg_loss
+from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
-    marked_timer,
     reduce_metrics,
 )
+from verl.trainer.ppo.ray_trainer import (
+    ResourcePoolManager,
+    apply_kl_penalty,
+    compute_advantage,
+)
+from verl.trainer.ppo.utils import Role, WorkerType
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
+from verl.utils.debug import marked_timer
 from verl.utils.tracking import Tracking
+
+from rllm.trainer.verl.agent_workflow_trainer import AgentWorkflowPPOTrainer
+from rllm.workflows.workflow import TerminationReason
 
 
 class FireworksAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
@@ -44,7 +46,7 @@ class FireworksAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
         tokenizer,
         role_worker_mapping: dict[Role, WorkerType],
         resource_pool_manager: ResourcePoolManager,
-        ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
+        ray_worker_group_cls: type[RayWorkerGroup] = RayWorkerGroup,
         reward_fn=None,
         val_reward_fn=None,
         workflow_class=None,
@@ -97,14 +99,18 @@ class FireworksAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
         self.actor_wg.init_model()
         self.actor_rollout_wg = self.actor_wg  # for compatibility
 
+        sampling_params = {
+            "temperature": self.config.actor_rollout_ref.rollout.temperature,
+            "top_p": self.config.actor_rollout_ref.rollout.top_p,
+            "max_tokens": self.config.data.max_prompt_length + self.config.data.max_response_length,
+        }
+        if self.config.fireworks.return_token_ids:
+            sampling_params["return_token_ids"] = True
+
         fireworks_engine = FireworksEngine(
             tokenizer=self.tokenizer,
             deployment_id=self.config.fireworks.deployment_id,
-            sampling_params={
-                "temperature": 0.6,
-                "top_p": 0.95,
-                "max_tokens": self.config.data.max_prompt_length + self.config.data.max_response_length,
-            },
+            sampling_params=sampling_params,
         )
         self.fireworks_engine = fireworks_engine
         self.agent_execution_engine = AgentWorkflowEngine(

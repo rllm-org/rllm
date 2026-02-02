@@ -9,29 +9,32 @@ from pprint import pprint
 import numpy as np
 import torch
 from omegaconf import OmegaConf
+from verl import DataProto
+from verl.protocol import pad_dataproto_to_divisor
+from verl.single_controller.ray import RayWorkerGroup
+from verl.trainer.ppo.core_algos import (
+    AdvantageEstimator,
+    agg_loss,
+)
+from verl.trainer.ppo.metric_utils import (
+    compute_data_metrics,
+    compute_throughout_metrics,
+    compute_timing_metrics,
+    reduce_metrics,
+)
+from verl.trainer.ppo.ray_trainer import (
+    RayPPOTrainer,
+    ResourcePoolManager,
+    apply_kl_penalty,
+    compute_advantage,
+)
+from verl.trainer.ppo.utils import Role, WorkerType
+from verl.utils.debug import marked_timer
 
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
 from rllm.utils.episode_logger import EpisodeLogger
 from rllm.workflows.workflow import TerminationReason
-from verl import DataProto
-from verl.protocol import pad_dataproto_to_divisor
-from verl.trainer.ppo.ray_trainer import (
-    AdvantageEstimator,
-    RayPPOTrainer,
-    RayWorkerGroup,
-    ResourcePoolManager,
-    Role,
-    WorkerType,
-    agg_loss,
-    apply_kl_penalty,
-    compute_advantage,
-    compute_data_metrics,
-    compute_throughout_metrics,
-    compute_timing_metrics,
-    marked_timer,
-    reduce_metrics,
-)
 
 
 class AgentWorkflowPPOTrainer(RayPPOTrainer):
@@ -41,32 +44,56 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         tokenizer,
         role_worker_mapping: dict[Role, WorkerType],
         resource_pool_manager: ResourcePoolManager,
-        ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
+        ray_worker_group_cls: type[RayWorkerGroup] = RayWorkerGroup,
+        processor=None,
         reward_fn=None,
         val_reward_fn=None,
         workflow_class=None,
         workflow_args=None,
     ):
-        super().__init__(config=config, tokenizer=tokenizer, role_worker_mapping=role_worker_mapping, resource_pool_manager=resource_pool_manager, ray_worker_group_cls=ray_worker_group_cls, reward_fn=reward_fn, val_reward_fn=val_reward_fn)
+        super().__init__(config=config, tokenizer=tokenizer, processor=processor, role_worker_mapping=role_worker_mapping, resource_pool_manager=resource_pool_manager, ray_worker_group_cls=ray_worker_group_cls, reward_fn=reward_fn, val_reward_fn=val_reward_fn)
 
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
+        self._validate_config()
+
+        # Initialize teacher engine if distillation is enabled
+        self.distill_enabled = self.config.rllm.get("distill", {}).get("enable", False)
+        if self.distill_enabled:
+            print("Distillation is enabled, will ignore rewards returned in episodes.")
+        self.teacher_engine = None
+        self.teacher_tokenizer = None
+        if self.distill_enabled:
+            from transformers import AutoTokenizer
+
+            from rllm.engine.rollout.openai_engine import OpenAIEngine
+
+            teacher_rollout_args = self.config.rllm.distill.get("teacher_rollout_args", {})
+            teacher_model = teacher_rollout_args.get("model", "")
+            if not teacher_model:
+                raise ValueError("model must be specified in rllm.distill.teacher_rollout_args when distillation is enabled")
+
+            self.teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_model)
+            self.teacher_engine = OpenAIEngine(
+                **teacher_rollout_args,
+                tokenizer=self.teacher_tokenizer,
+            )
 
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._thread.start()
 
     def _validate_config(self):
+        assert self.workflow_class is not None, "workflow_class is required for agent workflow trainer"
         assert self.config.actor_rollout_ref.hybrid_engine is True, "Only hybrid engine is supported"
         assert self.config.actor_rollout_ref.rollout.mode == "async", "Only async rollout mode is supported"
         assert self.use_rm is False, "Reward models are not supported. Rewards should be assigned using a reward function in the workflow or environment."
         if self.config.rllm.rejection_sample.multiplier != 1:
             assert self.config.rllm.rejection_sample.enable is True, "rejection sampling is disabled, but rejection_sample.multiplier is not 1"
 
+        # TODO: revisit whether this is now supported by Verl
         if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
             raise NotImplementedError("REMAX is not supported yet")
-
-        super()._validate_config()
 
     def init_workers(self):
         super().init_workers()
@@ -75,6 +102,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
             config=self.config,
             rollout_manager=self.async_rollout_manager,
             tokenizer=self.tokenizer,
+            processor=self.processor,
         )
 
         # Create episode logger if enabled in config
@@ -101,7 +129,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         """
         The training loop of PPO. Adapted to train the underlying model of agent.
         """
-        from verl.utils.tracking import Tracking
+        from rllm.utils.tracking import Tracking
 
         logger = Tracking(
             project_name=self.config.trainer.project_name,
@@ -143,7 +171,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         for epoch in range(self.config.trainer.total_epochs):
             pprint(f"epoch {epoch}, step {self.global_steps} started")
             for batch_dict in self.train_dataloader:
-                do_profile = self.global_steps in self.config.trainer.profile_steps if self.config.trainer.profile_steps is not None else False
+                do_profile = self.global_steps in self.config.trainer.profile_steps if self.config.trainer.get("profile_steps") is not None else False
                 with marked_timer("start_profile", timing_raw):
                     self._start_profiling(do_profile)
 
@@ -280,28 +308,10 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         batch = batch.union(old_log_prob)
 
                         if "rollout_log_probs" in batch.batch.keys():
-                            # TODO: we may want to add diff of probs too.
-                            rollout_old_log_probs = batch.batch["rollout_log_probs"]
-                            actor_old_log_probs = batch.batch["old_log_probs"]
-                            attention_mask = batch.batch["attention_mask"]
-                            responses = batch.batch["responses"]
-                            response_length = responses.size(1)
-                            response_mask = attention_mask[:, -response_length:]
+                            from verl.utils.debug.metrics import calculate_debug_metrics
 
-                            rollout_probs = torch.exp(rollout_old_log_probs)
-                            actor_probs = torch.exp(actor_old_log_probs)
-                            rollout_probs_diff = torch.abs(rollout_probs - actor_probs)
-                            rollout_probs_diff = torch.masked_select(rollout_probs_diff, response_mask.bool())
-                            rollout_probs_diff_max = torch.max(rollout_probs_diff)
-                            rollout_probs_diff_mean = torch.mean(rollout_probs_diff)
-                            rollout_probs_diff_std = torch.std(rollout_probs_diff)
-                            metrics.update(
-                                {
-                                    "training/rollout_probs_diff_max": rollout_probs_diff_max.detach().item(),
-                                    "training/rollout_probs_diff_mean": rollout_probs_diff_mean.detach().item(),
-                                    "training/rollout_probs_diff_std": rollout_probs_diff_std.detach().item(),
-                                }
-                            )
+                            debug_metrics = calculate_debug_metrics(batch)
+                            metrics.update(debug_metrics)
 
                     if self.use_reference_policy:
                         # compute reference log_prob
@@ -329,38 +339,45 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         else:
                             batch.batch["token_level_scores"] = batch.batch["traj_rewards"]
 
-                        # compute rewards. apply_kl_penalty if available
-                        if self.config.algorithm.use_kl_in_reward:
-                            batch, kl_metrics = apply_kl_penalty(batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty)
-                            metrics.update(kl_metrics)
-                        else:
+                        if self.distill_enabled:
                             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
-
-                        if self.config.rllm.stepwise_advantage.enable and self.config.rllm.stepwise_advantage.mode == "broadcast":
-                            is_last_step = batch.non_tensor_batch["is_last_step"]
-                            last_step_indices = np.where(is_last_step == True)[0]
-                            not_last_step_indices = np.where(is_last_step == False)[0]
-                            non_last_step_batch = batch.select_idxs(not_last_step_indices)
-                            batch = batch.select_idxs(last_step_indices)  # This batch only has last steps
-                            # last_step_batch contains no padded steps as it was rounded down (not padded) to a multiple of world size
+                            batch = self._remove_padding(batch)
+                            distill_advantages = asyncio.run_coroutine_threadsafe(self._compute_distill_advantages(batch), self._loop).result()
+                            batch.batch["advantages"] = distill_advantages
+                            batch.batch["returns"] = distill_advantages
                         else:
-                            batch = self._remove_padding(batch)  # compute advantages over non-padded steps only
+                            # apply_kl_penalty if available
+                            if self.config.algorithm.use_kl_in_reward:
+                                batch, kl_metrics = apply_kl_penalty(batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty)
+                                metrics.update(kl_metrics)
+                            else:
+                                batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
 
-                        # compute advantages, executed on the driver process
-                        batch = compute_advantage(
-                            batch,
-                            adv_estimator=self.config.algorithm.adv_estimator,
-                            gamma=self.config.algorithm.gamma,
-                            lam=self.config.algorithm.lam,
-                            num_repeat=self.config.actor_rollout_ref.rollout.n,
-                            norm_adv_by_std_in_grpo=self.config.algorithm.norm_adv_by_std_in_grpo,
-                            config=self.config.algorithm,
-                        )
+                            if self.config.rllm.stepwise_advantage.enable and self.config.rllm.stepwise_advantage.mode == "broadcast":
+                                is_last_step = batch.non_tensor_batch["is_last_step"]
+                                last_step_indices = np.where(is_last_step == True)[0]
+                                not_last_step_indices = np.where(is_last_step == False)[0]
+                                non_last_step_batch = batch.select_idxs(not_last_step_indices)
+                                batch = batch.select_idxs(last_step_indices)  # This batch only has last steps
+                                # last_step_batch contains no padded steps as it was rounded down (not padded) to a multiple of world size
+                            else:
+                                batch = self._remove_padding(batch)  # compute advantages over non-padded steps only
 
-                        if self.config.rllm.stepwise_advantage.enable and self.config.rllm.stepwise_advantage.mode == "broadcast":
-                            # Merging the separated out steps using the advantage from last steps
-                            self._stepwise_advantage_broadcast(batch, non_last_step_batch)
-                            batch = DataProto.concat([batch, non_last_step_batch])
+                            # compute advantages, executed on the driver process
+                            batch = compute_advantage(
+                                batch,
+                                adv_estimator=self.config.algorithm.adv_estimator,
+                                gamma=self.config.algorithm.gamma,
+                                lam=self.config.algorithm.lam,
+                                num_repeat=self.config.actor_rollout_ref.rollout.n,
+                                norm_adv_by_std_in_grpo=self.config.algorithm.norm_adv_by_std_in_grpo,
+                                config=self.config.algorithm,
+                            )
+
+                            if self.config.rllm.stepwise_advantage.enable and self.config.rllm.stepwise_advantage.mode == "broadcast":
+                                # Merging the separated out steps using the advantage from last steps
+                                self._stepwise_advantage_broadcast(batch, non_last_step_batch)
+                                batch = DataProto.concat([batch, non_last_step_batch])
 
                     # remove invalid items filtered out due to compact filtering
                     is_valid = batch.non_tensor_batch["is_valid"]
@@ -473,6 +490,12 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         val_metrics = self._validate_agent()
                         pprint(f"Final validation metrics: {val_metrics}")
                         logger.log(data=val_metrics, step=self.global_steps)
+
+                    try:
+                        logger.finish()
+                    except Exception:
+                        pass  # skip errors during cleanup
+
                     return
 
     def _validate_agent(self):
@@ -480,6 +503,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         data_source_lst = []
         uid_lst = []
         workflow_metrics_by_source = defaultdict(lambda: defaultdict(list))
+        batches_for_distill = []
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -497,6 +521,9 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
             test_batch = test_batch.sample_level_repeat(repeat_counts)
             test_output_gen_batch.meta_info.pop("repeat_counts", None)  # no longer needed after this
             test_batch = test_batch.union(test_output_gen_batch)
+
+            if self.distill_enabled:
+                batches_for_distill.append(test_batch)
 
             seen_episodes = set()
             selected_idxs = []
@@ -545,7 +572,197 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                     if values:  # Only add if we have values
                         metrics[f"val/{data_source}/{key}"] = np.mean(values)
 
+        # Compute distillation metrics if enabled
+        if self.distill_enabled and batches_for_distill:
+            try:
+                # Concatenate all validation batches
+                combined_batch = DataProto.concat(batches_for_distill)
+
+                # Compute old_log_probs for distillation
+                old_log_prob = self.actor_rollout_wg.compute_log_prob(combined_batch)
+                combined_batch = combined_batch.union(old_log_prob)
+
+                # Compute distillation advantages
+                distill_advantages = asyncio.run_coroutine_threadsafe(self._compute_distill_advantages(combined_batch), self._loop).result()
+
+                # Extract distillation metrics
+                response_mask = combined_batch.batch["response_mask"]
+                valid_advantages = distill_advantages[response_mask.bool()]
+                if len(valid_advantages) > 0:
+                    metrics["val/distill/mean_advantage"] = valid_advantages.mean().item()
+                    metrics["val/distill/std_advantage"] = valid_advantages.std().item()
+                    metrics["val/distill/min_advantage"] = valid_advantages.min().item()
+                    metrics["val/distill/max_advantage"] = valid_advantages.max().item()
+            except Exception as e:
+                print(f"Warning: Failed to compute distillation metrics during validation: {e}")
+                import traceback
+
+                traceback.print_exc()
+
         return metrics
+
+    async def _compute_distill_advantages(self, batch: DataProto) -> torch.Tensor:
+        """
+        Compute distillation advantages by querying teacher and aligning logprobs.
+
+        For each sample in the batch:
+        1. Extract student completion_ids, student logprobs, and (if needed) chat_completions
+        2. Query teacher for logprobs on the same completion
+        3. Align teacher logprobs to student tokens (byte-level alignment if different tokenizers)
+        4. Compute per-token advantages: teacher_logprob - student_logprob
+
+        Args:
+            batch: DataProto containing student responses, logprobs, and optionally chat_completions
+                  (chat_completions only needed when shared_tokenizer=False)
+
+        Returns:
+            Tensor of shape (batch_size, max_response_length) with per-token advantages.
+            Padded positions have advantages = 0.0
+        """
+        shared_tokenizer = self.config.rllm.distill.shared_tokenizer
+
+        prompts = batch.batch["prompts"]  # (batch_size, max_prompt_length)
+        responses = batch.batch["responses"]  # (batch_size, max_response_length)
+        response_mask = batch.batch["response_mask"]  # (batch_size, max_response_length)
+        attention_mask = batch.batch["attention_mask"]  # (batch_size, max_prompt_length + max_response_length)
+        rollout_log_probs = batch.batch["rollout_log_probs"]  # (batch_size, max_response_length)
+
+        batch_size, max_prompt_length = prompts.shape
+        _, max_response_length = responses.shape
+        advantages = torch.zeros((batch_size, max_response_length), dtype=torch.float32)
+
+        # Only need chat_completions and chat_parser when tokenizers differ
+        if not shared_tokenizer:
+            from rllm.trainer.distill import align_teacher_logprobs
+
+            chat_completions = batch.non_tensor_batch.get("chat_completions", None)
+            if chat_completions is None:
+                raise ValueError("chat_completions not found in batch, cannot perform distillation.")
+
+            if not hasattr(self.teacher_engine, "chat_parser") or self.teacher_engine.chat_parser is None:
+                raise ValueError("Teacher engine does not have a chat_parser.")
+            teacher_chat_parser = self.teacher_engine.chat_parser
+
+        async def get_teacher_logprobs(prompt: str | list[int], prompt_length: int, sample_idx: int) -> list[float]:
+            """Query teacher for logprobs
+            Note: We assume the teacher engine is vLLM, not SGLang.
+            This is because SGLang does not support prompt_logprobs through the completions endpoint.
+            Though we could support this through the echo and logprobs params if needed.
+            You can still use SGLang to serve the policy, but you should ensure the temperature is 1.0 and the top_p is 1.0."""
+
+            teacher_resp = await self.teacher_engine.completion(
+                prompt,
+                max_tokens=1,
+                extra_body={"prompt_logprobs": 1},
+            )
+            if not teacher_resp.prompt_logprobs:
+                raise ValueError(f"Teacher missing prompt_logprobs for sample {sample_idx}.")
+
+            return teacher_resp.prompt_logprobs[prompt_length:]
+
+        async def process_sample(sample_idx: int) -> None:
+            """Process a single sample: query teacher, align, compute advantages."""
+            try:
+                student_prompt_length = attention_mask[sample_idx, :max_prompt_length].sum().item()
+                if student_prompt_length == 0:
+                    raise ValueError(f"Sample {sample_idx} has no valid prompt tokens.")
+
+                student_response_length = attention_mask[sample_idx, -max_response_length:].sum().item()
+                if student_response_length == 0:
+                    raise ValueError(f"Sample {sample_idx} has no valid response tokens.")
+
+                student_prompt_ids = prompts[sample_idx, -student_prompt_length:].tolist()
+                student_response_ids = responses[sample_idx, :student_response_length].tolist()
+                student_logprobs = rollout_log_probs[sample_idx, :student_response_length].tolist()
+
+                if shared_tokenizer:
+                    # Fast path: student and teacher use the same tokenizer
+                    # Directly use student token IDs for teacher query
+                    teacher_ids = student_prompt_ids + student_response_ids
+                    aligned_teacher_logprobs = await get_teacher_logprobs(teacher_ids, student_prompt_length, sample_idx)
+
+                else:
+                    # Slow path: different tokenizers, need byte-level alignment
+                    sample_chat_completions = chat_completions[sample_idx]
+                    if sample_chat_completions is None or len(sample_chat_completions) == 0:
+                        raise ValueError(f"Sample {sample_idx} has no chat_completions for distillation.")
+
+                    teacher_prompt_messages = sample_chat_completions[:-1]
+                    teacher_completion_messages = sample_chat_completions[-1:]
+
+                    reasoning_str = teacher_completion_messages[0].get("reasoning", "")
+                    content_str = teacher_completion_messages[0].get("content", "")
+                    if not reasoning_str and not content_str:
+                        raise ValueError(f"Sample {sample_idx} has no reasoning or content in teacher completion message.")
+
+                    # Build teacher prompt and completion
+                    teacher_prompt = teacher_chat_parser.parse(
+                        teacher_prompt_messages,
+                        is_first_msg=True,
+                        add_generation_prompt=True,
+                        tools=[],
+                        accumulate_reasoning=False,
+                    )
+                    teacher_prompt_ids = self.teacher_tokenizer.encode(teacher_prompt, add_special_tokens=False)
+
+                    teacher_completion = teacher_chat_parser.parse(
+                        teacher_completion_messages,
+                        is_first_msg=False,
+                        add_generation_prompt=False,
+                        tools=[],
+                        accumulate_reasoning=True,
+                    )
+                    if teacher_completion.startswith(teacher_chat_parser.generation_prompt):
+                        teacher_completion = teacher_completion[len(teacher_chat_parser.generation_prompt) :]
+                    teacher_completion_ids = self.teacher_tokenizer.encode(teacher_completion, add_special_tokens=False)
+
+                    teacher_full_prompt = teacher_prompt + teacher_completion
+                    teacher_prompt_length = len(teacher_prompt_ids)
+                    teacher_logprobs = await get_teacher_logprobs(teacher_full_prompt, teacher_prompt_length, sample_idx)
+
+                    # Align teacher logprobs to student tokens using fast byte-level alignment algorithm
+                    aligned_teacher_logprobs = align_teacher_logprobs(
+                        student_ids=student_response_ids,
+                        student_tokenizer=self.tokenizer,
+                        teacher_ids=teacher_completion_ids,
+                        teacher_tokenizer=self.teacher_tokenizer,
+                        teacher_logprobs=teacher_logprobs,
+                        student_logprobs=student_logprobs,
+                        reasoning_str=reasoning_str,
+                        content_str=content_str,
+                    )
+
+                    # Visualize first sample for debugging alignment
+                    if sample_idx == 0:
+                        from rllm.trainer.distill import visualize_alignment
+
+                        visualize_alignment(
+                            student_ids=student_response_ids,
+                            student_tokenizer=self.tokenizer,
+                            teacher_ids=teacher_completion_ids,
+                            teacher_tokenizer=self.teacher_tokenizer,
+                            teacher_logprobs=teacher_logprobs,
+                            student_logprobs=student_logprobs,
+                            reasoning_str=reasoning_str,
+                            content_str=content_str,
+                            max_tokens=150,
+                        )
+
+                # reverse kl: teacher_logprob - student_logprob
+                sample_advantages = [t_lp - s_lp for t_lp, s_lp in zip(aligned_teacher_logprobs, student_logprobs, strict=False)]
+
+                advantages[sample_idx, :student_response_length] = torch.tensor(sample_advantages, dtype=torch.float32)
+
+            except Exception as e:
+                print(f"Error processing sample {sample_idx} for distillation: {e}")
+                import traceback
+
+                traceback.print_exc()
+                batch.non_tensor_batch["is_valid"][sample_idx] = False  # drop the item from the batch
+
+        await asyncio.gather(*[process_sample(i) for i in range(batch_size)])
+        advantages *= response_mask.float()
+        return advantages
 
     def generate_trajectories(self, batch, timing_raw=None, **kwargs):
         """
@@ -654,7 +871,9 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
 
     def shutdown(self):
         """A cleanup method to gracefully stop the background event loop."""
-        self.agent_execution_engine.shutdown()
+        if hasattr(self, "agent_execution_engine") and self.agent_execution_engine is not None:
+            self.agent_execution_engine.shutdown()
+            self.agent_execution_engine = None
         if hasattr(self, "_loop") and self._loop is not None and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
         if hasattr(self, "_thread") and self._thread is not None:

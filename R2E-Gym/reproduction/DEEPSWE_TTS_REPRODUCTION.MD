@@ -71,7 +71,7 @@ for run_idx in {1..16}; do
         --scaffold "r2egym" \
         --use_fn_calling False \
         --exp_name "${EXP_NAME}_run_${run_idx}" \
-        --temperature $TEMP \
+        --temperature "$TEMP" \
         --max_steps_absolute 100 \
         --backend "docker" \
         --condense_history False \

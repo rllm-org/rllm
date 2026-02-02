@@ -8,6 +8,11 @@ PPO_RAY_RUNTIME_ENV = {
         "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true",
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         "VLLM_USE_V1": "1",
+        # To prevent hanging or crash during synchronization of weights between actor and rollout
+        # in disaggregated mode. See:
+        # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
+        # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
+        "NCCL_CUMEM_ENABLE": "0",
     },
     "worker_process_setup_hook": "rllm.patches.verl_patch_hook.setup",
 }
@@ -68,5 +73,5 @@ def get_ppo_ray_runtime_env():
     env.update(_get_forwarded_env_vars())
     return {
         "env_vars": env,
-        "worker_process_setup_hook": PPO_RAY_RUNTIME_ENV["worker_process_setup_hook"],
+        # "worker_process_setup_hook": PPO_RAY_RUNTIME_ENV["worker_process_setup_hook"],
     }

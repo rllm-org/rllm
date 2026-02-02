@@ -10,7 +10,7 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     data.train_batch_size=64 \
     data.max_prompt_length=2048 \
     data.max_response_length=1024 \
-    actor_rollout_ref.model.path=Qwen/Qwen3-0.6B \
+    actor_rollout_ref.model.path=Qwen/Qwen3-4B-Instruct-2507 \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
@@ -31,12 +31,13 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.mode="async" \
     actor_rollout_ref.rollout.enforce_eager=False \
-    actor_rollout_ref.rollout.temperature=0.6 \
+    actor_rollout_ref.rollout.temperature=1.0 \
+    actor_rollout_ref.rollout.top_p=1.0 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.n=4 \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
-    actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
-    actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
+    actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
+    actor_rollout_ref.rollout.val_kwargs.top_p=1.0 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.adv_estimator=grpo \
     rllm.compact_filtering.enable=False \
@@ -59,6 +60,7 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     trainer.test_freq=10 \
     trainer.default_hdfs_dir=null \
     trainer.total_epochs=100 \
-    rllm.workflow.use_workflow=True
+    rllm.workflow.use_workflow=True \
+    +ray_init._temp_dir=/home/tianhao/tmp
 
 pkill -9 -f 'ray::WorkerDict' 

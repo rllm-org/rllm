@@ -56,6 +56,10 @@ In a new terminal session, run the DeepSWE agent evaluation:
 # Activate the virtual environment (if in new terminal)
 source .venv/bin/activate
 
+# Set required environment variables
+export TEMP=1
+export EXP_NAME="deepswe_32b_agent_swebv_eval_temp_1_run_1"
+
 # Run the DeepSWE agent on SWE-Bench Verified
 time python src/r2egym/agenthub/run/edit.py runagent_multiple \
     --traj_dir "./traj" \

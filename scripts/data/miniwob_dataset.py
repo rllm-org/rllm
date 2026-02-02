@@ -5,9 +5,9 @@ import random
 import browsergym.miniwob
 import gymnasium as gym
 import pandas as pd
+from verl.utils.hdfs_io import copy, makedirs
 
 import rllm
-from verl.utils.hdfs_io import copy, makedirs
 
 if __name__ == "__main__":
     import importlib

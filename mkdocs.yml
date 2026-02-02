@@ -81,6 +81,13 @@ nav:
         - AgentWorkflowEngine for Episode Rollout: core-concepts/workflow-engine.md
         - AgentTrainer for RL Training: core-concepts/training.md
         - RL Algorithms for Agents: core-concepts/rl-algos.md
+        - SDK Overview: core-concepts/sdk.md
+      - Examples:
+        - Training a LangGraph Search Agent using the rLLM SDK: examples/sdk_langgraph_rag.md
+        - RL Training with Tinker: examples/tinker_rl.md
+        - VLM Training on Geo3k dataset: examples/vlm.md
+        - Joint Training of Solver-Judge Workflow: examples/solver_judge.md
+        - LoRA Training in rLLM (with verl): examples/gsm8k_lora.md
         - Eval Protocol Integration: core-concepts/eval-protocol.md
       - References:
         - Examples: examples/index.md
@@ -97,17 +104,24 @@ nav:
       - AgentWorkflowEngine for Episode Rollout: core-concepts/workflow-engine.md
       - AgentTrainer for RL Training: core-concepts/training.md
       - RL Algorithms for Agents: core-concepts/rl-algos.md
+      - SDK Overview: core-concepts/sdk.md
       - Eval Protocol Integration: core-concepts/eval-protocol.md
   - Examples:
       - Overview: examples/index.md
+      - Math Agent with rLLM SDK: examples/sdk_math.md
+      - Solver-Judge Workflow with rLLM SDK: examples/sdk_solver_judge.md
+      - LangGraph RAG Agent with rLLM SDK: examples/sdk_langgraph_rag.md
+      - RL Training with Tinker: examples/tinker_rl.md
+      - Verifiers (Prime Intellect Hub): examples/verifiers.md
+      - LoRA Training in rLLM (with verl): examples/gsm8k_lora.md
+      - Solver-Judge Workflow: examples/solver_judge.md
+      - Vision-Language Models (VLM): examples/vlm.md
       - DeepScaleR: examples/deepscaler.md
       - DeepCoder: examples/deepcoder.md
       - DeepSWE: examples/swe.md
       - Search Agent: examples/search.md
       - FrozenLake Agent: examples/frozenlake.md
       - Math SFT: examples/sft.md
-      - Solver-Judge Workflow: examples/solver_judge.md
-
   - API Reference:
       - Overview: api/index.md
       - Agents:

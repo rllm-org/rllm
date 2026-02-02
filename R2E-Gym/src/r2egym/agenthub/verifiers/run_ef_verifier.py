@@ -41,8 +41,6 @@ def run_model(arg) -> float:
                 api_key=None,
                 temperature=0,
                 api_base=f"http://localhost:8000/v1",
-                vertex_ai_project="r2eg-441800",
-                vertex_ai_location="europe-west1",
                 logprobs=True,
                 top_logprobs=20,
                 # extra_body={
@@ -56,19 +54,19 @@ def run_model(arg) -> float:
             if retries >= MAX_RETRIES:
                 raise e
 
+    target_token = 4 # <YES> or <NO>
     all_logits = [
         {
             lp.token: lp.logprob
-            for lp in response.choices[0].logprobs.content[4].top_logprobs
+            for lp in response.choices[0].logprobs.content[target_token].top_logprobs
         }
     ]
 
+    # compute probability of YES
     k = 0
-
     p_yes = all_logits[k].get("YES", -10000)
     p_no = all_logits[k].get("NO", -10000)
     yes_prob = (np.exp(p_yes)) / (np.exp(p_yes) + np.exp(p_no))
-
     return yes_prob
 
 
@@ -88,7 +86,7 @@ def process_trajectories_to_verifier_format(
         messages = []
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = [
-                executor.submit(traj2verifier_data, traj, max_tokens=max_tokens)
+                executor.submit(traj2verifier_data, traj.model_dump(), max_tokens=max_tokens)
                 for traj in trajectories
             ]
             for future in as_completed(futures):

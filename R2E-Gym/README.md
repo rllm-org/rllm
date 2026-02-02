@@ -16,7 +16,7 @@
 
 <!-- paper . data and models . project page -->
 <p align="center">
-<a href="./assets/paper.pdf">📃 Paper</a>
+<a href="https://arxiv.org/abs/2504.07164">📃 Paper</a>
 •
 <a href="https://huggingface.co/R2E-Gym" >🤗 Data & Models</a>
 •
@@ -25,6 +25,19 @@
 </p>
 
 ---
+
+## 🚨 UPDATES
+
+🔥 **NEW: DeepSWE Models Available!** We've released **DeepSWE**, our latest state-of-the-art SWE agent models that achieve exceptional performance on SWE-Bench trained with [**rLLM**](https://github.com/agentica-project/rLLM). 
+
+- 🤗 **Model**: [agentica-org/DeepSWE-Preview](https://huggingface.co/agentica-org/DeepSWE-Preview) 
+- 📋 **Reproduction Guides**: Check out our detailed reproduction guides in the [`reproduction/`](./reproduction/) folder:
+  - [`DEEPSWE_REPRODUCTION.MD`](./reproduction/DEEPSWE_REPRODUCTION.MD) - Complete guide for reproducing DeepSWE results
+  - [`DEEPSWE_TTS_REPRODUCTION.MD`](./reproduction/DEEPSWE_TTS_REPRODUCTION.MD) - Test-time scaling reproduction guide
+
+---
+
+
 
 We present **R2E-Gym**, the largest procedurally curated environment for training real-world SWE-Agents.
 We show that R2E-Gym enables more scalable train and test-time scaling, achieving **51% on the SWE-Bench Verified benchmark**, reflecting a new state-of-the-art for open-weight SWE-Agents and for first time being competitive with proprietary models such as o1 and sonnet-3.5-v2 with tools.
