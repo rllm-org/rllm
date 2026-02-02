@@ -122,6 +122,9 @@ nav:
       - Search Agent: examples/search.md
       - FrozenLake Agent: examples/frozenlake.md
       - Math SFT: examples/sft.md
+  - Experimental:
+      - Experimental Features: experimental/index.md
+      - Configuration: experimental/rllm-and-backend-config.md
   - API Reference:
       - Overview: api/index.md
       - Agents:

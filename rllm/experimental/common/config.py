@@ -110,6 +110,8 @@ class AlgorithmConfig:
     stepwise_advantage_mode: Literal["broadcast", "per_step"] = "broadcast"
     norm_adv_by_std_in_grpo: bool = True
     use_rllm: bool = False
+    # for tinker backend only
+    loss_fn: Literal["importance_sampling", "ppo", "cispo", "dro", "cross_entropy"] | None = None
 
     @classmethod
     def from_config(cls, config: DictConfig) -> "AlgorithmConfig":
@@ -125,4 +127,5 @@ class AlgorithmConfig:
             stepwise_advantage_mode=config.rllm.stepwise_advantage.mode,
             norm_adv_by_std_in_grpo=config.rllm.stepwise_advantage.get("norm_adv_by_std_in_grpo", True),
             use_rllm=config.rllm.stepwise_advantage.get("use_rllm", False),
+            loss_fn=config.rllm.algorithm.get("loss_fn", None),
         )

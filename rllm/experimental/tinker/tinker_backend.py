@@ -123,15 +123,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # we need to get it from `AutoTokenizer` since the `policy_trainer` has not been initialized yet
         self.tokenizer = AutoTokenizer.from_pretrained(self.full_config.model.name)
 
-        self.rollout_engine = TinkerEngine(
-            base_url=self.full_config.tinker_base_url,
-            model_name=self.full_config.model.name,
-            service_client=self.service_client,
-            tokenizer=self.tokenizer,
-            max_prompt_length=self.full_config.data.max_prompt_length,
-            max_response_length=self.full_config.data.max_response_length,
-            sampling_params=self.full_config.sampling,
-        )
+        self.rollout_engine = TinkerEngine(base_url=self.full_config.tinker_base_url, model_name=self.full_config.model.name, service_client=self.service_client, tokenizer=self.tokenizer, max_prompt_length=self.full_config.data.max_prompt_length, max_response_length=self.full_config.data.max_response_length, sampling_params=self.full_config.sampling, **self.full_config.rollout_engine)
         return self.rollout_engine
 
     def validate_config(self) -> None:
@@ -186,6 +178,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         self,
         batch: Any,
         agent_workflow_engine: UnifiedWorkflowEngine,
+        is_validation: bool = False,
         **kwargs,
     ) -> list[Episode]:
         """Generate episodes using the workflow engine.
@@ -198,6 +191,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         Args:
             batch: Input batch (list of task dicts from dataloader).
             agent_workflow_engine: The workflow engine to use for episode generation.
+            is_validation: Whether the generation is for validation.
             **kwargs: Additional arguments.
 
         Returns:
@@ -210,17 +204,17 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         self.rollout_engine.set_sampling_client(self.sampling_client)
 
         # Build interleaved batch
-        if agent_workflow_engine.current_mode == "train":
-            group_size = self.full_config.rllm.rollout.n
-        else:
+        if is_validation:
             group_size = self.full_config.rllm.rollout.n_val
+        else:
+            group_size = self.full_config.rllm.rollout.n
         interleaved_batch = _build_interleave_batch(batch, group_size)
 
         # Extract task IDs
         task_ids = [item["uid"] for item in interleaved_batch]
 
         # Execute tasks using the agent workflow engine (async)
-        episodes = await agent_workflow_engine.execute_tasks(interleaved_batch, task_ids, **kwargs)
+        episodes = await agent_workflow_engine.execute_tasks(interleaved_batch, task_ids, is_validation=is_validation, **kwargs)
 
         return episodes
 
@@ -266,15 +260,26 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         assert trainer_state.trajectory_groups is not None, "Trajectory groups are not set"
 
         # Use TinkerPolicyTrainer's method for forward-backward
-        with simple_timer("forward_backward", trainer_state.timing_dict):
-            (
-                training_datums,
-                training_logprobs,
-                adv_metrics,
-            ) = await self.policy_trainer.forward_backward_from_trajectory_groups(
-                trainer_state.trajectory_groups,
-                algorithm_config=self._algorithm_config,
-            )
+        if not self.full_config.fuse_forward_backward_and_optim_step:  # perform forward_backward and optim_step separately
+            with simple_timer("forward_backward", trainer_state.timing_dict):
+                (
+                    training_datums,
+                    training_logprobs,
+                    adv_metrics,
+                ) = await self.policy_trainer.forward_backward_from_trajectory_groups(
+                    trainer_state.trajectory_groups,
+                    algorithm_config=self._algorithm_config,
+                )
+        else:
+            with simple_timer("fused_forward_backward_and_optim_step", trainer_state.timing_dict):
+                (
+                    training_datums,
+                    training_logprobs,
+                    adv_metrics,
+                ) = await self.policy_trainer.fused_forward_backward_and_optim_step(
+                    trainer_state.trajectory_groups,
+                    algorithm_config=self._algorithm_config,
+                )
 
         # Store datums as backend batch
         trainer_state.backend_batch = training_datums
@@ -313,6 +318,9 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         Args:
             trainer_state: The trainer state.
         """
+        if self.full_config.fuse_forward_backward_and_optim_step:  # optim_step already performed
+            return
+
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
         beta1 = self.full_config.training.get("beta1", 0.9)
@@ -355,7 +363,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Save final checkpoint if we didn't just save it in the last batch
         if trainer_state.global_step % self.full_config.rllm.trainer.save_freq != 0:
             logger.info(f"Saving final checkpoint at step {trainer_state.global_step}")
-            await self.policy_trainer.save_checkpoint_async(trainer_state.global_step, kind="state")
+            await self.policy_trainer.save_checkpoint_and_get_sampling_client(trainer_state.global_step, kind="state", do_save=True)
 
     async def on_batch_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of each batch.

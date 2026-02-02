@@ -164,11 +164,12 @@ class UnifiedWorkflowEngine:
         finally:
             await self.workflow_queue.put(workflow)
 
-    async def execute_tasks(self, tasks: list[dict], task_ids: list[str] | None = None, **kwargs) -> list[Episode]:
+    async def execute_tasks(self, tasks: list[dict], task_ids: list[str] | None = None, is_validation: bool = False, **kwargs) -> list[Episode]:
         """Run asynchronous workflow execution with retry logic for multiple tasks.
         Args:
             tasks: List of task dictionaries to process.
             task_ids: Optional list of task identifiers. If None, UUIDs are generated.
+            is_validation: Whether the generation is for validation.
             **kwargs: Additional arguments passed to individual task processing.
 
         Returns:
@@ -176,6 +177,8 @@ class UnifiedWorkflowEngine:
         """
         if self.workflow_queue is None:
             await self.initialize_pool()
+
+        self.rollout_engine.is_validation = is_validation
 
         if task_ids is None:
             task_ids = [str(uuid.uuid4()) for _ in tasks]
@@ -229,12 +232,13 @@ class UnifiedWorkflowEngine:
         """
         # Lazy import to avoid importing verl when using SkyRL backend
         from rllm.experimental.rollout import VerlEngine
+
         assert isinstance(self.rollout_engine, VerlEngine), "Rollout engine must be a VerlEngine to invoke execute_tasks_verl"
         await self.rollout_engine.wake_up()
 
         is_validation = batch.meta_info.get("validate", False)
         if is_validation:
-            self.rollout_engine.validate = True
+            self.rollout_engine.is_validation = True
             self.current_mode = "val"
         else:
             self.current_mode = "train"
@@ -247,7 +251,7 @@ class UnifiedWorkflowEngine:
             for episode, data_source in zip(episodes, data_sources, strict=True):
                 episode.info["data_source"] = data_source
 
-        self.rollout_engine.validate = False
+        self.rollout_engine.is_validation = False
 
         await self.rollout_engine.sleep()
 

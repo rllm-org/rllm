@@ -90,6 +90,7 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
         self,
         batch: TBatch,
         agent_workflow_engine: UnifiedWorkflowEngine,
+        is_validation: bool = False,
         **kwargs,
     ) -> list[Episode]:
         """Generate episodes from the batch using the agent workflow engine.
@@ -97,6 +98,7 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
         Args:
             batch: The input batch.
             agent_workflow_engine: The workflow engine to use.
+            is_validation: Whether the generation is for validation.
             **kwargs: Additional arguments.
 
         Returns:

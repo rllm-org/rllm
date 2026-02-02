@@ -16,12 +16,12 @@ from tinker_cookbook import checkpoint_utils
 from tinker_cookbook.tokenizer_utils import Tokenizer
 
 import tinker
-from rllm.agents.agent import Episode, TrajectoryGroup
+from rllm.agents.agent import TrajectoryGroup
 from rllm.experimental.common import (
     AlgorithmConfig,
     CompactFilteringConfig,
     TransformConfig,
-    transform_episodes_to_trajectory_groups,
+    rLLMAdvantageEstimator,
 )
 from rllm.experimental.tinker.transform import transform_trajectory_groups_to_datums
 from tinker.types import AdamParams
@@ -30,6 +30,14 @@ if TYPE_CHECKING:
     import torch
 
 logger = logging.getLogger(__name__)
+
+
+# Mapping from rLLMAdvantageEstimator to their default Tinker loss function (overriding is allowed through config)
+ADV_TO_LOSS_FN_AUTO_MAP = {
+    rLLMAdvantageEstimator.REINFORCE: "importance_sampling",
+    rLLMAdvantageEstimator.GRPO: "ppo",
+    rLLMAdvantageEstimator.OTHER: "importance_sampling",
+}
 
 
 # helper decorator for any function requiring a training client to be initialized
@@ -158,43 +166,6 @@ class TinkerPolicyTrainer:
         )
 
     @require_training_client
-    async def forward_backward_future(self, episodes: list[Episode]):
-        """
-        Run forward-backward pass from episodes.
-
-        .. deprecated::
-            This method is deprecated. Use `forward_backward_from_trajectory_groups` instead.
-            The UnifiedTrainer handles episode to trajectory group transformation.
-        """
-        import warnings
-
-        warnings.warn(
-            "forward_backward_future() is deprecated. Use forward_backward_from_trajectory_groups() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-        trajectory_groups, grouping_metrics = transform_episodes_to_trajectory_groups(
-            episodes,
-            transform_config=self.transform_config,
-            compact_filtering_config=self.cf_config,
-            metrics_prefix="grouping",
-        )
-        training_datums = transform_trajectory_groups_to_datums(
-            trajectory_groups,
-            algorithm_config=self.algorithm_config,
-        )
-
-        datums_no_mask = [self._remove_mask(datum) for datum in training_datums]
-
-        fwd_bwd_future = await self.training_client.forward_backward_async(  # type: ignore[attr-defined]
-            datums_no_mask,
-            loss_fn="importance_sampling",
-        )
-
-        return fwd_bwd_future, grouping_metrics
-
-    @require_training_client
     async def forward_backward_from_trajectory_groups(
         self,
         trajectory_groups: list[TrajectoryGroup],
@@ -225,13 +196,11 @@ class TinkerPolicyTrainer:
             algorithm_config=algorithm_config,
         )
 
-        # Remove mask from datums (not needed by forward_backward)
-        datums_no_mask = [self._remove_mask(datum) for datum in training_datums]
-
         # Forward-backward pass
+        loss_fn = algorithm_config.loss_fn or ADV_TO_LOSS_FN_AUTO_MAP[algorithm_config.estimator]
         fwd_bwd_future = await self.training_client.forward_backward_async(  # type: ignore[attr-defined]
-            datums_no_mask,
-            loss_fn="importance_sampling",
+            [self._remove_mask(datum) for datum in training_datums],
+            loss_fn=loss_fn,
         )
 
         # Wait for completion and extract logprobs
@@ -264,6 +233,48 @@ class TinkerPolicyTrainer:
         )
         optim_step_future = await self.training_client.optim_step_async(adam_params)  # type: ignore[attr-defined]
         return optim_step_future
+
+    @require_training_client
+    async def fused_forward_backward_and_optim_step(
+        self,
+        trajectory_groups: list[TrajectoryGroup],
+        algorithm_config: AlgorithmConfig | None = None,
+        learning_rate: float | None = None,
+        beta1: float = 0.9,
+        beta2: float = 0.95,
+        eps: float = 1e-8,
+    ) -> tuple[list[tinker.Datum], list[torch.Tensor], dict]:
+        """Run forward-backward pass and optimizer step from trajectory groups -- at the same time.
+
+        This follows from the best-practice with Tinker: https://tinker-docs.thinkingmachines.ai/async#performance-tips-overlap-requests
+        """
+        # TODO(listar2000): refactor this function to avoid redundant code with forward_backward_from_trajectory_groups
+        if algorithm_config is None:
+            algorithm_config = self.algorithm_config
+
+        # Transform trajectory groups to datums (includes advantage computation)
+        training_datums, adv_metrics = transform_trajectory_groups_to_datums(
+            trajectory_groups,
+            algorithm_config=algorithm_config,
+        )
+
+        # Forward-backward and optimizer future together
+        loss_fn = algorithm_config.loss_fn or ADV_TO_LOSS_FN_AUTO_MAP[algorithm_config.estimator]
+        fwd_bwd_future = await self.training_client.forward_backward_async(  # type: ignore[attr-defined]
+            [self._remove_mask(datum) for datum in training_datums],
+            loss_fn=loss_fn,
+        )
+        optim_step_future = await self.optim_step_future(learning_rate=learning_rate, beta1=beta1, beta2=beta2, eps=eps)
+        # Retrieve the results together
+        fwd_bwd_result = await fwd_bwd_future.result_async()
+        await optim_step_future.result_async()
+
+        training_logprobs = []
+        for output in fwd_bwd_result.loss_fn_outputs:
+            logprobs = output["logprobs"].to_torch()
+            training_logprobs.append(logprobs)
+
+        return training_datums, training_logprobs, adv_metrics
 
     @require_training_client
     async def save_checkpoint_and_get_sampling_client(

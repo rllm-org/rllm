@@ -46,8 +46,6 @@ class VerlEngine(RolloutEngine):
         print(f"train_sampling_params: {self.train_sampling_params}")
         print(f"val_sampling_params: {self.val_sampling_params}")
 
-        self.validate = False  # flag enabled/disabled by AgentWorkflowEngine.execute_tasks_verl
-
     @property
     def supports_token_in_token_out(self) -> bool:
         return True
@@ -59,12 +57,11 @@ class VerlEngine(RolloutEngine):
         input_length = len(token_input)
         application_id = kwargs.pop("application_id", str(uuid.uuid4()))
         enforce_max_prompt_length = kwargs.pop("enforce_max_prompt_length", True)
-        validate = self.validate or kwargs.pop("validate", False)
 
         if enforce_max_prompt_length and input_length > self.max_prompt_length:
             raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
 
-        sampling_params = self.val_sampling_params.copy() if validate else self.train_sampling_params.copy()
+        sampling_params = self.val_sampling_params.copy() if self.is_validation else self.train_sampling_params.copy()
         sampling_params.update(kwargs)
         max_tokens = sampling_params.pop("max_tokens", sampling_params.pop("max_new_tokens", self.max_response_length))
         # starting from verl 0.7.0, we can pass in per-turn max_tokens into the sampling_params

@@ -57,6 +57,7 @@ class ModelOutput:
 class RolloutEngine:
     chat_parser: ChatTemplateParser | None = None
     tokenizer: Tokenizer | None = None
+    is_validation: bool = False  # flag enabled/disabled by AgentWorkflowEngine.execute_tasks
 
     def __init__(self, *args, **kwargs):
         pass

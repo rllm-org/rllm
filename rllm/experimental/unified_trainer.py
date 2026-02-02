@@ -321,15 +321,14 @@ class UnifiedTrainer:
 
     async def _train_batch_async(self, batch: Any, trainer_state: TrainerState) -> None:
         """Train a batch (async implementation)."""
-        termination_counts = Counter()
-        workflow_metrics = defaultdict(list)
-
         self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="train", epoch=trainer_state.epoch)
 
-        # stage 1: generate episodes (async)
-        trainer_state.episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine)
+        # stage 1: generate episodes (async) and collect metrics (sync)
+        trainer_state.episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, is_validation=False)
         if not trainer_state.has_episodes:
             return
+
+        workflow_metrics, termination_counts = self._collect_workflow_metrics_from_episodes(trainer_state.episodes)
 
         # stage 2: transform episodes to trajectory groups (sync)
         trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(trainer_state.episodes, self.transform_config, self.trajectory_grouping_hook)
@@ -377,7 +376,7 @@ class UnifiedTrainer:
 
         total_counts = max(sum(termination_counts.values()), 1)
         for r in TerminationReason:
-            trainer_state.metrics[f"batch/{r.value}"] = termination_counts[r.value] / total_counts
+            trainer_state.metrics[f"batch/termination_reason/{r.value}"] = termination_counts[r.value] / total_counts
 
     async def _validate_async(self, trainer_state: TrainerState) -> dict:
         """Validate the model (async implementation)."""
@@ -396,7 +395,7 @@ class UnifiedTrainer:
         val_dataloader: Iterable = self.backend.get_dataloader(self.val_dataset, trainer_state)
         for batch in val_dataloader:
             # Generate episodes and transform to trajectory groups
-            val_episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine)
+            val_episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, is_validation=True)
             val_trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(val_episodes, self.transform_config, self.trajectory_grouping_hook)
             reward_metrics = collect_reward_and_advantage_from_trajectory_groups(val_trajectory_groups, self.algorithm_config, collect_advantage=False)
 
@@ -457,6 +456,26 @@ class UnifiedTrainer:
         # Explicitly finish the logger to prevent hang in __del__ during garbage collection
         if hasattr(self, "logger") and self.logger is not None:
             self.logger.finish()
+
+    # =========================================================================
+    # Helper functions
+    # =========================================================================
+    def _collect_workflow_metrics_from_episodes(self, episodes: list[Episode]) -> tuple[dict, Counter]:
+        workflow_metrics = defaultdict(list)
+        termination_counts = Counter()
+        for episode in episodes:
+            for k, v in episode.metrics.items():
+                workflow_metrics[k].append(v)
+            if episode.termination_reason is not None:
+                termination_counts[episode.termination_reason.value] += 1
+        # reduce the metrics to a scalar value, with error handling
+        reduced_workflow_metrics = {}
+        for k, v in workflow_metrics.items():
+            try:
+                reduced_workflow_metrics[k] = np.mean(v)
+            except Exception:
+                continue
+        return reduced_workflow_metrics, termination_counts
 
 
 class TrainerLauncher(ABC):
