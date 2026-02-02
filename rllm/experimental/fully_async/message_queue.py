@@ -59,10 +59,7 @@ class MessageQueue:
         self.total_consumed = 0
         self.dropped_samples = 0
 
-        print(
-            f"[MessageQueue] initialized with max_queue_size={max_queue_size},"
-            f"staleness_threshold={self.staleness_threshold}"
-        )
+        print(f"[MessageQueue] initialized with max_queue_size={max_queue_size},staleness_threshold={self.staleness_threshold}")
 
     async def put_sample(self, sample: Any, param_version: int) -> bool:
         """

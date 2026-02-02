@@ -3,8 +3,8 @@ import time
 
 import ray
 
+from rllm.experimental.fully_async.client import RolloutClient
 from rllm.experimental.fully_async.protocol import TrajectoryGroup
-from rllm.experimental.fully_async.rollout_client import RolloutClient
 
 
 @ray.remote(num_cpus=10)
@@ -40,7 +40,7 @@ class RolloutExecutor:
         # Track active rollouts
         self.active_sample = 0
         self.enqueued_sample = 0
-        self.max_staleness_samples = None # fill in during fit()
+        self.max_staleness_samples = None  # fill in during fit()
 
     def _create_dataloader(self):
         """Create dataset and dataloader inside the actor."""
@@ -91,7 +91,7 @@ class RolloutExecutor:
                 # Get message queue stats
                 mq_stats = await self.message_queue_client.get_statistics()
 
-                print(f"\n{'='*60}")
+                print(f"\n{'=' * 60}")
                 print(f"[RolloutExecutor][WATCH] Debug Stats @ {time.strftime('%H:%M:%S')}")
                 print(f"  Staleness Control:")
                 print(f"    active_sample:        {self.active_sample}")
@@ -111,7 +111,7 @@ class RolloutExecutor:
                 print(f"    current_param_version:{self.current_param_version}")
                 print(f"    is_paused:            {self.is_paused}")
                 print(f"    last_consumed:        {self.last_consumed}")
-                print(f"{'='*60}\n")
+                print(f"{'=' * 60}\n")
 
             except asyncio.CancelledError:
                 print("[RolloutExecutor][WATCH] Watch task cancelled")
@@ -128,9 +128,7 @@ class RolloutExecutor:
         while True:
             try:
                 serialized, param_version = await self.result_queue.get()
-                put_succeeded = await self.message_queue_client.put_sample(
-                    serialized, param_version=param_version
-                )
+                put_succeeded = await self.message_queue_client.put_sample(serialized, param_version=param_version)
                 # If drop happened, return permit to compensate for lost old sample
             except asyncio.CancelledError:
                 raise
@@ -143,9 +141,7 @@ class RolloutExecutor:
         # This prevents overwhelming the SGLang server with too many requests
         async with self.sema:
             try:
-                trajectory_ls = await asyncio.gather(
-                    *[self.generate_trajectory(datum) for _ in range(self.n)]
-                )
+                trajectory_ls = await asyncio.gather(*[self.generate_trajectory(datum) for _ in range(self.n)])
                 trajectory_gp = TrajectoryGroup(trajectories=trajectory_ls)
                 # Serialize before putting in queue (trainer expects bytes and does cloudpickle.loads)
                 serialized = ray.cloudpickle.dumps(trajectory_gp)
@@ -154,6 +150,7 @@ class RolloutExecutor:
                 self.enqueued_sample += 1
             except Exception as e:
                 import traceback
+
                 error_msg = traceback.format_exc()
                 print(f"[RolloutExecutor] Full traceback:\n{error_msg}")
                 # Re-raise to make the error visible and stop the system if it keeps failing
@@ -226,18 +223,17 @@ class RolloutExecutor:
                 print(f"[RolloutExecutor] Completed epoch {iteration}, processed {datum_count} datums", flush=True)
         except Exception as e:
             import traceback
+
             print(f"[RolloutExecutor] EXCEPTION in main loop: {e}")
             print(f"[RolloutExecutor] Traceback:\n{traceback.format_exc()}")
             raise
         finally:
             # Cleanup
-            print(f"[RolloutExecutor] Cleaning up watch task...")
             watch_task.cancel()
             try:
                 await watch_task
             except asyncio.CancelledError:
                 pass
-            print(f"[RolloutExecutor] Cleaning up drain task...")
             drain_task.cancel()
             try:
                 await drain_task
@@ -251,13 +247,11 @@ class RolloutExecutor:
             await asyncio.sleep(0.5)
 
         mq_stats = await self.message_queue_client.get_statistics()
-        mq_queue_size = mq_stats.get('queue_size', 0)
-        mq_total_consumed = mq_stats.get('total_consumed', 'N/A')
-        mq_total_produced = mq_stats.get('total_produced', 'N/A')
+        mq_queue_size = mq_stats.get("queue_size", 0)
+        mq_total_consumed = mq_stats.get("total_consumed", "N/A")
+        mq_total_produced = mq_stats.get("total_produced", "N/A")
 
-        print(f"[RolloutExecutor] update_staleness_tracking CALLED with consumed={consumed_since_last_sync}, "
-              f"current enqueued_sample={self.enqueued_sample}, active_sample={self.active_sample}, "
-              f"mq_queue_size={mq_queue_size}, mq_total_consumed={mq_total_consumed}, mq_total_produced={mq_total_produced}", flush=True)
+        print(f"[RolloutExecutor] update_staleness_tracking CALLED with consumed={consumed_since_last_sync}, current enqueued_sample={self.enqueued_sample}, active_sample={self.active_sample}, mq_queue_size={mq_queue_size}, mq_total_consumed={mq_total_consumed}, mq_total_produced={mq_total_produced}", flush=True)
         self.enqueued_sample = mq_queue_size
         print(f"[RolloutExecutor] update_staleness_tracking DONE, new enqueued_sample={self.enqueued_sample}", flush=True)
 
@@ -289,10 +283,7 @@ class RolloutExecutor:
         old_version = self.current_param_version
         self.current_param_version = version
 
-        print(
-            f"[RolloutExecutor] Parameter version updated from {old_version} to {version}, "
-            f"idle_ratio: {idle_ratio}"
-        )
+        print(f"[RolloutExecutor] Parameter version updated from {old_version} to {version}, idle_ratio: {idle_ratio}")
 
         # Reset version_start_time for next version cycle
         self.version_start_time = time.time()

@@ -22,6 +22,7 @@ from verl.utils.device import get_nccl_backend
 
 logger = logging.getLogger(__name__)
 
+
 @ray.remote
 class ParameterSynchronizer:
     """
@@ -142,11 +143,7 @@ class ParameterSynchronizer:
         # Update staleness tracking - subtracts consumed samples from enqueued count
         # This must be called AFTER resume so continue_event can be set if there's capacity
         # Calculate consumed samples per sync directly from config
-        consumed_per_sync = (
-            self.config.actor_rollout_ref.actor.ppo_mini_batch_size
-            * self.config.async_training.require_batches
-            * self.config.async_training.trigger_parameter_sync_step
-        )
+        consumed_per_sync = self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self.config.async_training.require_batches * self.config.async_training.trigger_parameter_sync_step
         print(f"[ParameterSynchronizer] Calling update_staleness_tracking with consumed_per_sync={consumed_per_sync}", flush=True)
         ray.get(self.rollout_executor.update_staleness_tracking.remote(consumed_per_sync))
         print(f"[ParameterSynchronizer] update_staleness_tracking completed", flush=True)
@@ -166,10 +163,7 @@ class ParameterSynchronizer:
             ray.get(self.rollout_wg.sync_rollout_weights(self.sync_group_name))
 
         end_time = time.time()
-        print(
-            f"[ParameterSynchronizer] sync_weights success. cost {end_time - start_time:.2f} seconds, "
-            f"pause:{pause_time - start_time:.2f}s, sync:{end_time - pause_time:.2f}s"
-        )
+        print(f"[ParameterSynchronizer] sync_weights success. cost {end_time - start_time:.2f} seconds, pause:{pause_time - start_time:.2f}s, sync:{end_time - pause_time:.2f}s")
         # async train do validate
         if validate and use_trainer_do_validate:
             self.validate_task = self.trainer._validate_process.remote()
@@ -177,9 +171,7 @@ class ParameterSynchronizer:
             self.validate_task = None
         # Async Update rollout version & validation
         # Pass the timing metrics from RolloutExecutor to the rollouter
-        self.wait_last_update = self.rollouter.update_param_version.remote(
-            version, validate, global_steps, use_trainer_do_validate, rollout_executor_timing
-        )
+        self.wait_last_update = self.rollouter.update_param_version.remote(version, validate, global_steps, use_trainer_do_validate, rollout_executor_timing)
         self.wait_last_resume = self.rollouter.resume.remote(self.wait_last_update)
 
         # Resume SGLang generation after abort_router paused it

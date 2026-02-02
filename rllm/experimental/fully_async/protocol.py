@@ -70,6 +70,7 @@ class OutputWithVersion:
             end_version=end_version,
         )
 
+
 @dataclass
 class Sequence:
     prompt_ids: list[int]
@@ -137,6 +138,7 @@ class Sequence:
             end_version=self.end_version,
         )
 
+
 @dataclass
 class Trajectory:
     sequences: list[Sequence]
@@ -161,6 +163,7 @@ class Trajectory:
         if cur_seq:
             merged_sequences.append(cur_seq)
         return merged_sequences
+
 
 @dataclass
 class TrajectoryGroup:

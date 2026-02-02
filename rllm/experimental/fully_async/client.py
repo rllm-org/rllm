@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Literal
 
 import httpx
 
@@ -48,31 +48,31 @@ class RolloutClient:
     async def generate_chat(
         self,
         # === OpenAI Chat Completions API parameters ===
-        messages: List[Dict[str, Any]],
-        model: Optional[str] = None,  # ignored, for API compatibility
+        messages: list[dict[str, Any]],
+        model: str | None = None,  # ignored, for API compatibility
         temperature: float = 1.0,
         top_p: float = 1.0,
         n: int = 1,
-        max_tokens: Optional[int] = None,
-        max_completion_tokens: Optional[int] = None,
-        stop: Optional[Union[str, List[str]]] = None,
+        max_tokens: int | None = None,
+        max_completion_tokens: int | None = None,
+        stop: str | list[str] | None = None,
         presence_penalty: float = 0.0,
         frequency_penalty: float = 0.0,
-        logit_bias: Optional[Dict[str, float]] = None,
+        logit_bias: dict[str, float] | None = None,
         logprobs: bool = True,  # Default True for training
-        top_logprobs: Optional[int] = None,
-        tools: Optional[List[Dict]] = None,
-        tool_choice: Union[str, Dict] = "auto",
-        response_format: Optional[Dict] = None,
-        seed: Optional[int] = None,
-        user: Optional[str] = None,
+        top_logprobs: int | None = None,
+        tools: list[dict] | None = None,
+        tool_choice: str | dict = "auto",
+        response_format: dict | None = None,
+        seed: int | None = None,
+        user: str | None = None,
         # === SGLang extra parameters ===
-        top_k: Optional[int] = None,
-        min_p: Optional[float] = None,
-        repetition_penalty: Optional[float] = None,
-        stop_token_ids: Optional[List[int]] = None,
-        reasoning_effort: Optional[Literal["low", "medium", "high"]] = None,
-        chat_template_kwargs: Optional[Dict] = None,
+        top_k: int | None = None,
+        min_p: float | None = None,
+        repetition_penalty: float | None = None,
+        stop_token_ids: list[int] | None = None,
+        reasoning_effort: Literal["low", "medium", "high"] | None = None,
+        chat_template_kwargs: dict | None = None,
         continue_final_message: bool = False,
     ) -> OutputWithVersion:
         """
@@ -84,10 +84,7 @@ class RolloutClient:
             response token IDs and log probabilities.
         """
         if self.tokenizer is None:
-            raise ValueError(
-                "tokenizer is required for generate_chat(). "
-                "Pass tokenizer to RolloutClient.__init__() or use generate() with input_ids."
-            )
+            raise ValueError("tokenizer is required for generate_chat(). Pass tokenizer to RolloutClient.__init__() or use generate() with input_ids.")
 
         # Step 1: Apply chat template to get prompt_ids
         prompt_ids = self._apply_chat_template(
@@ -121,13 +118,13 @@ class RolloutClient:
 
     def _apply_chat_template(
         self,
-        messages: List[Dict],
-        tools: Optional[List[Dict]] = None,
-        tool_choice: Union[str, Dict] = "auto",
-        reasoning_effort: Optional[str] = None,
-        chat_template_kwargs: Optional[Dict] = None,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        tool_choice: str | dict = "auto",
+        reasoning_effort: str | None = None,
+        chat_template_kwargs: dict | None = None,
         continue_final_message: bool = False,
-    ) -> List[int]:
+    ) -> list[int]:
         """
         Apply chat template exactly like /v1/chat/completions.
 
@@ -179,7 +176,7 @@ class RolloutClient:
         if assistant_prefix:
             encoded = self.tokenizer.encode(assistant_prefix, add_special_tokens=False)
             # Remove BOS if present
-            if encoded and hasattr(self.tokenizer, 'bos_token_id') and self.tokenizer.bos_token_id is not None:
+            if encoded and hasattr(self.tokenizer, "bos_token_id") and self.tokenizer.bos_token_id is not None:
                 if encoded[0] == self.tokenizer.bos_token_id:
                     encoded = encoded[1:]
             prompt_ids = prompt_ids + list(encoded)
@@ -190,18 +187,18 @@ class RolloutClient:
         self,
         temperature: float = 1.0,
         top_p: float = 1.0,
-        max_tokens: Optional[int] = None,
-        stop: Optional[Union[str, List[str]]] = None,
+        max_tokens: int | None = None,
+        stop: str | list[str] | None = None,
         presence_penalty: float = 0.0,
         frequency_penalty: float = 0.0,
         n: int = 1,
-        top_k: Optional[int] = None,
-        min_p: Optional[float] = None,
-        repetition_penalty: Optional[float] = None,
-        stop_token_ids: Optional[List[int]] = None,
-        seed: Optional[int] = None,
-        logit_bias: Optional[Dict[str, float]] = None,
-    ) -> Dict[str, Any]:
+        top_k: int | None = None,
+        min_p: float | None = None,
+        repetition_penalty: float | None = None,
+        stop_token_ids: list[int] | None = None,
+        seed: int | None = None,
+        logit_bias: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
         """Build sampling params dict for SGLang /generate endpoint."""
         params = {
             "temperature": temperature,
@@ -234,7 +231,7 @@ class RolloutClient:
 
     # ========== Original Low-Level API (preserved for backward compatibility) ==========
 
-    async def generate(self, prompt_ids: List[int], sampling_params: Dict) -> OutputWithVersion:
+    async def generate(self, prompt_ids: list[int], sampling_params: dict) -> OutputWithVersion:
         """
         Generate with token IDs directly (low-level API).
 
@@ -257,7 +254,7 @@ class RolloutClient:
             else:
                 return output
 
-    async def _generate(self, output: OutputWithVersion, sampling_params: Dict):
+    async def _generate(self, output: OutputWithVersion, sampling_params: dict):
         """Internal generate that handles a single request/response cycle."""
         version = self.cur_version
         payload = {

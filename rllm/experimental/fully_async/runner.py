@@ -13,37 +13,58 @@
 # limitations under the License.
 
 import asyncio
+import inspect
 import os
 import random
 import socket
 import threading
+import time
 from pprint import pprint
 
-import hydra
 import ray
 from omegaconf import OmegaConf
 
-from verl.experimental.fully_async_policy.fully_async_main import (
-    create_resource_pool_manager,
-    create_role_worker_mapping,
-)
 from rllm.experimental.fully_async.async_trainer import AsyncTrainer
 from rllm.experimental.fully_async.fully_async_rollouter import FullyAsyncRollouter
 from rllm.experimental.fully_async.message_queue import MessageQueue, MessageQueueClient
 from rllm.experimental.fully_async.param_sync import ParameterSynchronizer
 from rllm.experimental.fully_async.protocol import Trajectory
-from rllm.experimental.fully_async.rollout_engine import RolloutExecutor
+from rllm.experimental.fully_async.rollout_executor import RolloutExecutor
 from rllm.experimental.fully_async.utils import calculate_max_concurrency
+from verl.experimental.fully_async_policy.fully_async_main import create_resource_pool_manager, create_role_worker_mapping
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.utils import Role, need_reference_policy
 from verl.utils.fs import copy_to_local
 
 
-@ray.remote(num_cpus=1)
+def create_task_runner_with_rollout_fn(rollout_fn):
+    """
+    Factory function that creates a FullyAsyncTaskRunner class with a custom rollout_fn baked in.
+
+    This allows passing a custom rollout function to the TaskRunner without modifying run_ppo.
+
+    Args:
+        rollout_fn: Async function with signature:
+            async def rollout_fn(client, tokenizer, **kwargs) -> Trajectory
+
+    Returns:
+        A Ray remote class configured with the custom rollout_fn
+    """
+
+    @ray.remote(num_cpus=1)
+    class ConfiguredTaskRunner(FullyAsyncTaskRunner):
+        _custom_rollout_fn = staticmethod(rollout_fn)
+
+    return ConfiguredTaskRunner
+
+
 class FullyAsyncTaskRunner:
     """
     Ray remote class for executing distributed PPO training tasks.
     """
+
+    # Default rollout function - should be overridden by subclasses or set via factory
+    _custom_rollout_fn = None
 
     def __init__(self):
         self.running = False
@@ -61,9 +82,7 @@ class FullyAsyncTaskRunner:
         OmegaConf.resolve(config)
 
         print("[ASYNC MAIN] Initializing model and tokenizer...")
-        local_path = copy_to_local(
-            config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False)
-        )
+        local_path = copy_to_local(config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False))
         from verl.utils import hf_processor, hf_tokenizer
 
         trust_remote_code = config.data.get("trust_remote_code", False)
@@ -138,6 +157,30 @@ class FullyAsyncTaskRunner:
         print("[ASYNC MAIN] All components initialized successfully")
         # set router url and msg client for the parameter syncer
 
+    def _create_rollout_executor(self, config):
+        """Override to use the custom rollout_fn instead of the default."""
+        max_concurrent_tasks = calculate_max_concurrency(config)
+        n = config.actor_rollout_ref.rollout.get("n", 1)
+
+        if self._custom_rollout_fn is None:
+            raise ValueError("Use create_task_runner_with_rollout_fn to pass in a rollout_fn")
+
+        if not inspect.iscoroutinefunction(self._custom_rollout_fn):
+            raise TypeError(f"rollout_fn must be an async function (defined with 'async def'), but got {type(self._custom_rollout_fn).__name__}. Only async functions are supported.")
+
+        rollout_executor = RolloutExecutor.remote(
+            router_url=self.router_url,
+            rollout_fn=self._custom_rollout_fn,
+            n=n,
+            message_queue_client=self.components["message_queue_client"],
+            config=config,
+            tokenizer=self.components["tokenizer"],
+            processor=self.components["processor"],
+            max_concurrency=max_concurrent_tasks,
+            total_rollout_steps=config.rollout.total_rollout_steps,
+        )
+
+        self.components["rollout_executor"] = rollout_executor
 
     def _create_rollouter(self, config) -> None:
         rollouter = FullyAsyncRollouter.remote(
@@ -161,11 +204,7 @@ class FullyAsyncTaskRunner:
         print("[ASYNC MAIN] Rollouter created and initialized successfully")
 
     def _create_trainer(self, config) -> None:
-        trainer_role_mapping = {
-            role: worker_cls
-            for role, worker_cls in self.components["role_worker_mapping"].items()
-            if role != Role.Rollout
-        }
+        trainer_role_mapping = {role: worker_cls for role, worker_cls in self.components["role_worker_mapping"].items() if role != Role.Rollout}
 
         trainer = AsyncTrainer.remote(
             config=config,
@@ -180,126 +219,6 @@ class FullyAsyncTaskRunner:
         ray.get(trainer.init_workers.remote())
         self.components["trainer"] = trainer
         print("[ASYNC MAIN] FullyAsyncTrainer created and initialized successfully")
-
-    def _create_rollout_executor(self, config):
-        import time as time_module
-
-        from verl.utils.reward_score import default_compute_score
-
-        # Get overlong buffer config from reward_model.reward_kwargs
-        reward_kwargs = config.reward_model.get("reward_kwargs", {})
-        overlong_buffer_cfg = reward_kwargs.get("overlong_buffer_cfg", {})
-        overlong_buffer_enabled = overlong_buffer_cfg.get("enable", False)
-        overlong_buffer_len = overlong_buffer_cfg.get("len", 0)
-        overlong_penalty_factor = overlong_buffer_cfg.get("penalty_factor", 1.0)
-        max_resp_len = reward_kwargs.get("max_resp_len", config.data.max_response_length)
-
-        async def rollout_fn(client, tokenizer, **kwargs):
-            start_time = time_module.time()
-            param_version_start = client.cur_version
-
-            # Extract raw_prompt from dataset (chat format: [{'content': '...', 'role': 'user'}])
-            # raw_prompt is ndarray shape (1,), raw_prompt[0] is the list of message dicts
-            messages = kwargs["raw_prompt"][0]
-            messages = [{"role": "system", "content": "Please reason step by step, and put your final answer within \\boxed{}."}] + messages
-            prompt_ids = tokenizer.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                tokenize=True,
-            )
-
-            # Get sampling params from config or use defaults
-            sampling_params = {
-                "temperature": config.actor_rollout_ref.rollout.get("temperature", 1.0),
-                "max_new_tokens": config.actor_rollout_ref.rollout.get("max_new_tokens", 8192),
-                "top_p": 1.0,
-                "top_k": -1,
-            }
-
-            output = await client.generate(prompt_ids, sampling_params=sampling_params)
-
-            # Capture timing and version info
-            end_time = time_module.time()
-            param_version_end = client.cur_version
-            processing_time = end_time - start_time
-
-            # Extract response_ids from output_chunks (OutputWithVersion protocol)
-            # OutputWithVersion has output_chunks, each OutputChunk has response_ids
-            response_ids = []
-            for chunk in output.output_chunks:
-                response_ids.extend(chunk.response_ids)
-
-            # Decode the response for reward calculation
-            response_str = tokenizer.decode(response_ids, skip_special_tokens=False)
-            if random.random() < 0.001:
-                prompt_str = tokenizer.decode(prompt_ids, skip_special_tokens=False)
-                print(f"[FullyAsyncRollouter DEBUG] Prompt: {prompt_str}")
-                print(f"[FullyAsyncRollouter DEBUG] Response: {response_str}")
-
-            # Extract ground_truth and data_source from kwargs for reward calculation
-            # reward_model is ndarray shape (1,), reward_model[0] is the dict with ground_truth
-            # data_source is ndarray shape (1,), data_source[0] is the string
-            reward_model_info = kwargs["reward_model"][0]
-            ground_truth = reward_model_info.get("ground_truth", "")
-            data_source = kwargs["data_source"][0]
-
-            # Compute reward using default_compute_score (same as DAPORewardManager)
-            try:
-                result = default_compute_score(
-                    data_source=data_source,
-                    solution_str=tokenizer.decode(response_ids, skip_special_tokens=True),
-                    ground_truth=ground_truth,
-                )
-                if isinstance(result, dict):
-                    score = result["score"]
-                else:
-                    score = float(result)
-            except Exception as e:
-                print(f"[RolloutFn] Error computing reward: {e}, using default score -1.0")
-                score = -1.0
-
-            reward = score
-
-            # Apply overlong penalty (DAPO-specific feature)
-            if overlong_buffer_enabled:
-                valid_response_length = len(response_ids)
-                expected_len = max_resp_len - overlong_buffer_len
-                exceed_len = valid_response_length - expected_len
-                overlong_reward = min(-exceed_len / overlong_buffer_len * overlong_penalty_factor, 0)
-                reward += overlong_reward
-
-            # Store metadata for statistics tracking
-            metadata = {
-                "processing_time": processing_time,
-                "param_version_start": param_version_start,
-                "param_version_end": param_version_end,
-                "param_version": param_version_end,  # The version used for this trajectory
-                "is_partial": param_version_start != param_version_end,  # Was there a param update during generation?
-                "tool_calls_time": 0.0,  # Placeholder for agent-based rollouts with tool calls
-            }
-
-            return Trajectory(sequences=[output.to_sequence()], reward=reward, metadata=metadata)
-
-        # Calculate max_concurrent_tasks for the new simplified design
-        # This controls how many generation tasks run concurrently
-        # Staleness bound = max_concurrent_tasks + max_queue_size
-        max_concurrent_tasks = calculate_max_concurrency(config)
-        # Get n (number of trajectories per datum) from config, matching fully_async_rollouter.py
-        n = config.actor_rollout_ref.rollout.get("n", 1)
-
-        rollout_executor = RolloutExecutor.remote(
-            router_url=self.router_url,
-            rollout_fn=rollout_fn,
-            n=n,
-            message_queue_client=self.components["message_queue_client"],
-            config=config,
-            tokenizer=self.components["tokenizer"],
-            processor=self.components["processor"],
-            max_concurrency=max_concurrent_tasks,
-            total_rollout_steps=config.rollout.total_rollout_steps,
-        )
-
-        self.components["rollout_executor"] = rollout_executor
 
     def _run_training_loop(self):
         self.running = True
@@ -337,19 +256,24 @@ class FullyAsyncTaskRunner:
             print("[ASYNC MAIN] Training completed or interrupted")
 
 
-@hydra.main(config_path="../config", config_name="fully_async_ppo_trainer", version_base=None)
-def main(config):
-    from verl.trainer.main_ppo import run_ppo
+class AsyncAgentTrainer:
+    def __init__(self, config, train_dataset, val_dataset, rollout_fn):
+        self.config = config
+        self.train_dataset = train_dataset
+        self.val_dataset = val_dataset
+        self.rollout_fn = rollout_fn
 
-    # Ensure async training config exists
-    if not hasattr(config, "async_training"):
-        raise RuntimeError("must set async_training config")
-    from time import time
+    def train(self):
+        from verl.trainer.main_ppo import run_ppo
 
-    start_time = time()
-    run_ppo(config, task_runner_class=FullyAsyncTaskRunner)
-    print(f"total time: {time() - start_time:.2f} seconds")
+        # Ensure async training config exists
+        if not hasattr(self.config, "async_training"):
+            raise RuntimeError("must set async_training config")
 
+        start_time = time.time()
 
-if __name__ == "__main__":
-    main()
+        # Create a configured TaskRunner class with rollout_fn baked in
+        task_runner_class = create_task_runner_with_rollout_fn(self.rollout_fn)
+        run_ppo(self.config, task_runner_class=task_runner_class)
+
+        print(f"total time: {time.time() - start_time:.2f} seconds")

@@ -61,7 +61,9 @@ async def post(url: str, payload: dict = None, max_retries: int = 3, expect_json
                 raise
             await asyncio.sleep(1)
 
+
 # Sglang utils
+
 
 async def abort_async(router_url):
     """Abort all requests on all workers behind the router and WAIT for completion.
@@ -79,10 +81,7 @@ async def abort_async(router_url):
 
     # Use /pause_generation with mode="abort" which WAITS for all requests to complete
     # This is different from /abort_request which is fire-and-forget
-    await asyncio.gather(*[
-        post(f"{url}/pause_generation", {"mode": "abort"}, expect_json=True)
-        for url in urls
-    ])
+    await asyncio.gather(*[post(f"{url}/pause_generation", {"mode": "abort"}, expect_json=True) for url in urls])
 
 
 async def continue_generation_async(router_url):
@@ -93,12 +92,11 @@ async def continue_generation_async(router_url):
     response = await get(f"{router_url.strip('/')}/workers")
     urls = [worker["url"] for worker in response["workers"]]
 
-    await asyncio.gather(*[
-        post(f"{url}/continue_generation", {}, expect_json=True)
-        for url in urls
-    ])
+    await asyncio.gather(*[post(f"{url}/continue_generation", {}, expect_json=True) for url in urls])
+
 
 # Sample utils
+
 
 def compute_grpo_outcome_advantage(
     token_level_rewards: torch.Tensor,
@@ -173,7 +171,8 @@ def compute_grpo_outcome_advantage(
 
     return scores, scores
 
-def padding(tensor_ls, max_len, pad_value, padding_side='left'):
+
+def padding(tensor_ls, max_len, pad_value, padding_side="left"):
     """
     Pad a list of 1D tensors to max_len.
 
@@ -192,14 +191,13 @@ def padding(tensor_ls, max_len, pad_value, padding_side='left'):
 
     # Then use pad_sequence_to_length to ensure we reach max_len
     # pad_sequence_to_length pads a 2D tensor [bs, seq_len] -> [bs, max_len]
-    left_pad = (padding_side == 'left')
+    left_pad = padding_side == "left"
     padded = pad_sequence_to_length(padded, max_len, pad_value, left_pad=left_pad)
 
     return padded
 
-def assemble_batch_from_trajectory_group_ls(
-    trajectory_group_ls: list[TrajectoryGroup], config, tokenizer, balance_batch=None
-) -> DataProto:
+
+def assemble_batch_from_trajectory_group_ls(trajectory_group_ls: list[TrajectoryGroup], config, tokenizer, balance_batch=None) -> DataProto:
     """
     Assemble gen_batch_output from TrajectoryGroup objects.
 
@@ -312,7 +310,6 @@ def assemble_batch_from_trajectory_group_ls(
     position_ids_t = position_ids_t.masked_fill(attention_masks_t == 0, 0)
     input_ids_t = torch.cat([prompts_t, responses_t], dim=-1)
 
-
     tensor_dict = {
         "attention_mask": attention_masks_t,
         "input_ids": input_ids_t,
@@ -342,7 +339,7 @@ def assemble_batch_from_trajectory_group_ls(
             "tool_calls_times": np.array(tool_calls_times) if tool_calls_times else np.array([]),
             "param_version_start": np.array(param_version_starts) if param_version_starts else np.array([0]),
             "param_version_end": np.array(param_version_ends) if param_version_ends else np.array([0]),
-        }
+        },
     )
 
     # Set meta_info for downstream processing

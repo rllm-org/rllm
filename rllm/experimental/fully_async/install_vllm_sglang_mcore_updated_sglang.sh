@@ -1,15 +1,18 @@
 #!/bin/bash
+# installing verl at commit adff7956cefd8ef707cd67dd8e08c06fa63679bd
 
-USE_MEGATRON=${USE_MEGATRON:-1}
+USE_MEGATRON=${USE_MEGATRON:-0}
 USE_SGLANG=${USE_SGLANG:-1}
 
 export MAX_JOBS=32
 
 echo "1. install inference frameworks and pytorch they need"
 if [ $USE_SGLANG -eq 1 ]; then
-    uv pip install "sglang[all]==0.5.2" --no-cache && uv pip install torch-memory-saver --no-cache
+    uv pip install "sglang[all]==0.5.7" --no-cache && uv pip install torch-memory-saver --no-cache
 fi
 uv pip install --no-cache "vllm==0.15.0"
+uv pip install sglang-router
+
 
 echo "2. install basic packages"
 uv pip install "transformers[hf_xet]>=4.51.0,<5.0.0" "accelerate" datasets peft hf-transfer \
@@ -53,3 +56,6 @@ if [ $USE_MEGATRON -eq 1 ]; then
 fi
 
 echo "Successfully installed all packages"
+
+# install verl
+# install rllm

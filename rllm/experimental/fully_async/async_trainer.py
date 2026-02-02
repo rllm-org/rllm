@@ -3,21 +3,17 @@ from typing import Any
 
 import ray
 
-from verl import DataProto
 from rllm.experimental.fully_async.fully_async_trainer import FullyAsyncTrainer
-from rllm.experimental.fully_async.utils import (
-    assemble_batch_from_trajectory_group_ls,
-    compute_grpo_outcome_advantage,
-)
+from rllm.experimental.fully_async.utils import assemble_batch_from_trajectory_group_ls, compute_grpo_outcome_advantage
+from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss
-from verl.trainer.ppo.ray_trainer import apply_kl_penalty
+from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_response_mask
 from verl.utils.debug import marked_timer
 from verl.utils.metric import reduce_metrics
 
 
 @ray.remote(num_cpus=10)
 class AsyncTrainer(FullyAsyncTrainer):
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Initialize stale tracking counters
@@ -47,11 +43,13 @@ class AsyncTrainer(FullyAsyncTrainer):
                 self.stale_trajectory_processed += stale_traj_count
 
             # Add stale tracking metrics
-            metrics.update({
-                "fully_async/count/stale_samples_processed": self.stale_samples_processed,
-                "fully_async/count/stale_trajectory_processed": self.stale_trajectory_processed,
-                "fully_async/count/current_param_version": self.current_param_version,
-            })
+            metrics.update(
+                {
+                    "fully_async/count/stale_samples_processed": self.stale_samples_processed,
+                    "fully_async/count/stale_trajectory_processed": self.stale_trajectory_processed,
+                    "fully_async/count/current_param_version": self.current_param_version,
+                }
+            )
 
             # Collect all fully_async and timing metrics from batch.meta_info
             for key, value in batch.meta_info.items():
@@ -70,8 +68,6 @@ class AsyncTrainer(FullyAsyncTrainer):
             f"[FullyAsyncTrainer] Requesting {self.required_samples} samples from queue",
             flush=True,
         )
-        max_prompt_length = self.config.data.max_prompt_length
-        max_response_length = self.config.data.max_response_length
 
         # Collect samples using a simple loop calling get_sample
         consumer_start = time.time()
@@ -82,19 +78,13 @@ class AsyncTrainer(FullyAsyncTrainer):
             sample, queue_len = self.message_queue_client.get_sample_sync()
 
             if sample is None:
-                print(
-                    f"[FullyAsyncTrainer] Detected termination signal (None), stopping sample collection. "
-                    f"Collected {len(queue_samples)}/{self.required_samples} samples"
-                )
+                print(f"[FullyAsyncTrainer] Detected termination signal (None), stopping sample collection. Collected {len(queue_samples)}/{self.required_samples} samples")
                 break
 
             queue_samples.append(sample)
 
             if len(queue_samples) % 64 == 0:
-                print(
-                    f"[FullyAsyncTrainer] Collected {len(queue_samples)}/{self.required_samples} samples. "
-                    f"mq_len: {queue_len}"
-                )
+                print(f"[FullyAsyncTrainer] Collected {len(queue_samples)}/{self.required_samples} samples. mq_len: {queue_len}")
 
         consumer_end = time.time()
 
@@ -103,11 +93,7 @@ class AsyncTrainer(FullyAsyncTrainer):
             return None, None
         total_wait_time = consumer_end - consumer_start
 
-        print(
-            f"[FullyAsyncTrainer] Loop collection completed: {len(queue_samples)}/{self.required_samples} samples, "
-            f"total wait time: {total_wait_time:.2f} seconds."
-            f"mq_len: {queue_len}"
-        )
+        print(f"[FullyAsyncTrainer] Loop collection completed: {len(queue_samples)}/{self.required_samples} samples, total wait time: {total_wait_time:.2f} seconds.mq_len: {queue_len}")
 
         queue_samples = [ray.cloudpickle.loads(x) for x in queue_samples]
         # Assemble batch - now working directly with TrajectoryGroup objects
@@ -156,7 +142,6 @@ class AsyncTrainer(FullyAsyncTrainer):
         return data
 
     def _process_batch_common(self, batch, metrics, timing_raw, local_trigger_step=None):
-
         # with marked_timer("reward", timing_raw, color="yellow"):
         #     # compute reward model score
         #     if self.use_rm:
@@ -241,9 +226,7 @@ class AsyncTrainer(FullyAsyncTrainer):
 
             # compute rewards. apply_kl_penalty if available
             if self.config.algorithm.use_kl_in_reward:
-                batch, kl_metrics = apply_kl_penalty(
-                    batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
-                )
+                batch, kl_metrics = apply_kl_penalty(batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty)
                 metrics.update(kl_metrics)
             else:
                 batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
@@ -260,9 +243,7 @@ class AsyncTrainer(FullyAsyncTrainer):
                 metrics.update(is_metrics)
 
             # compute advantages, executed on the driver process
-            norm_adv_by_std_in_grpo = self.config.algorithm.get(
-                "norm_adv_by_std_in_grpo", True
-            )  # GRPO adv normalization factor
+            norm_adv_by_std_in_grpo = self.config.algorithm.get("norm_adv_by_std_in_grpo", True)  # GRPO adv normalization factor
 
             # TODO: fixed here to calculate advantage correctly because of var len problem.
             # batch = compute_advantage(
@@ -274,13 +255,11 @@ class AsyncTrainer(FullyAsyncTrainer):
             #     norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
             #     config=self.config.algorithm,
             # )
-            batch = self.compute_grpo_advantage(
-                batch,
-                norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo
-            )
+            batch = self.compute_grpo_advantage(batch, norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo)
 
         # Pad batch to world_size for distributed training
         from verl.protocol import pad_dataproto_to_divisor
+
         actor_world_size = self.actor_rollout_wg.world_size
         original_batch_size = len(batch)
         batch, pad_size = pad_dataproto_to_divisor(batch, actor_world_size)

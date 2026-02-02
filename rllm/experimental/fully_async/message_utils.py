@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 @dataclass
 class ToolCall:
     """OpenAI-compatible tool call structure."""
+
     id: str
     type: str = "function"
     function: Dict[str, Any] = None  # {"name": str, "arguments": str (JSON)}
@@ -35,23 +36,16 @@ class MessageConverter:
         # Regex patterns for different model types
         if model_type in ["qwen", "hermes"]:
             # Qwen/Hermes: <tool_call>\n{"name": "...", "arguments": {...}}\n</tool_call>
-            self.tool_call_regex = re.compile(
-                r'<tool_call>\s*(.*?)\s*</tool_call>',
-                re.DOTALL
-            )
+            self.tool_call_regex = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
         elif model_type == "gpt-oss":
             # GPT-OSS: <|start|>assistant<|channel|>commentary to=functions.{name}...
             self.tool_call_regex = re.compile(
-                r'<\|start\|>assistant<\|channel\>commentary to=functions\.(\w+).*?'
-                r'<\|constrain\|>json<\|message\|>(.*?)<\|call\|>',
-                re.DOTALL
+                r"<\|start\|>assistant<\|channel\>commentary to=functions\.(\w+).*?"
+                r"<\|constrain\|>json<\|message\|>(.*?)<\|call\|>",
+                re.DOTALL,
             )
 
-    def token_ids_to_message(
-        self,
-        response_ids: List[int],
-        skip_special_tokens: bool = True
-    ) -> Dict[str, Any]:
+    def token_ids_to_message(self, response_ids: List[int], skip_special_tokens: bool = True) -> Dict[str, Any]:
         """
         Convert response token IDs to OpenAI message format.
 
@@ -87,21 +81,11 @@ class MessageConverter:
         content, tool_calls = self._parse_tool_calls(text)
 
         # Step 3: Build OpenAI message
-        message = {
-            "role": "assistant",
-            "content": content.strip()
-        }
+        message = {"role": "assistant", "content": content.strip()}
 
         # Add tool_calls only if present
         if tool_calls:
-            message["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": tc.type,
-                    "function": tc.function
-                }
-                for tc in tool_calls
-            ]
+            message["tool_calls"] = [{"id": tc.id, "type": tc.type, "function": tc.function} for tc in tool_calls]
 
         return message
 
@@ -149,14 +133,7 @@ class MessageConverter:
                 arguments = tool_data.get("arguments", {})
 
                 # Create ToolCall object
-                tool_calls.append(ToolCall(
-                    id=f"call_{idx}",
-                    type="function",
-                    function={
-                        "name": name,
-                        "arguments": json.dumps(arguments, ensure_ascii=False)
-                    }
-                ))
+                tool_calls.append(ToolCall(id=f"call_{idx}", type="function", function={"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)}))
             except json.JSONDecodeError as e:
                 print(f"Warning: Failed to parse tool call: {e}")
                 continue
@@ -179,25 +156,14 @@ class MessageConverter:
                 # Parse arguments JSON
                 arguments = json.loads(arguments_str.strip())
 
-                tool_calls.append(ToolCall(
-                    id=f"call_{idx}",
-                    type="function",
-                    function={
-                        "name": name,
-                        "arguments": json.dumps(arguments, ensure_ascii=False)
-                    }
-                ))
+                tool_calls.append(ToolCall(id=f"call_{idx}", type="function", function={"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)}))
             except json.JSONDecodeError as e:
                 print(f"Warning: Failed to parse tool call arguments: {e}")
                 continue
 
         return tool_calls
 
-    def batch_token_ids_to_messages(
-        self,
-        batch_response_ids: List[List[int]],
-        skip_special_tokens: bool = True
-    ) -> List[Dict[str, Any]]:
+    def batch_token_ids_to_messages(self, batch_response_ids: List[List[int]], skip_special_tokens: bool = True) -> List[Dict[str, Any]]:
         """
         Convert a batch of response token IDs to OpenAI messages.
 
@@ -208,17 +174,10 @@ class MessageConverter:
         Returns:
             List of OpenAI message dicts
         """
-        return [
-            self.token_ids_to_message(response_ids, skip_special_tokens)
-            for response_ids in batch_response_ids
-        ]
+        return [self.token_ids_to_message(response_ids, skip_special_tokens) for response_ids in batch_response_ids]
 
 
-def build_tool_response_message(
-    tool_name: str,
-    tool_output: str,
-    tool_call_id: Optional[str] = None
-) -> Dict[str, Any]:
+def build_tool_response_message(tool_name: str, tool_output: str, tool_call_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Build a tool response message in OpenAI format.
 
@@ -244,11 +203,7 @@ def build_tool_response_message(
             "tool_call_id": "call_0"
         }
     """
-    message = {
-        "role": "tool",
-        "name": tool_name,
-        "content": tool_output
-    }
+    message = {"role": "tool", "name": tool_name, "content": tool_output}
 
     if tool_call_id:
         message["tool_call_id"] = tool_call_id
@@ -275,7 +230,7 @@ def extract_thinking_content(text: str) -> Tuple[str, str]:
         >>> print(content)
         "The answer is 42."
     """
-    think_pattern = re.compile(r'<think>(.*?)</think>', re.DOTALL)
+    think_pattern = re.compile(r"<think>(.*?)</think>", re.DOTALL)
     matches = think_pattern.findall(text)
 
     # Extract all thinking content
@@ -293,9 +248,9 @@ if __name__ == "__main__":
     from transformers import AutoTokenizer
 
     # Example 1: Basic conversion
-    print("="*60)
+    print("=" * 60)
     print("Example 1: Basic Message Conversion")
-    print("="*60)
+    print("=" * 60)
 
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
     converter = MessageConverter(tokenizer, model_type="qwen")
@@ -312,9 +267,9 @@ if __name__ == "__main__":
     print(json.dumps(message, indent=2))
 
     # Example 2: Multiple tool calls
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Example 2: Multiple Tool Calls")
-    print("="*60)
+    print("=" * 60)
 
     response_text_multi = """I'll help with both tasks.
 <tool_call>
@@ -330,22 +285,18 @@ if __name__ == "__main__":
     print(json.dumps(message_multi, indent=2))
 
     # Example 3: Tool response message
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Example 3: Building Tool Response")
-    print("="*60)
+    print("=" * 60)
 
-    tool_response = build_tool_response_message(
-        tool_name="search",
-        tool_output="Found 3 relevant Python tutorials...",
-        tool_call_id="call_0"
-    )
+    tool_response = build_tool_response_message(tool_name="search", tool_output="Found 3 relevant Python tutorials...", tool_call_id="call_0")
 
     print(json.dumps(tool_response, indent=2))
 
     # Example 4: Extracting thinking content
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("Example 4: Extract Thinking Content")
-    print("="*60)
+    print("=" * 60)
 
     text_with_thinking = """<think>
 The user is asking about the capital of France. This is a straightforward geography question.

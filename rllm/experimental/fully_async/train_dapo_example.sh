@@ -1,23 +1,15 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-# Workaround for transformers/accelerate _is_hf_initialized compatibility issue
-# export ACCELERATE_DISABLE_RICH=1
-# export HF_HUB_DISABLE_PROGRESS_BARS=1
+# DAPO Math Training Example using Fully Async Infrastructure
+# This script launches training using the train_dapo_example.py with AsyncAgentTrainer
 
-project_name='DAPO'
-exp_name='DAPO-Qwen3-4B-fsdp2-fully-async-4-4-cache-aware'
+project_name='rllm-fully-async'
+exp_name='DAPO-Qwen3-4B-4-4'
 
-# Ray
-# RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
-# WORKING_DIR=${WORKING_DIR:-"${PWD}"}
-# RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
 # Paths
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
-# very important! please modify the max_position_embeddings in config.json to 32768 after downloading from huggingface
-# MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen2.5-Math-7B"}
 MODEL_PATH="/datasets/pretrained-llms/Qwen3-4B"
-# CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
 CKPTS_DIR="/checkpoint/ram-h100-2/tianhaowu/verl/ckpts/${project_name}/${exp_name}"
 TRAIN_FILE=${TRAIN_FILE:-"/checkpoint/ram-h100-2/tianhaowu/verl/data/dapo-math-17k.parquet"}
 TEST_FILE=${TEST_FILE:-"/checkpoint/ram-h100-2/tianhaowu/verl/data/aime-2024.parquet"}
@@ -84,7 +76,8 @@ trigger_parameter_sync_step=4
 require_batches=4
 partial_rollout=True
 
-PYTHONUNBUFFERED=1 python -m rllm.experimental.fully_async.runner \
+# Launch training using train_dapo_example.py with AsyncAgentTrainer
+PYTHONUNBUFFERED=1 python -m rllm.experimental.fully_async.train_dapo_example \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \

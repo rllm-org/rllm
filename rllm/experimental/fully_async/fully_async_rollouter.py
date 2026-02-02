@@ -26,14 +26,10 @@ import ray
 import torch
 from ray import ObjectRef
 
-from verl.experimental.fully_async_policy.detach_utils import (
-    RolloutSample,
-    ValidateMetrics,
-    prepare_single_generation_data,
-)
-from verl.experimental.fully_async_policy.ray_trainer import FullyAsyncRayPPOTrainer
 from rllm.experimental.fully_async.message_queue import MessageQueueClient
 from rllm.experimental.fully_async.utils import abort_async, continue_generation_async
+from verl.experimental.fully_async_policy.detach_utils import RolloutSample, ValidateMetrics, prepare_single_generation_data
+from verl.experimental.fully_async_policy.ray_trainer import FullyAsyncRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.reward import load_reward_manager
@@ -67,21 +63,15 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
-        self.reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
-        )
-        self.val_reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
-        )
+        self.reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
+        self.val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {}))
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
 
         assert not self.hybrid_engine
         assert self.config.data.train_batch_size == 0, "train_batch_size must be zero"
         assert self.config.data.gen_batch_size == 1, "gen_batch_size must be one"
         assert self.config.async_training.staleness_threshold >= 0, "staleness_threshold must larger than 0"
-        assert self.config.async_training.trigger_parameter_sync_step >= 1, (
-            "trigger_parameter_sync_step must larger than 1"
-        )
+        assert self.config.async_training.trigger_parameter_sync_step >= 1, "trigger_parameter_sync_step must larger than 1"
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
@@ -196,28 +186,14 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
 
     async def set_max_required_samples(self):
         async with self.lock:
-            self.max_required_samples = int(
-                self.required_samples
-                * (self.staleness_threshold + 1)
-                * self.config.async_training.trigger_parameter_sync_step
-            )
-            self.total_train_steps = int(
-                self.total_rollout_steps
-                / (self.required_samples * self.config.async_training.trigger_parameter_sync_step)
-            )
+            self.max_required_samples = int(self.required_samples * (self.staleness_threshold + 1) * self.config.async_training.trigger_parameter_sync_step)
+            self.total_train_steps = int(self.total_rollout_steps / (self.required_samples * self.config.async_training.trigger_parameter_sync_step))
 
             self.max_concurrent_samples = len(self.async_rollout_manager.server_handles) * 16
             self.max_concurrent_samples = min(self.max_concurrent_samples, self.max_required_samples)
             self.max_queue_size = self.max_required_samples
 
-            print(
-                f"[FullyAsyncRollouter] required_samples : {self.required_samples} "
-                f"max_required_samples: {self.max_required_samples} "
-                f"max_queue_size: {self.max_queue_size} "
-                f"total_train_steps: {self.total_train_steps} "
-                f"total_rollout_steps: {self.total_rollout_steps} "
-                f"max_concurrent_samples: {self.max_concurrent_samples} "
-            )
+            print(f"[FullyAsyncRollouter] required_samples : {self.required_samples} max_required_samples: {self.max_required_samples} max_queue_size: {self.max_queue_size} total_train_steps: {self.total_train_steps} total_rollout_steps: {self.total_rollout_steps} max_concurrent_samples: {self.max_concurrent_samples} ")
 
     def get_rollout_wg(self):
         """Get rollout worker group"""
@@ -229,45 +205,25 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
     def get_total_train_steps(self):
         return self.total_train_steps
 
-    async def update_param_version(
-        self, version: int, validate: bool = False, global_steps: int = 0, use_trainer_do_validate: bool = False,
-        rollout_executor_timing: dict = None
-    ):
+    async def update_param_version(self, version: int, validate: bool = False, global_steps: int = 0, use_trainer_do_validate: bool = False, rollout_executor_timing: dict = None):
         """Update current parameter version"""
         async with self.lock:
             old_version = self.current_param_version
             self.current_param_version = version
             # every time param change, reset staleness_samples
-            self.staleness_samples = (
-                len(self.active_tasks) + self.cancel_queue.qsize() + await self.message_queue_client.get_queue_size()
-            )
+            self.staleness_samples = len(self.active_tasks) + self.cancel_queue.qsize() + await self.message_queue_client.get_queue_size()
             # Use timing metrics from RolloutExecutor if provided, otherwise compute from local timestamps
             timing_raw = rollout_executor_timing if rollout_executor_timing else {}
             idle_ratio = timing_raw.get("rollouter/idle_ratio") if timing_raw else None
 
-            print(
-                f"[FullyAsyncRollouter][Public][update_param_version] "
-                f"Parameter version updated from {old_version} to {version} "
-                f",reset staleness_samples to: {self.staleness_samples}"
-                f",idle_ratio: {idle_ratio}"
-            )
+            print(f"[FullyAsyncRollouter][Public][update_param_version] Parameter version updated from {old_version} to {version} ,reset staleness_samples to: {self.staleness_samples},idle_ratio: {idle_ratio}")
             need_validate = (
-                (
-                    self.val_reward_fn is not None
-                    and self.config.rollout.test_freq > 0
-                    and self.current_param_version % self.config.rollout.test_freq == 0
-                    and self.current_param_version > 0
-                )  # don't test here in the initial parameter sync
+                (self.val_reward_fn is not None and self.config.rollout.test_freq > 0 and self.current_param_version % self.config.rollout.test_freq == 0 and self.current_param_version > 0)  # don't test here in the initial parameter sync
                 or (validate and self.val_reward_fn is not None)
             )
-            print(
-                f"[FullyAsyncRollouter] need_validate: {need_validate},"
-                f"parallel_validate_and_rollout: {self.parallel_validate_and_rollout}"
-            )
+            print(f"[FullyAsyncRollouter] need_validate: {need_validate},parallel_validate_and_rollout: {self.parallel_validate_and_rollout}")
             if not need_validate:
-                data = ValidateMetrics(
-                    timing_raw=timing_raw, metrics=None, global_steps=global_steps, param_version=version
-                )
+                data = ValidateMetrics(timing_raw=timing_raw, metrics=None, global_steps=global_steps, param_version=version)
             elif need_validate and not self.parallel_validate_and_rollout:
                 print(f"[DEBUG][FullyAsyncRollouter][update_param_version] Running _validate_wrapper...")
                 data = self._validate_wrapper(timing_raw, version, global_steps, use_trainer_do_validate)
@@ -284,19 +240,13 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             if self.validate_task and not self.validate_task.done():
                 print("[FullyAsyncRollouter] validate_task is running, wait last validate_task to finish")
                 self.validate_task.get()
-            self.validate_task = asyncio.create_task(
-                self.do_validate_async(timing_raw, version, global_steps, use_trainer_do_validate)
-            )
+            self.validate_task = asyncio.create_task(self.do_validate_async(timing_raw, version, global_steps, use_trainer_do_validate))
 
-    def _validate_wrapper(
-        self, timing_raw: dict, version: int, global_steps: int = 0, use_trainer_do_validate: bool = False
-    ):
+    def _validate_wrapper(self, timing_raw: dict, version: int, global_steps: int = 0, use_trainer_do_validate: bool = False):
         val_metrics = None
         with marked_timer("rollouter/validate_time", timing_raw, color="green"):
             val_metrics: dict = self._validate(use_trainer_do_validate)
-        data = ValidateMetrics(
-            timing_raw=timing_raw, metrics=val_metrics, global_steps=global_steps, param_version=version
-        )
+        data = ValidateMetrics(timing_raw=timing_raw, metrics=val_metrics, global_steps=global_steps, param_version=version)
         return data
 
     async def do_validate_async(
@@ -360,12 +310,8 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
                 print("[FullyAsyncRollouter] Training from scratch (no checkpoint found)")
                 return 0
         elif self.config.trainer.resume_mode == "resume_path":
-            assert isinstance(self.config.trainer.resume_from_path, str), (
-                "[FullyAsyncRollouter] resume_from_path must be str type"
-            )
-            assert "global_step_" in self.config.trainer.resume_from_path, (
-                "[FullyAsyncRollouter] resume_from_path must specify the global_steps"
-            )
+            assert isinstance(self.config.trainer.resume_from_path, str), "[FullyAsyncRollouter] resume_from_path must be str type"
+            assert "global_step_" in self.config.trainer.resume_from_path, "[FullyAsyncRollouter] resume_from_path must specify the global_steps"
             global_step_folder = self.config.trainer.resume_from_path
             if not os.path.isabs(global_step_folder):
                 working_dir = os.getcwd()
@@ -377,9 +323,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
 
         # Extract and set global step
         trainer_global_steps = int(global_step_folder.split("global_step_")[-1])
-        self.global_steps = (
-            trainer_global_steps * self.required_samples * self.config.async_training.trigger_parameter_sync_step + 1
-        )
+        self.global_steps = trainer_global_steps * self.required_samples * self.config.async_training.trigger_parameter_sync_step + 1
         print(f"[FullyAsyncRollouter] Setting global_steps to {self.global_steps}")
 
         # Load dataloader state
@@ -389,10 +333,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             self.train_dataloader.load_state_dict(dataloader_state_dict)
             print(f"[FullyAsyncRollouter] Loaded dataloader state from {dataloader_local_path}")
         else:
-            print(
-                f"[FullyAsyncRollouter] Warning: No dataloader state found at {dataloader_local_path}, "
-                f"will start from scratch"
-            )
+            print(f"[FullyAsyncRollouter] Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
     def _validate_config(self):
         # Validate asynchronous training configuration
@@ -453,12 +394,18 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
     def launch_router(self, urls: list[str], port: int = 30000):
         """Launch SGLang router with the given server URLs."""
         cmd = [
-            "python3", "-m", "sglang_router.launch_router",
-            "--worker-urls", *urls,
-            "--port", str(port),
+            "python3",
+            "-m",
+            "sglang_router.launch_router",
+            "--worker-urls",
+            *urls,
+            "--port",
+            str(port),
             # "--policy", "cache_aware",
-            "--policy", "cache_aware",
-            "--log-level", "warn",
+            "--policy",
+            "cache_aware",
+            "--log-level",
+            "warn",
         ]
         self.router_process = subprocess.Popen(cmd)
         self.router_url = f"http://{ray.util.get_node_ip_address()}:{port}"
