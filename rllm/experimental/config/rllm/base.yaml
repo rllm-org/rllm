@@ -1,0 +1,107 @@
+# Common, backend-agnostic configuration for rLLM
+# Agent Configuration
+agent:
+  name: math_agent
+  max_steps: 20
+  trajectory_timeout: null
+  overlong_filter: False
+  agent_args: {}
+  engine_args: {}
+
+# Environment Configuration
+env:
+  name: custom
+  env_args: {}
+
+# Workflow Configuration
+workflow:
+  use_workflow: False
+  name: single_turn_workflow
+  workflow_args:
+    agent_cls: null
+    agent_args: {}
+    env_cls: null
+    env_args: {}
+    timeout: 1e6
+    gamma: 0.0 # no discounting
+    reward_bonus_coeff: 0.0 # no reward shaping
+  n_parallel_tasks: 256
+  retry_limit: 3
+  raise_on_error: true
+
+# Rollout Configuration (note: this is just for logging purpose, the actual rollout configs are backend-specific)
+rollout:
+  n: 8
+  n_val: 1  # number of validation samples per prompt
+
+# Trainer Configuration
+trainer:
+  total_epochs: 10
+  total_batches: -1
+  logger: ['console']  # Options: 'console', 'wandb', 'tensorboard'
+  project_name: 'rllm-training'
+  experiment_name: 'default'
+  test_freq: 5
+  save_freq: 20
+  val_before_train: true
+  val_only: false
+
+# Algorithm Configuration
+algorithm:
+  adv_estimator: grpo # [grpo, reinforce, gae]
+  gamma: 1.0
+  lam: 0.95
+  norm_adv_by_std_in_grpo: true
+  use_rllm: false
+
+# Stepwise advantage
+stepwise_advantage:
+  enable: False
+  mode: broadcast # [broadcast, per_step]
+  normalize_by_steps: False
+
+# Disable thinking
+disable_thinking: False
+
+# Accumulate reasoning
+accumulate_reasoning: False
+
+# Mask truncated samples
+mask_truncated_samples: False
+filter_token_mismatch: True
+
+# Compact filtering
+compact_filtering:
+  enable: False
+  mask_max_prompt_length_exceeded: True
+  mask_max_response_length_exceeded: True
+  mask_env_done: False
+  mask_max_turns_exceeded: True
+  mask_timeout: True
+  mask_unknown: False
+  mask_error: True
+
+# Rejection sampling
+rejection_sample:
+  enable: False
+  multiplier: 1
+  min_partial_solve_tasks: 1
+  min_trajs_per_group: 2
+
+# SDK Configuration
+sdk:
+  store:
+    path: ~/.rllm/traces.db
+  processing:
+    groupby_key: null
+    traj_name_key: null
+  proxy:
+    host: 127.0.0.1
+    port: 4000
+    mode: subprocess  # external | subprocess
+    admin_token: my-shared-secret
+
+# Episode Logging Configuration
+episode_logging:
+  log_episodes: false
+  episode_log_dir: logs/${rllm.trainer.project_name}/${rllm.trainer.experiment_name}

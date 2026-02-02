@@ -1,0 +1,44 @@
+{
+    "R2E-Gym/R2EGym-SFT-Trajectories": {
+        "hf_hub_url": "R2E-Gym/R2EGym-SFT-Trajectories",
+        "formatting": "sharegpt",
+        "columns": {
+            "messages": "messages"
+        },
+        "tags": {
+            "role_tag": "role",
+            "content_tag": "content",
+            "user_tag": "user",
+            "assistant_tag": "assistant",
+            "system_tag": "system"
+        }
+    },
+    "R2E-Gym/R2EGym-TestingAgent-SFT-Trajectories": {
+        "hf_hub_url": "R2E-Gym/R2EGym-TestingAgent-SFT-Trajectories",
+        "formatting": "sharegpt",
+        "columns": {
+            "messages": "messages"
+        },
+        "tags": {
+            "role_tag": "role",
+            "content_tag": "content",
+            "user_tag": "user",
+            "assistant_tag": "assistant",
+            "system_tag": "system"
+        }
+    },
+    "R2E-Gym/R2EGym-Verifier-Trajectories": {
+        "hf_hub_url": "R2E-Gym/R2EGym-Verifier-Trajectories",
+        "formatting": "sharegpt",
+        "columns": {
+            "messages": "messages"
+        },
+        "tags": {
+            "role_tag": "role",
+            "content_tag": "content",
+            "user_tag": "user",
+            "assistant_tag": "assistant",
+            "system_tag": "system"
+        }
+    }
+}
