@@ -21,6 +21,9 @@ model:
 training:
   group_size: ???  # Number of rollouts per prompt (for GRPO)
   learning_rate: 2e-5  # 2e-5 for MATH dataset
+  lr_schedule: "constant"  # "constant", "linear", "cosine"
+  warmup_steps_ratio: 0.0  # Warmup steps as ratio of total steps (between 0 and 1)
+  # below are the Adam optimizer parameters
   beta1: 0.9
   beta2: 0.95
   eps: 1e-8

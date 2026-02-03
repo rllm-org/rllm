@@ -112,6 +112,8 @@ class AlgorithmConfig:
     use_rllm: bool = False
     # for tinker backend only
     loss_fn: Literal["importance_sampling", "ppo", "cispo", "dro", "cross_entropy"] | None = None
+    lr_schedule: Literal["linear", "cosine", "constant"] = "constant"
+    warmup_steps_ratio: float = 0.0
 
     @classmethod
     def from_config(cls, config: DictConfig) -> "AlgorithmConfig":
@@ -128,4 +130,6 @@ class AlgorithmConfig:
             norm_adv_by_std_in_grpo=config.rllm.stepwise_advantage.get("norm_adv_by_std_in_grpo", True),
             use_rllm=config.rllm.stepwise_advantage.get("use_rllm", False),
             loss_fn=config.rllm.algorithm.get("loss_fn", None),
+            lr_schedule=config.rllm.algorithm.get("lr_schedule", "constant"),
+            warmup_steps_ratio=config.rllm.algorithm.get("warmup_steps_ratio", 0.0),
         )

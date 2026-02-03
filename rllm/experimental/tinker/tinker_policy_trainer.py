@@ -9,7 +9,7 @@ from __future__ import annotations
 import inspect
 import logging
 from functools import wraps
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from omegaconf import OmegaConf
 from tinker_cookbook import checkpoint_utils
@@ -217,54 +217,66 @@ class TinkerPolicyTrainer:
     @require_training_client
     async def optim_step_future(
         self,
-        learning_rate: float | None = None,
+        step: int,
+        total_steps: int,
+        learning_rate: float,
         beta1: float = 0.9,
         beta2: float = 0.95,
         eps: float = 1e-8,
-    ):
-        if learning_rate is None:
-            learning_rate = self.config.training.learning_rate or 1e-6
+    ) -> tuple[tinker.APIFuture[tinker.types.OptimStepResponse], float]:
+        scheduled_learning_rate = learning_rate * compute_schedule_lr_multiplier(
+            lr_schedule=self.algorithm_config.lr_schedule,
+            warmup_steps_ratio=self.algorithm_config.warmup_steps_ratio,
+            step=step,
+            total_steps=total_steps,
+        )
 
         adam_params = AdamParams(
-            learning_rate=learning_rate,
+            learning_rate=scheduled_learning_rate,
             beta1=beta1,
             beta2=beta2,
             eps=eps,
         )
         optim_step_future = await self.training_client.optim_step_async(adam_params)  # type: ignore[attr-defined]
-        return optim_step_future
+        return optim_step_future, scheduled_learning_rate
 
     @require_training_client
     async def fused_forward_backward_and_optim_step(
         self,
+        step: int,
+        total_steps: int,
         trajectory_groups: list[TrajectoryGroup],
-        algorithm_config: AlgorithmConfig | None = None,
-        learning_rate: float | None = None,
+        learning_rate: float,
         beta1: float = 0.9,
         beta2: float = 0.95,
         eps: float = 1e-8,
-    ) -> tuple[list[tinker.Datum], list[torch.Tensor], dict]:
+    ) -> tuple[list[tinker.Datum], list[torch.Tensor], dict, float]:
         """Run forward-backward pass and optimizer step from trajectory groups -- at the same time.
 
         This follows from the best-practice with Tinker: https://tinker-docs.thinkingmachines.ai/async#performance-tips-overlap-requests
         """
         # TODO(listar2000): refactor this function to avoid redundant code with forward_backward_from_trajectory_groups
-        if algorithm_config is None:
-            algorithm_config = self.algorithm_config
-
         # Transform trajectory groups to datums (includes advantage computation)
         training_datums, adv_metrics = transform_trajectory_groups_to_datums(
             trajectory_groups,
-            algorithm_config=algorithm_config,
+            algorithm_config=self.algorithm_config,
         )
 
         # Forward-backward and optimizer future together
-        loss_fn = algorithm_config.loss_fn or ADV_TO_LOSS_FN_AUTO_MAP[algorithm_config.estimator]
+        loss_fn = self.algorithm_config.loss_fn or ADV_TO_LOSS_FN_AUTO_MAP[self.algorithm_config.estimator]
         fwd_bwd_future = await self.training_client.forward_backward_async(  # type: ignore[attr-defined]
             [self._remove_mask(datum) for datum in training_datums],
             loss_fn=loss_fn,
         )
-        optim_step_future = await self.optim_step_future(learning_rate=learning_rate, beta1=beta1, beta2=beta2, eps=eps)
+
+        optim_step_future, scheduled_learning_rate = await self.optim_step_future(
+            step=step,
+            total_steps=total_steps,
+            learning_rate=learning_rate,
+            beta1=beta1,
+            beta2=beta2,
+            eps=eps,
+        )
         # Retrieve the results together
         fwd_bwd_result = await fwd_bwd_future.result_async()
         await optim_step_future.result_async()
@@ -274,7 +286,7 @@ class TinkerPolicyTrainer:
             logprobs = output["logprobs"].to_torch()
             training_logprobs.append(logprobs)
 
-        return training_datums, training_logprobs, adv_metrics
+        return training_datums, training_logprobs, adv_metrics, scheduled_learning_rate
 
     @require_training_client
     async def save_checkpoint_and_get_sampling_client(
@@ -332,3 +344,41 @@ class TinkerPolicyTrainer:
     def get_tokenizer(self) -> Tokenizer:
         """Get tokenizer from training client."""
         return self.training_client.get_tokenizer()  # type: ignore[attr-defined]
+
+
+"""
+Learning rate scheduler for Tinker. Add warmup steps support.
+Adapted from https://github.com/thinking-machines-lab/tinker-cookbook/blob/main/tinker_cookbook/utils/lr_scheduling.py
+"""
+
+LRSchedule = Literal["linear", "cosine", "constant"]
+
+
+def compute_schedule_lr_multiplier(lr_schedule: LRSchedule, warmup_steps_ratio: float, step: int, total_steps: int) -> float:
+    """
+    What factor to multiply the base LR by due to the LR schedule
+
+    Args:
+        lr_schedule: Learning rate schedule
+        warmup_steps_ratio: Ratio of warmup steps to total steps
+        step: Current step
+        total_steps: Total steps
+
+    Returns:
+        Learning rate multiplier
+    """
+    import math
+
+    warmup_steps = int(total_steps * warmup_steps_ratio)
+    if step < warmup_steps:
+        return step / warmup_steps
+    # Adjust step and total_steps for warmup steps
+    step, total_steps = step - warmup_steps, total_steps - warmup_steps
+    if lr_schedule == "linear":
+        return 1 - step / total_steps
+    elif lr_schedule == "cosine":
+        return 0.5 * (1 + math.cos(math.pi * step / total_steps))
+    elif lr_schedule == "constant":
+        return 1
+    else:
+        raise ValueError(f"Unknown learning rate schedule: {lr_schedule}")
