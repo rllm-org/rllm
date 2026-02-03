@@ -9,21 +9,19 @@ export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 
 # DIY configs in your cluster.
-export ROOT_DIR='/mnt/bn/trae-research-models/xujunjielong'
+export ROOT_DIR='/mnt/bn/trae-research-models-lq/xujunjielong'
 export BASE_MODEL=$ROOT_DIR'/models/Qwen3-32B'
 export WAND_PROJECT='xujunjielong'
 export EXPERIMENT_NAME='agentic-swe-rl'
 
-# Auto configs in your cluster.
-# $ARNOLD_WORKER_NUM
-
-# Find the directory where rllm package is located
-RLLM_DIR=$(python3 -c "import rllm; import os; print(os.path.dirname(os.path.dirname(rllm.__file__)))")
+# If use local cluster:
+# ROOT_DIR=$(python3 -c "import rllm; import os; print(os.path.dirname(os.path.dirname(rllm.__file__)))")
+# ARNOLD_WORKER_NUM=8
 
 python3 -m rllm.trainer.verl.train_agent_ppo \
     algorithm.adv_estimator=rloo \
-    data.train_files=${RLLM_DIR}/data/swe/R2E_Gym_Subset.parquet \
-    data.val_files=${RLLM_DIR}/data/swe/SWE_Bench_Verified.parquet \
+    data.train_files=${ROOT_DIR}/data/swe/R2E_Gym_Subset.parquet \
+    data.val_files=${ROOT_DIR}/data/swe/SWE_Bench_Verified.parquet \
     trainer.default_local_dir=$ROOT_DIR/experiments/verl/$EXPERIMENT_NAME \
     trainer.rollout_data_dir=$ROOT_DIR/rollouts/$EXPERIMENT_NAME \
     data.train_batch_size=8 \

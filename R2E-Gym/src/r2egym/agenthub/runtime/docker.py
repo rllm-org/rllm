@@ -43,7 +43,7 @@ from kubernetes import client, config, watch
 # For Kubernetes exec.
 from kubernetes.stream import stream
 
-DEFAULT_NAMESPACE = "default"
+DEFAULT_NAMESPACE = os.environ.get("KUBE_NAMESPACE", "default")
 DOCKER_PATH = "/root/.venv/bin:/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 from swebench.harness.constants import (
@@ -161,10 +161,11 @@ class DockerRuntime(ExecutionEnvironment):
             self.client = docker.from_env(timeout=120)
         elif self.backend == "kubernetes":
             # Try in-cluster config first, fallback to kubeconfig
-            try:
-                config.load_incluster_config()
-            except Exception:
-                config.load_kube_config()
+            # try:
+            #     config.load_incluster_config()
+            # except Exception:
+            #     config.load_kube_config()
+            config.load_kube_config() # use extra k8s cluster. do not use in-cluster k8s config.
             self.client = client.CoreV1Api()
 
         # Start the container
@@ -179,6 +180,7 @@ class DockerRuntime(ExecutionEnvironment):
 
         # Initialize the environment
         self.setup_env()
+        logger.info(f"Kubernetes namespace: {DEFAULT_NAMESPACE}")
         if self.backend == "kubernetes":
             self.logger.info("Kubernetes environment initialized")
         else:
