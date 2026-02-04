@@ -51,6 +51,13 @@ class OutputWithVersion:
             tokens.extend(chunk.response_ids)
         return tokens
 
+    def all_response_ids(self) -> list[int]:
+        """Get all response token IDs from all chunks."""
+        ids = []
+        for chunk in self.output_chunks:
+            ids.extend(chunk.response_ids)
+        return ids
+
     def to_sequence(self):
         response_ids = []
         response_logprobs = []
@@ -79,8 +86,8 @@ class Sequence:
     response_masks: list[int]
 
     # Auto Generate from .to_sequence()
-    start_version: Optional[int] = None
-    end_version: Optional[int] = None
+    start_version: int | None = None
+    end_version: int | None = None
 
     def is_prefix(self, other: "Sequence") -> bool:
         return self.input_ids == other.input_ids[: len(self.input_ids)]
@@ -101,12 +108,13 @@ class Sequence:
 
         other_p_len = len(other.prompt_ids)
 
-        pad_masks = [0] * (other_p_len - self.total_length) if other_p_len > self.total_length else []
+        pad_len = other_p_len - self.total_length if other_p_len > self.total_length else 0
         start_idx = max(self.total_length - other_p_len, 0)
 
         response_ids = other_input_ids[p_len:]
-        response_logprobs = self.response_logprobs + pad_masks + other.response_logprobs[start_idx:]
-        response_masks = self.response_masks + pad_masks + other.response_masks[start_idx:]
+        # Use 0.0 for logprobs padding (consistent with verl), 0 for mask padding
+        response_logprobs = self.response_logprobs + [0.0] * pad_len + other.response_logprobs[start_idx:]
+        response_masks = self.response_masks + [0] * pad_len + other.response_masks[start_idx:]
 
         # Preserve version information: start from self, end from other
         start_version = self.start_version if self.start_version is not None else other.start_version
@@ -127,7 +135,7 @@ class Sequence:
 
         new_prompt_ids = self.prompt_ids[:max_prompt_length]
         new_response_ids = self.prompt_ids[max_prompt_length:] + self.response_ids
-        new_response_logprobs = [-100] * (len(self.prompt_ids) - max_prompt_length) + self.response_logprobs
+        new_response_logprobs = [0.0] * (len(self.prompt_ids) - max_prompt_length) + self.response_logprobs
         new_response_masks = [0] * (len(self.prompt_ids) - max_prompt_length) + self.response_masks
         return Sequence(
             prompt_ids=new_prompt_ids,
@@ -142,8 +150,8 @@ class Sequence:
 @dataclass
 class Trajectory:
     sequences: list[Sequence]
-    reward: float
-    metadata: Optional[dict]
+    reward: float = 0.0
+    metadata: dict | None = None
 
     def append(self, sequence):
         self.sequences.append(sequence)

@@ -23,13 +23,23 @@ async def _rollout_fn_impl(
     overlong_penalty_factor=_DEFAULT_OVERLONG_PENALTY_FACTOR,
     **kwargs,
 ):
+    """
+    Rollout function for DAPO training with rllm dataset format.
+
+    Expected datum format from DatasetRegistry:
+    {
+        'data_source': 'math_dapo',
+        'prompt': [{'content': '...', 'role': 'user'}],
+        'ability': 'MATH',
+        'reward_model': {'ground_truth': '34', 'style': 'rule-lighteval/MATH_v2'},
+        'extra_info': {'index': '...'}
+    }
+    """
     start_time = time.time()
     param_version_start = client.cur_version
 
-    # Extract raw_prompt from dataset (chat format: [{'content': '...', 'role': 'user'}])
-    # raw_prompt is ndarray shape (1,), raw_prompt[0] is the list of message dicts
-    messages = kwargs["raw_prompt"][0]
-    messages = [{"role": "system", "content": "Please reason step by step, and put your final answer within \\boxed{}."}] + messages
+    # Extract prompt from dataset (chat format: [{'content': '...', 'role': 'user'}])
+    messages = kwargs["prompt"]
     prompt_ids = tokenizer.apply_chat_template(
         messages,
         add_generation_prompt=True,
@@ -37,11 +47,15 @@ async def _rollout_fn_impl(
     )
 
     # Get sampling params from config or use defaults
+    # Match verl's fully_async_policy/agent_loop/agent_loop.py:101-106
+    # Note: verl does NOT set top_k in sampling_params (uses server default from config)
+    # Note: verl hardcodes repetition_penalty=1.0 (not from config)
     sampling_params = {
-        "temperature": 1,
-        "max_new_tokens": 8192,
+        "temperature": 1.0,
         "top_p": 1.0,
         "top_k": -1,
+        "repetition_penalty": 1.0,
+        "max_new_tokens": 8192,
     }
 
     output = await client.generate(prompt_ids, sampling_params=sampling_params)
@@ -52,7 +66,6 @@ async def _rollout_fn_impl(
     processing_time = end_time - start_time
 
     # Extract response_ids from output_chunks (OutputWithVersion protocol)
-    # OutputWithVersion has output_chunks, each OutputChunk has response_ids
     response_ids = []
     for chunk in output.output_chunks:
         response_ids.extend(chunk.response_ids)
@@ -64,12 +77,10 @@ async def _rollout_fn_impl(
         print(f"[FullyAsyncRollouter DEBUG] Prompt: {prompt_str}")
         print(f"[FullyAsyncRollouter DEBUG] Response: {response_str}")
 
-    # Extract ground_truth and data_source from kwargs for reward calculation
-    # reward_model is ndarray shape (1,), reward_model[0] is the dict with ground_truth
-    # data_source is ndarray shape (1,), data_source[0] is the string
-    reward_model_info = kwargs["reward_model"][0]
+    # Extract ground_truth and data_source from kwargs (rllm dataset format)
+    reward_model_info = kwargs["reward_model"]
     ground_truth = reward_model_info.get("ground_truth", "")
-    data_source = kwargs["data_source"][0]
+    data_source = kwargs["data_source"]
 
     # Compute reward using default_compute_score (same as DAPORewardManager)
     try:
@@ -101,9 +112,9 @@ async def _rollout_fn_impl(
         "processing_time": processing_time,
         "param_version_start": param_version_start,
         "param_version_end": param_version_end,
-        "param_version": param_version_end,  # The version used for this trajectory
-        "is_partial": param_version_start != param_version_end,  # Was there a param update during generation?
-        "tool_calls_time": 0.0,  # Placeholder for agent-based rollouts with tool calls
+        "param_version": param_version_end,
+        "is_partial": param_version_start != param_version_end,
+        "tool_calls_time": 0.0,
     }
 
     return Trajectory(sequences=[output.to_sequence()], reward=reward, metadata=metadata)
@@ -142,8 +153,7 @@ def main(config):
 
     trainer = AsyncAgentTrainer(
         config=config,
-        train_dataset=None,  # Using config.data.train_files
-        val_dataset=None,  # Using config.data.val_files
+        dataset_name=config.async_training.dataset_name,
         rollout_fn=rollout_fn_with_config,
     )
 

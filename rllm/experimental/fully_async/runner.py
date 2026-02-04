@@ -15,7 +15,6 @@
 import asyncio
 import inspect
 import os
-import random
 import socket
 import threading
 import time
@@ -24,8 +23,8 @@ from pprint import pprint
 import ray
 from omegaconf import OmegaConf
 
-from rllm.experimental.fully_async.async_trainer import AsyncTrainer
 from rllm.experimental.fully_async.fully_async_rollouter import FullyAsyncRollouter
+from rllm.experimental.fully_async.fully_async_trainer import FullyAsyncTrainer
 from rllm.experimental.fully_async.message_queue import MessageQueue, MessageQueueClient
 from rllm.experimental.fully_async.param_sync import ParameterSynchronizer
 from rllm.experimental.fully_async.protocol import Trajectory
@@ -68,8 +67,21 @@ class FullyAsyncTaskRunner:
 
     def __init__(self):
         self.running = False
-        self.components = {}
         self.shutdown_event = threading.Event()
+
+        # Instance attributes for components
+        self.config = None
+        self.tokenizer = None
+        self.processor = None
+        self.role_worker_mapping = None
+        self.ray_worker_group_cls = None
+        self.rollouter = None
+        self.trainer = None
+        self.message_queue = None
+        self.message_queue_client = None
+        self.param_synchronizer = None
+        self.rollout_executor = None
+        self.router_url = None
 
     def run(self, config):
         print("[ASYNC MAIN] Starting fully async PPO training...")
@@ -86,19 +98,15 @@ class FullyAsyncTaskRunner:
         from verl.utils import hf_processor, hf_tokenizer
 
         trust_remote_code = config.data.get("trust_remote_code", False)
-        tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
 
         # Used for multimodal LLM, could be None
-        processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+        self.processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
-        self.components["tokenizer"] = tokenizer
-        self.components["processor"] = processor
-        self.components["config"] = config
+        self.config = config
 
         print("[ASYNC MAIN] Creating worker mapping and resource pools...")
-        role_worker_mapping, ray_worker_group_cls = create_role_worker_mapping(config)
-        self.components["role_worker_mapping"] = role_worker_mapping
-        self.components["ray_worker_group_cls"] = ray_worker_group_cls
+        self.role_worker_mapping, self.ray_worker_group_cls = create_role_worker_mapping(config)
 
         print("[ASYNC MAIN] Creating FullyAsyncRollouter...")
         self._create_rollouter(config)
@@ -107,55 +115,50 @@ class FullyAsyncTaskRunner:
         self._create_trainer(config)
 
         # sync total_train_steps between rollouter and trainer
-        total_train_steps = ray.get(self.components["rollouter"].get_total_train_steps.remote())
+        total_train_steps = ray.get(self.rollouter.get_total_train_steps.remote())
         print(f"total_train_steps {total_train_steps}")
-        ray.get(self.components["trainer"].set_total_train_steps.remote(total_train_steps))
+        ray.get(self.trainer.set_total_train_steps.remote(total_train_steps))
 
         # max_queue_size
-        max_queue_size = ray.get(self.components["rollouter"].get_max_queue_size.remote())
+        max_queue_size = ray.get(self.rollouter.get_max_queue_size.remote())
         print(f"[ASYNC MAIN] Creating MessageQueue... max_queue_size {max_queue_size}")
-        message_queue = MessageQueue.remote(config, max_queue_size)
-        message_queue_client = MessageQueueClient(message_queue)
-        self.components["message_queue"] = message_queue
-        self.components["message_queue_client"] = message_queue_client
+        self.message_queue = MessageQueue.remote(config, max_queue_size)
+        self.message_queue_client = MessageQueueClient(self.message_queue)
 
-        ray.get(self.components["rollouter"].set_message_queue_client.remote(self.components["message_queue_client"]))
-        ray.get(self.components["trainer"].set_message_queue_client.remote(self.components["message_queue_client"]))
+        ray.get(self.rollouter.set_message_queue_client.remote(self.message_queue_client))
+        ray.get(self.trainer.set_message_queue_client.remote(self.message_queue_client))
 
         print("[ASYNC MAIN] Setting up parameter synchronization...")
-
-        param_synchronizer = ParameterSynchronizer.remote(
+        self.param_synchronizer = ParameterSynchronizer.remote(
             config=config,
-            trainer=self.components["trainer"],
-            rollouter=self.components["rollouter"],
-            mq=self.components["message_queue_client"],
+            trainer=self.trainer,
+            rollouter=self.rollouter,
+            mq=self.message_queue_client,
         )
-        ray.get(self.components["trainer"].set_parameter_synchronizer.remote(param_synchronizer))
+        ray.get(self.trainer.set_parameter_synchronizer.remote(self.param_synchronizer))
 
         # Create rollout executor BEFORE sync_weights (so it can be paused during sync)
         self._create_rollout_executor(config)
 
         # Set rollout_executor and router_url on param_synchronizer BEFORE sync_weights
-        ray.get(param_synchronizer.set_rollout_executor.remote(self.components["rollout_executor"]))
-        ray.get(param_synchronizer.set_router_url.remote(self.router_url))
+        ray.get(self.param_synchronizer.set_rollout_executor.remote(self.rollout_executor))
+        ray.get(self.param_synchronizer.set_router_url.remote(self.router_url))
 
         # load checkpoint and sync parameter before doing anything
         val_before_train = config.trainer.get("val_before_train", True)
         # param_version resume from ckpt or default 0
-        param_version = ray.get(self.components["trainer"].load_checkpoint.remote())
-        ray.get(self.components["rollouter"].load_checkpoint.remote())
+        param_version = ray.get(self.trainer.load_checkpoint.remote())
+        ray.get(self.rollout_executor.load_checkpoint.remote())
         ray.get(
-            param_synchronizer.sync_weights.remote(
+            self.param_synchronizer.sync_weights.remote(
                 version=param_version,
                 validate=val_before_train,
                 use_trainer_do_validate=config.async_training.use_trainer_do_validate,
             )
         )
-        ray.get(param_synchronizer.wait_last_valid.remote())
+        ray.get(self.param_synchronizer.wait_last_valid.remote())
 
-        self.components["param_synchronizer"] = param_synchronizer
         print("[ASYNC MAIN] All components initialized successfully")
-        # set router url and msg client for the parameter syncer
 
     def _create_rollout_executor(self, config):
         """Override to use the custom rollout_fn instead of the default."""
@@ -168,64 +171,60 @@ class FullyAsyncTaskRunner:
         if not inspect.iscoroutinefunction(self._custom_rollout_fn):
             raise TypeError(f"rollout_fn must be an async function (defined with 'async def'), but got {type(self._custom_rollout_fn).__name__}. Only async functions are supported.")
 
-        rollout_executor = RolloutExecutor.remote(
+        self.rollout_executor = RolloutExecutor.remote(
             router_url=self.router_url,
             rollout_fn=self._custom_rollout_fn,
             n=n,
-            message_queue_client=self.components["message_queue_client"],
+            message_queue_client=self.message_queue_client,
             config=config,
-            tokenizer=self.components["tokenizer"],
-            processor=self.components["processor"],
+            tokenizer=self.tokenizer,
+            processor=self.processor,
             max_concurrency=max_concurrent_tasks,
             total_rollout_steps=config.rollout.total_rollout_steps,
         )
 
-        self.components["rollout_executor"] = rollout_executor
-
     def _create_rollouter(self, config) -> None:
-        rollouter = FullyAsyncRollouter.remote(
+        self.rollouter = FullyAsyncRollouter.remote(
             config=config,
-            tokenizer=self.components["tokenizer"],
-            role_worker_mapping={Role.Rollout: self.components["role_worker_mapping"][Role.Rollout]},
+            tokenizer=self.tokenizer,
+            role_worker_mapping={Role.Rollout: self.role_worker_mapping[Role.Rollout]},
             resource_pool_manager=create_resource_pool_manager(config, roles=[Role.Rollout]),
-            ray_worker_group_cls=self.components["ray_worker_group_cls"],
-            processor=self.components["processor"],
+            ray_worker_group_cls=self.ray_worker_group_cls,
+            processor=self.processor,
             device_name=config.trainer.device,
         )
-        ray.get(rollouter.init_workers.remote())
-        ray.get(rollouter.set_max_required_samples.remote())
+        ray.get(self.rollouter.init_workers.remote())
+        ray.get(self.rollouter.set_max_required_samples.remote())
 
-        server_urls = ray.get(rollouter.get_server_urls.remote())
+        server_urls = ray.get(self.rollouter.get_server_urls.remote())
         print("Launched server urls: ", server_urls)
 
-        self.router_url = ray.get(rollouter.launch_router.remote(server_urls))
+        self.router_url = ray.get(self.rollouter.launch_router.remote(server_urls))
 
-        self.components["rollouter"] = rollouter
         print("[ASYNC MAIN] Rollouter created and initialized successfully")
 
     def _create_trainer(self, config) -> None:
-        trainer_role_mapping = {role: worker_cls for role, worker_cls in self.components["role_worker_mapping"].items() if role != Role.Rollout}
+        trainer_role_mapping = {role: worker_cls for role, worker_cls in self.role_worker_mapping.items() if role != Role.Rollout}
 
-        trainer = AsyncTrainer.remote(
+        self.trainer = FullyAsyncTrainer.remote(
             config=config,
-            tokenizer=self.components["tokenizer"],
+            tokenizer=self.tokenizer,
             role_worker_mapping=trainer_role_mapping,
             resource_pool_manager=create_resource_pool_manager(config, roles=list(trainer_role_mapping.keys())),
-            ray_worker_group_cls=self.components["ray_worker_group_cls"],
-            processor=self.components["processor"],
+            ray_worker_group_cls=self.ray_worker_group_cls,
+            processor=self.processor,
             device_name=config.trainer.device,
         )
 
-        ray.get(trainer.init_workers.remote())
-        self.components["trainer"] = trainer
+        ray.get(self.trainer.init_workers.remote())
         print("[ASYNC MAIN] FullyAsyncTrainer created and initialized successfully")
 
     def _run_training_loop(self):
         self.running = True
 
         print("[ASYNC MAIN] Starting Rollouter and Trainer...")
-        rollout_executor_future = self.components["rollout_executor"].fit.remote()
-        trainer_future = self.components["trainer"].fit.remote()
+        rollout_executor_future = self.rollout_executor.fit.remote()
+        trainer_future = self.trainer.fit.remote()
 
         futures = [rollout_executor_future, trainer_future]
 
@@ -252,16 +251,18 @@ class FullyAsyncTaskRunner:
                 ray.cancel(future)
             raise
         finally:
-            asyncio.run(self.components["message_queue_client"].clear_queue())
+            asyncio.run(self.message_queue_client.clear_queue())
             print("[ASYNC MAIN] Training completed or interrupted")
 
 
 class AsyncAgentTrainer:
-    def __init__(self, config, train_dataset, val_dataset, rollout_fn):
+    def __init__(self, config, dataset_name: str, rollout_fn):
         self.config = config
-        self.train_dataset = train_dataset
-        self.val_dataset = val_dataset
+        self.dataset_name = dataset_name
         self.rollout_fn = rollout_fn
+
+        # Store dataset_name in config for RolloutExecutor to use
+        self.config.async_training.dataset_name = dataset_name
 
     def train(self):
         from verl.trainer.main_ppo import run_ppo

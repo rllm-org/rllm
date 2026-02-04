@@ -86,7 +86,7 @@ class MessageQueue:
             # Notify waiting consumers
             self._consumer_condition.notify_all()
 
-            if self.total_produced % 100 == 0:
+            if self.total_produced % 128 == 0:
                 print(f"MessageQueue stats: produced={self.total_produced}, queue_size={len(self.queue)}")
             if is_drop:
                 return False

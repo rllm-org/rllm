@@ -1,6 +1,7 @@
 # http utils
 
 import asyncio
+import os
 import time
 import uuid
 from collections import defaultdict
@@ -16,6 +17,112 @@ from verl.utils.torch_functional import pad_sequence_to_length
 from .protocol import TrajectoryGroup
 
 _client: httpx.AsyncClient | None = None
+
+
+# Checkpoint utils
+
+
+async def save_dataloader_checkpoint(dataloader, dataloader_lock, checkpoint_folder: str):
+    """Save dataloader state to checkpoint folder.
+
+    Args:
+        dataloader: StatefulDataLoader instance
+        dataloader_lock: asyncio.Lock for thread-safe access
+        checkpoint_folder: Path to checkpoint folder (e.g., .../global_step_100)
+
+    Note: Due to the asynchronous nature, there may be some in-flight samples
+    (in pending/result queues). These samples will be regenerated on resume.
+    """
+    from verl.utils.fs import local_mkdir_safe
+
+    local_mkdir_safe(checkpoint_folder)
+    dataloader_path = os.path.join(checkpoint_folder, "data.pt")
+
+    async with dataloader_lock:
+        dataloader_state_dict = dataloader.state_dict()
+
+    torch.save(dataloader_state_dict, dataloader_path)
+    print(f"[Checkpoint] Saved dataloader state to {dataloader_path}")
+
+
+def load_dataloader_checkpoint(dataloader, config) -> int:
+    """Load dataloader state from checkpoint based on resume mode.
+
+    Args:
+        dataloader: StatefulDataLoader instance to load state into
+        config: Config object with trainer.resume_mode, trainer.default_local_dir, etc.
+
+    Returns:
+        trainer_global_steps from checkpoint (0 if no checkpoint found or resume disabled)
+    """
+    from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
+
+    if config.trainer.resume_mode == "disable":
+        print("[Checkpoint] Resume mode is disabled, starting from scratch")
+        return 0
+
+    # Determine checkpoint folder path
+    if config.trainer.default_hdfs_dir is not None:
+        raise NotImplementedError("[Checkpoint] Load from hdfs is not implemented yet")
+
+    checkpoint_folder = config.trainer.default_local_dir
+    if not os.path.isabs(checkpoint_folder):
+        working_dir = os.getcwd()
+        checkpoint_folder = os.path.join(working_dir, checkpoint_folder)
+
+    global_step_folder = find_latest_ckpt_path(checkpoint_folder)
+
+    # Find and validate global_step_folder based on resume mode
+    if config.trainer.resume_mode == "auto":
+        if global_step_folder is None:
+            print("[Checkpoint] Training from scratch (no checkpoint found)")
+            return 0
+    elif config.trainer.resume_mode == "resume_path":
+        assert isinstance(config.trainer.resume_from_path, str), (
+            "[Checkpoint] resume_from_path must be str type"
+        )
+        assert "global_step_" in config.trainer.resume_from_path, (
+            "[Checkpoint] resume_from_path must specify the global_steps"
+        )
+        global_step_folder = config.trainer.resume_from_path
+        if not os.path.isabs(global_step_folder):
+            working_dir = os.getcwd()
+            global_step_folder = os.path.join(working_dir, global_step_folder)
+    else:
+        raise ValueError(f"[Checkpoint] Unknown resume_mode: {config.trainer.resume_mode}")
+
+    print(f"[Checkpoint] Loading from: {global_step_folder}")
+
+    # Extract trainer_global_steps from folder name
+    trainer_global_steps = int(global_step_folder.split("global_step_")[-1])
+
+    # Load dataloader state
+    dataloader_path = os.path.join(global_step_folder, "data.pt")
+    if os.path.exists(dataloader_path):
+        dataloader_state_dict = torch.load(dataloader_path, weights_only=False)
+        dataloader.load_state_dict(dataloader_state_dict)
+        print(f"[Checkpoint] Loaded dataloader state from {dataloader_path}")
+    else:
+        print(f"[Checkpoint] Warning: No dataloader state found at {dataloader_path}")
+
+    return trainer_global_steps
+
+
+def calculate_rollout_global_steps(trainer_global_steps: int, config) -> int:
+    """Calculate rollout global_steps from trainer_global_steps.
+
+    Formula: rollout_steps = trainer_steps * required_samples * sync_frequency + 1
+
+    Args:
+        trainer_global_steps: The trainer's global step count
+        config: Config object with async_training settings
+
+    Returns:
+        The rollout global_steps value
+    """
+    # Use config.async_training.required_samples directly (consistent with fully_async_rollouter.py)
+    required_samples = config.async_training.required_samples
+    return trainer_global_steps * required_samples * config.async_training.trigger_parameter_sync_step + 1
 
 
 def calculate_max_concurrency(config) -> int:
@@ -200,6 +307,7 @@ def padding(tensor_ls, max_len, pad_value, padding_side="left"):
 def assemble_batch_from_trajectory_group_ls(trajectory_group_ls: list[TrajectoryGroup], config, tokenizer, balance_batch=None) -> DataProto:
     """
     Assemble gen_batch_output from TrajectoryGroup objects.
+    Optimized version: pre-allocates tensors and fills in single pass.
 
     Args:
         trajectory_group_ls: List of TrajectoryGroup objects
@@ -221,93 +329,122 @@ def assemble_batch_from_trajectory_group_ls(trajectory_group_ls: list[Trajectory
     if not trajectory_group_ls:
         raise ValueError("Empty trajectory group provided for batch assembly")
 
-    total_trajectories = sum(len(tg.trajectories) for tg in trajectory_group_ls)
-    print(f"[BatchUtils] Assembling batch from {total_trajectories} Trajectories objects")
-
-    uids = []
-    trajectory_uuids = []
-    prompts = []
-    response_masks = []
-    responses = []
-    rollout_log_probs = []
-    sequences = []
-
+    # Pre-collect all data in single pass
+    all_data = []  # List of (uid, trajectory_uid, seq)
     trajectory_uuid2reward = {}
 
-    # Collect metadata for statistics
+    # Collect metadata for statistics (initialize with None to track which trajectories have metadata)
     processing_times = []
     tool_calls_times = []
     param_versions = []
     param_version_starts = []
     param_version_ends = []
+    # Store all user-defined custom metrics
+    custom_metrics: dict[str, list] = defaultdict(list)
 
-    # not used by verl, but we need to use it to track the padding
-    prompt_attention_masks = []
-    response_attention_masks = []
-
-    # Collect all sequences from trajectory groups
     for trajectory_group in trajectory_group_ls:
         uid = str(uuid.uuid4())
         for trajectory in trajectory_group.trajectories:
             trajectory_uid = str(uuid.uuid4())
             trajectory_uuid2reward[trajectory_uid] = trajectory.reward
 
-            # Extract metadata if available
-            if trajectory.metadata:
-                processing_times.append(trajectory.metadata.get("processing_time", 0.0))
-                tool_calls_times.append(trajectory.metadata.get("tool_calls_time", 0.0))
-                param_versions.append(trajectory.metadata.get("param_version", 0))
-                param_version_starts.append(trajectory.metadata.get("param_version_start", 0))
-                param_version_ends.append(trajectory.metadata.get("param_version_end", 0))
+            # Extract metadata if available, use defaults if not provided
+            # This ensures all lists have consistent length matching the number of trajectories
+            metadata = trajectory.metadata or {}
+            processing_times.append(metadata.get("processing_time", 0.0))
+            tool_calls_times.append(metadata.get("tool_calls_time", 0.0))
+            param_versions.append(metadata.get("param_version", 0))
+            param_version_starts.append(metadata.get("param_version_start", 0))
+            param_version_ends.append(metadata.get("param_version_end", 0))
 
-            seqs = trajectory.merge()
-            sequences.extend(seqs)
-            uids.extend([uid] * len(seqs))
-            trajectory_uuids.extend([trajectory_uid] * len(seqs))
+            # Collect user-defined custom metrics
+            # Built-in keys are handled separately above, so we skip them here
+            builtin_keys = {
+                "processing_time", "tool_calls_time", "param_version",
+                "param_version_start", "param_version_end"
+            }
+            for key, value in metadata.items():
+                if key not in builtin_keys:
+                    # Add custom/ prefix if not already present
+                    metric_key = key if key.startswith("custom/") else f"custom/{key}"
+                    custom_metrics[metric_key].append(value)
 
-    # Format sequences
-    for seq in sequences:
-        seq = seq.resize_prompt_length(max_prompt_length)
-        prompts.append(seq.prompt_ids)
-        responses.append(seq.response_ids)
-        response_masks.append(seq.response_masks)
-        rollout_log_probs.append(seq.response_logprobs)
-        prompt_attention_masks.append([1] * len(seq.prompt_ids))
-        response_attention_masks.append([1] * len(seq.response_ids))
+            for seq in trajectory.merge():
+                seq = seq.resize_prompt_length(max_prompt_length)
+                all_data.append((uid, trajectory_uid, seq))
 
-    prompt_lens = [len(p) for p in prompts]
-    response_lens = [len(r) for r in responses]
-    max_prompt_len = max(prompt_lens)
-    max_response_len = max(response_lens)
+    num_sequences = len(all_data)
+    print(f"[BatchUtils] Assembling batch from {num_sequences} sequences")
+
+    # Find max lengths in single pass
+    max_prompt_len = 0
+    max_response_len = 0
+    for _, _, seq in all_data:
+        max_prompt_len = max(max_prompt_len, len(seq.prompt_ids))
+        max_response_len = max(max_response_len, len(seq.response_ids))
+    max_response_len = min(max_response_len, max_response_length)
 
     pad_token_id = tokenizer.pad_token_id
-    prompts_t = padding([torch.tensor(p) for p in prompts], max_prompt_len, pad_token_id, padding_side="left")
-    prompt_attention_masks_t = padding([torch.tensor(pm) for pm in prompt_attention_masks], max_prompt_len, 0, padding_side="left")
 
-    responses_t = padding([torch.tensor(r) for r in responses], max_response_len, pad_token_id, padding_side="right")
-    response_attention_masks_t = padding([torch.tensor(rm) for rm in response_attention_masks], max_response_len, 0, padding_side="right")
-    response_masks_t = padding([torch.tensor(rm) for rm in response_masks], max_response_len, 0, padding_side="right").long()
-    rollout_log_probs_t = padding([torch.tensor(lp) for lp in rollout_log_probs], max_response_len, -100.0, padding_side="right")
+    # Pre-allocate tensors (MUCH faster than repeated torch.tensor + padding)
+    prompts_t = torch.full((num_sequences, max_prompt_len), pad_token_id, dtype=torch.long)
+    prompt_attention_masks_t = torch.zeros((num_sequences, max_prompt_len), dtype=torch.long)
+    responses_t = torch.full((num_sequences, max_response_len), pad_token_id, dtype=torch.long)
+    response_attention_masks_t = torch.zeros((num_sequences, max_response_len), dtype=torch.long)
+    response_masks_t = torch.zeros((num_sequences, max_response_len), dtype=torch.long)
+    rollout_log_probs_t = torch.zeros((num_sequences, max_response_len), dtype=torch.float32)
 
-    # clip the length
-    responses_t = responses_t[:, :max_response_length]
-    response_attention_masks_t = response_attention_masks_t[:, :max_response_length]
-    response_masks_t = response_masks_t[:, :max_response_length]
-    rollout_log_probs_t = rollout_log_probs_t[:, :max_response_length]
+    uids = []
+    trajectory_uuids = []
+    response_lens = []
 
-    cur_response_len = responses_t.shape[1]
+    # Fill tensors in single pass (left-pad prompts, right-pad responses)
+    for i, (uid, traj_uid, seq) in enumerate(all_data):
+        uids.append(uid)
+        trajectory_uuids.append(traj_uid)
 
-    # token level rewards (place the reward at the last response token)
+        p_ids = seq.prompt_ids
+        r_ids = seq.response_ids
+        r_masks = seq.response_masks
+        r_logprobs = seq.response_logprobs
+
+        p_len = len(p_ids)
+        r_len_original = len(r_ids)
+        r_len = min(r_len_original, max_response_len)
+        response_lens.append(r_len_original)  # Original length before clipping
+
+        # Left-pad prompts
+        prompts_t[i, max_prompt_len - p_len :] = torch.as_tensor(p_ids, dtype=torch.long)
+        prompt_attention_masks_t[i, max_prompt_len - p_len :] = 1
+
+        # Right-pad responses (clip to max_response_len)
+        responses_t[i, :r_len] = torch.as_tensor(r_ids[:r_len], dtype=torch.long)
+        response_attention_masks_t[i, :r_len] = 1
+        # Clip masks and logprobs to their actual lengths (in case they differ from r_ids)
+        assert len(r_masks) == len(r_ids), "{} != {}".format(len(r_masks), len(r_ids))
+        r_mask_len = min(len(r_masks), r_len)
+        r_logprob_len = min(len(r_logprobs), r_len)
+        response_masks_t[i, :r_mask_len] = torch.as_tensor(r_masks[:r_mask_len], dtype=torch.long)
+        # Ensure logprobs are Python floats (not nested structures or tensors)
+        # This prevents "unsupported format string passed to Tensor.__format__" errors
+        logprobs_as_floats = [float(lp) for lp in r_logprobs[:r_logprob_len]]
+        rollout_log_probs_t[i, :r_logprob_len] = torch.tensor(logprobs_as_floats, dtype=torch.float32)
+
+    # Multiply response_mask by attention_mask (consistent with verl's agent_loop.py:586)
+    # This ensures padding positions have mask=0
+    response_masks_t = response_masks_t * response_attention_masks_t
+
+    # Token level rewards (place the reward at the last response token)
     token_level_scores = torch.zeros_like(responses_t, dtype=torch.float32)
     trajectory_rewards = torch.tensor([trajectory_uuid2reward[traj_uid] for traj_uid in trajectory_uuids], dtype=torch.float32)
     response_lens_t = torch.tensor(response_lens)
-    # clamp to max_response_length - 1 in case response was truncated
-    last_token_idx = (response_lens_t - 1).clamp(0, cur_response_len - 1)
-    token_level_scores[torch.arange(len(sequences)), last_token_idx] = trajectory_rewards
+    # clamp to max_response_len - 1 in case response was truncated
+    last_token_idx = (response_lens_t - 1).clamp(0, max_response_len - 1)
+    token_level_scores[torch.arange(num_sequences), last_token_idx] = trajectory_rewards
 
+    # Concatenate and compute derived tensors
     attention_masks_t = torch.cat([prompt_attention_masks_t, response_attention_masks_t], dim=-1)
-    position_ids_t = torch.cumsum(attention_masks_t, dim=-1) - 1
-    position_ids_t = position_ids_t.masked_fill(attention_masks_t == 0, 0)
+    position_ids_t = torch.clip(torch.cumsum(attention_masks_t, dim=-1) - 1, min=0, max=None)
     input_ids_t = torch.cat([prompts_t, responses_t], dim=-1)
 
     tensor_dict = {
@@ -332,15 +469,25 @@ def assemble_batch_from_trajectory_group_ls(trajectory_group_ls: list[Trajectory
             "uids": np.array(uids),
             "trajectory_uuids": np.array(trajectory_uuids),
             "response_clipped": np.array([l > max_response_length for l in response_lens]),
-            "ignore_in_loss": np.array([False] * len(uids)),
+            "ignore_in_loss": np.array([False] * num_sequences),
             "trajectory_rewards": np.array([trajectory_uuid2reward[traj_uid] for traj_uid in trajectory_uuids]),
-            # Store metadata arrays for statistics calculation
-            "processing_times": np.array(processing_times) if processing_times else np.array([0.0]),
-            "tool_calls_times": np.array(tool_calls_times) if tool_calls_times else np.array([]),
-            "param_version_start": np.array(param_version_starts) if param_version_starts else np.array([0]),
-            "param_version_end": np.array(param_version_ends) if param_version_ends else np.array([0]),
+            # NOTE: processing_times, tool_calls_times, param_version_start/end are NOT included here
+            # because they are per-trajectory (1024) while batch is per-sequence (1076).
+            # They are used only for statistics in meta_info below.
         },
     )
+
+    # Pad batch to actor_world_size for distributed training
+    from verl.protocol import pad_dataproto_to_divisor
+
+    actor_world_size = config.trainer.nnodes * config.trainer.n_gpus_per_node
+    original_batch_size = len(batch)
+    batch, pad_size = pad_dataproto_to_divisor(batch, actor_world_size)
+    batch.meta_info["pad_size"] = pad_size
+
+    # Mark padded samples as ignore_in_loss so they don't contribute to training
+    if pad_size > 0:
+        batch.non_tensor_batch["ignore_in_loss"][original_batch_size:] = True
 
     # Set meta_info for downstream processing
     # global_token_num should be a list of sequence lengths for flops_counter.estimate_flops()
@@ -349,42 +496,54 @@ def assemble_batch_from_trajectory_group_ls(trajectory_group_ls: list[Trajectory
     # Calculate and add statistics to meta_info
     if processing_times:
         processing_times_arr = np.array(processing_times)
-        processing_time_stats = {
-            "fully_async/processing_time/avg": np.mean(processing_times_arr),
-            "fully_async/processing_time/max": np.max(processing_times_arr),
-            "fully_async/processing_time/min": np.min(processing_times_arr),
-            "fully_async/processing_time/tp50": np.percentile(processing_times_arr, 50),
-            "fully_async/processing_time/tp95": np.percentile(processing_times_arr, 95),
-            "fully_async/processing_time/tp99": np.percentile(processing_times_arr, 99),
-        }
-        batch.meta_info.update(processing_time_stats)
+        batch.meta_info.update(
+            {
+                "fully_async/processing_time/avg": np.mean(processing_times_arr),
+                "fully_async/processing_time/max": np.max(processing_times_arr),
+                "fully_async/processing_time/min": np.min(processing_times_arr),
+                "fully_async/processing_time/tp50": np.percentile(processing_times_arr, 50),
+                "fully_async/processing_time/tp95": np.percentile(processing_times_arr, 95),
+                "fully_async/processing_time/tp99": np.percentile(processing_times_arr, 99),
+            }
+        )
 
     # Tool calls stats
     tool_calls_arr = np.array([t for t in tool_calls_times if t > 0])
     if len(tool_calls_arr) > 0:
-        tool_calls_stats = {
-            "timing_s/agent_loop/tool_calls/max": np.max(tool_calls_arr),
-            "timing_s/agent_loop/tool_calls/min": np.min(tool_calls_arr),
-            "timing_s/agent_loop/tool_calls/mean": np.mean(tool_calls_arr),
-        }
-        batch.meta_info.update(tool_calls_stats)
+        batch.meta_info.update(
+            {
+                "timing_s/agent_loop/tool_calls/max": np.max(tool_calls_arr),
+                "timing_s/agent_loop/tool_calls/min": np.min(tool_calls_arr),
+                "timing_s/agent_loop/tool_calls/mean": np.mean(tool_calls_arr),
+            }
+        )
 
     # Partial rollout stats (param version changed during generation)
     if param_version_starts and param_version_ends:
-        param_version_diff = [abs(a - b) for a, b in zip(param_version_ends, param_version_starts)]
+        param_version_diff = [abs(a - b) for a, b in zip(param_version_ends, param_version_starts, strict=False)]
         num_diff0 = param_version_diff.count(0)
-        partial_stats = {
-            "fully_async/partial/total_partial_num": len(param_version_diff) - num_diff0,
-            "fully_async/partial/partial_ratio": (len(param_version_diff) - num_diff0) / len(param_version_diff) if param_version_diff else 0,
-            "fully_async/partial/max_partial_span": max(param_version_diff) if param_version_diff else 0,
-        }
-        batch.meta_info.update(partial_stats)
+        batch.meta_info.update(
+            {
+                "fully_async/partial/total_partial_num": len(param_version_diff) - num_diff0,
+                "fully_async/partial/partial_ratio": (len(param_version_diff) - num_diff0) / len(param_version_diff) if param_version_diff else 0,
+                "fully_async/partial/max_partial_span": max(param_version_diff) if param_version_diff else 0,
+            }
+        )
 
     # Parameter version tracking
     if param_versions:
         batch.meta_info["rollout_param_versions"] = param_versions
         batch.meta_info["param_version_diversity"] = len(set(param_versions))
         batch.meta_info["trajectory_param_versions"] = param_version_ends
+
+    # Add user-defined custom metrics to meta_info
+    # Users can define metrics with "custom/" prefix in trajectory.metadata
+    for metric_key, values in custom_metrics.items():
+        if values:
+            values_arr = np.array(values)
+            batch.meta_info[f"{metric_key}/avg"] = float(np.mean(values_arr))
+            batch.meta_info[f"{metric_key}/max"] = float(np.max(values_arr))
+            batch.meta_info[f"{metric_key}/min"] = float(np.min(values_arr))
 
     if balance_batch:
         balance_batch(batch, metrics={})

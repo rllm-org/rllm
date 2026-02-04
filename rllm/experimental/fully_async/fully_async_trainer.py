@@ -24,7 +24,7 @@ from tqdm import tqdm
 from rllm.experimental.fully_async.message_queue import MessageQueueClient
 from rllm.experimental.fully_async.utils import assemble_batch_from_trajectory_group_ls, compute_grpo_outcome_advantage
 from verl import DataProto
-from verl.experimental.fully_async_policy.detach_utils import MetricsAggregator, ValidateMetrics, assemble_batch_from_rollout_samples
+from verl.experimental.fully_async_policy.detach_utils import MetricsAggregator, ValidateMetrics
 from verl.experimental.fully_async_policy.ray_trainer import FullyAsyncRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo import core_algos
@@ -37,7 +37,7 @@ from verl.utils.debug import marked_timer
 from verl.utils.metric import reduce_metrics
 
 
-# @ray.remote(num_cpus=10)
+@ray.remote(num_cpus=10)
 class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
     """
     A fully asynchronous PPO trainer that obtains samples from a MessageQueue for training.
@@ -107,7 +107,7 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
 
         # required_samples use ppo_mini_batch_size*require_batches as the minimum number of samples.
         self.require_batches = config.async_training.require_batches
-        self.required_samples = config.actor_rollout_ref.actor.ppo_mini_batch_size * self.require_batches
+        self.required_samples = config.async_training.required_samples
         self.compute_prox_log_prob = self.config.async_training.compute_prox_log_prob
         total_gpus = config.trainer.nnodes * config.trainer.n_gpus_per_node + config.rollout.nnodes * config.rollout.n_gpus_per_node
         self.metrics_aggregator = MetricsAggregator(total_gpus=total_gpus)
@@ -158,55 +158,6 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
     def get_actor_wg(self):
         """Get actor worker group"""
         return self.actor_wg
-
-    def _get_samples_from_queue(self) -> tuple[None, None] | tuple[int, Any]:
-        """
-        Get samples from message queue and compose gen_batch_output
-        Uses a loop to continuously collect samples until enough are gathered
-
-        Returns:
-            tuple: (epoch, batch_dict, gen_batch_output)
-        """
-        print(
-            f"[FullyAsyncTrainer] Requesting {self.required_samples} samples from queue",
-            flush=True,
-        )
-
-        # Collect samples using a simple loop calling get_sample
-        consumer_start = time.time()
-        queue_samples = []
-        queue_len = 0
-        while len(queue_samples) < self.required_samples:
-            # Get a single sample and wait until there is a sample or None is received
-            sample, queue_len = self.message_queue_client.get_sample_sync()
-
-            if sample is None:
-                print(f"[FullyAsyncTrainer] Detected termination signal (None), stopping sample collection. Collected {len(queue_samples)}/{self.required_samples} samples")
-                break
-
-            queue_samples.append(sample)
-
-            if len(queue_samples) % 64 == 0:
-                print(f"[FullyAsyncTrainer] Collected {len(queue_samples)}/{self.required_samples} samples. mq_len: {queue_len}")
-
-        consumer_end = time.time()
-
-        if not queue_samples or len(queue_samples) < self.required_samples:
-            print("[FullyAsyncTrainer] not enough samples collected after loop")
-            return None, None
-        total_wait_time = consumer_end - consumer_start
-
-        print(f"[FullyAsyncTrainer] Loop collection completed: {len(queue_samples)}/{self.required_samples} samples, total wait time: {total_wait_time:.2f} seconds.mq_len: {queue_len}")
-
-        queue_samples = [ray.cloudpickle.loads(x) for x in queue_samples]
-        # Assemble batch - now working directly with RolloutSample objects
-        if self.config.trainer.balance_batch:
-            batch = assemble_batch_from_rollout_samples(queue_samples, self.tokenizer, self.config, self._balance_batch)
-        else:
-            batch = assemble_batch_from_rollout_samples(queue_samples, self.tokenizer, self.config, None)
-
-        batch.meta_info["fully_async/total_wait_time"] = total_wait_time
-        return 0, batch
 
     def _create_actor_rollout_classes(self):
         # create actor
@@ -382,7 +333,7 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
                 self.current_param_version,
                 max_ckpt_to_keep=max_critic_ckpt_to_keep,
             )
-        ray.get(self.param_synchronizer.rollouter_save_checkpoint.remote(local_global_step_folder))
+        ray.get(self.param_synchronizer.rollout_executor_save_checkpoint.remote(local_global_step_folder))
         # latest checkpointed iteration tracker (for atomic usage)
         local_latest_checkpointed_iteration = os.path.join(self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt")
         with open(local_latest_checkpointed_iteration, "w") as f:
@@ -434,29 +385,6 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
         if self.use_critic:
             self.critic_wg.load_checkpoint(critic_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load)
         return self.current_param_version
-
-    def _collect_metrics_from_samples(self, batch, metrics):
-        """
-        Collect metrics from samples
-        """
-        pass
-        # if hasattr(batch, "meta_info") and batch.meta_info:
-        #     samples_param_versions = batch.meta_info["rollout_param_versions"]
-        #     stale_count = sum(1 for v in samples_param_versions if self.current_param_version - v >= 1)
-        #     self.stale_samples_processed += stale_count
-        #     trajectory_param_versions = batch.meta_info["trajectory_param_versions"]
-        #     stale_traj_count = sum(1 for v in trajectory_param_versions if self.current_param_version - v >= 1)
-        #     self.stale_trajectory_processed += stale_traj_count
-        #     metrics.update(
-        #         {
-        #             "fully_async/count/stale_samples_processed": self.stale_samples_processed,
-        #             "fully_async/count/stale_trajectory_processed": self.stale_trajectory_processed,
-        #             "fully_async/count/current_param_version": self.current_param_version,
-        #         }
-        #     )
-        #     for key, value in batch.meta_info.items():
-        #         if key.startswith("fully_async") or key.startswith("timing_s"):
-        #             metrics[key] = value
 
     async def _trigger_parameter_sync_after_step(self, validate: bool = False, global_steps: int = None):
         """
@@ -568,9 +496,9 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
                 }
             )
 
-            # Collect all fully_async and timing metrics from batch.meta_info
+            # Collect all fully_async, timing, and custom metrics from batch.meta_info
             for key, value in batch.meta_info.items():
-                if key.startswith("fully_async") or key.startswith("timing_s"):
+                if key.startswith("fully_async") or key.startswith("timing_s") or key.startswith("custom/"):
                     metrics[key] = value
 
     def _get_samples_from_queue(self) -> tuple[None, None] | tuple[int, Any]:
@@ -716,6 +644,9 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
             else:
                 batch = compute_old_log_prob(batch)
 
+            # add this to ensure to eliminate boundary value stem from packing
+            batch.batch["old_log_probs"] = batch.batch["old_log_probs"] * batch.batch["response_mask"]
+
         if self.use_reference_policy:
             # compute reference log_prob
             with marked_timer("ref", timing_raw, color="olive"):
@@ -774,18 +705,15 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
             # )
             batch = self.compute_grpo_advantage(batch, norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo)
 
-        # Pad batch to world_size for distributed training
-        from verl.protocol import pad_dataproto_to_divisor
-
-        actor_world_size = self.actor_rollout_wg.world_size
-        original_batch_size = len(batch)
-        batch, pad_size = pad_dataproto_to_divisor(batch, actor_world_size)
-        batch.meta_info["pad_size"] = pad_size
-
-        # Zero out masks for padded samples so they don't contribute to loss
-        if pad_size > 0:
-            batch.batch["response_mask"][original_batch_size:] = 0
-            batch.batch["attention_mask"][original_batch_size:] = 0
+        # Some of the rows in batch are padded to be multiple of actor
+        # world size, we need to set the attention mask and response mask
+        # to zero here so they don't contribute to loss.
+        # Note: batch may be shuffled, so we use ignore_in_loss to identify padded samples
+        ignore_in_loss = batch.non_tensor_batch["ignore_in_loss"]
+        for i, should_ignore in enumerate(ignore_in_loss):
+            if should_ignore:
+                batch.batch["response_mask"][i] = 0
+                batch.batch["attention_mask"][i] = 0
 
         # update critic
         if self.use_critic:

@@ -5,14 +5,16 @@ set -xeuo pipefail
 # This script launches training using the train_dapo_example.py with AsyncAgentTrainer
 
 project_name='rllm-fully-async'
-exp_name='DAPO-Qwen3-4B-4-4'
+exp_name='DAPO-Qwen3-4B-4-4-rllm-fix-shuffle-should-match-revert'
 
 # Paths
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
 MODEL_PATH="/datasets/pretrained-llms/Qwen3-4B"
 CKPTS_DIR="/checkpoint/ram-h100-2/tianhaowu/verl/ckpts/${project_name}/${exp_name}"
-TRAIN_FILE=${TRAIN_FILE:-"/checkpoint/ram-h100-2/tianhaowu/verl/data/dapo-math-17k.parquet"}
-TEST_FILE=${TEST_FILE:-"/checkpoint/ram-h100-2/tianhaowu/verl/data/aime-2024.parquet"}
+
+# Dataset name (must be registered with DatasetRegistry first)
+# Run: python -m rllm.experimental.fully_async.create_rllm_dataset --name dapo-math-17k --train_file /path/to/train.parquet
+DATASET_NAME=${DATASET_NAME:-"dapo-math-17k"}
 
 rollout_mode="async"
 rollout_name="sglang" # sglang or vllm
@@ -78,8 +80,8 @@ partial_rollout=True
 
 # Launch training using train_dapo_example.py with AsyncAgentTrainer
 PYTHONUNBUFFERED=1 python -m rllm.experimental.fully_async.train_dapo_example \
-    data.train_files="${TRAIN_FILE}" \
-    data.val_files="${TEST_FILE}" \
+    data.train_files=null \
+    data.val_files=null \
     data.prompt_key=prompt \
     data.truncation='left' \
     data.max_prompt_length=${max_prompt_length} \
@@ -156,11 +158,13 @@ PYTHONUNBUFFERED=1 python -m rllm.experimental.fully_async.train_dapo_example \
     rollout.total_rollout_steps="${total_rollout_steps}" \
     rollout.total_epochs=10 \
     rollout.test_freq="${test_freq}" \
+    +async_training.dataset_name="${DATASET_NAME}" \
     async_training.staleness_threshold="${staleness_threshold}" \
     async_training.trigger_parameter_sync_step="${trigger_parameter_sync_step}" \
     async_training.require_batches="${require_batches}" \
     async_training.partial_rollout="${partial_rollout}" \
     async_training.use_rollout_log_probs=True \
+    async_training.compute_prox_log_prob=True \
     algorithm.rollout_correction.rollout_is=sequence \
     algorithm.rollout_correction.rollout_is_threshold=2.0 \
     algorithm.rollout_correction.rollout_is_batch_normalize=False \

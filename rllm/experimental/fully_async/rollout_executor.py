@@ -2,9 +2,15 @@ import asyncio
 import time
 
 import ray
+from torchdata.stateful_dataloader import StatefulDataLoader
 
 from rllm.experimental.fully_async.client import RolloutClient
 from rllm.experimental.fully_async.protocol import TrajectoryGroup
+from rllm.experimental.fully_async.utils import (
+    calculate_rollout_global_steps,
+    load_dataloader_checkpoint,
+    save_dataloader_checkpoint,
+)
 
 
 @ray.remote(num_cpus=10)
@@ -19,13 +25,16 @@ class RolloutExecutor:
         self.router_url = router_url
         self.total_rollout_steps = total_rollout_steps
         self.global_steps = 1
+        self.max_concurrent_sample = 1024 // self.n
 
         # Use the passed max_concurrency value directly
         self.max_concurrency = max_concurrency
 
-        self.client = RolloutClient(router_url=router_url, max_concurrency=self.max_concurrency)
-        self.last_consumed = 0
+        self.client = RolloutClient(router_url=router_url, tokenizer=tokenizer, max_concurrency=self.max_concurrency)
         self.dataloader = self._create_dataloader()
+
+        # Lock for dataloader access (async safety)
+        self.dataloader_lock = asyncio.Lock()
 
         # Internal buffer for completed trajectories
         self.result_queue = asyncio.Queue()
@@ -43,28 +52,35 @@ class RolloutExecutor:
         self.max_staleness_samples = None  # fill in during fit()
 
     def _create_dataloader(self):
-        """Create dataset and dataloader inside the actor."""
-        from torch.utils.data import DataLoader
+        """Load dataset from DatasetRegistry and create StatefulDataLoader."""
+        from rllm.data.dataset import DatasetRegistry
 
-        from verl.trainer.main_ppo import create_rl_dataset
-        from verl.utils.dataset.rl_dataset import collate_fn
+        dataset_name = self.config.async_training.dataset_name
+        dataset = DatasetRegistry.load_dataset(dataset_name, "train")
+        if dataset is None:
+            raise ValueError(f"Failed to load dataset '{dataset_name}' from DatasetRegistry")
+        print(f"[RolloutExecutor] Loaded dataset '{dataset_name}' with {len(dataset)} examples")
 
-        train_dataset = create_rl_dataset(
-            data_paths=self.config.data.train_files,
-            data_config=self.config.data,
-            tokenizer=self.tokenizer,
-            processor=self.processor,
-            is_train=True,
-        )
-
-        dataloader = DataLoader(
-            dataset=train_dataset,
+        # Create StatefulDataLoader with shuffle=True for checkpoint resumption support
+        dataloader = StatefulDataLoader(
+            dataset,
             batch_size=1,
-            shuffle=self.config.data.get("shuffle", True),
-            collate_fn=collate_fn,
-            drop_last=self.config.data.get("drop_last", False),
+            shuffle=True,
+            collate_fn=lambda x: x,  # Return batches as lists without merging
         )
         return dataloader
+
+    async def save_checkpoint(self, checkpoint_folder: str):
+        """Save dataloader state to checkpoint folder."""
+        await save_dataloader_checkpoint(self.dataloader, self.dataloader_lock, checkpoint_folder)
+
+    def load_checkpoint(self) -> int:
+        """Load checkpoint and set global_steps. Returns trainer_global_steps."""
+        trainer_global_steps = load_dataloader_checkpoint(self.dataloader, self.config)
+        if trainer_global_steps > 0:
+            self.global_steps = calculate_rollout_global_steps(trainer_global_steps, self.config)
+            print(f"[RolloutExecutor] Set global_steps to {self.global_steps}")
+        return trainer_global_steps
 
     def pause(self):
         """Pause rollout and record idle start time for timing metrics."""
@@ -96,10 +112,11 @@ class RolloutExecutor:
                 print(f"  Staleness Control:")
                 print(f"    active_sample:        {self.active_sample}")
                 print(f"    enqueued_sample:      {self.enqueued_sample}")
-                print(f"    total_in_flight:      {self.active_sample + self.enqueued_sample}")
                 print(f"    max_staleness_samples:{self.max_staleness_samples}")
-                print(f"    headroom:             {self.max_staleness_samples - (self.active_sample + self.enqueued_sample)}")
                 print(f"    continue_event_set:   {self.continue_event.is_set() if self.continue_event else 'N/A'}")
+                print(f"  Concurrency Config:")
+                print(f"    max_concurrent_sample:{self.max_concurrent_sample}")
+                print(f"    repeat_per_sample:    {self.n}")
                 print(f"  Message Queue:")
                 print(f"    mq_queue_size:        {mq_stats.get('queue_size', 'N/A')}")
                 print(f"    mq_total_consumed:    {mq_stats.get('total_consumed', 'N/A')}")
@@ -110,7 +127,6 @@ class RolloutExecutor:
                 print(f"    result_queue_size:    {self.result_queue.qsize()}")
                 print(f"    current_param_version:{self.current_param_version}")
                 print(f"    is_paused:            {self.is_paused}")
-                print(f"    last_consumed:        {self.last_consumed}")
                 print(f"{'=' * 60}\n")
 
             except asyncio.CancelledError:
@@ -148,6 +164,10 @@ class RolloutExecutor:
                 # Put to internal queue (fast, non-blocking)
                 await self.result_queue.put((serialized, self.client.cur_version))
                 self.enqueued_sample += 1
+                # Start idle time when queue is actually full (enqueued equals max)
+                if self.enqueued_sample >= self.max_staleness_samples and self.idle_start_time is None:
+                    self.idle_start_time = time.time()
+                    print(f"[RolloutExecutor] Queue full (enqueued={self.enqueued_sample}), idle_start_time set to {self.idle_start_time:.2f}", flush=True)
             except Exception as e:
                 import traceback
 
@@ -171,34 +191,37 @@ class RolloutExecutor:
 
         self.continue_event = asyncio.Event()
         self.continue_event.set()
-        print(f"[RolloutExecutor] continue_event set", flush=True)
 
         # Sync last_consumed and client version with current state
-        print(f"[RolloutExecutor] Getting MQ statistics...", flush=True)
         stats = await self.message_queue_client.get_statistics()
         print(f"[RolloutExecutor] MQ stats: {stats}", flush=True)
 
-        self.sema = asyncio.Semaphore(64)
+        # Each task is self.n rollouts
+        max_concurrent_task = self.max_concurrency // self.n
+        self.sema = asyncio.Semaphore(max_concurrent_task)
 
         self.max_staleness_samples = stats["max_queue_size"]
         print(f"[RolloutExecutor] max_staleness_samples set to {self.max_staleness_samples}", flush=True)
 
         self.client.set_version(stats["current_param_version"])
-        self.last_consumed = stats["total_consumed"]
 
         drain_task = asyncio.create_task(self._drain_results_to_mq())
-        watch_task = asyncio.create_task(self._watch_task(interval=10.0))
-
-        print(f"[RolloutExecutor] Dataloader type: {type(self.dataloader)}, len: {len(self.dataloader) if hasattr(self.dataloader, '__len__') else 'unknown'}", flush=True)
+        watch_task = asyncio.create_task(self._watch_task(interval=20.0))
 
         try:
             iteration = 0
             while self.global_steps < self.total_rollout_steps:
                 print(f"[RolloutExecutor] Starting epoch iteration {iteration}", flush=True)
                 datum_count = 0
-                for datum in self.dataloader:
+
+                # Create iterator from dataloader (must be done after load_state_dict for proper resumption)
+                async with self.dataloader_lock:
+                    dataloader_iter = iter(self.dataloader)
+
+                for batch in dataloader_iter:
+                    datum = batch[0]  # batch_size=1, extract single item
                     datum_count += 1
-                    if datum_count % 100 == 1:
+                    if datum_count % 128 == 1:
                         print(f"[RolloutExecutor] Processing datum {datum_count}, global_steps={self.global_steps}/{self.total_rollout_steps}, active={self.active_sample}, enqueued={self.enqueued_sample}", flush=True)
 
                     await self.continue_event.wait()
@@ -207,12 +230,10 @@ class RolloutExecutor:
                         self.active_sample += 1
                         asyncio.create_task(self.generate_trajectory_group(datum))
                         if self.active_sample + self.enqueued_sample >= self.max_staleness_samples:
-                            self.idle_start_time = time.time()
                             print(f"[RolloutExecutor] Reached staleness limit, clearing continue_event", flush=True)
                             self.continue_event.clear()
                     else:
-                        print("Error, shouldn't happen.")
-                        self.continue_event.clear()
+                        raise RuntimeError("This shouldn't happen.")
 
                     if self.global_steps >= self.total_rollout_steps:
                         print(f"[RolloutExecutor] Reached total_rollout_steps {self.total_rollout_steps}, stopping", flush=True)
@@ -224,7 +245,6 @@ class RolloutExecutor:
         except Exception as e:
             import traceback
 
-            print(f"[RolloutExecutor] EXCEPTION in main loop: {e}")
             print(f"[RolloutExecutor] Traceback:\n{traceback.format_exc()}")
             raise
         finally:

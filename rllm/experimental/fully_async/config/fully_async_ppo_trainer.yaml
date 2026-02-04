@@ -18,6 +18,8 @@ async_training:
   # The number of ppo_mini_batches that the FullyAsyncTrainer obtains once
   require_batches: 1
 
+  required_samples: 128
+
   # When synchronizing parameters, whether to interrupt rollouter and perform partial rollout
   partial_rollout: True
 
@@ -29,7 +31,6 @@ async_training:
 
   # whether to use trainer do_validate
   use_trainer_do_validate: False
-
 
   # checkpoint_engine config for accelerating parameter synchronization between rollouter and trainer
   checkpoint_engine:

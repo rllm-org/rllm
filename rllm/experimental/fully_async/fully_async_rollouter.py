@@ -89,11 +89,18 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         self.use_rm = False
 
         print("[FullyAsyncRollouter] Creating datasets...")
-        from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
+        from rllm.data.dataset import DatasetRegistry
+        from verl.trainer.main_ppo import create_rl_sampler
         from verl.utils.dataset.rl_dataset import collate_fn
 
-        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
+        dataset_name = config.async_training.dataset_name
+        train_dataset = DatasetRegistry.load_dataset(dataset_name, "train")
+        val_dataset = DatasetRegistry.load_dataset(dataset_name, "test")
+        if train_dataset is None:
+            raise ValueError(f"Failed to load dataset '{dataset_name}' from DatasetRegistry. Run create_rllm_dataset.py first.")
+        if val_dataset is None:
+            print(f"[FullyAsyncRollouter] Warning: No test split for dataset '{dataset_name}', using train split for validation")
+            val_dataset = train_dataset
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         self._validate_config()
@@ -132,7 +139,7 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         self.staleness_threshold: float = config.async_training.get("staleness_threshold", 1)
         # required_samples use ppo_mini_batch_size*require_batches as the minimum number of samples.
         self.require_batches = config.async_training.require_batches
-        self.required_samples = config.actor_rollout_ref.actor.ppo_mini_batch_size * self.require_batches
+        self.required_samples = config.async_training.required_samples
         self.max_required_samples = None
         self.max_concurrent_samples = None
         # queue size
@@ -270,71 +277,6 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
         )
         await self.message_queue_client.put_validate(ray.cloudpickle.dumps(data))
 
-    async def save_checkpoint(self, local_global_step_folder: str):
-        # WARNING!: Due to the asynchronous nature, there are some in-flight samples
-        # (pending/cancel/result queue and message queue).
-        # Therefore, directly saving the state of the dataloader will result in losing these
-        # samples when resuming training.
-        # TODO: Implement dataloader recovery without losing in-flight samples.
-        from verl.utils.fs import local_mkdir_safe
-
-        # save dataloader
-        local_mkdir_safe(local_global_step_folder)
-        dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
-        async with self.dataloader_lock:
-            dataloader_state_dict = self.train_dataloader.state_dict()
-        torch.save(dataloader_state_dict, dataloader_local_path)
-        print(f"[FullyAsyncRollouter] Saved dataloader checkpoint to {dataloader_local_path}")
-
-    def load_checkpoint(self):
-        """Load checkpoint including dataloader state based on resume mode"""
-
-        if self.config.trainer.resume_mode == "disable":
-            print("[FullyAsyncRollouter] Resume mode is disabled, starting from scratch")
-            return 0
-
-        # Determine checkpoint folder path
-        if self.config.trainer.default_hdfs_dir is not None:
-            raise NotImplementedError("[FullyAsyncRollouter] Load from hdfs is not implemented yet")
-        else:
-            checkpoint_folder = self.config.trainer.default_local_dir
-            if not os.path.isabs(checkpoint_folder):
-                working_dir = os.getcwd()
-                checkpoint_folder = os.path.join(working_dir, checkpoint_folder)
-
-            global_step_folder = find_latest_ckpt_path(checkpoint_folder)
-
-        # Find and validate global_step_folder based on resume mode
-        if self.config.trainer.resume_mode == "auto":
-            if global_step_folder is None:
-                print("[FullyAsyncRollouter] Training from scratch (no checkpoint found)")
-                return 0
-        elif self.config.trainer.resume_mode == "resume_path":
-            assert isinstance(self.config.trainer.resume_from_path, str), "[FullyAsyncRollouter] resume_from_path must be str type"
-            assert "global_step_" in self.config.trainer.resume_from_path, "[FullyAsyncRollouter] resume_from_path must specify the global_steps"
-            global_step_folder = self.config.trainer.resume_from_path
-            if not os.path.isabs(global_step_folder):
-                working_dir = os.getcwd()
-                global_step_folder = os.path.join(working_dir, global_step_folder)
-        else:
-            raise ValueError(f"[FullyAsyncRollouter] Unknown resume_mode: {self.config.trainer.resume_mode}")
-
-        print(f"[FullyAsyncRollouter] Loading checkpoint from: {global_step_folder}")
-
-        # Extract and set global step
-        trainer_global_steps = int(global_step_folder.split("global_step_")[-1])
-        self.global_steps = trainer_global_steps * self.required_samples * self.config.async_training.trigger_parameter_sync_step + 1
-        print(f"[FullyAsyncRollouter] Setting global_steps to {self.global_steps}")
-
-        # Load dataloader state
-        dataloader_local_path = os.path.join(global_step_folder, "data.pt")
-        if os.path.exists(dataloader_local_path):
-            dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
-            self.train_dataloader.load_state_dict(dataloader_state_dict)
-            print(f"[FullyAsyncRollouter] Loaded dataloader state from {dataloader_local_path}")
-        else:
-            print(f"[FullyAsyncRollouter] Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
-
     def _validate_config(self):
         # Validate asynchronous training configuration
         if not hasattr(self.config, "async_training"):
@@ -401,7 +343,6 @@ class FullyAsyncRollouter(FullyAsyncRayPPOTrainer):
             *urls,
             "--port",
             str(port),
-            # "--policy", "cache_aware",
             "--policy",
             "cache_aware",
             "--log-level",
