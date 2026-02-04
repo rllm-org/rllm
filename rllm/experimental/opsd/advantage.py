@@ -73,7 +73,7 @@ async def calculate_advantage_opsd(
                     all_tasks.append(calculate_reverse_kl_advantage(step, sampling_client, parser, opsd_config.kl_penalty_coef, opsd_config.kl_discount_factor, teacher_prompt_ids=teacher_prompt_ids))
             else:
                 for step in trajectory.steps:
-                    teacher_messages = trajectory.info.get(teacher_messages_key)
+                    teacher_messages = step.info.get(teacher_messages_key)
                     all_tasks.append(calculate_reverse_kl_advantage(step, sampling_client, parser, opsd_config.kl_penalty_coef, opsd_config.kl_discount_factor, teacher_messages=teacher_messages))
 
     await asyncio.gather(*all_tasks)

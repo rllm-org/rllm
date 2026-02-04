@@ -3,20 +3,23 @@ A subclass of TinkerBackend that supports on-policy self-distillation (OPSD).
 TODO(listar2000): instead of creating a new backend, we should be able to convert OPSD in an advantage computer form.
 """
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
+from omegaconf import DictConfig
 from typing_extensions import override
 
 from rllm.experimental.common import simple_timer
 from rllm.experimental.common.advantage import _collect_metrics_from_trajectory_groups
 from rllm.experimental.opsd.advantage import calculate_advantage_opsd
 from rllm.experimental.opsd.utils import OPSDConfig
-from rllm.experimental.protocol import AlgorithmConfig, TrainerState
+from rllm.experimental.protocol import AlgorithmConfig
 from rllm.experimental.tinker.tinker_backend import TinkerBackend
 from rllm.experimental.tinker.transform import trajectory_to_datums
 
 if TYPE_CHECKING:
-    from omegaconf import DictConfig
+    from rllm.experimental.unified_trainer import TrainerState
 
 
 class TinkerOPSDBackend(TinkerBackend):
@@ -28,10 +31,10 @@ class TinkerOPSDBackend(TinkerBackend):
         TinkerBackend.__init__(self, config, **kwargs)
 
         self.opsd_config = OPSDConfig(
-            kl_penalty_coef=config.ospd.get("kl_penalty_coef", 1.0),
-            kl_discount_factor=config.ospd.get("kl_discount_factor", 0.0),
-            teacher_messages_key=config.ospd.get("teacher_messages_key", "teacher_messages"),
-            teacher_policy_update_freq=config.ospd.get("teacher_policy_update_freq", 1),
+            kl_penalty_coef=config.opsd.get("kl_penalty_coef", 1.0),
+            kl_discount_factor=config.opsd.get("kl_discount_factor", 0.0),
+            teacher_messages_key=config.opsd.get("teacher_messages_key", "teacher_messages"),
+            teacher_policy_update_freq=config.opsd.get("teacher_policy_update_freq", -1),
         )
 
     @override
@@ -64,7 +67,7 @@ class TinkerOPSDBackend(TinkerBackend):
 
         with simple_timer("calculate_advantage_self_distill", trainer_state.timing_dict):
             await calculate_advantage_opsd(trajectory_groups, self.teacher_sampling_client, self.rollout_engine.chat_parser, self.opsd_config)
-            # only collect advantage metrics as in OSPD there's no external reward
+            # only collect advantage metrics as in OPSD there's no external reward
             adv_metrics = _collect_metrics_from_trajectory_groups(trajectory_groups, algorithm_config.stepwise_advantage_mode, collect_rewards=False, collect_advantage=True)
 
         trainer_state.metrics.update(adv_metrics)
