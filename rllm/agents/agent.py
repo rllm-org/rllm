@@ -219,6 +219,14 @@ class TrajectoryGroup:
     group_id: str = ""
     metadata: list[dict] = field(default_factory=list)
 
+    @property
+    def group_role(self) -> str:
+        return self.group_id.split(":")[1] if ":" in self.group_id[:-1] else "all_groups"
+
+    @property
+    def task_id(self) -> str:
+        return self.group_id.split(":")[0]
+
 
 class BaseAgent(ABC):
     @property

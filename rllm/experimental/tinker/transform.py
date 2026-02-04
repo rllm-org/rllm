@@ -35,7 +35,7 @@ def _flatten_token_input(token_input: TinkerTokenInput) -> TinkerTokenInput:
     return flattened
 
 
-def trajectory_to_data(traj: Trajectory) -> list[tinker.Datum]:
+def trajectory_to_datums(traj: Trajectory) -> list[tinker.Datum]:
     """
     Return one or more Datum objects corresponding to the trajectory.
     If the sequence grows by appending, i.e., each successive observation contains
@@ -141,6 +141,6 @@ def transform_trajectory_groups_to_datums(
     datums = []
     for group in trajectory_groups:
         for trajectory in group.trajectories:
-            datums.extend(trajectory_to_data(trajectory))
+            datums.extend(trajectory_to_datums(trajectory))
 
     return datums, adv_metrics
