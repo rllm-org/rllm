@@ -1,13 +1,4 @@
-#!/bin/bash
 set -x
-
-# On-policy distillation: 8B student learns from 32B teacher on DeepMath
-# Following Kyle's instructions for the 8b/32b replication run
-# Uses Kyle's SFT checkpoint as the starting point
-#
-# Usage:
-#   1. First prepare data: python -m examples.solver_judge_distill.prepare_deepmath_data
-#   2. Then run training: bash examples/solver_judge_distill/train_deepmath_distill_tinker.sh
 
 python -m examples.solver_judge_distill.train_simple_math_distill_tinker \
     trainer.resume_from_tinker_id='tinker://4a1939e6-04be-5a77-9e4e-910ccff9f27e:train:0/weights/final' \

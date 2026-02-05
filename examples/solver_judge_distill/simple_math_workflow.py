@@ -23,7 +23,6 @@ def math_reward_fn(task: dict, action: str):
     data_source = task.get("data_source", "math")
     return rllm_reward_fn_math(data_source, action, ground_truth)
 
-
 class SimpleMathWorkflow(Workflow):
     """
     Workflow:

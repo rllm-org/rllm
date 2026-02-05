@@ -1,13 +1,5 @@
 set -x
 
-# On-policy distillation: student (Qwen3-8B) learns from teacher (Qwen3-235B-Instruct)
-# 
-# shared_tokenizer: Set to False for proper chat template handling, especially when:
-#   - Student is a base model (Qwen3-8B) and teacher is an instruct model (Qwen3-235B-Instruct)
-#   - The models may have different chat template expectations
-# When False: Uses byte-level alignment and proper chat template parsing for teacher
-# When True: Assumes tokenizers are identical and bypasses chat template parsing (faster but less robust)
-
 python -m examples.solver_judge_distill.train_simple_math_distill_tinker \
     model.name=Qwen/Qwen3-8B \
     model.lora_rank=32 \

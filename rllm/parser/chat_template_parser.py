@@ -375,6 +375,7 @@ class QwenChatTemplateParser(ChatTemplateParser):
         self.image_token = "<|image_pad|>"
         self.vision_start_token = "<|vision_start|>"
         self.vision_end_token = "<|vision_end|>"
+        self.stop_sequences = [self.eos_token, self.eot_token, "<|im_end|>"]
 
         from rllm.parser.tool_parser import QwenToolParser
 
