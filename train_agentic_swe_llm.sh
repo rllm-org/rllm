@@ -19,12 +19,14 @@ export EXPERIMENT_NAME='agentic-swe-rl'
 # ARNOLD_WORKER_NUM=8
 
 export UV_INDEX_URL=https://bytedpypi.byted.org/simple/
+export HF_ENDPOINT=https://hf-mirror.com
+uv run python3 scripts/data/swe_dataset.py --local_dir ./data/swe
 uv pip uninstall ray wandb bytedray byted-wandb
 uv pip install bytedray[default,data,serve,bytedance] byted-wandb
 uv run --no-sync python3 -m rllm.trainer.verl.train_agent_ppo \
     algorithm.adv_estimator=rloo \
-    data.train_files=${ROOT_DIR}/data/swe/R2E-Gym-Subset.parquet \
-    data.val_files=${ROOT_DIR}/data/swe/SWE-Bench-Verified.parquet \
+    data.train_files=data/swe/R2E_Gym_Subset.parquet \
+    data.val_files=data/swe/SWE_Bench_Verified.parquet \
     trainer.default_local_dir=$ROOT_DIR/experiments/verl/$EXPERIMENT_NAME \
     trainer.rollout_data_dir=$ROOT_DIR/rollouts/$EXPERIMENT_NAME \
     data.train_batch_size=8 \
@@ -81,4 +83,5 @@ uv run --no-sync python3 -m rllm.trainer.verl.train_agent_ppo \
     rllm.agent.max_steps=50 \
     rllm.agent.overlong_filter=True \
     +rllm.rllm.agent.trajectory_timeout=5400 \
-    trainer.total_epochs=1000
+    trainer.total_epochs=1000 \
+    2>&1 | tee $EXPERIMENT_NAME.log
