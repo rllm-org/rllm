@@ -74,21 +74,32 @@ class TinkerPolicyTrainer:
             # Check if a Tinker model ID is provided in config
             tinker_model_id = OmegaConf.select(self.config, "trainer.resume_from_tinker_id", default=None)
             if tinker_model_id:
-                # Parse Tinker model ID format: tinker://{uuid}/weights/{checkpoint_name}
-                # Example: tinker://7af7f6f0-e8f9-4124-ab93-e7f08eb54a9d/weights/000060
+                # Parse Tinker model ID format:
+                # - Standard: tinker://{uuid}/weights/{checkpoint_name}  (e.g., tinker://7af7f6f0.../weights/000060)
+                # - Extended: tinker://{uuid}:train:0/weights/{name}     (e.g., tinker://...uuid...:train:0/weights/final)
                 if not tinker_model_id.startswith("tinker://"):
                     raise ValueError(f"Invalid Tinker model ID format: {tinker_model_id}. Expected format: tinker://uuid/weights/checkpoint_name")
 
-                # Extract checkpoint name (e.g., "000060") from path
+                # Extract checkpoint name (e.g., "000060" or "final") from path
                 if "/weights/" not in tinker_model_id:
                     raise ValueError(f"Invalid Tinker model ID format: {tinker_model_id}. Expected format: tinker://uuid/weights/checkpoint_name")
 
                 checkpoint_name = tinker_model_id.split("/weights/")[-1]
-                try:
-                    # Extract batch number from checkpoint name (6-digit format: 000060 -> 60)
-                    batch = int(checkpoint_name)
-                except ValueError as err:
-                    raise ValueError(f"Invalid checkpoint name format: {checkpoint_name}. Expected 6-digit number (e.g., 000060)") from err
+
+                # Handle different checkpoint name formats
+                if checkpoint_name == "final":
+                    # "final" means the final checkpoint from a completed training run
+                    # Start from batch 0 since this is a fresh OPD run on top of SFT
+                    batch = 0
+                    logger.info("Loading from 'final' checkpoint - starting OPD from batch 0")
+                else:
+                    try:
+                        # Extract batch number from checkpoint name (6-digit format: 000060 -> 60)
+                        batch = int(checkpoint_name)
+                    except ValueError:
+                        # If not a number and not "final", default to 0 and warn
+                        logger.warning(f"Could not parse checkpoint name '{checkpoint_name}' as integer, defaulting to batch 0")
+                        batch = 0
 
                 # Construct sampler path by replacing "weights" with "sampler_weights"
                 sampler_path = tinker_model_id.replace("/weights/", "/sampler_weights/")
