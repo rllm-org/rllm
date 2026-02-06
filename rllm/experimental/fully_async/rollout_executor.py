@@ -1,43 +1,86 @@
 import asyncio
 import time
+from collections import defaultdict
 
 import ray
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from rllm.experimental.fully_async.client import RolloutClient
 from rllm.experimental.fully_async.protocol import TrajectoryGroup
+from rllm.experimental.fully_async.stats import global_stats
 from rllm.experimental.fully_async.utils import (
+    abort_async,
     calculate_rollout_global_steps,
+    continue_generation_async,
     load_dataloader_checkpoint,
     save_dataloader_checkpoint,
 )
 
 
-@ray.remote(num_cpus=10)
+@ray.remote(num_cpus=10, max_concurrency=10)
 class RolloutExecutor:
-    def __init__(self, router_url, rollout_fn, n, message_queue_client, config, tokenizer, processor, max_concurrency: int = 4096, total_rollout_steps: int = None):
+    def __init__(self, router_url, rollout_fn, n, config, tokenizer, processor, max_concurrency: int = 4096, total_rollout_steps: int = None, val_rollout_fn=None):
         self.rollout_fn = rollout_fn
+        # Use val_rollout_fn if provided, otherwise fall back to rollout_fn for validation
+        self.val_rollout_fn = val_rollout_fn if val_rollout_fn is not None else rollout_fn
         self.n = n
-        self.message_queue_client = message_queue_client
+        self.message_queue_client = None  # Set later via set_message_queue_client
         self.config = config
         self.tokenizer = tokenizer
         self.processor = processor
         self.router_url = router_url
-        self.total_rollout_steps = total_rollout_steps
         self.global_steps = 1
-        self.max_concurrent_sample = 1024 // self.n
+        
+        # Calculate max_concurrent_rollout from config: limits total concurrent individual rollouts
+        num_servers = config.rollout.n_gpus_per_node * config.rollout.nnodes
+        self.max_concurrent_rollout = 128 * num_servers
+        print(f"[RolloutExecutor] num_servers={num_servers}, max_concurrent_rollout={self.max_concurrent_rollout}")
+
+        self.result_dict = defaultdict(list)
 
         # Use the passed max_concurrency value directly
         self.max_concurrency = max_concurrency
 
-        self.client = RolloutClient(router_url=router_url, tokenizer=tokenizer, max_concurrency=self.max_concurrency)
+        max_prompt_length = int(getattr(config.data, "max_prompt_length", 0) or 0)
+        max_response_length = int(getattr(config.data, "max_response_length", 0) or 0)
+        max_tokens = max_prompt_length + max_response_length
+        # RolloutClient defaults to 32768; only override when config provides a positive budget.
+        client_kwargs = dict(router_url=router_url, tokenizer=tokenizer, max_concurrency=self.max_concurrency)
+        if max_tokens > 0:
+            client_kwargs["max_tokens"] = max_tokens
+
+        self.client = RolloutClient(**client_kwargs)
         self.dataloader = self._create_dataloader()
+        self.val_dataloader = self._create_val_dataloader()
+
+        # Calculate total_rollout_steps from dataloader if not provided
+        if total_rollout_steps is None:
+            dataset_size = len(self.dataloader.dataset)
+            total_epochs = getattr(config.trainer, "total_epochs", 1)
+            self.total_rollout_steps = dataset_size * total_epochs
+            print(f"[RolloutExecutor] Calculated total_rollout_steps={self.total_rollout_steps} from dataset")
+        else:
+            self.total_rollout_steps = total_rollout_steps
+
+        # ==================== Staleness and queue configuration ====================
+        # These are calculated here since executor owns the dataset and generation logic
+        staleness_threshold = config.async_training.get("staleness_threshold", 1)
+        required_samples = config.async_training.required_samples
+        trigger_parameter_sync_step = config.async_training.trigger_parameter_sync_step
+
+        self.max_required_samples = int(required_samples * (staleness_threshold + 1) * trigger_parameter_sync_step)
+        self.total_train_steps = int(self.total_rollout_steps / (required_samples * trigger_parameter_sync_step))
+        self.max_queue_size = self.max_required_samples
+
+        print(f"[RolloutExecutor] required_samples={required_samples} max_required_samples={self.max_required_samples} "
+              f"max_queue_size={self.max_queue_size} total_train_steps={self.total_train_steps} "
+              f"total_rollout_steps={self.total_rollout_steps}")
 
         # Lock for dataloader access (async safety)
         self.dataloader_lock = asyncio.Lock()
 
         # Internal buffer for completed trajectories
-        self.result_queue = asyncio.Queue()
+        self.trajectory_group_queue = asyncio.Queue()
 
         # Timing tracking for version_time, idle_ratio, active_time
         self.version_start_time = None  # Set when a new param version starts
@@ -49,17 +92,27 @@ class RolloutExecutor:
         # Track active rollouts
         self.active_sample = 0
         self.enqueued_sample = 0
+        self.dropped_samples = 0
         self.max_staleness_samples = None  # fill in during fit()
+
+        # Validation tracking
+        self.is_validating = False
+        self.last_val_version = None
+        self.last_val_reward = None
+        self.val_count = 0
+    
+    
 
     def _create_dataloader(self):
         """Load dataset from DatasetRegistry and create StatefulDataLoader."""
         from rllm.data.dataset import DatasetRegistry
 
-        dataset_name = self.config.async_training.dataset_name
-        dataset = DatasetRegistry.load_dataset(dataset_name, "train")
+        dataset_name = self.config.data.train_dataset_name
+        train_split = self.config.data.train_split
+        dataset = DatasetRegistry.load_dataset(dataset_name, train_split)
         if dataset is None:
-            raise ValueError(f"Failed to load dataset '{dataset_name}' from DatasetRegistry")
-        print(f"[RolloutExecutor] Loaded dataset '{dataset_name}' with {len(dataset)} examples")
+            raise ValueError(f"Failed to load dataset '{dataset_name}' split '{train_split}' from DatasetRegistry")
+        print(f"[RolloutExecutor] Loaded dataset '{dataset_name}' split '{train_split}' with {len(dataset)} examples")
 
         # Create StatefulDataLoader with shuffle=True for checkpoint resumption support
         dataloader = StatefulDataLoader(
@@ -69,6 +122,77 @@ class RolloutExecutor:
             collate_fn=lambda x: x,  # Return batches as lists without merging
         )
         return dataloader
+
+    def _create_val_dataloader(self):
+        """Load validation dataset if configured."""
+        from rllm.data.dataset import DatasetRegistry
+
+        val_dataset_name = getattr(self.config.data, "val_dataset_name", None)
+        if val_dataset_name is None:
+            return None
+
+        val_split = getattr(self.config.data, "val_split", "test")
+        dataset = DatasetRegistry.load_dataset(val_dataset_name, val_split)
+        if dataset is None:
+            return None
+
+        print(f"[RolloutExecutor] Loaded val dataset '{val_dataset_name}' split '{val_split}' with {len(dataset)} examples")
+        from torch.utils.data import DataLoader
+        return DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=lambda x: x)
+
+    async def validate(self, param_version: int, global_steps: int = 0):
+        """Run validation and send metrics to MessageQueue."""
+        if self.val_dataloader is None:
+            return
+
+        import numpy as np
+        from verl.experimental.fully_async_policy.detach_utils import ValidateMetrics
+
+        self.is_validating = True
+        self.val_count += 1
+        print(f"[RolloutExecutor] Starting validation #{self.val_count} for version {param_version} ({len(self.val_dataloader)} samples)...")
+        start_time = time.time()
+
+        # Run validation rollouts concurrently, but cap max concurrency to avoid
+        # spiky load on the router / servers.
+        sema = asyncio.Semaphore(1024)
+
+        async def run_one(datum):
+            async with sema:
+                result = await self.val_rollout_fn(self.client, self.tokenizer, **datum)
+                if isinstance(result, tuple):
+                    return result[0], result[1]  # reward, metrics
+                return getattr(result, "reward", 0.0), getattr(result, "metadata", {}) or {}
+
+        results = await asyncio.gather(*[run_one(batch[0]) for batch in self.val_dataloader])
+
+        rewards = [r for r, _ in results]
+
+        # Aggregate all numeric metrics from user-returned metadata
+        all_metadata = [m for _, m in results]
+        aggregated_user_metrics = {}
+        if all_metadata:
+            # Collect all keys that have numeric values
+            for key in all_metadata[0].keys():
+                values = [m.get(key) for m in all_metadata if key in m]
+                # Only aggregate numeric types
+                if values and all(isinstance(v, (int, float, bool)) for v in values):
+                    aggregated_user_metrics[f"val/{key}"] = float(np.mean([float(v) for v in values]))
+
+        metrics = {
+            "val/avg_reward": float(np.mean(rewards)),
+            "val/num_samples": len(rewards),
+            "timing_s/validation": time.time() - start_time,
+            **aggregated_user_metrics,  # Include all user metrics
+        }
+        self.is_validating = False
+        self.last_val_version = param_version
+        self.last_val_reward = metrics["val/avg_reward"]
+        print(f"[RolloutExecutor] Validation #{self.val_count} done: avg_reward={metrics['val/avg_reward']:.4f}, took {metrics['timing_s/validation']:.1f}s")
+
+        # Send to MessageQueue
+        data = ValidateMetrics(timing_raw={}, metrics=metrics, global_steps=global_steps, param_version=param_version)
+        await self.message_queue_client.put_validate(ray.cloudpickle.dumps(data))
 
     async def save_checkpoint(self, checkpoint_folder: str):
         """Save dataloader state to checkpoint folder."""
@@ -82,58 +206,126 @@ class RolloutExecutor:
             print(f"[RolloutExecutor] Set global_steps to {self.global_steps}")
         return trainer_global_steps
 
-    def pause(self):
-        """Pause rollout and record idle start time for timing metrics."""
+    def set_message_queue_client(self, message_queue_client):
+        """Set message queue client after initialization."""
+        self.message_queue_client = message_queue_client
+
+    def get_max_queue_size(self):
+        """Get max queue size for MessageQueue initialization."""
+        return self.max_queue_size
+
+    def get_total_train_steps(self):
+        """Get total training steps for trainer initialization."""
+        return self.total_train_steps
+
+    async def pause(self):
+        """Pause rollout, abort in-flight requests, and record idle start time for timing metrics."""
         self.is_paused = True
         if self.idle_start_time is None:
             self.idle_start_time = time.time()
         self.client.pause()
+        # Abort all in-flight requests on the router - waits for completion
+        await abort_async(self.router_url)
         print(f"[RolloutExecutor] Paused at {self.idle_start_time:.2f}")
 
-    def resume(self):
-        """Resume rollout."""
+    async def resume(self):
+        """Resume rollout and SGLang generation."""
+        # Resume SGLang generation first (unblocks workers)
+        await continue_generation_async(self.router_url)
         self.is_paused = False
         self.idle_start_time = None
         self.continue_event.set()  # Unblock the main loop
         self.client.resume()
         print(f"[RolloutExecutor] Resumed")
 
-    async def _watch_task(self, interval: float = 10.0):
+    async def _watch_task(self, interval: float = 20.0):
         """Periodically print debug stats for monitoring staleness control."""
+        last_watch_time = time.time()
+        
         while True:
             try:
+                # Measure event loop latency: time spent between wakeups
+                pre_sleep = time.time()
                 await asyncio.sleep(interval)
+                post_sleep = time.time()
+                
+                # Calculate expected vs actual sleep time (latency = deviation from expected)
+                actual_sleep = post_sleep - pre_sleep
+                event_loop_latency = actual_sleep - interval
+                watch_interval = post_sleep - last_watch_time
+                last_watch_time = post_sleep
 
                 # Get message queue stats
                 mq_stats = await self.message_queue_client.get_statistics()
+                
+                # Get client HTTP stats
+                client_stats = self.client.get_stats_sync()
+                
+                # Get global component stats (tool_call, refine, etc.)
+                component_stats = global_stats.get_all_stats_sync()
+                
+                # Count pending asyncio tasks
+                all_tasks = asyncio.all_tasks()
+                pending_tasks = len([t for t in all_tasks if not t.done()])
 
-                print(f"\n{'=' * 60}")
+                print(f"\n{'=' * 80}")
                 print(f"[RolloutExecutor][WATCH] Debug Stats @ {time.strftime('%H:%M:%S')}")
+                print(f"  Event Loop Health:")
+                print(f"    event_loop_latency:      {event_loop_latency:.3f}s (should be ~0)")
+                print(f"    actual_watch_interval:   {watch_interval:.1f}s (target: {interval}s)")
+                print(f"    pending_asyncio_tasks:   {pending_tasks}")
+                print(f"  HTTP Client Stats (generation):")
+                print(f"    http_in_flight:          {client_stats['in_flight']}")
+                print(f"    http_total_started:      {client_stats['total_started']}")
+                print(f"    http_total_completed:    {client_stats['total_completed']}")
+                print(f"    http_total_failed:       {client_stats['total_failed']}")
+                print(f"    http_avg_latency:        {client_stats['avg_latency']:.2f}s")
+                
+                # Print component stats (tool_call, refine, etc.)
+                if component_stats:
+                    print(f"  Component Stats:")
+                    for comp_name, comp_stat in component_stats.items():
+                        print(f"    [{comp_name:12s}]  in_flight: {comp_stat['in_flight']:>5}, "
+                              f"completed: {comp_stat['total_completed']:>6}, "
+                              f"failed: {comp_stat['total_failed']:>4}, "
+                              f"avg_latency: {comp_stat['avg_latency']:.2f}s")
+                
                 print(f"  Staleness Control:")
-                print(f"    active_sample:        {self.active_sample}")
-                print(f"    enqueued_sample:      {self.enqueued_sample}")
-                print(f"    max_staleness_samples:{self.max_staleness_samples}")
-                print(f"    continue_event_set:   {self.continue_event.is_set() if self.continue_event else 'N/A'}")
-                print(f"  Concurrency Config:")
-                print(f"    max_concurrent_sample:{self.max_concurrent_sample}")
-                print(f"    repeat_per_sample:    {self.n}")
+                print(f"    active_sample:           {self.active_sample}")
+                print(f"    enqueued_sample:         {self.enqueued_sample}")
+                print(f"    dropped_samples:         {self.dropped_samples}")
+                print(f"    max_staleness_samples:   {self.max_staleness_samples}")
+                print(f"    continue_event_set:      {self.continue_event.is_set() if self.continue_event else 'N/A'}")
+                print(f"  Concurrency Control:")
+                sema_available = self.sema._value if hasattr(self, 'sema') else 'N/A'
+                active_rollouts = self.max_concurrent_rollout - sema_available if isinstance(sema_available, int) else 'N/A'
+                print(f"    active_rollouts:         {active_rollouts}  (semaphore slots in use)")
+                print(f"    sema_available:          {sema_available}  (remaining capacity)")
+                print(f"    max_concurrent_rollout:  {self.max_concurrent_rollout}")
+                print(f"    repeat_per_sample:       {self.n}")
                 print(f"  Message Queue:")
-                print(f"    mq_queue_size:        {mq_stats.get('queue_size', 'N/A')}")
-                print(f"    mq_total_consumed:    {mq_stats.get('total_consumed', 'N/A')}")
-                print(f"    mq_total_produced:    {mq_stats.get('total_produced', 'N/A')}")
-                print(f"    mq_max_queue_size:    {mq_stats.get('max_queue_size', 'N/A')}")
-                print(f"    mq_param_version:     {mq_stats.get('current_param_version', 'N/A')}")
+                print(f"    mq_queue_size:           {mq_stats.get('queue_size', 'N/A')}")
+                print(f"    mq_total_consumed:       {mq_stats.get('total_consumed', 'N/A')}")
+                print(f"    mq_total_produced:       {mq_stats.get('total_produced', 'N/A')}")
+                print(f"    mq_max_queue_size:       {mq_stats.get('max_queue_size', 'N/A')}")
                 print(f"  Internal State:")
-                print(f"    result_queue_size:    {self.result_queue.qsize()}")
-                print(f"    current_param_version:{self.current_param_version}")
-                print(f"    is_paused:            {self.is_paused}")
-                print(f"{'=' * 60}\n")
+                print(f"    trajectory_group_queue_size:       {self.trajectory_group_queue.qsize()}")
+                print(f"    current_param_version:   {self.current_param_version}")
+                print(f"    is_paused:               {self.is_paused}")
+                print(f"  Validation:")
+                print(f"    is_validating:           {self.is_validating}")
+                print(f"    val_count:               {self.val_count}")
+                print(f"    last_val_version:        {self.last_val_version}")
+                print(f"    last_val_reward:         {f'{self.last_val_reward:.4f}' if self.last_val_reward is not None else 'N/A'}")
+                print(f"{'=' * 80}\n", flush=True)
 
             except asyncio.CancelledError:
                 print("[RolloutExecutor][WATCH] Watch task cancelled")
                 raise
             except Exception as e:
+                import traceback
                 print(f"[RolloutExecutor][WATCH] Error getting stats: {e}")
+                print(traceback.format_exc())
 
     async def _drain_results_to_mq(self):
         """Single loop that drains internal result queue to MessageQueue.
@@ -143,46 +335,34 @@ class RolloutExecutor:
         """
         while True:
             try:
-                serialized, param_version = await self.result_queue.get()
-                put_succeeded = await self.message_queue_client.put_sample(serialized, param_version=param_version)
-                # If drop happened, return permit to compensate for lost old sample
+                serialized = await self.trajectory_group_queue.get()
+                put_succeeded = await self.message_queue_client.put_sample(serialized)
+                if not put_succeeded:
+                    self.dropped_samples += 1
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 print(f"[DrainLoop] Error: {e}")
 
-    async def generate_trajectory_group(self, datum):
-        """Generate n trajectories for one datum and put to internal queue."""
-        # Acquire semaphore to limit concurrent rollout tasks
-        # This prevents overwhelming the SGLang server with too many requests
-        async with self.sema:
-            try:
-                trajectory_ls = await asyncio.gather(*[self.generate_trajectory(datum) for _ in range(self.n)])
-                trajectory_gp = TrajectoryGroup(trajectories=trajectory_ls)
-                # Serialize before putting in queue (trainer expects bytes and does cloudpickle.loads)
-                serialized = ray.cloudpickle.dumps(trajectory_gp)
-                # Put to internal queue (fast, non-blocking)
-                await self.result_queue.put((serialized, self.client.cur_version))
-                self.enqueued_sample += 1
-                # Start idle time when queue is actually full (enqueued equals max)
-                if self.enqueued_sample >= self.max_staleness_samples and self.idle_start_time is None:
-                    self.idle_start_time = time.time()
-                    print(f"[RolloutExecutor] Queue full (enqueued={self.enqueued_sample}), idle_start_time set to {self.idle_start_time:.2f}", flush=True)
-            except Exception as e:
-                import traceback
 
-                error_msg = traceback.format_exc()
-                print(f"[RolloutExecutor] Full traceback:\n{error_msg}")
-                # Re-raise to make the error visible and stop the system if it keeps failing
-                raise RuntimeError(f"[RolloutExecutor] Trajectory generation failed: {e}") from e
-            finally:
-                self.active_sample -= 1
-
-    async def generate_trajectory(self, datum):
+    async def generate_trajectory(self, idx, datum):
+        result = None
         try:
-            return await self.rollout_fn(self.client, self.tokenizer, **datum)
+            result = await self.rollout_fn(self.client, self.tokenizer, **datum)
+        except Exception as e:
+            import traceback
+            error_msg = traceback.format_exc()
+            print(f"[RolloutExecutor] Trajectory {idx} generation failed:\n{error_msg}")
         finally:
-            pass
+            self.result_dict[idx].append(result)
+            self.sema.release()
+            if len(self.result_dict[idx]) >= self.n:
+                group = TrajectoryGroup(trajectories=[res for res in self.result_dict[idx] if res is not None])
+                serialized = ray.cloudpickle.dumps(group)
+                await self.trajectory_group_queue.put(serialized)
+                del self.result_dict[idx]
+                self.active_sample -= 1
+                self.enqueued_sample += 1
 
     async def fit(self):
         """Main loop."""
@@ -192,18 +372,18 @@ class RolloutExecutor:
         self.continue_event = asyncio.Event()
         self.continue_event.set()
 
+        # Initialize version_start_time so timing metrics work from the first sync
+        self.version_start_time = time.time()
+
         # Sync last_consumed and client version with current state
         stats = await self.message_queue_client.get_statistics()
         print(f"[RolloutExecutor] MQ stats: {stats}", flush=True)
 
         # Each task is self.n rollouts
-        max_concurrent_task = self.max_concurrency // self.n
-        self.sema = asyncio.Semaphore(max_concurrent_task)
+        self.sema = asyncio.Semaphore(self.max_concurrent_rollout)
 
         self.max_staleness_samples = stats["max_queue_size"]
         print(f"[RolloutExecutor] max_staleness_samples set to {self.max_staleness_samples}", flush=True)
-
-        self.client.set_version(stats["current_param_version"])
 
         drain_task = asyncio.create_task(self._drain_results_to_mq())
         watch_task = asyncio.create_task(self._watch_task(interval=20.0))
@@ -223,17 +403,16 @@ class RolloutExecutor:
                     datum_count += 1
                     if datum_count % 128 == 1:
                         print(f"[RolloutExecutor] Processing datum {datum_count}, global_steps={self.global_steps}/{self.total_rollout_steps}, active={self.active_sample}, enqueued={self.enqueued_sample}", flush=True)
+                    
+                    if self.active_sample + self.enqueued_sample >= self.max_staleness_samples:
+                        self.continue_event.clear()
 
-                    await self.continue_event.wait()
-
-                    if self.active_sample + self.enqueued_sample < self.max_staleness_samples:
-                        self.active_sample += 1
-                        asyncio.create_task(self.generate_trajectory_group(datum))
-                        if self.active_sample + self.enqueued_sample >= self.max_staleness_samples:
-                            print(f"[RolloutExecutor] Reached staleness limit, clearing continue_event", flush=True)
-                            self.continue_event.clear()
-                    else:
-                        raise RuntimeError("This shouldn't happen.")
+                    for idx in range(self.n):
+                        await self.continue_event.wait()  # Wait BEFORE acquiring semaphore to avoid leak
+                        await self.sema.acquire()
+                        if idx == 0:
+                            self.active_sample += 1
+                        asyncio.create_task(self.generate_trajectory(datum_count, datum))
 
                     if self.global_steps >= self.total_rollout_steps:
                         print(f"[RolloutExecutor] Reached total_rollout_steps {self.total_rollout_steps}, stopping", flush=True)
@@ -261,9 +440,9 @@ class RolloutExecutor:
                 pass
             print(f"[RolloutExecutor] fit() ENDED")
 
-    async def update_staleness_tracking(self, consumed_since_last_sync):
+    async def update_staleness_tracking(self):
         # Wait for internal result_queue to drain to MQ before syncing
-        while not self.result_queue.empty():
+        while not self.trajectory_group_queue.empty():
             await asyncio.sleep(0.5)
 
         mq_stats = await self.message_queue_client.get_statistics()
@@ -271,7 +450,7 @@ class RolloutExecutor:
         mq_total_consumed = mq_stats.get("total_consumed", "N/A")
         mq_total_produced = mq_stats.get("total_produced", "N/A")
 
-        print(f"[RolloutExecutor] update_staleness_tracking CALLED with consumed={consumed_since_last_sync}, current enqueued_sample={self.enqueued_sample}, active_sample={self.active_sample}, mq_queue_size={mq_queue_size}, mq_total_consumed={mq_total_consumed}, mq_total_produced={mq_total_produced}", flush=True)
+        print(f"[RolloutExecutor] update_staleness_tracking CALLED, current enqueued_sample={self.enqueued_sample}, active_sample={self.active_sample}, mq_queue_size={mq_queue_size}, mq_total_consumed={mq_total_consumed}, mq_total_produced={mq_total_produced}", flush=True)
         self.enqueued_sample = mq_queue_size
         print(f"[RolloutExecutor] update_staleness_tracking DONE, new enqueued_sample={self.enqueued_sample}", flush=True)
 
@@ -300,10 +479,8 @@ class RolloutExecutor:
             # Reset idle_start_time after capturing metrics
             self.idle_start_time = None
 
-        old_version = self.current_param_version
+        print(f"[RolloutExecutor] Parameter version updated from {self.current_param_version} to {version}, idle_ratio: {idle_ratio}")
         self.current_param_version = version
-
-        print(f"[RolloutExecutor] Parameter version updated from {old_version} to {version}, idle_ratio: {idle_ratio}")
 
         # Reset version_start_time for next version cycle
         self.version_start_time = time.time()

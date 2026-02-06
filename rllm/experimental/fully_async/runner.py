@@ -23,7 +23,7 @@ from pprint import pprint
 import ray
 from omegaconf import OmegaConf
 
-from rllm.experimental.fully_async.fully_async_rollouter import FullyAsyncRollouter
+from rllm.experimental.fully_async.inference_manager import InferenceManager
 from rllm.experimental.fully_async.fully_async_trainer import FullyAsyncTrainer
 from rllm.experimental.fully_async.message_queue import MessageQueue, MessageQueueClient
 from rllm.experimental.fully_async.param_sync import ParameterSynchronizer
@@ -36,7 +36,7 @@ from verl.trainer.ppo.utils import Role, need_reference_policy
 from verl.utils.fs import copy_to_local
 
 
-def create_task_runner_with_rollout_fn(rollout_fn):
+def create_task_runner_with_rollout_fn(rollout_fn, val_rollout_fn=None):
     """
     Factory function that creates a FullyAsyncTaskRunner class with a custom rollout_fn baked in.
 
@@ -45,14 +45,17 @@ def create_task_runner_with_rollout_fn(rollout_fn):
     Args:
         rollout_fn: Async function with signature:
             async def rollout_fn(client, tokenizer, **kwargs) -> Trajectory
+        val_rollout_fn: Optional async function for validation with the same signature.
+            If not provided and validation dataset exists, rollout_fn will be used for validation.
 
     Returns:
-        A Ray remote class configured with the custom rollout_fn
+        A Ray remote class configured with the custom rollout_fn and optional val_rollout_fn
     """
 
     @ray.remote(num_cpus=1)
     class ConfiguredTaskRunner(FullyAsyncTaskRunner):
         _custom_rollout_fn = staticmethod(rollout_fn)
+        _custom_val_rollout_fn = staticmethod(val_rollout_fn) if val_rollout_fn is not None else None
 
     return ConfiguredTaskRunner
 
@@ -64,6 +67,8 @@ class FullyAsyncTaskRunner:
 
     # Default rollout function - should be overridden by subclasses or set via factory
     _custom_rollout_fn = None
+    # Optional separate validation rollout function
+    _custom_val_rollout_fn = None
 
     def __init__(self):
         self.running = False
@@ -75,7 +80,7 @@ class FullyAsyncTaskRunner:
         self.processor = None
         self.role_worker_mapping = None
         self.ray_worker_group_cls = None
-        self.rollouter = None
+        self.inference_manager = None
         self.trainer = None
         self.message_queue = None
         self.message_queue_client = None
@@ -108,39 +113,41 @@ class FullyAsyncTaskRunner:
         print("[ASYNC MAIN] Creating worker mapping and resource pools...")
         self.role_worker_mapping, self.ray_worker_group_cls = create_role_worker_mapping(config)
 
-        print("[ASYNC MAIN] Creating FullyAsyncRollouter...")
-        self._create_rollouter(config)
+        print("[ASYNC MAIN] Creating InferenceManager...")
+        self._create_inference_manager(config)
+
+        print("[ASYNC MAIN] Creating RolloutExecutor...")
+        self._create_rollout_executor(config)
+
+        # Get total_train_steps and max_queue_size from executor (it owns dataset and staleness logic)
+        total_train_steps = ray.get(self.rollout_executor.get_total_train_steps.remote())
+        max_queue_size = ray.get(self.rollout_executor.get_max_queue_size.remote())
+        print(f"[ASYNC MAIN] total_train_steps={total_train_steps} max_queue_size={max_queue_size}")
+
+        print("[ASYNC MAIN] Creating MessageQueue...")
+        self.message_queue = MessageQueue.remote(config, max_queue_size)
+        self.message_queue_client = MessageQueueClient(self.message_queue)
+
+        # Set MQ client on executor
+        ray.get(self.rollout_executor.set_message_queue_client.remote(self.message_queue_client))
 
         print("[ASYNC MAIN] Creating FullyAsyncTrainer...")
         self._create_trainer(config)
 
-        # sync total_train_steps between rollouter and trainer
-        total_train_steps = ray.get(self.rollouter.get_total_train_steps.remote())
-        print(f"total_train_steps {total_train_steps}")
+        # Set total_train_steps and MQ client on trainer
         ray.get(self.trainer.set_total_train_steps.remote(total_train_steps))
-
-        # max_queue_size
-        max_queue_size = ray.get(self.rollouter.get_max_queue_size.remote())
-        print(f"[ASYNC MAIN] Creating MessageQueue... max_queue_size {max_queue_size}")
-        self.message_queue = MessageQueue.remote(config, max_queue_size)
-        self.message_queue_client = MessageQueueClient(self.message_queue)
-
-        ray.get(self.rollouter.set_message_queue_client.remote(self.message_queue_client))
         ray.get(self.trainer.set_message_queue_client.remote(self.message_queue_client))
 
         print("[ASYNC MAIN] Setting up parameter synchronization...")
         self.param_synchronizer = ParameterSynchronizer.remote(
             config=config,
             trainer=self.trainer,
-            rollouter=self.rollouter,
+            inference_manager=self.inference_manager,
             mq=self.message_queue_client,
         )
         ray.get(self.trainer.set_parameter_synchronizer.remote(self.param_synchronizer))
 
-        # Create rollout executor BEFORE sync_weights (so it can be paused during sync)
-        self._create_rollout_executor(config)
-
-        # Set rollout_executor and router_url on param_synchronizer BEFORE sync_weights
+        # Set rollout_executor and router_url on param_synchronizer
         ray.get(self.param_synchronizer.set_rollout_executor.remote(self.rollout_executor))
         ray.get(self.param_synchronizer.set_router_url.remote(self.router_url))
 
@@ -153,7 +160,6 @@ class FullyAsyncTaskRunner:
             self.param_synchronizer.sync_weights.remote(
                 version=param_version,
                 validate=val_before_train,
-                use_trainer_do_validate=config.async_training.use_trainer_do_validate,
             )
         )
         ray.get(self.param_synchronizer.wait_last_valid.remote())
@@ -161,7 +167,7 @@ class FullyAsyncTaskRunner:
         print("[ASYNC MAIN] All components initialized successfully")
 
     def _create_rollout_executor(self, config):
-        """Override to use the custom rollout_fn instead of the default."""
+        """Create RolloutExecutor which owns dataset, staleness logic, and generation."""
         max_concurrent_tasks = calculate_max_concurrency(config)
         n = config.actor_rollout_ref.rollout.get("n", 1)
 
@@ -171,11 +177,15 @@ class FullyAsyncTaskRunner:
         if not inspect.iscoroutinefunction(self._custom_rollout_fn):
             raise TypeError(f"rollout_fn must be an async function (defined with 'async def'), but got {type(self._custom_rollout_fn).__name__}. Only async functions are supported.")
 
+        # Validate val_rollout_fn if provided
+        if self._custom_val_rollout_fn is not None and not inspect.iscoroutinefunction(self._custom_val_rollout_fn):
+            raise TypeError(f"val_rollout_fn must be an async function (defined with 'async def'), but got {type(self._custom_val_rollout_fn).__name__}. Only async functions are supported.")
+
         self.rollout_executor = RolloutExecutor.remote(
             router_url=self.router_url,
             rollout_fn=self._custom_rollout_fn,
+            val_rollout_fn=self._custom_val_rollout_fn,
             n=n,
-            message_queue_client=self.message_queue_client,
             config=config,
             tokenizer=self.tokenizer,
             processor=self.processor,
@@ -183,8 +193,9 @@ class FullyAsyncTaskRunner:
             total_rollout_steps=config.rollout.total_rollout_steps,
         )
 
-    def _create_rollouter(self, config) -> None:
-        self.rollouter = FullyAsyncRollouter.remote(
+    def _create_inference_manager(self, config) -> None:
+        """Create InferenceManager which manages SGLang servers."""
+        self.inference_manager = InferenceManager.remote(
             config=config,
             tokenizer=self.tokenizer,
             role_worker_mapping={Role.Rollout: self.role_worker_mapping[Role.Rollout]},
@@ -193,15 +204,12 @@ class FullyAsyncTaskRunner:
             processor=self.processor,
             device_name=config.trainer.device,
         )
-        ray.get(self.rollouter.init_workers.remote())
-        ray.get(self.rollouter.set_max_required_samples.remote())
+        ray.get(self.inference_manager.init_workers.remote())
 
-        server_urls = ray.get(self.rollouter.get_server_urls.remote())
-        print("Launched server urls: ", server_urls)
+        self.router_url = ray.get(self.inference_manager.launch_router.remote())
+        print(f"[ASYNC MAIN] Router launched at {self.router_url}")
 
-        self.router_url = ray.get(self.rollouter.launch_router.remote(server_urls))
-
-        print("[ASYNC MAIN] Rollouter created and initialized successfully")
+        print("[ASYNC MAIN] InferenceManager created and initialized successfully")
 
     def _create_trainer(self, config) -> None:
         trainer_role_mapping = {role: worker_cls for role, worker_cls in self.role_worker_mapping.items() if role != Role.Rollout}
@@ -256,13 +264,15 @@ class FullyAsyncTaskRunner:
 
 
 class AsyncAgentTrainer:
-    def __init__(self, config, dataset_name: str, rollout_fn):
+    def __init__(
+        self,
+        config,
+        rollout_fn,
+        val_rollout_fn=None,
+    ):
         self.config = config
-        self.dataset_name = dataset_name
         self.rollout_fn = rollout_fn
-
-        # Store dataset_name in config for RolloutExecutor to use
-        self.config.async_training.dataset_name = dataset_name
+        self.val_rollout_fn = val_rollout_fn
 
     def train(self):
         from verl.trainer.main_ppo import run_ppo
@@ -274,7 +284,7 @@ class AsyncAgentTrainer:
         start_time = time.time()
 
         # Create a configured TaskRunner class with rollout_fn baked in
-        task_runner_class = create_task_runner_with_rollout_fn(self.rollout_fn)
+        task_runner_class = create_task_runner_with_rollout_fn(self.rollout_fn, self.val_rollout_fn)
         run_ppo(self.config, task_runner_class=task_runner_class)
 
         print(f"total time: {time.time() - start_time:.2f} seconds")

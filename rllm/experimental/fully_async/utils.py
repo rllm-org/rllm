@@ -201,7 +201,6 @@ async def continue_generation_async(router_url):
 
     await asyncio.gather(*[post(f"{url}/continue_generation", {}, expect_json=True) for url in urls])
 
-
 # Sample utils
 
 
@@ -437,10 +436,10 @@ def assemble_batch_from_trajectory_group_ls(trajectory_group_ls: list[Trajectory
     # Token level rewards (place the reward at the last response token)
     token_level_scores = torch.zeros_like(responses_t, dtype=torch.float32)
     trajectory_rewards = torch.tensor([trajectory_uuid2reward[traj_uid] for traj_uid in trajectory_uuids], dtype=torch.float32)
-    response_lens_t = torch.tensor(response_lens)
+    response_lens_t = torch.tensor(response_lens, dtype=torch.long)
     # clamp to max_response_len - 1 in case response was truncated
     last_token_idx = (response_lens_t - 1).clamp(0, max_response_len - 1)
-    token_level_scores[torch.arange(num_sequences), last_token_idx] = trajectory_rewards
+    token_level_scores[torch.arange(num_sequences, dtype=torch.long), last_token_idx] = trajectory_rewards
 
     # Concatenate and compute derived tensors
     attention_masks_t = torch.cat([prompt_attention_masks_t, response_attention_masks_t], dim=-1)

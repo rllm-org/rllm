@@ -30,7 +30,6 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager, apply_kl_penalty, compute_response_mask
-from verl.trainer.ppo.reward import load_reward_manager
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.debug import marked_timer
@@ -52,16 +51,12 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
         resource_pool_manager: ResourcePoolManager,
         ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
         processor=None,
-        reward_fn=None,
-        val_reward_fn=None,
         device_name=None,
     ):
         # Store the tokenizer for text processing
         self.tokenizer = tokenizer
         self.processor = processor
         self.config = config
-        self.reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
-        self.val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {}))
 
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert not self.hybrid_engine
@@ -69,7 +64,7 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
         self.use_reference_policy = need_reference_policy(self.config)
-        self.use_rm = need_reward_model(self.role_worker_mapping)
+        self.use_rm = False
         self.use_critic = need_critic(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name if device_name else self.config.trainer.device
@@ -102,8 +97,7 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
         self.progress_bar = None
         self.trigger_parameter_sync_step = config.async_training.trigger_parameter_sync_step
         self.last_ckpt_version = 0
-        self.train_val_metrics = None
-        self.train_role = Role.ActorRollout if config.async_training.use_trainer_do_validate else Role.Actor
+        self.train_role = Role.Actor  # Trainer only handles Actor role; validation is done by RolloutExecutor
 
         # required_samples use ppo_mini_batch_size*require_batches as the minimum number of samples.
         self.require_batches = config.async_training.require_batches
@@ -111,37 +105,6 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
         self.compute_prox_log_prob = self.config.async_training.compute_prox_log_prob
         total_gpus = config.trainer.nnodes * config.trainer.n_gpus_per_node + config.rollout.nnodes * config.rollout.n_gpus_per_node
         self.metrics_aggregator = MetricsAggregator(total_gpus=total_gpus)
-
-        # use trainer to do validation
-        if self.config.async_training.use_trainer_do_validate:
-            from verl.trainer.main_ppo import create_rl_dataset
-            from verl.utils.dataset.rl_dataset import collate_fn
-
-            val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
-            rollout_gpus = config.rollout.nnodes * config.rollout.n_gpus_per_node
-            print(f"[FullyAsyncTrainer] split before val_dataset total len: {len(val_dataset)}")
-            split_dataset = val_dataset.split(total_gpus)
-            rollout_val_dataset0 = split_dataset[rollout_gpus:]
-            from torch.utils.data import ConcatDataset
-
-            val_dataset = ConcatDataset(rollout_val_dataset0)
-            print(f"[FullyAsyncTrainer] split after val_dataset total len: {len(val_dataset)}")
-            self.val_dataset = val_dataset
-            # update val_dataloader
-            val_batch_size = self.config.data.val_batch_size  # Prefer config value if set
-            if val_batch_size is None:
-                val_batch_size = len(val_dataset)
-            from torchdata.stateful_dataloader import StatefulDataLoader
-
-            print(f"[FullyAsyncTrainer] create val_dataloader with batch_size: {val_batch_size}")
-            self.val_dataloader = StatefulDataLoader(
-                dataset=val_dataset,
-                batch_size=val_batch_size,
-                num_workers=self.config.data["dataloader_num_workers"],
-                shuffle=self.config.data.get("validation_shuffle", True),
-                drop_last=False,
-                collate_fn=collate_fn,
-            )
 
     def set_message_queue_client(self, message_queue_client: MessageQueueClient):
         """Set message queue client"""
@@ -179,10 +142,6 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
             self.ref_policy_wg = self.all_wg[str(Role.RefPolicy)]
             self.ref_policy_wg.init_model()
 
-        if self.use_rm:
-            self.rm_wg = self.all_wg[str(Role.RewardModel)]
-            self.rm_wg.init_model()
-
         self.actor_wg = self.all_wg[str(self.train_role)]
         self.actor_wg.init_model()
         self.actor_rollout_wg = self.actor_wg  # to be compatible with the functions that not be modified
@@ -198,22 +157,7 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
         self._create_worker_classes()
         self._init_worker_groups()
         self._init_models()
-        await self._init_async_rollout_manager()
-
-    async def _init_async_rollout_manager(self):
-        # use async rollout do validate
-        print(f"[FullyAsyncTrainer] use_trainer_do_validate: {self.config.async_training.use_trainer_do_validate}")
-        if self.config.async_training.use_trainer_do_validate:
-            assert self.config.actor_rollout_ref.rollout.mode == "async"
-            self.async_rollout_mode = True
-            print("[FullyAsyncTrainer] Init async rollout manager")
-            from verl.experimental.fully_async_policy.agent_loop import FullyAsyncAgentLoopManager
-
-            self.async_rollout_manager = await FullyAsyncAgentLoopManager.create(config=self.config, worker_group=self.actor_rollout_wg)
-            print("[FullyAsyncTrainer] async_rollout_manager sleep")
-            await self.async_rollout_manager.sleep()
-        else:
-            print("[FullyAsyncTrainer] Skip async rollout manager (use_trainer_do_validate=False)")
+        # Note: Validation is handled by RolloutExecutor, not trainer
 
     async def fit(self):
         """
@@ -263,7 +207,8 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
             time_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             print(f"[FullyAsyncTrainer] global_steps: {self.global_steps} local_trigger_step: {self.local_trigger_step} trigger_parameter_sync_step: {self.trigger_parameter_sync_step} {time_str}")
             await self._trigger_parameter_sync_after_step(global_steps=self.global_steps)
-            self._log_validation_data()
+            # Note: _log_validation_data() is called inside _trigger_parameter_sync_after_step 
+            # after wait_last_valid() to ensure we log the completed validation results
             self._check_save_checkpoint(timing_raw)
             self.global_steps += 1
 
@@ -406,64 +351,42 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
         timing_param_sync = {}
         with marked_timer("timing_s/wait_last_valid", timing_param_sync):
             ray.get(self.param_synchronizer.wait_last_valid.remote())
+        # Log validation data from the PREVIOUS sync (now completed)
+        self._log_validation_data()
         with marked_timer("timing_s/param_sync", timing_param_sync):
-            ray.get(
+            rollout_executor_timing = ray.get(
                 self.param_synchronizer.sync_weights.remote(
                     self.current_param_version,
                     validate=validate,
                     global_steps=global_steps,
-                    use_trainer_do_validate=self.config.async_training.use_trainer_do_validate,
                 )
             )
-
-        #  do trainer validate
-        do_validate_param = self.config.rollout.test_freq > 0 and self.current_param_version % self.config.rollout.test_freq == 0 and self.current_param_version > 0
-        print(f"do_validate_param: {do_validate_param}")
-        if do_validate_param and self.reward_fn is not None and self.config.async_training.use_trainer_do_validate:
-            print(f"[FullyAsyncTrainer] validate param version: {self.current_param_version}")
-            await self._validate_process()
-        else:
-            self.train_val_metrics = None
+        # Validation is now handled by RolloutExecutor, triggered by ParameterSynchronizer
+        # Merge rollout executor timing metrics (rollouter/active_time, rollouter/version_time, rollouter/idle_ratio)
+        if rollout_executor_timing:
+            timing_param_sync.update(rollout_executor_timing)
         self.logger.log(data=timing_param_sync, step=self.current_param_version)
 
     def _log_validation_data(self):
         """
-        Log validation data
+        Log validation data from RolloutExecutor via MessageQueue.
+        Uses current_param_version for step to ensure monotonically increasing steps.
         """
         val_data = self.message_queue_client.get_validate_sync()
         if not val_data:
             return
 
         val_metrics: ValidateMetrics = ray.cloudpickle.loads(val_data)
-        if self.train_val_metrics and self.config.async_training.use_trainer_do_validate:
-            # merge info
-            timing_param_sync = {}
-            with marked_timer("timing_s/merge_val", timing_param_sync):
-                new_metrics = self._merge_validation_results(self.train_val_metrics, val_metrics.metrics)
-            if new_metrics:
-                self.logger.log(data=new_metrics, step=val_metrics.param_version)
-                pprint(f"[FullyAsyncTrainer] parameter version: {val_metrics.param_version} Validation metrics: {new_metrics}, timing_param_sync: {timing_param_sync['timing_s/merge_val']}")
-                self.logger.log(data=val_metrics.timing_raw, step=val_metrics.param_version)
-        else:
-            if val_metrics.metrics:
-                self.logger.log(data=val_metrics.metrics, step=val_metrics.param_version)
-                pprint(f"[FullyAsyncTrainer] parameter version: {val_metrics.param_version} Validation metrics: {val_metrics.metrics}")
-        self.logger.log(data=val_metrics.timing_raw, step=val_metrics.param_version)
-
-    async def _validate_process(self):
-        if self.config.async_training.use_trainer_do_validate:
-            print("[FullyAsyncTrainer] _validate_process")
-            from verl.utils.profiler import marked_timer
-
-            timing_raw = {}
-            await self.async_rollout_manager.wake_up()
-            with marked_timer("trainer/validate_time", timing_raw):
-                self.train_val_metrics = self._validate(True)
-            await self.async_rollout_manager.sleep()
-            print(f"[FullyAsyncTrainer] validate timing_raw validate: {timing_raw['trainer/validate_time']}")
-        else:
-            self.train_val_metrics = None
-            print("[FullyAsyncTrainer] _validate_process without async_rollout_manager")
+        # Use current_param_version for logging step (must be monotonically increasing)
+        # Include the actual validated version as a metric for reference
+        log_step = self.current_param_version
+        if val_metrics.metrics:
+            metrics_to_log = val_metrics.metrics.copy()
+            metrics_to_log["val/validated_version"] = val_metrics.param_version
+            self.logger.log(data=metrics_to_log, step=log_step)
+            pprint(f"[FullyAsyncTrainer] Logged val results (validated version {val_metrics.param_version}) at step {log_step}: {val_metrics.metrics}")
+        if val_metrics.timing_raw:
+            self.logger.log(data=val_metrics.timing_raw, step=log_step)
 
     def _collect_metrics_from_samples(self, batch, metrics):
         """
@@ -587,17 +510,6 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
         return data
 
     def _process_batch_common(self, batch, metrics, timing_raw, local_trigger_step=None):
-        # with marked_timer("reward", timing_raw, color="yellow"):
-        #     # compute reward model score
-        #     if self.use_rm:
-        #         reward_tensor = self.rm_wg.compute_rm_score(batch)
-        #         batch = batch.union(reward_tensor)
-
-        #     if self.config.reward_model.launch_reward_fn_async:
-        #         future_reward = compute_reward_async.remote(data=batch, reward_fn=self.reward_fn)
-        #     else:
-        #         reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
-
         with marked_timer("old_log_prob", timing_raw, color="blue"):
 
             def compute_old_log_prob(batch):
@@ -663,15 +575,6 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
                 batch = batch.union(values)
 
         with marked_timer("adv", timing_raw, color="brown"):
-            # we combine with rule-based rm
-            # reward_extra_infos_dict: dict[str, list]
-            # if self.config.reward_model.launch_reward_fn_async:
-            #     reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
-            # batch.batch["token_level_scores"] = reward_tensor
-
-            # if reward_extra_infos_dict:
-            #     batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
-
             # compute rewards. apply_kl_penalty if available
             if self.config.algorithm.use_kl_in_reward:
                 batch, kl_metrics = apply_kl_penalty(batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty)

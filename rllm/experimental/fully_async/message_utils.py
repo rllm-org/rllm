@@ -5,13 +5,12 @@ Utilities for converting response token IDs to OpenAI message format.
 import json
 import re
 
-from rllm.parser.tool_parser import ToolParser
 
 # Regex for thinking content: <think>...</think>
 THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
 
-def parse_response(tokenizer, response_ids: list[int], skip_special_tokens: bool = True) -> dict:
+def parse_response(tokenizer, parser, response_ids: list[int], skip_special_tokens: bool = True) -> dict:
     """
     Convert response token IDs to OpenAI message format.
 
@@ -26,7 +25,6 @@ def parse_response(tokenizer, response_ids: list[int], skip_special_tokens: bool
     text = tokenizer.decode(response_ids, skip_special_tokens=skip_special_tokens)
 
     # Use the existing tool parser
-    parser = ToolParser.get_parser(tokenizer)
     tool_call_objs = parser.parse(text)
 
     # Convert ToolCall objects to OpenAI format

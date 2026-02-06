@@ -68,6 +68,12 @@ data:
   # Number of samples generated, currently only support 1
   gen_batch_size: 1
 
+  # DatasetRegistry datasets/splits (explicit; validation is optional)
+  train_dataset_name: null
+  train_split: train
+  val_dataset_name: null
+  val_split: test
+
 actor_rollout_ref:
   # checkpoint_engine config for accelerating parameter synchronization between rollouter and trainer
   checkpoint_engine: ${oc.select:async_training.checkpoint_engine, null}

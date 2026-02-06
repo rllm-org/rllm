@@ -31,20 +31,18 @@ class ParameterSynchronizer:
     Merges the functions of the original multiple synchronizer classes
     """
 
-    def __init__(self, config, trainer, rollouter, mq):
+    def __init__(self, config, trainer, inference_manager, mq):
         self.config = config
         self.trainer = trainer
-        self.rollouter = rollouter
+        self.inference_manager = inference_manager
         self.mq_client = mq
         self.actor_wg = ray.get(trainer.get_actor_wg.remote())
-        self.rollout_wg = ray.get(rollouter.get_rollout_wg.remote())
+        self.rollout_wg = ray.get(inference_manager.get_rollout_wg.remote())
 
         # Basic attributes
         self.weights_info = None
         self.sync_group_initialized = False
         self.sync_group_name = "actor_rollout"
-        self.wait_last_update = None
-        self.wait_last_resume = None
         self.validate_task = None
 
         # Statistics
@@ -120,21 +118,32 @@ class ParameterSynchronizer:
     def set_rollout_executor(self, rollout_executor):
         self.rollout_executor = rollout_executor
 
-    def sync_weights(self, version, validate=False, global_steps=0, use_trainer_do_validate=False):
-        """Sync weights between trainer and rollouter, and update parameter version"""
+    def sync_weights(self, version, validate=False, global_steps=0):
+        """Sync weights between trainer and rollouter, and update parameter version.
+        
+        Validation is triggered by RolloutExecutor after weights are synced.
+        
+        Returns:
+            dict: Timing metrics from RolloutExecutor including:
+                - rollouter/active_time
+                - rollouter/version_time  
+                - rollouter/idle_ratio
+        """
+        # Wait for previous validation to complete before syncing new weights
+        if self.validate_task:
+            print("[ParameterSynchronizer] Waiting for previous validation to complete...")
+            ray.get(self.validate_task)
+            self.validate_task = None
+
         start_time = time.time()
 
         self.current_version = version
         ray.get(self.rollout_executor.pause.remote())
 
-        # Call abort_router BEFORE pause to cancel all in-flight requests
-        ray.get(self.rollouter.abort_router.remote())
-
         # Now safe to pause (which includes clear_kv_cache -> release_memory_occupation)
-        ray.get(self.rollouter.pause.remote())
+        ray.get(self.inference_manager.clear_kv_cache.remote())
 
         print(f"[ParameterSynchronizer] rollout paused. cost {time.time() - start_time:.2f} seconds")
-        self.mq_client.update_param_version_sync(version)
 
         # Get timing metrics from RolloutExecutor before updating version
         # This returns timing_raw dict with rollouter/active_time, rollouter/version_time, rollouter/idle_ratio
@@ -142,10 +151,7 @@ class ParameterSynchronizer:
 
         # Update staleness tracking - subtracts consumed samples from enqueued count
         # This must be called AFTER resume so continue_event can be set if there's capacity
-        # Calculate consumed samples per sync directly from config
-        consumed_per_sync = self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self.config.async_training.require_batches * self.config.async_training.trigger_parameter_sync_step
-        print(f"[ParameterSynchronizer] Calling update_staleness_tracking with consumed_per_sync={consumed_per_sync}", flush=True)
-        ray.get(self.rollout_executor.update_staleness_tracking.remote(consumed_per_sync))
+        ray.get(self.rollout_executor.update_staleness_tracking.remote())
         print(f"[ParameterSynchronizer] update_staleness_tracking completed", flush=True)
 
         pause_time = time.time()
@@ -164,33 +170,35 @@ class ParameterSynchronizer:
 
         end_time = time.time()
         print(f"[ParameterSynchronizer] sync_weights success. cost {end_time - start_time:.2f} seconds, pause:{pause_time - start_time:.2f}s, sync:{end_time - pause_time:.2f}s")
-        # async train do validate
-        if validate and use_trainer_do_validate:
-            self.validate_task = self.trainer._validate_process.remote()
-        else:
-            self.validate_task = None
-        # Async Update rollout version & validation
-        # Pass the timing metrics from RolloutExecutor to the rollouter
-        self.wait_last_update = self.rollouter.update_param_version.remote(version, validate, global_steps, use_trainer_do_validate, rollout_executor_timing)
-        self.wait_last_resume = self.rollouter.resume.remote(self.wait_last_update)
 
-        # Resume SGLang generation after abort_router paused it
-        # This must be called to allow workers to process new requests
-        ray.get(self.rollouter.resume_router.remote())
+        # Resume executor (includes resume_router for SGLang generation)
         ray.get(self.rollout_executor.resume.remote())
+
+        # Trigger validation AFTER resume so it runs with new weights
+        need_validate = (
+            self.config.rollout.test_freq > 0
+            and version % self.config.rollout.test_freq == 0
+            and version > 0
+        ) or validate
+        self.validate_task = self.rollout_executor.validate.remote(version, global_steps) if need_validate else None
+
+        # Return timing metrics so trainer can log them
+        return rollout_executor_timing
 
     def wait_last_valid(self):
         print("[ParameterSynchronizer] Waiting last sync and validate...")
         start_time = time.time()
-        if self.wait_last_update:
-            ray.get(self.wait_last_update)
-        if self.wait_last_resume:
-            ray.get(self.wait_last_resume)
         if self.validate_task:
             ray.get(self.validate_task)
         print(f"[ParameterSynchronizer] Wait last validate cost: {time.time() - start_time:.2f} seconds")
 
-    def rollouter_save_checkpoint(self, local_global_step_folder: str):
-        """Trigger rollout to save checkpoint(dataloader)"""
-        print(f"[ParameterSynchronizer] Triggering checkpoint save at {local_global_step_folder} ...")
-        return ray.get(self.rollouter.save_checkpoint.remote(local_global_step_folder))
+    def rollout_executor_save_checkpoint(self, local_global_step_folder: str):
+        """Trigger RolloutExecutor to save its StatefulDataLoader state.
+
+        The RolloutExecutor is the component that owns the dataset iterator in the
+        fully-async pipeline (see rllm.experimental.fully_async.rollout_executor).
+        """
+        if not hasattr(self, "rollout_executor") or self.rollout_executor is None:
+            raise RuntimeError("rollout_executor is not set; call set_rollout_executor() before saving checkpoint")
+        print(f"[ParameterSynchronizer] Triggering RolloutExecutor checkpoint save at {local_global_step_folder} ...")
+        return ray.get(self.rollout_executor.save_checkpoint.remote(local_global_step_folder))
