@@ -152,7 +152,12 @@ def visualize_trajectory_last_steps(
         prompt_ids = last_step.prompt_ids
         response_ids = last_step.response_ids
 
-        prompt_str = abbreviate_string(tokenizer.decode(prompt_ids))
+        # special handling for prompt ids, we will skip any non-int elements
+        clean_prompt_ids = [elem for elem in prompt_ids if isinstance(elem, int)]
+        if len(clean_prompt_ids) != len(prompt_ids):
+            colorful_warning(f"During visualization, skipped {len(prompt_ids) - len(clean_prompt_ids)} non-int elements in prompt_ids.")
+
+        prompt_str = abbreviate_string(tokenizer.decode(clean_prompt_ids))
 
         print(_format_token(prompt_str, config.masked_token_style))
         print("----------------")

@@ -270,13 +270,20 @@ class TinkerEngine(RolloutEngine):
         # decode full text
         completion_text = self.tokenizer.decode(response_tokens, skip_special_tokens=True)  # type: ignore
         finish_reason = sampled_sequence.stop_reason
+        # special handling for prompt ids, we will break any EncodedTextChunk into ints
+        prompt_ids = []
+        for elem in token_input:
+            if isinstance(elem, tinker.EncodedTextChunk):
+                prompt_ids.extend(elem.tokens)
+            else:
+                prompt_ids.append(elem)
 
         return ModelOutput(
             text=completion_text,
             content=content,
             reasoning=reasoning,
             tool_calls=tool_calls,
-            prompt_ids=token_input,
+            prompt_ids=prompt_ids,
             completion_ids=response_tokens,
             logprobs=logprobs,
             prompt_length=_flat_token_input_length(token_input),
