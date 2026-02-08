@@ -34,13 +34,16 @@ export http_proxy=http://sys-proxy-rd-relay.byted.org:8118
 export https_proxy=http://sys-proxy-rd-relay.byted.org:8118
 export no_proxy="localhost,.byted.org,byted.org,.bytedance.net,bytedance.net,.byteintl.net,.tiktok-row.net,.tiktok-row.org,127.0.0.1,127.0.0.0/8,169.254.0.0/16,100.64.0.0/10,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8,::1,fe80::/10,fd00::/8"
 
+# Kubernetes namespace for SWE environment pods
+export KUBE_NAMESPACE='rllm'
+kubectl delete pods --all -n rllm
+
 # Patch verl rl_dataset.py to fix extra_info parsing (issue: https://github.com/rllm-org/rllm/issues/364)
 uv run --no-sync python3 -c "
 import verl.utils.dataset.rl_dataset as m
 f = m.__file__
 with open(f, 'r') as file:
     content = file.read()
-# Add import json if not present
 if 'import json' not in content:
     content = 'import json\n' + content
 content = content.replace(
@@ -70,7 +73,7 @@ uv run --no-sync python3 -m rllm.trainer.verl.train_agent_ppo \
     data.val_files=data/swe/SWE_Bench_Verified.parquet \
     trainer.default_local_dir=$ROOT_DIR/experiments/verl/$EXPERIMENT_NAME \
     trainer.rollout_data_dir=$ROOT_DIR/rollouts/$EXPERIMENT_NAME \
-    data.train_batch_size=128 \
+    data.train_batch_size=8 \
     data.val_batch_size=512 \
     data.max_prompt_length=4096 \
     data.max_response_length=32768 \
@@ -81,18 +84,18 @@ uv run --no-sync python3 -m rllm.trainer.verl.train_agent_ppo \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-sum \
-    actor_rollout_ref.actor.ppo_mini_batch_size=128 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=8 \
     actor_rollout_ref.actor.use_dynamic_bsz=False \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=32 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=32 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=32000 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.clip_ratio_high=0.28 \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
-    actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=32 \
+    actor_rollout_ref.actor.ulysses_sequence_parallel_size=8 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
