@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 from .rollout_engine import ModelOutput, RolloutEngine
 
 if TYPE_CHECKING:
+    from .skyrl_engine import SkyRLEngine
     from .tinker_engine import TinkerEngine
     from .types import TinkerTokenInput, TinkerTokenOutput, TokenInput, Tokenizer, TokenOutput, VerlTokenInput, VerlTokenOutput
     from .verl_engine import VerlEngine
@@ -11,6 +12,7 @@ __all__ = [
     "ModelOutput",
     # Rollout engines
     "RolloutEngine",
+    "SkyRLEngine",
     "TinkerEngine",
     "VerlEngine",
     # Token input/output types
@@ -25,7 +27,14 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    """Lazy import for engines and types to avoid importing tinker/verl when not needed."""
+    """Lazy import for engines and types to avoid importing tinker/verl/skyrl when not needed."""
+    if name == "SkyRLEngine":
+        try:
+            from .skyrl_engine import SkyRLEngine as _SkyRLEngine
+
+            return _SkyRLEngine
+        except Exception:
+            raise AttributeError(name) from None
     if name == "TinkerEngine":
         from .tinker_engine import TinkerEngine
 

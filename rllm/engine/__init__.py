@@ -17,7 +17,6 @@ __all__ = [
     "ModelOutput",
     "OpenAIEngine",
     "VerlEngine",
-    "SkyRLEngine",
 ]
 
 
@@ -35,13 +34,6 @@ def __getattr__(name):
             from .rollout.verl_engine import VerlEngine as _VerlEngine
 
             return _VerlEngine
-        except Exception:
-            raise AttributeError(name) from None
-    if name == "SkyRLEngine":
-        try:
-            from .rollout.skyrl_engine import SkyRLEngine as _SkyRLEngine
-
-            return _SkyRLEngine
         except Exception:
             raise AttributeError(name) from None
     raise AttributeError(name)

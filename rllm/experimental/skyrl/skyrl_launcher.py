@@ -20,8 +20,6 @@ from skyrl_train.entrypoints.main_base import (
     create_ray_wrapped_inference_engines_from_config,
     create_remote_inference_engines_from_config,
 )
-from skyrl_train.generators.base import GeneratorInterface
-
 # Import SkyRL components
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
@@ -104,22 +102,6 @@ class SkyRLExp:
             return pg
         else:
             return None
-
-    def get_generator(self, cfg, tokenizer, inference_engine_client):
-        """Initializes the generator.
-
-        Returns:
-            GeneratorInterface: The generator.
-        """
-        from rllm.experimental.skyrl.rllm_generator import RLLMGenerator
-
-        max_response_length = cfg.data.get("max_response_length", 4096)
-        # workflow_engine will be set later in the backend when it's available
-        return RLLMGenerator(
-            workflow_engine=None,
-            tokenizer=tokenizer,
-            max_response_length=max_response_length,
-        )
 
     def _convert_rllm_dataset_to_skyrl_file(self, rllm_dataset: Dataset | None) -> str | None:
         """Convert rLLM Dataset to SkyRL format and save to file.
@@ -205,8 +187,6 @@ class SkyRLExp:
 
         inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
 
-        generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
-
         # Convert rLLM Datasets to SkyRL format and build PromptDatasets
         # SkyRL's RayPPOTrainer expects PromptDataset objects (unlike Verl which reads from config)
         from skyrl_train.dataset.dataset import PromptDataset
@@ -254,7 +234,7 @@ class SkyRLExp:
             "train_dataset": train_prompt_dataset,
             "eval_dataset": eval_prompt_dataset,
             "inference_engine_client": inference_engine_client,
-            "generator": generator,
+            "generator": None,  # Not used — generate_episodes() calls workflow engine directly
             "colocate_pg": self.colocate_pg,
         }
 

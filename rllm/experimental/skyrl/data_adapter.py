@@ -74,7 +74,7 @@ def adapt_single_item(item: dict[str, Any]) -> dict[str, Any]:
         if key not in RESERVED_KEYS and key != prompt_key:
             env_extras[key] = value
 
-    # Store original prompt info in env_extras for reconstruction in RLLMGenerator
+    # Store original prompt info in env_extras for downstream reconstruction
     # This allows us to convert back to rLLM format for the workflow
     if prompt_key:
         env_extras["_rllm_original_prompt_key"] = prompt_key

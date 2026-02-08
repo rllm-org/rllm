@@ -15,9 +15,6 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from omegaconf import DictConfig
-from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
-
-# Moved this OUT OF TYPE CHECKING
 from skyrl_train.training_batch import TrainingInputBatch
 
 from rllm.agents.agent import Episode, TrajectoryGroup
@@ -25,7 +22,6 @@ from rllm.data import Dataset
 from rllm.engine.rollout import RolloutEngine
 from rllm.experimental.common.advantage import AlgorithmConfig
 from rllm.experimental.protocol import BackendProtocol
-from rllm.experimental.skyrl.data_adapter import adapt_rllm_batch_to_skyrl
 
 if TYPE_CHECKING:
     from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
@@ -72,7 +68,7 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
             train_dataset: Training PromptDataset (optional).
             eval_dataset: Evaluation PromptDataset (optional).
             inference_engine_client: Initialized InferenceEngineClient instance.
-            generator: GeneratorInterface instance.
+            generator: Unused. Passed through to RayPPOTrainer.__init__() which requires it.
             colocate_pg: Optional placement group for colocated training.
             **kwargs: Additional arguments.
         """
@@ -118,7 +114,7 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
             RolloutEngine: The initialized rollout engine.
         """
         # Import here to avoid hard dependency
-        from rllm.engine.rollout.skyrl_engine import SkyRLEngine
+        from rllm.experimental.rollout.skyrl_engine import SkyRLEngine
 
         # Create rollout engine with provided components
         # Note: inference_engine_client is already set in __init__, so no need for set_skyrl_components
@@ -185,69 +181,6 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
             asyncio.run(self.inference_engine_client.teardown())
 
     # =========================================================================
-    # Override RayPPOTrainer.generate() to handle validation correctly
-    # =========================================================================
-
-    @torch.no_grad()
-    async def generate(
-        self,
-        input_batch: GeneratorInput,
-    ) -> GeneratorOutput:
-        """
-        Generate rollouts using RLLMGenerator with UnifiedWorkflowEngine.
-
-        Overrides RayPPOTrainer.generate() to validate with actual response count
-        instead of prompt count, since some prompts may be filtered out if workflows fail.
-
-        If colocate_all is enabled:
-        - before calling this method, the policy model should be on CPU and inference engine should
-            be awake (i.e. on GPU).
-        - after calling this method, the same model placement still holds.
-        """
-        from skyrl_train.utils.trainer_utils import validate_generator_output
-
-        # Initialize UnifiedWorkflowEngine pool if generator uses it and pool is not initialized
-        # RLLMGenerator exposes workflow_engine attribute
-        if hasattr(self.generator, "workflow_engine") and self.generator.workflow_engine is not None:
-            if self.generator.workflow_engine.workflow_queue is None:
-                await self.generator.workflow_engine.initialize_pool()
-
-            # Set training step for episode logging (rLLM abstraction)
-            # Calculate epoch from global_step and dataloader length
-            batch_metadata = input_batch.get("batch_metadata")
-            if batch_metadata:
-                global_step = batch_metadata.global_step if hasattr(batch_metadata, "global_step") else self.global_step
-                training_phase = batch_metadata.training_phase if hasattr(batch_metadata, "training_phase") else "train"
-            else:
-                global_step = self.global_step
-                training_phase = "train"
-
-            # Calculate epoch: epoch = global_step // steps_per_epoch
-            # Note: global_step starts at 1, so we subtract 1 before dividing
-            steps_per_epoch = len(self.train_dataloader) if self.train_dataloader else 1
-            epoch = (global_step - 1) // steps_per_epoch if global_step > 0 else 0
-
-            self.generator.workflow_engine.set_training_step(global_step, mode=training_phase, epoch=epoch)
-
-        # Call parent's generate method via generator directly (bypassing RayPPOTrainer.generate validation)
-        # NOTE: we assume that .generate returns samples in the same order as passed in
-        # Here RLLMGenerator would return output from UnifiedWorkflowEngine
-        generator_output: GeneratorOutput = await self.generator.generate(input_batch)
-
-        # Add rollout metrics to self.all_metrics
-        if generator_output.get("rollout_metrics") is not None:
-            if not hasattr(self, "all_metrics"):
-                self.all_metrics = {}
-            self.all_metrics.update(generator_output["rollout_metrics"])
-
-        # Validate output - use actual number of responses (some prompts may be filtered out if workflows failed)
-        # The generator filters out prompts that don't have valid responses, so we validate against the actual response count
-        num_responses = len(generator_output["response_ids"])
-        validate_generator_output(num_responses, generator_output)
-
-        return generator_output
-
-    # =========================================================================
     # Async pipeline methods
     # =========================================================================
 
@@ -257,16 +190,13 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         agent_workflow_engine: UnifiedWorkflowEngine,
         **kwargs,
     ) -> list[Episode]:
-        """Generate episodes using SkyrlTrainer's generator.
+        """Generate episodes by calling the workflow engine directly.
 
-        For SkyRL backend, this function:
-        1. Builds interleaved batch (each task repeated `group_size` times)
-        2. Uses SkyrlTrainer.generate() which internally uses RLLMGenerator
-        3. Converts GeneratorOutput to Episodes (for compatibility with unified trainer)
+        The workflow engine returns full Episodes with all metadata preserved
+        (termination_reason, metrics, trajectory names, step-level fields).
 
-        Note: Uses `rllm.rollout.n` for training and `rllm.rollout.n_val` for validation
-        (consistent with VERL backend pattern). The training phase is determined from the
-        workflow engine's current mode.
+        Uses `rllm.rollout.n` for training and `rllm.rollout.n_val` for validation
+        (consistent with VERL backend pattern).
 
         Args:
             batch: Input batch (list of task dicts from dataloader).
@@ -274,28 +204,17 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
             **kwargs: Additional arguments including global_step.
 
         Returns:
-            List of generated episodes.
+            List of generated episodes with full metadata.
         """
-        from skyrl_train.generators.utils import prepare_generator_input
-
-        from rllm.agents.agent import Episode, Step, Trajectory
-        from rllm.engine.rollout import ModelOutput
-
         # Store workflow engine for reference
-        self.workflow_engine = agent_workflow_engine  # TODO: remove since redundant.
-
-        # Set the workflow engine for the RLLMGenerator
-        self.generator.workflow_engine = agent_workflow_engine
+        self.workflow_engine = agent_workflow_engine
 
         # Get global step from kwargs (passed by unified trainer)
         global_step = kwargs.get("global_step", 0)
 
-        # Determine training phase from workflow engine mode (consistent with VERL approach)
+        # Determine training phase from workflow engine mode
         training_phase = agent_workflow_engine.current_mode if hasattr(agent_workflow_engine, "current_mode") else "train"
-
-        # Get sampling params from config
-        sampling_params = self.full_config.get("sampling", {})
-        default_env_class = self.full_config.get("environment", {}).get("env_class", "BaseTextEnv")
+        is_validation = training_phase != "train"
 
         # Use rllm.rollout.n for training, rllm.rollout.n_val for validation (VERL pattern)
         if training_phase == "train":
@@ -303,85 +222,39 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         else:
             group_size = self.full_config.rllm.rollout.n_val
 
-        # Adapt batch to SkyRL format
-        adapted_batch = adapt_rllm_batch_to_skyrl(batch)
+        # Set training step for episode logging
+        steps_per_epoch = len(self.train_dataloader) if self.train_dataloader else 1
+        epoch = (global_step - 1) // steps_per_epoch if global_step > 0 else 0
+        agent_workflow_engine.set_training_step(global_step, mode=training_phase, epoch=epoch)
 
-        # Ensure each item has a uid
-        batch_with_uid = []
-        for batch_item in adapted_batch:
-            if batch_item.get("uid") is None:
-                batch_item = {**batch_item, "uid": str(uuid.uuid4())}
-            batch_with_uid.append(batch_item)
+        # Build interleaved tasks directly from batch (no SkyRL format conversion needed)
+        tasks = []
+        task_ids = []
+        for item in batch:
+            uid = item.get("uid") or item.get("unique_id") or str(uuid.uuid4())
+            for _ in range(group_size):
+                tasks.append(item)
+                task_ids.append(uid)
 
-        interleaved_batch = []
-        for batch_item in batch_with_uid:
-            interleaved_batch.extend([batch_item for _ in range(group_size)])
-
-        # Prepare GeneratorInput from interleaved batch
-        generator_input, uids = prepare_generator_input(
-            prompts=interleaved_batch,
-            n_samples_per_prompt=1,  # Already interleaved, so 1 sample per prompt
-            sampling_params=sampling_params,
-            default_env_class=default_env_class,
-            training_phase=training_phase,
-            global_step=global_step,
+        # Execute workflows directly - returns full Episodes with all metadata
+        episodes: list[Episode] = await agent_workflow_engine.execute_tasks(
+            tasks, task_ids, is_validation=is_validation,
         )
 
-        # Call generate() which uses RLLMGenerator internally
-        generator_output: GeneratorOutput = await self.generate(generator_input)
+        # Compute rollout metrics from episodes
+        if not hasattr(self, "all_metrics"):
+            self.all_metrics = {}
 
-        # Convert GeneratorOutput to Episodes (for unified trainer compatibility)
-        episodes = []
-        prompt_token_ids = generator_output["prompt_token_ids"]
-        response_ids = generator_output["response_ids"]
-        rewards = generator_output["rewards"]
-        loss_masks = generator_output["loss_masks"]
-        rollout_logprobs = generator_output.get("rollout_logprobs")
+        all_rewards = []
+        for ep in episodes:
+            for traj in ep.trajectories:
+                if traj.reward is not None:
+                    all_rewards.append(traj.reward)
 
-        for i, (prompt_tokens, response_tokens, reward, loss_mask) in enumerate(zip(prompt_token_ids, response_ids, rewards, loss_masks, strict=False)):
-            # Get trajectory_id if available
-            trajectory_id = generator_input.get("trajectory_ids", [None] * len(prompt_token_ids))[i]
-            if trajectory_id:
-                task_id = trajectory_id.instance_id
-                rollout_idx = trajectory_id.repetition_id
-                episode_id = f"{task_id}:{rollout_idx}"
-            else:
-                episode_id = uids[i] if i < len(uids) else f"task_{i}:0"
-
-            # Create Step from GeneratorOutput
-            step = Step(
-                prompt_ids=prompt_tokens,
-                response_ids=response_tokens,
-                logprobs=rollout_logprobs[i] if rollout_logprobs and i < len(rollout_logprobs) else [],
-                reward=reward if isinstance(reward, int | float) else reward[-1] if isinstance(reward, list) and len(reward) > 0 else 0.0,
-                done=True,
-            )
-
-            # Create ModelOutput for the step
-            step.model_output = ModelOutput(
-                prompt_ids=prompt_tokens,
-                completion_ids=response_tokens,
-                logprobs=rollout_logprobs[i] if rollout_logprobs and i < len(rollout_logprobs) else None,
-            )
-
-            # Create Trajectory
-            trajectory = Trajectory(
-                uid=episode_id,
-                name="default_traj_name",
-                task=interleaved_batch[i] if i < len(interleaved_batch) else {},
-                steps=[step],
-                reward=reward if isinstance(reward, int | float) else reward[-1] if isinstance(reward, list) and len(reward) > 0 else 0.0,
-            )
-
-            # Create Episode
-            episode = Episode(
-                id=episode_id,
-                task=interleaved_batch[i] if i < len(interleaved_batch) else {},
-                trajectories=[trajectory],
-                is_correct=reward > 0.0 if isinstance(reward, int | float) else (reward[-1] > 0.0 if isinstance(reward, list) and len(reward) > 0 else False),
-            )
-
-            episodes.append(episode)
+        if all_rewards:
+            self.all_metrics["rollout/mean_raw_reward"] = sum(all_rewards) / len(all_rewards)
+            self.all_metrics["rollout/num_episodes"] = len(episodes)
+            self.all_metrics["rollout/num_trajectories"] = len(all_rewards)
 
         return episodes
 
