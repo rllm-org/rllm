@@ -78,12 +78,8 @@ def load_dataloader_checkpoint(dataloader, config) -> int:
             print("[Checkpoint] Training from scratch (no checkpoint found)")
             return 0
     elif config.trainer.resume_mode == "resume_path":
-        assert isinstance(config.trainer.resume_from_path, str), (
-            "[Checkpoint] resume_from_path must be str type"
-        )
-        assert "global_step_" in config.trainer.resume_from_path, (
-            "[Checkpoint] resume_from_path must specify the global_steps"
-        )
+        assert isinstance(config.trainer.resume_from_path, str), "[Checkpoint] resume_from_path must be str type"
+        assert "global_step_" in config.trainer.resume_from_path, "[Checkpoint] resume_from_path must specify the global_steps"
         global_step_folder = config.trainer.resume_from_path
         if not os.path.isabs(global_step_folder):
             working_dir = os.getcwd()
@@ -201,6 +197,7 @@ async def continue_generation_async(router_url):
 
     await asyncio.gather(*[post(f"{url}/continue_generation", {}, expect_json=True) for url in urls])
 
+
 # Sample utils
 
 
@@ -303,6 +300,122 @@ def padding(tensor_ls, max_len, pad_value, padding_side="left"):
     return padded
 
 
+def apply_rejection_sampling(
+    trajectory_group_ls: list[TrajectoryGroup],
+    config,
+) -> tuple[list[TrajectoryGroup], dict[str, float]]:
+    """
+    Apply rejection sampling to filter trajectory groups based on is_correct field.
+
+    This follows the same logic as agent_ppo_trainer.py:
+    - Filter out groups where ALL trajectories are correct (solve_all)
+    - Filter out groups where ALL trajectories are incorrect (solve_none)
+    - Keep only groups with mixed results (some correct, some incorrect)
+
+    Args:
+        trajectory_group_ls: List of TrajectoryGroup objects to filter
+        config: Configuration object with rollout.rejection_sample (bool) setting
+
+    Returns:
+        Tuple of:
+        - Filtered list of TrajectoryGroup objects (filtered only if enabled)
+        - Statistics dict with solve_none, solve_all, solve_partial counts (always computed)
+    """
+    enable = config.rollout.get("rejection_sample", False)
+
+    stats: dict[str, float] = {
+        "rejection_sample/solve_none": 0,
+        "rejection_sample/solve_all": 0,
+        "rejection_sample/solve_partial": 0,
+        "rejection_sample/total_groups": len(trajectory_group_ls),
+        "rejection_sample/filtered_groups": 0,
+        "rejection_sample/enabled": int(enable),
+    }
+
+    # Collect ALL rewards BEFORE filtering for unfiltered metrics
+    all_rewards = []
+    for trajectory_group in trajectory_group_ls:
+        for trajectory in trajectory_group.trajectories:
+            all_rewards.append(trajectory.reward)
+
+    # Track unfiltered reward statistics (before any filtering)
+    # NOTE: We store both _sum and _count to enable correct weighted averaging
+    # across batches in MetricsAggregator. The mean is computed from sum/count.
+    if all_rewards:
+        stats["rejection_sample/unfiltered_reward_sum"] = float(np.sum(all_rewards))
+        stats["rejection_sample/unfiltered_reward_count"] = len(all_rewards)
+        stats["rejection_sample/unfiltered_reward_mean"] = float(np.mean(all_rewards))
+        stats["rejection_sample/unfiltered_reward_std"] = float(np.std(all_rewards))
+        stats["rejection_sample/unfiltered_reward_min"] = float(np.min(all_rewards))
+        stats["rejection_sample/unfiltered_reward_max"] = float(np.max(all_rewards))
+        stats["rejection_sample/unfiltered_num_trajectories"] = len(all_rewards)
+
+    filtered_groups = []
+
+    for trajectory_group in trajectory_group_ls:
+        # Extract is_correct from each trajectory's metadata
+        is_correct_list = []
+        for trajectory in trajectory_group.trajectories:
+            metadata = trajectory.metadata or {}
+            # is_correct can be in metadata directly or under different keys
+            is_correct = metadata.get("is_correct", None)
+            if is_correct is None:
+                # Fallback: infer from reward if is_correct not explicitly set
+                is_correct = trajectory.reward > 0
+            is_correct_list.append(bool(is_correct))
+
+        if not is_correct_list:
+            # Empty trajectory group, skip
+            continue
+
+        # Check if all correct or all incorrect
+        all_correct = all(is_correct_list)
+        all_incorrect = not any(is_correct_list)
+
+        if all_incorrect:
+            stats["rejection_sample/solve_none"] += 1
+            if not enable:
+                # Keep all groups when not filtering
+                filtered_groups.append(trajectory_group)
+        elif all_correct:
+            stats["rejection_sample/solve_all"] += 1
+            if not enable:
+                # Keep all groups when not filtering
+                filtered_groups.append(trajectory_group)
+        else:
+            # Mixed results - always keep this group
+            stats["rejection_sample/solve_partial"] += 1
+            filtered_groups.append(trajectory_group)
+
+    stats["rejection_sample/filtered_groups"] = len(filtered_groups)
+
+    # Collect filtered rewards for comparison
+    filtered_rewards = []
+    for trajectory_group in filtered_groups:
+        for trajectory in trajectory_group.trajectories:
+            filtered_rewards.append(trajectory.reward)
+
+    # Track filtered reward statistics (after filtering)
+    # NOTE: We store both _sum and _count to enable correct weighted averaging
+    # across batches in MetricsAggregator. The mean is computed from sum/count.
+    if filtered_rewards:
+        stats["rejection_sample/filtered_reward_sum"] = float(np.sum(filtered_rewards))
+        stats["rejection_sample/filtered_reward_count"] = len(filtered_rewards)
+        stats["rejection_sample/filtered_reward_mean"] = float(np.mean(filtered_rewards))
+        stats["rejection_sample/filtered_reward_std"] = float(np.std(filtered_rewards))
+        stats["rejection_sample/filtered_num_trajectories"] = len(filtered_rewards)
+
+    # Log rejection sampling results
+    unfiltered_mean = stats.get("rejection_sample/unfiltered_reward_mean", 0)
+    filtered_mean = stats.get("rejection_sample/filtered_reward_mean", 0)
+    if enable:
+        print(f"[RejectionSampling] Applied rejection sampling: solve_none={stats['rejection_sample/solve_none']}, solve_all={stats['rejection_sample/solve_all']}, solve_partial={stats['rejection_sample/solve_partial']}, kept {len(filtered_groups)}/{len(trajectory_group_ls)} groups, unfiltered_reward={unfiltered_mean:.4f}, filtered_reward={filtered_mean:.4f}")
+    else:
+        print(f"[RejectionSampling] Stats (filtering disabled): solve_none={stats['rejection_sample/solve_none']}, solve_all={stats['rejection_sample/solve_all']}, solve_partial={stats['rejection_sample/solve_partial']}, reward_mean={unfiltered_mean:.4f}")
+
+    return filtered_groups, stats
+
+
 def assemble_batch_from_trajectory_group_ls(trajectory_group_ls: list[TrajectoryGroup], config, tokenizer, balance_batch=None) -> DataProto:
     """
     Assemble gen_batch_output from TrajectoryGroup objects.
@@ -327,6 +440,23 @@ def assemble_batch_from_trajectory_group_ls(trajectory_group_ls: list[Trajectory
 
     if not trajectory_group_ls:
         raise ValueError("Empty trajectory group provided for batch assembly")
+
+    # Apply rejection sampling at the top
+    filtered_groups, rejection_stats = apply_rejection_sampling(trajectory_group_ls, config)
+
+    # Handle edge case: all groups were filtered out
+    # Keep the first group but mark for masking all response tokens
+    mask_all_responses = False
+    if not filtered_groups and trajectory_group_ls:
+        print("[BatchUtils] All trajectory groups filtered out by rejection sampling. Keeping first group with masked responses.")
+        filtered_groups = [trajectory_group_ls[0]]
+        mask_all_responses = True
+        rejection_stats["rejection_sample/all_filtered_fallback"] = 1
+    else:
+        rejection_stats["rejection_sample/all_filtered_fallback"] = 0
+
+    # Use filtered_groups for the rest of the processing
+    trajectory_group_ls = filtered_groups
 
     # Pre-collect all data in single pass
     all_data = []  # List of (uid, trajectory_uid, seq)
@@ -358,10 +488,7 @@ def assemble_batch_from_trajectory_group_ls(trajectory_group_ls: list[Trajectory
 
             # Collect user-defined custom metrics
             # Built-in keys are handled separately above, so we skip them here
-            builtin_keys = {
-                "processing_time", "tool_calls_time", "param_version",
-                "param_version_start", "param_version_end"
-            }
+            builtin_keys = {"processing_time", "tool_calls_time", "param_version", "param_version_start", "param_version_end"}
             for key, value in metadata.items():
                 if key not in builtin_keys:
                     # Add custom/ prefix if not already present
@@ -432,6 +559,11 @@ def assemble_batch_from_trajectory_group_ls(trajectory_group_ls: list[Trajectory
     # Multiply response_mask by attention_mask (consistent with verl's agent_loop.py:586)
     # This ensures padding positions have mask=0
     response_masks_t = response_masks_t * response_attention_masks_t
+
+    # If all groups were filtered out by rejection sampling, mask all response tokens
+    if mask_all_responses:
+        print("[BatchUtils] Masking all response tokens due to rejection sampling fallback.")
+        response_masks_t = torch.zeros_like(response_masks_t)
 
     # Token level rewards (place the reward at the last response token)
     token_level_scores = torch.zeros_like(responses_t, dtype=torch.float32)
@@ -546,6 +678,9 @@ def assemble_batch_from_trajectory_group_ls(trajectory_group_ls: list[Trajectory
 
     if balance_batch:
         balance_batch(batch, metrics={})
+
+    # Add rejection sampling stats to meta_info for logging
+    batch.meta_info.update(rejection_stats)
 
     print(f"[BatchUtils] Batch assembly completed in {time.time() - start_time:.2f}s")
 

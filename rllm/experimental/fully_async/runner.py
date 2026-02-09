@@ -259,7 +259,14 @@ class FullyAsyncTaskRunner:
                 ray.cancel(future)
             raise
         finally:
-            asyncio.run(self.message_queue_client.clear_queue())
+            # Handle case where we might be in an existing event loop (Ray uses asyncio)
+            try:
+                loop = asyncio.get_running_loop()
+                # Already in an event loop, schedule as a task
+                loop.create_task(self.message_queue_client.clear_queue())
+            except RuntimeError:
+                # No running event loop, safe to use asyncio.run
+                asyncio.run(self.message_queue_client.clear_queue())
             print("[ASYNC MAIN] Training completed or interrupted")
 
 

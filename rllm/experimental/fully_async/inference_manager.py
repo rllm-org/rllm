@@ -32,7 +32,7 @@ class InferenceManager(FullyAsyncRayPPOTrainer):
     - Launching and managing SGLang worker processes
     - Launching the router for load balancing
     - Clearing KV cache during weight synchronization
-    
+
     Does NOT handle:
     - Dataset loading (owned by RolloutExecutor)
     - Staleness/queue sizing (owned by RolloutExecutor)
@@ -138,7 +138,7 @@ class InferenceManager(FullyAsyncRayPPOTrainer):
         # Get server URLs from async_rollout_manager
         server_addresses = self.async_rollout_manager.server_addresses
         urls = [f"http://{addr}" for addr in server_addresses]
-        
+
         # Auto-find available port
         ip = ray.util.get_node_ip_address()
         actual_port, sock = get_free_port(ip)

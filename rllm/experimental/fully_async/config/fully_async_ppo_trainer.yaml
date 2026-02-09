@@ -11,6 +11,8 @@ async_training:
   # Maximum samples staleness threshold
   staleness_threshold: 0.1
 
+  gradient_accumulation_steps: 1
+
   # Frequency of parameter synchronization between rollouter and trainer,
   # One step means trainer obtains a batch of required samples
   trigger_parameter_sync_step: 4
@@ -63,6 +65,8 @@ rollout:
 
   # Test frequency, how many times a parameter update triggers a validation
   test_freq: 1
+
+  rejection_sample: False # filter all correct or all incorrect
 
 data:
   # Number of samples generated, currently only support 1

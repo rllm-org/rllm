@@ -120,13 +120,13 @@ class ParameterSynchronizer:
 
     def sync_weights(self, version, validate=False, global_steps=0):
         """Sync weights between trainer and rollouter, and update parameter version.
-        
+
         Validation is triggered by RolloutExecutor after weights are synced.
-        
+
         Returns:
             dict: Timing metrics from RolloutExecutor including:
                 - rollouter/active_time
-                - rollouter/version_time  
+                - rollouter/version_time
                 - rollouter/idle_ratio
         """
         # Wait for previous validation to complete before syncing new weights
@@ -175,11 +175,7 @@ class ParameterSynchronizer:
         ray.get(self.rollout_executor.resume.remote())
 
         # Trigger validation AFTER resume so it runs with new weights
-        need_validate = (
-            self.config.rollout.test_freq > 0
-            and version % self.config.rollout.test_freq == 0
-            and version > 0
-        ) or validate
+        need_validate = (self.config.rollout.test_freq > 0 and version % self.config.rollout.test_freq == 0 and version > 0) or validate
         self.validate_task = self.rollout_executor.validate.remote(version, global_steps) if need_validate else None
 
         # Return timing metrics so trainer can log them
