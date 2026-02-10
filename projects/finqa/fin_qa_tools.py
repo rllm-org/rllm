@@ -101,18 +101,13 @@ def _compute_table_info(table: str, metadata: dict, df: pd.DataFrame) -> str:
             cols_to_drop.append(col)
 
     df_filtered = df.drop(columns=cols_to_drop)
-    table_payload["unique_vals_per_col"] = {
-        col: [_safe_json_value(v) for v in df_filtered[col].dropna().unique().tolist()]
-        for col in df_filtered.columns
-    }
+    table_payload["unique_vals_per_col"] = {col: [_safe_json_value(v) for v in df_filtered[col].dropna().unique().tolist()] for col in df_filtered.columns}
 
     if index_info:
         name = index_info["name"]
         table_payload["index"] = {
             "name": name,
-            "values": table_payload["unique_vals_per_col"].get(
-                name, index_info["values"]
-            ),
+            "values": table_payload["unique_vals_per_col"].get(name, index_info["values"]),
         }
 
     return json.dumps(table_payload, indent=0).replace("\n", "")
@@ -122,9 +117,7 @@ def _preload_company(company: str) -> tuple:
     """Load all tables for a company into caches. Returns (loaded, skipped) counts."""
     global _DB_CONN
 
-    metadata_path = os.path.join(
-        TABLES_ROOT, company, TABLES_CLEANED_ALL_COMPANIES_FILE_NAME
-    )
+    metadata_path = os.path.join(TABLES_ROOT, company, TABLES_CLEANED_ALL_COMPANIES_FILE_NAME)
     if not os.path.exists(metadata_path):
         _COMPANY_TABLES[company] = []
         return 0, 0
@@ -162,9 +155,7 @@ def _preload_company(company: str) -> tuple:
             df.to_sql(sql_name, _DB_CONN, index=False, if_exists="replace")
             loaded += 1
         except ValueError as e:
-            warnings.warn(
-                f"Skipping table '{table}' for company '{company}': {e}", stacklevel=2
-            )
+            warnings.warn(f"Skipping table '{table}' for company '{company}': {e}", stacklevel=2)
 
     _COMPANY_TABLES[company] = valid_tables
     return loaded, skipped
@@ -184,11 +175,7 @@ def _preload_all():
         _PRELOADED = True
         return
 
-    companies = [
-        name
-        for name in os.listdir(TABLES_ROOT)
-        if os.path.isdir(os.path.join(TABLES_ROOT, name))
-    ]
+    companies = [name for name in os.listdir(TABLES_ROOT) if os.path.isdir(os.path.join(TABLES_ROOT, name))]
 
     total_loaded, total_skipped = 0, 0
     for company in companies:
@@ -221,9 +208,7 @@ Example:
     """
 
     def __init__(self, name: str = NAME, description: str = DESCRIPTION):
-        super().__init__(
-            name=name, description=description, function=self.get_table_names
-        )
+        super().__init__(name=name, description=description, function=self.get_table_names)
         # No filesystem operations - data already pre-loaded into _COMPANY_TABLES
 
     def get_table_names(self, company_name: str) -> list[str] | str:
@@ -263,9 +248,7 @@ Example:
     """
 
     def __init__(self, name: str = NAME, description: str = DESCRIPTION):
-        super().__init__(
-            name=name, description=description, function=self.get_table_info
-        )
+        super().__init__(name=name, description=description, function=self.get_table_info)
         # No filesystem operations - data already pre-loaded into _TABLE_INFO_CACHE
 
     def get_table_info(self, company_name: str, table_name: str) -> str:
@@ -320,10 +303,7 @@ Example:
 
         query_upper = re.sub(r"(\\r|\\n|\\t|[\r\n\t])+", " ", query).upper()
         if "SELECT *" in query_upper:
-            return (
-                'Error : "SELECT *" is not allowed. Please list columns explicitly, '
-                f"e.g., SELECT column1, column2 FROM {table} LIMIT 5."
-            )
+            return f'Error : "SELECT *" is not allowed. Please list columns explicitly, e.g., SELECT column1, column2 FROM {table} LIMIT 5.'
 
         # Require at least one filter or limiting clause to keep queries efficient
         sql_filters = (
@@ -365,9 +345,7 @@ Example:
         # SINGLE REGEX handles: backticks, quotes, case-insensitivity,
         # column collision, and string literal issues (only replaces after FROM/JOIN)
         pattern = rf'(FROM|JOIN)\s+[`"\']?{re.escape(table_name)}[`"\']?(?=\s|$|;|,|\))'
-        query_for_execution = re.sub(
-            pattern, rf"\1 {quoted_sql_name}", query, flags=re.IGNORECASE
-        )
+        query_for_execution = re.sub(pattern, rf"\1 {quoted_sql_name}", query, flags=re.IGNORECASE)
 
         try:
             with _DB_LOCK:  # 2x faster + fixes race condition
@@ -379,10 +357,7 @@ Example:
                     cursor = _DB_CONN.cursor()
                     cursor.execute(f"PRAGMA table_info({quoted_sql_name})")
                     columns = [row[1] for row in cursor.fetchall()]
-                    return (
-                        "Error : Column not found in table. Available columns are: "
-                        + ", ".join(columns)
-                    )
+                    return "Error : Column not found in table. Available columns are: " + ", ".join(columns)
                 except Exception:
                     pass
             return f"Error: {err_msg}"
@@ -462,9 +437,7 @@ Example:
         expr = re.sub(r"(\d+(?:\.\d+)?)%", r"(\1/100)", expr)
 
         # 10. Thousand separators (safe pattern - preserves function calls like max(1, 2))
-        expr = re.sub(
-            r"\d{1,3}(?:,\d{3})+", lambda m: m.group(0).replace(",", ""), expr
-        )
+        expr = re.sub(r"\d{1,3}(?:,\d{3})+", lambda m: m.group(0).replace(",", ""), expr)
 
         try:
             aeval = Interpreter()

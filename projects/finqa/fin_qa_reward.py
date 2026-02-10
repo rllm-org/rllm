@@ -43,21 +43,15 @@ try:
         base_url=PORTKEY_GATEWAY_URL,
         api_key=OPENAI_API_KEY,
         http_client=custom_http_client,
-        default_headers=createHeaders(
-            api_key=PORTKEY_API_KEY, provider="openai", config=GATEWAY_CONFIG
-        ),
+        default_headers=createHeaders(api_key=PORTKEY_API_KEY, provider="openai", config=GATEWAY_CONFIG),
     )
 
 except Exception as e:
     print(f"Warning: Failed to initialize global OpenAI client: {e}")
     JUDGE_CLIENT = None
 
-_FINAL_ANSWER_CODE_BLOCK_RE = re.compile(
-    r"```\s*FINAL ANSWER:\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE
-)
-_FINAL_ANSWER_PARAGRAPH_RE = re.compile(
-    r"FINAL ANSWER:\s*(.*?)(?=\n\s*\n)", re.DOTALL | re.IGNORECASE
-)
+_FINAL_ANSWER_CODE_BLOCK_RE = re.compile(r"```\s*FINAL ANSWER:\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+_FINAL_ANSWER_PARAGRAPH_RE = re.compile(r"FINAL ANSWER:\s*(.*?)(?=\n\s*\n)", re.DOTALL | re.IGNORECASE)
 _FINAL_ANSWER_TAIL_RE = re.compile(r"FINAL ANSWER:\s*(.*)$", re.DOTALL | re.IGNORECASE)
 
 # Weight configuration for multi-table scoring
@@ -138,7 +132,7 @@ def _call_judge(
             total_weight = 0.0
             for key, weight in CORRECTNESS_WEIGHTS.items():
                 score = parsed.get(key)
-                if isinstance(score, (int, float)):
+                if isinstance(score, int | float):
                     normalized = float(score) / 100.0
                     weighted_score += normalized * weight
                     total_weight += weight
@@ -158,31 +152,17 @@ def _call_judge(
         return (False if not is_multi_table else 0.0), {}
 
 
-def _check_right_table_accessed(
-    accessed_tables: list[str], expected_table_names: str | list[str]
-) -> float:
+def _check_right_table_accessed(accessed_tables: list[str], expected_table_names: str | list[str]) -> float:
     """Return fraction of required tables that were accessed at least once."""
     if not accessed_tables or not expected_table_names:
         return 0.0
 
-    normalized_access = {
-        table.lower().strip()
-        for table in accessed_tables
-        if isinstance(table, str) and table.strip()
-    }
+    normalized_access = {table.lower().strip() for table in accessed_tables if isinstance(table, str) and table.strip()}
 
     if isinstance(expected_table_names, list):
-        expected = [
-            name.lower().strip()
-            for name in expected_table_names
-            if isinstance(name, str) and name.strip()
-        ]
+        expected = [name.lower().strip() for name in expected_table_names if isinstance(name, str) and name.strip()]
     else:
-        expected = (
-            [expected_table_names.lower().strip()]
-            if isinstance(expected_table_names, str)
-            else []
-        )
+        expected = [expected_table_names.lower().strip()] if isinstance(expected_table_names, str) else []
 
     if not expected:
         return 0.0
@@ -242,19 +222,11 @@ def fin_qa_reward_function(task_info: dict, action: str) -> RewardOutput:
 
     # Build correctness input
     if is_multi_table:
-        correctness_input = (
-            f"question : {core_question}\n"
-            f"model response : {action}\n"
-            f"label : {ground_truth}"
-        )
+        correctness_input = f"question : {core_question}\nmodel response : {action}\nlabel : {ground_truth}"
         system_prompt = MULTI_TABLE_CORRECTNESS_PROMPT
     else:
         final_answer = _extract_final_answer(action)
-        correctness_input = (
-            f"question : {question}\n"
-            f"model response : {final_answer}\n"
-            f"label : {ground_truth}"
-        )
+        correctness_input = f"question : {question}\nmodel response : {final_answer}\nlabel : {ground_truth}"
         system_prompt = CORRECTNESS_PROMPT
 
     result, rubric = _call_judge(
@@ -273,9 +245,7 @@ def fin_qa_reward_function(task_info: dict, action: str) -> RewardOutput:
     # Check table access
     accessed_tables = task_info.get("accessed_tables", [])
     expected_table_names = task_info.get("table_name", "")
-    right_table_access_reward = _check_right_table_accessed(
-        accessed_tables, expected_table_names
-    )
+    right_table_access_reward = _check_right_table_accessed(accessed_tables, expected_table_names)
 
     # Build metadata
     metadata = {
@@ -286,7 +256,7 @@ def fin_qa_reward_function(task_info: dict, action: str) -> RewardOutput:
         # Add all rubric scores to metadata
         for key in CORRECTNESS_WEIGHTS.keys():
             score = rubric.get(key)
-            if isinstance(score, (int, float)):
+            if isinstance(score, int | float):
                 metadata[f"multi_table_{key}"] = float(score)
         metadata["multi_table_overall_score"] = correctness_reward
 

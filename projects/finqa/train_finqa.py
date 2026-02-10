@@ -23,10 +23,7 @@ class FinQAWorkflow(MultiTurnWorkflow):
         self.agent.update_from_env(observation, 0, False, info)
 
         # Calculate max context once (max_prompt_length + max_response_length)
-        max_model_len = (
-            self.rollout_engine.max_prompt_length
-            + self.rollout_engine.max_response_length
-        )
+        max_model_len = self.rollout_engine.max_prompt_length + self.rollout_engine.max_response_length
         min_response_buffer = 1000  # Minimum tokens to reserve for model response
 
         for _ in range(1, self.max_steps + 1):
@@ -38,11 +35,7 @@ class FinQAWorkflow(MultiTurnWorkflow):
                     add_generation_prompt=True,
                     is_first_msg=True,
                 )
-                prompt_length = len(
-                    self.rollout_engine.tokenizer.encode(
-                        prompt, add_special_tokens=False
-                    )
-                )
+                prompt_length = len(self.rollout_engine.tokenizer.encode(prompt, add_special_tokens=False))
             else:
                 # Tinker backend - use tokenizer directly
                 prompt_ids = self.rollout_engine.tokenizer.apply_chat_template(
@@ -69,9 +62,7 @@ class FinQAWorkflow(MultiTurnWorkflow):
             if self.agent.trajectory.steps:
                 self.agent.trajectory.steps[-1].model_output = output
 
-            next_obs, reward, done, info = await self.run_in_executor(
-                self.env.step, action.action
-            )
+            next_obs, reward, done, info = await self.run_in_executor(self.env.step, action.action)
 
             self.agent.update_from_env(next_obs, reward, done, info)
 

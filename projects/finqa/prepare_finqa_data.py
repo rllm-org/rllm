@@ -24,9 +24,7 @@ def download_data():
     data_dir.mkdir(parents=True, exist_ok=True)
 
     # Download tar.gz from HuggingFace
-    tar_path = hf_hub_download(
-        repo_id=HF_REPO_ID, filename=HF_FILENAME, repo_type="dataset"
-    )
+    tar_path = hf_hub_download(repo_id=HF_REPO_ID, filename=HF_FILENAME, repo_type="dataset")
 
     # Extract to parent directory (tar contains data/ prefix)
     print(f"Extracting to {data_dir}...")

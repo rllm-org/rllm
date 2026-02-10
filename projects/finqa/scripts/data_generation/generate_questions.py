@@ -100,27 +100,17 @@ def _normalize_token(text: str) -> str:
     return text.strip("_")
 
 
-def normalize_table_references(
-    columns: list[str], rows: list[str], table: pd.DataFrame
-):
+def normalize_table_references(columns: list[str], rows: list[str], table: pd.DataFrame):
     """Align loosely formatted column and row references with table values"""
     column_candidates = [str(value).strip() for value in columns if str(value).strip()]
     row_candidates = [str(value).strip() for value in rows if str(value).strip()]
 
     column_lookup = {_normalize_token(col): str(col) for col in table.columns}
     cell_values = table.fillna("").astype(str).values.flatten()
-    row_lookup = {
-        _normalize_token(value): value.strip()
-        for value in cell_values
-        if value and value.strip()
-    }
+    row_lookup = {_normalize_token(value): value.strip() for value in cell_values if value and value.strip()}
 
-    normalized_columns = [
-        column_lookup.get(_normalize_token(col), col) for col in column_candidates
-    ]
-    normalized_rows = [
-        row_lookup.get(_normalize_token(row), row) for row in row_candidates
-    ]
+    normalized_columns = [column_lookup.get(_normalize_token(col), col) for col in column_candidates]
+    normalized_rows = [row_lookup.get(_normalize_token(row), row) for row in row_candidates]
     return normalized_columns, normalized_rows
 
 
@@ -129,20 +119,9 @@ def clean_question(question: Any, table: pd.DataFrame) -> dict[str, Any] | None:
     if not isinstance(question, dict):
         return None
     try:
-        cleaned = {
-            key: str(question[key]).strip()
-            for key in ("question_type", "question", "explanation", "answer")
-        }
-        columns_used = [
-            value
-            for value in (str(item).strip() for item in question["columns_used"])
-            if value
-        ]
-        rows_used = [
-            value
-            for value in (str(item).strip() for item in question["rows_used"])
-            if value
-        ]
+        cleaned = {key: str(question[key]).strip() for key in ("question_type", "question", "explanation", "answer")}
+        columns_used = [value for value in (str(item).strip() for item in question["columns_used"]) if value]
+        rows_used = [value for value in (str(item).strip() for item in question["rows_used"]) if value]
     except (KeyError, TypeError):
         return None
 
@@ -154,23 +133,15 @@ def clean_question(question: Any, table: pd.DataFrame) -> dict[str, Any] | None:
     return {**cleaned, "columns_used": columns_used, "rows_used": rows_used}
 
 
-def validate_references(
-    columns_used: list[str], rows_used: list[str], table: pd.DataFrame
-) -> bool:
+def validate_references(columns_used: list[str], rows_used: list[str], table: pd.DataFrame) -> bool:
     """Confirm the referenced columns and row values exist in the table"""
     if any(col not in table.columns for col in columns_used):
         return False
-    table_values = {
-        cell.strip().lower()
-        for cell in table.fillna("").astype(str).values.flatten()
-        if cell and cell.strip()
-    }
+    table_values = {cell.strip().lower() for cell in table.fillna("").astype(str).values.flatten() if cell and cell.strip()}
     return all(str(row).strip().lower() in table_values for row in rows_used)
 
 
-def generate_question(
-    client: OpenAI, system_prompt: str, payload: str
-) -> dict[str, Any] | None:
+def generate_question(client: OpenAI, system_prompt: str, payload: str) -> dict[str, Any] | None:
     """Call the generator model with the guided schema and parse the response"""
     completion = client.chat.completions.create(
         model="Qwen/Qwen3-30B-A3B-Instruct-2507",
@@ -198,11 +169,7 @@ def verify_question(
     table_name: str,
 ) -> bool:
     """Ask the verifier model to confirm the question/answer fits the table"""
-    user_message = (
-        f"Table Name: {table_name}\n\n"
-        f"Original Data:\n{json.dumps(table, indent=2)}\n\n"
-        f"Question:\n{json.dumps(question, indent=2)}\n"
-    )
+    user_message = f"Table Name: {table_name}\n\nOriginal Data:\n{json.dumps(table, indent=2)}\n\nQuestion:\n{json.dumps(question, indent=2)}\n"
     completion = client.chat.completions.create(
         model="Qwen/Qwen3-30B-A3B-Instruct-2507",
         max_tokens=50,
@@ -236,14 +203,7 @@ def process_table(
     columns_json = json.dumps(df.columns.tolist())
     records_json = json.dumps(df.reset_index(drop=True).to_dict(orient="records"))
 
-    payload = (
-        f"Company: {company}\n"
-        f"Split: {split_name}\n"
-        f"Table Name: {table_name}\n"
-        f"Columns: {columns_json}\n"
-        f"Rows:\n{records_json}\n"
-        f"Original Table JSON:\n{json.dumps(table_json)}"
-    )
+    payload = f"Company: {company}\nSplit: {split_name}\nTable Name: {table_name}\nColumns: {columns_json}\nRows:\n{records_json}\nOriginal Table JSON:\n{json.dumps(table_json)}"
     raw_question = generate_question(client, system_prompt, payload)
     if raw_question is None:
         return None
@@ -252,10 +212,7 @@ def process_table(
     if not question:
         return None
 
-    if not all(
-        verify_question(client, verification_prompt, table_json, question, table_name)
-        for _ in range(NUM_VERIFICATION_RUNS)
-    ):
+    if not all(verify_question(client, verification_prompt, table_json, question, table_name) for _ in range(NUM_VERIFICATION_RUNS)):
         return None
 
     return {
@@ -282,24 +239,16 @@ def process_company(
         print(f"{split_name}/{company}: missing directory")
         return []
 
-    table_paths = [
-        path
-        for path in sorted(company_dir.glob("*.json"))
-        if path.name != TABLES_CLEANED_ALL_COMPANIES_FILE_NAME
-    ]
+    table_paths = [path for path in sorted(company_dir.glob("*.json")) if path.name != TABLES_CLEANED_ALL_COMPANIES_FILE_NAME]
     if not table_paths:
         print(f"{split_name}/{company}: no table files found")
         return []
 
-    print(
-        f"{split_name}/{company}: processing {len(table_paths)} tables...", flush=True
-    )
+    print(f"{split_name}/{company}: processing {len(table_paths)} tables...", flush=True)
 
     def run(path):
         try:
-            return process_table(
-                client, system_prompt, verification_prompt, company, split_name, path
-            )
+            return process_table(client, system_prompt, verification_prompt, company, split_name, path)
         except Exception as exc:
             print(f"{split_name}/{company}/{path.stem}: error {exc}")
             return None
@@ -316,11 +265,7 @@ def finalize_split(split_name: str, rows: list[dict], output_path: Path) -> None
         print(f"{split_name}: no questions")
         return
 
-    df = (
-        pd.DataFrame(rows)
-        .sort_values(["company", "table_name", "question"])
-        .reset_index(drop=True)
-    )
+    df = pd.DataFrame(rows).sort_values(["company", "table_name", "question"]).reset_index(drop=True)
     df["id"] = df.index
     df = df[OUTPUT_COLUMNS]
     output_path.parent.mkdir(parents=True, exist_ok=True)

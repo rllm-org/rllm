@@ -29,9 +29,7 @@ class FinQAEnvironment(ToolEnvironment):
             "sql_query": SQLQuery,
         }
 
-        super().__init__(
-            task=task, tool_map=tool_map, reward_fn=fin_qa_reward_function, max_steps=20
-        )
+        super().__init__(task=task, tool_map=tool_map, reward_fn=fin_qa_reward_function, max_steps=20)
         self.accessed_tables = []  # track accessed tables in get_table_info tool call
 
     def reset(self, task: dict | None = None):
