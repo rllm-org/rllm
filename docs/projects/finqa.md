@@ -78,3 +78,5 @@ FinQA training configuration:
 ```python title="projects/finqa/train_finqa.py"
 --8<-- "projects/finqa/train_finqa.py"
 ```
+
+For detailed setup instructions, see the [README](https://github.com/rllm-org/rllm/blob/main/projects/finqa/README.md) in the finqa project directory.
