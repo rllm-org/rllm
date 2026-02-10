@@ -100,6 +100,10 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         # Store algorithm config for use in process_backend_batch
         self._algorithm_config: AlgorithmConfig | None = None
 
+        # Track whether SkyRL weight-sync sender/receiver state is initialized.
+        # Native SkyRL trainer initializes this once before training starts.
+        self._weight_sync_state_initialized = False
+
     # =========================================================================
     # BackendProtocol interface methods
     # =========================================================================
@@ -363,6 +367,11 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
 
         training_input: TrainingInputBatch = trainer_state.backend_batch
 
+        # Keep RayPPOTrainer's internal global_step in sync with UnifiedTrainer.
+        # SkyRL workers read this from training_input.metadata["global_step"] and
+        # checkpoint naming also relies on self.global_step.
+        self.global_step = trainer_state.global_step
+
         # Use SkyRL's training step
         # This updates both critic and policy
         # Wrap in asyncio.to_thread() to avoid blocking the event loop (contains ray.get() calls)
@@ -458,6 +467,28 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         if len(trainer_state.metrics) <= 3:  # Only global_step, epoch, and maybe lr
             logger.warning(f"Step {trainer_state.global_step}: No training metrics found in all_metrics. all_metrics keys were: {list(self.all_metrics.keys()) if hasattr(self, 'all_metrics') and self.all_metrics else 'empty'}. Available trainer_state.metrics: {list(trainer_state.metrics.keys())}")
 
+    async def _sync_policy_weights_for_next_rollout(self) -> None:
+        """Sync policy weights to inference engines for subsequent generation."""
+        import ray
+
+        # In colocated mode, we need staged wake-up/offload for memory safety.
+        if self.colocate_all:
+            self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
+            await self.inference_engine_client.wake_up(tags=["weights"])
+
+        try:
+            weight_sync_refs = self.sync_policy_weights_to_inference_engines()
+            await asyncio.to_thread(ray.get, weight_sync_refs)
+        except AttributeError as e:
+            if "_weight_transfer_sender" in str(e):
+                logger.warning("Weight transfer sender not initialized. Skipping weight sync. Inference engines may use stale weights.")
+            else:
+                raise
+
+        if self.colocate_all:
+            self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
+            await self.inference_engine_client.wake_up(tags=["kv_cache"])
+
     # =========================================================================
     # Async hook methods
     # =========================================================================
@@ -465,12 +496,24 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
     async def on_train_start(self, trainer_state: TrainerState) -> None:
         """Called at the start of training.
 
-        Sets global_step from the trainer.
+        Sets global_step from the trainer and initializes weight-sync state.
         """
         trainer_state.global_step = self.global_step
 
+        # Match native SkyRL trainer behavior:
+        # initialize weight transfer sender/receivers once before training.
+        if not self._weight_sync_state_initialized:
+            logger.info("Initializing policy->inference weight sync state")
+            await asyncio.to_thread(self.init_weight_sync_state)
+            self._weight_sync_state_initialized = True
+
+        # Ensure generation starts from the current policy weights.
+        await self._sync_policy_weights_for_next_rollout()
+
     async def on_train_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of training."""
+        self.global_step = trainer_state.global_step
+
         # Save final checkpoint if needed
         save_freq = self.full_config.rllm.trainer.get("save_freq", 0)
         if save_freq > 0 and trainer_state.global_step % save_freq != 0:
@@ -485,6 +528,7 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         happen in on_batch_end.
         """
         global_step = trainer_state.global_step
+        self.global_step = global_step
 
         # Save checkpoint periodically
         save_freq = self.full_config.rllm.trainer.get("save_freq", 0)
@@ -492,35 +536,9 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
             logger.info(f"Saving checkpoint at step {global_step}")
             await asyncio.to_thread(self.save_checkpoints)
 
-        # Sync weights to inference engines after training (following SkyRL's pattern)
-        # This ensures inference engines use the latest policy weights for the next batch's generation
-        # Use self.colocate_all which is set by RayPPOTrainer.__init__ from cfg.trainer.placement.colocate_all
-        if self.colocate_all:
-            # Offload policy model optimizer to CPU (keep model on GPU for now)
-            self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
-            # Wake up inference engines for weight loading
-            await self.inference_engine_client.wake_up(tags=["weights"])
-
-        # Sync weights from policy model to inference engines
-        # Only sync when colocate_all=true (weight transfer sender is only initialized in that mode)
-        # When colocate_all=false, inference engines load weights from checkpoints separately
-        if self.colocate_all:
-            import ray
-
-            try:
-                weight_sync_refs = self.sync_policy_weights_to_inference_engines()
-                await asyncio.to_thread(ray.get, weight_sync_refs)
-            except AttributeError as e:
-                if "_weight_transfer_sender" in str(e):
-                    logger.warning("Weight transfer sender not initialized. Skipping weight sync. Inference engines may use stale weights.")
-                else:
-                    raise
-
-        if self.colocate_all:
-            # Offload policy model to CPU (free GPU for inference)
-            self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
-            # Wake up inference engines for KV cache loading
-            await self.inference_engine_client.wake_up(tags=["kv_cache"])
+        # Sync weights after each optimizer step so the next rollout uses fresh policy.
+        # This must run for both colocated and non-colocated configurations.
+        await self._sync_policy_weights_for_next_rollout()
 
     async def on_epoch_start(self, trainer_state: TrainerState) -> None:
         """Called at the start of an epoch."""

@@ -36,6 +36,18 @@ def transform_trajectory_groups_to_training_input(
     tokenizer = rollout_engine.tokenizer
     assert tokenizer is not None and hasattr(tokenizer, "pad_token_id"), "Tokenizer must have a pad token ID"
 
+    # Match the VERL pattern:
+    # - "broadcast": use trajectory reward on the final token of the final step
+    # - "per_step": use each step reward on the final token of each step
+    stepwise_mode = "broadcast"
+    config = getattr(rollout_engine, "config", None)
+    if config is not None and hasattr(config, "rllm") and hasattr(config.rllm, "stepwise_advantage"):
+        configured_mode = config.rllm.stepwise_advantage.get("mode", "broadcast")
+        if configured_mode is not None:
+            stepwise_mode = str(configured_mode)
+    if stepwise_mode not in {"broadcast", "per_step"}:
+        raise ValueError(f"Unsupported stepwise mode for SkyRL transform: {stepwise_mode}")
+
     # Extract data from trajectory groups
     prompt_token_ids: list[list[int]] = []
     response_ids: list[list[int]] = []
@@ -62,13 +74,21 @@ def transform_trajectory_groups_to_training_input(
             # Store uid for this trajectory (used by SkyRL's compute_advantages_and_returns)
             uids.append(task_id)
 
+            # Prefer trajectory-level reward; fall back to the final step reward when needed.
+            # Some workflows set rewards on steps but leave trajectory.reward unset.
+            trajectory_reward = trajectory.reward
+            if trajectory_reward is None:
+                trajectory_reward = trajectory.steps[-1].reward
+            if trajectory_reward is None:
+                trajectory_reward = 0.0
+
             # Concatenate all response tokens from all steps
             response_tokens_list: list[int] = []
             response_logprobs_list: list[float] = []
             loss_mask_list: list[int] = []
             reward_list: list[float] = []
 
-            for step in trajectory.steps:
+            for step_idx, step in enumerate(trajectory.steps):
                 if not isinstance(step.model_output, ModelOutput):
                     raise TypeError(f"Step must have a valid model output, but got {type(step.model_output)}")
 
@@ -85,13 +105,19 @@ def transform_trajectory_groups_to_training_input(
                 else:
                     response_logprobs_list.extend([0.0] * len(step_response))
 
-                # Reward: distribute trajectory reward across steps
-                # Put all reward on the last token of the last step
-                if step == trajectory.steps[-1]:
-                    # Last step gets the reward
-                    step_reward = [0.0] * (len(step_response) - 1) + [trajectory.reward if trajectory.reward is not None else 0.0]
+                if len(step_response) == 0:
+                    # No generated tokens in this step; no token-level reward can be assigned.
+                    step_reward = []
                 else:
-                    step_reward = [0.0] * len(step_response)
+                    # Match VERL reward source policy:
+                    # - per_step: use each step.reward
+                    # - broadcast: use trajectory-level reward on final step only
+                    if stepwise_mode == "per_step":
+                        token_reward = float(step.reward if step.reward is not None else 0.0)
+                    else:  # broadcast
+                        is_last_step = step_idx == len(trajectory.steps) - 1
+                        token_reward = float(trajectory_reward) if is_last_step else 0.0
+                    step_reward = [0.0] * (len(step_response) - 1) + [token_reward]
                 reward_list.extend(step_reward)
 
             response_ids.append(response_tokens_list)

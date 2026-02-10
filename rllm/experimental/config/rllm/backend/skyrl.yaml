@@ -29,6 +29,10 @@ rllm:
     save_freq: ${oc.select:trainer.ckpt_interval, 20}
     val_before_train: ${oc.select:trainer.eval_before_train, true}
 
+trainer:
+  algorithm:
+    max_seq_len: ${oc.select:data.max_prompt_length,1024}
+
 data:
   # SkyRL backend reads batch sizes and max lengths from `data.*`
   train_batch_size: ${trainer.train_batch_size}

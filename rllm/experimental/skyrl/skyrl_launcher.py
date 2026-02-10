@@ -292,6 +292,13 @@ def skyrl_entrypoint(cfg: DictConfig, workflow_class: type[Workflow], workflow_a
     print(f"SkyRL entrypoint hostname: {socket.gethostname()}, PID: {os.getpid()}")
     OmegaConf.register_new_resolver("mul", lambda x, y: int(x) * int(y))
     OmegaConf.resolve(cfg)
+
+    # Inject max_seq_len into algorithm config (normally done by SkyRL's native entrypoint
+    # in skyrl_train.utils.utils, but rLLM bypasses that code path)
+    algorithm_config = OmegaConf.create(cfg.trainer.algorithm)
+    algorithm_config.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+    cfg.trainer.algorithm = algorithm_config
+
     pprint(OmegaConf.to_container(cfg))
 
     exp = SkyRLExp(cfg, workflow_class, workflow_args, train_dataset=train_dataset, val_dataset=val_dataset, **kwargs)
