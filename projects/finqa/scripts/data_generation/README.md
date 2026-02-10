@@ -1,6 +1,6 @@
-# Data Generation Scripts
+# Data Generation
 
-Three-step pipeline for building Q&A data from SEC 10-K filings.
+Three step pipeline for building Q&A data from SEC 10-K filings.
 
 **Prerequisites:** Follow [FinQA installation](../../README.md#installation).
 
@@ -14,10 +14,9 @@ Scrapes SEC EDGAR pages via headless Chrome, extracts all `TableTextBlock` HTML 
 
 ```bash
 python projects/finqa/scripts/data_generation/download_10k.py \
-  --user_agent "your-email@example.com"
+  --user_agent "your-email@example.com" # required (SEC fair access policy)
 ```
 
-`--user_agent` is required (SEC fair access policy). Optional: `--seed_urls_path` (default: `projects/finqa/data/scraped/seed_10k_urls.csv`), `--output_base_dir` (default: `projects/finqa/data/scraped/<date>/`), `--max_workers` (default: 10).
 
 **Output:** `<output_base_dir>/<company>/*.txt` — one raw HTML file per table.
 

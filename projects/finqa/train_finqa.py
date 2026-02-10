@@ -58,8 +58,8 @@ class FinQAWorkflow(MultiTurnWorkflow):
 
             action = self.agent.update_from_model(response)
 
-            # Store model_output on step for Tinker training
-            if self.agent.trajectory.steps:
+            # Store model_output on step for Tinker training (verl uses chat_completions)
+            if not hasattr(self.rollout_engine, "chat_parser") and self.agent.trajectory.steps:
                 self.agent.trajectory.steps[-1].model_output = output
 
             next_obs, reward, done, info = await self.run_in_executor(self.env.step, action.action)

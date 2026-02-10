@@ -82,6 +82,8 @@ nav:
         - AgentTrainer for RL Training: core-concepts/training.md
         - RL Algorithms for Agents: core-concepts/rl-algos.md
         - SDK Overview: core-concepts/sdk.md
+      - Projects:
+        - FinQA Financial Agent: projects/finqa.md
       - Examples:
         - Training a LangGraph Search Agent using the rLLM SDK: examples/sdk_langgraph_rag.md
         - RL Training with Tinker: examples/tinker_rl.md
