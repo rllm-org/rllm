@@ -32,7 +32,7 @@ python3 -m rllm.experimental.test.test_skyrl_solver_judge \
     data.train_batch_size=32 \
     data.val_batch_size=16 \
     data.max_prompt_length=2048 \
-    data.max_response_length=1024 \
+    data.max_response_length=4096 \
     generator.n_samples_per_prompt=4 \
     generator.eval_n_samples_per_prompt=1 \
     generator.num_inference_engines=1 \
