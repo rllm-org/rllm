@@ -7,7 +7,6 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 
 from rllm.experimental.fully_async.client import RolloutClient
 from rllm.experimental.fully_async.protocol import TrajectoryGroup
-from rllm.experimental.fully_async.stats import global_stats
 from rllm.experimental.fully_async.utils import (
     abort_async,
     calculate_rollout_global_steps,
@@ -30,7 +29,7 @@ class RolloutExecutor:
         self.processor = processor
         self.router_url = router_url
         self.global_steps = 1
-        
+
         # Calculate max_concurrent_rollout from config: limits total concurrent individual rollouts
         num_servers = config.rollout.n_gpus_per_node * config.rollout.nnodes
         self.max_concurrent_rollout = 128 * num_servers
@@ -72,9 +71,7 @@ class RolloutExecutor:
         self.total_train_steps = int(self.total_rollout_steps / (required_samples * trigger_parameter_sync_step))
         self.max_queue_size = self.max_required_samples
 
-        print(f"[RolloutExecutor] required_samples={required_samples} max_required_samples={self.max_required_samples} "
-              f"max_queue_size={self.max_queue_size} total_train_steps={self.total_train_steps} "
-              f"total_rollout_steps={self.total_rollout_steps}")
+        print(f"[RolloutExecutor] required_samples={required_samples} max_required_samples={self.max_required_samples} max_queue_size={self.max_queue_size} total_train_steps={self.total_train_steps} total_rollout_steps={self.total_rollout_steps}")
 
         # Lock for dataloader access (async safety)
         self.dataloader_lock = asyncio.Lock()
@@ -100,8 +97,6 @@ class RolloutExecutor:
         self.last_val_version = None
         self.last_val_reward = None
         self.val_count = 0
-    
-    
 
     def _create_dataloader(self):
         """Load dataset from DatasetRegistry and create StatefulDataLoader."""
@@ -138,6 +133,7 @@ class RolloutExecutor:
 
         print(f"[RolloutExecutor] Loaded val dataset '{val_dataset_name}' split '{val_split}' with {len(dataset)} examples")
         from torch.utils.data import DataLoader
+
         return DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=lambda x: x)
 
     async def validate(self, param_version: int, global_steps: int = 0):
@@ -146,7 +142,7 @@ class RolloutExecutor:
             return
 
         import numpy as np
-        from verl.experimental.fully_async_policy.detach_utils import ValidateMetrics
+        from rllm.experimental.fully_async.metric_utils import ValidateMetrics
 
         self.is_validating = True
         self.val_count += 1
@@ -239,91 +235,47 @@ class RolloutExecutor:
         print(f"[RolloutExecutor] Resumed")
 
     async def _watch_task(self, interval: float = 20.0):
-        """Periodically print debug stats for monitoring staleness control."""
+        """Periodically print debug stats for monitoring."""
         last_watch_time = time.time()
-        
+
         while True:
             try:
-                # Measure event loop latency: time spent between wakeups
                 pre_sleep = time.time()
                 await asyncio.sleep(interval)
                 post_sleep = time.time()
-                
-                # Calculate expected vs actual sleep time (latency = deviation from expected)
-                actual_sleep = post_sleep - pre_sleep
-                event_loop_latency = actual_sleep - interval
+
+                event_loop_latency = (post_sleep - pre_sleep) - interval
                 watch_interval = post_sleep - last_watch_time
                 last_watch_time = post_sleep
 
-                # Get message queue stats
                 mq_stats = await self.message_queue_client.get_statistics()
-                
-                # Get client HTTP stats
-                client_stats = self.client.get_stats_sync()
-                
-                # Get global component stats (tool_call, refine, etc.)
-                component_stats = global_stats.get_all_stats_sync()
-                
-                # Count pending asyncio tasks
-                all_tasks = asyncio.all_tasks()
-                pending_tasks = len([t for t in all_tasks if not t.done()])
+                pending_tasks = len([t for t in asyncio.all_tasks() if not t.done()])
+                sema_val = self.sema._value if hasattr(self, "sema") else 0
+                active_rollouts = self.max_concurrent_rollout - sema_val if isinstance(sema_val, int) else 0
+                continue_set = self.continue_event.is_set() if self.continue_event else "N/A"
+                val_reward = f"{self.last_val_reward:.4f}" if self.last_val_reward is not None else "N/A"
 
-                print(f"\n{'=' * 80}")
-                print(f"[RolloutExecutor][WATCH] Debug Stats @ {time.strftime('%H:%M:%S')}")
-                print(f"  Event Loop Health:")
-                print(f"    event_loop_latency:      {event_loop_latency:.3f}s (should be ~0)")
-                print(f"    actual_watch_interval:   {watch_interval:.1f}s (target: {interval}s)")
-                print(f"    pending_asyncio_tasks:   {pending_tasks}")
-                print(f"  HTTP Client Stats (generation):")
-                print(f"    http_in_flight:          {client_stats['in_flight']}")
-                print(f"    http_total_started:      {client_stats['total_started']}")
-                print(f"    http_total_completed:    {client_stats['total_completed']}")
-                print(f"    http_total_failed:       {client_stats['total_failed']}")
-                print(f"    http_avg_latency:        {client_stats['avg_latency']:.2f}s")
-                
-                # Print component stats (tool_call, refine, etc.)
-                if component_stats:
-                    print(f"  Component Stats:")
-                    for comp_name, comp_stat in component_stats.items():
-                        print(f"    [{comp_name:12s}]  in_flight: {comp_stat['in_flight']:>5}, "
-                              f"completed: {comp_stat['total_completed']:>6}, "
-                              f"failed: {comp_stat['total_failed']:>4}, "
-                              f"avg_latency: {comp_stat['avg_latency']:.2f}s")
-                
-                print(f"  Staleness Control:")
-                print(f"    active_sample:           {self.active_sample}")
-                print(f"    enqueued_sample:         {self.enqueued_sample}")
-                print(f"    dropped_samples:         {self.dropped_samples}")
-                print(f"    max_staleness_samples:   {self.max_staleness_samples}")
-                print(f"    continue_event_set:      {self.continue_event.is_set() if self.continue_event else 'N/A'}")
-                print(f"  Concurrency Control:")
-                sema_available = self.sema._value if hasattr(self, 'sema') else 'N/A'
-                active_rollouts = self.max_concurrent_rollout - sema_available if isinstance(sema_available, int) else 'N/A'
-                print(f"    active_rollouts:         {active_rollouts}  (semaphore slots in use)")
-                print(f"    sema_available:          {sema_available}  (remaining capacity)")
-                print(f"    max_concurrent_rollout:  {self.max_concurrent_rollout}")
-                print(f"    repeat_per_sample:       {self.n}")
-                print(f"  Message Queue:")
-                print(f"    mq_queue_size:           {mq_stats.get('queue_size', 'N/A')}")
-                print(f"    mq_total_consumed:       {mq_stats.get('total_consumed', 'N/A')}")
-                print(f"    mq_total_produced:       {mq_stats.get('total_produced', 'N/A')}")
-                print(f"    mq_max_queue_size:       {mq_stats.get('max_queue_size', 'N/A')}")
-                print(f"  Internal State:")
-                print(f"    trajectory_group_queue_size:       {self.trajectory_group_queue.qsize()}")
-                print(f"    current_param_version:   {self.current_param_version}")
-                print(f"    is_paused:               {self.is_paused}")
-                print(f"  Validation:")
-                print(f"    is_validating:           {self.is_validating}")
-                print(f"    val_count:               {self.val_count}")
-                print(f"    last_val_version:        {self.last_val_version}")
-                print(f"    last_val_reward:         {f'{self.last_val_reward:.4f}' if self.last_val_reward is not None else 'N/A'}")
-                print(f"{'=' * 80}\n", flush=True)
+                print(
+                    f"""
+{"=" * 80}
+[RolloutExecutor][WATCH] @ {time.strftime("%H:%M:%S")}
+  EventLoop: latency={event_loop_latency:.3f}s interval={watch_interval:.1f}s pending_tasks={pending_tasks}
+  Staleness: active={self.active_sample} enqueued={self.enqueued_sample} dropped={self.dropped_samples} max={self.max_staleness_samples} continue={continue_set}
+  Concurrency: rollouts={active_rollouts}/{self.max_concurrent_rollout} sema={sema_val} repeat={self.n}
+  MessageQueue: size={mq_stats.get("queue_size", "N/A")} max={mq_stats.get("max_queue_size", "N/A")} consumed={mq_stats.get("total_consumed", "N/A")} produced={mq_stats.get("total_produced", "N/A")}
+  State: traj_q={self.trajectory_group_queue.qsize()} version={self.current_param_version} paused={self.is_paused}
+  Validation: validating={self.is_validating} count={self.val_count} last_version={self.last_val_version} reward={val_reward}
+{"=" * 80}
+""",
+                    flush=True,
+                )
 
             except asyncio.CancelledError:
                 print("[RolloutExecutor][WATCH] Watch task cancelled")
                 raise
             except Exception as e:
                 import traceback
+
                 print(f"[RolloutExecutor][WATCH] Error getting stats: {e}")
                 print(traceback.format_exc())
 
@@ -344,13 +296,13 @@ class RolloutExecutor:
             except Exception as e:
                 print(f"[DrainLoop] Error: {e}")
 
-
     async def generate_trajectory(self, idx, datum):
         result = None
         try:
             result = await self.rollout_fn(self.client, self.tokenizer, **datum)
         except Exception as e:
             import traceback
+
             error_msg = traceback.format_exc()
             print(f"[RolloutExecutor] Trajectory {idx} generation failed:\n{error_msg}")
         finally:
@@ -403,7 +355,7 @@ class RolloutExecutor:
                     datum_count += 1
                     if datum_count % 128 == 1:
                         print(f"[RolloutExecutor] Processing datum {datum_count}, global_steps={self.global_steps}/{self.total_rollout_steps}, active={self.active_sample}, enqueued={self.enqueued_sample}", flush=True)
-                    
+
                     if self.active_sample + self.enqueued_sample >= self.max_staleness_samples:
                         self.continue_event.clear()
 

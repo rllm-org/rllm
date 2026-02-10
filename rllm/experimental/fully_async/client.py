@@ -1,6 +1,4 @@
 import asyncio
-import time
-from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -9,64 +7,14 @@ from rllm.experimental.fully_async.protocol import OutputChunk, OutputWithVersio
 from rllm.parser.tool_parser import ToolParser
 
 
-@dataclass
-class ClientStats:
-    """Thread-safe HTTP client statistics tracker."""
-    in_flight: int = 0
-    total_started: int = 0
-    total_completed: int = 0
-    total_failed: int = 0
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    
-    # Timing stats
-    min_latency: float = float('inf')
-    max_latency: float = 0.0
-    total_latency: float = 0.0
-    
-    async def start_request(self) -> int:
-        async with self._lock:
-            self.in_flight += 1
-            self.total_started += 1
-            return self.in_flight
-    
-    async def end_request(self, success: bool, latency: float):
-        async with self._lock:
-            self.in_flight -= 1
-            if success:
-                self.total_completed += 1
-                self.total_latency += latency
-                self.min_latency = min(self.min_latency, latency)
-                self.max_latency = max(self.max_latency, latency)
-            else:
-                self.total_failed += 1
-    
-    async def get_stats(self) -> dict:
-        async with self._lock:
-            avg_latency = self.total_latency / max(1, self.total_completed)
-            return {
-                "in_flight": self.in_flight,
-                "total_started": self.total_started,
-                "total_completed": self.total_completed,
-                "total_failed": self.total_failed,
-                "avg_latency": avg_latency,
-                "min_latency": self.min_latency if self.min_latency != float('inf') else 0,
-                "max_latency": self.max_latency,
-            }
-    
-    def get_stats_sync(self) -> dict:
-        """Non-async version for quick access (may have slight race)."""
-        avg_latency = self.total_latency / max(1, self.total_completed)
-        return {
-            "in_flight": self.in_flight,
-            "total_started": self.total_started,
-            "total_completed": self.total_completed,
-            "total_failed": self.total_failed,
-            "avg_latency": avg_latency,
-        }
-
-
 class RolloutClient:
-    def __init__(self, router_url: str, tokenizer=None, max_concurrency: int = 4096, max_tokens=32768):
+    def __init__(
+        self,
+        router_url: str,
+        tokenizer=None,
+        max_concurrency: int = 4096,
+        max_tokens=32768,
+    ):
         self.router_url = router_url
         self.tokenizer = tokenizer
         self.parser = ToolParser.get_parser(tokenizer)
@@ -84,9 +32,6 @@ class RolloutClient:
         self.max_tokens = max_tokens
         self.resume_event = asyncio.Event()
         self.resume_event.set()
-        
-        # Request statistics tracking
-        self.stats = ClientStats()
 
     @property
     def max_concurrency(self) -> int:
@@ -98,26 +43,10 @@ class RolloutClient:
     async def _post(self, payload):
         # Block if paused - ensures no new requests after pause()
         await self.resume_event.wait()
-        
-        start_time = time.time()
-        await self.stats.start_request()
-        success = False
-        try:
-            response = await self.client.post(self.router_url + "/generate", json=payload)
-            response.raise_for_status()
-            success = True
-            return response.json()
-        finally:
-            latency = time.time() - start_time
-            await self.stats.end_request(success, latency)
 
-    async def get_stats(self) -> dict:
-        """Get current client request statistics."""
-        return await self.stats.get_stats()
-
-    def get_stats_sync(self) -> dict:
-        """Get stats without awaiting (for quick access in logging)."""
-        return self.stats.get_stats_sync()
+        response = await self.client.post(self.router_url + "/generate", json=payload)
+        response.raise_for_status()
+        return response.json()
 
     def resume(self):
         self.resume_event.set()

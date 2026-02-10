@@ -1,0 +1,41 @@
+diff --git a/verl/workers/actor/dp_actor.py b/verl/workers/actor/dp_actor.py
+index d524f0e2..18ac7b80 100644
+--- a/verl/workers/actor/dp_actor.py
++++ b/verl/workers/actor/dp_actor.py
+@@ -538,7 +538,8 @@ class DataParallelPPOActor(BasePPOActor):
+ 
+         # Split to make minibatch iterator for updating the actor
+         # See PPO paper for details. https://arxiv.org/abs/1707.06347
+-        mini_batches = data.split(self.config.ppo_mini_batch_size)
++        mini_batches = data.split(65536)
++        assert len(mini_batches) == 1
+ 
+         on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1
+ 
+@@ -551,6 +552,7 @@ class DataParallelPPOActor(BasePPOActor):
+                 if self.config.use_dynamic_bsz:
+                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
+                     micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
++                    mini_batch_num_tokens = mini_batch.batch["response_mask"].sum().item()
+                 else:
+                     self.gradient_accumulation = (
+                         self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
+@@ -573,7 +575,8 @@ class DataParallelPPOActor(BasePPOActor):
+                     calculate_entropy = self.config.calculate_entropy or (entropy_coeff != 0)
+ 
+                     if self.config.use_dynamic_bsz:
+-                        loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
++                        micro_batch_num_tokens = micro_batch.batch["response_mask"].sum().item()
++                        loss_scale_factor = micro_batch_num_tokens / mini_batch_num_tokens
+                     else:
+                         loss_scale_factor = 1 / self.gradient_accumulation
+ 
+@@ -618,7 +621,7 @@ class DataParallelPPOActor(BasePPOActor):
+ 
+                     # Skip if using bypass_mode loss (metrics already computed in pg_metrics)
+                     rollout_log_prob = model_inputs.get("rollout_log_probs", None)
+-                    if loss_mode != "bypass_mode" and rollout_log_prob is not None:
++                    if loss_mode != "bypass_mode" and rollout_log_prob is not None and response_mask.any():
+                         # Compute metrics using CURRENT policy π_θ vs π_rollout
+                         # Tracks evolving off-policy gap as π_θ updates during mini-batch training
+                         from verl.trainer.ppo.rollout_corr_helper import compute_rollout_corr_metrics_from_logprobs

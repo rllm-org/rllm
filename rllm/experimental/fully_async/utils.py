@@ -5,6 +5,7 @@ import os
 import time
 import uuid
 from collections import defaultdict
+from typing import Any
 
 import httpx
 import numpy as np
@@ -17,6 +18,57 @@ from verl.utils.torch_functional import pad_sequence_to_length
 from .protocol import TrajectoryGroup
 
 _client: httpx.AsyncClient | None = None
+
+
+# Metric utils for fully_async
+
+
+def _flatten_if_nested(val: list) -> list:
+    """Flatten a nested list (list of lists) into a flat list.
+
+    This handles the case where metrics are collected per-micro-batch on each worker,
+    then aggregated across workers, resulting in a list of lists with potentially
+    different lengths (due to dynamic batching or skipped micro-batches).
+    """
+    if isinstance(val, list) and len(val) > 0 and isinstance(val[0], list):
+        return [item for sublist in val for item in sublist]
+    return val
+
+
+def reduce_metrics_with_flatten(metrics: dict[str, Any]) -> dict[str, Any]:
+    """
+    Reduces a dictionary of metric lists by computing the mean, max, or min.
+
+    This is a fully_async-specific version that handles nested lists from
+    variable micro-batching in async training.
+
+    The reduce operation is determined by the key name:
+    - If the key contains "max", np.max is used
+    - If the key contains "min", np.min is used
+    - Otherwise, np.mean is used
+
+    Args:
+        metrics: A dictionary mapping metric names to lists of metric values.
+                 Values can be flat lists or nested lists (list of lists).
+
+    Returns:
+        A dictionary with the same keys but with each list replaced by its reduced value.
+    """
+    from verl.utils.metric.utils import Metric
+
+    for key, val in metrics.items():
+        if isinstance(val, Metric):
+            metrics[key] = val.aggregate()
+        elif "max" in key:
+            val = _flatten_if_nested(val)
+            metrics[key] = np.max(val)
+        elif "min" in key:
+            val = _flatten_if_nested(val)
+            metrics[key] = np.min(val)
+        else:
+            val = _flatten_if_nested(val)
+            metrics[key] = np.mean(val)
+    return metrics
 
 
 # Checkpoint utils

@@ -11,8 +11,6 @@ async_training:
   # Maximum samples staleness threshold
   staleness_threshold: 0.1
 
-  gradient_accumulation_steps: 1
-
   # Frequency of parameter synchronization between rollouter and trainer,
   # One step means trainer obtains a batch of required samples
   trigger_parameter_sync_step: 4
