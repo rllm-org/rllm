@@ -134,9 +134,14 @@ class SkyRLEngine(RolloutEngine):
             raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
 
         # Prepare SkyRL inference input
+        # Pass pre-computed prompt_ids from chat_parser instead of raw messages.
+        # This avoids a double-templating bug where InferenceEngineClient would
+        # re-apply tokenizer.apply_chat_template() on raw messages, producing a
+        # different prompt than what chat_parser.parse() generated (especially
+        # for thinking models where <think> token handling differs).
         inference_input: InferenceEngineInput = {
-            "prompts": [messages],
-            "prompt_token_ids": None,
+            "prompts": None,
+            "prompt_token_ids": [prompt_ids],
             "sampling_params": {"max_tokens": sampling_params.get("max_tokens", self.max_response_length), "temperature": 0.0 if validate else sampling_params.get("temperature", 1.0), "top_p": sampling_params.get("top_p", 1.0), **{k: v for k, v in sampling_params.items() if k not in ["max_tokens", "temperature", "top_p"]}},
             "session_ids": None,
         }
