@@ -1,10 +1,12 @@
 # FinQA Financial Agent
 
-This example demonstrates training and running [FinQA](https://rllm-project.com/blog), a financial question-answering agent fine-tuned from Qwen3-4B-Instruct-2507 on SEC 10-K filings. The agent uses specialized tools (SQL queries, table lookup, calculators) to answer questions about financial statements, achieving 59.70% accuracy on Snorkel Finance Benchmark and 26.6% on Snorkel Finance Reasoning.
+This project demonstrates training and running [FinQA](https://rllm-project.com/blog), a financial question-answering agent fine-tuned from Qwen3-4B-Instruct-2507 on SEC 10-K filings. The agent uses specialized tools (SQL queries, table lookup, calculators) to answer questions about financial statements, achieving **59.70%** on Snorkel Finance Benchmark and **26.6%** on Snorkel Finance Reasoning.
+
+[Model Weights](https://huggingface.co/rLLM/rLLM-FinQA-4B) | [Dataset](https://huggingface.co/datasets/rLLM/finqa) | [Blog Post](https://rllm-project.com/blog)
 
 ## Overview
 
-The FinQA examples demonstrate:
+The FinQA project demonstrates:
 
 - How to use rLLM's FinQA Agent for financial question-answering with tool use
 - How to train agents with GRPO on multi-step tasks
@@ -12,42 +14,42 @@ The FinQA examples demonstrate:
 
 ## Quick Start
 
-### Setup Financial Data
+### Installation
 
-First, prepare your financial datasets:
+Follow [rLLM installation](../getting-started/installation.md), then install FinQA dependencies:
 
 ```bash
-cd projects/finqa
-python prepare_finqa_data.py
+uv pip install -r projects/finqa/requirements.txt
+```
+
+### Dataset Preparation
+
+Downloads the [rLLM/finqa](https://huggingface.co/datasets/rLLM/finqa) dataset and registers train/val/test splits:
+
+```bash
+python -m projects.finqa.prepare_finqa_data
 ```
 
 ### Model Hosting
 
-Start a model server (choose one option):
+Start a vLLM server with OpenAI-compatible API:
 
-**Option 1: Using vLLM**
 ```bash
 python -m vllm.entrypoints.openai.api_server \
-    --model Qwen/Qwen3-4B-Instruct-2507 \
+    --model rLLM/rLLM-FinQA-4B \
     --host 0.0.0.0 \
     --port 30000 \
     --dtype bfloat16
 ```
 
-**Option 2: Using SGLang**
-```bash
-python -m sglang_router.launch_server \
-    --model-path Qwen/Qwen3-4B-Instruct-2507 \
-    --dp-size 1 \
-    --dtype bfloat16
-```
+The server should be accessible at `http://localhost:30000/v1`
 
 ### Run FinQA Agent
 
-Execute the financial reasoning agent for evaluation:
+Once your model server is running and datasets are prepared, run inference:
 
 ```bash
-python run_finqa.py
+python -m projects.finqa.run_finqa
 ```
 
 ### Train FinQA Agent
@@ -56,11 +58,19 @@ Train your own FinQA agent:
 
 ```bash
 # Train with verl backend
-bash train_finqa.sh
+bash projects/finqa/train_finqa.sh
 
 # Train with tinker backend
-bash train_finqa_tinker.sh
+bash projects/finqa/train_finqa_tinker.sh
 ```
+
+### Environment Variables
+
+| Variable | Required For | Description |
+|---|---|---|
+| `FINQA_TABLES_ROOT` | Training | Path to company tables directory (default: `data/company_tables`) |
+| `OPENAI_API_KEY` | Training | OpenAI API key for the reward judge |
+| `PORTKEY_API_KEY` | Training | Portkey gateway key for reward judge caching |
 
 ## Code Reference
 

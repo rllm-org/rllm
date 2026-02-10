@@ -25,6 +25,8 @@ rLLM is an open-source framework for post-training language agents via reinforce
 
 ## Releases 📰
 
+<strong>[2026/02/11]</strong> We release [`rLLM-FinQA-4B`](https://rllm-project.com/blog), a 4B financial analysis agent trained with RL that outperforms Qwen3-235B (**59.7% vs 51.4%**) and rivals Gemini 2.5 Pro on Snorkel Finance Benchmark. [[Blog]](https://rllm-project.com/blog) [[Model]](https://huggingface.co/rLLM/rLLM-FinQA-4B) [[Dataset]](https://huggingface.co/datasets/rLLM/finqa)
+
 <strong>[2025/12/11]</strong> We release rLLM [v0.2.1](https://github.com/rllm-org/rllm/tree/v0.2.1) which comes with support for Tinker backend, LoRA and VLM training, and support for Eval Protocol. We also bumped our `verl` backend to `v0.6.1`. [[SDK Blogpost]](https://rllm-project.com/post.html?post=sdk.md)
 
 <strong>[2025/10/16]</strong> rLLM [v0.2](https://github.com/rllm-org/rllm/tree/v0.2) is now officially released! We introduce `AgentWorkflowEngine` for training over arbitrary agentic programs. It also comes integrated with the official `verl-0.5.0`, featuring support for Megatron training. Check out this [blog post](https://rllm-project.com/post.html?post=rllm_v0.2.md) for more.
@@ -100,6 +102,7 @@ For more detailed installation guide, including using `sglang` for `verl` backen
 
 ## Awesome Projects using rLLM 🔥
 
+* [rLLM-FinQA-4B](https://rllm-project.com/blog): A 4B Financial Analysis Agent that Outperforms 235B and Rivals Gemini 2.5 Pro [[Model]](https://huggingface.co/rLLM/rLLM-FinQA-4B) [[Dataset]](https://huggingface.co/datasets/rLLM/finqa)
 * [DeepScaleR](https://pretty-radio-b75.notion.site/DeepScaleR-Surpassing-O1-Preview-with-a-1-5B-Model-by-Scaling-RL-19681902c1468005bed8ca303013a4e2): Surpassing O1-Preview with a 1.5B Model by Scaling RL
 * [DeepCoder](https://pretty-radio-b75.notion.site/DeepCoder-A-Fully-Open-Source-14B-Coder-at-O3-mini-Level-1cf81902c14680b3bee5eb349a512a51): A Fully Open-Source 14B Coder at O3-mini Level
 * [DeepSWE](https://pretty-radio-b75.notion.site/DeepSWE-Training-a-Fully-Open-sourced-State-of-the-Art[%E2%80%A6]-by-Scaling-RL-22281902c1468193aabbe9a8c59bbe33): Training a Fully Open-sourced, State-of-the-Art Coding Agent by Scaling RL
