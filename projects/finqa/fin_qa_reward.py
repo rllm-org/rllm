@@ -56,12 +56,12 @@ _FINAL_ANSWER_TAIL_RE = re.compile(r"FINAL ANSWER:\s*(.*)$", re.DOTALL | re.IGNO
 
 # Weight configuration for multi-table scoring
 CORRECTNESS_WEIGHTS = {
-    "primary_data_score": 0.30,  # High weight - core correctness
-    "derived_metrics_score": 0.30,  # High weight - core correctness
-    "reasoning_score": 0.15,  # Medium weight
-    "consistency_score": 0.10,  # Medium weight
-    "completeness_score": 0.10,  # Medium weight
-    "structure_score": 0.05,  # Low weight
+    "primary_data_score": 0.30,  # core correctness
+    "derived_metrics_score": 0.30,  # core correctness
+    "reasoning_score": 0.15,
+    "consistency_score": 0.10,
+    "completeness_score": 0.10,
+    "structure_score": 0.05,
 }
 
 

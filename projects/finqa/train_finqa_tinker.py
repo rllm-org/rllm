@@ -14,15 +14,15 @@ from .train_finqa import FinQAWorkflow
     version_base=None,
 )
 def main(config):
-    train_dataset = DatasetRegistry.load_dataset("finqa_tinker", "train_tinker")
-    val_dataset = DatasetRegistry.load_dataset("finqa_tinker", "test_tinker")
+    train_dataset = DatasetRegistry.load_dataset("finqa", "train")
+    val_dataset = DatasetRegistry.load_dataset("finqa", "val")
 
     trainer = AgentTrainer(
         workflow_class=FinQAWorkflow,
         workflow_args={
             "agent_cls": FinQAAgent,
             "env_cls": FinQAEnvironment,
-            "max_steps": 50,
+            "max_steps": 20,
         },
         config=config,
         train_dataset=train_dataset,

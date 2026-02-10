@@ -21,7 +21,7 @@ python3 -m projects.finqa.train_finqa_tinker \
     trainer.total_epochs=10 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='finqa-tinker' \
-    trainer.experiment_name='finqa-tool-tinker-v1' \
+    trainer.experiment_name='finqa-30b' \
     trainer.val_before_train=True \
     trainer.test_freq=5 \
     trainer.save_freq=5 \

@@ -348,7 +348,7 @@ Example:
         query_for_execution = re.sub(pattern, rf"\1 {quoted_sql_name}", query, flags=re.IGNORECASE)
 
         try:
-            with _DB_LOCK:  # 2x faster + fixes race condition
+            with _DB_LOCK:
                 resp = pd.read_sql_query(query_for_execution, _DB_CONN)
         except Exception as e:
             err_msg = str(e)

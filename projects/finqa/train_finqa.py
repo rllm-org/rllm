@@ -100,7 +100,7 @@ class FinQAWorkflow(MultiTurnWorkflow):
 )
 def main(config):
     train_dataset = DatasetRegistry.load_dataset("finqa", "train")
-    val_dataset = DatasetRegistry.load_dataset("finqa", "test")
+    val_dataset = DatasetRegistry.load_dataset("finqa", "val")
 
     config.rllm.workflow.use_workflow = True
 
