@@ -6,14 +6,23 @@ from rllm.workflows.workflow import TerminationReason, Workflow
 
 
 def _get_full_response(output: ModelOutput) -> str:
-    """Get the full response from ModelOutput, handling thinking models."""
+    """Get the full response from ModelOutput, handling thinking models.
+    
+    The reward function (RewardMathFn) expects the </think> delimiter to separate
+    reasoning from the answer. Since the Qwen3Renderer strips <think>...</think> tags
+    and returns structured content, we need to re-add the delimiter when combining.
+    """
     content = output.content or ""
     reasoning = output.reasoning or ""
 
-    if not content and reasoning:
-        return reasoning
+    if reasoning and content:
+        # Re-add the </think> delimiter so reward function can find the answer
+        return f"{reasoning}</think>{content}"
     if content:
         return content
+    if reasoning:
+        # If only reasoning, still add delimiter in case answer is at end of reasoning
+        return f"{reasoning}</think>"
     return ""
 
 

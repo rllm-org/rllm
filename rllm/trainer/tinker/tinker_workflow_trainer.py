@@ -141,44 +141,79 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
         all_episode_metrics = {}  # episode_id -> episode.metrics dict
         val_group_size = self.config.training.get('val_group_size', 1)
         self.agent_execution_engine.rollout_engine.set_sampling_client(sampling_client)
-        for batch in dataloader:
-            batch = self.build_interleave_batch(batch, val_group_size)
-            self.init_envs_and_agents(batch)
-            # For validation, collect all episodes from generator
-            async for episodes, episode_metrics in self.generate_agent_episodes(group_size=val_group_size, minibatch_size=1, return_metrics=True):
-                all_episodes.extend(episodes)
-                all_episode_metrics.update(episode_metrics)
+        
+        # Adjust max_response_length for validation if specified
+        rollout_engine = self.agent_execution_engine.rollout_engine
+        val_max_response_length = self.config.data.get("max_response_length_val") or self.config.data.max_response_length
+        original_max_response_length = rollout_engine.max_response_length
+        original_sampling_params = rollout_engine.sampling_params
+        
+        if val_max_response_length != original_max_response_length:
+            rollout_engine.max_response_length = val_max_response_length
+            # Update sampling_params to reflect new max_tokens
+            import tinker
+            rollout_engine.sampling_params = tinker.types.SamplingParams(
+                max_tokens=val_max_response_length,
+                stop=original_sampling_params.stop if hasattr(original_sampling_params, 'stop') else None,
+                temperature=original_sampling_params.temperature if hasattr(original_sampling_params, 'temperature') else 1.0,
+                top_p=original_sampling_params.top_p if hasattr(original_sampling_params, 'top_p') else 1.0,
+            )
+            logger.info(f"Validation: using max_response_length={val_max_response_length} (training uses {original_max_response_length})")
+        
+        try:
+            for batch in dataloader:
+                batch = self.build_interleave_batch(batch, val_group_size)
+                self.init_envs_and_agents(batch)
+                # For validation, collect all episodes from generator
+                async for episodes, episode_metrics in self.generate_agent_episodes(group_size=val_group_size, minibatch_size=1, return_metrics=True):
+                    all_episodes.extend(episodes)
+                    all_episode_metrics.update(episode_metrics)
 
-        # Collect workflow metrics per episode (deduplicated by episode.id)
-        # all_episode_metrics is: {episode_id: {metric_name: metric_value, ...}, ...}
-        workflow_metrics = defaultdict(list)
-        for episode_id, episode_metric_dict in all_episode_metrics.items():
-            if episode_metric_dict:  # Check if metrics dict is not None
-                for key, value in episode_metric_dict.items():
-                    workflow_metrics[key].append(float(value))
+            # Collect workflow metrics per episode (deduplicated by episode.id)
+            # all_episode_metrics is: {episode_id: {metric_name: metric_value, ...}, ...}
+            workflow_metrics = defaultdict(list)
+            for episode_id, episode_metric_dict in all_episode_metrics.items():
+                if episode_metric_dict:  # Check if metrics dict is not None
+                    for key, value in episode_metric_dict.items():
+                        workflow_metrics[key].append(float(value))
 
-        # Compute trajectory-level statistics from all episodes
-        all_trajectories = []
-        for episode in all_episodes:
-            all_trajectories.extend(episode.trajectories)
+            # Compute trajectory-level statistics from all episodes
+            all_trajectories = []
+            for episode in all_episodes:
+                all_trajectories.extend(episode.trajectories)
 
-        mean_reward = sum([traj.reward for traj in all_trajectories]) / len(all_trajectories)
-        std_reward = sum([(traj.reward - mean_reward) ** 2 for traj in all_trajectories]) / len(all_trajectories)
-        min_reward = min([traj.reward for traj in all_trajectories])
-        max_reward = max([traj.reward for traj in all_trajectories])
-        mean_turns = sum([len(traj.steps) for traj in all_trajectories]) / len(all_trajectories)
-        metrics = {
-            "val/reward_mean": mean_reward,
-            "val/reward_std": std_reward,
-            "val/reward_min": min_reward,
-            "val/reward_max": max_reward,
-            "val/turns_mean": mean_turns,
-        }
+            if not all_trajectories:
+                logger.warning("Validation produced no trajectories — returning zero metrics.")
+                metrics = {
+                    "val/reward_mean": 0.0,
+                    "val/reward_std": 0.0,
+                    "val/reward_min": 0.0,
+                    "val/reward_max": 0.0,
+                    "val/turns_mean": 0.0,
+                }
+            else:
+                mean_reward = sum([traj.reward for traj in all_trajectories]) / len(all_trajectories)
+                std_reward = sum([(traj.reward - mean_reward) ** 2 for traj in all_trajectories]) / len(all_trajectories)
+                min_reward = min([traj.reward for traj in all_trajectories])
+                max_reward = max([traj.reward for traj in all_trajectories])
+                mean_turns = sum([len(traj.steps) for traj in all_trajectories]) / len(all_trajectories)
+                metrics = {
+                    "val/reward_mean": mean_reward,
+                    "val/reward_std": std_reward,
+                    "val/reward_min": min_reward,
+                    "val/reward_max": max_reward,
+                    "val/turns_mean": mean_turns,
+                }
 
-        # Add workflow-provided metrics (e.g., solver_acc, judge_acc)
-        for key, values in workflow_metrics.items():
-            if values:
-                metrics[f"val/{key}"] = sum(values) / len(values)
+            # Add workflow-provided metrics (e.g., solver_acc, judge_acc)
+            for key, values in workflow_metrics.items():
+                if values:
+                    metrics[f"val/{key}"] = sum(values) / len(values)
+        finally:
+            # Restore original max_response_length and sampling_params after validation
+            if val_max_response_length != original_max_response_length:
+                rollout_engine.max_response_length = original_max_response_length
+                rollout_engine.sampling_params = original_sampling_params
 
         return metrics
 

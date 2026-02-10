@@ -14,18 +14,16 @@ from rllm.data.dataset import DatasetRegistry
 
 def prepare_deepmath_data():
     """Load and prepare DeepMath dataset for OPD training."""
-    # Load DeepMath from HuggingFace (same dataset used by tinker-cookbook)
     train_dataset = load_dataset("zwhe99/DeepMath-103K", split="train")
 
-    # For validation, use AIME 2024 (as Kyle suggested)
     test_dataset = load_dataset("HuggingFaceH4/aime_2024", split="train")
 
     def preprocess_train(example, idx):
         """Convert DeepMath format to solver-judge expected format."""
         return {
             "idx": idx,
-            "question": example["question"],  # DeepMath uses 'question' field
-            "ground_truth": str(example.get("answer", "")),  # May not have answer
+            "question": example["question"], 
+            "ground_truth": str(example.get("answer", "")), 
             "data_source": "deepmath",
         }
 
@@ -37,10 +35,10 @@ def prepare_deepmath_data():
             "ground_truth": str(example["answer"]),
             "data_source": "aime2024",
         }
-
     # Apply preprocessing
     train_dataset = train_dataset.map(
         preprocess_train, with_indices=True, remove_columns=train_dataset.column_names
+
     )
     test_dataset = test_dataset.map(
         preprocess_test, with_indices=True, remove_columns=test_dataset.column_names

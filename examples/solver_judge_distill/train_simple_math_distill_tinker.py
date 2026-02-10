@@ -10,10 +10,8 @@ from rllm.trainer import AgentTrainer
 def main(config: DictConfig):
     """Main training function for simple math distillation."""
 
-    # Get dataset name from config, with fallback to solver_judge_math
-    # Supports: data.train_files='deepmath_opd:train' or data.train_files='solver_judge_math:train'
-    train_files = config.data.get("train_files", "solver_judge_math:train")
-    val_files = config.data.get("val_files", "solver_judge_math:test")
+    train_files = config.data.get("train_files") or "solver_judge_math:train"
+    val_files = config.data.get("val_files") or "solver_judge_math:test"
 
     # Parse dataset name and split from "name:split" format
     if ":" in train_files:

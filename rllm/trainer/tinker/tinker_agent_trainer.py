@@ -232,8 +232,11 @@ class TinkerAgentTrainer:
                     logger.info(f"Processed minibatch {minibatch_count}/{num_minibatches} with {len(minibatch_episodes)} episodes")
 
                 optim_step_time = time.time()
-                optim_step_future = await self.trainer.optim_step_future(learning_rate=learning_rate, beta1=beta1, beta2=beta2, eps=eps)
-                await optim_step_future.result_async()
+                if training_datums:
+                    optim_step_future = await self.trainer.optim_step_future(learning_rate=learning_rate, beta1=beta1, beta2=beta2, eps=eps)
+                    await optim_step_future.result_async()
+                else:
+                    logger.warning("No training datums produced for batch %d — skipping optimizer step.", batch_idx)
                 time_metrics["time/optim_step"] = time.time() - optim_step_time
                 time_metrics["time/forward_backward"] = sum(forward_backward_times)
                 time_metrics["time/one_batch_generate_and_train"] = time.time() - train_step_start
@@ -356,6 +359,16 @@ class TinkerAgentTrainer:
         all_trajectories = []
         for episode in episodes_ls:
             all_trajectories.extend(episode.trajectories)
+
+        if not all_trajectories:
+            logger.warning("Validation produced no trajectories — returning zero metrics.")
+            return {
+                "val/reward_mean": 0.0,
+                "val/reward_std": 0.0,
+                "val/reward_min": 0.0,
+                "val/reward_max": 0.0,
+                "val/turns_mean": 0.0,
+            }
 
         mean_reward = sum([traj.reward for traj in all_trajectories]) / len(all_trajectories)
         std_reward = sum([(traj.reward - mean_reward) ** 2 for traj in all_trajectories]) / len(all_trajectories)

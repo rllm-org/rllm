@@ -16,8 +16,9 @@ python -m examples.solver_judge_distill.train_simple_math_distill_tinker \
     +algorithm.adv_clip_max=5.0 \
     algorithm.teacher_rollout_args.backend=tinker \
     algorithm.teacher_rollout_args.model=Qwen/Qwen3-32B \
-    data.max_prompt_length=1024 \
+    data.max_prompt_length=2048 \
     data.max_response_length=4096 \
+    +data.max_response_length_val=16384 \
     data.train_batch_size=1024 \
     data.val_batch_size=32 \
     data.train_files='deepmath_opd:train' \
@@ -30,5 +31,7 @@ python -m examples.solver_judge_distill.train_simple_math_distill_tinker \
     trainer.test_freq=10 \
     trainer.save_freq=10 \
     trainer.default_local_dir='./outputs/deepmath-distill-8b-32b-rllm' \
-    rollout_engine.bypass_render_with_parser=True \
-    workflow.n_parallel_tasks=256
+    rollout_engine.bypass_render_with_parser=False \
+    rollout_engine.renderer_name=qwen3 \
+    workflow.n_parallel_tasks=256 \
+    training.rollout_timeout=1200

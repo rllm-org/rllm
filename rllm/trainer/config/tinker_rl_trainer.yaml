@@ -67,6 +67,7 @@ rollout_engine:
   accumulate_reasoning: false
   disable_thinking: false
   bypass_render_with_parser: false
+  renderer_name: null  # Override renderer name (null = auto-detect from model)
 
 # Data Configuration
 data:
@@ -74,6 +75,7 @@ data:
   val_files: null
   max_prompt_length: 2048
   max_response_length: 2048
+  max_response_length_val: null  # Optional: different max_response_length for validation (null = use max_response_length)
   train_batch_size: 64
   val_batch_size: 32
 

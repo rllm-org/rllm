@@ -28,6 +28,7 @@ class TinkerEngine(RolloutEngine):
         disable_thinking: bool = False,
         accumulate_reasoning: bool = False,
         reasoning_effort: str = "medium",
+        renderer_name: str | None = None,
         **kwargs,
     ):
         """
@@ -47,6 +48,7 @@ class TinkerEngine(RolloutEngine):
             image_processor: Optional image processor for vision-language models (used with renderer)
             disable_thinking: Whether to disable thinking in generation prompt (used when bypass_render_with_parser=True)
             accumulate_reasoning: Whether to accumulate reasoning (used when bypass_render_with_parser=True)
+            renderer_name: Override renderer name (None = auto-detect from model)
         """
         self.model_name = model_name
         self.max_prompt_length = max_prompt_length
@@ -71,9 +73,10 @@ class TinkerEngine(RolloutEngine):
             else:
                 raise ValueError("No stop sequences found for tokenizer or chat parser")
         else:
-            renderer_name = model_info.get_recommended_renderer_name(self.model_name)
+            # Use explicit renderer_name if provided, otherwise auto-detect
+            effective_renderer_name = renderer_name or model_info.get_recommended_renderer_name(self.model_name)
             # Pass image_processor for VLM support with Tinker renderer
-            self.renderer = renderers.get_renderer(renderer_name, self.tokenizer, image_processor=image_processor)
+            self.renderer = renderers.get_renderer(effective_renderer_name, self.tokenizer, image_processor=image_processor)
             self.chat_parser = None
             self.stop_sequences = self.renderer.get_stop_sequences()
 
@@ -275,10 +278,28 @@ class TinkerEngine(RolloutEngine):
             response_dict, _ = self.renderer.parse_response(response_tokens)
 
             # Extract content from response
+            # Qwen3Renderer returns Message with structured content (list of parts)
+            # or string content. We need to extract thinking and text separately.
             if isinstance(response_dict, dict):
-                content = response_dict.get("content", "")
-                reasoning = response_dict.get("reasoning", "")
+                raw_content = response_dict.get("content", "")
                 tool_calls = response_dict.get("tool_calls", [])
+                
+                # Handle structured content (list of ThinkingPart/TextPart)
+                if isinstance(raw_content, list):
+                    thinking_parts = []
+                    text_parts = []
+                    for part in raw_content:
+                        if isinstance(part, dict):
+                            if part.get("type") == "thinking":
+                                thinking_parts.append(part.get("thinking", ""))
+                            elif part.get("type") == "text":
+                                text_parts.append(part.get("text", ""))
+                    reasoning = "".join(thinking_parts)
+                    content = "".join(text_parts)
+                else:
+                    # String content - no structured thinking
+                    content = raw_content
+                    reasoning = ""
             else:
                 content = response_dict if isinstance(response_dict, str) else ""
                 reasoning = ""

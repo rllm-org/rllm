@@ -74,9 +74,6 @@ class TinkerPolicyTrainer:
             # Check if a Tinker model ID is provided in config
             tinker_model_id = OmegaConf.select(self.config, "trainer.resume_from_tinker_id", default=None)
             if tinker_model_id:
-                # Parse Tinker model ID format:
-                # - Standard: tinker://{uuid}/weights/{checkpoint_name}  (e.g., tinker://7af7f6f0.../weights/000060)
-                # - Extended: tinker://{uuid}:train:0/weights/{name}     (e.g., tinker://...uuid...:train:0/weights/final)
                 if not tinker_model_id.startswith("tinker://"):
                     raise ValueError(f"Invalid Tinker model ID format: {tinker_model_id}. Expected format: tinker://uuid/weights/checkpoint_name")
 
@@ -88,20 +85,15 @@ class TinkerPolicyTrainer:
 
                 # Handle different checkpoint name formats
                 if checkpoint_name == "final":
-                    # "final" means the final checkpoint from a completed training run
-                    # Start from batch 0 since this is a fresh OPD run on top of SFT
                     batch = 0
                     logger.info("Loading from 'final' checkpoint - starting OPD from batch 0")
                 else:
                     try:
-                        # Extract batch number from checkpoint name (6-digit format: 000060 -> 60)
                         batch = int(checkpoint_name)
                     except ValueError:
-                        # If not a number and not "final", default to 0 and warn
                         logger.warning(f"Could not parse checkpoint name '{checkpoint_name}' as integer, defaulting to batch 0")
                         batch = 0
 
-                # Construct sampler path by replacing "weights" with "sampler_weights"
                 sampler_path = tinker_model_id.replace("/weights/", "/sampler_weights/")
 
                 resume_info = {
@@ -309,6 +301,17 @@ class TinkerPolicyTrainer:
             self.config.algorithm,
         )
 
+        # Guard: skip forward_backward when all episodes were filtered out (e.g. all
+        # length-exceeded in distillation mode).  Sending an empty list to Tinker's
+        # forward_backward_async causes it to hang indefinitely.
+        if not training_datums:
+            logger.warning(
+                "No training datums after processing %d episodes — skipping "
+                "forward-backward and optimizer step for this minibatch.",
+                len(episodes),
+            )
+            return [], [], grouping_metrics
+
         # Step 3: Remove mask from datums (not needed by forward_backward)
         datums_no_mask = [self._remove_mask(datum) for datum in training_datums]
 
@@ -351,6 +354,10 @@ class TinkerPolicyTrainer:
             self.trajectory_filter,
             self.config.algorithm,
         )
+
+        if not training_datums:
+            logger.warning("No training datums — skipping forward_backward_future.")
+            return None, grouping_metrics
 
         datums_no_mask = [self._remove_mask(datum) for datum in training_datums]
 
