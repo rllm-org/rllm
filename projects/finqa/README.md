@@ -4,9 +4,16 @@ This directory contains examples for training and running FinQA, a financial que
 
 Our examples uses the following:
 * Qwen/Qwen3-4B-Instruct-2507 as the base model
-* [rLLM/finqa](https://huggingface.co/rLLM) dataset for training and evaluation
+* [rLLM/finqa](https://huggingface.co/datasets/rLLM/finqa) dataset for training and evaluation
 
+## Installation
 
+Follow [rLLM installation](../../docs/getting-started/installation.md), then install FinQA dependencies:
+
+```bash
+# After installing rLLM and activating the venv
+uv pip install -r projects/finqa/requirements.txt
+```
 
 ## Model Hosting
 
@@ -83,3 +90,11 @@ bash projects/finqa/train_finqa.sh
 # Or train with tinker backend 
 bash projects/finqa/train_finqa_tinker.sh
 ```
+
+### Environment Variables
+
+| Variable | Required For | Description |
+|---|---|---|
+| `FINQA_TABLES_ROOT` | Training | Path to company tables directory (default: `data/company_tables`) |
+| `OPENAI_API_KEY` | Training | OpenAI API key for the reward judge |
+| `PORTKEY_API_KEY` | Training | Portkey gateway key for reward judge caching |

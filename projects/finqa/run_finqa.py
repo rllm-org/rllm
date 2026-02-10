@@ -12,7 +12,6 @@ from projects.finqa.fin_qa_agent import FinQAAgent
 from projects.finqa.fin_qa_environment import FinQAEnvironment
 from rllm.data.dataset import DatasetRegistry
 from rllm.engine.agent_execution_engine import AgentExecutionEngine
-from rllm.trajectory_visualizer import save_trajectories
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -61,29 +60,19 @@ if __name__ == "__main__":
     # Compute metrics
     problem_correct = defaultdict(int)
     for r in results:
-        task_str = (
-            json.dumps(r.task, sort_keys=True)
-            if isinstance(r.task, dict)
-            else str(r.task)
-        )
+        task_str = json.dumps(r.task, sort_keys=True) if isinstance(r.task, dict) else str(r.task)
         task_hash = hashlib.md5(task_str.encode()).hexdigest()
         problem_correct[task_hash] += 1 if r.reward > 0 else 0
 
     num_tasks = len(problem_correct)
     total_correct = sum(problem_correct.values())
     pass_at_1 = total_correct / len(results) if results else 0.0
-    pass_at_k = (
-        sum(1 for c in problem_correct.values() if c > 0) / num_tasks
-        if num_tasks
-        else 0.0
-    )
+    pass_at_k = sum(1 for c in problem_correct.values() if c > 0) / num_tasks if num_tasks else 0.0
     avg_reward = sum(r.reward for r in results) / len(results) if results else 0.0
 
     print(f"Model: {model_name}")
     print(f"Completed {len(results)} tasks ({num_tasks} unique × {args.n})")
-    print(
-        f"Pass@1: {pass_at_1:.2%} | Pass@{args.n}: {pass_at_k:.2%} | Avg Reward: {avg_reward:.4f}"
-    )
+    print(f"Pass@1: {pass_at_1:.2%} | Pass@{args.n}: {pass_at_k:.2%} | Avg Reward: {avg_reward:.4f}")
 
     if args.output:
         output_data = {
@@ -96,5 +85,3 @@ if __name__ == "__main__":
         os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
         with open(args.output, "w") as f:
             json.dump(output_data, f, indent=2)
-
-    save_trajectories(results, model_name=model_name)

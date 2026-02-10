@@ -1,7 +1,7 @@
 # Core (needed for training/inference)
 asteval>=1.0.6
 portkey-ai>=0.1
-httpx>=0.24
+httpx[http2]>=0.24
 
 # Data generation (only for scripts/data_generation/)
 beautifulsoup4>=4.12

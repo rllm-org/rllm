@@ -5,6 +5,7 @@ import glob
 import json
 import os
 from io import StringIO
+from pathlib import Path
 
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -109,7 +110,7 @@ def reformat_and_cleanup_table(table: str) -> tuple[str, str, str]:
 async def process_file_async(file_path):
     # converts the blocking call to an async call
     loop = asyncio.get_event_loop()
-    func = functools.partial(reformat_and_cleanup_table, open(file_path).read())
+    func = functools.partial(reformat_and_cleanup_table, Path(file_path).read_text())
     return await loop.run_in_executor(None, func)
 
 
@@ -138,9 +139,7 @@ async def process_company(company_dir: str, file_sem: asyncio.Semaphore):
     tasks = [context_handler(fp, file_sem) for fp in file_paths]
     if not tasks:
         return {"company": company_name, "processed": 0}
-    results = await tqdm.gather(
-        *tasks, desc=f"Processing {company_name}", total=len(tasks)
-    )
+    results = await tqdm.gather(*tasks, desc=f"Processing {company_name}", total=len(tasks))
 
     company_summary = {}
     for item in results:
@@ -152,9 +151,7 @@ async def process_company(company_dir: str, file_sem: asyncio.Semaphore):
         if "data" in item:
             df = pd.read_json(StringIO(item["data"]))
             cols = df.columns.tolist()
-            unique_vals_per_col = {
-                col: df[col].astype(str).unique().tolist() for col in cols
-            }
+            unique_vals_per_col = {col: df[col].astype(str).unique().tolist() for col in cols}
             res = {
                 "table": item["data"],
                 "description": item["description"],
@@ -163,7 +160,7 @@ async def process_company(company_dir: str, file_sem: asyncio.Semaphore):
                 "company": company_name,
             }
             company_summary[file_basename_cleaned] = res
-            open(f"{dirname}/{file_basename_json}", "w").write(item["data"])
+            Path(f"{dirname}/{file_basename_json}").write_text(item["data"])
         else:
             print(f"Skipping {file} because it does not have a table")
 
@@ -176,18 +173,11 @@ async def process_company(company_dir: str, file_sem: asyncio.Semaphore):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="CLEANUP TABLES")
-    parser.add_argument(
-        "--input_base_dir",
-        type=str,
-        required=True,
-        help="Input directory of 10K data .txt files.",
-    )
-    args = vars(parser.parse_args())
+    parser = argparse.ArgumentParser(description="Clean up scraped 10-K HTML tables into structured JSON")
+    parser.add_argument("--input_base_dir", type=str, required=True, help="Directory containing company subdirectories with .txt table files")
+    args = parser.parse_args()
 
-    company_dirs = [
-        d for d in glob.glob(f"{args['input_base_dir']}/*") if os.path.isdir(d)
-    ]
+    company_dirs = [d for d in glob.glob(f"{args.input_base_dir}/*") if os.path.isdir(d)]
     print(f"Total companies : {len(company_dirs)}")
 
     async def _process_all_companies():
@@ -202,4 +192,5 @@ if __name__ == "__main__":
         return await asyncio.gather(*company_tasks)
 
     company_results = asyncio.run(_process_all_companies())
-    json.dump(company_results, open("results-table-cleanup.json", "w"))
+    with open("results-table-cleanup.json", "w") as f:
+        json.dump(company_results, f)
