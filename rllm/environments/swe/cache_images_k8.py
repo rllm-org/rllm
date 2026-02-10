@@ -28,12 +28,12 @@ def create_daemonset_yaml(docker_image, name):
                             "image": docker_image,
                             "command": ["sleep", "1000000"],
                             "imagePullPolicy": "Always",
-                            "resources": {"requests": {"cpu": "1", "memory": "1Gi"}},
+                            "resources": {"requests": {"cpu": "0.5", "memory": "1Gi"}},
                         }
                     ],
                     "restartPolicy": "Always",
-                    "imagePullSecrets": [{"name": "dockerhub-pro"}],
-                    # ← removed nodeSelector so it runs on all schedulable nodes
+                    # "imagePullSecrets": [{"name": "dockerhub-pro"}],
+                    # "nodeSelector": {"karpenter.sh/nodepool": "bigcpu-standby"},
                 },
             },
         },

@@ -125,7 +125,12 @@ class DockerRuntime(ExecutionEnvironment):
         if self.swesmith:
             image_name = self.ds['image_name'].replace('__', '_1776_')
             self.swebench_verified = False
-            self.docker_image = f'jyangballin/{image_name}:latest'
+            swesmith_image = f'jyangballin/{image_name}:latest'
+            # Apply mirror prefix to swesmith images as well
+            if mirror_prefix:
+                self.docker_image = f'{mirror_prefix}/{swesmith_image}'
+            else:
+                self.docker_image = swesmith_image
         
         if self.swebench_verified:
             # also create a test spec for swebench verified dockers (useful for grading)
@@ -267,11 +272,11 @@ class DockerRuntime(ExecutionEnvironment):
                         "tty": True,
                         "env": env_spec,
                         "resources": {
-                            "requests": {"cpu": "1", "memory": "1Gi"},
+                            "requests": {"cpu": "0.5", "memory": "1Gi"},
                         },
                     }
                 ],
-                "imagePullSecrets": [{"name": "dockerhub-pro"}],
+                # "imagePullSecrets": [{"name": "dockerhub-pro"}],
                 # "nodeSelector": {"karpenter.sh/nodepool": "bigcpu-standby"},
                 "tolerations": [
                     {

@@ -24,6 +24,7 @@ export EXPERIMENT_NAME='agentic-swe-rl'
 
 export UV_INDEX_URL=https://bytedpypi.byted.org/simple/
 export HF_ENDPOINT=https://hf-mirror.com
+export DOCKER_MIRROR_PREFIX='aibrix-docker-mirror-cn-beijing.cr.volces.com'
 
 uv run python3 scripts/data/swe_dataset.py --local_dir ./data/swe
 uv pip uninstall ray wandb bytedray byted-wandb
