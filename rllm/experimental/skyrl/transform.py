@@ -57,7 +57,14 @@ def transform_trajectory_groups_to_training_input(
     uids: list[str] = []  # Collect uids for each trajectory
 
     for trajectory_group in trajectory_groups:
-        task_id = trajectory_group.group_id.split(":")[0]
+        # group_id has the format "task_id:trajectory_name" (e.g. "abc123:solver",
+        # "abc123:judge").  SkyRL's GRPO advantage computation groups rows by uid,
+        # so we must keep different trajectory names in *separate* groups.
+        #
+        # Using the full group_id preserves the separation established by
+        # _build_trajectory_groups in common/transform.py, matching verl's
+        # behaviour where uid = "{task_id}_{trajectory_name}".
+        grpo_uid = trajectory_group.group_id  # e.g. "task_id:solver"
 
         for trajectory in trajectory_group.trajectories:
             if len(trajectory.steps) == 0:
@@ -71,8 +78,10 @@ def transform_trajectory_groups_to_training_input(
             prompt_tokens = first_step.model_output.prompt_ids
             prompt_token_ids.append(prompt_tokens)
 
-            # Store uid for this trajectory (used by SkyRL's compute_advantages_and_returns)
-            uids.append(task_id)
+            # Store uid for this trajectory (used by SkyRL's compute_advantages_and_returns).
+            # Must be group_id (not bare task_id) so that trajectories with different
+            # roles (e.g. solver vs judge) are normalised independently in GRPO.
+            uids.append(grpo_uid)
 
             # Prefer trajectory-level reward; fall back to the final step reward when needed.
             # Some workflows set rewards on steps but leave trajectory.reward unset.

@@ -297,9 +297,10 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         """Process the backend batch by running forward-backward pass.
 
         For SkyRL, this performs:
-        1. Forward pass to compute log probs and values
-        2. Compute rewards if needed
-        3. Store results back in trainer_state.backend_batch
+        1. Sleep inference engines (colocate mode) to free GPU for training models
+        2. Forward pass to compute log probs and values
+        3. Compute rewards if needed
+        4. Store results back in trainer_state.backend_batch
 
         Reuses logic from SkyRL's RayPPOTrainer.
 
@@ -308,6 +309,13 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
             **kwargs: Additional arguments.
         """
         assert trainer_state.backend_batch is not None, "Backend batch is not set"
+
+        # In colocated mode, inference engines must release GPU memory before
+        # training models are loaded.  Native SkyRL does this right after
+        # generation completes (trainer.py L207-209).  In the unified pipeline
+        # the earliest point after generation is the start of this method.
+        if self.colocate_all:
+            await self.inference_engine_client.sleep()
 
         training_input: TrainingInputBatch = trainer_state.backend_batch
 
