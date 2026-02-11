@@ -22,18 +22,16 @@ from pprint import pprint
 
 import ray
 from omegaconf import OmegaConf
+from verl.experimental.fully_async_policy.fully_async_main import create_resource_pool_manager, create_role_worker_mapping
+from verl.trainer.ppo.utils import Role
+from verl.utils.fs import copy_to_local
 
-from rllm.experimental.fully_async.inference_manager import InferenceManager
 from rllm.experimental.fully_async.fully_async_trainer import FullyAsyncTrainer
+from rllm.experimental.fully_async.inference_manager import InferenceManager
 from rllm.experimental.fully_async.message_queue import MessageQueue, MessageQueueClient
 from rllm.experimental.fully_async.param_sync import ParameterSynchronizer
-from rllm.experimental.fully_async.protocol import Trajectory
 from rllm.experimental.fully_async.rollout_executor import RolloutExecutor
 from rllm.experimental.fully_async.utils import calculate_max_concurrency
-from verl.experimental.fully_async_policy.fully_async_main import create_resource_pool_manager, create_role_worker_mapping
-from verl.trainer.ppo.ray_trainer import ResourcePoolManager
-from verl.trainer.ppo.utils import Role, need_reference_policy
-from verl.utils.fs import copy_to_local
 
 
 def create_task_runner_with_rollout_fn(rollout_fn, val_rollout_fn=None):

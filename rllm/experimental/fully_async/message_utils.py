@@ -5,7 +5,6 @@ Utilities for converting response token IDs to OpenAI message format.
 import json
 import re
 
-
 # Regex for thinking content: <think>...</think>
 THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 

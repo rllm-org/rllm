@@ -22,7 +22,7 @@ This module provides:
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -33,9 +33,9 @@ class ValidateMetrics:
     """Metrics for validation"""
 
     timing_raw: dict[str, Any]
-    metrics: Optional[dict[str, Any]] = None
-    global_steps: Optional[int] = None
-    param_version: Optional[int] = None
+    metrics: dict[str, Any] | None = None
+    global_steps: int | None = None
+    param_version: int | None = None
 
 
 class MetricsAggregator:

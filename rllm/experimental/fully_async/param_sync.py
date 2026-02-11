@@ -17,7 +17,6 @@ import time
 
 import ray
 from ray.util.collective import collective
-
 from verl.utils.device import get_nccl_backend
 
 logger = logging.getLogger(__name__)
@@ -152,7 +151,7 @@ class ParameterSynchronizer:
         # Update staleness tracking - subtracts consumed samples from enqueued count
         # This must be called AFTER resume so continue_event can be set if there's capacity
         ray.get(self.rollout_executor.update_staleness_tracking.remote())
-        print(f"[ParameterSynchronizer] update_staleness_tracking completed", flush=True)
+        print("[ParameterSynchronizer] update_staleness_tracking completed", flush=True)
 
         pause_time = time.time()
 

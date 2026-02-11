@@ -12,11 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import asyncio
 import subprocess
 
 import ray
-
 from verl.experimental.fully_async_policy.ray_trainer import FullyAsyncRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
