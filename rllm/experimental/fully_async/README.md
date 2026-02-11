@@ -46,13 +46,14 @@ bash install_vllm_sglang_mcore_updated_sglang.sh
 ```bash
 git clone https://github.com/verl-project/verl.git
 cd verl
+git fetch
 git checkout adff7956cefd8ef707cd67dd8e08c06fa63679bd
 ```
 
 Apply the required patch:
 
 ```bash
-git apply /path/to/fully_async/verl_dp_actor.patch
+git apply rllm/experimental/fully_async/verl_dp_actor.patch
 ```
 
 Install:
@@ -72,7 +73,7 @@ uv pip install -e .
 
 See `VERL_PATCHES.md` for details on required verl modifications.
 
-**Patch file:** `dp_actor_functional_changes.patch`
+**Patch file:** `verl_dp_actor.patch`
 
 Changes to `verl/workers/actor/dp_actor.py`:
 - Force single mini-batch for async training
