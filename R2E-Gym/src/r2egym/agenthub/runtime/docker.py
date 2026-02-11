@@ -321,20 +321,22 @@ class DockerRuntime(ExecutionEnvironment):
         try:
             rv = pod.metadata.resource_version
             w = watch.Watch()
+            # Increased timeout to 30 minutes (1800s) to accommodate slow image pulls
+            # Some images are >1GB and can take 20+ minutes to pull
             stream = w.stream(
                 self.client.list_namespaced_pod,
                 namespace=DEFAULT_NAMESPACE,
                 field_selector=f"metadata.name={pod_name}",
                 resource_version=rv,
-                timeout_seconds=1200,  # 10 minutes timeout instead of 1 hour
+                timeout_seconds=1800,  # 30 minutes timeout to handle slow image pulls
             )
             start_time = time.time()
             for event in stream:
                 obj = event["object"]
                 phase = obj.status.phase
-                if time.time() - start_time > 1200:
+                if time.time() - start_time > 1800:
                     w.stop()
-                    raise RuntimeError(f"Kubernetes pod '{pod_name}' timed out after 1200 seconds.")
+                    raise RuntimeError(f"Kubernetes pod '{pod_name}' timed out after 1800 seconds.")
                 # self.logger.info(f"Event {event['type']} → pod.phase={phase}")
                 if phase == "Running":
                     self.logger.info(f"Kubernetes pod '{pod_name}' is Running.")

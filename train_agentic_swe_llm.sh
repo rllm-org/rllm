@@ -37,6 +37,8 @@ export no_proxy="localhost,.byted.org,byted.org,.bytedance.net,bytedance.net,.by
 
 # Kubernetes namespace for SWE environment pods
 export KUBE_NAMESPACE='rllm'
+# Clean up all pods AND daemonsets from previous runs
+kubectl delete daemonset --all -n rllm --ignore-not-found
 kubectl delete pods --all -n rllm
 
 # Patch verl rl_dataset.py to fix extra_info parsing (issue: https://github.com/rllm-org/rllm/issues/364)
