@@ -142,6 +142,7 @@ class RolloutExecutor:
             return
 
         import numpy as np
+
         from rllm.experimental.fully_async.metric_utils import ValidateMetrics
 
         self.is_validating = True
@@ -172,7 +173,7 @@ class RolloutExecutor:
             for key in all_metadata[0].keys():
                 values = [m.get(key) for m in all_metadata if key in m]
                 # Only aggregate numeric types
-                if values and all(isinstance(v, (int, float, bool)) for v in values):
+                if values and all(isinstance(v, int | float | bool) for v in values):
                     aggregated_user_metrics[f"val/{key}"] = float(np.mean([float(v) for v in values]))
 
         metrics = {
@@ -232,7 +233,7 @@ class RolloutExecutor:
         self.idle_start_time = None
         self.continue_event.set()  # Unblock the main loop
         self.client.resume()
-        print(f"[RolloutExecutor] Resumed")
+        print("[RolloutExecutor] Resumed")
 
     async def _watch_task(self, interval: float = 20.0):
         """Periodically print debug stats for monitoring."""
@@ -300,7 +301,7 @@ class RolloutExecutor:
         result = None
         try:
             result = await self.rollout_fn(self.client, self.tokenizer, **datum)
-        except Exception as e:
+        except Exception:
             import traceback
 
             error_msg = traceback.format_exc()
@@ -373,7 +374,7 @@ class RolloutExecutor:
 
                 iteration += 1
                 print(f"[RolloutExecutor] Completed epoch {iteration}, processed {datum_count} datums", flush=True)
-        except Exception as e:
+        except Exception:
             import traceback
 
             print(f"[RolloutExecutor] Traceback:\n{traceback.format_exc()}")
@@ -390,7 +391,7 @@ class RolloutExecutor:
                 await drain_task
             except asyncio.CancelledError:
                 pass
-            print(f"[RolloutExecutor] fit() ENDED")
+            print("[RolloutExecutor] fit() ENDED")
 
     async def update_staleness_tracking(self):
         # Wait for internal result_queue to drain to MQ before syncing

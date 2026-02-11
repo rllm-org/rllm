@@ -11,7 +11,6 @@ import httpx
 import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
-
 from verl import DataProto
 from verl.utils.torch_functional import pad_sequence_to_length
 
@@ -211,7 +210,7 @@ async def post(url: str, payload: dict = None, max_retries: int = 3, expect_json
             if expect_json:
                 return response.json() if response.content else {}
             return response
-        except Exception as e:
+        except Exception:
             if attempt == max_retries - 1:
                 raise
             await asyncio.sleep(1)
@@ -651,7 +650,7 @@ def assemble_batch_from_trajectory_group_ls(trajectory_group_ls: list[Trajectory
         non_tensors={
             "uids": np.array(uids),
             "trajectory_uuids": np.array(trajectory_uuids),
-            "response_clipped": np.array([l > max_response_length for l in response_lens]),
+            "response_clipped": np.array([response_len > max_response_length for response_len in response_lens]),
             "ignore_in_loss": np.array([False] * num_sequences),
             "trajectory_rewards": np.array([trajectory_uuid2reward[traj_uid] for traj_uid in trajectory_uuids]),
             # NOTE: processing_times, tool_calls_times, param_version_start/end are NOT included here
