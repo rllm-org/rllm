@@ -12,7 +12,7 @@ defaults:
 
 rllm:
   backend: skyrl
-  disable_thinking: true
+  disable_thinking: false
   algorithm:
     adv_estimator: ${oc.select:trainer.algorithm.advantage_estimator, grpo}
     gamma: ${oc.select:trainer.algorithm.gamma, 1.0}
