@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import os
 import time
 from datetime import datetime
@@ -109,6 +110,9 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
         total_gpus = config.trainer.nnodes * config.trainer.n_gpus_per_node + config.rollout.nnodes * config.rollout.n_gpus_per_node
         self.metrics_aggregator = MetricsAggregator(total_gpus=total_gpus)
 
+        # Trajectory saving config
+        self.save_trajectories = config.async_training.get("save_trajectories", False)
+
     def set_message_queue_client(self, message_queue_client: MessageQueueClient):
         """Set message queue client"""
         self.message_queue_client = message_queue_client
@@ -197,10 +201,12 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
 
             with marked_timer("step", timing_raw):
                 with marked_timer("gen", timing_raw, color="red"):
-                    epoch, batch = self._get_samples_from_queue()
+                    epoch, batch, trajectory_groups = self._get_samples_from_queue()
                     if batch is None:
                         break
                     self._collect_metrics_from_samples(batch, metrics)
+                    # Save trajectory groups immediately after collection if enabled
+                    self._save_trajectory_groups(trajectory_groups, self.global_steps)
                 batch, reward_extra_infos_dict = self._process_batch_common(batch, metrics, timing_raw, self.local_trigger_step if self.compute_prox_log_prob else None)
                 self._log_rollout(batch, reward_extra_infos_dict, timing_raw)
 
@@ -427,13 +433,13 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
                 if key.startswith(("fully_async", "timing_s", "custom/", "rejection_sample")):
                     metrics[key] = value
 
-    def _get_samples_from_queue(self) -> tuple[None, None] | tuple[int, Any]:
+    def _get_samples_from_queue(self) -> tuple[None, None, None] | tuple[int, Any, list]:
         """
         Get samples from message queue and compose gen_batch_output
         Uses a loop to continuously collect samples until enough are gathered
 
         Returns:
-            tuple: (epoch, batch_dict, gen_batch_output)
+            tuple: (epoch, batch, trajectory_groups) where trajectory_groups is the raw sample list
         """
         print(
             f"[FullyAsyncTrainer] Requesting {self.required_samples} samples from queue",
@@ -461,20 +467,58 @@ class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
 
         if not queue_samples or len(queue_samples) < self.required_samples:
             print("[FullyAsyncTrainer] not enough samples collected after loop")
-            return None, None
+            return None, None, None
         total_wait_time = consumer_end - consumer_start
 
         print(f"[FullyAsyncTrainer] Loop collection completed: {len(queue_samples)}/{self.required_samples} samples, total wait time: {total_wait_time:.2f} seconds.mq_len: {queue_len}")
 
-        queue_samples = [ray.cloudpickle.loads(x) for x in queue_samples]
+        # Deserialize trajectory groups
+        trajectory_groups = [ray.cloudpickle.loads(x) for x in queue_samples]
+
         # Assemble batch - now working directly with TrajectoryGroup objects
         if self.config.trainer.balance_batch:
-            batch = assemble_batch_from_trajectory_group_ls(queue_samples, self.config, self.tokenizer, self._balance_batch)
+            batch = assemble_batch_from_trajectory_group_ls(trajectory_groups, self.config, self.tokenizer, self._balance_batch)
         else:
-            batch = assemble_batch_from_trajectory_group_ls(queue_samples, self.config, self.tokenizer, None)
+            batch = assemble_batch_from_trajectory_group_ls(trajectory_groups, self.config, self.tokenizer, None)
 
         batch.meta_info["fully_async/total_wait_time"] = total_wait_time
-        return 0, batch
+        return 0, batch, trajectory_groups
+
+    def _save_trajectory_groups(self, trajectory_groups: list, global_step: int):
+        """
+        Save trajectory groups for the current step to a JSON file.
+
+        Each step's trajectories are saved to a separate JSON file in the checkpoint directory.
+        File format: {ckpt_dir}/trajectories/step_{global_step}.json
+
+        Args:
+            trajectory_groups: List of TrajectoryGroup objects to save
+            global_step: The current global training step
+        """
+        if not self.save_trajectories or not trajectory_groups:
+            return
+
+        # Create trajectories directory in checkpoint path
+        trajectories_dir = os.path.join(self.config.trainer.default_local_dir, "trajectories")
+        os.makedirs(trajectories_dir, exist_ok=True)
+
+        # Save trajectory groups to JSON
+        trajectory_file = os.path.join(trajectories_dir, f"step_{global_step}.json")
+
+        # Convert trajectory groups to serializable format
+        trajectory_data = {
+            "global_step": global_step,
+            "param_version": self.current_param_version,
+            "num_trajectory_groups": len(trajectory_groups),
+            "trajectory_groups": [tg.to_dict() for tg in trajectory_groups],
+        }
+
+        try:
+            with open(trajectory_file, "w") as f:
+                json.dump(trajectory_data, f, indent=2, default=str)
+            print(f"[FullyAsyncTrainer] Saved {len(trajectory_groups)} trajectory groups to {trajectory_file}")
+        except Exception as e:
+            print(f"[FullyAsyncTrainer] Failed to save trajectory groups: {e}")
 
     def compute_grpo_advantage(
         self,

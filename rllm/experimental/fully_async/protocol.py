@@ -145,6 +145,29 @@ class Sequence:
             end_version=self.end_version,
         )
 
+    def to_dict(self) -> dict:
+        """Serialize Sequence to a dictionary."""
+        return {
+            "prompt_ids": self.prompt_ids,
+            "response_ids": self.response_ids,
+            "response_logprobs": self.response_logprobs,
+            "response_masks": self.response_masks,
+            "start_version": self.start_version,
+            "end_version": self.end_version,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Sequence":
+        """Create Sequence from dictionary."""
+        return cls(
+            prompt_ids=data["prompt_ids"],
+            response_ids=data["response_ids"],
+            response_logprobs=data["response_logprobs"],
+            response_masks=data["response_masks"],
+            start_version=data.get("start_version"),
+            end_version=data.get("end_version"),
+        )
+
 
 @dataclass
 class Trajectory:
@@ -171,7 +194,37 @@ class Trajectory:
             merged_sequences.append(cur_seq)
         return merged_sequences
 
+    def to_dict(self) -> dict:
+        """Serialize Trajectory to a dictionary."""
+        return {
+            "sequences": [seq.to_dict() for seq in self.sequences],
+            "reward": self.reward,
+            "metadata": self.metadata,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Trajectory":
+        """Create Trajectory from dictionary."""
+        return cls(
+            sequences=[Sequence.from_dict(seq_data) for seq_data in data.get("sequences", [])],
+            reward=data.get("reward", 0.0),
+            metadata=data.get("metadata"),
+        )
+
 
 @dataclass
 class TrajectoryGroup:
     trajectories: list[Trajectory]
+
+    def to_dict(self) -> dict:
+        """Serialize TrajectoryGroup to a dictionary."""
+        return {
+            "trajectories": [traj.to_dict() for traj in self.trajectories],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TrajectoryGroup":
+        """Create TrajectoryGroup from dictionary."""
+        return cls(
+            trajectories=[Trajectory.from_dict(traj_data) for traj_data in data.get("trajectories", [])],
+        )
