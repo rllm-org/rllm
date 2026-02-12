@@ -37,8 +37,14 @@ pip install uv
 
 ### 2. Install dependencies
 
+For FSDP:
 ```bash
-bash install_vllm_sglang_mcore_updated_sglang.sh
+bash install_fsdp_sglang.sh
+```
+
+For Megatron:
+```bash
+bash install_megatron_sglang.sh
 ```
 
 ### 3. Install verl
@@ -53,7 +59,7 @@ git checkout adff7956cefd8ef707cd67dd8e08c06fa63679bd
 Apply the required patch:
 
 ```bash
-git apply rllm/experimental/fully_async/verl_dp_actor.patch
+git apply rllm/experimental/fully_async/verl_patch.patch
 ```
 
 Install:
@@ -71,9 +77,9 @@ uv pip install -e .
 
 ## Verl Patches
 
-See `VERL_PATCHES.md` for details on required verl modifications.
+See `verl_patch.md` for details on required verl modifications.
 
-**Patch file:** `verl_dp_actor.patch`
+**Patch file:** `verl_patch.patch`
 
 Changes to `verl/workers/actor/dp_actor.py`:
 - Force single mini-batch for async training
@@ -86,4 +92,6 @@ TBD
 
 ## Configuration
 
-See `config/` for example configurations.
+See example configurations:
+- `config/fully_async_ppo_trainer.yaml` - FSDP configuration
+- `config/fully_async_ppo_megatron_trainer.yaml` - Megatron configuration

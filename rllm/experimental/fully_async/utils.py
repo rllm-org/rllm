@@ -194,11 +194,17 @@ def get_client(max_connections: int = 100) -> httpx.AsyncClient:
     return _client
 
 
-async def get(url: str):
+async def get(url: str, max_retries: int = 10):
     client = get_client()
-    response = await client.get(url)
-    response.raise_for_status()
-    return response.json()
+    for attempt in range(max_retries):
+        try:
+            response = await client.get(url)
+            response.raise_for_status()
+            return response.json()
+        except Exception:
+            if attempt == max_retries - 1:
+                raise
+            await asyncio.sleep(2)
 
 
 async def post(url: str, payload: dict = None, max_retries: int = 3, expect_json: bool = True):

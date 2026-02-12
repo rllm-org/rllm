@@ -13,7 +13,9 @@
 # limitations under the License.
 
 import subprocess
+import time
 
+import httpx
 import ray
 from verl.experimental.fully_async_policy.ray_trainer import FullyAsyncRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
@@ -128,8 +130,12 @@ class InferenceManager(FullyAsyncRayPPOTrainer):
             worker_group=self.rollout_wg,
         )
 
-    def launch_router(self, port: int = 30000):
-        """Launch SGLang router with the server URLs from async_rollout_manager."""
+    def launch_router(self, port: int = 30000, health_check_timeout: int = 120):
+        """Launch SGLang router with the server URLs from async_rollout_manager.
+
+        After launching, polls the router's /health endpoint until it responds
+        (up to health_check_timeout seconds) before returning.
+        """
         if self.async_rollout_manager is None:
             raise RuntimeError("async_rollout_manager not initialized. Call init_workers() first.")
 
@@ -141,7 +147,9 @@ class InferenceManager(FullyAsyncRayPPOTrainer):
         ip = ray.util.get_node_ip_address()
         actual_port, sock = get_free_port(ip)
         sock.close()  # Release the socket, router will bind to this port
-        print(f"[InferenceManager] Launching router on port {actual_port} with server URLs: {urls}")
+
+        print(f"[InferenceManager] Worker URLs: {urls}")
+        print(f"[InferenceManager] Launching router on {ip}:{actual_port}")
 
         cmd = [
             "python3",
@@ -158,7 +166,25 @@ class InferenceManager(FullyAsyncRayPPOTrainer):
         ]
         self.router_process = subprocess.Popen(cmd)
         self.router_url = f"http://{ip}:{actual_port}"
-        return self.router_url
+
+        # Health check loop: wait until the router is ready
+        print(f"[InferenceManager] Waiting for router to become healthy at {self.router_url}/health ...")
+        start = time.time()
+        while time.time() - start < health_check_timeout:
+            try:
+                resp = httpx.get(f"{self.router_url}/health", timeout=5.0)
+                if resp.status_code == 200:
+                    elapsed = time.time() - start
+                    print(f"[InferenceManager] Router is healthy! (took {elapsed:.1f}s)")
+                    return self.router_url
+            except (httpx.ConnectError, httpx.TimeoutException):
+                pass
+            # Check if the router process has crashed
+            if self.router_process.poll() is not None:
+                raise RuntimeError(f"Router process exited with code {self.router_process.returncode} before becoming healthy")
+            time.sleep(2)
+
+        raise TimeoutError(f"Router at {self.router_url} did not become healthy within {health_check_timeout}s")
 
     async def clear_kv_cache(self):
         await self.async_rollout_manager.clear_kv_cache()
