@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from tqdm import tqdm
 
 from rllm.agents.agent import Episode
-from rllm.experimental.rollout import RolloutEngine, VerlEngine
+from rllm.experimental.rollout import RolloutEngine
 from rllm.utils import colorful_print
 from rllm.workflows.workflow import TerminationReason, Workflow
 
@@ -123,6 +123,7 @@ class UnifiedWorkflowEngine:
         try:
             for retry_attempt in range(1, self.retry_limit + 1):
                 uid = f"{task_id}:{rollout_idx}"
+                workflow.reset(task=task, uid=uid)
                 episode = await workflow.run_with_termination_handling(task=task, uid=uid, **kwargs)
 
                 # We will make sure that the episode has the correct `uid` and `task` fields.
@@ -230,6 +231,8 @@ class UnifiedWorkflowEngine:
         Returns:
             DataProto: Transformed results compatible with Verl training.
         """
+        from rllm.experimental.rollout import VerlEngine
+
         assert isinstance(self.rollout_engine, VerlEngine), "Rollout engine must be a VerlEngine to invoke execute_tasks_verl"
         await self.rollout_engine.wake_up()
 

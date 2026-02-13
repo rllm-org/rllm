@@ -187,7 +187,7 @@ class Episode:
     @classmethod
     def from_dict(cls, data: dict) -> Episode:
         """Create Episode from dictionary, properly deserializing Trajectory objects."""
-        from rllm.engine.agent_workflow_engine import TerminationReason
+        from rllm.workflows.workflow import TerminationReason
 
         return cls(
             id=data["id"],
