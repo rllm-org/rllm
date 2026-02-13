@@ -1,16 +1,27 @@
+import logging
+
 from rllm.agents.agent import Action, Episode, Step, Trajectory
 from rllm.engine import ModelOutput, RolloutEngine
 from rllm.rewards.math_reward import rllm_reward_fn_math
 from rllm.rewards.reward_fn import RewardFunction
 from rllm.workflows.workflow import TerminationReason, Workflow
 
+logger = logging.getLogger(__name__)
+
 
 def _get_full_response(output: ModelOutput) -> str:
     """Get the full response from ModelOutput, handling thinking models.
     
-    The reward function (RewardMathFn) expects the </think> delimiter to separate
-    reasoning from the answer. Since the Qwen3Renderer strips <think>...</think> tags
-    and returns structured content, we need to re-add the delimiter when combining.
+    The Qwen3Renderer parses <think>...</think> and separates:
+    - reasoning: content BETWEEN <think> and </think> (tags stripped)
+    - content: text AFTER </think>
+    
+    For reward evaluation, we reconstruct the full response with the </think>
+    delimiter so RewardMathFn can find the answer after the thinking block.
+    
+    Edge case: If the model hits max_response_length before closing </think>,
+    the entire response ends up in content (starting with <think>). In this case,
+    we use the raw text which may contain \\boxed{} somewhere.
     """
     content = output.content or ""
     reasoning = output.reasoning or ""
@@ -19,6 +30,13 @@ def _get_full_response(output: ModelOutput) -> str:
         # Re-add the </think> delimiter so reward function can find the answer
         return f"{reasoning}</think>{content}"
     if content:
+        # Check if this is an unparsed thinking response (starts with <think> but no reasoning)
+        # This happens when model hits length limit before </think>
+        if content.startswith("<think>") and not reasoning:
+            # Use the raw text which may have \boxed{} somewhere
+            raw_text = output.text or ""
+            if "\\boxed" in raw_text:
+                return raw_text
         return content
     if reasoning:
         # If only reasoning, still add delimiter in case answer is at end of reasoning
@@ -32,8 +50,11 @@ def math_reward_fn(task: dict, action: str):
     data_source = task.get("data_source", "math")
     return rllm_reward_fn_math(data_source, action, ground_truth)
 
+
 class SimpleMathWorkflow(Workflow):
     """
+    Simple single-turn math workflow for distillation training.
+    
     Workflow:
     1. Generates one solution per problem
     2. Evaluates it with the reward function
@@ -56,7 +77,7 @@ class SimpleMathWorkflow(Workflow):
         # Get problem text
         problem = task.get("question") or task.get("problem", "")
         
-        # Create math prompt (matching the solver prompt from SolverJudgeMathWorkflow)
+        # Create math prompt
         messages = [
             {
                 "role": "user",
@@ -75,14 +96,14 @@ class SimpleMathWorkflow(Workflow):
         # Evaluate with reward function
         reward_result = self.reward_function(task, full_response)
         
-        # Check for length exceeded FIRST - if exceeded, count as wrong (reward=0)
+        # Check for length exceeded - if exceeded, count as wrong (reward=0)
         is_length_exceeded = output.finish_reason == "length"
         
         # If length exceeded, override the reward to 0 (wrong answer)
         final_reward = 0.0 if is_length_exceeded else reward_result.reward
         final_is_correct = False if is_length_exceeded else reward_result.is_correct
         
-        # Create single trajectory (always include it, even if length exceeded)
+        # Create single trajectory
         trajectory = Trajectory(
             name="solver",
             steps=[
@@ -99,7 +120,7 @@ class SimpleMathWorkflow(Workflow):
             reward=final_reward,
         )
         
-        # Return episode with single trajectory (including termination reason if applicable)
+        # Return episode with single trajectory
         episode = Episode(
             id=uid,
             task=task,
@@ -108,9 +129,8 @@ class SimpleMathWorkflow(Workflow):
             metrics={"accuracy": float(final_is_correct)},
         )
         
-        # Set termination reason if length exceeded (but still return the episode)
+        # Set termination reason if length exceeded
         if is_length_exceeded:
             episode.termination_reason = TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED
         
         return episode
-

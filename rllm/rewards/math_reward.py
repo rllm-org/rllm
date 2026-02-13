@@ -47,6 +47,7 @@ class RewardMathFn:
             return RewardOutput(reward=self.config.format_error_reward, is_correct=False)
 
         # Extract solution.
+        # First, try to extract from after the </think> delimiter (preferred format)
         if THOUGHT_DELIMITER_END in model_response:
             model_solution = model_response.split(THOUGHT_DELIMITER_END)[1]
         else:
@@ -55,6 +56,12 @@ class RewardMathFn:
             model_solution = model_response
 
         model_answer = extract_answer(model_solution)
+        
+        # If no answer found after </think>, try extracting from the full response
+        # This handles cases where the model puts \boxed{} inside the thinking block
+        if model_answer is None:
+            model_answer = extract_answer(model_response)
+        
         if model_answer is None:
             return RewardOutput(reward=self.config.format_error_reward, is_correct=False)
 

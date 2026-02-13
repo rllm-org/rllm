@@ -148,17 +148,23 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
         original_max_response_length = rollout_engine.max_response_length
         original_sampling_params = rollout_engine.sampling_params
         
-        if val_max_response_length != original_max_response_length:
+        # Get validation temperature - default to training temperature, but can be overridden
+        # For greedy evaluation (like official benchmarks), set data.val_temperature=0.0
+        val_temperature = self.config.data.get("val_temperature")
+        if val_temperature is None:
+            val_temperature = original_sampling_params.temperature if hasattr(original_sampling_params, 'temperature') else 1.0
+        
+        if val_max_response_length != original_max_response_length or val_temperature != (original_sampling_params.temperature if hasattr(original_sampling_params, 'temperature') else 1.0):
             rollout_engine.max_response_length = val_max_response_length
-            # Update sampling_params to reflect new max_tokens
+            # Update sampling_params to reflect validation settings
             import tinker
             rollout_engine.sampling_params = tinker.types.SamplingParams(
                 max_tokens=val_max_response_length,
                 stop=original_sampling_params.stop if hasattr(original_sampling_params, 'stop') else None,
-                temperature=original_sampling_params.temperature if hasattr(original_sampling_params, 'temperature') else 1.0,
+                temperature=val_temperature,
                 top_p=original_sampling_params.top_p if hasattr(original_sampling_params, 'top_p') else 1.0,
             )
-            logger.info(f"Validation: using max_response_length={val_max_response_length} (training uses {original_max_response_length})")
+            logger.info(f"Validation: using max_response_length={val_max_response_length} (training uses {original_max_response_length}), temperature={val_temperature}")
         
         try:
             for batch in dataloader:

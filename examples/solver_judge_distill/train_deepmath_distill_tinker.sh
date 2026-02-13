@@ -18,7 +18,8 @@ python -m examples.solver_judge_distill.train_simple_math_distill_tinker \
     algorithm.teacher_rollout_args.model=Qwen/Qwen3-32B \
     data.max_prompt_length=2048 \
     data.max_response_length=4096 \
-    +data.max_response_length_val=16384 \
+    +data.max_response_length_val=32768 \
+    +data.val_temperature=0.0 \
     data.train_batch_size=1024 \
     data.val_batch_size=32 \
     data.train_files='deepmath_opd:train' \

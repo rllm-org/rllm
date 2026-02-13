@@ -76,6 +76,7 @@ data:
   max_prompt_length: 2048
   max_response_length: 2048
   max_response_length_val: null  # Optional: different max_response_length for validation (null = use max_response_length)
+  val_temperature: null  # Optional: temperature for validation sampling (null = use training temperature). Set to 0.0 for greedy evaluation.
   train_batch_size: 64
   val_batch_size: 32
 
