@@ -102,7 +102,6 @@ For more detailed installation guide, including using `sglang` for `verl` backen
 
 ## Awesome Projects using rLLM 🔥
 
-* [rLLM-FinQA-4B](https://rllm-project.com/blog): A 4B Financial Analysis Agent that Outperforms 235B and Rivals Gemini 2.5 Pro [[Model]](https://huggingface.co/rLLM/rLLM-FinQA-4B) [[Dataset]](https://huggingface.co/datasets/rLLM/finqa)
 * [DeepScaleR](https://pretty-radio-b75.notion.site/DeepScaleR-Surpassing-O1-Preview-with-a-1-5B-Model-by-Scaling-RL-19681902c1468005bed8ca303013a4e2): Surpassing O1-Preview with a 1.5B Model by Scaling RL
 * [DeepCoder](https://pretty-radio-b75.notion.site/DeepCoder-A-Fully-Open-Source-14B-Coder-at-O3-mini-Level-1cf81902c14680b3bee5eb349a512a51): A Fully Open-Source 14B Coder at O3-mini Level
 * [DeepSWE](https://pretty-radio-b75.notion.site/DeepSWE-Training-a-Fully-Open-sourced-State-of-the-Art[%E2%80%A6]-by-Scaling-RL-22281902c1468193aabbe9a8c59bbe33): Training a Fully Open-sourced, State-of-the-Art Coding Agent by Scaling RL
@@ -113,6 +112,7 @@ For more detailed installation guide, including using `sglang` for `verl` backen
 * [Cut the Bill, Keep the Turns](https://agate-slipper-ef0.notion.site/Cut-the-Bill-Keep-the-Turns-Affordable-Multi-Turn-Search-RL-003f78214a4d451fb06f453d084e666c): Affordable Multi-Turn Search RL
 * [SETA](https://eigent-ai.notion.site/SETA-Scaling-Environment-for-Terminal-Agent-2d2511c70ba280a9b7c0fe3e7f1b6ab8): Scaling Environments for Terminal Agents [![GitHub Repo stars](https://img.shields.io/github/stars/camel-ai/seta)](https://github.com/camel-ai/seta)
 * [LLM-in-Sandbox](https://arxiv.org/abs/2601.16206): Building General Agents by running LLMs in a sandbox (virtual computer) [![GitHub Repo stars](https://img.shields.io/github/stars/llm-in-sandbox/llm-in-sandbox?style=social)](https://github.com/llm-in-sandbox/llm-in-sandbox)
+* [rLLM-FinQA-4B](https://rllm-project.com/blog): A 4B Financial Analysis Agent that Outperforms 235B and Rivals Gemini 2.5 Pro [[Model]](https://huggingface.co/rLLM/rLLM-FinQA-4B) [[Dataset]](https://huggingface.co/datasets/rLLM/finqa)
 
 ## Acknowledgements
 Our work is done as part of [Berkeley Sky Computing Lab](https://sky.cs.berkeley.edu/). The rLLM team is generously supported by grants from [Laude Institute](https://www.laude.org/), [AWS](https://aws.amazon.com/), [Hyperbolic](https://www.hyperbolic.ai/), [Fireworks AI](https://fireworks.ai/), and [Modal](https://modal.com/). We pay special thanks to [Together AI](https://www.together.ai/) for the research partnership and compute support. 
