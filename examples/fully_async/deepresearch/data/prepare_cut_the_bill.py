@@ -4,7 +4,7 @@ from datasets import load_dataset
 
 from rllm.data import DatasetRegistry
 
-ds = load_dataset("username/ASearcher_en_no-math_Qwen3-8B-reject-sample")
+ds = load_dataset("aidenjhwu/ASearcher_en_no-math_Qwen3-8B-reject-sample")
 
 data_ls = []
 for sample in ds["train"]:
