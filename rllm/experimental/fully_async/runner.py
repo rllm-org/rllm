@@ -34,6 +34,131 @@ from rllm.experimental.fully_async.rollout_executor import RolloutExecutor
 from rllm.experimental.fully_async.utils import calculate_max_concurrency
 
 
+# ---------------------------------------------------------------------------
+# Reusable initialization helpers (used by both FullyAsyncTaskRunner and
+# the remote TrainingServer so that component wiring logic is not duplicated).
+# ---------------------------------------------------------------------------
+
+
+def load_tokenizer_and_processor(config):
+    """Load HuggingFace tokenizer and (optional) processor from the model path.
+
+    Returns:
+        (tokenizer, processor) tuple.  ``processor`` may be ``None``.
+    """
+    local_path = copy_to_local(
+        config.actor_rollout_ref.model.path,
+        use_shm=config.actor_rollout_ref.model.get("use_shm", False),
+    )
+    from verl.utils import hf_processor, hf_tokenizer
+
+    trust_remote_code = config.data.get("trust_remote_code", False)
+    tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+    processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+    return tokenizer, processor
+
+
+def init_inference_manager(config, tokenizer, role_worker_mapping, ray_worker_group_cls, processor):
+    """Create and initialise the InferenceManager (SGLang servers + router).
+
+    Returns:
+        (inference_manager, router_url)
+    """
+    inference_manager = InferenceManager.remote(
+        config=config,
+        tokenizer=tokenizer,
+        role_worker_mapping={Role.Rollout: role_worker_mapping[Role.Rollout]},
+        resource_pool_manager=create_resource_pool_manager(config, roles=[Role.Rollout]),
+        ray_worker_group_cls=ray_worker_group_cls,
+        processor=processor,
+        device_name=config.trainer.device,
+    )
+    ray.get(inference_manager.init_workers.remote())
+    router_url = ray.get(inference_manager.launch_router.remote())
+    print(f"[init] InferenceManager created – router at {router_url}")
+    return inference_manager, router_url
+
+
+def init_trainer(config, tokenizer, role_worker_mapping, ray_worker_group_cls, processor):
+    """Create and initialise the FullyAsyncTrainer (actor / critic workers).
+
+    Returns:
+        trainer (Ray actor handle)
+    """
+    trainer_role_mapping = {
+        role: worker_cls
+        for role, worker_cls in role_worker_mapping.items()
+        if role != Role.Rollout
+    }
+    trainer = FullyAsyncTrainer.remote(
+        config=config,
+        tokenizer=tokenizer,
+        role_worker_mapping=trainer_role_mapping,
+        resource_pool_manager=create_resource_pool_manager(config, roles=list(trainer_role_mapping.keys())),
+        ray_worker_group_cls=ray_worker_group_cls,
+        processor=processor,
+        device_name=config.trainer.device,
+    )
+    ray.get(trainer.init_workers.remote())
+    print("[init] FullyAsyncTrainer created and initialised")
+    return trainer
+
+
+def init_message_queue(config, max_queue_size):
+    """Create the MessageQueue Ray actor and a client wrapper.
+
+    Returns:
+        (message_queue_actor, MessageQueueClient)
+    """
+    mq = MessageQueue.remote(config, max_queue_size)
+    mq_client = MessageQueueClient(mq)
+    print(f"[init] MessageQueue created – max_queue_size={max_queue_size}")
+    return mq, mq_client
+
+
+def init_param_synchronizer(config, trainer, inference_manager, mq_client):
+    """Create the ParameterSynchronizer Ray actor.
+
+    Returns:
+        param_synchronizer (Ray actor handle)
+    """
+    param_synchronizer = ParameterSynchronizer.remote(
+        config=config,
+        trainer=trainer,
+        inference_manager=inference_manager,
+        mq=mq_client,
+    )
+    ray.get(trainer.set_parameter_synchronizer.remote(param_synchronizer))
+    print("[init] ParameterSynchronizer created")
+    return param_synchronizer
+
+
+def load_checkpoint_and_sync(trainer, param_synchronizer, config, rollout_executor=None):
+    """Load checkpoint (if any) and perform the initial weight sync.
+
+    If *rollout_executor* is provided its checkpoint is also loaded.
+
+    Returns:
+        param_version (int) – the version restored (0 when starting fresh).
+    """
+    val_before_train = config.trainer.get("val_before_train", True)
+    param_version = ray.get(trainer.load_checkpoint.remote())
+    if rollout_executor is not None:
+        ray.get(rollout_executor.load_checkpoint.remote())
+    ray.get(
+        param_synchronizer.sync_weights.remote(
+            version=param_version,
+            validate=val_before_train,
+        )
+    )
+    ray.get(param_synchronizer.wait_last_valid.remote())
+    print(f"[init] Checkpoint loaded – param_version={param_version}")
+    return param_version
+
+
+# ---------------------------------------------------------------------------
+
+
 def create_task_runner_with_rollout_fn(rollout_fn, val_rollout_fn=None):
     """
     Factory function that creates a FullyAsyncTaskRunner class with a custom rollout_fn baked in.
@@ -97,22 +222,16 @@ class FullyAsyncTaskRunner:
         OmegaConf.resolve(config)
 
         print("[ASYNC MAIN] Initializing model and tokenizer...")
-        local_path = copy_to_local(config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False))
-        from verl.utils import hf_processor, hf_tokenizer
-
-        trust_remote_code = config.data.get("trust_remote_code", False)
-        self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
-
-        # Used for multimodal LLM, could be None
-        self.processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
-
+        self.tokenizer, self.processor = load_tokenizer_and_processor(config)
         self.config = config
 
         print("[ASYNC MAIN] Creating worker mapping and resource pools...")
         self.role_worker_mapping, self.ray_worker_group_cls = create_role_worker_mapping(config)
 
         print("[ASYNC MAIN] Creating InferenceManager...")
-        self._create_inference_manager(config)
+        self.inference_manager, self.router_url = init_inference_manager(
+            config, self.tokenizer, self.role_worker_mapping, self.ray_worker_group_cls, self.processor,
+        )
 
         print("[ASYNC MAIN] Creating RolloutExecutor...")
         self._create_rollout_executor(config)
@@ -123,44 +242,33 @@ class FullyAsyncTaskRunner:
         print(f"[ASYNC MAIN] total_train_steps={total_train_steps} max_queue_size={max_queue_size}")
 
         print("[ASYNC MAIN] Creating MessageQueue...")
-        self.message_queue = MessageQueue.remote(config, max_queue_size)
-        self.message_queue_client = MessageQueueClient(self.message_queue)
+        self.message_queue, self.message_queue_client = init_message_queue(config, max_queue_size)
 
         # Set MQ client on executor
         ray.get(self.rollout_executor.set_message_queue_client.remote(self.message_queue_client))
 
         print("[ASYNC MAIN] Creating FullyAsyncTrainer...")
-        self._create_trainer(config)
+        self.trainer = init_trainer(
+            config, self.tokenizer, self.role_worker_mapping, self.ray_worker_group_cls, self.processor,
+        )
 
         # Set total_train_steps and MQ client on trainer
         ray.get(self.trainer.set_total_train_steps.remote(total_train_steps))
         ray.get(self.trainer.set_message_queue_client.remote(self.message_queue_client))
 
         print("[ASYNC MAIN] Setting up parameter synchronization...")
-        self.param_synchronizer = ParameterSynchronizer.remote(
-            config=config,
-            trainer=self.trainer,
-            inference_manager=self.inference_manager,
-            mq=self.message_queue_client,
+        self.param_synchronizer = init_param_synchronizer(
+            config, self.trainer, self.inference_manager, self.message_queue_client,
         )
-        ray.get(self.trainer.set_parameter_synchronizer.remote(self.param_synchronizer))
 
         # Set rollout_executor and router_url on param_synchronizer
         ray.get(self.param_synchronizer.set_rollout_executor.remote(self.rollout_executor))
         ray.get(self.param_synchronizer.set_router_url.remote(self.router_url))
 
-        # load checkpoint and sync parameter before doing anything
-        val_before_train = config.trainer.get("val_before_train", True)
-        # param_version resume from ckpt or default 0
-        param_version = ray.get(self.trainer.load_checkpoint.remote())
-        ray.get(self.rollout_executor.load_checkpoint.remote())
-        ray.get(
-            self.param_synchronizer.sync_weights.remote(
-                version=param_version,
-                validate=val_before_train,
-            )
+        # Load checkpoint and sync parameters before doing anything
+        load_checkpoint_and_sync(
+            self.trainer, self.param_synchronizer, config, rollout_executor=self.rollout_executor,
         )
-        ray.get(self.param_synchronizer.wait_last_valid.remote())
 
         print("[ASYNC MAIN] All components initialized successfully")
 
@@ -190,40 +298,6 @@ class FullyAsyncTaskRunner:
             max_concurrency=max_concurrent_tasks,
             total_rollout_steps=config.rollout.total_rollout_steps,
         )
-
-    def _create_inference_manager(self, config) -> None:
-        """Create InferenceManager which manages SGLang servers."""
-        self.inference_manager = InferenceManager.remote(
-            config=config,
-            tokenizer=self.tokenizer,
-            role_worker_mapping={Role.Rollout: self.role_worker_mapping[Role.Rollout]},
-            resource_pool_manager=create_resource_pool_manager(config, roles=[Role.Rollout]),
-            ray_worker_group_cls=self.ray_worker_group_cls,
-            processor=self.processor,
-            device_name=config.trainer.device,
-        )
-        ray.get(self.inference_manager.init_workers.remote())
-
-        self.router_url = ray.get(self.inference_manager.launch_router.remote())
-        print(f"[ASYNC MAIN] Router launched at {self.router_url}")
-
-        print("[ASYNC MAIN] InferenceManager created and initialized successfully")
-
-    def _create_trainer(self, config) -> None:
-        trainer_role_mapping = {role: worker_cls for role, worker_cls in self.role_worker_mapping.items() if role != Role.Rollout}
-
-        self.trainer = FullyAsyncTrainer.remote(
-            config=config,
-            tokenizer=self.tokenizer,
-            role_worker_mapping=trainer_role_mapping,
-            resource_pool_manager=create_resource_pool_manager(config, roles=list(trainer_role_mapping.keys())),
-            ray_worker_group_cls=self.ray_worker_group_cls,
-            processor=self.processor,
-            device_name=config.trainer.device,
-        )
-
-        ray.get(self.trainer.init_workers.remote())
-        print("[ASYNC MAIN] FullyAsyncTrainer created and initialized successfully")
 
     def _run_training_loop(self):
         self.running = True

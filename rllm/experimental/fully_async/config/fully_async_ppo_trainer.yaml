@@ -67,6 +67,10 @@ rollout:
   rejection_sample: False # filter all correct or all incorrect
 
 data:
+  # In fully-async mode, training batches come from the MessageQueue,
+  # not a traditional dataloader, so train_batch_size must be 0.
+  train_batch_size: 0
+
   # Number of samples generated, currently only support 1
   gen_batch_size: 1
 
@@ -76,10 +80,28 @@ data:
   val_dataset_name: null
   val_split: test
 
+# Critic strategy must match actor strategy
+critic:
+  strategy: fsdp2
+
 actor_rollout_ref:
+  # Fully-async mode uses standalone SGLang servers, not a hybrid engine
+  hybrid_engine: false
+
   # checkpoint_engine config for accelerating parameter synchronization between rollouter and trainer
   checkpoint_engine: ${oc.select:async_training.checkpoint_engine, null}
 
   actor:
+    # Default strategy for fully-async mode
+    strategy: fsdp2
+
     # Whether to use rollout log probs for training
     use_rollout_log_probs: ${oc.select:async_training.use_rollout_log_probs, True}
+
+  rollout:
+    # Fully-async mode always uses standalone SGLang for generation
+    name: sglang
+    mode: async
+
+    # Must compute log-probs during rollout for PPO/GRPO training
+    calculate_log_probs: true

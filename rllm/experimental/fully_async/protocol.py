@@ -1,4 +1,7 @@
-from dataclasses import dataclass
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from typing import Any
 
 
 @dataclass
@@ -11,6 +14,13 @@ class OutputChunk:
     @property
     def num_output_tokens(self):
         return len(self.response_ids)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> OutputChunk:
+        return cls(**data)
 
 
 @dataclass
@@ -76,6 +86,24 @@ class OutputWithVersion:
             end_version=end_version,
         )
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "prompt_ids": self.prompt_ids,
+            "output_chunks": [c.to_dict() for c in self.output_chunks],
+            "finish_reason": self.finish_reason,
+            "prompt_text": self.prompt_text,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> OutputWithVersion:
+        chunks = [OutputChunk.from_dict(c) for c in data.get("output_chunks", [])]
+        return cls(
+            prompt_ids=data["prompt_ids"],
+            output_chunks=chunks,
+            finish_reason=data.get("finish_reason", "Not Finish"),
+            prompt_text=data.get("prompt_text", ""),
+        )
+
 
 @dataclass
 class Sequence:
@@ -88,7 +116,7 @@ class Sequence:
     start_version: int | None = None
     end_version: int | None = None
 
-    def is_prefix(self, other: "Sequence") -> bool:
+    def is_prefix(self, other: Sequence) -> bool:
         return self.input_ids == other.input_ids[: len(self.input_ids)]
 
     @property
@@ -99,7 +127,7 @@ class Sequence:
     def total_length(self) -> int:
         return len(self.input_ids)
 
-    def merge(self, other: "Sequence") -> "Sequence":
+    def merge(self, other: Sequence) -> Sequence:
         assert self.is_prefix(other), "You can only merge sequence is self is a prefix of other"
 
         p_len = len(self.prompt_ids)
@@ -128,7 +156,7 @@ class Sequence:
             end_version=end_version,
         )
 
-    def resize_prompt_length(self, max_prompt_length: int) -> "Sequence":
+    def resize_prompt_length(self, max_prompt_length: int) -> Sequence:
         if len(self.prompt_ids) <= max_prompt_length:
             return self
 
@@ -144,6 +172,13 @@ class Sequence:
             start_version=self.start_version,
             end_version=self.end_version,
         )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Sequence:
+        return cls(**data)
 
 
 @dataclass
@@ -171,7 +206,33 @@ class Trajectory:
             merged_sequences.append(cur_seq)
         return merged_sequences
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "sequences": [s.to_dict() for s in self.sequences],
+            "reward": self.reward,
+            "metadata": self.metadata,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Trajectory:
+        sequences = [Sequence.from_dict(s) for s in data.get("sequences", [])]
+        return cls(
+            sequences=sequences,
+            reward=data.get("reward", 0.0),
+            metadata=data.get("metadata"),
+        )
+
 
 @dataclass
 class TrajectoryGroup:
     trajectories: list[Trajectory]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "trajectories": [t.to_dict() for t in self.trajectories],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TrajectoryGroup:
+        trajectories = [Trajectory.from_dict(t) for t in data.get("trajectories", [])]
+        return cls(trajectories=trajectories)
