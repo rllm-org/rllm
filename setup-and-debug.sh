@@ -1,10 +1,8 @@
 # before execute it, please "pip install uv"
 
 export UV_HTTP_TIMEOUT=300
-export KUBE_NAMESPACE="rllm"
 
 your_k8s_config_path='/mnt/bn/trae-research-models/xujunjielong/data/config'
-env_debug_script=debug_swe_minimal.py
 
 # IMPORTANT: if use BYTED cluster, set this to true
 use_byted_venv=true
@@ -24,10 +22,6 @@ fi
 source .venv/bin/activate
 echo "=== installing rLLM w./ VeRL ==="
 uv pip install -e ".[verl]"
-cd R2E-Gym
-echo "=== installing R2E-Gym ==="
-uv pip install -e .
-cd ..
 # if use byted cluster, install bytedray and byted-wandb
 if [ "$use_byted_venv" = true ]; then
     export UV_INDEX_URL=https://bytedpypi.byted.org/simple/
@@ -44,11 +38,3 @@ fi
 mkdir -p ~/.kube
 # BYTERD: copy k8s config
 cp $your_k8s_config_path ~/.kube/config
-if ! kubectl get namespace $KUBE_NAMESPACE &>/dev/null; then
-    kubectl create namespace $KUBE_NAMESPACE
-fi
-kubectl config set-context --current --namespace=$KUBE_NAMESPACE
-
-# the script to be run
-echo "=== start debugging env with uv ==="
-uv run python $env_debug_script
