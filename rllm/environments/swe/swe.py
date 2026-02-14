@@ -10,13 +10,21 @@ from datasets import Dataset, load_dataset
 from arl import SandboxSession
 
 from rllm.environments.swe.action import Action
-from rllm.environments.swe.observation import format_observation
-from rllm.environments.swe.constants import CMD_TIMEOUT, CONTINUE_MSG, SKIP_FILES_NEW
 from rllm.environments.swe.reward import calculate_reward
 from rllm.environments.swe.session_pool import SessionPool, SessionEntry
 from rllm.environments.base.base_env import BaseEnv
 
 TOOLS_DIR = os.path.join(os.path.dirname(__file__), "tools")
+CONTINUE_MSG = """
+You forgot to use a function call in your response.
+YOU MUST USE A FUNCTION CALL IN EACH RESPONSE.
+
+IMPORTANT: YOU SHOULD NEVER ASK FOR HUMAN HELP.
+"""
+
+CMD_TIMEOUT = 120  # seconds
+
+SKIP_FILES_NEW = ["run_tests.sh", "r2e_tests"]
 
 # Only tools that do real work inside the sandbox.
 # execute_bash/finish/submit are handled directly in step().
@@ -39,6 +47,35 @@ R2E_ENV_IDS = [
     "R2E-Gym/SWE-Bench-Lite",
 ]
 DEFAULT_R2E_ENV_ID = "R2E-Gym/R2E-Gym-Lite"
+_TRUNCATION_LINES = 40
+
+
+def format_observation(output: str, error_code: str, action_name: str) -> str:
+    """Format command output into an observation string.
+
+    For bash commands: includes exit code and truncates long output
+    (keeps first/last 40 lines) to save LLM context.
+    For tool commands (file_editor, search, etc.): light header only,
+    since tool scripts handle their own truncation internally.
+    """
+    if action_name in ("execute_bash", "bash"):
+        lines = output.splitlines() if output else []
+        if len(lines) > 2 * _TRUNCATION_LINES:
+            top = "\n".join(lines[:_TRUNCATION_LINES])
+            bottom = "\n".join(lines[-_TRUNCATION_LINES:])
+            divider = "-" * 50
+            output = (
+                f"{top}\n"
+                f"{divider}\n"
+                f"<Observation truncated in middle for saving context>\n"
+                f"{divider}\n"
+                f"{bottom}"
+            )
+        return (
+            f"Exit code: {error_code}\nExecution output of [{action_name}]:\n{output}"
+        )
+
+    return f"Execution output of [{action_name}]:\n{output}"
 
 
 def _derive_pool_ref(ds: dict) -> str:
@@ -88,7 +125,9 @@ class SWEEnv(BaseEnv):
 
         self.step_timeout = step_timeout
         self.reward_timeout = reward_timeout
-        self.gateway_url = gateway_url or os.environ.get("ARL_GATEWAY_URL", "http://localhost:8080")
+        self.gateway_url = gateway_url or os.environ.get(
+            "ARL_GATEWAY_URL", "http://localhost:8080"
+        )
         self.namespace = namespace
         self.pool_ref = pool_ref or _derive_pool_ref(self.entry)
         self.total_steps = 0
@@ -325,7 +364,9 @@ class SWEEnv(BaseEnv):
                     cmd, timeout=self.step_timeout
                 )
                 if exit_code == 124:
-                    output = f"The command took too long to execute (>{self.step_timeout}s)"
+                    output = (
+                        f"The command took too long to execute (>{self.step_timeout}s)"
+                    )
                     error_code = "-1"
                 elif exit_code != 0:
                     output = (
@@ -336,8 +377,7 @@ class SWEEnv(BaseEnv):
                     error_code = f"Error: Exit code {exit_code}"
                 else:
                     output = (
-                        f"[STDOUT]\n\n{stdout.strip()}\n\n"
-                        f"[STDERR]\n\n{stderr.strip()}"
+                        f"[STDOUT]\n\n{stdout.strip()}\n\n[STDERR]\n\n{stderr.strip()}"
                     )
                     error_code = str(exit_code)
         else:

@@ -8,12 +8,53 @@ import json
 import logging
 import re
 
-from rllm.environments.swe.log_parser import decolor_dict_keys, parse_log_fn
 
 logger = logging.getLogger(__name__)
 
 
-def calculate_reward(session, ds: dict, repo_path: str, alt_path: str, timeout: int = 300) -> float:
+def parse_log_pytest(log: str | None) -> dict[str, str]:
+    """
+    Parser for test logs generated with pytest framework.
+
+    Args:
+        log: log content
+    Returns:
+        dict: test case to test status mapping
+    """
+    if log is None:
+        return {}
+    test_status_map = {}
+    if "short test summary info" not in log:
+        return test_status_map
+    log = log.split("short test summary info")[1]
+    log = log.strip()
+    log = log.split("\n")
+    for line in log:
+        if "PASSED" in line:
+            test_name = ".".join(line.split("::")[1:])
+            test_status_map[test_name] = "PASSED"
+        elif "FAILED" in line:
+            test_name = ".".join(line.split("::")[1:]).split(" - ")[0]
+            test_status_map[test_name] = "FAILED"
+        elif "ERROR" in line:
+            try:
+                test_name = ".".join(line.split("::")[1:])
+            except IndexError:
+                test_name = line
+            test_name = test_name.split(" - ")[0]
+            test_status_map[test_name] = "ERROR"
+    return test_status_map
+
+
+def decolor_dict_keys(key_dict) -> dict:
+    """Remove ANSI escape codes from dictionary keys."""
+    decolor = lambda key: re.sub(r"\u001b\[\d+m", "", key)
+    return {decolor(k): v for k, v in key_dict.items()}
+
+
+def calculate_reward(
+    session, ds: dict, repo_path: str, alt_path: str, timeout: int = 300
+) -> float:
     """Dispatch reward calculation by dataset type.
 
     Args:
@@ -41,16 +82,22 @@ def _run_in_session(session, cmd: str, workdir: str, timeout: int) -> tuple[str,
     Returns:
         (output, error_code_str) matching the previous runtime interface.
     """
-    response = session.execute(steps=[{
-        "name": "reward_cmd",
-        "command": ["sh", "-c", f"timeout {timeout} {cmd}"],
-        "workDir": workdir,
-        "timeout": timeout + 10,
-    }])
+    response = session.execute(
+        steps=[
+            {
+                "name": "reward_cmd",
+                "command": ["sh", "-c", f"timeout {timeout} {cmd}"],
+                "workDir": workdir,
+                "timeout": timeout + 10,
+            }
+        ]
+    )
     result = response.results[0]
     output = result.output.stdout
     if result.output.stderr:
-        output = output + "\n" + result.output.stderr if output else result.output.stderr
+        output = (
+            output + "\n" + result.output.stderr if output else result.output.stderr
+        )
     exit_code = result.output.exit_code
 
     output = re.sub(r"\x1b\[[0-9;]*m|\r", "", output)
@@ -64,9 +111,7 @@ def _run_in_session(session, cmd: str, workdir: str, timeout: int) -> tuple[str,
 
 def _run_tests(session, alt_path: str, repo_path: str, timeout: int) -> tuple[str, str]:
     """Run the test script in the sandbox."""
-    return _run_in_session(
-        session, f"bash {alt_path}/run_tests.sh", repo_path, timeout
-    )
+    return _run_in_session(session, f"bash {alt_path}/run_tests.sh", repo_path, timeout)
 
 
 def _calculate_reward_swebench(session, ds: dict, timeout: int = 300) -> float:
@@ -105,8 +150,7 @@ def _calculate_reward_r2e(
 ) -> float:
     """R2E reward via test output comparison."""
     output, _ = _run_tests(session, alt_path, repo_path, timeout)
-    repo_name = ds.get("repo_name", ds.get("repo", ""))
-    parse = parse_log_fn(repo_name)(output)
+    parse = parse_log_pytest(output)
     parse = decolor_dict_keys(parse)
 
     try:
@@ -120,7 +164,7 @@ def _calculate_reward_r2e(
     try:
         expected: dict = json.loads(expected_json)
     except (json.JSONDecodeError, TypeError):
-        logger.error(f"Failed to parse expected output JSON")
+        logger.error("Failed to parse expected output JSON")
         return 0.0
     expected = decolor_dict_keys(expected)
     parse = {k.split(" - ")[0]: parse[k] for k in sorted(parse.keys())}
@@ -157,20 +201,14 @@ def _get_logs_eval(test_spec, content: str) -> tuple[dict[str, str], bool]:
     if isinstance(test_cmd, list):
         test_cmd = test_cmd[-1]
 
-    bad_codes = [x for x in [APPLY_PATCH_FAIL, RESET_FAILED, TESTS_ERROR, TESTS_TIMEOUT] if x in content]
+    bad_codes = [
+        x
+        for x in [APPLY_PATCH_FAIL, RESET_FAILED, TESTS_ERROR, TESTS_TIMEOUT]
+        if x in content
+    ]
     if bad_codes:
         logger.error(f"Bad code found in log: {bad_codes}")
         return {}, False
 
     content = content.split(test_cmd)[-1]
     return log_parser(content, test_spec), True
-
-
-def _parse_logs(ds: dict, log_output: str, swebench_verified: bool, test_spec=None) -> dict:
-    """Dispatch to correct log parser."""
-    if swebench_verified and test_spec is not None:
-        parsed_output, _ = _get_logs_eval(test_spec, log_output)
-        return parsed_output
-    else:
-        repo_name = ds.get("repo_name", ds.get("repo", ""))
-        return parse_log_fn(repo_name)(log_output)
