@@ -2,10 +2,7 @@ import json
 import logging
 import re
 
-try:
-    from r2egym.agenthub.action import Action as SWEAction
-except ImportError:
-    SWEAction = None
+from rllm.environments.swe.action import Action as SWEAction
 
 from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 from rllm.agents.system_prompts import SWE_SYSTEM_PROMPT, SWE_SYSTEM_PROMPT_FN_CALL, SWE_USER_PROMPT, SWE_USER_PROMPT_FN_CALL, SWEAGENT_SYSTEM_PROMPT, SWEAGENT_USER_PROMPT
