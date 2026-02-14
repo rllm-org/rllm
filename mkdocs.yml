@@ -82,6 +82,8 @@ nav:
         - AgentTrainer for RL Training: core-concepts/training.md
         - RL Algorithms for Agents: core-concepts/rl-algos.md
         - SDK Overview: core-concepts/sdk.md
+      - Projects:
+        - FinQA Financial Agent: projects/finqa.md
       - Examples:
         - Training a LangGraph Search Agent using the rLLM SDK: examples/sdk_langgraph_rag.md
         - RL Training with Tinker: examples/tinker_rl.md
@@ -91,6 +93,7 @@ nav:
         - Eval Protocol Integration: core-concepts/eval-protocol.md
       - References:
         - Examples: examples/index.md
+        - Projects: projects/index.md
         - API Reference: api/index.md
         - Contributing: contributing.md
         - Blogs: https://rllm-project.com/blog.html
@@ -125,6 +128,9 @@ nav:
   - Experimental:
       - Experimental Features: experimental/index.md
       - Configuration: experimental/rllm-and-backend-config.md
+  - Projects:
+      - Overview: projects/index.md
+      - FinQA: projects/finqa.md
   - API Reference:
       - Overview: api/index.md
       - Agents:

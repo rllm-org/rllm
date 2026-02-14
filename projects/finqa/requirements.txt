@@ -1,0 +1,9 @@
+# Core (needed for training/inference)
+asteval>=1.0.6
+portkey-ai>=0.1
+httpx[http2]>=0.24
+
+# Data generation (only for scripts/data_generation/)
+beautifulsoup4>=4.12
+selenium>=4.0
+webdriver-manager>=4.0

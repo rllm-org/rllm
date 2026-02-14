@@ -30,6 +30,10 @@ rLLM provides:
 
 To get started with rLLM, see the [Installation Guide](getting-started/installation.md) and [Quick Start tutorial](getting-started/quick-start.md).
 
+## Projects
+
+rLLM includes end-to-end training pipelines for domain-specific applications. See the [FinQA project](projects/finqa.md) for a complete example of training a financial analysis agent with rLLM.
+
 ## Examples and Tutorials
 
 rLLM is designed to be extensible. You can easily build and train custom agents and environments using our modular API and training engine. Walk through the [core concepts](core-concepts/overview.md) and browse the [examples on GitHub](https://github.com/rllm-org/rllm/tree/main/examples) to understand the fundamentals of rLLM and adapt them to your own use cases.
