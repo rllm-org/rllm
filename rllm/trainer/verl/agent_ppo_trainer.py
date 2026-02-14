@@ -751,9 +751,15 @@ class AgentPPOTrainer(RayPPOTrainer):
 
         def runner():
             async def consume():
-                async for item in self.agent_execution_engine.trajectory_generator(timing_raw=timing_raw, mode=mode, meta_info=meta_info):
-                    queue.put(item)
-                queue.put(None)  # sentinel to signal done
+                try:
+                    async for item in self.agent_execution_engine.trajectory_generator(timing_raw=timing_raw, mode=mode, meta_info=meta_info):
+                        queue.put(item)
+                except Exception as e:
+                    # Put exception in queue so main thread can re-raise it
+                    print("Error in trajectory_generator:", repr(e))
+                    queue.put(e)
+                finally:
+                    queue.put(None)  # sentinel to signal done, always executed
 
             asyncio.run(consume())
 
@@ -762,6 +768,8 @@ class AgentPPOTrainer(RayPPOTrainer):
             item = queue.get()
             if item is None:
                 break
+            if isinstance(item, Exception):
+                raise item  # re-raise exception from the generator thread
             yield item
 
     def _transform_agent_steps(self, steps: list[dict], uids: np.ndarray):
