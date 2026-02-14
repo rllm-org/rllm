@@ -470,12 +470,14 @@ class DockerRuntime(ExecutionEnvironment):
 
     def stop_container(self):
         try:
-            if self.container:
-                if self.backend == "docker":
+            if self.backend == "docker":
+                if self.container:
                     self.container.stop()
                     self.container.remove()
-                elif self.backend == "kubernetes":
-                    self._stop_kubernetes_pod()
+            elif self.backend == "kubernetes":
+                # Always try to delete the pod using container_name, even if self.container is None
+                # This handles the case where pod was created but wait for Running state timed out
+                self._stop_kubernetes_pod()
         except Exception as e:
             print("Container stop/delete error:", repr(e))
     
