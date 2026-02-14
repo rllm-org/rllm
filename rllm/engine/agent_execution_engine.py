@@ -492,12 +492,22 @@ class AgentExecutionEngine:
         return prompt_tokens, response_tokens, response_masks, is_valid_trajectory
 
     async def run_agent_trajectory_with_retry(self, idx, seed=0, mode="Text", **kwargs):
+        loop = asyncio.get_event_loop()
         for _ in range(self.retry_limit):
             try:
                 application_id = str(uuid.uuid4())
                 return await asyncio.wait_for(self.run_agent_trajectory_async(idx, application_id=application_id, seed=seed, mode=mode, **kwargs), timeout=7200)
             except Exception:
-                traceback.print_exc()
+                # traceback.print_exc()
+                # Clean up the environment on failure before retrying
+                # This ensures pods are deleted even when exceptions occur
+                try:
+                    env = self.envs[idx]
+                    if env is not None and hasattr(env, 'close'):
+                        await loop.run_in_executor(self.executor, env.close)
+                        colorful_print(f"Trajectory {idx}: Cleaned up environment after exception", "yellow")
+                except Exception as cleanup_error:
+                    colorful_print(f"Trajectory {idx}: Failed to clean up environment: {cleanup_error}", "red")
                 continue
         traceback.print_exc()
         raise Exception(f"Trajectory {idx} cannot complete. Please check the log message")
@@ -528,7 +538,7 @@ class AgentExecutionEngine:
                 except Exception as e:
                     import traceback
 
-                    traceback.print_exc()
+                    # traceback.print_exc()
                     raise e
                 return result
 
