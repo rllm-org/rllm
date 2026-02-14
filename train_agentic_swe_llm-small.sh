@@ -130,5 +130,8 @@ uv run --no-sync python3 -m rllm.trainer.verl.train_agent_ppo \
     rllm.agent.max_steps=50 \
     rllm.agent.overlong_filter=True \
     rllm.agent.trajectory_timeout=1200 \
+    +rllm.env.env_args.verbose=False \
+    +rllm.env.env_args.scaffold=r2egym \
+    +rllm.agent.agent_args.scaffold=r2egym \
     trainer.total_epochs=1000 \
     2>&1 | tee $EXPERIMENT_NAME.log

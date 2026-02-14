@@ -34,7 +34,6 @@ from r2egym.agenthub.trajectory.swebench_utils import (
     swebench_parse,
     TestSpec,
 )
-from r2egym.agenthub.utils.utils import get_logger
 from r2egym.commit_models.diff_classes import ParsedCommit
 from r2egym.swesmith.utils import get_test_command
 
@@ -214,6 +213,23 @@ class DockerRuntime(ExecutionEnvironment):
         image_name_sanitized = image_name_sanitized.replace(":", "-")
         return f"{image_name_sanitized}-{hash_object.hexdigest()[:10]}"
 
+    def _log_pod_describe(self, pod_name: str, context: str = ""):
+        """Log pod describe information for debugging purposes."""
+        try:
+            result = subprocess.run(
+                ["kubectl", "describe", "pod", pod_name, "-n", DEFAULT_NAMESPACE],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            self.logger.info(f"=== Pod Describe for '{pod_name}' ({context}) ===")
+            self.logger.info(result.stdout)
+            if result.stderr:
+                self.logger.info(f"stderr: {result.stderr}")
+            self.logger.info("=== End of Pod Describe ===")
+        except Exception as e:
+            self.logger.error(f"Failed to get pod describe for '{pod_name}': {e}")
+
     def _start_kubernetes_pod(
         self, docker_image: str, command: str, pod_name: str, **docker_kwargs
     ):
@@ -352,6 +368,7 @@ class DockerRuntime(ExecutionEnvironment):
             self.logger.error(
                 f"Failed to create Kubernetes pod '{pod_name}': {create_error}"
             )
+            self._log_pod_describe(pod_name, "ApiException during pod watch")
             raise create_error
         except Exception as e:
             # Handle watch timeout or other errors
@@ -369,6 +386,7 @@ class DockerRuntime(ExecutionEnvironment):
                     raise RuntimeError(f"Pod '{pod_name}' failed to reach Running state: {pod_status.status.phase}")
             except Exception as status_error:
                 self.logger.error(f"Failed to check pod status after watch error: {status_error}")
+                self._log_pod_describe(pod_name, "Exception during fallback status check")
                 raise RuntimeError(f"Failed to verify pod status: {status_error}")
 
     def start_container(

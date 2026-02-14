@@ -17,11 +17,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import subprocess
 from r2egym.agenthub import SUPPORTED_REPOS
 import concurrent.futures
+import logging
 
 ##############################################################################
 # Initialize Logger
 ##############################################################################
-logger = get_logger(__name__)  # Initialize the logger
+logger = get_logger(__name__, level=logging.CRITICAL)  # No logging
 
 
 ##############################################################################

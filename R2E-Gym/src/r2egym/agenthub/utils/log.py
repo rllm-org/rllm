@@ -3,43 +3,31 @@ from rich.logging import RichHandler
 
 
 def get_logger(
-    name: str = "defaultLogger", level: int = logging.INFO
+    name: str = "defaultLogger",
+    level: int = logging.INFO,
+    verbose: bool = False,
 ) -> logging.Logger:
-    """
-    Returns a logger configured with RichHandler, ensuring that
-    any existing handlers on this logger are removed first.
 
-    :param name: Name of the logger.
-    :param level: Logging level.
-    :return: Configured logger.
-    """
     logger = logging.getLogger(name)
 
-    # Remove any existing handlers from this logger
-    # (the loop approach or just `logger.handlers = []`)
+    # Remove existing handlers from this logger only
     while logger.handlers:
         logger.removeHandler(logger.handlers[0])
 
-    # Remove any existing handlers from the root logger
-    root_logger = logging.getLogger()
-    while root_logger.handlers:
-        root_logger.removeHandler(root_logger.handlers[0])
-
-    # Set the logging level
     logger.setLevel(level)
+    logger.propagate = False  # prevent double printing via root
 
-    # If logging is globally disabled, do not add any handlers
-    if not logging.getLogger().isEnabledFor(logging.CRITICAL):
-        return logger
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
-    # Create a RichHandler
-    rich_handler = RichHandler(rich_tracebacks=True, show_path=False)
+    # Always add file handler
+    file_handler = logging.FileHandler(f"{name}.log")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
 
-    # Set the format for the logger
-    formatter = logging.Formatter("%(message)s")
-    rich_handler.setFormatter(formatter)
-
-    # Add the RichHandler to the logger
-    logger.addHandler(rich_handler)
+    # Only add RichHandler when verbose=True
+    if verbose:
+        rich_handler = RichHandler(rich_tracebacks=True, show_path=False)
+        rich_handler.setFormatter(formatter)
+        logger.addHandler(rich_handler)
 
     return logger

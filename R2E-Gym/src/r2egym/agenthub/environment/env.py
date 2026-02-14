@@ -30,19 +30,14 @@ class RepoEnv(gym.Env):
                  args: EnvArgs,
                  logger=None,
                  backend: str = "docker",
-                 verbose: bool = True,
+                 verbose: bool = False,
                  step_timeout: int = 90,
                  reward_timeout: int = 300):
         # Get the logger
         if logger is None:
-            self.logger = get_logger("RepoEnv")  # Pass the module name for clarity
+            self.logger = get_logger("RepoEnv", verbose=verbose)  # Pass the module name for clarity
         else:
             self.logger = logger
-
-        if not verbose:
-            self.logger.setLevel(logging.CRITICAL)  # Disable all possible logging
-            #logging.getLogger().setLevel(logging.CRITICAL)  # Disable root logger
-            #logging.disable(logging.CRITICAL)  # Disable all logging
 
         self.runtime = DockerRuntime(
             ds=args.ds, command=["/bin/bash", "-l"], logger=self.logger, backend=backend
