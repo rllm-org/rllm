@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -35,6 +36,8 @@ from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.rollout import RolloutEngine
 from rllm.utils import EpisodeLogger, Tracking
 from rllm.workflows.workflow import TerminationReason, Workflow
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -114,6 +117,10 @@ class UnifiedTrainer:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
 
+        # Remote agent support
+        self._inference_server = None  # InferenceAPIServer, if remote mode
+        self._remote_agent_enabled = bool(OmegaConf.select(self.rllm_config, "remote_agent.enabled", default=False))
+
         # Read user-defined hooks from kwargs
         self.trajectory_grouping_hook = kwargs.get("trajectory_grouping_hook")
 
@@ -132,19 +139,11 @@ class UnifiedTrainer:
                 rs_config=self.rs_config,
                 algorithm_config=self.algorithm_config,
             )
-            self.agent_workflow_engine = UnifiedWorkflowEngine(
-                workflow_cls=self.workflow_class,
-                workflow_args=self.workflow_args,
-                rollout_engine=rollout_engine,
-                config=self.config,
-                n_parallel_tasks=self.rllm_config.workflow.n_parallel_tasks,
-                retry_limit=self.rllm_config.workflow.retry_limit,
-                raise_on_error=self.rllm_config.workflow.raise_on_error,
-                episode_logger=self.episode_logger,
-            )
 
-            # Initialize workflow pool
-            self._run_async(self.agent_workflow_engine.initialize_pool())
+            if self._remote_agent_enabled:
+                self._setup_remote_agent(rollout_engine)
+            else:
+                self._setup_local_workflow_engine(rollout_engine)
         except Exception as e:
             # Clean up any resources that were initialized before the error
             self._cleanup_on_init_failure()
@@ -201,6 +200,66 @@ class UnifiedTrainer:
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._thread.start()
 
+    def _setup_local_workflow_engine(self, rollout_engine: RolloutEngine):
+        """Setup the standard local workflow engine for episode generation."""
+        self.agent_workflow_engine = UnifiedWorkflowEngine(
+            workflow_cls=self.workflow_class,
+            workflow_args=self.workflow_args,
+            rollout_engine=rollout_engine,
+            config=self.config,
+            n_parallel_tasks=self.rllm_config.workflow.n_parallel_tasks,
+            retry_limit=self.rllm_config.workflow.retry_limit,
+            raise_on_error=self.rllm_config.workflow.raise_on_error,
+            episode_logger=self.episode_logger,
+        )
+        # Initialize workflow pool
+        self._run_async(self.agent_workflow_engine.initialize_pool())
+
+    def _setup_remote_agent(self, rollout_engine: RolloutEngine):
+        """Setup remote agent mode: inference API server + remote episode collector.
+
+        In remote mode the trainer exposes an OpenAI-compatible inference API
+        that remote agents call for model inference. Episodes are collected by
+        sending tasks to remote agent HTTP endpoints.
+        """
+        from rllm.experimental.remote.inference_server import (
+            InferenceAPIServer,
+            InferenceServerConfig,
+        )
+        from rllm.experimental.remote.remote_episode_collector import (
+            RemoteCollectorConfig,
+            RemoteEpisodeCollector,
+        )
+
+        ra_cfg = self.rllm_config.remote_agent
+
+        # 1. Start the inference API server
+        inf_cfg = InferenceServerConfig(
+            host=OmegaConf.select(ra_cfg, "inference_api.host", default="0.0.0.0"),
+            port=int(OmegaConf.select(ra_cfg, "inference_api.port", default=8089)),
+        )
+        self._inference_server = InferenceAPIServer(
+            rollout_engine=rollout_engine,
+            config=inf_cfg,
+        )
+        self._inference_server.start()
+        logger.info(f"Remote agent mode enabled. Inference API at {self._inference_server.inference_api_url}")
+
+        # 2. Create the remote episode collector (duck-types as agent_workflow_engine)
+        collector_cfg = RemoteCollectorConfig(
+            endpoints=list(OmegaConf.select(ra_cfg, "endpoints", default=[])),
+            inference_api_url=self._inference_server.inference_api_url,
+            timeout=float(OmegaConf.select(ra_cfg, "timeout", default=600)),
+            max_concurrent=int(OmegaConf.select(ra_cfg, "max_concurrent", default=128)),
+            retry_limit=int(OmegaConf.select(ra_cfg, "retry_limit", default=3)),
+        )
+        collector = RemoteEpisodeCollector(config=collector_cfg)
+        collector.episode_logger = self.episode_logger
+
+        # Assign to agent_workflow_engine so the rest of the trainer code
+        # (and backends that call agent_workflow_engine.execute_tasks) works unchanged.
+        self.agent_workflow_engine = collector  # type: ignore[assignment]
+
     def _setup_logging(self):
         """Setup up both the tracking and episode logging."""
         # create episode logger if enabled in config
@@ -233,6 +292,9 @@ class UnifiedTrainer:
             self._thread.join(timeout=5.0)  # Wait up to 5 seconds for thread to stop
 
         try:
+            # Stop the inference API server if it was started (remote agent mode)
+            if hasattr(self, "_inference_server") and self._inference_server is not None:
+                self._inference_server.stop()
             # Clean up the logger (this will call finish() which handles wandb.finish(), etc.)
             if hasattr(self, "logger") and self.logger is not None:
                 self.logger.finish()
@@ -445,6 +507,10 @@ class UnifiedTrainer:
 
     def shutdown(self):
         """Shutdown the trainer and cleanup resources."""
+        # Stop the inference API server if running (remote agent mode)
+        if hasattr(self, "_inference_server") and self._inference_server is not None:
+            self._inference_server.stop()
+
         if hasattr(self, "_loop") and self._loop is not None and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
         if hasattr(self, "_thread") and self._thread is not None:

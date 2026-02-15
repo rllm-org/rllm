@@ -189,10 +189,16 @@ class Episode:
         """Create Episode from dictionary, properly deserializing Trajectory objects."""
         from rllm.workflows.workflow import TerminationReason
 
+        raw_reason = data.get("termination_reason")
+        if raw_reason is not None:
+            termination_reason = TerminationReason(raw_reason)
+        else:
+            termination_reason = None
+
         return cls(
             id=data["id"],
             task=data["task"],
-            termination_reason=TerminationReason(data.get("termination_reason", TerminationReason.UNKNOWN)),
+            termination_reason=termination_reason,
             is_correct=data["is_correct"],
             trajectories=[Trajectory.from_dict(trajectory_data) for trajectory_data in data["trajectories"]],
             metrics=data.get("metrics", {}),

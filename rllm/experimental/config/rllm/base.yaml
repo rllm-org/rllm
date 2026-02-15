@@ -103,6 +103,25 @@ sdk:
     mode: subprocess  # external | subprocess
     admin_token: my-shared-secret
 
+# Remote Agent Configuration
+# When enabled, episodes are collected from remote agent runtimes (e.g. Docker
+# containers) instead of running workflows locally.  The trainer exposes an
+# OpenAI-compatible inference API that remote agents call for model inference.
+remote_agent:
+  enabled: false
+  # List of remote agent endpoint URLs (e.g. ["http://agent1:8000", "http://agent2:8000"])
+  endpoints: []
+  # Inference API server settings (exposed by the trainer for remote agents)
+  inference_api:
+    host: "0.0.0.0"
+    port: 8089
+  # Per-episode HTTP timeout in seconds
+  timeout: 600
+  # Maximum number of concurrent requests to remote agents
+  max_concurrent: 128
+  # Number of retry attempts for failed remote calls
+  retry_limit: 3
+
 # Episode Logging Configuration
 episode_logging:
   log_episodes: false
