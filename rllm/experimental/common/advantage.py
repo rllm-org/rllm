@@ -52,6 +52,8 @@ def collect_reward_and_advantage_from_trajectory_groups(
     Returns:
         Dictionary of metrics
     """
+    assert algorithm_config.stepwise_advantage_mode == "broadcast", "Only broadcast mode is supported in experimental unified trainer."
+
     if collect_advantage:
         if algorithm_config.estimator == rLLMAdvantageEstimator.GRPO:
             advantage_fn = partial(_calculate_grpo_advantages, norm_adv_by_std_in_grpo=algorithm_config.norm_adv_by_std_in_grpo)
@@ -68,31 +70,18 @@ def collect_reward_and_advantage_from_trajectory_groups(
     for group in groups:
         # extract the role of the group (e.g. "solver" or "judge") or assign the default name
         group_role = group.group_id.split(":")[1] if ":" in group.group_id[:-1] else "all_groups"
-        if algorithm_config.stepwise_advantage_mode == "broadcast":
-            assert all(traj.reward is not None for traj in group.trajectories), "Trajectory reward cannot be None in broadcast mode"
-            traj_rewards = np.array([traj.reward for traj in group.trajectories])
-            rewards_by_group[group_role].extend(traj_rewards)
 
-            if collect_advantage:
-                advantages = advantage_fn(traj_rewards)
-                advantages_by_group[group_role].extend(advantages)
-                # broadcast the advantage to all steps in the trajectory
-                for traj, advantage in zip(group.trajectories, advantages, strict=False):
-                    for step in traj.steps:
-                        step.advantage = advantage
+        assert all(traj.reward is not None for traj in group.trajectories), "Trajectory reward cannot be None in broadcast mode"
+        traj_rewards = np.array([traj.reward for traj in group.trajectories])
+        rewards_by_group[group_role].extend(traj_rewards)
 
-        elif algorithm_config.stepwise_advantage_mode == "per_step":
-            assert len(set([len(traj.steps) for traj in group.trajectories])) == 1, "All trajectories must have the same number of steps in per_step mode"
-            # compute advantage step by step for all trajectories
-            for step_idx in range(len(group.trajectories[0].steps)):
-                steps = [traj.steps[step_idx] for traj in group.trajectories]
-                step_rewards = np.array([step.reward for step in steps])
-                rewards_by_group[f"{group_role}_step_{step_idx}"].extend(step_rewards)
-                if collect_advantage:
-                    advantages = advantage_fn(step_rewards)
-                    advantages_by_group[f"{group_role}_step_{step_idx}"].extend(advantages)
-                    for step, advantage in zip(steps, advantages, strict=False):
-                        step.advantage = advantage
+        if collect_advantage:
+            advantages = advantage_fn(traj_rewards)
+            advantages_by_group[group_role].extend(advantages)
+            # broadcast the advantage to all steps in the trajectory
+            for traj, advantage in zip(group.trajectories, advantages, strict=False):
+                for step in traj.steps:
+                    step.advantage = advantage
 
     # reduce metrics by group
     final_metrics = {}

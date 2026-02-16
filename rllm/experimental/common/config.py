@@ -107,6 +107,7 @@ class AlgorithmConfig:
     """Configuration for algorithm parameters."""
 
     estimator: rLLMAdvantageEstimator = rLLMAdvantageEstimator.GRPO
+    # TODO(listar2000): eventually we will remove the `per_step` mode all-together. Now we keep it for backward compatibility.
     stepwise_advantage_mode: Literal["broadcast", "per_step"] = "broadcast"
     norm_adv_by_std_in_grpo: bool = True
     use_rllm: bool = False
@@ -129,3 +130,14 @@ class AlgorithmConfig:
             use_rllm=config.rllm.stepwise_advantage.get("use_rllm", False),
             loss_fn=config.rllm.algorithm.get("loss_fn", None),
         )
+
+    def __post_init__(self):
+        if self.stepwise_advantage_mode == "per_step":
+            from warnings import warn
+
+            warn(
+                "The `per_step` mode is deprecated in experimental unified trainer. Set to `broadcast` mode automatically.",
+                "Please either use the legacy trainers (`agent_workflow_trainer` for `Verl` or `tinker_workflow_trainer` for `Tinker`) with the `per_step` configuration. Or manually pass in a hook with the implementation of `per_step` advantage computation logic. Read the documentation for a comprehensive guide on the migration (TBD).",
+                DeprecationWarning,
+            )
+            self.stepwise_advantage_mode = "broadcast"

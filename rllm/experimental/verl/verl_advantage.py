@@ -12,13 +12,11 @@ from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_advantage
 
 def compute_advantage_verl(batch: DataProto, config: DictConfig) -> tuple[DataProto, dict]:
     """Verl-native advantage computation."""
+    assert config.rllm.stepwise_advantage.mode == "broadcast", "Only broadcast mode is supported in experimental unified trainer."
     metrics = {}
     batch.non_tensor_batch["uid"] = batch.non_tensor_batch["trajectory_ids"]
 
-    if config.rllm.stepwise_advantage.mode == "per_step":
-        batch.batch["token_level_scores"] = batch.batch["step_rewards"]
-    else:
-        batch.batch["token_level_scores"] = batch.batch["traj_rewards"]
+    batch.batch["token_level_scores"] = batch.batch["traj_rewards"]
 
     if config.algorithm.use_kl_in_reward:
         batch, kl_metrics = apply_kl_penalty(
@@ -30,14 +28,11 @@ def compute_advantage_verl(batch: DataProto, config: DictConfig) -> tuple[DataPr
     else:
         batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
 
-    if config.rllm.stepwise_advantage.mode == "broadcast":
-        is_last_step = batch.non_tensor_batch["is_last_step"]
-        last_step_indices = np.where(is_last_step == True)[0]
-        not_last_step_indices = np.where(is_last_step == False)[0]
-        non_last_step_batch = batch.select_idxs(not_last_step_indices)
-        batch = batch.select_idxs(last_step_indices)
-    else:
-        batch = _remove_padding(batch)
+    is_last_step = batch.non_tensor_batch["is_last_step"]
+    last_step_indices = np.where(is_last_step)[0]
+    not_last_step_indices = np.where(~is_last_step)[0]
+    non_last_step_batch = batch.select_idxs(not_last_step_indices)
+    batch = batch.select_idxs(last_step_indices)
 
     batch = compute_advantage(
         batch,
@@ -49,9 +44,8 @@ def compute_advantage_verl(batch: DataProto, config: DictConfig) -> tuple[DataPr
         config=config.algorithm,
     )
 
-    if config.rllm.stepwise_advantage.mode == "broadcast":
-        _stepwise_advantage_broadcast(batch, non_last_step_batch, config)
-        batch = DataProto.concat([batch, non_last_step_batch])
+    _stepwise_advantage_broadcast(batch, non_last_step_batch, config)
+    batch = DataProto.concat([batch, non_last_step_batch])
 
     return batch, metrics
 
@@ -89,5 +83,5 @@ def _stepwise_advantage_broadcast(last_step_batch: DataProto, non_last_step_batc
 def _remove_padding(batch: DataProto) -> DataProto:
     """Remove padded steps from batch."""
     is_pad_step = batch.non_tensor_batch["is_pad_step"]
-    non_pad_step_indices = np.where(is_pad_step == False)[0]
+    non_pad_step_indices = np.where(~is_pad_step)[0]
     return batch.select_idxs(non_pad_step_indices)

@@ -385,13 +385,10 @@ def update_dataproto_with_advantages(batch: DataProto, container: list[Episode] 
 
     # TODO(listar2000): we should support `token_level_scores` from the `Step` attribute level.
     # we also need to implement the `kl_penalty` logic used in `verl`.
-    if mode == "per_step":
-        batch.batch["token_level_scores"] = batch.batch["step_rewards"]
-        batch.batch["token_level_rewards"] = batch.batch["step_rewards"]
-    elif mode == "broadcast":
+    if mode == "broadcast":
         batch.batch["token_level_scores"] = batch.batch["traj_rewards"]
         batch.batch["token_level_rewards"] = batch.batch["traj_rewards"]
     else:
-        raise ValueError(f"Stepwise advantage mode {mode} not supported")
+        raise ValueError(f"Stepwise advantage mode {mode} not supported in experimental unified trainer.")
 
     return batch
