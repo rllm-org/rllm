@@ -125,6 +125,9 @@ uv run --no-sync python3 -m rllm.trainer.verl.train_agent_ppo \
     rllm.agent.name=sweagent \
     rllm.agent.max_steps=50 \
     rllm.agent.overlong_filter=True \
-    +rllm.rllm.agent.trajectory_timeout=5400 \
+    rllm.agent.trajectory_timeout=1200 \
     trainer.total_epochs=1000 \
+    +rllm.env.env_args.verbose=False \
+    +rllm.env.env_args.scaffold=r2egym \
+    +rllm.agent.agent_args.scaffold=r2egym \
     2>&1 | tee $EXPERIMENT_NAME.log
