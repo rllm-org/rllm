@@ -150,11 +150,25 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         if dataset is None:
             raise ValueError("Dataset cannot be None for SkyRLBackend")
 
+        num_policy_gpus = (
+            self.full_config.trainer.placement.get("policy_num_gpus_per_node", 1)
+            * self.full_config.trainer.get("nnodes", 1)
+        )
         if trainer_state.is_training:
-            batch_size = self.full_config.data.train_batch_size
+            per_gpu = self.full_config.data.get("train_batch_size_per_gpu", None)
+            batch_size = (
+                per_gpu * num_policy_gpus
+                if per_gpu is not None
+                else self.full_config.data.train_batch_size
+            )
             shuffle = True
         else:
-            batch_size = self.full_config.data.get("val_batch_size", self.full_config.data.train_batch_size)
+            per_gpu = self.full_config.data.get("val_batch_size_per_gpu", None)
+            batch_size = (
+                per_gpu * num_policy_gpus
+                if per_gpu is not None
+                else self.full_config.data.get("val_batch_size", self.full_config.data.train_batch_size)
+            )
             shuffle = False
 
         return torch.utils.data.DataLoader(
@@ -245,6 +259,7 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
             tasks, task_ids, is_validation=is_validation,
         )
 
+        # Potentially Remove this:
         # Compute rollout metrics from episodes
         if not hasattr(self, "all_metrics"):
             self.all_metrics = {}

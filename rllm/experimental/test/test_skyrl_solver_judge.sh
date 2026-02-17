@@ -11,7 +11,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 # Override this externally if needed.
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2,3}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 
 python3 -m rllm.experimental.test.test_skyrl_solver_judge \
     rllm/backend=skyrl \
@@ -21,8 +21,9 @@ python3 -m rllm.experimental.test.test_skyrl_solver_judge \
     trainer.placement.colocate_all=false \
     trainer.epochs=1 \
     rllm.trainer.total_batches=100 \
-    trainer.eval_before_train=true \
+    trainer.eval_before_train=false \
     trainer.eval_interval=10 \
+    trainer.val_max_samples=8 \
     trainer.ckpt_interval=20 \
     trainer.run_name=skyrl_solver_judge_test \
     rllm.episode_logging.log_episodes=true \
@@ -31,8 +32,8 @@ python3 -m rllm.experimental.test.test_skyrl_solver_judge \
     trainer.critic.optimizer_config.lr=5e-5 \
     trainer.algorithm.use_kl_loss=false \
     trainer.algorithm.eps_clip_high=0.28 \
-    data.train_batch_size=64 \
-    data.val_batch_size=16 \
+    data.train_batch_size=32 \
+    data.val_batch_size=32 \
     data.max_prompt_length=2048 \
     data.max_response_length=1024 \
     generator.n_samples_per_prompt=4 \

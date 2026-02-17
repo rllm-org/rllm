@@ -30,6 +30,7 @@ rllm:
     val_before_train: ${oc.select:trainer.eval_before_train, true}
 
 trainer:
+  val_max_samples: -1  # max validation samples per eval (-1 = all)
   algorithm:
     max_seq_len: ${oc.select:data.max_prompt_length,1024}
 

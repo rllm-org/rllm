@@ -519,8 +519,10 @@ class QwenChatTemplateParser(ChatTemplateParser):
                 content = content[: -len(self.eot_token)]
             reasoning = reasoning.strip()
             content = content.strip()
-        elif not self.disable_thinking:
-            # generation was cut short during reasoning
+        elif not self.disable_thinking: 
+            # TODO: there are two cases where the model didn't output </think>
+            # 1. Start <think> but no </think>. -> current handling (when the model is capable of thinking)
+            # 2. No <think> at all. -> we also need to handle this case. (when the model is not capable of thinking)
             reasoning = completion_text
             if reasoning.startswith("<think>"):
                 reasoning = reasoning[len("<think>") :]

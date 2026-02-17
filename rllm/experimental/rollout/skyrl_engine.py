@@ -6,6 +6,7 @@ This adapter allows rLLM workflows to use SkyRL's inference backends
 (vLLM, SGLang, etc.) transparently during trajectory generation.
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -160,6 +161,13 @@ class SkyRLEngine(RolloutEngine):
         content = parsed_output["content"]
         reasoning = parsed_output["reasoning"]
         tool_calls = parsed_output["tool_calls"]
+
+        # When content is empty but reasoning has text (e.g. Qwen puts answer in <think> block),
+        # extract action (e.g. <answer>...</answer>) from reasoning into content so workflows
+        # that expect the answer in content get it. If no match, fall back to full reasoning.
+        if not content and reasoning:
+            answer_match = re.search(r"<answer>(.*?)</answer>", reasoning, re.IGNORECASE | re.DOTALL)
+            content = f"<answer>{answer_match.group(1).strip()}</answer>" if answer_match else reasoning
 
         # Determine finish reason
         finish_reason = stop_reason

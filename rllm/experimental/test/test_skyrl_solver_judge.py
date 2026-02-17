@@ -14,6 +14,9 @@ from rllm.rewards.countdown_reward import countdown_reward_fn
 def main(config):
     train_dataset = DatasetRegistry.load_dataset("countdown", "train")
     test_dataset = DatasetRegistry.load_dataset("countdown", "test")
+    val_max_samples = int(config.trainer.get("val_max_samples", -1))
+    if test_dataset is not None and val_max_samples > 0:
+        test_dataset = test_dataset.select(range(min(val_max_samples, len(test_dataset))))
 
     trainer = SkyRLTrainerLauncher(
         workflow_class=SolverJudgeWorkflow,
