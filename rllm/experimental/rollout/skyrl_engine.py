@@ -17,7 +17,7 @@ if skyrl_train_path.exists():
 
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient  # noqa: E402
 
-from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine  # noqa: E402
+from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine  # noqa: E402
 from rllm.parser import ChatTemplateParser  # noqa: E402
 
 
@@ -62,7 +62,7 @@ class SkyRLEngine(RolloutEngine):
         self.max_response_length = max_response_length
         self.config = config
         self.skyrl_trainer = None  # Can be set later via set_skyrl_components
-        self.validate = False  # Flag enabled/disabled by SkyRLBackend validation hooks
+        self.is_validation = False  # Flag enabled/disabled by SkyRLBackend validation hooks
 
         # Add ChatTemplateParser (matching VerlEngine pattern)
         disable_thinking = config.get("rllm", {}).get("disable_thinking", False) if config else False
@@ -112,7 +112,7 @@ class SkyRLEngine(RolloutEngine):
 
         # Extract parameters
         sampling_params = kwargs.get("sampling_params", {})
-        validate = self.validate or kwargs.get("validate", False)
+        validate = self.is_validation or kwargs.get("validate", False)
         enforce_max_prompt_length = kwargs.get("enforce_max_prompt_length", True)
 
         # Extract kwargs for parser

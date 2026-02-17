@@ -579,7 +579,7 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         """
         trainer_state.is_training = False
         if self.rollout_engine is not None:
-            self.rollout_engine.validate = True
+            self.rollout_engine.is_validation = True
         return True
 
     async def on_validation_end(self, trainer_state: TrainerState) -> None:
@@ -589,4 +589,4 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         """
         trainer_state.is_training = True
         if self.rollout_engine is not None:
-            self.rollout_engine.validate = False
+            self.rollout_engine.is_validation = False
