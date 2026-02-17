@@ -1,7 +1,7 @@
 import hydra
 
 from rllm.data.dataset import DatasetRegistry
-from rllm.experimental.opsd.tinker_opsd_backend import TinkerOPSDBackend
+from rllm.experimental.tinker.tinker_backend import TinkerBackend
 from rllm.experimental.unified_trainer import UnifiedTrainer
 
 from .math_opsd_workflow import MathOPSDWorkflow
@@ -15,7 +15,7 @@ def main(config):
     try:
         # Since we use a custom backend, we will directly interface with the UnifiedTrainer instead of using the AgentTrainer
         trainer = UnifiedTrainer(
-            backend_cls=TinkerOPSDBackend,
+            backend_cls=TinkerBackend,
             config=config,
             workflow_class=MathOPSDWorkflow,
             train_dataset=train_dataset,
