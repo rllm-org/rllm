@@ -121,7 +121,7 @@ def collect_reward_and_advantage_from_trajectory_groups(
                 for traj, advantage in zip(group.trajectories, advantages, strict=False):
                     for step in traj.steps:
                         step.advantage = advantage
-        else:  # we simply need to collect the advantage
+        elif collect_advantage:  # we simply need to collect the advantage
             advantages_by_group[group_role].extend(flattened_advantages)
 
     # reduce metrics by group

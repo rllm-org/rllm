@@ -359,7 +359,7 @@ def transform_trajectory_groups_to_dataproto(
 
     accumulated = AccumulatedData()
     for trajectory_group in trajectory_groups:
-        task_id = trajectory_group.group_id.split(":")[0]
+        task_id = trajectory_group.task_id
         total_steps = _process_trajectory_group(trajectory_group, task_id, accumulated)
         accumulated.repeat_counts.append(total_steps)
 

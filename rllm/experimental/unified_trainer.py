@@ -44,6 +44,7 @@ class TrainerState:
     rs_state: RejectionSamplingState = field(default_factory=RejectionSamplingState)
     global_step: int = 0
     epoch: int = 0
+    total_steps: int = 0
     is_training: bool = True
     # For timing and metrics
     timing_dict: dict = field(default_factory=dict)
@@ -281,6 +282,11 @@ class UnifiedTrainer:
         train_dataloader: Iterable = self.backend.get_dataloader(self.train_dataset, trainer_state)
         break_via_total_batches = False  # used to break the training loop via the `total_batches` parameter
         use_total_batches = self.rllm_config.trainer.get("total_batches") is not None and self.rllm_config.trainer.total_batches > 0
+
+        if use_total_batches:
+            trainer_state.total_steps = self.rllm_config.trainer.total_batches
+        else:
+            trainer_state.total_steps = len(train_dataloader) * self.rllm_config.trainer.total_epochs
 
         for epoch in range(self.rllm_config.trainer.total_epochs):
             # recursively break through the outer loop
