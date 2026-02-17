@@ -36,3 +36,6 @@ fi
 mkdir -p ~/.kube
 # BYTERD: copy k8s config
 cp $your_k8s_config_path ~/.kube/config
+
+# Pre-cache the datasets
+uv run python3 scripts/data/swe_dataset.py --local_dir ./data/swe

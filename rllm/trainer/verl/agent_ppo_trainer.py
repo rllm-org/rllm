@@ -457,6 +457,7 @@ class AgentPPOTrainer(RayPPOTrainer):
         rewards_lst = []
         data_source_lst = []
         uid_lst = []
+        extra_info_all = []
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
             test_batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(test_batch.batch))], dtype=object)
@@ -488,9 +489,11 @@ class AgentPPOTrainer(RayPPOTrainer):
             rewards_lst.append(reward_tensor.sum(-1).cpu())
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
             uid_lst.append(test_batch.non_tensor_batch["uid"])
+            extra_info_all.extend(test_batch.non_tensor_batch.get("extra_info", ["{}"] * reward_tensor.shape[0]))
 
         reward_tensor = torch.cat(rewards_lst, dim=0)  # (batch_size,)
         data_sources = np.concatenate(data_source_lst, axis=0)
+        extra_info_lst = list(extra_info_all)
         # evaluate test_score based on data source
         data_source_reward = {}
 
@@ -527,6 +530,35 @@ class AgentPPOTrainer(RayPPOTrainer):
             for uid, pass_score in pass_rates.items():
                 pass_k_lst.append(pass_score >= 1)  # assuming 1 means passed
             metric_dict[f"val/test_score/pass@k/{data_source}"] = np.mean(pass_k_lst)
+
+        # Save per-instance validation results to JSONL for downstream reporting
+        try:
+            n_val_samples = self.config.actor_rollout_ref.rollout.val_kwargs.n
+            results_dir = os.path.join(self.config.trainer.default_local_dir, "val_results")
+            os.makedirs(results_dir, exist_ok=True)
+            results_path = os.path.join(results_dir, f"step_{self.global_steps}.jsonl")
+            with open(results_path, "w") as f:
+                for i in range(reward_tensor.shape[0]):
+                    sample_idx = i % n_val_samples
+                    record = {
+                        "uid": str(uid_tensor[i]),
+                        "data_source": str(data_sources[i]),
+                        "reward": reward_tensor[i].item(),
+                        "sample_idx": sample_idx,
+                        "n_samples": n_val_samples,
+                    }
+                    # Extract instance_id from extra_info if available
+                    if extra_info_lst:
+                        try:
+                            extra = json.loads(extra_info_lst[i]) if isinstance(extra_info_lst[i], str) else extra_info_lst[i]
+                            record["instance_id"] = extra.get("instance_id", "")
+                            record["repo"] = extra.get("repo", "")
+                        except Exception:
+                            pass
+                    f.write(json.dumps(record) + "\n")
+            pprint(f"Saved per-instance val results to {results_path}")
+        except Exception as e:
+            pprint(f"Warning: failed to save val results: {e}")
 
         return metric_dict
 
