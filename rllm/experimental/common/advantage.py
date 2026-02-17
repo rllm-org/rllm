@@ -35,6 +35,43 @@ def _calculate_reinforce_advantages(rewards: np.ndarray) -> np.ndarray:
     return rewards
 
 
+def _check_advantage_already_computed(group: TrajectoryGroup, group_role: str) -> tuple[bool, list[float]]:
+    """Check if the advantage has already been computed for all steps in the trajectory group.
+
+    Returns True only when every step has a non-None advantage and, for list-valued
+    advantages, the length matches the corresponding logprobs length.
+    """
+    total_steps = 0
+    steps_with_advantage = 0
+    flattened_advantages = []
+
+    for traj in group.trajectories:
+        if total_steps > steps_with_advantage:
+            break
+        for step in traj.steps:
+            total_steps += 1
+            if step.advantage is None:
+                break
+            # validate list-valued advantages against logprobs length
+            if isinstance(step.advantage, list):
+                if len(step.advantage) != len(step.logprobs):
+                    logger.warning(f"[group={group_role}] Detected a step has advantage length {len(step.advantage)} but logprobs length {len(step.logprobs)}. Fall back to re-compute all advantages.")
+                    break
+                else:
+                    flattened_advantages.extend(step.advantage)
+            else:
+                flattened_advantages.append(step.advantage)
+            steps_with_advantage += 1
+
+    if steps_with_advantage < total_steps:
+        # give a warning if at least one step has advantage
+        if steps_with_advantage > 0:
+            logger.warning(f"[group={group_role}] Detected some steps have advantages already computed, while others do not. Fall back to re-compute all advantages. Please check the pre-computed advantage in workflow.")
+        return False, flattened_advantages
+    # all steps have advantage
+    return True, flattened_advantages
+
+
 def collect_reward_and_advantage_from_trajectory_groups(
     groups: list[TrajectoryGroup],
     algorithm_config: AlgorithmConfig,
@@ -70,18 +107,22 @@ def collect_reward_and_advantage_from_trajectory_groups(
     for group in groups:
         # extract the role of the group (e.g. "solver" or "judge") or assign the default name
         group_role = group.group_id.split(":")[1] if ":" in group.group_id[:-1] else "all_groups"
+        # check if the advantage has already been computed for all steps in the trajectory group
+        advantages_already_computed, flattened_advantages = _check_advantage_already_computed(group, group_role)
+        if not advantages_already_computed:
+            assert all(traj.reward is not None for traj in group.trajectories), "Trajectory reward cannot be None in broadcast mode"
+            traj_rewards = np.array([traj.reward for traj in group.trajectories])
+            rewards_by_group[group_role].extend(traj_rewards)
 
-        assert all(traj.reward is not None for traj in group.trajectories), "Trajectory reward cannot be None in broadcast mode"
-        traj_rewards = np.array([traj.reward for traj in group.trajectories])
-        rewards_by_group[group_role].extend(traj_rewards)
-
-        if collect_advantage:
-            advantages = advantage_fn(traj_rewards)
-            advantages_by_group[group_role].extend(advantages)
-            # broadcast the advantage to all steps in the trajectory
-            for traj, advantage in zip(group.trajectories, advantages, strict=False):
-                for step in traj.steps:
-                    step.advantage = advantage
+            if collect_advantage:
+                advantages = advantage_fn(traj_rewards)
+                advantages_by_group[group_role].extend(advantages)
+                # broadcast the advantage to all steps in the trajectory
+                for traj, advantage in zip(group.trajectories, advantages, strict=False):
+                    for step in traj.steps:
+                        step.advantage = advantage
+        else:  # we simply need to collect the advantage
+            advantages_by_group[group_role].extend(flattened_advantages)
 
     # reduce metrics by group
     final_metrics = {}
