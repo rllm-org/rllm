@@ -194,6 +194,9 @@ class UnifiedTrainer:
             stepwise_advantage_mode=self.rllm_config.stepwise_advantage.mode,
             norm_adv_by_std_in_grpo=self.rllm_config.stepwise_advantage.get("norm_adv_by_std_in_grpo", True),
             use_rllm=self.rllm_config.algorithm.get("use_rllm", False),
+            loss_fn=self.rllm_config.algorithm.get("loss_fn", None),
+            lr_schedule=self.rllm_config.algorithm.get("lr_schedule", "constant"),
+            warmup_steps_ratio=self.rllm_config.algorithm.get("warmup_steps_ratio", 0.0),
         )
 
     def _setup_event_loop(self):

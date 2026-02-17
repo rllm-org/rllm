@@ -295,7 +295,9 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         trainer_state.backend_batch = training_datums
         # Also store the training logprobs
         trainer_state.extra_info["training_logprobs"] = training_logprobs
-        trainer_state.extra_info["scheduled_learning_rate"] = scheduled_learning_rate
+        # scheduled_learning_rate is only available when fused; set in update_policy otherwise
+        if self.full_config.fuse_forward_backward_and_optim_step:
+            trainer_state.extra_info["scheduled_learning_rate"] = scheduled_learning_rate
         # Also store the advantage metrics
         trainer_state.metrics.update(adv_metrics)
 
@@ -373,7 +375,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Save final checkpoint if we didn't just save it in the last batch
         if trainer_state.global_step % self.full_config.rllm.trainer.save_freq != 0:
             logger.info(f"Saving final checkpoint at step {trainer_state.global_step}")
-            await self.policy_trainer.save_checkpoint_and_get_sampling_client(trainer_state.global_step, kind="state", do_save=True)
+            await self.policy_trainer.save_checkpoint_and_get_sampling_client(trainer_state.global_step, kind="both", do_save=True)
 
     async def on_batch_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of each batch.
