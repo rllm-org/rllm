@@ -19,7 +19,7 @@ from skyrl_train.training_batch import TrainingInputBatch
 
 from rllm.agents.agent import Episode, TrajectoryGroup
 from rllm.data import Dataset
-from rllm.engine.rollout import RolloutEngine
+from rllm.experimental.rollout import RolloutEngine, SkyRLEngine
 from rllm.experimental.common.advantage import AlgorithmConfig
 from rllm.experimental.protocol import BackendProtocol
 
@@ -117,9 +117,6 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         Returns:
             RolloutEngine: The initialized rollout engine.
         """
-        # Import here to avoid hard dependency
-        from rllm.experimental.rollout.skyrl_engine import SkyRLEngine
-
         # Create rollout engine with provided components
         # Note: inference_engine_client is already set in __init__, so no need for set_skyrl_components
         self.rollout_engine = SkyRLEngine(
