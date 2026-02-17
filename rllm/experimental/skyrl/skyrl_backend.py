@@ -22,6 +22,7 @@ from rllm.data import Dataset
 from rllm.experimental.rollout import RolloutEngine, SkyRLEngine
 from rllm.experimental.common.advantage import AlgorithmConfig
 from rllm.experimental.protocol import BackendProtocol
+from rllm.experimental.skyrl.skyrl_metrics_utils import update_training_metrics
 
 if TYPE_CHECKING:
     from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
@@ -256,22 +257,6 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
             tasks, task_ids, is_validation=is_validation,
         )
 
-        # Potentially Remove this:
-        # Compute rollout metrics from episodes
-        if not hasattr(self, "all_metrics"):
-            self.all_metrics = {}
-
-        all_rewards = []
-        for ep in episodes:
-            for traj in ep.trajectories:
-                if traj.reward is not None:
-                    all_rewards.append(traj.reward)
-
-        if all_rewards:
-            self.all_metrics["rollout/mean_raw_reward"] = sum(all_rewards) / len(all_rewards)
-            self.all_metrics["rollout/num_episodes"] = len(episodes)
-            self.all_metrics["rollout/num_trajectories"] = len(all_rewards)
-
         return episodes
 
     def transform_trajectory_groups_to_backend_batch(
@@ -397,96 +382,6 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         # Wrap in asyncio.to_thread() to avoid blocking the event loop (contains ray.get() calls)
         await asyncio.to_thread(self.train_critic_and_policy, training_input)
 
-        # Ensure all_metrics exists (RayPPOTrainer should initialize it, but be safe)
-        if not hasattr(self, "all_metrics"):
-            self.all_metrics = {}
-
-        # Extract metrics from SkyRL's all_metrics (populated by train_critic_and_policy)
-        # SkyRL's train_critic_and_policy updates self.all_metrics with:
-        # - critic/* metrics from critic_statuses[0].metadata["train_status"]
-        # - policy/* metrics from policy_statuses[0].metadata["train_status"]
-        # Convert SkyRL metrics to rLLM logger format (training/ prefix for training metrics)
-        if self.all_metrics:
-            for key, value in self.all_metrics.items():
-                # Skip non-scalar values and None
-                if value is None:
-                    continue
-
-                # Convert value to scalar
-                if isinstance(value, int | float):
-                    scalar_value = value
-                elif hasattr(value, "item"):  # torch.Tensor
-                    try:
-                        scalar_value = value.item()
-                    except (ValueError, RuntimeError):
-                        continue
-                else:
-                    continue
-
-                # Map SkyRL metric keys to rLLM logger format
-                # SkyRL uses: policy/*, critic/*, loss/*, reward/*
-                # rLLM format: training/policy/*, training/critic/*, training/loss/*, reward/* (unchanged)
-                if key.startswith("policy/") or key.startswith("critic/") or key.startswith("loss/"):
-                    # Add training/ prefix for training-related metrics
-                    rllm_key = f"training/{key}"
-                elif key.startswith("reward/"):
-                    # Keep reward metrics as-is (already in rLLM format)
-                    rllm_key = key
-                elif key.startswith("trainer/"):
-                    # Map trainer/* to training/*
-                    rllm_key = key.replace("trainer/", "training/", 1)
-                else:
-                    # For other metrics, add training/ prefix by default
-                    rllm_key = f"training/{key}"
-
-                trainer_state.metrics[rllm_key] = scalar_value
-
-            # Clear all_metrics after extracting (SkyRL will repopulate on next batch)
-            self.all_metrics.clear()
-
-        # Add reward metrics from episodes/trajectory_groups if available
-        # This ensures we have reward metrics even if all_metrics is empty
-        if hasattr(trainer_state, "trajectory_groups") and trainer_state.trajectory_groups:
-            import numpy as np
-
-            from rllm.experimental.common.metrics import reduce_metrics_by_trajectory_name
-
-            # Add reward metrics from trajectory groups
-            reward_metrics = reduce_metrics_by_trajectory_name(trainer_state.trajectory_groups, prefix="reward")
-            trainer_state.metrics.update(reward_metrics)
-
-            # Also compute basic reward stats
-            all_rewards = []
-            for group in trainer_state.trajectory_groups:
-                for traj in group.trajectories:
-                    if traj.reward is not None:
-                        all_rewards.append(traj.reward)
-
-            if all_rewards:
-                trainer_state.metrics["reward/mean"] = np.mean(all_rewards)
-                trainer_state.metrics["reward/max"] = np.max(all_rewards)
-                trainer_state.metrics["reward/min"] = np.min(all_rewards)
-                trainer_state.metrics["reward/std"] = np.std(all_rewards)
-
-        # Add basic training metrics that should always be present (rLLM format)
-        # Get learning rate from optimizer if available
-        if hasattr(self, "policy_model") and hasattr(self.policy_model, "optimizer"):
-            optimizer = self.policy_model.optimizer
-            if optimizer is not None and len(optimizer.param_groups) > 0:
-                trainer_state.metrics["optim/lr"] = optimizer.param_groups[0].get("lr", 0.0)
-
-        # Add global step and epoch (always present, rLLM format)
-        trainer_state.metrics["training/global_step"] = trainer_state.global_step
-        trainer_state.metrics["training/epoch"] = trainer_state.epoch
-
-        # Debug logging to verify metrics are being populated
-        num_training_metrics = len([k for k in trainer_state.metrics.keys() if k.startswith("training/") or k.startswith("reward/") or k.startswith("optim/")])
-        logger.info(f"Step {trainer_state.global_step}: Extracted {num_training_metrics} training metrics. Keys: {sorted(trainer_state.metrics.keys())}")
-
-        # Log warning if no metrics were found (for debugging)
-        if len(trainer_state.metrics) <= 3:  # Only global_step, epoch, and maybe lr
-            logger.warning(f"Step {trainer_state.global_step}: No training metrics found in all_metrics. all_metrics keys were: {list(self.all_metrics.keys()) if hasattr(self, 'all_metrics') and self.all_metrics else 'empty'}. Available trainer_state.metrics: {list(trainer_state.metrics.keys())}")
-
     async def _sync_policy_weights_for_next_rollout(self) -> None:
         """Sync policy weights to inference engines for subsequent generation."""
         import ray
@@ -543,12 +438,16 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
     async def on_batch_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of each batch.
 
-        Saves checkpoint and syncs weights to inference engines.
-        This follows the pattern where batch-level operations (like checkpointing in Verl)
-        happen in on_batch_end.
+        Finalizes metrics, saves checkpoint, and syncs weights to inference engines.
         """
         global_step = trainer_state.global_step
         self.global_step = global_step
+
+        # Finalize training metrics (all pipeline stages have completed)
+        skyrl_all_metrics = getattr(self, "all_metrics", {})
+        update_training_metrics(trainer_state, skyrl_all_metrics, self)
+        if hasattr(self, "all_metrics"):
+            self.all_metrics.clear()
 
         # Save checkpoint periodically
         save_freq = self.full_config.rllm.trainer.get("save_freq", 0)
