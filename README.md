@@ -110,6 +110,7 @@ For more detailed installation guide, including using `sglang` for `verl` backen
 * [Cut the Bill, Keep the Turns](https://agate-slipper-ef0.notion.site/Cut-the-Bill-Keep-the-Turns-Affordable-Multi-Turn-Search-RL-003f78214a4d451fb06f453d084e666c): Affordable Multi-Turn Search RL
 * [SETA](https://eigent-ai.notion.site/SETA-Scaling-Environment-for-Terminal-Agent-2d2511c70ba280a9b7c0fe3e7f1b6ab8): Scaling Environments for Terminal Agents [![GitHub Repo stars](https://img.shields.io/github/stars/camel-ai/seta)](https://github.com/camel-ai/seta)
 * [LLM-in-Sandbox](https://arxiv.org/abs/2601.16206): Building General Agents by running LLMs in a sandbox (virtual computer) [![GitHub Repo stars](https://img.shields.io/github/stars/llm-in-sandbox/llm-in-sandbox?style=social)](https://github.com/llm-in-sandbox/llm-in-sandbox)
+* [Experiential Reinforcement Learning](https://arxiv.org/pdf/2602.13949v1): Reinforcement Learning with a Experience–Reflection–Consolidation Loop. 
 
 ## Acknowledgements
 Our work is done as part of [Berkeley Sky Computing Lab](https://sky.cs.berkeley.edu/). The rLLM team is generously supported by grants from [Laude Institute](https://www.laude.org/), [AWS](https://aws.amazon.com/), [Hyperbolic](https://www.hyperbolic.ai/), [Fireworks AI](https://fireworks.ai/), and [Modal](https://modal.com/). We pay special thanks to [Together AI](https://www.together.ai/) for the research partnership and compute support. 
