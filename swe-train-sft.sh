@@ -28,7 +28,7 @@ export https_proxy=http://sys-proxy-rd-relay.byted.org:8118
 # ============ Config ============
 WAND_PROJECT='xujunjielong'
 EXPERIMENT_NAME='agentic-swe-sft'
-LR=2e-5
+LR=1e-5
 
 # ============ Byted env ============
 uv pip uninstall ray wandb bytedray byted-wandb
@@ -55,7 +55,7 @@ uv run --no-sync torchrun \
     data.max_length=16384 \
     data.truncation=right \
     data.train_batch_size=128 \
-    data.micro_batch_size_per_gpu=4 \
+    data.micro_batch_size_per_gpu=2 \
     optim.lr=$LR \
     trainer.total_epochs=2 \
     model.partial_pretrain=$ROOT_DIR/models/$MODEL_NAME \
