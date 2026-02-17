@@ -57,9 +57,10 @@ algorithm:
   loss_fn: null
 
 # Stepwise advantage
+# TODO(listar2000): deprecate the `per_step` mode and refactor this config.
 stepwise_advantage:
   enable: False
-  mode: broadcast # [broadcast, per_step]
+  mode: broadcast # support `broadcast` only now
   normalize_by_steps: False
 
 # Disable thinking

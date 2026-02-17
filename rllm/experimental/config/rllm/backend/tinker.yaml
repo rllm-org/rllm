@@ -21,6 +21,9 @@ model:
 training:
   group_size: ???  # Number of rollouts per prompt (for GRPO)
   learning_rate: 2e-5  # 2e-5 for MATH dataset
+  lr_schedule: "constant"  # "constant", "linear", "cosine"
+  warmup_steps_ratio: 0.0  # Warmup steps as ratio of total steps (between 0 and 1)
+  # below are the Adam optimizer parameters
   beta1: 0.9
   beta2: 0.95
   eps: 1e-8
@@ -69,6 +72,13 @@ data:
   max_response_length: 2048
   train_batch_size: 64
   val_batch_size: 32
+
+# On-policy Self-Distillation (OPSD) Configuration
+opsd:
+  kl_penalty_coef: 1.0
+  kl_discount_factor: 0.0
+  teacher_messages_key: "teacher_messages"
+  teacher_policy_update_freq: -1 # -1 for always using the initial policy
 
 # Overriding the rLLM-common config with Tinker-specific ones
 # Only override if the algorithm values are not None, otherwise still use the rLLM-common config
