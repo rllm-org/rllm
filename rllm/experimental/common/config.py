@@ -140,8 +140,8 @@ class AlgorithmConfig:
             from warnings import warn
 
             warn(
-                "The `per_step` mode is deprecated in experimental unified trainer. Set to `broadcast` mode automatically.",
-                "Please either use the legacy trainers (`agent_workflow_trainer` for `Verl` or `tinker_workflow_trainer` for `Tinker`) with the `per_step` configuration. Or manually pass in a hook with the implementation of `per_step` advantage computation logic. Read the documentation for a comprehensive guide on the migration (TBD).",
+                "The `per_step` mode is deprecated in experimental unified trainer. Set to `broadcast` mode automatically.Please either use the legacy trainers (`agent_workflow_trainer` for `Verl` or `tinker_workflow_trainer` for `Tinker`) with the `per_step` configuration. Or manually pass in a hook with the implementation of `per_step` advantage computation logic. Read the documentation for a comprehensive guide on the migration (TBD).",
                 DeprecationWarning,
+                stacklevel=2,
             )
             self.stepwise_advantage_mode = "broadcast"

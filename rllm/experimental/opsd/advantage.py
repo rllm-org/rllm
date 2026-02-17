@@ -1,11 +1,8 @@
-import asyncio
-
 import numpy as np
 from tinker import ModelInput, SamplingClient
 from tinker_cookbook.rl.metrics import discounted_future_sum_vectorized
 
-from rllm.agents.agent import Step, TrajectoryGroup
-from rllm.experimental.opsd.utils import OPSDConfig
+from rllm.agents.agent import Step
 from rllm.parser.chat_template_parser import ChatTemplateParser
 
 
@@ -51,29 +48,3 @@ async def calculate_reverse_kl_advantage(
         advantage = discounted_future_sum_vectorized(advantage, kl_discount_factor)
 
     step.advantage = advantage.tolist()
-
-
-async def calculate_advantage_opsd(
-    trajectory_groups: list[TrajectoryGroup],
-    sampling_client: SamplingClient,
-    parser: ChatTemplateParser,
-    opsd_config: OPSDConfig,
-):
-    """Calculate the advantage for a trajectory group using OPSD."""
-    all_tasks = []
-    teacher_messages_key = opsd_config.teacher_messages_key
-    for trajectory_group in trajectory_groups:
-        for trajectory in trajectory_group.trajectories:
-            # use trajectory-level teacher prompt ids if available
-            teacher_messages = trajectory.info.get(teacher_messages_key, None)
-            if teacher_messages is not None:
-                # pre-compute the prompt ids for every step to reuse
-                teacher_prompt_ids = parser.tokenizer.encode(parser.parse(teacher_messages, add_generation_prompt=True), add_special_tokens=False)
-                for step in trajectory.steps:
-                    all_tasks.append(calculate_reverse_kl_advantage(step, sampling_client, parser, opsd_config.kl_penalty_coef, opsd_config.kl_discount_factor, teacher_prompt_ids=teacher_prompt_ids))
-            else:
-                for step in trajectory.steps:
-                    teacher_messages = step.info.get(teacher_messages_key)
-                    all_tasks.append(calculate_reverse_kl_advantage(step, sampling_client, parser, opsd_config.kl_penalty_coef, opsd_config.kl_discount_factor, teacher_messages=teacher_messages))
-
-    await asyncio.gather(*all_tasks)

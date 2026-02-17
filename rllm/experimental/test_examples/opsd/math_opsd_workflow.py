@@ -1,4 +1,5 @@
 from rllm.agents.agent import Episode, Trajectory
+from rllm.experimental.opsd.workflow_utils import OPSDConfig, opsd_postprocess
 from rllm.experimental.rollout.completer import Completer
 from rllm.experimental.rollout.rollout_engine import RolloutEngine
 from rllm.rewards.reward_fn import math_reward_fn
@@ -7,11 +8,19 @@ from rllm.workflows.workflow import Workflow
 
 class MathOPSDWorkflow(Workflow):
     def __init__(self, rollout_engine: RolloutEngine, **kwargs):
+        # Extract opsd_config before passing kwargs to super
+        opsd_config = kwargs.pop("opsd_config", None)
         super().__init__(rollout_engine, **kwargs)  # type: ignore
         self.reward_function = math_reward_fn
         # completer is used to construct step based on the messages input and model output
         self.completer = Completer(rollout_engine)
 
+        self.opsd_config = opsd_config or OPSDConfig(
+            kl_penalty_coef=1.0,
+            kl_discount_factor=0.0,
+        )
+
+    @opsd_postprocess
     async def run(self, task: dict, uid: str, **kwargs) -> Episode:
         """Execute the math OPSD workflow."""
         self.reset(task, uid)

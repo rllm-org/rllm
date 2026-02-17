@@ -105,8 +105,7 @@ def collect_reward_and_advantage_from_trajectory_groups(
     rewards_by_group = defaultdict(list)
     # TODO(listar2000): in the future, we should support per-trajectory-group advantage modes
     for group in groups:
-        # extract the role of the group (e.g. "solver" or "judge") or assign the default name
-        group_role = group.group_id.split(":")[1] if ":" in group.group_id[:-1] else "all_groups"
+        group_role = group.group_role
         # check if the advantage has already been computed for all steps in the trajectory group
         advantages_already_computed, flattened_advantages = _check_advantage_already_computed(group, group_role)
         if not advantages_already_computed:
