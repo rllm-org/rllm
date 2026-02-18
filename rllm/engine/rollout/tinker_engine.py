@@ -1,9 +1,12 @@
+import json
+
 import tinker
 from tinker.types import ModelInput
 from tinker_cookbook import model_info, renderers
 
 from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine
 from rllm.parser import ChatTemplateParser
+from rllm.tools.tool_base import ToolCall
 from rllm.workflows import TerminationEvent, TerminationReason
 
 
@@ -22,6 +25,7 @@ class TinkerEngine(RolloutEngine):
         max_response_length: int = 4096,
         max_model_length: int = 32768,
         sampling_params: dict | None = None,
+        val_sampling_params: dict | None = None,
         bypass_render_with_parser: bool = False,
         processor=None,
         image_processor=None,
@@ -42,7 +46,8 @@ class TinkerEngine(RolloutEngine):
             max_prompt_length: Maximum prompt length in tokens
             max_response_length: Maximum response length in tokens
             max_model_length: Maximum total length (prompt + response) in tokens
-            sampling_params: Default sampling parameters (temperature, top_p, etc.)
+            sampling_params: Default sampling parameters for training (temperature, top_p, etc.)
+            val_sampling_params: Sampling parameters for validation (defaults to sampling_params if not provided)
             bypass_render_with_parser: If True, use ChatTemplateParser instead of Tinker's renderer
             processor: Optional processor for multimodal models (used when bypass_render_with_parser=True)
             image_processor: Optional image processor for vision-language models (used with renderer)
@@ -55,7 +60,9 @@ class TinkerEngine(RolloutEngine):
         self.max_response_length = max_response_length
         self.max_model_length = max_model_length - 1  # Reserve 1 token for logprob computation
         self.tokenizer = tokenizer
-        self.default_sampling_params = sampling_params or {}
+        self.sampling_params = sampling_params or {}
+        self.val_sampling_params = val_sampling_params or self.sampling_params
+        self.validate = False
         self.bypass_render_with_parser = bypass_render_with_parser
         self.accumulate_reasoning = accumulate_reasoning
         self.reasoning_effort = reasoning_effort
@@ -74,19 +81,11 @@ class TinkerEngine(RolloutEngine):
                 raise ValueError("No stop sequences found for tokenizer or chat parser")
         else:
             # Use explicit renderer_name if provided, otherwise auto-detect
-            effective_renderer_name = renderer_name or model_info.get_recommended_renderer_name(self.model_name)
+            renderer_name = renderer_name or model_info.get_recommended_renderer_name(self.model_name)
             # Pass image_processor for VLM support with Tinker renderer
-            self.renderer = renderers.get_renderer(effective_renderer_name, self.tokenizer, image_processor=image_processor)
+            self.renderer = renderers.get_renderer(renderer_name, self.tokenizer, image_processor=image_processor)
             self.chat_parser = None
             self.stop_sequences = self.renderer.get_stop_sequences()
-
-        # Set up sampling parameters
-        self.sampling_params = tinker.types.SamplingParams(
-            max_tokens=self.max_response_length,
-            stop=self.stop_sequences,
-            temperature=self.default_sampling_params.get("temperature", 1.0),
-            top_p=self.default_sampling_params.get("top_p", 1.0),
-        )
 
         # Sampling client can be set later via set_sampling_client()
         self.sampling_client = sampling_client
@@ -171,8 +170,9 @@ class TinkerEngine(RolloutEngine):
 
         # Extract kwargs
         kwargs.pop("application_id", None)
-        kwargs.pop("validate", False)
+        validate = kwargs.pop("validate", False) or self.validate
         enforce_max_prompt_length = kwargs.pop("enforce_max_prompt_length", True)
+        sampling_params = self.val_sampling_params if validate else self.sampling_params
 
         # Extract parser-specific kwargs
         tools = kwargs.pop("tools", [])
@@ -197,15 +197,16 @@ class TinkerEngine(RolloutEngine):
                 raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
 
             # Dynamically adjust max_tokens based on prompt length
-            requested_max_tokens = kwargs.get("max_tokens", kwargs.get("max_new_tokens", self.max_response_length))
+            default_max_tokens = sampling_params.get("max_tokens", self.max_response_length)
+            requested_max_tokens = kwargs.get("max_tokens", kwargs.get("max_new_tokens", default_max_tokens))
             max_tokens = self._prepare_max_tokens(requested_max_tokens, prompt_length)
 
             # Prepare sampling params (override defaults with kwargs)
             sampling_params = tinker.types.SamplingParams(
                 max_tokens=max_tokens,
                 stop=self.stop_sequences,
-                temperature=kwargs.get("temperature", self.default_sampling_params.get("temperature", 1.0)),
-                top_p=kwargs.get("top_p", self.default_sampling_params.get("top_p", 1.0)),
+                temperature=kwargs.get("temperature", sampling_params.get("temperature", 1.0)),
+                top_p=kwargs.get("top_p", sampling_params.get("top_p", 1.0)),
             )
 
             # Convert prompt to Tinker prompt format
@@ -252,15 +253,16 @@ class TinkerEngine(RolloutEngine):
                 raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
 
             # Dynamically adjust max_tokens based on prompt length
-            requested_max_tokens = kwargs.get("max_tokens", kwargs.get("max_new_tokens", self.max_response_length))
+            default_max_tokens = sampling_params.get("max_tokens", self.max_response_length)
+            requested_max_tokens = kwargs.get("max_tokens", kwargs.get("max_new_tokens", default_max_tokens))
             max_tokens = self._prepare_max_tokens(requested_max_tokens, prompt_length) if prompt_length > 0 else requested_max_tokens
 
             # Prepare sampling params (override defaults with kwargs)
             sampling_params = tinker.types.SamplingParams(
                 max_tokens=max_tokens,
                 stop=self.stop_sequences,
-                temperature=kwargs.get("temperature", self.default_sampling_params.get("temperature", 1.0)),
-                top_p=kwargs.get("top_p", self.default_sampling_params.get("top_p", 1.0)),
+                temperature=kwargs.get("temperature", sampling_params.get("temperature", 1.0)),
+                top_p=kwargs.get("top_p", sampling_params.get("top_p", 1.0)),
             )
 
             # Call Tinker sampling API
@@ -275,35 +277,21 @@ class TinkerEngine(RolloutEngine):
             logprobs = sample_response.sequences[0].logprobs
 
             # Parse response using renderer
-            response_dict, _ = self.renderer.parse_response(response_tokens)
+            parsed_msg, _ = self.renderer.parse_response(response_tokens)
+            raw_content = parsed_msg["content"]
+            tool_calls = []
+            for tc in parsed_msg.get("tool_calls", []):
+                try:
+                    tool_calls.append(ToolCall(name=tc.function.name, arguments=json.loads(tc.function.arguments)))
+                except (json.JSONDecodeError, AttributeError):
+                    continue
 
-            # Extract content from response
-            # Qwen3Renderer returns Message with structured content (list of parts)
-            # or string content. We need to extract thinking and text separately.
-            if isinstance(response_dict, dict):
-                raw_content = response_dict.get("content", "")
-                tool_calls = response_dict.get("tool_calls", [])
-                
-                # Handle structured content (list of ThinkingPart/TextPart)
-                if isinstance(raw_content, list):
-                    thinking_parts = []
-                    text_parts = []
-                    for part in raw_content:
-                        if isinstance(part, dict):
-                            if part.get("type") == "thinking":
-                                thinking_parts.append(part.get("thinking", ""))
-                            elif part.get("type") == "text":
-                                text_parts.append(part.get("text", ""))
-                    reasoning = "".join(thinking_parts)
-                    content = "".join(text_parts)
-                else:
-                    # String content - no structured thinking
-                    content = raw_content
-                    reasoning = ""
+            if isinstance(raw_content, list):
+                reasoning = next((p["thinking"] for p in raw_content if p["type"] == "thinking"), "")
+                content = next((p["text"] for p in raw_content if p["type"] == "text"), "")
             else:
-                content = response_dict if isinstance(response_dict, str) else ""
+                content = raw_content
                 reasoning = ""
-                tool_calls = []
 
             # Decode full text
             completion_text = self.tokenizer.decode(response_tokens, skip_special_tokens=True)

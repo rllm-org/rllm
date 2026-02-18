@@ -270,27 +270,23 @@ def align_teacher_logprobs(
     student_to_teachers, teacher_usage_count = _merge_overlap_mappings(mappings, n_student, n_teacher)
 
     aligned_logprobs = []
-    n_teacher_logprobs = len(teacher_logprobs)
     for i in range(n_student):
         teacher_indices = student_to_teachers[i]
 
+        # Format/special token with no teacher overlap
         if not teacher_indices:
             aligned_logprobs.append(student_logprobs[i])
-        else:
-            total = 0.0
-            valid_count = 0
-            for j in teacher_indices:
-                if j >= n_teacher_logprobs:
-                    # Teacher IDs were truncated, skip out-of-bounds indices
-                    continue
-                usage = max(1, teacher_usage_count[j])
-                total += teacher_logprobs[j] / usage
-                valid_count += 1
-            if valid_count == 0:
-                # All teacher indices were truncated, use student logprob
-                aligned_logprobs.append(student_logprobs[i])
-            else:
-                aligned_logprobs.append(total)
+            continue
+
+        # Teacher was truncated in the middle of a student token
+        if teacher_indices[-1] >= len(teacher_logprobs):
+            aligned_logprobs.extend(student_logprobs[i:])
+            break
+
+        total = 0.0
+        for j in teacher_indices:
+            total += teacher_logprobs[j] / teacher_usage_count[j]
+        aligned_logprobs.append(total)
 
     return aligned_logprobs
 

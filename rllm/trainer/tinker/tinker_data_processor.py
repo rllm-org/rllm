@@ -141,20 +141,7 @@ class TinkerAdvantageComputer:
         advantages = [t_lp - s_lp for t_lp, s_lp in zip(teacher_logprobs, student_logprobs, strict=False)]
 
         if self.clip_advantages:
-            clipped_count = 0
-            clipped_advantages = []
-            for adv in advantages:
-                if adv < self.adv_clip_min:
-                    clipped_advantages.append(self.adv_clip_min)
-                    clipped_count += 1
-                elif adv > self.adv_clip_max:
-                    clipped_advantages.append(self.adv_clip_max)
-                    clipped_count += 1
-                else:
-                    clipped_advantages.append(adv)
-            if clipped_count > 0:
-                logger.debug(f"Clipped {clipped_count}/{len(advantages)} advantages to [{self.adv_clip_min}, {self.adv_clip_max}]")
-            advantages = clipped_advantages
+            advantages = [max(self.adv_clip_min, min(self.adv_clip_max, adv)) for adv in advantages]
 
         return advantages
 
@@ -555,7 +542,30 @@ async def process_episodes(
 
     training_datums = []
 
-    if advantage_computer.distill_enabled:
+    # Check if any steps have pre-computed advantages
+    has_precomputed = any(
+        isinstance(step.advantage, list) and len(step.advantage) == len(step.response_ids)
+        for episode in episodes
+        for trajectory in episode.trajectories
+        for step in trajectory.steps
+    )
+
+    if has_precomputed:
+        for episode in episodes:
+            for trajectory in episode.trajectories:
+                for step in trajectory.steps:
+                    if not isinstance(step.advantage, list) or len(step.advantage) != len(step.response_ids):
+                        continue
+                    datum = TinkerDatumBuilder.build_distillation_datum(
+                        prompt_ids=step.prompt_ids,
+                        response_ids=step.response_ids,
+                        logprobs=step.logprobs,
+                        advantages=step.advantage,
+                    )
+                    training_datums.append(datum)
+                    all_advantages.append(float(np.mean(step.advantage)))
+
+    elif advantage_computer.distill_enabled:
         import asyncio
 
         teacher_chat_parser = None
@@ -607,15 +617,7 @@ async def process_episodes(
                 reasoning_str = teacher_completion_messages[0].get("reasoning", "")
                 content_str = teacher_completion_messages[0].get("content", "")
                 if not reasoning_str and not content_str:
-                    # Skip steps where teacher returned empty response (likely due to timeout/error)
-                    # Log warning and return None to skip this step
-                    import logging
-                    logger = logging.getLogger(__name__)
-                    logger.warning(
-                        f"Skipping step with empty teacher response (no reasoning or content). "
-                        f"This may indicate a teacher model timeout or error."
-                    )
-                    return None  # Return None (not tuple) so filtering works correctly
+                    return None
 
                 # Build teacher prompt and completion
                 teacher_prompt = teacher_chat_parser.parse(
@@ -705,62 +707,23 @@ async def process_episodes(
         start_time = time.time()
         logger.info(f"[Distillation] Processing {len(all_steps)} steps in parallel...")
 
-        # Limit concurrency to avoid overwhelming the teacher model backend
-        MAX_CONCURRENT_TEACHER_CALLS = 64
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT_TEACHER_CALLS)
+        tasks = [process_step(idx, step) for idx, step in enumerate(all_steps)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        async def throttled_process_step(idx, step):
-            async with semaphore:
-                return await asyncio.wait_for(process_step(idx, step), timeout=300.0)
-
-        # Process all steps with bounded concurrency and per-step timeout
-        tasks = [throttled_process_step(idx, step) for idx, step in enumerate(all_steps)]
-        try:
-            results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=1800.0)
-        except asyncio.TimeoutError:
-            logger.error("[Distillation] Overall distillation processing timed out after 1800s. Returning empty datums.")
-            return [], {}
-
-        # Check for per-step exceptions and treat them as skipped
-        processed_results = []
-        timeout_count = 0
-        for r in results:
-            if isinstance(r, asyncio.TimeoutError):
-                timeout_count += 1
-                processed_results.append(None)
-            elif isinstance(r, Exception):
-                logger.warning(f"[Distillation] Step failed with error: {r}")
-                processed_results.append(None)
-            else:
-                processed_results.append(r)
-        if timeout_count > 0:
-            logger.warning(f"[Distillation] {timeout_count}/{len(results)} steps timed out (>300s each).")
-        results = processed_results
-
-        logger.info(f"[Distillation] Processing complete in {time.time() - start_time:.2f} seconds.")
-
-        # Collect results (filter out None values from skipped steps)
-        skipped_count = 0
         for result in results:
+            if isinstance(result, Exception):
+                logger.warning(f"[Distillation] Step failed with error: {result}")
+                continue
             if result is None:
-                skipped_count += 1
                 continue
             datum, avg_advantage = result
             training_datums.append(datum)
             all_advantages.append(avg_advantage)
-        
-        if skipped_count > 0:
-            logger.warning(
-                f"Skipped {skipped_count}/{len(results)} steps due to empty teacher responses. "
-                f"Proceeding with {len(training_datums)} valid steps."
-            )
-        
+
+        logger.info(f"[Distillation] Processing complete in {time.time() - start_time:.2f}s. {len(training_datums)}/{len(results)} steps succeeded.")
+
         if len(training_datums) == 0:
-            logger.error(
-                "All steps were skipped due to empty teacher responses. "
-                "This batch cannot be processed. Check teacher model connectivity/health."
-            )
-            # Return empty datums and empty metrics dict to match expected return type
+            logger.error("[Distillation] All steps failed. Check teacher model connectivity/health.")
             return [], {}
     else:
         # Standard RL mode: group trajectories and compute advantages from rewards

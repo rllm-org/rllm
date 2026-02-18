@@ -4,7 +4,7 @@ DeepMath-103K contains math problems for training reasoning models.
 This script loads the dataset and registers it for use with rllm trainers.
 
 Usage:
-    python -m examples.solver_judge_distill.prepare_deepmath_data
+    python -m examples.math_distill.prepare_deepmath_data
 """
 
 from datasets import load_dataset
@@ -22,8 +22,8 @@ def prepare_deepmath_data():
         """Convert DeepMath format to solver-judge expected format."""
         return {
             "idx": idx,
-            "question": example["question"], 
-            "ground_truth": str(example.get("answer", "")), 
+            "question": example["question"],
+            "ground_truth": str(example.get("answer", "")),
             "data_source": "deepmath",
         }
 

@@ -339,7 +339,12 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         else:
                             batch.batch["token_level_scores"] = batch.batch["traj_rewards"]
 
-                        if self.distill_enabled:
+                        if "advantages" in batch.batch:
+                            # Workflow already computed advantages (e.g., distillation)
+                            batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+                            batch = self._remove_padding(batch)
+                            batch.batch["returns"] = batch.batch["advantages"]
+                        elif self.distill_enabled:
                             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
                             batch = self._remove_padding(batch)
                             distill_advantages = asyncio.run_coroutine_threadsafe(self._compute_distill_advantages(batch), self._loop).result()

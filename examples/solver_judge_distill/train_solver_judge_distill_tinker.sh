@@ -29,5 +29,4 @@ python -m examples.solver_judge_distill.train_solver_judge_distill_tinker \
     trainer.default_local_dir='./outputs/solver-judge-distill-8b-235b-solver-judge' \
     rollout_engine.bypass_render_with_parser=True \
     rollout_engine.disable_thinking=True \
-    workflow.n_parallel_tasks=256 \
-    training.rollout_timeout=1200
+    workflow.n_parallel_tasks=256

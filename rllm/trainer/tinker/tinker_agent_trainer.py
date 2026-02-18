@@ -96,6 +96,7 @@ class TinkerAgentTrainer:
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.model.name)
         sampling_params = self.config.sampling
         assert sampling_params.get("temperature", 1.0) == 1.0 and sampling_params.get("top_p", 1.0) == 1.0, "temperature and top_p must be 1.0 for tinker agent trainer"
+        val_sampling_params = self.config.get("val_sampling", None)
         self.agent_execution_engine = AsyncAgentExecutionEngine(
             config=self.config,
             engine_name="tinker",
@@ -115,6 +116,7 @@ class TinkerAgentTrainer:
                 "max_response_length": self.config.data.max_response_length,
                 "max_model_length": self.config.training.max_length,
                 "sampling_params": sampling_params,
+                "val_sampling_params": val_sampling_params,
             },
         )
         # Track number of batches for progress calculation
@@ -207,9 +209,8 @@ class TinkerAgentTrainer:
                 # Stream: train on each minibatch as it arrives
                 train_step_start = time.time()
                 all_grouping_metrics = []
-                # Pass rollout timeout for training (if configured)
-                rollout_timeout = self.config.training.get('rollout_timeout', None)
-                async for minibatch_episodes in self.generate_agent_episodes(group_size=self.config.training.group_size, minibatch_size=minibatch_size, timeout=rollout_timeout):
+
+                async for minibatch_episodes in self.generate_agent_episodes(group_size=self.config.training.group_size, minibatch_size=minibatch_size):
                     episodes.extend(minibatch_episodes)
                     minibatch_count += 1
 
@@ -349,12 +350,15 @@ class TinkerAgentTrainer:
         episodes_ls = []
         val_group_size = self.config.training.get('val_group_size', 1)
         self.agent_execution_engine.rollout_engine.set_sampling_client(sampling_client)
-        for batch in dataloader:
-            batch = self.build_interleave_batch(batch, val_group_size)
-            self.init_envs_and_agents(batch)
-            # For validation, collect all episodes from generator
-            async for episode_batch in self.generate_agent_episodes(group_size=val_group_size, minibatch_size=1):
-                episodes_ls.extend(episode_batch)
+        self.agent_execution_engine.rollout_engine.validate = True
+        try:
+            for batch in dataloader:
+                batch = self.build_interleave_batch(batch, val_group_size)
+                self.init_envs_and_agents(batch)
+                async for episode_batch in self.generate_agent_episodes(group_size=val_group_size, minibatch_size=1):
+                    episodes_ls.extend(episode_batch)
+        finally:
+            self.agent_execution_engine.rollout_engine.validate = False
 
         all_trajectories = []
         for episode in episodes_ls:
