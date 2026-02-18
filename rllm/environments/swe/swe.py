@@ -11,7 +11,6 @@ from arl import SandboxSession
 
 from rllm.environments.swe.action import Action
 from rllm.environments.swe.reward import calculate_reward
-from rllm.environments.swe.session_pool import SessionPool, SessionEntry
 from rllm.environments.base.base_env import BaseEnv
 
 TOOLS_DIR = os.path.join(os.path.dirname(__file__), "tools")
@@ -86,11 +85,6 @@ def _derive_pool_ref(ds: dict) -> str:
     hash_prefix = commit_hash[:12].lower()
     name = f"{safe_repo}-{hash_prefix}"
     return name[:63].rstrip("-")
-
-
-def _session_key(ds: dict) -> str:
-    """Generate a unique key for session pool lookup."""
-    return ds.get("instance_id", _derive_pool_ref(ds))
 
 
 class SWEEnv(BaseEnv):
@@ -279,46 +273,15 @@ class SWEEnv(BaseEnv):
         )
         self.session.create_sandbox()
 
-        # Register in session pool for reconnection
-        pool = SessionPool.get_instance()
-        pool.register(
-            _session_key(self.entry),
-            SessionEntry(
-                session_id=self.session.session_id,
-                pool_ref=self.pool_ref,
-                gateway_url=self.gateway_url,
-                namespace=self.namespace,
-            ),
-        )
-
-    def _attach_or_create_session(self):
-        """Attach to existing session if available, otherwise create new."""
-        pool = SessionPool.get_instance()
-        entry = pool.get(_session_key(self.entry))
-        if entry:
-            try:
-                self.session = SandboxSession.attach(
-                    entry.session_id,
-                    gateway_url=entry.gateway_url,
-                    keep_alive=True,
-                )
-                return
-            except Exception:
-                pool.remove(_session_key(self.entry))
-        self._create_session()
-
     # =====================================================
     # BaseEnv interface
     # =====================================================
 
     def reset(self) -> tuple[str, dict]:
-        if not self.session:
-            self._attach_or_create_session()
-            self._setup_env()
-        else:
+        if self.session:
             self.close()
-            self._create_session()
-            self._setup_env()
+        self._create_session()
+        self._setup_env()
 
         tool_files = (
             R2EGYM_TOOL_FILES if self.scaffold == "r2egym" else SWEAGENT_TOOL_FILES
@@ -403,8 +366,6 @@ class SWEEnv(BaseEnv):
                 self.session.delete_sandbox()
             except Exception as e:
                 self.logger.error(f"Error deleting sandbox: {e}")
-            pool = SessionPool.get_instance()
-            pool.remove(_session_key(self.entry))
             self.session = None
 
     @staticmethod
