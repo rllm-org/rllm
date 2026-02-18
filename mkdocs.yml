@@ -60,13 +60,18 @@ markdown_extensions:
   - pymdownx.snippets:
       base_path: ['.', '..']
       check_paths: true
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - admonition
   - pymdownx.details
   - pymdownx.tabbed:
       alternate_style: true
   - tables
   - footnotes
+      
 
 nav:
   - Home: 
@@ -127,7 +132,10 @@ nav:
       - Math SFT: examples/sft.md
   - Experimental:
       - Experimental Features: experimental/index.md
-      - Configuration: experimental/rllm-and-backend-config.md
+      - Unified Workflow Trainer:
+        - Unified Training Loop: experimental/unified-trainer.md
+        - Backend Protocol: experimental/backend-protocol.md
+        - Configuration: experimental/rllm-and-backend-config.md
   - Projects:
       - Overview: projects/index.md
       - FinQA: projects/finqa.md
