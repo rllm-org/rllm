@@ -9,10 +9,11 @@ ground-truth solution as privileged context in its prompt.
 from functools import partial
 
 from rllm.agents.agent import Episode, Step
-from rllm.engine import ModelOutput
+from rllm.engine import ModelOutput, RolloutEngine
 from rllm.trainer.distill import compute_step_distill_advantage
 from rllm.workflows.distillation_workflow import DistillationWorkflow
 from rllm.workflows.workflow import TerminationEvent, TerminationReason
+from rllm.rewards.reward_fn import RewardFunction
 
 
 REFERENCE_SOLUTION_TEMPLATE = (
@@ -33,10 +34,8 @@ def inject_reference_solution(messages: list[dict], ground_truth: str) -> list[d
 
 
 class OPSDWorkflow(DistillationWorkflow):
-    """Self-distillation: same model as both student and teacher.
-
-    The task dict must contain a solution key (default: "solution") with the ground-truth.
-    """
+    def __init__(self, rollout_engine: RolloutEngine, reward_function: RewardFunction | None = None, clip_min: float | None = None, clip_max: float | None = None, **kwargs):
+        super().__init__(rollout_engine, reward_function=reward_function, teacher_engine=None, shared_tokenizer=True, clip_min=clip_min, clip_max=clip_max, **kwargs)
 
     async def run(self, task: dict, uid: str, **kwargs) -> Episode:
         self.reset(task, uid)
@@ -49,17 +48,18 @@ class OPSDWorkflow(DistillationWorkflow):
         step = Step(
             chat_completions=messages + [{"role": "assistant", "content": output.content, "reasoning": output.reasoning, "tool_calls": output.tool_calls}],
             model_output=output,
+            reward = self.reward_function(task, output.text).reward,
         )
 
         teacher_prompt_fn = partial(inject_reference_solution, ground_truth=ground_truth) if ground_truth else None
 
         step.advantage = await compute_step_distill_advantage(
             step=step,
-            teacher_engine=self.teacher_engine,
+            teacher_engine=self.rollout_engine,
             student_tokenizer=self.rollout_engine.tokenizer,
-            teacher_tokenizer=self.teacher_engine.tokenizer,
-            shared_tokenizer=self.shared_tokenizer,
-            teacher_chat_parser=self.teacher_engine.chat_parser,
+            teacher_tokenizer=self.rollout_engine.tokenizer,
+            shared_tokenizer=True,
+            teacher_chat_parser=self.rollout_engine.chat_parser,
             teacher_prompt_fn=teacher_prompt_fn,
             clip_min=self.clip_min,
             clip_max=self.clip_max,

@@ -7,6 +7,7 @@ from rllm.workflows.distillation_workflow import DistillationWorkflow
 from rllm.data.dataset import DatasetRegistry
 from rllm.trainer import AgentTrainer
 from rllm.engine.rollout.tinker_engine import TinkerEngine
+from rllm.rewards.reward_fn import math_reward_fn
 
 
 @hydra.main(config_path="pkg://rllm.trainer.config", config_name="tinker_rl_trainer")
@@ -31,6 +32,7 @@ def main(config: DictConfig):
     trainer = AgentTrainer(
         workflow_class=DistillationWorkflow,
         workflow_args={
+            "reward_function": math_reward_fn,
             "teacher_engine": teacher_engine,
             "shared_tokenizer": True,
             "clip_min": -5.0,

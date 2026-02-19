@@ -2,14 +2,17 @@ from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.engine import ModelOutput, RolloutEngine
 from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflow
 from rllm.trainer.distill import compute_step_distill_advantage
+from rllm.rewards.reward_fn import RewardFunction
 
 class DistillationWorkflow(Workflow):
-    def __init__(self, rollout_engine: RolloutEngine, teacher_engine: RolloutEngine, shared_tokenizer: bool = False, clip_min: float | None = None, clip_max: float | None = None, **kwargs):
+    def __init__(self, rollout_engine: RolloutEngine, reward_function: RewardFunction | None = None, teacher_engine: RolloutEngine | None = None, shared_tokenizer: bool = False, clip_min: float | None = None, clip_max: float | None = None, **kwargs):
         super().__init__(rollout_engine, **kwargs)
+        self.reward_function = reward_function
         self.teacher_engine = teacher_engine
         self.shared_tokenizer = shared_tokenizer
         self.clip_min = clip_min
         self.clip_max = clip_max
+
         self.trajectory = Trajectory(name="student")
 
     async def run(self, task: dict, uid: str, **kwargs) -> Episode:
@@ -30,6 +33,7 @@ class DistillationWorkflow(Workflow):
         step = Step(
             chat_completions=messages + [{"role": "assistant", "content": output.content, "reasoning": output.reasoning, "tool_calls": output.tool_calls}],
             model_output=output,
+            reward = self.reward_function(task, output.content).reward,
         )
         step.advantage = await compute_step_distill_advantage(
             step=step,

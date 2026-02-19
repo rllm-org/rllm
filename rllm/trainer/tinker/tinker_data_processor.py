@@ -539,6 +539,7 @@ async def process_episodes(
     # Track metrics
     all_advantages = []
     group_sizes = []
+    filtered_groups = []
 
     training_datums = []
 
