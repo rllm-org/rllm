@@ -1,5 +1,5 @@
 """
-Tests for trajectory_to_data function in rllm.experimental.tinker.transform.
+Tests for trajectory_to_datums function in rllm.experimental.tinker.transform.
 
 These tests verify that trajectories are correctly converted to Tinker Datum objects,
 especially the logic for merging consecutive steps that share a prefix relationship.
@@ -17,7 +17,7 @@ from rllm.agents.agent import Step, Trajectory
 from rllm.experimental.tinker.transform import (
     _flatten_token_input,
     _is_prefix,
-    trajectory_to_data,
+    trajectory_to_datums,
 )
 
 # =============================================================================
@@ -215,12 +215,12 @@ class TestFlattenTokenInput:
 
 
 # =============================================================================
-# Tests for trajectory_to_data - Single Step
+# Tests for trajectory_to_datums - Single Step
 # =============================================================================
 
 
 class TestTrajectoryToDataSingleStep:
-    """Tests for trajectory_to_data with single-step trajectories."""
+    """Tests for trajectory_to_datums with single-step trajectories."""
 
     def test_single_step_comprehensive(self):
         """
@@ -235,7 +235,7 @@ class TestTrajectoryToDataSingleStep:
         )
         trajectory = Trajectory(steps=[step])
 
-        datums = trajectory_to_data(trajectory)
+        datums = trajectory_to_datums(trajectory)
 
         # Should produce exactly one Datum
         assert len(datums) == 1
@@ -270,7 +270,7 @@ class TestTrajectoryToDataSingleStep:
         )
         trajectory = Trajectory(steps=[step])
 
-        datums = trajectory_to_data(trajectory)
+        datums = trajectory_to_datums(trajectory)
 
         assert len(datums) == 1
         verify_datum_structure(datums[0])
@@ -283,12 +283,12 @@ class TestTrajectoryToDataSingleStep:
 
 
 # =============================================================================
-# Tests for trajectory_to_data - Prefix Merging
+# Tests for trajectory_to_datums - Prefix Merging
 # =============================================================================
 
 
 class TestTrajectoryToDataPrefixMerging:
-    """Tests for trajectory_to_data when steps should be merged due to prefix relationship."""
+    """Tests for trajectory_to_datums when steps should be merged due to prefix relationship."""
 
     def test_two_steps_with_prefix_comprehensive(self):
         """
@@ -311,7 +311,7 @@ class TestTrajectoryToDataPrefixMerging:
         )
         trajectory = Trajectory(steps=[step1, step2])
 
-        datums = trajectory_to_data(trajectory)
+        datums = trajectory_to_datums(trajectory)
 
         # Should produce single datum since step2 extends step1
         assert len(datums) == 1
@@ -332,19 +332,19 @@ class TestTrajectoryToDataPrefixMerging:
         step3 = make_step(prompt_ids=[1, 2, 3, 4, 5, 6, 7, 8], response_tokens=[9, 10], advantage=0.7)
         trajectory = Trajectory(steps=[step1, step2, step3])
 
-        datums = trajectory_to_data(trajectory)
+        datums = trajectory_to_datums(trajectory)
 
         assert len(datums) == 1
         verify_datum_structure(datums[0])
 
 
 # =============================================================================
-# Tests for trajectory_to_data - No Prefix (Multiple Datums)
+# Tests for trajectory_to_datums - No Prefix (Multiple Datums)
 # =============================================================================
 
 
 class TestTrajectoryToDataNoPrefix:
-    """Tests for trajectory_to_data when steps don't share prefix relationship."""
+    """Tests for trajectory_to_datums when steps don't share prefix relationship."""
 
     def test_two_independent_steps_creates_two_datums(self):
         """Steps without prefix relationship should produce separate Datums."""
@@ -352,7 +352,7 @@ class TestTrajectoryToDataNoPrefix:
         step2 = make_step(prompt_ids=[10, 11, 12], response_tokens=[13, 14], advantage=0.6)
         trajectory = Trajectory(steps=[step1, step2])
 
-        datums = trajectory_to_data(trajectory)
+        datums = trajectory_to_datums(trajectory)
 
         assert len(datums) == 2
         for datum in datums:
@@ -368,7 +368,7 @@ class TestTrajectoryToDataNoPrefix:
         step3 = make_step(prompt_ids=[100, 101, 102], response_tokens=[103, 104], advantage=0.7)
         trajectory = Trajectory(steps=[step1, step2, step3])
 
-        datums = trajectory_to_data(trajectory)
+        datums = trajectory_to_datums(trajectory)
 
         # First two steps merge into one Datum, third step is separate
         assert len(datums) == 2
@@ -377,12 +377,12 @@ class TestTrajectoryToDataNoPrefix:
 
 
 # =============================================================================
-# Tests for trajectory_to_data - With Chunks
+# Tests for trajectory_to_datums - With Chunks
 # =============================================================================
 
 
 class TestTrajectoryToDataWithChunks:
-    """Tests for trajectory_to_data with EncodedTextChunk and ImageChunk in prompt_ids."""
+    """Tests for trajectory_to_datums with EncodedTextChunk and ImageChunk in prompt_ids."""
 
     def test_prompt_with_encoded_text_chunk(self):
         """Test that EncodedTextChunk in prompt_ids is flattened and processed correctly."""
@@ -394,7 +394,7 @@ class TestTrajectoryToDataWithChunks:
         )
         trajectory = Trajectory(steps=[step])
 
-        datums = trajectory_to_data(trajectory)
+        datums = trajectory_to_datums(trajectory)
 
         assert len(datums) == 1
         verify_datum_structure(datums[0])
@@ -419,7 +419,7 @@ class TestTrajectoryToDataWithChunks:
         )
         trajectory = Trajectory(steps=[step])
 
-        datums = trajectory_to_data(trajectory)
+        datums = trajectory_to_datums(trajectory)
 
         assert len(datums) == 1
         verify_datum_structure(datums[0])
@@ -445,7 +445,7 @@ class TestTrajectoryToDataWithChunks:
         )
         trajectory = Trajectory(steps=[step1, step2])
 
-        datums = trajectory_to_data(trajectory)
+        datums = trajectory_to_datums(trajectory)
 
         # Should merge since step2 extends step1 (same img_chunk object)
         assert len(datums) == 1
@@ -471,24 +471,24 @@ class TestTrajectoryToDataWithChunks:
         )
         trajectory = Trajectory(steps=[step1, step2])
 
-        datums = trajectory_to_data(trajectory)
+        datums = trajectory_to_datums(trajectory)
 
         # Should NOT merge - different image chunks mean no prefix relationship
         assert len(datums) == 2
 
 
 # =============================================================================
-# Tests for trajectory_to_data - Edge Cases
+# Tests for trajectory_to_datums - Edge Cases
 # =============================================================================
 
 
 class TestTrajectoryToDataEdgeCases:
-    """Edge case tests for trajectory_to_data."""
+    """Edge case tests for trajectory_to_datums."""
 
     def test_empty_trajectory(self):
         """Empty trajectory should return empty list."""
         trajectory = Trajectory(steps=[])
-        datums = trajectory_to_data(trajectory)
+        datums = trajectory_to_datums(trajectory)
         assert datums == []
 
     def test_advantage_list_length_mismatch_raises(self):
@@ -501,7 +501,7 @@ class TestTrajectoryToDataEdgeCases:
         trajectory = Trajectory(steps=[step])
 
         with pytest.raises(AssertionError, match="length mismatch"):
-            trajectory_to_data(trajectory)
+            trajectory_to_datums(trajectory)
 
     def test_missing_logprobs_raises(self):
         """If logprobs is None, should raise."""
@@ -517,7 +517,7 @@ class TestTrajectoryToDataEdgeCases:
         trajectory = Trajectory(steps=[step])
 
         with pytest.raises(AssertionError, match="logprobs is None"):
-            trajectory_to_data(trajectory)
+            trajectory_to_datums(trajectory)
 
     def test_missing_advantage_raises(self):
         """If advantage is None, should raise."""
@@ -529,7 +529,7 @@ class TestTrajectoryToDataEdgeCases:
         trajectory = Trajectory(steps=[step])
 
         with pytest.raises(AssertionError, match="advantage is None"):
-            trajectory_to_data(trajectory)
+            trajectory_to_datums(trajectory)
 
     def test_single_token_prompt_and_response(self):
         """Test minimal case with single token prompt and response."""
@@ -541,7 +541,7 @@ class TestTrajectoryToDataEdgeCases:
         )
         trajectory = Trajectory(steps=[step])
 
-        datums = trajectory_to_data(trajectory)
+        datums = trajectory_to_datums(trajectory)
 
         assert len(datums) == 1
         verify_datum_structure(datums[0])
