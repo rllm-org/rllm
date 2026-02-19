@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -199,6 +200,14 @@ class Episode:
             info=data.get("info", {}),
         )
 
+    @cached_property
+    def task_id(self) -> str:
+        return self.id.split(":")[0]
+
+    @cached_property
+    def rollout_idx(self) -> str:
+        return self.id.split(":")[1]
+
 
 @dataclass
 class TrajectoryGroup:
@@ -219,11 +228,11 @@ class TrajectoryGroup:
     group_id: str = ""
     metadata: list[dict] = field(default_factory=list)
 
-    @property
+    @cached_property
     def group_role(self) -> str:
         return self.group_id.split(":")[1] if ":" in self.group_id[:-1] else "all_groups"
 
-    @property
+    @cached_property
     def task_id(self) -> str:
         return self.group_id.split(":")[0]
 

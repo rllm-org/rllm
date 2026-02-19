@@ -220,7 +220,7 @@ class UnifiedTrainer:
             project_name=self.rllm_config.trainer.project_name,
             experiment_name=self.rllm_config.trainer.experiment_name,
             default_backend=self.rllm_config.trainer.logger,
-            config=OmegaConf.to_container(self.rllm_config, resolve=True),
+            config=OmegaConf.to_container(self.config, resolve=True),
         )
 
     def _cleanup_on_init_failure(self):
@@ -409,7 +409,7 @@ class UnifiedTrainer:
             reward_metrics = collect_reward_and_advantage_from_trajectory_groups(val_trajectory_groups, self.algorithm_config, collect_advantage=False)
 
             is_correct_lst.extend([episode.is_correct for episode in val_episodes])
-            uid_lst.extend([episode.id.split(":")[0] for episode in val_episodes])
+            uid_lst.extend([episode.task_id for episode in val_episodes])
 
             data_sources = [episode.info.get("data_source", "unknown") for episode in val_episodes]
             data_source_lst.extend(data_sources)

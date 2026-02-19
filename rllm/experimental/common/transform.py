@@ -118,14 +118,15 @@ def _build_trajectory_groups(episodes: list[Episode], compact_filtering_config: 
         # skip episode if it should be masked by compact filtering
         if compact_filtering_config and compact_filtering_config.should_mask(termination_reason):
             continue
-        task_id = episode.id.split(":")[0]
+        task_id = episode.task_id
         for trajectory in episode.trajectories:
             if len(trajectory.steps) == 0:
                 continue
             trajectories_by_name[f"{task_id}:{trajectory.name}"].append(trajectory)
             metadata_by_name[f"{task_id}:{trajectory.name}"].append(
                 {
-                    "episode_id": episode.id,
+                    "task_id": episode.task_id,
+                    "rollout_idx": episode.rollout_idx,
                     "termination_reason": episode.termination_reason,
                     "is_correct": episode.is_correct,
                 }
