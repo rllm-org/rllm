@@ -93,8 +93,7 @@ class Tracking:
         self.logger = {}
         self._finished = False  # Track whether finish() has been called
 
-        if config is not None:
-            rllm_config = config.rllm
+        rllm_config = config.get("rllm", {}) if config is not None else {}
 
         if "tracking" in default_backend or "wandb" in default_backend:
             import wandb
