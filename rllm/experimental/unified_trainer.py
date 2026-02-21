@@ -1,5 +1,4 @@
 import asyncio
-import threading
 import time
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
@@ -87,7 +86,7 @@ class UnifiedTrainer:
     (like Tinker) while still supporting sync backends.
 
     The main `fit()` method remains sync for ease of use, but internally runs
-    the async training loop in a dedicated event loop thread.
+    the async training loop via `asyncio.run()`.
     """
 
     def __init__(
@@ -111,16 +110,10 @@ class UnifiedTrainer:
         self.config = config
         self.rllm_config = config.rllm
 
-        # Initialize event loop before backend (some backends may need it)
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._thread: threading.Thread | None = None
-
         # Read user-defined hooks from kwargs
         self.trajectory_grouping_hook = kwargs.get("trajectory_grouping_hook")
 
         try:
-            self._setup_event_loop()
-
             # Initialize backend
             self.backend = backend_cls(config=config, **(backend_args or {}))
 
@@ -143,9 +136,6 @@ class UnifiedTrainer:
                 raise_on_error=self.rllm_config.workflow.raise_on_error,
                 episode_logger=self.episode_logger,
             )
-
-            # Initialize workflow pool
-            self._run_async(self.agent_workflow_engine.initialize_pool())
         except Exception as e:
             # Clean up any resources that were initialized before the error
             self._cleanup_on_init_failure()
@@ -155,11 +145,6 @@ class UnifiedTrainer:
         if hasattr(self.backend, "tokenizer"):
             self.tokenizer = self.backend.tokenizer
 
-    def _run_async(self, coro):
-        """Run an async coroutine in the event loop thread and wait for result."""
-        assert self._loop is not None, "Event loop is not initialized"
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result()
 
     def _validate_and_setup_configs(self):
         """Validate and setup common configs."""
@@ -194,16 +179,11 @@ class UnifiedTrainer:
             stepwise_advantage_mode=self.rllm_config.stepwise_advantage.mode,
             norm_adv_by_std_in_grpo=self.rllm_config.stepwise_advantage.get("norm_adv_by_std_in_grpo", True),
             use_rllm=self.rllm_config.algorithm.get("use_rllm", False),
+            use_precomputed_advantage=self.rllm_config.algorithm.get("use_precomputed_advantage", False),
             loss_fn=self.rllm_config.algorithm.get("loss_fn", None),
             lr_schedule=self.rllm_config.algorithm.get("lr_schedule", "constant"),
             warmup_steps_ratio=self.rllm_config.algorithm.get("warmup_steps_ratio", 0.0),
         )
-
-    def _setup_event_loop(self):
-        """Setup the event loop in a background thread."""
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
-        self._thread.start()
 
     def _setup_logging(self):
         """Setup up both the tracking and episode logging."""
@@ -224,18 +204,7 @@ class UnifiedTrainer:
         )
 
     def _cleanup_on_init_failure(self):
-        """Clean up resources when initialization fails partway through.
-
-        This method is called when an exception occurs during __init__ to ensure
-        that resources like the event loop, wandb, etc. are properly cleaned up
-        to prevent the process from hanging.
-        """
-        # Stop the event loop thread if it was started
-        if self._loop is not None and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._loop.stop)
-        if self._thread is not None:
-            self._thread.join(timeout=5.0)  # Wait up to 5 seconds for thread to stop
-
+        """Clean up resources when initialization fails partway through."""
         try:
             # Clean up the logger (this will call finish() which handles wandb.finish(), etc.)
             if hasattr(self, "logger") and self.logger is not None:
@@ -254,14 +223,12 @@ class UnifiedTrainer:
     # =========================================================================
 
     def fit(self):
-        """Main training loop (sync entry point).
-
-        This runs the async training loop in the background event loop thread.
-        """
-        self._run_async(self._fit_entry_async())
+        """Main training loop (sync entry point)."""
+        asyncio.run(self._fit_entry_async())
 
     async def _fit_entry_async(self) -> None:
         """Async entry point for the full training process."""
+        await self.agent_workflow_engine.initialize_pool()
         trainer_state = TrainerState()
 
         await self.backend.on_train_start(trainer_state)
@@ -454,10 +421,6 @@ class UnifiedTrainer:
 
     def shutdown(self):
         """Shutdown the trainer and cleanup resources."""
-        if hasattr(self, "_loop") and self._loop is not None and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._loop.stop)
-        if hasattr(self, "_thread") and self._thread is not None:
-            self._thread.join()
         if hasattr(self, "agent_workflow_engine") and self.agent_workflow_engine is not None:
             self.agent_workflow_engine.shutdown()
         self.backend.shutdown()

@@ -3,11 +3,11 @@ from omegaconf import DictConfig
 
 from examples.math_distill.opsd.opsd_workflow import OPSDWorkflow
 from rllm.data.dataset import DatasetRegistry
-from rllm.trainer import AgentTrainer
+from rllm.experimental.unified_trainer import AgentTrainer
 from rllm.rewards.reward_fn import math_reward_fn
 
 
-@hydra.main(config_path="pkg://rllm.trainer.config", config_name="tinker_rl_trainer")
+@hydra.main(config_path="pkg://rllm.experimental.config", config_name="unified")
 def main(config: DictConfig):
     """Main training function for OPSD (self-distillation) on deepmath."""
     train_dataset = DatasetRegistry.load_dataset("deepmath_opd", "train")

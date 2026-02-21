@@ -1,6 +1,6 @@
 set -x
 
-python -m examples.math_distill.train_deepmath_distill_tinker \
+python -m examples.math_distill.kimi.train_deepmath_distill_tinker \
     rllm/backend=tinker \
     training.resume_from_tinker_id='tinker://4a1939e6-04be-5a77-9e4e-910ccff9f27e:train:0/weights/final' \
     model.name=Qwen/Qwen3-8B-Base \
@@ -18,11 +18,11 @@ python -m examples.math_distill.train_deepmath_distill_tinker \
     rllm.trainer.total_epochs=1 \
     rllm.trainer.logger=['console','wandb'] \
     rllm.trainer.project_name='opd-deepmath-8b-32b' \
-    rllm.trainer.experiment_name='deepmath-distill-8b-32b-unified' \
-    rllm.trainer.val_before_train=True \
+    rllm.trainer.experiment_name='deepmath-distill-8b-32b-kimi' \
+    rllm.trainer.val_before_train=False \
     rllm.trainer.test_freq=10 \
     rllm.trainer.save_freq=10 \
-    training.default_local_dir='./outputs/deepmath-distill-8b-32b-unified' \
+    training.default_local_dir='./outputs/deepmath-distill-8b-32b-kimi' \
     rllm.algorithm.use_precomputed_advantage=true \
     rllm.algorithm.loss_fn=importance_sampling \
     rollout_engine.bypass_render_with_parser=False \

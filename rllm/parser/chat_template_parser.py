@@ -109,7 +109,7 @@ class ChatTemplateParser:
             elif "gpt-oss" in model_name or "imo" in model_name:
                 logger.info(f"Using HarmonyChatTemplateParser for {tokenizer.name_or_path}")
                 return HarmonyChatTemplateParser()
-            elif "kimi-k2-thinking" in model_name:
+            elif "kimi-k2" in model_name:
                 logger.info(f"Using KimiK2ThinkingChatTemplateParser for {tokenizer.name_or_path}")
                 return KimiK2ThinkingChatTemplateParser(tokenizer)
 
@@ -375,7 +375,7 @@ class QwenChatTemplateParser(ChatTemplateParser):
         self.image_token = "<|image_pad|>"
         self.vision_start_token = "<|vision_start|>"
         self.vision_end_token = "<|vision_end|>"
-        self.stop_sequences = ["<|im_end|>"]
+        self.stop_sequences = [151645]
 
         from rllm.parser.tool_parser import QwenToolParser
 
@@ -516,15 +516,14 @@ class QwenChatTemplateParser(ChatTemplateParser):
 
     def parse_completion(self, completion_ids):
         completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=False)
-
         if completion_text.count("</think>") == 1:
             reasoning, _, content = completion_text.partition("</think>")
             if reasoning.startswith("<think>"):
                 reasoning = reasoning[len("<think>") :]
-            if content.endswith(self.eos_token):
-                content = content[: -len(self.eos_token)]
-            if content.endswith(self.eot_token):
-                content = content[: -len(self.eot_token)]
+            if content.endswith("<|im_end|>"):
+                content = content[: -len("<|im_end|>")]
+            if content.endswith("<|endoftext|>"):
+                content = content[: -len("<|endoftext|>")]
             reasoning = reasoning.strip()
             content = content.strip()
         elif not self.disable_thinking:
@@ -538,10 +537,10 @@ class QwenChatTemplateParser(ChatTemplateParser):
             # thinking is disabled, so everything is content
             reasoning = ""
             content = completion_text
-            if content.endswith(self.eos_token):
-                content = content[: -len(self.eos_token)]
-            if content.endswith(self.eot_token):
-                content = content[: -len(self.eot_token)]
+            if content.endswith("<|im_end|>"):
+                content = content[: -len("<|im_end|>")]
+            if content.endswith("<|endoftext|>"):
+                content = content[: -len("<|endoftext|>")]
             content = content.strip()
 
         if content:
@@ -644,7 +643,7 @@ class HarmonyChatTemplateParser(ChatTemplateParser):
 
         self.enc = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
         self.generation_prompt = "<|start|>assistant"
-        self.stop_sequences = ["<|endoftext|>", "<|return|>", "<|call|>"]
+        self.stop_sequences = [200002, 199999, 200012] # <|endoftext|>, <|return|>, <|call|>
 
     def parse(self, messages, add_generation_prompt=False, is_first_msg=False, **kwargs) -> str:
         return self.parse_prompt_from_messages(messages, add_generation_prompt=add_generation_prompt, is_first_msg=is_first_msg, **kwargs)

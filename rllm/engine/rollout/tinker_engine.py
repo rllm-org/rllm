@@ -315,4 +315,5 @@ class TinkerEngine(RolloutEngine):
         )
 
     async def compute_logprobs(self, ids: list[int]) -> list[float]:
+        ids = ids[: self.max_model_length]
         return await self.sampling_client.compute_logprobs_async(ModelInput.from_ints(ids))

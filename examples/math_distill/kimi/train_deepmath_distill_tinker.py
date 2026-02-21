@@ -17,8 +17,8 @@ def main(config: DictConfig):
     train_dataset = DatasetRegistry.load_dataset("deepmath_opd", "train")
     test_dataset = DatasetRegistry.load_dataset("deepmath_opd", "test")
 
-    teacher_model = "Qwen/Qwen3-32B"
-    teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_model)
+    teacher_model = "moonshotai/Kimi-K2-Thinking"
+    teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_model, allow_remote_code=True)
     teacher_service_client = tinker.ServiceClient()
     teacher_sampling_client = teacher_service_client.create_sampling_client(base_model=teacher_model)
     teacher_engine = TinkerEngine(
@@ -34,7 +34,7 @@ def main(config: DictConfig):
         workflow_args={
             "reward_function": math_reward_fn,
             "teacher_engine": teacher_engine,
-            "shared_tokenizer": True,
+            "shared_tokenizer": False,
             "clip_min": -5.0,
             "clip_max": 5.0,
         },

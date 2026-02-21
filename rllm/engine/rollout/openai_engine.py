@@ -236,5 +236,6 @@ class OpenAIEngine(RolloutEngine):
             return await self.completion(prompt, **kwargs)
 
     async def compute_logprobs(self, ids: list[int]) -> list[float]:
+        ids = ids[: self.max_model_length]
         output = await self.completion(ids, max_tokens=1, echo=True, logprobs=1, temperature=1.0, top_p=1.0)
         return output.prompt_logprobs

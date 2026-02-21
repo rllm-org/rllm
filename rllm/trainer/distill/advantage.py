@@ -140,6 +140,8 @@ async def compute_step_distill_advantage(
 
     # Compute per-token advantages: teacher_logprob - student_logprob
     advantages = [t_lp - s_lp for t_lp, s_lp in zip(aligned_teacher_logprobs, student_logprobs, strict=False)]
+    if len(advantages) < len(student_logprobs):
+        advantages.extend([0.0] * (len(student_logprobs) - len(advantages)))
 
     # Optionally clip
     if clip_min is not None or clip_max is not None:

@@ -84,7 +84,7 @@ class TinkerEngine(RolloutEngine):
         service_client: tinker.ServiceClient,
         max_prompt_length: int = 4096,
         max_response_length: int = 4096,
-        max_model_length: int | None = None,
+        max_model_length: int = 32768,
         sampling_params: dict | None = None,
         bypass_render_with_parser: bool = True,  # default to True now
         processor: Processor | None = None,
@@ -92,6 +92,7 @@ class TinkerEngine(RolloutEngine):
         disable_thinking: bool = False,
         accumulate_reasoning: bool = False,
         reasoning_effort: str = "medium",
+        renderer_name: str | None = None,
         **kwargs,
     ):
         """
@@ -116,19 +117,19 @@ class TinkerEngine(RolloutEngine):
         self.model_name = model_name
         self.max_prompt_length = max_prompt_length
         self.max_response_length = max_response_length
-        self.max_model_length = max_model_length - 1 if max_model_length is not None else max_prompt_length + max_response_length - 1
+        self.max_model_length = max_model_length - 1
         self.tokenizer = tokenizer
         self.bypass_render_with_parser = bypass_render_with_parser
         self.accumulate_reasoning = accumulate_reasoning
         self.reasoning_effort = reasoning_effort
 
-        self.train_sampling_params = sampling_params.get("train", {}) if sampling_params else {}
-        self.val_sampling_params = sampling_params.get("val", {}) if sampling_params else {}
+        self.train_sampling_params = dict(sampling_params.get("train", {})) if sampling_params else {}
+        self.val_sampling_params = dict(sampling_params.get("val", {})) if sampling_params else {}
         # Initialize Tinker service client
         self.service_client = service_client
 
         # Initialize the renderer
-        renderer_name = model_info.get_recommended_renderer_name(self.model_name)
+        renderer_name = renderer_name or model_info.get_recommended_renderer_name(self.model_name)
         # Pass image_processor for VLM support with Tinker renderer
         self.renderer = renderers.get_renderer(renderer_name, self.tokenizer, image_processor=image_processor)
 
@@ -136,8 +137,8 @@ class TinkerEngine(RolloutEngine):
             self.chat_parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=disable_thinking)
             if hasattr(self.chat_parser, "stop_sequences") and self.chat_parser.stop_sequences:
                 self.stop_sequences = self.chat_parser.stop_sequences
-            elif hasattr(tokenizer, "eos_token") and tokenizer.eos_token:
-                self.stop_sequences = [tokenizer.eos_token]
+            elif hasattr(tokenizer, "eos_token_id") and tokenizer.eos_token_id:
+                self.stop_sequences = [tokenizer.eos_token_id]
             else:
                 raise ValueError("No stop sequences found for tokenizer or chat parser")
         else:
@@ -226,12 +227,13 @@ class TinkerEngine(RolloutEngine):
         if enforce_max_prompt_length and input_length > min(self.max_prompt_length, self.max_model_length):
             raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
 
-        requested_max_tokens = kwargs.pop("max_tokens", kwargs.pop("max_new_tokens", self.max_response_length))
-        max_tokens = self._prepare_max_tokens(requested_max_tokens, input_length)
-
         # prepare sampling params
         sampling_params = self.val_sampling_params.copy() if self.is_validation else self.train_sampling_params.copy()
-        # override with kwargs
+
+        requested_max_tokens = kwargs.pop("max_tokens", kwargs.pop("max_new_tokens", self.max_response_length))
+        requested_max_tokens = sampling_params.pop("max_tokens", requested_max_tokens)
+        max_tokens = self._prepare_max_tokens(requested_max_tokens, input_length)
+
         if "temperature" in kwargs:
             sampling_params["temperature"] = kwargs["temperature"]
         if "top_p" in kwargs:
@@ -260,13 +262,20 @@ class TinkerEngine(RolloutEngine):
         """
         Assemble model output from a sampled sequence.
         """
-        assert isinstance(self.renderer, renderers.Renderer), "self.renderer must be a valid Tinker Renderer"
         sampled_sequence = cast(TinkerTokenOutput, token_output)
         response_tokens, logprobs = sampled_sequence.tokens, sampled_sequence.logprobs
 
-        response_message, _ = self.renderer.parse_response(response_tokens)
-        # obtain content, reasoning, and tool calls
-        content, reasoning, tool_calls = _parse_tinker_message(response_message)
+        if self.bypass_render_with_parser:
+            assert self.chat_parser is not None, "chat_parser must be set when bypass_render_with_parser=True"
+            parsed_output = self.chat_parser.parse_completion(response_tokens)
+            content = parsed_output.get("content", "")
+            reasoning = parsed_output.get("reasoning", "")
+            tool_calls = parsed_output.get("tool_calls", [])
+        else:
+            assert isinstance(self.renderer, renderers.Renderer), "self.renderer must be a valid Tinker Renderer"
+            response_message, _ = self.renderer.parse_response(response_tokens)
+            content, reasoning, tool_calls = _parse_tinker_message(response_message)
+
         # decode full text
         completion_text = self.tokenizer.decode(response_tokens, skip_special_tokens=True)  # type: ignore
         finish_reason = sampled_sequence.stop_reason
@@ -335,3 +344,7 @@ class TinkerEngine(RolloutEngine):
 
         sampled_sequence = await self.get_token_output_from_token_input(token_input=token_input, **kwargs)
         return self.assemble_model_output(token_input=token_input, token_output=sampled_sequence)
+
+    async def compute_logprobs(self, ids: list[int]) -> list[float]:
+        ids = ids[: self.max_model_length]
+        return await self.sampling_client.compute_logprobs_async(ModelInput.from_ints(ids))
