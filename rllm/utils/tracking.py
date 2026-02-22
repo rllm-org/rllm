@@ -372,7 +372,7 @@ class UILogger:
 
         import json
 
-        # Send metrics (always) - convert numpy types to native Python
+        # Send metrics
         try:
             metrics_json = json.loads(json.dumps(data, default=self._json_serializer))
             self.client.post(
@@ -382,23 +382,25 @@ class UILogger:
         except Exception as e:
             self.logger.warning(f"Failed to send metrics to UI: {e}")
 
-        # Send episodes (if provided)
+        # Send episodes
         if episodes:
             try:
                 self.logger.info(f"Sending {len(episodes)} episodes to UI")
                 for episode in episodes:
-                    episode_data = {
-                        "session_id": self.session_id,
-                        "step": step,
-                        "episode_id": episode.id,
-                        "task": episode.task,
-                        "is_correct": bool(episode.is_correct),
-                        "reward": float(episode.trajectories[0].reward) if episode.trajectories else None,
-                        "termination_reason": (episode.termination_reason.value if episode.termination_reason is not None else None),
-                        "trajectories": [self._serialize_trajectory(t) for t in episode.trajectories],
-                        "metrics": episode.metrics if episode.metrics else {},
-                        "info": episode.info if hasattr(episode, "info") and episode.info else {},
-                    }
+                    episode_data = episode.to_dict()
+
+                    # Add API context fields and remap id to episode_id
+                    episode_data["session_id"] = self.session_id
+                    episode_data["step"] = step
+                    episode_data["episode_id"] = episode_data.pop("id")
+
+                    # Strip fields from steps to keep UI payloads lightweight
+                    _STEP_DROP_KEYS = {"prompt_ids", "response_ids", "logprobs", "model_output"}
+                    for traj in episode_data.get("trajectories", []):
+                        for s in traj.get("steps", []):
+                            for key in _STEP_DROP_KEYS:
+                                s.pop(key, None)
+
                     # Serialize to handle numpy types
                     episode_json = json.loads(json.dumps(episode_data, default=self._json_serializer))
                     response = self.client.post("/api/episodes", json=episode_json)
@@ -409,8 +411,7 @@ class UILogger:
 
                 self.logger.warning(f"Traceback: {traceback.format_exc()}")
 
-        # Send trajectory groups (if provided)
-        # Note: Only metadata is sent, not full trajectories (they live in episodes table)
+        # Send trajectory groups (only metadata is sent)
         if trajectory_groups:
             try:
                 self.logger.info(f"Sending {len(trajectory_groups)} trajectory groups to UI")
@@ -419,11 +420,9 @@ class UILogger:
                     num_trajectories = len(group.trajectories)
                     rewards = [float(t.reward) for t in group.trajectories if t.reward is not None]
                     avg_reward = sum(rewards) / len(rewards) if rewards else None
-                    correct_count = sum(1 for m in group.metadata if m.get("is_correct", False))
-                    total_count = len(group.metadata)
 
                     # Slim metadata: only episode_id references
-                    metadata = [{"episode_id": m.get("episode_id", "")} for m in group.metadata]
+                    metadata = [{"episode_id": f"{m['task_id']}:{m['rollout_idx']}"} for m in group.metadata]
 
                     group_data = {
                         "session_id": self.session_id,
@@ -431,8 +430,6 @@ class UILogger:
                         "group_id": group.group_id,
                         "num_trajectories": num_trajectories,
                         "avg_reward": avg_reward,
-                        "correct_count": correct_count,
-                        "total_count": total_count,
                         "metadata": metadata,
                     }
                     # Serialize to handle numpy types
@@ -461,30 +458,6 @@ class UILogger:
             return str(obj)
         else:
             return str(obj)
-
-    def _serialize_trajectory(self, traj):
-        """Serialize a trajectory object to JSON-compatible dict."""
-        return {
-            "uid": traj.uid,
-            "name": traj.name,
-            "reward": float(traj.reward) if traj.reward is not None else None,
-            "info": traj.info if traj.info else {},
-            "steps": [
-                {
-                    "observation": step.observation,
-                    "thought": step.thought if step.thought else "",
-                    "action": step.action,
-                    "model_response": step.model_response,
-                    "chat_completions": step.chat_completions,
-                    "info": step.info if step.info else {},
-                    "reward": float(step.reward) if step.reward is not None else None,
-                    "done": bool(step.done) if step.done is not None else None,
-                    "mc_return": float(step.mc_return) if step.mc_return is not None else 0.0,
-                    "advantage": (float(step.advantage) if isinstance(step.advantage, int | float) else step.advantage) if step.advantage is not None else None,
-                }
-                for step in traj.steps
-            ],
-        }
 
     def finish(self, exit_code: int = 0):
         """Mark the session as complete, restore streams, and close HTTP client.
