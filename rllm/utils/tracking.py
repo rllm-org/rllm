@@ -317,7 +317,11 @@ class UILogger:
 
         self.logger = logging.getLogger(__name__)
         self.ui_url = os.getenv("RLLM_UI_URL", "http://localhost:3000")
-        self.client = httpx.Client(base_url=self.ui_url, timeout=5.0)
+        headers = {}
+        api_key = os.getenv("RLLM_UI_API_KEY")
+        if api_key:
+            headers["X-API-Key"] = api_key
+        self.client = httpx.Client(base_url=self.ui_url, timeout=5.0, headers=headers)
         self._heartbeat_stop = threading.Event()
 
         try:
