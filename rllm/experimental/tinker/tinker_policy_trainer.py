@@ -114,7 +114,24 @@ class TinkerPolicyTrainer:
         # Check for existing checkpoint
         resume_info = None
         if resume_from_checkpoint:
-            resume_info = self.get_last_checkpoint()
+            # Check if a Tinker model ID is provided in config
+            tinker_model_id = OmegaConf.select(self.config, "training.resume_from_tinker_id", default=None)
+            if tinker_model_id and tinker_model_id.startswith("tinker://") and "/weights/" in tinker_model_id:
+                checkpoint_name = tinker_model_id.split("/weights/")[-1]
+                try:
+                    batch = int(checkpoint_name)
+                except ValueError:
+                    batch = 0
+
+                resume_info = {
+                    "state_path": tinker_model_id,
+                    "sampler_path": tinker_model_id.replace("/weights/", "/sampler_weights/"),
+                    "batch": batch,
+                }
+                logger.info(f"Resuming from Tinker model ID: {tinker_model_id}")
+            else:
+                # Fall back to local checkpoint lookup
+                resume_info = self.get_last_checkpoint()
 
         if resume_info:
             # Resume from checkpoint

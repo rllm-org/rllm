@@ -111,6 +111,10 @@ class AlgorithmConfig:
     stepwise_advantage_mode: Literal["broadcast", "per_step"] = "broadcast"
     norm_adv_by_std_in_grpo: bool = True
     use_rllm: bool = False
+    # When True, always use pre-computed step.advantage from the workflow and skip
+    # advantage computation (GRPO/REINFORCE). Steps missing advantages default to 0.0.
+    # When False (default), always compute advantages normally.
+    use_precomputed_advantage: bool = False
     # for tinker backend only
     loss_fn: Literal["importance_sampling", "ppo", "cispo", "dro", "cross_entropy"] | None = None
     lr_schedule: Literal["linear", "cosine", "constant"] = "constant"
@@ -130,6 +134,7 @@ class AlgorithmConfig:
             stepwise_advantage_mode=config.rllm.stepwise_advantage.mode,
             norm_adv_by_std_in_grpo=config.rllm.stepwise_advantage.get("norm_adv_by_std_in_grpo", True),
             use_rllm=config.rllm.stepwise_advantage.get("use_rllm", False),
+            use_precomputed_advantage=config.rllm.algorithm.get("use_precomputed_advantage", False),
             loss_fn=config.rllm.algorithm.get("loss_fn", None),
             lr_schedule=config.rllm.algorithm.get("lr_schedule", "constant"),
             warmup_steps_ratio=config.rllm.algorithm.get("warmup_steps_ratio", 0.0),
