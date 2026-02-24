@@ -55,24 +55,15 @@ def _collect_precomputed_advantages(group: TrajectoryGroup, group_role: str) -> 
                 steps_missing += 1
             elif isinstance(step.advantage, list):
                 if len(step.advantage) != len(step.response_ids):
-                    logger.warning(
-                        f"[group={group_role}] Step has advantage length {len(step.advantage)} "
-                        f"but response_ids length {len(step.response_ids)}. Defaulting to zeros."
-                    )
+                    logger.warning(f"[group={group_role}] Step has advantage length {len(step.advantage)} but response_ids length {len(step.response_ids)}. Defaulting to zeros.")
                     step.advantage = [0.0] * len(step.response_ids)
                     steps_missing += 1
                 flattened_advantages.extend(step.advantage)
             else:
-                raise ValueError(
-                    f"[group={group_role}] step.advantage must be a list when "
-                    f"use_precomputed_advantage is True, got {type(step.advantage)}"
-                )
+                raise ValueError(f"[group={group_role}] step.advantage must be a list when use_precomputed_advantage is True, got {type(step.advantage)}")
 
     if steps_missing > 0:
-        logger.warning(
-            f"[group={group_role}] {steps_missing}/{total_steps} steps missing "
-            f"pre-computed advantages, defaulted to zeros."
-        )
+        logger.warning(f"[group={group_role}] {steps_missing}/{total_steps} steps missing pre-computed advantages, defaulted to zeros.")
 
     return flattened_advantages
 
@@ -123,10 +114,7 @@ def collect_reward_and_advantage_from_trajectory_groups(
                 # Warn if steps have pre-computed advantages that will be overwritten.
                 has_any = any(step.advantage is not None for traj in group.trajectories for step in traj.steps)
                 if has_any:
-                    logger.warning(
-                        f"[group={group_role}] Steps have pre-computed advantages but "
-                        f"use_precomputed_advantage is False. Overwriting with {algorithm_config.estimator.value}."
-                    )
+                    logger.warning(f"[group={group_role}] Steps have pre-computed advantages but use_precomputed_advantage is False. Overwriting with {algorithm_config.estimator.value}.")
 
             assert all(traj.reward is not None for traj in group.trajectories), "Trajectory reward cannot be None in broadcast mode"
             traj_rewards = np.array([traj.reward for traj in group.trajectories])

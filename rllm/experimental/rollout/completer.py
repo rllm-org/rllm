@@ -45,17 +45,8 @@ class Completer:
         model_output: ModelOutput = await self.rollout_engine.get_model_response(messages, **kwargs)
 
         # construct the step
-        chat_completions = messages + [{"role": "assistant", "content": model_output.content or "", "reasoning": model_output.reasoning or ""}]
         action = action_hook(model_output) if action_hook is not None else None
-        return Step(
-            prompt_ids=model_output.prompt_ids or [],
-            response_ids=model_output.completion_ids or [],
-            logprobs=model_output.logprobs or [],
-            chat_completions=chat_completions,
-            thought=model_output.reasoning or "",
-            action=action,
-            model_output=model_output,  # type: ignore
-        )
+        return Step.from_model_output(model_output, messages, action)  # type: ignore
 
     def reset(self):
         """Reset the completer to its initial state."""
@@ -123,21 +114,18 @@ class TITOCompleter(Completer):
 
         # update the previous messages and token input
         self._prev_messages_str = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, accumulate_reasoning=True)
-        self._prev_token_input = curr_token_input + curr_token_output.completion_ids
+        # backend-specific handling for retrieving the completion ids
+        if hasattr(curr_token_output, "token_ids"):  # Verl
+            curr_completion_ids: list[int] = curr_token_output.token_ids  # type: ignore[assignment]
+        elif hasattr(curr_token_output, "tokens"):  # Tinker
+            curr_completion_ids: list[int] = curr_token_output.tokens
+        else:
+            raise ValueError(f"Unsupported token output type: {type(curr_token_output)}")
         # update the number of completions and prefixes
         self._n_completions += 1
         self._n_prefixes += int(is_prefix)
-
-        return Step(
-            prompt_ids=model_output.prompt_ids or [],
-            response_ids=model_output.completion_ids or [],
-            logprobs=model_output.logprobs or [],
-            chat_completions=messages + [{"role": "assistant", "content": model_output.content, "reasoning": model_output.reasoning}],
-            thought=model_output.reasoning or "",
-            action=action,
-            model_response=model_output.content or "",
-            model_output=model_output,  # type: ignore
-        )
+        self._prev_token_input = curr_token_input + curr_completion_ids
+        return Step.from_model_output(model_output, messages, action)  # type: ignore
 
     def reset(self):
         """Reset the completer to its initial state."""

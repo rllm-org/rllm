@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -12,7 +13,8 @@ if TYPE_CHECKING:
 
 @dataclass
 class Step:
-    prompt_ids: list[int] = field(default_factory=list)
+    # this is to accomodate the fact that for backend like `tinker`, the prompt_ids might contain special image blocks
+    prompt_ids: list[int] | list[Any] = field(default_factory=list)
     response_ids: list[int] = field(default_factory=list)
     logprobs: list[float] = field(default_factory=list)
 
@@ -91,6 +93,19 @@ class Step:
             done=data["done"],
             mc_return=data["mc_return"],
             advantage=data["advantage"],
+        )
+
+    @classmethod
+    def from_model_output(cls, model_output: ModelOutput, messages: list[dict] | None = None, action: Any | None = None) -> Step:
+        return cls(
+            prompt_ids=model_output.prompt_ids or [],
+            response_ids=model_output.completion_ids or [],
+            logprobs=model_output.logprobs or [],
+            chat_completions=(messages or []) + [{"role": "assistant", "content": model_output.content, "reasoning": model_output.reasoning}],
+            thought=model_output.reasoning or "",
+            action=action,
+            model_response=model_output.content or "",
+            model_output=model_output,
         )
 
 
@@ -199,6 +214,14 @@ class Episode:
             info=data.get("info", {}),
         )
 
+    @cached_property
+    def task_id(self) -> str:
+        return self.id.split(":")[0]
+
+    @cached_property
+    def rollout_idx(self) -> str:
+        return self.id.split(":")[1]
+
 
 @dataclass
 class TrajectoryGroup:
@@ -219,11 +242,11 @@ class TrajectoryGroup:
     group_id: str = ""
     metadata: list[dict] = field(default_factory=list)
 
-    @property
+    @cached_property
     def group_role(self) -> str:
         return self.group_id.split(":")[1] if ":" in self.group_id[:-1] else "all_groups"
 
-    @property
+    @cached_property
     def task_id(self) -> str:
         return self.group_id.split(":")[0]
 

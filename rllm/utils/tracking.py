@@ -93,12 +93,14 @@ class Tracking:
         self.logger = {}
         self._finished = False  # Track whether finish() has been called
 
+        rllm_config = config.get("rllm", {}) if config is not None else {}
+
         if "tracking" in default_backend or "wandb" in default_backend:
             import wandb
 
             settings = None
-            if config and config["trainer"].get("wandb_proxy", None):
-                settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
+            if rllm_config and rllm_config.get("trainer", {}).get("wandb_proxy", None):
+                settings = wandb.Settings(https_proxy=rllm_config["trainer"]["wandb_proxy"])
             wandb.init(project=project_name, name=experiment_name, config=config, settings=settings)
             self.logger["wandb"] = wandb
 

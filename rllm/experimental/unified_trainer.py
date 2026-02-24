@@ -86,7 +86,7 @@ class UnifiedTrainer:
     (like Tinker) while still supporting sync backends.
 
     The main `fit()` method remains sync for ease of use, but internally runs
-    the async training loop via `asyncio.run()`.
+    the async training loop in a dedicated event loop thread.
     """
 
     def __init__(
@@ -113,38 +113,31 @@ class UnifiedTrainer:
         # Read user-defined hooks from kwargs
         self.trajectory_grouping_hook = kwargs.get("trajectory_grouping_hook")
 
-        try:
-            # Initialize backend
-            self.backend = backend_cls(config=config, **(backend_args or {}))
+        self.backend = backend_cls(config=config, **(backend_args or {}))
 
-            self._validate_and_setup_configs()
-            self._setup_logging()
+        self._validate_and_setup_configs()
+        self._setup_logging()
 
-            rollout_engine: RolloutEngine = self.backend.init_rollout_engine(
-                cf_config=self.cf_config,
-                transform_config=self.transform_config,
-                rs_config=self.rs_config,
-                algorithm_config=self.algorithm_config,
-            )
-            self.agent_workflow_engine = UnifiedWorkflowEngine(
-                workflow_cls=self.workflow_class,
-                workflow_args=self.workflow_args,
-                rollout_engine=rollout_engine,
-                config=self.config,
-                n_parallel_tasks=self.rllm_config.workflow.n_parallel_tasks,
-                retry_limit=self.rllm_config.workflow.retry_limit,
-                raise_on_error=self.rllm_config.workflow.raise_on_error,
-                episode_logger=self.episode_logger,
-            )
-        except Exception as e:
-            # Clean up any resources that were initialized before the error
-            self._cleanup_on_init_failure()
-            raise e
+        rollout_engine: RolloutEngine = self.backend.init_rollout_engine(
+            cf_config=self.cf_config,
+            transform_config=self.transform_config,
+            rs_config=self.rs_config,
+            algorithm_config=self.algorithm_config,
+        )
+        self.agent_workflow_engine = UnifiedWorkflowEngine(
+            workflow_cls=self.workflow_class,
+            workflow_args=self.workflow_args,
+            rollout_engine=rollout_engine,
+            config=self.config,
+            n_parallel_tasks=self.rllm_config.workflow.n_parallel_tasks,
+            retry_limit=self.rllm_config.workflow.retry_limit,
+            raise_on_error=self.rllm_config.workflow.raise_on_error,
+            episode_logger=self.episode_logger,
+        )
 
         self.tokenizer = None
         if hasattr(self.backend, "tokenizer"):
             self.tokenizer = self.backend.tokenizer
-
 
     def _validate_and_setup_configs(self):
         """Validate and setup common configs."""
@@ -200,23 +193,8 @@ class UnifiedTrainer:
             project_name=self.rllm_config.trainer.project_name,
             experiment_name=self.rllm_config.trainer.experiment_name,
             default_backend=self.rllm_config.trainer.logger,
-            config=OmegaConf.to_container(self.rllm_config, resolve=True),
+            config=OmegaConf.to_container(self.config, resolve=True),
         )
-
-    def _cleanup_on_init_failure(self):
-        """Clean up resources when initialization fails partway through."""
-        try:
-            # Clean up the logger (this will call finish() which handles wandb.finish(), etc.)
-            if hasattr(self, "logger") and self.logger is not None:
-                self.logger.finish()
-            # Clean up the backend if it was initialized
-            if hasattr(self, "backend"):
-                self.backend.shutdown()
-            # Clean up the workflow engine if it was initialized
-            if hasattr(self, "agent_workflow_engine"):
-                self.agent_workflow_engine.shutdown()
-        except Exception:
-            pass  # Ignore errors during cleanup
 
     # =========================================================================
     # Main training loop methods
@@ -224,11 +202,13 @@ class UnifiedTrainer:
 
     def fit(self):
         """Main training loop (sync entry point)."""
-        asyncio.run(self._fit_entry_async())
+        asyncio.run(self.fit_async())
 
-    async def _fit_entry_async(self) -> None:
-        """Async entry point for the full training process."""
+    async def fit_async(self) -> None:
+        """Public async entry point for the full training process."""
+        # initialize the UnifiedWorkflowEngine (init the workflow pool)
         await self.agent_workflow_engine.initialize_pool()
+
         trainer_state = TrainerState()
 
         await self.backend.on_train_start(trainer_state)
@@ -248,7 +228,7 @@ class UnifiedTrainer:
         await self.backend.on_train_end(trainer_state)
 
     async def _fit_async(self, trainer_state: TrainerState) -> None:
-        """Async main training loop."""
+        """Internal async main training loop."""
         train_dataloader: Iterable = self.backend.get_dataloader(self.train_dataset, trainer_state)
         break_via_total_batches = False  # used to break the training loop via the `total_batches` parameter
         use_total_batches = self.rllm_config.trainer.get("total_batches") is not None and self.rllm_config.trainer.total_batches > 0
@@ -376,7 +356,7 @@ class UnifiedTrainer:
             reward_metrics = collect_reward_and_advantage_from_trajectory_groups(val_trajectory_groups, self.algorithm_config, collect_advantage=False)
 
             is_correct_lst.extend([episode.is_correct for episode in val_episodes])
-            uid_lst.extend([episode.id.split(":")[0] for episode in val_episodes])
+            uid_lst.extend([episode.task_id for episode in val_episodes])
 
             data_sources = [episode.info.get("data_source", "unknown") for episode in val_episodes]
             data_source_lst.extend(data_sources)
