@@ -13,7 +13,8 @@ if TYPE_CHECKING:
 
 @dataclass
 class Step:
-    prompt_ids: list[int] = field(default_factory=list)
+    # this is to accomodate the fact that for backend like `tinker`, the prompt_ids might contain special image blocks
+    prompt_ids: list[int] | list[Any] = field(default_factory=list)
     response_ids: list[int] = field(default_factory=list)
     logprobs: list[float] = field(default_factory=list)
 
@@ -92,6 +93,19 @@ class Step:
             done=data["done"],
             mc_return=data["mc_return"],
             advantage=data["advantage"],
+        )
+
+    @classmethod
+    def from_model_output(cls, model_output: ModelOutput, messages: list[dict] | None = None, action: Any | None = None) -> Step:
+        return cls(
+            prompt_ids=model_output.prompt_ids or [],
+            response_ids=model_output.completion_ids or [],
+            logprobs=model_output.logprobs or [],
+            chat_completions=(messages or []) + [{"role": "assistant", "content": model_output.content, "reasoning": model_output.reasoning}],
+            thought=model_output.reasoning or "",
+            action=action,
+            model_response=model_output.content or "",
+            model_output=model_output,
         )
 
 

@@ -87,7 +87,7 @@ def update_episode_metrics(
         if len(episode.trajectories) == 0:
             continue
         # Extract task_id from episode.id format "task_id:rollout_idx"
-        task_id = episode.id.split(":")[0]
+        task_id = episode.task_id
         if task_id not in episodes_by_task:
             episodes_by_task[task_id] = []
         episodes_by_task[task_id].append(episode)

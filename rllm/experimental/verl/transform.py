@@ -335,7 +335,7 @@ def transform_episodes_to_dataproto(
 
     accumulated = AccumulatedData()
     for episode in episodes:
-        task_id = episode.id.split(":")[0]
+        task_id = episode.task_id
         total_steps = _process_episode(episode, task_id, accumulated)
         accumulated.repeat_counts.append(total_steps)
 
