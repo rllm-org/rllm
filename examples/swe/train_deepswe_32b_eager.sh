@@ -18,6 +18,7 @@ VAL_PATH=/shared_workspace_mfs/datasets/r2e/SWE_Bench_Verified/test_verl.parquet
 
 MODEL_SAVE_PATH=/shared_workspace_mfs/ckpt_zl/deepswe_30b
 MODEL_PATH=/shared_workspace_mfs/original_models/Qwen3-32B
+RESUME_CKPT_PATH=/shared_workspace_mfs/ckpt_zl/deepswe_30b/global_step_140
 
 python3 -m rllm.trainer.verl.train_agent_ppo \
     algorithm.adv_estimator=rloo \
@@ -63,6 +64,7 @@ python3 -m rllm.trainer.verl.train_agent_ppo \
     algorithm.kl_ctrl.kl_coef=0.001 \
     rllm.mask_truncated_samples=False \
     trainer.default_local_dir=${MODEL_SAVE_PATH} \
+    trainer.resume_mode=auto \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='deepscaler-agent' \
@@ -75,7 +77,7 @@ python3 -m rllm.trainer.verl.train_agent_ppo \
     trainer.default_hdfs_dir=null \
     rllm.env.name=swe_remote \
     rllm.agent.name=sweagent \
-    rllm.agent.max_steps=100 \
+    rllm.agent.max_steps=50 \
     rllm.agent.overlong_filter=True \
     rllm.agent.trajectory_timeout=5400 \
     trainer.total_epochs=1000
