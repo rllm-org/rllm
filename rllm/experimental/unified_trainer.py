@@ -194,8 +194,6 @@ class UnifiedTrainer:
             workflow_args=self.workflow_args,
         )
 
-        # TODO: Add more info to the config for UI display, such as model_name,
-        # backend-specific settings (training, sampling, data), etc.
         self.logger = Tracking(
             project_name=self.rllm_config.trainer.project_name,
             experiment_name=self.rllm_config.trainer.experiment_name,

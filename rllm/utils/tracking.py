@@ -316,9 +316,12 @@ class UILogger:
         import httpx
 
         self.logger = logging.getLogger(__name__)
-        self.ui_url = os.getenv("RLLM_UI_URL", "http://localhost:3000")
+        api_key = os.getenv("RLLM_API_KEY")
+        ui_url = os.getenv("RLLM_UI_URL")
+        if not ui_url:
+            ui_url = "https://api.rllm-project.com" if api_key else "http://localhost:3000"
+        self.ui_url = ui_url
         headers = {}
-        api_key = os.getenv("RLLM_UI_API_KEY")
         if api_key:
             headers["X-API-Key"] = api_key
         self.client = httpx.Client(base_url=self.ui_url, timeout=5.0, headers=headers)
