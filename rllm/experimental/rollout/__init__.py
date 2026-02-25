@@ -36,9 +36,12 @@ def __getattr__(name: str):
         except Exception:
             raise AttributeError(name) from None
     if name == "TinkerEngine":
-        from .tinker_engine import TinkerEngine
+        try:
+            from .tinker_engine import TinkerEngine as _TinkerEngine
 
-        return TinkerEngine
+            return _TinkerEngine
+        except Exception:
+            raise AttributeError(name) from None
     if name == "VerlEngine":
         try:
             from .verl_engine import VerlEngine as _VerlEngine

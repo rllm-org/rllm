@@ -6,10 +6,12 @@ Follows the same pattern as verl/transform.py.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from rllm.agents.agent import TrajectoryGroup
 from rllm.engine.rollout import ModelOutput
 
-if False:  # TYPE_CHECKING:
+if TYPE_CHECKING:
     from skyrl_train.training_batch import TrainingInputBatch
 
 
