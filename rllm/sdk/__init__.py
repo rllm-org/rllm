@@ -44,6 +44,7 @@ __all__ = [
     "SqliteTracer",  # SQLite-based persistent tracer
     # Integrations (lazy-imported, requires optional deps)
     "RLLMTrajectoryPlugin",  # Google ADK plugin (requires google-adk)
+    "RLLMTrajectoryHooks",  # OpenAI Agents SDK hooks (requires openai-agents)
 ]
 
 
@@ -53,4 +54,8 @@ def __getattr__(name: str):
         from rllm.sdk.integrations.adk import RLLMTrajectoryPlugin
 
         return RLLMTrajectoryPlugin
+    if name == "RLLMTrajectoryHooks":
+        from rllm.sdk.integrations.openai_agents import RLLMTrajectoryHooks
+
+        return RLLMTrajectoryHooks
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

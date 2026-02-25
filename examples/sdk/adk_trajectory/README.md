@@ -37,7 +37,7 @@ traj.reward = my_reward_fn(traj.output, expected)
 |------|-------------|
 | `adk_agent_with_tracing.py` | Simple agent (no tools) with trajectory collection |
 | `adk_tool_agent_with_tracing.py` | Tool-using agent with multi-step trajectory |
-| `adk_multi_agent_with_tracing.py` | Multi-agent solver-judge with per-agent trajectories |
+| `adk_multi_agent_with_tracing.py` | Multi-agent solver-judge pipeline with per-agent trajectories |
 
 ## How It Works
 
@@ -52,24 +52,34 @@ Each LLM call becomes one `StepView` in the trajectory. The Gemini-native types 
 
 ## Multi-Agent: Per-Agent Trajectories
 
-In multi-agent systems, each sub-agent that makes LLM calls gets its own trajectory:
+For a solver-then-judge pattern, run each agent as a separate invocation through
+the same plugin. Each invocation produces its own trajectory, and
+`get_trajectories()` returns all of them.
 
 ```python
-coordinator = LlmAgent(
-    name="coordinator", model="gemini-2.5-flash",
-    sub_agents=[solver, judge],
-)
-
 plugin = RLLMTrajectoryPlugin()
-runner = Runner(..., plugins=[plugin])
 
-# After running...
-per_agent = plugin.get_trajectories_by_agent()
-# => {"coordinator": TrajectoryView, "solver": TrajectoryView, "judge": TrajectoryView}
+solver_runner = Runner(agent=solver, plugins=[plugin], ...)
+judge_runner  = Runner(agent=judge,  plugins=[plugin], ...)
 
-per_agent["solver"].reward = solver_reward
-per_agent["judge"].reward = judge_reward
+# Run solver, then judge with the solver's output
+for event in solver_runner.run_async(..., new_message=problem):
+    ...
+solver_traj = plugin.get_trajectory()
+
+for event in judge_runner.run_async(..., new_message=judge_input):
+    ...
+judge_traj = plugin.get_trajectory()
+
+# Each agent has its own trajectory
+solver_traj.reward = solver_reward
+judge_traj.reward  = judge_reward
 ```
+
+> **Note:** ADK's `sub_agents` are a delegation mechanism -- the parent
+> transfers control and the run ends when the sub-agent finishes. For
+> sequential multi-agent flows (solver then judge), use separate runner
+> invocations instead.
 
 ## What You Get
 
