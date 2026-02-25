@@ -109,18 +109,36 @@ sdk:
 # OpenAI-compatible inference API that remote agents call for model inference.
 remote_agent:
   enabled: false
+  # Mode: "http" (persistent connection) or "agentcore" (fire-and-forget via ACR + S3/SQS)
+  mode: "http"
   # List of remote agent endpoint URLs (e.g. ["http://agent1:8000", "http://agent2:8000"])
   endpoints: []
   # Inference API server settings (exposed by the trainer for remote agents)
   inference_api:
     host: "0.0.0.0"
     port: 8089
-  # Per-episode HTTP timeout in seconds
+  # Per-episode HTTP timeout in seconds (used in "http" mode)
   timeout: 600
   # Maximum number of concurrent requests to remote agents
   max_concurrent: 128
   # Number of retry attempts for failed remote calls
   retry_limit: 3
+  # AgentCore-specific config (used when mode: "agentcore")
+  agentcore:
+    # ARN of the deployed ACR agent runtime
+    agent_runtime_arn: ""
+    # S3 bucket for rollout data storage
+    s3_bucket: ""
+    # SQS queue URL for completion notifications
+    sqs_url: ""
+    # Experiment identifier used as S3 key prefix
+    exp_id: "default"
+    # Global timeout for collecting all episodes in a batch (seconds)
+    timeout: 1800
+    # SQS polling interval (seconds)
+    poll_interval: 2.0
+    # Max messages per SQS receive call
+    batch_size: 10
 
 # Episode Logging Configuration
 episode_logging:

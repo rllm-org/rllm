@@ -120,6 +120,7 @@ class UnifiedTrainer:
         # Remote agent support
         self._inference_server = None  # InferenceAPIServer, if remote mode
         self._remote_agent_enabled = bool(OmegaConf.select(self.rllm_config, "remote_agent.enabled", default=False))
+        self._remote_agent_mode = str(OmegaConf.select(self.rllm_config, "remote_agent.mode", default="http"))
 
         # Read user-defined hooks from kwargs
         self.trajectory_grouping_hook = kwargs.get("trajectory_grouping_hook")
@@ -141,7 +142,10 @@ class UnifiedTrainer:
             )
 
             if self._remote_agent_enabled:
-                self._setup_remote_agent(rollout_engine)
+                if self._remote_agent_mode == "agentcore":
+                    self._setup_agentcore_agent(rollout_engine)
+                else:
+                    self._setup_remote_agent(rollout_engine)
             else:
                 self._setup_local_workflow_engine(rollout_engine)
         except Exception as e:
@@ -250,7 +254,7 @@ class UnifiedTrainer:
             endpoints=list(OmegaConf.select(ra_cfg, "endpoints", default=[])),
             inference_api_url=self._inference_server.inference_api_url,
             timeout=float(OmegaConf.select(ra_cfg, "timeout", default=600)),
-            max_concurrent=int(OmegaConf.select(ra_cfg, "max_concurrent", default=128)),
+            max_concurrent=int(OmegaConf.select(ra_cfg, "max_concurrent", default=64)),
             retry_limit=int(OmegaConf.select(ra_cfg, "retry_limit", default=3)),
         )
         collector = RemoteEpisodeCollector(config=collector_cfg)
@@ -258,6 +262,57 @@ class UnifiedTrainer:
 
         # Assign to agent_workflow_engine so the rest of the trainer code
         # (and backends that call agent_workflow_engine.execute_tasks) works unchanged.
+        self.agent_workflow_engine = collector  # type: ignore[assignment]
+
+    def _setup_agentcore_agent(self, rollout_engine: RolloutEngine):
+        """Setup AgentCore fire-and-forget mode: inference API + S3/SQS episode collection.
+
+        Like ``_setup_remote_agent`` this exposes an inference API for
+        remote agents.  Instead of holding persistent HTTP connections the
+        collector fires tasks to ACR ``/invocations`` endpoints and polls
+        an SQS queue for completion notifications, downloading results
+        from S3.
+        """
+        from rllm.experimental.remote.agentcore_episode_collector import (
+            AgentCoreCollectorConfig,
+            AgentCoreEpisodeCollector,
+        )
+        from rllm.experimental.remote.inference_server import (
+            InferenceAPIServer,
+            InferenceServerConfig,
+        )
+
+        ra_cfg = self.rllm_config.remote_agent
+        ac_cfg = ra_cfg.agentcore
+
+        # 1. Start the inference API server (same as http mode)
+        inf_cfg = InferenceServerConfig(
+            host=OmegaConf.select(ra_cfg, "inference_api.host", default="0.0.0.0"),
+            port=int(OmegaConf.select(ra_cfg, "inference_api.port", default=8089)),
+        )
+        self._inference_server = InferenceAPIServer(
+            rollout_engine=rollout_engine,
+            config=inf_cfg,
+        )
+        self._inference_server.start()
+        logger.info(f"AgentCore mode enabled. Inference API at {self._inference_server.inference_api_url}")
+
+        # 2. Create the AgentCore episode collector
+        collector_cfg = AgentCoreCollectorConfig(
+            agent_runtime_arn=str(OmegaConf.select(ac_cfg, "agent_runtime_arn", default="")),
+            inference_api_url=self._inference_server.inference_api_url,
+            s3_bucket=str(OmegaConf.select(ac_cfg, "s3_bucket", default="")),
+            sqs_url=str(OmegaConf.select(ac_cfg, "sqs_url", default="")),
+            exp_id=str(OmegaConf.select(ac_cfg, "exp_id", default="default")),
+            timeout=float(OmegaConf.select(ac_cfg, "timeout", default=1800)),
+            max_concurrent=int(OmegaConf.select(ra_cfg, "max_concurrent", default=128)),
+            sqs_poll_interval=float(OmegaConf.select(ac_cfg, "poll_interval", default=2.0)),
+            sqs_batch_size=int(OmegaConf.select(ac_cfg, "batch_size", default=10)),
+            retry_limit=int(OmegaConf.select(ra_cfg, "retry_limit", default=3)),
+        )
+        collector = AgentCoreEpisodeCollector(config=collector_cfg)
+        collector.episode_logger = self.episode_logger
+
         self.agent_workflow_engine = collector  # type: ignore[assignment]
 
     def _setup_logging(self):
