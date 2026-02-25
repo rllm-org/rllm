@@ -18,6 +18,7 @@ async def compute_step_distill_advantage(
     teacher_prompt_fn: Callable[[list[dict]], list[dict]] | None = None,
     clip_min: float | None = None,
     clip_max: float | None = None,
+    visualize: bool = False,
 ) -> list[float]:
     """
     Compute per-token distillation advantages for a single Step.
@@ -119,10 +120,10 @@ async def compute_step_distill_advantage(
         )
         if teacher_completion.startswith(teacher_chat_parser.generation_prompt):
             teacher_completion = teacher_completion[len(teacher_chat_parser.generation_prompt):]
-        teacher_completion_ids = teacher_tokenizer.encode(teacher_completion, add_special_tokens=False)
+        teacher_ids = teacher_tokenizer.encode(teacher_prompt + teacher_completion, add_special_tokens=False)
+        teacher_completion_ids = teacher_ids[len(teacher_prompt_ids):]
 
         # Query teacher for logprobs
-        teacher_ids = teacher_prompt_ids + teacher_completion_ids
         teacher_full_logprobs = await teacher_engine.compute_logprobs(teacher_ids)
         teacher_logprobs = teacher_full_logprobs[len(teacher_prompt_ids):]
 
@@ -137,6 +138,19 @@ async def compute_step_distill_advantage(
             reasoning_str=reasoning_str,
             content_str=content_str,
         )
+
+        if visualize:
+            from rllm.trainer.distill import visualize_alignment
+            visualize_alignment(
+                student_ids=student_completion_ids,
+                student_tokenizer=student_tokenizer,
+                teacher_ids=teacher_completion_ids,
+                teacher_tokenizer=teacher_tokenizer,
+                teacher_logprobs=teacher_logprobs,
+                student_logprobs=student_logprobs,
+                reasoning_str=reasoning_str,
+                content_str=content_str,
+            )
 
     # Compute per-token advantages: teacher_logprob - student_logprob
     advantages = [t_lp - s_lp for t_lp, s_lp in zip(aligned_teacher_logprobs, student_logprobs, strict=False)]
