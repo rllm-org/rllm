@@ -42,4 +42,15 @@ __all__ = [
     "TracerProtocol",  # Tracer interface
     "InMemorySessionTracer",  # In-memory tracer for immediate access
     "SqliteTracer",  # SQLite-based persistent tracer
+    # Integrations (lazy-imported, requires optional deps)
+    "RLLMTrajectoryPlugin",  # Google ADK plugin (requires google-adk)
 ]
+
+
+def __getattr__(name: str):
+    """Lazy-import integrations that require optional dependencies."""
+    if name == "RLLMTrajectoryPlugin":
+        from rllm.sdk.integrations.adk import RLLMTrajectoryPlugin
+
+        return RLLMTrajectoryPlugin
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
