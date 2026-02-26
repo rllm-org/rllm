@@ -17,12 +17,16 @@ from rllm.sdk.tracers import (
     SqliteTracer,
     TracerProtocol,
 )
+from rllm.types import Step, Trajectory
 
 __all__ = [
+    # Canonical types (from rllm.types)
+    "Step",  # Canonical Step (same class as StepView)
+    "Trajectory",  # Canonical Trajectory (same class as TrajectoryView)
     # Protocol / Data Models
     "Trace",  # Low-level LLM call trace
-    "StepView",  # Trace wrapper with reward field (auto-generated from traces)
-    "TrajectoryView",  # Collection of steps forming a workflow
+    "StepView",  # Alias for Step (backward compatibility)
+    "TrajectoryView",  # Alias for Trajectory (backward compatibility)
     # Decorators
     "trajectory",  # Decorator to mark function as trajectory (returns TrajectoryView)
     # Sessions

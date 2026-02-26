@@ -125,9 +125,10 @@ def trace_to_step(trace: Trace) -> Step:
     assert response_message, "Response message is required in trace output"
 
     return Step(
+        id=trace.trace_id,
         chat_completions=messages + [response_message],
         model_output=trace_to_model_output(trace),
-        info=trace.metadata,
+        metadata=trace.metadata,
     )
 
 
