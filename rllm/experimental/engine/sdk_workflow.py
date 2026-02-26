@@ -4,7 +4,8 @@ This module provides two classes:
 
 - ``SdkWorkflowFactory`` – one-time setup of shared infrastructure (proxy, store,
   wrapped agent function).  Produces the kwargs dict that ``SdkWorkflow`` instances
-  need.
+  need.  Supports both Verl (``VerlProxyManager``) and Tinker
+  (``TinkerProxyManager``) backends via the same LiteLLM proxy pipeline.
 
 - ``SdkWorkflow(Workflow)`` – per-task adapter executed by
   ``UnifiedWorkflowEngine``.  Each call to ``run()`` invokes the user-provided
@@ -49,9 +50,9 @@ class SdkWorkflowFactory:
     """Initialise shared SDK infrastructure once and provide workflow args.
 
     Responsibilities:
-    - Sets up the LLM proxy (VerlProxyManager for verl, InferenceAPIServer
-      for tinker) so that ``get_chat_client()`` inside the user function can
-      reach the training model.
+    - Sets up the LLM proxy (``VerlProxyManager`` for verl,
+      ``TinkerProxyManager`` for tinker) so that ``get_chat_client()``
+      inside the user function can reach the training model.
     - Creates a ``SqliteTraceStore`` for trace persistence.
     - Wraps ``agent_run_func`` with ``wrap_with_session_context()``.
     - Exposes ``get_workflow_args()`` for ``SdkWorkflow`` construction.
@@ -88,7 +89,6 @@ class SdkWorkflowFactory:
 
         # Proxy setup – depends on backend engine type
         self.proxy_manager: Any = None
-        self._inference_server: Any = None
         self._setup_proxy()
 
     # ----- proxy setup helpers -----
@@ -152,26 +152,52 @@ class SdkWorkflowFactory:
         logger.info("VerlProxyManager ready at %s", base_url)
 
     def _setup_tinker_proxy(self) -> None:
-        """Start InferenceAPIServer for tinker backend."""
-        from rllm.experimental.remote.inference_server import (
-            InferenceAPIServer,
-            InferenceServerConfig,
-        )
+        """Set up TinkerProxyManager for tinker backend.
+
+        Follows the same LiteLLM proxy pattern as ``_setup_verl_proxy()`` so
+        that traces are captured by the ``TracingCallback`` instead of being
+        stored directly by the inference server.
+        """
+        from rllm.sdk.proxy.proxy_manager import TinkerProxyManager
 
         proxy_cfg = self._sdk_cfg.get("proxy", {})
-        host = proxy_cfg.get("host", "0.0.0.0")
-        port = proxy_cfg.get("port", 8089)
+        model_name = self.rllm_config.get("model_name", "default")
 
-        server_config = InferenceServerConfig(host=host, port=port)
-        self._inference_server = InferenceAPIServer(
+        self.proxy_manager = TinkerProxyManager(
             rollout_engine=self.rollout_engine,
-            config=server_config,
-            trace_store=self.store,
+            model_name=model_name,
+            proxy_host=proxy_cfg.get("host", "127.0.0.1"),
+            proxy_port=proxy_cfg.get("port", 4000),
+            backend_host=proxy_cfg.get("backend_host", "127.0.0.1"),
+            backend_port=proxy_cfg.get("backend_port", 8090),
+            admin_token=proxy_cfg.get("admin_token", "my-shared-secret"),
+            proxy_access_log=False,
         )
-        self._inference_server.start()
-        base_url = self._inference_server.inference_api_url
+
+        config_payload = self.proxy_manager.build_proxy_config()
+
+        proxy_mode = proxy_cfg.get("mode", "subprocess")
+        sync_tracer = proxy_cfg.get("sync_tracer", False)
+
+        if proxy_mode == "subprocess":
+            db_path = self._sdk_cfg.get("store", {}).get("path", None)
+            project = self.rllm_config.trainer.get("project_name", "rllm-agent-sdk")
+            self.proxy_manager.start_proxy_subprocess(
+                config=config_payload,
+                db_path=db_path,
+                project=project,
+                sync_tracer=sync_tracer,
+                add_logprobs=True,
+                add_return_token_ids=True,
+            )
+        elif proxy_mode == "external":
+            self.proxy_manager.reload_proxy_config(config=config_payload)
+        else:
+            raise ValueError(f"Unknown proxy mode: {proxy_mode}")
+
+        base_url = self.proxy_manager.get_proxy_url()
         os.environ["RLLM_SDK_BASE_URL"] = base_url
-        logger.info("InferenceAPIServer for tinker started at %s (base_url=%s)", self._inference_server.url, base_url)
+        logger.info("TinkerProxyManager ready at %s", base_url)
 
     # ----- public API -----
 
@@ -181,7 +207,6 @@ class SdkWorkflowFactory:
             "wrapped_func": self.wrapped_func,
             "store": self.store,
             "proxy_manager": self.proxy_manager,
-            "inference_server": self._inference_server,
             "groupby_key": self.groupby_key,
             "traj_name_key": self.traj_name_key,
             "sdk_cfg": self._sdk_cfg,
@@ -202,9 +227,6 @@ class SdkWorkflowFactory:
         if self.proxy_manager is not None:
             self.proxy_manager.shutdown_proxy()
             self.proxy_manager = None
-        if self._inference_server is not None:
-            self._inference_server.stop()
-            self._inference_server = None
         # Best-effort close of the connection pool
         try:
             import asyncio
@@ -241,7 +263,6 @@ class SdkWorkflow(Workflow):
         wrapped_func: Callable,
         store: SqliteTraceStore,
         proxy_manager: Any = None,
-        inference_server: Any = None,
         groupby_key: str | None = None,
         traj_name_key: str | None = None,
         sdk_cfg: dict | None = None,
@@ -251,7 +272,6 @@ class SdkWorkflow(Workflow):
         self.wrapped_func = wrapped_func
         self.store = store
         self.proxy_manager = proxy_manager
-        self.inference_server = inference_server
         self.groupby_key = groupby_key
         self.traj_name_key = traj_name_key
         self.sdk_cfg = sdk_cfg or {}
@@ -276,10 +296,6 @@ class SdkWorkflow(Workflow):
         if not success:
             # output is the traceback string on failure
             raise RuntimeError(f"SDK agent function failed: {output}")
-
-        # Flush any fire-and-forget trace writes before retrieval
-        if self.inference_server is not None and hasattr(self.inference_server, "flush_pending_traces"):
-            await self.inference_server.flush_pending_traces()
 
         # Collect traces from the store (session_uid is unique per invocation,
         # so all returned traces already belong to this session)

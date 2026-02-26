@@ -2,7 +2,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from rllm.types import Step
+from rllm.types import (
+    Step,
+    Trajectory,  # noqa: F401
+)
 
 
 class LLMInput(BaseModel):

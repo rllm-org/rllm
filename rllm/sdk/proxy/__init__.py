@@ -9,6 +9,7 @@ from rllm.sdk.proxy.metadata_slug import (
     extract_metadata_from_path,
 )
 from rllm.sdk.proxy.middleware import MetadataRoutingMiddleware
+from rllm.sdk.proxy.proxy_manager import TinkerProxyManager, VerlProxyManager
 
 __all__ = [
     "assemble_routing_metadata",
@@ -18,5 +19,7 @@ __all__ = [
     "extract_metadata_from_path",
     "MetadataRoutingMiddleware",
     "SamplingParametersCallback",
+    "TinkerProxyManager",
     "TracingCallback",
+    "VerlProxyManager",
 ]
