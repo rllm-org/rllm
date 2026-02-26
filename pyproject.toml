@@ -54,6 +54,11 @@ dependencies = [
 
 [project.optional-dependencies]
 
+ui = [
+    "httpx>=0.26.0",
+    "python-multipart>=0.0.6",
+]
+
 dev = [
     "pytest",
     "pre-commit",
