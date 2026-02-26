@@ -35,6 +35,9 @@ from rllm.experimental.rollout import RolloutEngine
 from rllm.utils import EpisodeLogger, Tracking
 from rllm.workflows.workflow import TerminationReason, Workflow
 
+TRAJ_GROUPING_HOOK_KEY = "traj_grouping_hook"
+TRAJ_GROUP_ADV_ESTIMATOR_MAP_KEY = "traj_group_adv_estimator_map"
+
 
 @dataclass
 class TrainerState:
@@ -111,7 +114,9 @@ class UnifiedTrainer:
         self.rllm_config = config.rllm
 
         # Read user-defined hooks from kwargs
-        self.trajectory_grouping_hook = kwargs.get("trajectory_grouping_hook")
+        self.traj_grouping_hook = kwargs.get(TRAJ_GROUPING_HOOK_KEY)
+        # Extract the TrajectoryGroup-specific estimator from kwargs
+        self.traj_group_adv_estimator_map = kwargs.get(TRAJ_GROUP_ADV_ESTIMATOR_MAP_KEY, {})
 
         self.backend = backend_cls(config=config, **(backend_args or {}))
 
@@ -143,6 +148,9 @@ class UnifiedTrainer:
         """Validate and setup common configs."""
         # validate common, backend-agnostic configs
         assert self.rllm_config is not None, "rLLM config is not set"
+        # if the traj_group_adv_estimator_map is given, the user must turn `use_rllm` to True
+        if self.traj_group_adv_estimator_map and not self.rllm_config.algorithm.get("use_rllm", False):
+            raise ValueError("If `traj_group_adv_estimator_map` is given, the user must explicitly turn `rllm.algorithm.use_rllm` to True")
 
         if self.rllm_config.rejection_sample.multiplier != 1:
             assert self.rllm_config.rejection_sample.enable is True, "rejection sampling is disabled, but rejection_sample.multiplier is not 1"
@@ -150,7 +158,6 @@ class UnifiedTrainer:
         # validate backend-specific configs
         self.backend.validate_config()
 
-        # TODO(listar2000): add these configurations to the hydra config
         # compact filtering config (used for filtering out episodes that are not valid)
         self.cf_config = CompactFilteringConfig.from_config(self.rllm_config.compact_filtering)
 
@@ -169,6 +176,7 @@ class UnifiedTrainer:
         # algorithm config (used for rLLM-native advantage computation)
         self.algorithm_config = AlgorithmConfig(
             estimator=self.rllm_config.algorithm.adv_estimator,
+            estimator_map=self.traj_group_adv_estimator_map,  # TODO(listar2000): see if we can make this configurable in config as well
             stepwise_advantage_mode=self.rllm_config.stepwise_advantage.mode,
             norm_adv_by_std_in_grpo=self.rllm_config.stepwise_advantage.get("norm_adv_by_std_in_grpo", True),
             use_rllm=self.rllm_config.algorithm.get("use_rllm", False),
@@ -287,7 +295,7 @@ class UnifiedTrainer:
         workflow_metrics, termination_counts = self._collect_workflow_metrics_from_episodes(trainer_state.episodes)
 
         # stage 2: transform episodes to trajectory groups (sync)
-        trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(trainer_state.episodes, self.transform_config, self.trajectory_grouping_hook)
+        trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(trainer_state.episodes, self.transform_config, self.traj_grouping_hook)
         trainer_state.trajectory_groups = trajectory_groups
         trainer_state.metrics.update(transform_metrics)
 
@@ -352,7 +360,7 @@ class UnifiedTrainer:
         for batch in val_dataloader:
             # Generate episodes and transform to trajectory groups
             val_episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, is_validation=True)
-            val_trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(val_episodes, self.transform_config, self.trajectory_grouping_hook)
+            val_trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(val_episodes, self.transform_config, self.traj_grouping_hook)
             reward_metrics = collect_reward_and_advantage_from_trajectory_groups(val_trajectory_groups, self.algorithm_config, collect_advantage=False)
 
             is_correct_lst.extend([episode.is_correct for episode in val_episodes])

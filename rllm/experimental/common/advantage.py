@@ -87,19 +87,19 @@ def collect_reward_and_advantage_from_trajectory_groups(
     """
     assert algorithm_config.stepwise_advantage_mode == "broadcast", "Only broadcast mode is supported in experimental unified trainer."
 
-    if collect_advantage:
-        if algorithm_config.estimator == rLLMAdvantageEstimator.GRPO:
+    def get_advantage_fn(estimator: rLLMAdvantageEstimator):
+        if estimator == rLLMAdvantageEstimator.GRPO:
             advantage_fn = partial(_calculate_grpo_advantages, norm_adv_by_std_in_grpo=algorithm_config.norm_adv_by_std_in_grpo)
-        elif algorithm_config.estimator == rLLMAdvantageEstimator.REINFORCE:
+        elif estimator == rLLMAdvantageEstimator.REINFORCE:
             advantage_fn = _calculate_reinforce_advantages
         else:
             logger.warning(f"Unsupported estimator {algorithm_config.estimator} in rLLMAdvantageEstimator, using GRPO")
             advantage_fn = partial(_calculate_grpo_advantages, norm_adv_by_std_in_grpo=algorithm_config.norm_adv_by_std_in_grpo)
+        return advantage_fn
 
-        advantages_by_group = defaultdict(list)
-
+    advantages_by_group = defaultdict(list)
     rewards_by_group = defaultdict(list)
-    # TODO(listar2000): in the future, we should support per-trajectory-group advantage modes
+
     for group in groups:
         group_role = group.group_role
 
@@ -121,6 +121,7 @@ def collect_reward_and_advantage_from_trajectory_groups(
             rewards_by_group[group_role].extend(traj_rewards)
 
             if collect_advantage:
+                advantage_fn = get_advantage_fn(algorithm_config.estimator_map.get(group_role, algorithm_config.estimator))
                 advantages = advantage_fn(traj_rewards)
                 advantages_by_group[group_role].extend(advantages)
                 # broadcast the advantage to all steps in the trajectory

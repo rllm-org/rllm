@@ -6,6 +6,7 @@ It does NOT contain any environment or agent logic.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 from functools import wraps
@@ -183,11 +184,38 @@ class TinkerPolicyTrainer:
         )
 
     @require_training_client
+    async def _get_forward_backward_futures(
+        self,
+        training_datums: list[tinker.Datum] | dict[str, list[tinker.Datum]],
+        estimator_map: dict[str, rLLMAdvantageEstimator],
+        algorithm_config: AlgorithmConfig,
+    ) -> list[tinker.APIFuture]:
+        fwd_bwd_futures = []
+        if isinstance(training_datums, dict):
+            for group_role, datums in training_datums.items():
+                estimator = estimator_map.get(group_role, self.algorithm_config.estimator)
+                loss_fn = algorithm_config.loss_fn or ADV_TO_LOSS_FN_AUTO_MAP[estimator]
+                fwd_bwd_future = await self.training_client.forward_backward_async(
+                    [self._remove_mask(datum) for datum in datums],
+                    loss_fn=loss_fn,  # type: ignore[attr-defined]
+                )
+                fwd_bwd_futures.append(fwd_bwd_future)
+        else:
+            loss_fn = algorithm_config.loss_fn or ADV_TO_LOSS_FN_AUTO_MAP[algorithm_config.estimator]
+            fwd_bwd_future = await self.training_client.forward_backward_async(
+                [self._remove_mask(datum) for datum in training_datums],
+                loss_fn=loss_fn,  # type: ignore[attr-defined]
+            )
+            fwd_bwd_futures.append(fwd_bwd_future)
+
+        return fwd_bwd_futures
+
+    @require_training_client
     async def forward_backward_from_trajectory_groups(
         self,
         trajectory_groups: list[TrajectoryGroup],
         algorithm_config: AlgorithmConfig | None = None,
-    ) -> tuple[list[tinker.Datum], list[torch.Tensor], dict]:
+    ) -> tuple[list[tinker.Datum] | dict[str, list[tinker.Datum]], list[torch.Tensor], dict]:
         """
         Run forward-backward pass from trajectory groups (skipping episode transformation).
 
@@ -200,7 +228,7 @@ class TinkerPolicyTrainer:
 
         Returns:
             Tuple of (training_datums, training_logprobs, adv_metrics)
-            - training_datums: List of datums WITH masks for metrics
+            - training_datums: List of datums WITH masks for metrics (or dictionary of datums, keyed by trajectory group role)
             - training_logprobs: List of training logprobs from forward-backward
             - adv_metrics: Dictionary of advantage metrics (rewards + advantages summary for each trajectory group)
         """
@@ -214,20 +242,21 @@ class TinkerPolicyTrainer:
         )
 
         # Forward-backward pass
-        loss_fn = algorithm_config.loss_fn or ADV_TO_LOSS_FN_AUTO_MAP[algorithm_config.estimator]
-        fwd_bwd_future = await self.training_client.forward_backward_async(  # type: ignore[attr-defined]
-            [self._remove_mask(datum) for datum in training_datums],
-            loss_fn=loss_fn,
+        fwd_bwd_futures = await self._get_forward_backward_futures(
+            training_datums=training_datums,
+            estimator_map=algorithm_config.estimator_map,
+            algorithm_config=algorithm_config,
         )
 
         # Wait for completion and extract logprobs
-        fwd_bwd_result = await fwd_bwd_future.result_async()
+        fwd_bwd_results = await asyncio.gather(*fwd_bwd_futures)
 
         # Extract training logprobs from loss_fn_outputs
         training_logprobs = []
-        for output in fwd_bwd_result.loss_fn_outputs:
-            logprobs = output["logprobs"].to_torch()
-            training_logprobs.append(logprobs)
+        for fwd_bwd_result in fwd_bwd_results:
+            for output in fwd_bwd_result.loss_fn_outputs:
+                logprobs = output["logprobs"].to_torch()
+                training_logprobs.append(logprobs)
 
         return training_datums, training_logprobs, adv_metrics
 
@@ -267,12 +296,11 @@ class TinkerPolicyTrainer:
         beta1: float = 0.9,
         beta2: float = 0.95,
         eps: float = 1e-8,
-    ) -> tuple[list[tinker.Datum], list[torch.Tensor], dict, float]:
+    ) -> tuple[list[tinker.Datum] | dict[str, list[tinker.Datum]], list[torch.Tensor], dict, float]:
         """Run forward-backward pass and optimizer step from trajectory groups -- at the same time.
 
         This follows from the best-practice with Tinker: https://tinker-docs.thinkingmachines.ai/async#performance-tips-overlap-requests
         """
-        # TODO(listar2000): refactor this function to avoid redundant code with forward_backward_from_trajectory_groups
         # Transform trajectory groups to datums (includes advantage computation)
         training_datums, adv_metrics = transform_trajectory_groups_to_datums(
             trajectory_groups,
@@ -280,10 +308,10 @@ class TinkerPolicyTrainer:
         )
 
         # Forward-backward and optimizer future together
-        loss_fn = self.algorithm_config.loss_fn or ADV_TO_LOSS_FN_AUTO_MAP[self.algorithm_config.estimator]
-        fwd_bwd_future = await self.training_client.forward_backward_async(  # type: ignore[attr-defined]
-            [self._remove_mask(datum) for datum in training_datums],
-            loss_fn=loss_fn,
+        fwd_bwd_futures = await self._get_forward_backward_futures(
+            training_datums=training_datums,
+            estimator_map=self.algorithm_config.estimator_map,
+            algorithm_config=self.algorithm_config,
         )
 
         optim_step_future, scheduled_learning_rate = await self.optim_step_future(
@@ -295,13 +323,14 @@ class TinkerPolicyTrainer:
             eps=eps,
         )
         # Retrieve the results together
-        fwd_bwd_result = await fwd_bwd_future.result_async()
+        fwd_bwd_results = await asyncio.gather(*fwd_bwd_futures)
         await optim_step_future.result_async()
 
         training_logprobs = []
-        for output in fwd_bwd_result.loss_fn_outputs:
-            logprobs = output["logprobs"].to_torch()
-            training_logprobs.append(logprobs)
+        for fwd_bwd_result in fwd_bwd_results:
+            for output in fwd_bwd_result.loss_fn_outputs:
+                logprobs = output["logprobs"].to_torch()
+                training_logprobs.append(logprobs)
 
         return training_datums, training_logprobs, adv_metrics, scheduled_learning_rate
 
