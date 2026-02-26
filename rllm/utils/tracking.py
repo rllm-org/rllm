@@ -319,7 +319,7 @@ class UILogger:
         api_key = os.getenv("RLLM_API_KEY")
         ui_url = os.getenv("RLLM_UI_URL")
         if not ui_url:
-            ui_url = "https://api.rllm-project.com" if api_key else "http://localhost:3000"
+            ui_url = "https://ui.rllm-project.com" if api_key else "http://localhost:3000"
         self.ui_url = ui_url
         headers = {}
         if api_key:
