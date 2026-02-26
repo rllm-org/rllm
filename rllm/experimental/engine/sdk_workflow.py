@@ -180,6 +180,7 @@ class SdkWorkflowFactory:
             "wrapped_func": self.wrapped_func,
             "store": self.store,
             "proxy_manager": self.proxy_manager,
+            "inference_server": self._inference_server,
             "groupby_key": self.groupby_key,
             "traj_name_key": self.traj_name_key,
             "sdk_cfg": self._sdk_cfg,
@@ -190,6 +191,11 @@ class SdkWorkflowFactory:
         if self.proxy_manager is not None and hasattr(self.proxy_manager, "flush_tracer"):
             await self.proxy_manager.flush_tracer(timeout=60.0)
 
+    async def _close_store(self) -> None:
+        """Close the trace store connection pool."""
+        if self.store is not None:
+            await self.store.close()
+
     def shutdown(self) -> None:
         """Release proxy / server resources."""
         if self.proxy_manager is not None:
@@ -198,6 +204,17 @@ class SdkWorkflowFactory:
         if self._inference_server is not None:
             self._inference_server.stop()
             self._inference_server = None
+        # Best-effort close of the connection pool
+        try:
+            import asyncio
+
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(self._close_store())
+            else:
+                loop.run_until_complete(self._close_store())
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +240,7 @@ class SdkWorkflow(Workflow):
         wrapped_func: Callable,
         store: SqliteTraceStore,
         proxy_manager: Any = None,
+        inference_server: Any = None,
         groupby_key: str | None = None,
         traj_name_key: str | None = None,
         sdk_cfg: dict | None = None,
@@ -232,6 +250,7 @@ class SdkWorkflow(Workflow):
         self.wrapped_func = wrapped_func
         self.store = store
         self.proxy_manager = proxy_manager
+        self.inference_server = inference_server
         self.groupby_key = groupby_key
         self.traj_name_key = traj_name_key
         self.sdk_cfg = sdk_cfg or {}
@@ -257,14 +276,14 @@ class SdkWorkflow(Workflow):
             # output is the traceback string on failure
             raise RuntimeError(f"SDK agent function failed: {output}")
 
-        # Collect traces from the store
+        # Flush any fire-and-forget trace writes before retrieval
+        if self.inference_server is not None and hasattr(self.inference_server, "flush_pending_traces"):
+            await self.inference_server.flush_pending_traces()
+
+        # Collect traces from the store (session_uid is unique per invocation,
+        # so all returned traces already belong to this session)
         traces = await self.store.get_by_session_uid(session_uid, since=rollout_start_time)
-        traces_for_session: list[tuple[str, Trace]] = []
-        for tc in traces:
-            session_name = tc.data.get("session_name")
-            if session_name != uid:
-                continue
-            traces_for_session.append((tc.id, Trace(**tc.data)))
+        traces_for_session = [(tc.id, Trace(**tc.data)) for tc in traces]
 
         # Unpack output (may be float, list[TrajectoryView], or tuple)
         output_payload, metrics = self._unpack_output(output)
