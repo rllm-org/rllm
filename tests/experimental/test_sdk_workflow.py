@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from rllm.agents.agent import Episode, Trajectory
-from rllm.sdk.protocol import StepView, TrajectoryView
+from rllm.types import Step
+from rllm.types import Trajectory as BaseTrajectory
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -115,18 +116,18 @@ class TestSdkWorkflow:
 
     @pytest.mark.asyncio
     async def test_run_trajectory_view_return(self):
-        """Agent returns List[TrajectoryView] -> multi-trajectory Episode."""
+        """Agent returns List[BaseTrajectory] -> multi-trajectory Episode."""
         session_uid = "test-session-uid-2"
 
         traj_views = [
-            TrajectoryView(
+            BaseTrajectory(
                 name="solver",
-                steps=[StepView(id="tr1", reward=0.5)],
+                steps=[Step(id="tr1", reward=0.5)],
                 reward=0.5,
             ),
-            TrajectoryView(
+            BaseTrajectory(
                 name="judge",
-                steps=[StepView(id="tr2", reward=1.0)],
+                steps=[Step(id="tr2", reward=1.0)],
                 reward=1.0,
             ),
         ]

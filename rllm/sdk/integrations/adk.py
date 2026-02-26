@@ -1,7 +1,7 @@
 """Google ADK integration for rLLM trajectory tracking.
 
 Provides ``RLLMTrajectoryPlugin``, a Google ADK ``BasePlugin`` that captures
-all LLM calls during agent execution and builds rLLM ``TrajectoryView``
+all LLM calls during agent execution and builds rLLM ``Trajectory``
 objects for SFT distillation and RL training.
 
 Usage::
@@ -38,8 +38,8 @@ from rllm.sdk.protocol import (
     LLMInput,
     LLMOutput,
     Trace,
-    TrajectoryView,
-    trace_to_step_view,
+    Trajectory,
+    trace_to_step,
 )
 
 try:
@@ -252,14 +252,14 @@ def _extract_tools_from_request(llm_request: Any) -> list[dict] | None:
 
 
 class RLLMTrajectoryPlugin(BasePlugin):
-    """ADK Plugin that captures LLM calls and builds rLLM TrajectoryView objects.
+    """ADK Plugin that captures LLM calls and builds rLLM Trajectory objects.
 
     Each model invocation is recorded as an rLLM ``Trace``, with Gemini-native
     types automatically converted to the OpenAI-compatible format that rLLM's
     training pipeline expects.
 
     After the runner finishes, call :py:meth:`get_trajectory` to obtain a
-    ``TrajectoryView`` ready for reward assignment and training.
+    ``Trajectory`` ready for reward assignment and training.
 
     Args:
         name: Plugin identifier (default ``"rllm_trajectory"``).
@@ -286,7 +286,7 @@ class RLLMTrajectoryPlugin(BasePlugin):
             raise ImportError("Google ADK is required for RLLMTrajectoryPlugin. Install it with: pip install google-adk")
         super().__init__(name=name)
         self._traces: list[Trace] = []
-        self._trajectories: list[TrajectoryView] = []
+        self._trajectories: list[Trajectory] = []
         self._pending_request: Any = None
         self._pending_agent_name: str = "adk_agent"
         self._request_start_time: float = 0.0
@@ -294,7 +294,7 @@ class RLLMTrajectoryPlugin(BasePlugin):
         self._last_output: Any = None
         self._agent_name: str = "adk_agent"
         self._model_name: str = "unknown"
-        self._per_agent_trajectories: dict[str, TrajectoryView] = {}
+        self._per_agent_trajectories: dict[str, Trajectory] = {}
 
     # ---- lifecycle callbacks --------------------------------------------------
 
@@ -309,7 +309,7 @@ class RLLMTrajectoryPlugin(BasePlugin):
         return None
 
     async def after_run_callback(self, *, invocation_context: InvocationContext) -> None:
-        """Build the ``TrajectoryView`` once the invocation completes.
+        """Build the ``Trajectory`` once the invocation completes.
 
         A combined trajectory (all agents) is always produced.  In addition,
         per-agent trajectories are built so multi-agent systems can assign
@@ -317,8 +317,8 @@ class RLLMTrajectoryPlugin(BasePlugin):
         :py:meth:`get_trajectories_by_agent`.
         """
         # -- combined trajectory (all agents) --
-        steps = [trace_to_step_view(t) for t in self._traces]
-        traj = TrajectoryView(
+        steps = [trace_to_step(t) for t in self._traces]
+        traj = Trajectory(
             name=self._agent_name,
             steps=steps,
             reward=0.0,
@@ -338,9 +338,9 @@ class RLLMTrajectoryPlugin(BasePlugin):
             a = t.metadata.get("agent", self._agent_name)
             agent_traces.setdefault(a, []).append(t)
 
-        per_agent: dict[str, TrajectoryView] = {}
+        per_agent: dict[str, Trajectory] = {}
         for agent, traces in agent_traces.items():
-            agent_steps = [trace_to_step_view(t) for t in traces]
+            agent_steps = [trace_to_step(t) for t in traces]
             last_content = None
             for t in reversed(traces):
                 msg = t.output.message if hasattr(t.output, "message") else {}
@@ -348,7 +348,7 @@ class RLLMTrajectoryPlugin(BasePlugin):
                 if c:
                     last_content = c
                     break
-            per_agent[agent] = TrajectoryView(
+            per_agent[agent] = Trajectory(
                 name=agent,
                 steps=agent_steps,
                 reward=0.0,
@@ -468,7 +468,7 @@ class RLLMTrajectoryPlugin(BasePlugin):
 
     # ---- public API -----------------------------------------------------------
 
-    def get_trajectory(self) -> TrajectoryView:
+    def get_trajectory(self) -> Trajectory:
         """Return the trajectory from the most recent completed invocation.
 
         Raises:
@@ -478,18 +478,18 @@ class RLLMTrajectoryPlugin(BasePlugin):
             raise ValueError("No trajectories collected yet. Make sure the runner has completed at least one invocation.")
         return self._trajectories[-1]
 
-    def get_trajectories(self) -> list[TrajectoryView]:
+    def get_trajectories(self) -> list[Trajectory]:
         """Return all collected trajectories (one per completed invocation)."""
         return list(self._trajectories)
 
-    def get_trajectories_by_agent(self) -> dict[str, TrajectoryView]:
+    def get_trajectories_by_agent(self) -> dict[str, Trajectory]:
         """Return per-agent trajectories from the most recent invocation.
 
         In a multi-agent system each sub-agent that made at least one LLM call
-        gets its own ``TrajectoryView``.  The keys are agent names.
+        gets its own ``Trajectory``.  The keys are agent names.
 
         Returns:
-            Mapping of agent name to its ``TrajectoryView``.
+            Mapping of agent name to its ``Trajectory``.
 
         Raises:
             ValueError: If no invocation has completed yet.

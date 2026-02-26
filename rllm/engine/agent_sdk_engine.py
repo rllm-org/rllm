@@ -17,11 +17,12 @@ from rllm.agents.agent import Episode, Trajectory
 from rllm.engine.rollout import ModelOutput, RolloutEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
 from rllm.sdk.data_process import group_steps, trace_to_step
-from rllm.sdk.protocol import Trace, TrajectoryView
+from rllm.sdk.protocol import Trace
 from rllm.sdk.proxy.proxy_manager import VerlProxyManager
 from rllm.sdk.session import SESSION_BACKEND
 from rllm.sdk.session.base import wrap_with_session_context
 from rllm.sdk.store.sqlite_store import SqliteTraceStore
+from rllm.types import Trajectory as BaseTrajectory
 from rllm.utils import colorful_print
 from rllm.workflows.workflow import TerminationReason
 
@@ -212,7 +213,7 @@ class AgentSdkEngine:
                     colorful_print(f"[{uid}] Rollout completed with reward: {float(output)}", fg="green" if float(output) > 0 else "yellow")
                     return task_id, rollout_idx, retry_attempt, float(output), session_uid
                 elif success and isinstance(output, list):
-                    assert all(isinstance(t, TrajectoryView) for t in output), "Must be a list of TrajectoryView"
+                    assert all(isinstance(t, BaseTrajectory) for t in output), "Must be a list of Trajectory"
                     return task_id, rollout_idx, retry_attempt, output, session_uid
                 elif success and isinstance(output, tuple):
                     assert len(output) == 2, "Must be a tuple of (payload, metrics)"
@@ -221,7 +222,7 @@ class AgentSdkEngine:
                         colorful_print(f"[{uid}] Rollout completed with reward: {float(payload)}", fg="green" if float(payload) > 0 else "yellow")
                         return task_id, rollout_idx, retry_attempt, (float(payload), metrics), session_uid
                     elif isinstance(payload, list):
-                        assert all(isinstance(t, TrajectoryView) for t in payload), "Must be a list of TrajectoryView"
+                        assert all(isinstance(t, BaseTrajectory) for t in payload), "Must be a list of Trajectory"
                         return task_id, rollout_idx, retry_attempt, (payload, metrics), session_uid
                     else:
                         raise ValueError(f"Invalid output type: {type(output)}")

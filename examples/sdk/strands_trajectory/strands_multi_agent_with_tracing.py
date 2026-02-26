@@ -1,7 +1,7 @@
 """Example: Strands multi-agent system with per-agent rLLM trajectory tracing.
 
 Demonstrates a solver-judge pipeline where each agent runs independently and
-gets its own ``TrajectoryView`` -- enabling per-agent reward assignment for
+gets its own ``Trajectory`` -- enabling per-agent reward assignment for
 RL training.
 
 The same ``RLLMTrajectoryHookProvider`` is passed to both agents so that

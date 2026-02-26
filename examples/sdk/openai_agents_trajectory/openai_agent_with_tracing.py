@@ -1,7 +1,7 @@
 """Example: OpenAI Agents SDK agent with rLLM trajectory tracing.
 
 Shows how to add rLLM trajectory collection to a standard OpenAI Agents SDK
-agent with just a few extra lines.  The collected ``TrajectoryView`` can be
+agent with just a few extra lines.  The collected ``Trajectory`` can be
 used for SFT distillation or RL training.
 
 Prerequisites:
@@ -85,10 +85,10 @@ async def main():
         traj.reward = 0.0
         print(f"\nReward: {traj.reward} (incorrect)")
 
-    # The TrajectoryView is now ready for:
+    # The Trajectory is now ready for:
     #   - SFT distillation (use traj.steps[i].input/output as training pairs)
     #   - RL training with rLLM (pass to rLLM trainer)
-    print(f"\nTrajectoryView object: {traj.model_dump_json(indent=2)[:500]}...")
+    print(f"\nTrajectory object: {traj.model_dump_json(indent=2)[:500]}...")
 
 
 if __name__ == "__main__":

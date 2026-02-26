@@ -2,7 +2,7 @@
 
 Demonstrates tracing an ADK agent that uses tools.  The plugin captures
 every LLM call (including the tool-calling rounds) and all tool execution
-metadata, producing a multi-step ``TrajectoryView``.
+metadata, producing a multi-step ``Trajectory``.
 
 Prerequisites:
     pip install google-adk rllm

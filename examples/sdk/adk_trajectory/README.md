@@ -46,9 +46,9 @@ traj.reward = my_reward_fn(traj.output, expected)
 1. **before_model_callback** -- stores the outgoing `LlmRequest`
 2. **after_model_callback** -- pairs request with response, converts Gemini types to OpenAI format, creates an rLLM `Trace`
 3. **after_tool_callback** -- annotates traces with tool execution metadata
-4. **after_run_callback** -- assembles all traces into a `TrajectoryView`
+4. **after_run_callback** -- assembles all traces into a `Trajectory`
 
-Each LLM call becomes one `StepView` in the trajectory. The Gemini-native types (`types.Content`, `LlmRequest`, `LlmResponse`) are automatically converted to the OpenAI-compatible message format that rLLM's training pipelines expect.
+Each LLM call becomes one `Step` in the trajectory. The Gemini-native types (`types.Content`, `LlmRequest`, `LlmResponse`) are automatically converted to the OpenAI-compatible message format that rLLM's training pipelines expect.
 
 ## Multi-Agent: Per-Agent Trajectories
 
@@ -84,9 +84,9 @@ judge_traj.reward  = judge_reward
 ## What You Get
 
 ```
-TrajectoryView
+Trajectory
 ├── name: "calculator_agent"
-├── steps: [StepView, StepView, ...]   # one per LLM call
+├── steps: [Step, Step, ...]   # one per LLM call
 │   ├── input:  {messages: [...]}       # OpenAI-format messages
 │   ├── output: {message: {...}}        # OpenAI-format response
 │   ├── reward: 0.0                     # set by your reward function

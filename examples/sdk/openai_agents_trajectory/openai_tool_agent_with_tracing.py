@@ -2,7 +2,7 @@
 
 Demonstrates tracing an agent that uses function tools.  The hooks capture
 every LLM call (including the tool-calling rounds) and all tool execution
-metadata, producing a multi-step ``TrajectoryView``.
+metadata, producing a multi-step ``Trajectory``.
 
 Prerequisites:
     pip install openai-agents rllm

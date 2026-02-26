@@ -3,7 +3,7 @@
 Demonstrates a solver-judge pattern using the "agents as tools" mechanism.
 The orchestrator agent calls solver and judge as tools, keeping control of the
 conversation. ``RLLMTrajectoryHooks`` automatically groups LLM calls by
-sub-agent so each agent gets its own ``TrajectoryView`` -- enabling per-agent
+sub-agent so each agent gets its own ``Trajectory`` -- enabling per-agent
 reward assignment for RL training.
 
 Note:

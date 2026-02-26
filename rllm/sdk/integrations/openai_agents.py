@@ -2,7 +2,7 @@
 
 Provides ``RLLMTrajectoryHooks``, an OpenAI Agents SDK ``RunHooks`` subclass
 that captures all LLM calls during agent execution and builds rLLM
-``TrajectoryView`` objects for SFT distillation and RL training.
+``Trajectory`` objects for SFT distillation and RL training.
 
 Usage::
 
@@ -28,8 +28,8 @@ from rllm.sdk.protocol import (
     LLMInput,
     LLMOutput,
     Trace,
-    TrajectoryView,
-    trace_to_step_view,
+    Trajectory,
+    trace_to_step,
 )
 
 try:
@@ -274,14 +274,14 @@ def _extract_model_name(agent: Any) -> str:
 
 
 class RLLMTrajectoryHooks(RunHooksBase):  # type: ignore[misc]
-    """OpenAI Agents SDK RunHooks that captures LLM calls and builds rLLM TrajectoryView objects.
+    """OpenAI Agents SDK RunHooks that captures LLM calls and builds rLLM Trajectory objects.
 
     Each model invocation is recorded as an rLLM ``Trace``, with the
     Responses API types automatically converted to the Chat Completions
     message format that rLLM's training pipeline expects.
 
     After the runner finishes, call :py:meth:`get_trajectory` to obtain a
-    ``TrajectoryView`` ready for reward assignment and training.
+    ``Trajectory`` ready for reward assignment and training.
 
     Example::
 
@@ -300,7 +300,7 @@ class RLLMTrajectoryHooks(RunHooksBase):  # type: ignore[misc]
         if not _AGENTS_SDK_AVAILABLE:
             raise ImportError("OpenAI Agents SDK is required for RLLMTrajectoryHooks. Install it with: pip install openai-agents")
         self._traces: list[Trace] = []
-        self._trajectories: list[TrajectoryView] = []
+        self._trajectories: list[Trajectory] = []
         self._pending_system_prompt: str | None = None
         self._pending_input_items: list | None = None
         self._pending_agent_name: str = "openai_agent"
@@ -309,7 +309,7 @@ class RLLMTrajectoryHooks(RunHooksBase):  # type: ignore[misc]
         self._last_output: Any = None
         self._agent_name: str = "openai_agent"
         self._model_name: str = "unknown"
-        self._per_agent_trajectories: dict[str, TrajectoryView] = {}
+        self._per_agent_trajectories: dict[str, Trajectory] = {}
         self._trajectory_built: bool = False
 
     # ---- agent lifecycle ------------------------------------------------------
@@ -480,8 +480,8 @@ class RLLMTrajectoryHooks(RunHooksBase):  # type: ignore[misc]
         self._trajectory_built = True
 
         # -- combined trajectory (all agents) --
-        steps = [trace_to_step_view(t) for t in self._traces]
-        traj = TrajectoryView(
+        steps = [trace_to_step(t) for t in self._traces]
+        traj = Trajectory(
             name=self._agent_name,
             steps=steps,
             reward=0.0,
@@ -506,9 +506,9 @@ class RLLMTrajectoryHooks(RunHooksBase):  # type: ignore[misc]
             a = t.metadata.get("agent", self._agent_name)
             agent_traces.setdefault(a, []).append(t)
 
-        per_agent: dict[str, TrajectoryView] = {}
+        per_agent: dict[str, Trajectory] = {}
         for agent_name, traces in agent_traces.items():
-            agent_steps = [trace_to_step_view(t) for t in traces]
+            agent_steps = [trace_to_step(t) for t in traces]
             last_content = None
             for t in reversed(traces):
                 msg = t.output.message if hasattr(t.output, "message") else {}
@@ -516,7 +516,7 @@ class RLLMTrajectoryHooks(RunHooksBase):  # type: ignore[misc]
                 if c:
                     last_content = c
                     break
-            per_agent[agent_name] = TrajectoryView(
+            per_agent[agent_name] = Trajectory(
                 name=agent_name,
                 steps=agent_steps,
                 reward=0.0,
@@ -532,7 +532,7 @@ class RLLMTrajectoryHooks(RunHooksBase):  # type: ignore[misc]
 
     # ---- public API -----------------------------------------------------------
 
-    def get_trajectory(self) -> TrajectoryView:
+    def get_trajectory(self) -> Trajectory:
         """Return the trajectory from the most recent completed run.
 
         The trajectory is built (or rebuilt) on demand from the collected
@@ -546,19 +546,19 @@ class RLLMTrajectoryHooks(RunHooksBase):  # type: ignore[misc]
             raise ValueError("No trajectories collected yet. Make sure the runner has completed at least one invocation.")
         return self._trajectories[-1]
 
-    def get_trajectories(self) -> list[TrajectoryView]:
+    def get_trajectories(self) -> list[Trajectory]:
         """Return all collected trajectories (one per completed run)."""
         self._ensure_trajectories()
         return list(self._trajectories)
 
-    def get_trajectories_by_agent(self) -> dict[str, TrajectoryView]:
+    def get_trajectories_by_agent(self) -> dict[str, Trajectory]:
         """Return per-agent trajectories from the most recent run.
 
         In a multi-agent system each sub-agent that made at least one LLM call
-        gets its own ``TrajectoryView``.  The keys are agent names.
+        gets its own ``Trajectory``.  The keys are agent names.
 
         Returns:
-            Mapping of agent name to its ``TrajectoryView``.
+            Mapping of agent name to its ``Trajectory``.
 
         Raises:
             ValueError: If no LLM calls have been captured yet.

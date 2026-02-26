@@ -38,9 +38,9 @@ traj.reward = my_reward_fn(traj.output, expected)
 2. **BeforeModelCallEvent** -- snapshots the current conversation messages and starts a timer
 3. **AfterModelCallEvent** -- pairs the request messages with the model response, converts Bedrock types to OpenAI format, creates an rLLM `Trace`
 4. **AfterToolCallEvent** -- annotates traces with tool execution metadata
-5. **AfterInvocationEvent** -- assembles all traces into a `TrajectoryView`
+5. **AfterInvocationEvent** -- assembles all traces into a `Trajectory`
 
-Each LLM call becomes one `StepView` in the trajectory. The Bedrock-native message types (`Message` with `ContentBlock` containing `text`, `toolUse`, `toolResult`) are automatically converted to the OpenAI Chat Completions message format that rLLM's training pipelines expect.
+Each LLM call becomes one `Step` in the trajectory. The Bedrock-native message types (`Message` with `ContentBlock` containing `text`, `toolUse`, `toolResult`) are automatically converted to the OpenAI Chat Completions message format that rLLM's training pipelines expect.
 
 ## Multi-Agent: Per-Agent Trajectories
 
@@ -69,9 +69,9 @@ judge_traj.reward = judge_reward
 ## What You Get
 
 ```
-TrajectoryView
+Trajectory
 ├── name: "solver"
-├── steps: [StepView, StepView, ...]   # one per LLM call
+├── steps: [Step, Step, ...]   # one per LLM call
 │   ├── input:  {messages: [...]}       # OpenAI-format messages
 │   ├── output: {message: {...}}        # OpenAI-format response
 │   ├── reward: 0.0                     # set by your reward function

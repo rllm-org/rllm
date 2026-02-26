@@ -26,9 +26,10 @@ from typing import TYPE_CHECKING, Any
 
 from rllm.agents.agent import Episode, Trajectory
 from rllm.sdk.data_process import group_steps, trace_to_step
-from rllm.sdk.protocol import Trace, TrajectoryView
+from rllm.sdk.protocol import Trace
 from rllm.sdk.session.base import wrap_with_session_context
 from rllm.sdk.store.sqlite_store import SqliteTraceStore
+from rllm.types import Trajectory as BaseTrajectory
 from rllm.workflows.workflow import TerminationReason, Workflow
 
 if TYPE_CHECKING:
@@ -285,7 +286,7 @@ class SdkWorkflow(Workflow):
         traces = await self.store.get_by_session_uid(session_uid, since=rollout_start_time)
         traces_for_session = [(tc.id, Trace(**tc.data)) for tc in traces]
 
-        # Unpack output (may be float, list[TrajectoryView], or tuple)
+        # Unpack output (may be float, list[Trajectory], or tuple)
         output_payload, metrics = self._unpack_output(output)
 
         # Build episode
@@ -353,8 +354,8 @@ class SdkWorkflow(Workflow):
                 traj.reward = output
             is_correct = output >= 1.0
         elif isinstance(output, list):
-            # List[TrajectoryView] – user-defined trajectory structure
-            assert all(isinstance(tv, TrajectoryView) for tv in output)
+            # List[Trajectory] – user-defined trajectory structure
+            assert all(isinstance(tv, BaseTrajectory) for tv in output)
             trajectories = []
             for tv in output:
                 traj_steps = []

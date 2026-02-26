@@ -2,7 +2,7 @@
 
 Demonstrates tracing a Strands agent that uses tools.  The hook provider
 captures every LLM call (including the tool-calling rounds) and all tool
-execution metadata, producing a multi-step ``TrajectoryView``.
+execution metadata, producing a multi-step ``Trajectory``.
 
 Prerequisites:
     pip install 'strands-agents[openai]' rllm

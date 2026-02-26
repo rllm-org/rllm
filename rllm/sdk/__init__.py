@@ -1,7 +1,7 @@
 """RLLM SDK for automatic LLM trace collection and RL training."""
 
 from rllm.sdk.decorators import trajectory
-from rllm.sdk.protocol import StepView, Trace, TrajectoryView
+from rllm.sdk.protocol import Step, Trace, Trajectory
 from rllm.sdk.session import (
     ContextVarSession,
     SessionBuffer,
@@ -17,18 +17,15 @@ from rllm.sdk.tracers import (
     SqliteTracer,
     TracerProtocol,
 )
-from rllm.types import Step, Trajectory
 
 __all__ = [
-    # Canonical types (from rllm.types)
-    "Step",  # Canonical Step (same class as StepView)
-    "Trajectory",  # Canonical Trajectory (same class as TrajectoryView)
+    # Canonical types
+    "Step",
+    "Trajectory",
     # Protocol / Data Models
     "Trace",  # Low-level LLM call trace
-    "StepView",  # Alias for Step (backward compatibility)
-    "TrajectoryView",  # Alias for Trajectory (backward compatibility)
     # Decorators
-    "trajectory",  # Decorator to mark function as trajectory (returns TrajectoryView)
+    "trajectory",  # Decorator to mark function as trajectory (returns Trajectory)
     # Sessions
     "SessionContext",  # Default (alias for ContextVarSession)
     "ContextVarSession",  # Explicit contextvars-based session

@@ -1,10 +1,9 @@
 """Canonical lightweight types for rLLM.
 
 These Pydantic BaseModel classes are the single source of truth for
-Step, Trajectory, and Episode. The SDK uses them directly (via the
-StepView / TrajectoryView aliases), while the training code in
-``rllm.agents.agent`` extends them with training-specific fields
-(token IDs, logprobs, advantage, etc.).
+Step, Trajectory, and Episode. The SDK uses them directly, while the
+training code in ``rllm.agents.agent`` extends them with
+training-specific fields (token IDs, logprobs, advantage, etc.).
 """
 
 from __future__ import annotations
@@ -69,8 +68,3 @@ class Episode(BaseModel):
     @property
     def rollout_idx(self) -> str:
         return self.id.split(":")[1]
-
-
-# Backward-compatible aliases for SDK code
-StepView = Step
-TrajectoryView = Trajectory

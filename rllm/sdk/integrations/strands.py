@@ -2,7 +2,7 @@
 
 Provides ``RLLMTrajectoryHookProvider``, a Strands ``HookProvider`` that
 captures all LLM calls during agent execution and builds rLLM
-``TrajectoryView`` objects for SFT distillation and RL training.
+``Trajectory`` objects for SFT distillation and RL training.
 
 Usage::
 
@@ -29,8 +29,8 @@ from rllm.sdk.protocol import (
     LLMInput,
     LLMOutput,
     Trace,
-    TrajectoryView,
-    trace_to_step_view,
+    Trajectory,
+    trace_to_step,
 )
 
 try:
@@ -270,14 +270,14 @@ def _extract_text_from_message(message: dict | None) -> str | None:
 
 
 class RLLMTrajectoryHookProvider:
-    """Strands HookProvider that captures LLM calls and builds rLLM TrajectoryView objects.
+    """Strands HookProvider that captures LLM calls and builds rLLM Trajectory objects.
 
     Each model invocation is recorded as an rLLM ``Trace``, with the
     Bedrock-style message types automatically converted to the OpenAI Chat
     Completions format that rLLM's training pipeline expects.
 
     After the agent finishes, call :py:meth:`get_trajectory` to obtain a
-    ``TrajectoryView`` ready for reward assignment and training.
+    ``Trajectory`` ready for reward assignment and training.
 
     Args:
         name: Name for the hook provider (used in trajectory metadata).
@@ -300,7 +300,7 @@ class RLLMTrajectoryHookProvider:
             raise ImportError("Strands Agents SDK is required for RLLMTrajectoryHookProvider. Install it with: pip install strands-agents")
         self._name = name
         self._traces: list[Trace] = []
-        self._trajectories: list[TrajectoryView] = []
+        self._trajectories: list[Trajectory] = []
         self._pending_messages: list[dict] | None = None
         self._request_start_time: float = 0.0
         self._user_input: dict | None = None
@@ -346,7 +346,7 @@ class RLLMTrajectoryHookProvider:
                         break
 
     def _on_after_invocation(self, event: AfterInvocationEvent) -> None:
-        """Build the TrajectoryView once the invocation completes."""
+        """Build the Trajectory once the invocation completes."""
         result = event.result
         if result is not None:
             output_text = str(result)
@@ -461,13 +461,13 @@ class RLLMTrajectoryHookProvider:
     # ---- internal helpers -----------------------------------------------------
 
     def _build_trajectories(self) -> None:
-        """Build TrajectoryView from collected traces."""
+        """Build Trajectory from collected traces."""
         if self._trajectory_built or not self._traces:
             return
         self._trajectory_built = True
 
-        steps = [trace_to_step_view(t) for t in self._traces]
-        traj = TrajectoryView(
+        steps = [trace_to_step(t) for t in self._traces]
+        traj = Trajectory(
             name=self._agent_name,
             steps=steps,
             reward=0.0,
@@ -483,7 +483,7 @@ class RLLMTrajectoryHookProvider:
 
     # ---- public API -----------------------------------------------------------
 
-    def get_trajectory(self) -> TrajectoryView:
+    def get_trajectory(self) -> Trajectory:
         """Return the trajectory from the most recent completed invocation.
 
         Raises:
@@ -494,7 +494,7 @@ class RLLMTrajectoryHookProvider:
             raise ValueError("No trajectories collected yet. Make sure the agent has completed at least one invocation.")
         return self._trajectories[-1]
 
-    def get_trajectories(self) -> list[TrajectoryView]:
+    def get_trajectories(self) -> list[Trajectory]:
         """Return all collected trajectories (one per completed invocation)."""
         self._build_trajectories()
         return list(self._trajectories)

@@ -35,9 +35,9 @@ traj.reward = my_reward_fn(traj.output, expected)
 1. **on_llm_start** -- stores the outgoing request (system prompt + input items)
 2. **on_llm_end** -- pairs request with `ModelResponse`, converts Responses API types to Chat Completions format, creates an rLLM `Trace`
 3. **on_tool_end** -- annotates traces with tool execution metadata
-4. **on_agent_end** -- assembles all traces into a `TrajectoryView`
+4. **on_agent_end** -- assembles all traces into a `Trajectory`
 
-Each LLM call becomes one `StepView` in the trajectory. The Responses API types (`ResponseOutputMessage`, `ResponseFunctionToolCall`, etc.) are automatically converted to the Chat Completions message format that rLLM's training pipelines expect.
+Each LLM call becomes one `Step` in the trajectory. The Responses API types (`ResponseOutputMessage`, `ResponseFunctionToolCall`, etc.) are automatically converted to the Chat Completions message format that rLLM's training pipelines expect.
 
 ## Multi-Agent: Per-Agent Trajectories
 
@@ -65,7 +65,7 @@ result = await Runner.run(orchestrator, "Solve this problem...", hooks=hooks)
 
 # After running...
 per_agent = hooks.get_trajectories_by_agent()
-# => {"orchestrator": TrajectoryView, "solver": TrajectoryView, "judge": TrajectoryView}
+# => {"orchestrator": Trajectory, "solver": Trajectory, "judge": Trajectory}
 
 per_agent["solver"].reward = solver_reward
 per_agent["judge"].reward = judge_reward
@@ -78,9 +78,9 @@ per_agent["judge"].reward = judge_reward
 ## What You Get
 
 ```
-TrajectoryView
+Trajectory
 ├── name: "calculator_agent"
-├── steps: [StepView, StepView, ...]   # one per LLM call
+├── steps: [Step, Step, ...]   # one per LLM call
 │   ├── input:  {messages: [...]}       # Chat Completions-format messages
 │   ├── output: {message: {...}}        # Chat Completions-format response
 │   ├── reward: 0.0                     # set by your reward function

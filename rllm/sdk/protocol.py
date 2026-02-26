@@ -2,7 +2,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from rllm.types import Step as StepView
+from rllm.types import Step
 
 
 class LLMInput(BaseModel):
@@ -92,8 +92,8 @@ class Trace(BaseModel):
     tags: list[str] | None = None
 
 
-def trace_to_step_view(trace: Trace) -> StepView:
-    """Convert a trace to a StepView (trace wrapper with reward field)."""
+def trace_to_step(trace: Trace) -> Step:
+    """Convert a Trace to a Step."""
     if hasattr(trace.input, "model_dump"):
         input_payload: Any = trace.input.model_dump()
     else:
@@ -104,7 +104,7 @@ def trace_to_step_view(trace: Trace) -> StepView:
     else:
         output_payload = trace.output
 
-    return StepView(
+    return Step(
         id=trace.trace_id,
         input=input_payload,
         output=output_payload,
