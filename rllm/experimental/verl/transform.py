@@ -71,13 +71,15 @@ def _build_step_and_trajectory_rewards(step_rewards: list[float], trajectory_rew
     return step_rewards_batch, trajectory_rewards_batch
 
 
-def _build_per_step_advantages(response_mask: torch.Tensor, advantages: list[float | list[float]]) -> torch.Tensor:
+def _build_per_step_advantages(response_mask: torch.Tensor, advantages: list[float] | list[list[float]]) -> torch.Tensor:
     """Builds the per-step advantages for a batch of prompts/responses."""
     assert response_mask.shape[0] == len(advantages), "response_mask and advantages must have the same length"
-    if isinstance(advantages[0], list):  # TODO(listar2000): support list-based advantages
-        raise NotImplementedError("Verl per-step advantages are not supported for list-based advantages yet")
-    advantages_tensor = torch.tensor(advantages, dtype=torch.float32)
-    return advantages_tensor.unsqueeze(-1) * response_mask
+    if isinstance(advantages[0], list):
+        # verticle stack the advantages (which implicitly ensures that all advantages have the same length)
+        advantages_tensor = torch.tensor(advantages, dtype=torch.float32)
+    else:
+        advantages_tensor = torch.tensor(advantages, dtype=torch.float32).unsqueeze(-1)
+    return advantages_tensor * response_mask
 
 
 def _handle_multimodal_position_ids(processor, input_ids: torch.Tensor, attention_mask: torch.Tensor, multi_modal_inputs: list[dict]) -> torch.Tensor:
@@ -333,7 +335,7 @@ def transform_episodes_to_dataproto(
 
     accumulated = AccumulatedData()
     for episode in episodes:
-        task_id = episode.id.split(":")[0]
+        task_id = episode.task_id
         total_steps = _process_episode(episode, task_id, accumulated)
         accumulated.repeat_counts.append(total_steps)
 
@@ -357,7 +359,7 @@ def transform_trajectory_groups_to_dataproto(
 
     accumulated = AccumulatedData()
     for trajectory_group in trajectory_groups:
-        task_id = trajectory_group.group_id.split(":")[0]
+        task_id = trajectory_group.task_id
         total_steps = _process_trajectory_group(trajectory_group, task_id, accumulated)
         accumulated.repeat_counts.append(total_steps)
 
@@ -385,13 +387,10 @@ def update_dataproto_with_advantages(batch: DataProto, container: list[Episode] 
 
     # TODO(listar2000): we should support `token_level_scores` from the `Step` attribute level.
     # we also need to implement the `kl_penalty` logic used in `verl`.
-    if mode == "per_step":
-        batch.batch["token_level_scores"] = batch.batch["step_rewards"]
-        batch.batch["token_level_rewards"] = batch.batch["step_rewards"]
-    elif mode == "broadcast":
+    if mode == "broadcast":
         batch.batch["token_level_scores"] = batch.batch["traj_rewards"]
         batch.batch["token_level_rewards"] = batch.batch["traj_rewards"]
     else:
-        raise ValueError(f"Stepwise advantage mode {mode} not supported")
+        raise ValueError(f"Stepwise advantage mode {mode} not supported in experimental unified trainer.")
 
     return batch

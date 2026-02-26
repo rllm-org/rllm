@@ -1,5 +1,4 @@
 import asyncio
-import threading
 import time
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
@@ -44,6 +43,7 @@ class TrainerState:
     rs_state: RejectionSamplingState = field(default_factory=RejectionSamplingState)
     global_step: int = 0
     epoch: int = 0
+    total_steps: int = 0
     is_training: bool = True
     # For timing and metrics
     timing_dict: dict = field(default_factory=dict)
@@ -119,87 +119,53 @@ class UnifiedTrainer:
         self.config = config
         self.rllm_config = config.rllm
 
-        # Initialize event loop before backend (some backends may need it)
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._thread: threading.Thread | None = None
-        self._current_future = None
-
         # Read user-defined hooks from kwargs
         self.trajectory_grouping_hook = kwargs.get("trajectory_grouping_hook")
 
         # SDK factory (set up later if agent_run_func is provided)
         self._sdk_factory = None
 
-        try:
-            self._setup_event_loop()
+        self.backend = backend_cls(config=config, **(backend_args or {}))
 
-            # Initialize backend
-            self.backend = backend_cls(config=config, **(backend_args or {}))
+        self._validate_and_setup_configs()
+        self._setup_logging()
 
-            self._validate_and_setup_configs()
-            self._setup_logging()
+        rollout_engine: RolloutEngine = self.backend.init_rollout_engine(
+            cf_config=self.cf_config,
+            transform_config=self.transform_config,
+            rs_config=self.rs_config,
+            algorithm_config=self.algorithm_config,
+        )
 
-            rollout_engine: RolloutEngine = self.backend.init_rollout_engine(
-                cf_config=self.cf_config,
-                transform_config=self.transform_config,
-                rs_config=self.rs_config,
-                algorithm_config=self.algorithm_config,
-            )
+        # If agent_run_func is provided, set up SDK workflow via factory
+        post_execute_hook = None
+        if agent_run_func is not None:
+            from rllm.experimental.engine.sdk_workflow import SdkWorkflow, SdkWorkflowFactory
 
-            # If agent_run_func is provided, set up SDK workflow via factory
-            post_execute_hook = None
-            if agent_run_func is not None:
-                from rllm.experimental.engine.sdk_workflow import SdkWorkflow, SdkWorkflowFactory
-
-                self._sdk_factory = SdkWorkflowFactory(
-                    agent_run_func=agent_run_func,
-                    rollout_engine=rollout_engine,
-                    config=self.config,
-                )
-                self.workflow_class = SdkWorkflow
-                self.workflow_args = self._sdk_factory.get_workflow_args()
-                post_execute_hook = self._sdk_factory.flush_traces_hook
-
-            self.agent_workflow_engine = UnifiedWorkflowEngine(
-                workflow_cls=self.workflow_class,
-                workflow_args=self.workflow_args,
+            self._sdk_factory = SdkWorkflowFactory(
+                agent_run_func=agent_run_func,
                 rollout_engine=rollout_engine,
                 config=self.config,
-                n_parallel_tasks=self.rllm_config.workflow.n_parallel_tasks,
-                retry_limit=self.rllm_config.workflow.retry_limit,
-                raise_on_error=self.rllm_config.workflow.raise_on_error,
-                episode_logger=self.episode_logger,
-                post_execute_hook=post_execute_hook,
             )
+            self.workflow_class = SdkWorkflow
+            self.workflow_args = self._sdk_factory.get_workflow_args()
+            post_execute_hook = self._sdk_factory.flush_traces_hook
 
-            # Initialize workflow pool
-            self._run_async(self.agent_workflow_engine.initialize_pool())
-        except Exception as e:
-            # Clean up any resources that were initialized before the error
-            self._cleanup_on_init_failure()
-            raise e
+        self.agent_workflow_engine = UnifiedWorkflowEngine(
+            workflow_cls=self.workflow_class,
+            workflow_args=self.workflow_args,
+            rollout_engine=rollout_engine,
+            config=self.config,
+            n_parallel_tasks=self.rllm_config.workflow.n_parallel_tasks,
+            retry_limit=self.rllm_config.workflow.retry_limit,
+            raise_on_error=self.rllm_config.workflow.raise_on_error,
+            episode_logger=self.episode_logger,
+            post_execute_hook=post_execute_hook,
+        )
 
         self.tokenizer = None
         if hasattr(self.backend, "tokenizer"):
             self.tokenizer = self.backend.tokenizer
-
-    def _run_async(self, coro):
-        """Run an async coroutine in the event loop thread and wait for result.
-
-        Uses a polling loop with short timeouts so that KeyboardInterrupt
-        (Ctrl+C) is delivered promptly instead of being swallowed by an
-        indefinite ``future.result()`` call.
-        """
-        assert self._loop is not None, "Event loop is not initialized"
-        self._current_future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        try:
-            while True:
-                try:
-                    return self._current_future.result(timeout=0.5)
-                except TimeoutError:
-                    continue
-        finally:
-            self._current_future = None
 
     def _validate_and_setup_configs(self):
         """Validate and setup common configs."""
@@ -234,13 +200,11 @@ class UnifiedTrainer:
             stepwise_advantage_mode=self.rllm_config.stepwise_advantage.mode,
             norm_adv_by_std_in_grpo=self.rllm_config.stepwise_advantage.get("norm_adv_by_std_in_grpo", True),
             use_rllm=self.rllm_config.algorithm.get("use_rllm", False),
+            use_precomputed_advantage=self.rllm_config.algorithm.get("use_precomputed_advantage", False),
+            loss_fn=self.rllm_config.algorithm.get("loss_fn", None),
+            lr_schedule=self.rllm_config.algorithm.get("lr_schedule", "constant"),
+            warmup_steps_ratio=self.rllm_config.algorithm.get("warmup_steps_ratio", 0.0),
         )
-
-    def _setup_event_loop(self):
-        """Setup the event loop in a background thread."""
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
-        self._thread.start()
 
     def _setup_logging(self):
         """Setup up both the tracking and episode logging."""
@@ -257,48 +221,22 @@ class UnifiedTrainer:
             project_name=self.rllm_config.trainer.project_name,
             experiment_name=self.rllm_config.trainer.experiment_name,
             default_backend=self.rllm_config.trainer.logger,
-            config=OmegaConf.to_container(self.rllm_config, resolve=True),
+            config=OmegaConf.to_container(self.config, resolve=True),
         )
-
-    def _cleanup_on_init_failure(self):
-        """Clean up resources when initialization fails partway through.
-
-        This method is called when an exception occurs during __init__ to ensure
-        that resources like the event loop, wandb, etc. are properly cleaned up
-        to prevent the process from hanging.
-        """
-        # Stop the event loop thread if it was started
-        if self._loop is not None and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._loop.stop)
-        if self._thread is not None:
-            self._thread.join(timeout=5.0)  # Wait up to 5 seconds for thread to stop
-
-        try:
-            # Clean up the logger (this will call finish() which handles wandb.finish(), etc.)
-            if hasattr(self, "logger") and self.logger is not None:
-                self.logger.finish()
-            # Clean up the backend if it was initialized
-            if hasattr(self, "backend"):
-                self.backend.shutdown()
-            # Clean up the workflow engine if it was initialized
-            if hasattr(self, "agent_workflow_engine"):
-                self.agent_workflow_engine.shutdown()
-        except Exception:
-            pass  # Ignore errors during cleanup
 
     # =========================================================================
     # Main training loop methods
     # =========================================================================
 
     def fit(self):
-        """Main training loop (sync entry point).
+        """Main training loop (sync entry point)."""
+        asyncio.run(self.fit_async())
 
-        This runs the async training loop in the background event loop thread.
-        """
-        self._run_async(self._fit_entry_async())
+    async def fit_async(self) -> None:
+        """Public async entry point for the full training process."""
+        # initialize the UnifiedWorkflowEngine (init the workflow pool)
+        await self.agent_workflow_engine.initialize_pool()
 
-    async def _fit_entry_async(self) -> None:
-        """Async entry point for the full training process."""
         trainer_state = TrainerState()
 
         await self.backend.on_train_start(trainer_state)
@@ -318,10 +256,15 @@ class UnifiedTrainer:
         await self.backend.on_train_end(trainer_state)
 
     async def _fit_async(self, trainer_state: TrainerState) -> None:
-        """Async main training loop."""
+        """Internal async main training loop."""
         train_dataloader: Iterable = self.backend.get_dataloader(self.train_dataset, trainer_state)
         break_via_total_batches = False  # used to break the training loop via the `total_batches` parameter
         use_total_batches = self.rllm_config.trainer.get("total_batches") is not None and self.rllm_config.trainer.total_batches > 0
+
+        if use_total_batches:
+            trainer_state.total_steps = self.rllm_config.trainer.total_batches
+        else:
+            trainer_state.total_steps = len(train_dataloader) * self.rllm_config.trainer.total_epochs
 
         for epoch in range(self.rllm_config.trainer.total_epochs):
             # recursively break through the outer loop
@@ -441,7 +384,7 @@ class UnifiedTrainer:
             reward_metrics = collect_reward_and_advantage_from_trajectory_groups(val_trajectory_groups, self.algorithm_config, collect_advantage=False)
 
             is_correct_lst.extend([episode.is_correct for episode in val_episodes])
-            uid_lst.extend([episode.id.split(":")[0] for episode in val_episodes])
+            uid_lst.extend([episode.task_id for episode in val_episodes])
 
             data_sources = [episode.info.get("data_source", "unknown") for episode in val_episodes]
             data_source_lst.extend(data_sources)
@@ -486,17 +429,9 @@ class UnifiedTrainer:
 
     def shutdown(self):
         """Shutdown the trainer and cleanup resources."""
-        # Cancel any running async training coroutine
-        if hasattr(self, "_current_future") and self._current_future is not None:
-            self._current_future.cancel()
-
         if hasattr(self, "_sdk_factory") and self._sdk_factory is not None:
             self._sdk_factory.shutdown()
             self._sdk_factory = None
-        if hasattr(self, "_loop") and self._loop is not None and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._loop.stop)
-        if hasattr(self, "_thread") and self._thread is not None:
-            self._thread.join(timeout=5)
         if hasattr(self, "agent_workflow_engine") and self.agent_workflow_engine is not None:
             self.agent_workflow_engine.shutdown()
         self.backend.shutdown()

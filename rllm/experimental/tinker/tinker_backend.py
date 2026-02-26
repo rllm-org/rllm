@@ -90,8 +90,6 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Initialize policy trainer (filled during init_rollout_engine)
         self.policy_trainer: TinkerPolicyTrainer | None = None
         self.tokenizer: PreTrainedTokenizer | None = None
-        self.learning_rate = self.full_config.training.learning_rate
-
         # Rollout engine - will be created in init_rollout_engine
         self.rollout_engine: TinkerEngine | None = None
 
@@ -99,6 +97,12 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         self.sampling_client: tinker.SamplingClient | None = None
         # Store algorithm config for use in process_backend_batch
         self._algorithm_config: AlgorithmConfig | None = None
+
+        # Specific optimizer parameters for Tinker
+        self.learning_rate = self.full_config.training.get("learning_rate", 1e-6)
+        self.beta1 = self.full_config.training.get("beta1", 0.9)
+        self.beta2 = self.full_config.training.get("beta2", 0.95)
+        self.eps = self.full_config.training.get("eps", 1e-8)
 
     # =========================================================================
     # BackendProtocol interface methods
@@ -123,7 +127,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # we need to get it from `AutoTokenizer` since the `policy_trainer` has not been initialized yet
         self.tokenizer = AutoTokenizer.from_pretrained(self.full_config.model.name)
 
-        self.rollout_engine = TinkerEngine(base_url=self.full_config.tinker_base_url, model_name=self.full_config.model.name, service_client=self.service_client, tokenizer=self.tokenizer, max_prompt_length=self.full_config.data.max_prompt_length, max_response_length=self.full_config.data.max_response_length, sampling_params=self.full_config.sampling, **self.full_config.rollout_engine)
+        self.rollout_engine = TinkerEngine(base_url=self.full_config.tinker_base_url, model_name=self.full_config.model.name, service_client=self.service_client, tokenizer=self.tokenizer, max_prompt_length=self.full_config.data.max_prompt_length, max_response_length=self.full_config.data.max_response_length, max_model_length=self.full_config.training.max_length, sampling_params=self.full_config.sampling, **self.full_config.rollout_engine)
         return self.rollout_engine
 
     def validate_config(self) -> None:
@@ -276,15 +280,24 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
                     training_datums,
                     training_logprobs,
                     adv_metrics,
+                    scheduled_learning_rate,
                 ) = await self.policy_trainer.fused_forward_backward_and_optim_step(
-                    trainer_state.trajectory_groups,
-                    algorithm_config=self._algorithm_config,
+                    step=trainer_state.global_step,
+                    total_steps=trainer_state.total_steps,
+                    trajectory_groups=trainer_state.trajectory_groups,
+                    learning_rate=self.learning_rate,
+                    beta1=self.beta1,
+                    beta2=self.beta2,
+                    eps=self.eps,
                 )
 
         # Store datums as backend batch
         trainer_state.backend_batch = training_datums
         # Also store the training logprobs
         trainer_state.extra_info["training_logprobs"] = training_logprobs
+        # scheduled_learning_rate is only available when fused; set in update_policy otherwise
+        if self.full_config.fuse_forward_backward_and_optim_step:
+            trainer_state.extra_info["scheduled_learning_rate"] = scheduled_learning_rate
         # Also store the advantage metrics
         trainer_state.metrics.update(adv_metrics)
 
@@ -323,19 +336,18 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
-        beta1 = self.full_config.training.get("beta1", 0.9)
-        beta2 = self.full_config.training.get("beta2", 0.95)
-        eps = self.full_config.training.get("eps", 1e-8)
-
         # Optimizer step (async)
         with simple_timer("optim_step", trainer_state.timing_dict):
-            optim_step_future = await self.policy_trainer.optim_step_future(
+            optim_step_future, scheduled_learning_rate = await self.policy_trainer.optim_step_future(
+                step=trainer_state.global_step,
+                total_steps=trainer_state.total_steps,
                 learning_rate=self.learning_rate,
-                beta1=beta1,
-                beta2=beta2,
-                eps=eps,
+                beta1=self.beta1,
+                beta2=self.beta2,
+                eps=self.eps,
             )
             await optim_step_future.result_async()
+            trainer_state.extra_info["scheduled_learning_rate"] = scheduled_learning_rate
 
     # =========================================================================
     # Async hook methods
@@ -363,7 +375,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Save final checkpoint if we didn't just save it in the last batch
         if trainer_state.global_step % self.full_config.rllm.trainer.save_freq != 0:
             logger.info(f"Saving final checkpoint at step {trainer_state.global_step}")
-            await self.policy_trainer.save_checkpoint_and_get_sampling_client(trainer_state.global_step, kind="state", do_save=True)
+            await self.policy_trainer.save_checkpoint_and_get_sampling_client(trainer_state.global_step, kind="both", do_save=True)
 
     async def on_batch_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of each batch.
@@ -381,8 +393,8 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             self.sampling_client = await self.policy_trainer.save_checkpoint_and_get_sampling_client(global_step, kind="both", do_save=do_save)
 
         # Update metrics
-        total_batches = self.full_config.rllm.trainer.get("total_batches", None)
-        update_training_metrics(trainer_state, self.learning_rate, total_batches)
+        learning_rate = trainer_state.extra_info.get("scheduled_learning_rate", self.learning_rate)
+        update_training_metrics(trainer_state, learning_rate, trainer_state.total_steps)
 
         # Print metrics table
         if trainer_state.metrics:

@@ -53,13 +53,17 @@ algorithm:
   lam: 0.95
   norm_adv_by_std_in_grpo: true
   use_rllm: false
+  # When true, always use pre-computed step.advantage from the workflow (e.g. distillation)
+  # and skip advantage computation (GRPO/REINFORCE). Missing advantages default to 0.
+  use_precomputed_advantage: false
   # for tinker backend only (avaiable options: importance_sampling, ppo, cispo, dro, cross_entropy)
   loss_fn: null
 
 # Stepwise advantage
+# TODO(listar2000): deprecate the `per_step` mode and refactor this config.
 stepwise_advantage:
   enable: False
-  mode: broadcast # [broadcast, per_step]
+  mode: broadcast # support `broadcast` only now
   normalize_by_steps: False
 
 # Disable thinking

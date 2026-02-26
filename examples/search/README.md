@@ -8,6 +8,9 @@ Train search agents using dense retrieval on Wikipedia with pre-built E5 embeddi
 ```bash
 cd examples/search
 python download_search_data.py --data_dir ./search_data
+
+cd examples/search/search_data/prebuilt_indices
+cat part_aa part_ab > e5_Flat.index
 ```
 
 Downloads:

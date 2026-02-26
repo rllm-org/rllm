@@ -92,8 +92,8 @@ class LocalRetrievalTool(Tool):
         formatted_results = []
         for i, result in enumerate(results[: self.max_results], 1):
             # Extract key information
-            doc_id = result.get("id", f"doc_{i}")
-            content = result.get("content", "")  # Fixed: use "content" not "contents"
+            doc_id = result.get("document", {}).get("id", f"doc_{i}")
+            content = result.get("document", {}).get("contents", "")
             score = result.get("score", 0.0)
 
             # Truncate content if too long (keep first 300 characters)
