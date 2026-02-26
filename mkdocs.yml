@@ -136,6 +136,8 @@ nav:
         - Unified Training Loop: experimental/unified-trainer.md
         - Backend Protocol: experimental/backend-protocol.md
         - Configuration: experimental/rllm-and-backend-config.md
+      - rLLM UI:
+        - Training Dashboard: experimental/rllm-ui.md
   - Projects:
       - Overview: projects/index.md
       - FinQA: projects/finqa.md
