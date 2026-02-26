@@ -3,6 +3,7 @@ Transformation utilities for converting token input (TinkerTokenInput) to Tinker
 Code is adapted from https://github.com/thinking-machines-lab/tinker-cookbook/blob/main/tinker_cookbook/rl/data_processing.py
 """
 
+from collections import defaultdict
 from typing import cast
 
 from tinker_cookbook.supervised.common import create_rightshifted_model_input_and_leftshifted_targets
@@ -141,7 +142,7 @@ def transform_trajectory_groups_to_datums(
     adv_metrics = collect_reward_and_advantage_from_trajectory_groups(trajectory_groups, algorithm_config)
 
     if algorithm_config.estimator_map:
-        datums_dict = {}
+        datums_dict = defaultdict(list)
     else:
         datums = []
 

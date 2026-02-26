@@ -2,7 +2,7 @@ import asyncio
 import time
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pprint import pprint
 from typing import Any, Literal
@@ -27,16 +27,13 @@ from rllm.experimental.common.rejection_sampling import (
     RejectionSamplingState,
     apply_rejection_sampling_and_filtering,
 )
-from rllm.experimental.common.transform import transform_episodes_to_trajectory_groups
+from rllm.experimental.common.transform import _default_traj_grouping_hook, transform_episodes_to_trajectory_groups
 from rllm.experimental.common.visualization import visualize_trajectory_last_steps
 from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
 from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.rollout import RolloutEngine
 from rllm.utils import EpisodeLogger, Tracking
 from rllm.workflows.workflow import TerminationReason, Workflow
-
-TRAJ_GROUPING_HOOK_KEY = "traj_grouping_hook"
-TRAJ_GROUP_ADV_ESTIMATOR_MAP_KEY = "traj_group_adv_estimator_map"
 
 
 @dataclass
@@ -101,6 +98,9 @@ class UnifiedTrainer:
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
         backend_args: dict | None = None,
+        *,
+        traj_grouping_hook: Callable | None = None,
+        traj_group_adv_estimator_map: dict | None = None,
         **kwargs,
     ):
         """Initialize the UnifiedTrainer."""
@@ -114,9 +114,9 @@ class UnifiedTrainer:
         self.rllm_config = config.rllm
 
         # Read user-defined hooks from kwargs
-        self.traj_grouping_hook = kwargs.get(TRAJ_GROUPING_HOOK_KEY)
+        self.traj_grouping_hook = traj_grouping_hook or _default_traj_grouping_hook
         # Extract the TrajectoryGroup-specific estimator from kwargs
-        self.traj_group_adv_estimator_map = kwargs.get(TRAJ_GROUP_ADV_ESTIMATOR_MAP_KEY, {})
+        self.traj_group_adv_estimator_map = traj_group_adv_estimator_map or {}
 
         self.backend = backend_cls(config=config, **(backend_args or {}))
 
@@ -295,7 +295,7 @@ class UnifiedTrainer:
         workflow_metrics, termination_counts = self._collect_workflow_metrics_from_episodes(trainer_state.episodes)
 
         # stage 2: transform episodes to trajectory groups (sync)
-        trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(trainer_state.episodes, self.transform_config, self.traj_grouping_hook)
+        trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(trainer_state.episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook)
         trainer_state.trajectory_groups = trajectory_groups
         trainer_state.metrics.update(transform_metrics)
 
@@ -360,7 +360,7 @@ class UnifiedTrainer:
         for batch in val_dataloader:
             # Generate episodes and transform to trajectory groups
             val_episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, is_validation=True)
-            val_trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(val_episodes, self.transform_config, self.traj_grouping_hook)
+            val_trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(val_episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook)
             reward_metrics = collect_reward_and_advantage_from_trajectory_groups(val_trajectory_groups, self.algorithm_config, collect_advantage=False)
 
             is_correct_lst.extend([episode.is_correct for episode in val_episodes])

@@ -291,8 +291,14 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
                     eps=self.eps,
                 )
 
-        # Store datums as backend batch
-        trainer_state.backend_batch = training_datums
+        # Store datums as backend batch, flatten if `training_datums` is a dict
+        if isinstance(training_datums, dict):
+            flattened_datums = []
+            for _, value in training_datums.items():
+                flattened_datums.extend(value)
+            trainer_state.backend_batch = flattened_datums
+        else:
+            trainer_state.backend_batch = training_datums
         # Also store the training logprobs
         trainer_state.extra_info["training_logprobs"] = training_logprobs
         # scheduled_learning_rate is only available when fused; set in update_policy otherwise

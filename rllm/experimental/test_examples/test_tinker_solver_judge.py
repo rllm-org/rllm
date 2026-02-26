@@ -7,6 +7,7 @@ import hydra
 
 from examples.solver_judge.solver_judge_flow import SolverJudgeWorkflow
 from rllm.data.dataset import DatasetRegistry
+from rllm.experimental.common.config import rLLMAdvantageEstimator
 from rllm.experimental.unified_trainer import AgentTrainer
 from rllm.rewards.countdown_reward import countdown_reward_fn
 
@@ -15,6 +16,11 @@ from rllm.rewards.countdown_reward import countdown_reward_fn
 def main(config):
     train_dataset = DatasetRegistry.load_dataset("countdown", "train")
     test_dataset = DatasetRegistry.load_dataset("countdown", "test")
+
+    traj_group_adv_estimator_map = {
+        "solver": rLLMAdvantageEstimator.GRPO,
+        "judge": rLLMAdvantageEstimator.REINFORCE,
+    }
 
     trainer = AgentTrainer(
         workflow_class=SolverJudgeWorkflow,
@@ -26,6 +32,7 @@ def main(config):
         train_dataset=train_dataset,
         val_dataset=test_dataset,
         backend="tinker",
+        traj_group_adv_estimator_map=traj_group_adv_estimator_map,
     )
     trainer.train()
 
