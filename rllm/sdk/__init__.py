@@ -45,6 +45,7 @@ __all__ = [
     # Integrations (lazy-imported, requires optional deps)
     "RLLMTrajectoryPlugin",  # Google ADK plugin (requires google-adk)
     "RLLMTrajectoryHooks",  # OpenAI Agents SDK hooks (requires openai-agents)
+    "RLLMTrajectoryHookProvider",  # Strands Agents SDK hooks (requires strands-agents)
 ]
 
 
@@ -58,4 +59,8 @@ def __getattr__(name: str):
         from rllm.sdk.integrations.openai_agents import RLLMTrajectoryHooks
 
         return RLLMTrajectoryHooks
+    if name == "RLLMTrajectoryHookProvider":
+        from rllm.sdk.integrations.strands import RLLMTrajectoryHookProvider
+
+        return RLLMTrajectoryHookProvider
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
