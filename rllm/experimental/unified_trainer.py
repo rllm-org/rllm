@@ -3,7 +3,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pprint import pprint
 from typing import Any, Literal
@@ -93,14 +93,23 @@ class UnifiedTrainer:
         self,
         backend_cls: type[BackendProtocol],
         config: DictConfig,
-        workflow_class: type[Workflow],
+        workflow_class: type[Workflow] | None = None,
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
         backend_args: dict | None = None,
+        agent_run_func: Callable | None = None,
         **kwargs,
     ):
-        """Initialize the UnifiedTrainer."""
+        """Initialize the UnifiedTrainer.
+
+        Provide exactly one of ``workflow_class`` or ``agent_run_func``.
+        When ``agent_run_func`` is given, the trainer automatically creates an
+        ``SdkWorkflow`` adapter so that SDK users can leverage the unified
+        pipeline (rejection sampling, advantage computation, verl + tinker).
+        """
+        assert (workflow_class is not None) ^ (agent_run_func is not None), "Exactly one of workflow_class or agent_run_func must be provided"
+
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
         self.train_dataset = train_dataset
@@ -113,9 +122,13 @@ class UnifiedTrainer:
         # Initialize event loop before backend (some backends may need it)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
+        self._current_future = None
 
         # Read user-defined hooks from kwargs
         self.trajectory_grouping_hook = kwargs.get("trajectory_grouping_hook")
+
+        # SDK factory (set up later if agent_run_func is provided)
+        self._sdk_factory = None
 
         try:
             self._setup_event_loop()
@@ -132,6 +145,21 @@ class UnifiedTrainer:
                 rs_config=self.rs_config,
                 algorithm_config=self.algorithm_config,
             )
+
+            # If agent_run_func is provided, set up SDK workflow via factory
+            post_execute_hook = None
+            if agent_run_func is not None:
+                from rllm.experimental.engine.sdk_workflow import SdkWorkflow, SdkWorkflowFactory
+
+                self._sdk_factory = SdkWorkflowFactory(
+                    agent_run_func=agent_run_func,
+                    rollout_engine=rollout_engine,
+                    config=self.config,
+                )
+                self.workflow_class = SdkWorkflow
+                self.workflow_args = self._sdk_factory.get_workflow_args()
+                post_execute_hook = self._sdk_factory.flush_traces_hook
+
             self.agent_workflow_engine = UnifiedWorkflowEngine(
                 workflow_cls=self.workflow_class,
                 workflow_args=self.workflow_args,
@@ -141,6 +169,7 @@ class UnifiedTrainer:
                 retry_limit=self.rllm_config.workflow.retry_limit,
                 raise_on_error=self.rllm_config.workflow.raise_on_error,
                 episode_logger=self.episode_logger,
+                post_execute_hook=post_execute_hook,
             )
 
             # Initialize workflow pool
@@ -155,10 +184,22 @@ class UnifiedTrainer:
             self.tokenizer = self.backend.tokenizer
 
     def _run_async(self, coro):
-        """Run an async coroutine in the event loop thread and wait for result."""
+        """Run an async coroutine in the event loop thread and wait for result.
+
+        Uses a polling loop with short timeouts so that KeyboardInterrupt
+        (Ctrl+C) is delivered promptly instead of being swallowed by an
+        indefinite ``future.result()`` call.
+        """
         assert self._loop is not None, "Event loop is not initialized"
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result()
+        self._current_future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        try:
+            while True:
+                try:
+                    return self._current_future.result(timeout=0.5)
+                except TimeoutError:
+                    continue
+        finally:
+            self._current_future = None
 
     def _validate_and_setup_configs(self):
         """Validate and setup common configs."""
@@ -445,10 +486,17 @@ class UnifiedTrainer:
 
     def shutdown(self):
         """Shutdown the trainer and cleanup resources."""
+        # Cancel any running async training coroutine
+        if hasattr(self, "_current_future") and self._current_future is not None:
+            self._current_future.cancel()
+
+        if hasattr(self, "_sdk_factory") and self._sdk_factory is not None:
+            self._sdk_factory.shutdown()
+            self._sdk_factory = None
         if hasattr(self, "_loop") and self._loop is not None and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
         if hasattr(self, "_thread") and self._thread is not None:
-            self._thread.join()
+            self._thread.join(timeout=5)
         if hasattr(self, "agent_workflow_engine") and self.agent_workflow_engine is not None:
             self.agent_workflow_engine.shutdown()
         self.backend.shutdown()
@@ -484,17 +532,16 @@ class TrainerLauncher(ABC):
 
     It handles the necessary environment setup (e.g. ray init for `verl`) for different backends. This is an abstract
     class that each backend must implement.
-
-    TODO(listar2000): add support to non-workflow training (e.g. agent/env classes), `fireworks` backend, and SDK.
     """
 
     def __init__(
         self,
         config: DictConfig,
-        workflow_class: type[Workflow],
+        workflow_class: type[Workflow] | None = None,
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
+        agent_run_func: Callable | None = None,
         **kwargs,
     ):
         """Initialize the TrainerLauncher."""
@@ -503,6 +550,7 @@ class TrainerLauncher(ABC):
         self.workflow_args = workflow_args or {}
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
+        self.agent_run_func = agent_run_func
         self.kwargs = kwargs
 
     @abstractmethod
@@ -516,18 +564,23 @@ class AgentTrainer:
     Adapted directly from `rllm.trainer.agent_trainer.AgentTrainer`.
 
     This trainer will simply delegate the task to the corresponding launcher class.
+
+    Provide exactly one of ``workflow_class`` or ``agent_run_func``.
     """
 
     def __init__(
         self,
         config: DictConfig,
-        workflow_class: type[Workflow],
+        workflow_class: type[Workflow] | None = None,
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
         backend: Literal["verl", "tinker"] = "verl",
+        agent_run_func: Callable | None = None,
         **kwargs,
     ):
+        assert (workflow_class is not None) ^ (agent_run_func is not None), "Exactly one of workflow_class or agent_run_func must be provided"
+
         if backend == "verl":
             from rllm.experimental.verl.verl_launcher import VerlTrainerLauncher
 
@@ -537,6 +590,7 @@ class AgentTrainer:
                 train_dataset=train_dataset,
                 val_dataset=val_dataset,
                 workflow_args=workflow_args,
+                agent_run_func=agent_run_func,
                 **kwargs,
             )
         elif backend == "tinker":
@@ -548,6 +602,7 @@ class AgentTrainer:
                 train_dataset=train_dataset,
                 val_dataset=val_dataset,
                 workflow_args=workflow_args,
+                agent_run_func=agent_run_func,
                 **kwargs,
             )
 
