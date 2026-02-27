@@ -300,7 +300,7 @@ def visualize_alignment(
     student_logprobs: list[float],
     reasoning_str: str,
     content_str: str,
-    max_tokens: int = 50,
+    max_tokens: int = 100,
 ) -> None:
     """
     Visualize alignment between student and teacher tokens.

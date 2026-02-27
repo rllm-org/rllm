@@ -35,16 +35,18 @@ class DistillationWorkflow(Workflow):
             model_output=output,
             reward = self.reward_function(task, output.content).reward,
         )
-        step.advantage = await compute_step_distill_advantage(
-            step=step,
-            teacher_engine=self.teacher_engine,
-            student_tokenizer=self.rollout_engine.tokenizer,
-            teacher_tokenizer=self.teacher_engine.tokenizer,
-            shared_tokenizer=self.shared_tokenizer,
-            teacher_chat_parser=self.teacher_engine.chat_parser,
-            clip_min=self.clip_min,
-            clip_max=self.clip_max,
-        )
+        if not self.rollout_engine.is_validation:
+            step.advantage = await compute_step_distill_advantage(
+                step=step,
+                teacher_engine=self.teacher_engine,
+                student_tokenizer=self.rollout_engine.tokenizer,
+                teacher_tokenizer=self.teacher_engine.tokenizer,
+                shared_tokenizer=self.shared_tokenizer,
+                teacher_chat_parser=self.teacher_engine.chat_parser,
+                clip_min=self.clip_min,
+                clip_max=self.clip_max,
+                visualize=not self.shared_tokenizer and hash(uid) % 100 == 0,
+            )
         self.trajectory.steps.append(step)
 
         if output.finish_reason == "length":
