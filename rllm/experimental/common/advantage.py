@@ -4,7 +4,7 @@ Generic advantage computation algorithms and utilities that work on TrajectoryGr
 
 import logging
 from collections import defaultdict
-from functools import partial
+from collections.abc import Callable
 
 import numpy as np
 
@@ -14,7 +14,36 @@ from rllm.experimental.common.config import AlgorithmConfig, rLLMAdvantageEstima
 logger = logging.getLogger(__name__)
 
 
-def _calculate_grpo_advantages(rewards: np.ndarray, norm_adv_by_std_in_grpo=True) -> np.ndarray:
+RLLM_ADV_ESTIMATOR_REGISTRY: dict[str, Callable] = {}
+
+
+def register_rllm_adv_estimator(name: str | rLLMAdvantageEstimator) -> Callable:
+    """Register a rLLM advantage estimator -- either built-in or custom.
+
+    Args:
+        name: Name of the advantage estimator.
+    """
+
+    def decorator(func: Callable) -> Callable:
+        RLLM_ADV_ESTIMATOR_REGISTRY[name] = func
+        return func
+
+    return decorator
+
+
+def get_rllm_adv_estimator(name: str | rLLMAdvantageEstimator) -> Callable:
+    """Get a rLLM advantage estimator by name.
+
+    Args:
+        name: Name of the advantage estimator.
+    """
+    if name not in RLLM_ADV_ESTIMATOR_REGISTRY:
+        raise ValueError(f"Unknown advantage estimator {name}. If you have a custom advantage estimator, please register it using `register_rllm_adv_estimator`.")
+    return RLLM_ADV_ESTIMATOR_REGISTRY[name]
+
+
+@register_rllm_adv_estimator(rLLMAdvantageEstimator.GRPO)
+def _calculate_grpo_advantages(rewards: np.ndarray, norm_adv_by_std_in_grpo=True, episilon=1e-6) -> np.ndarray:
     if rewards is None or len(rewards) < 1:
         return np.array([])
     elif len(rewards) == 1:
@@ -30,6 +59,7 @@ def _calculate_grpo_advantages(rewards: np.ndarray, norm_adv_by_std_in_grpo=True
     return advantages
 
 
+@register_rllm_adv_estimator(rLLMAdvantageEstimator.REINFORCE)
 def _calculate_reinforce_advantages(rewards: np.ndarray) -> np.ndarray:
     """REINFORCE: advantage = reward (no baseline)"""
     return rewards
@@ -87,16 +117,6 @@ def collect_reward_and_advantage_from_trajectory_groups(
     """
     assert algorithm_config.stepwise_advantage_mode == "broadcast", "Only broadcast mode is supported in experimental unified trainer."
 
-    def get_advantage_fn(estimator: rLLMAdvantageEstimator):
-        if estimator == rLLMAdvantageEstimator.GRPO:
-            advantage_fn = partial(_calculate_grpo_advantages, norm_adv_by_std_in_grpo=algorithm_config.norm_adv_by_std_in_grpo)
-        elif estimator == rLLMAdvantageEstimator.REINFORCE:
-            advantage_fn = _calculate_reinforce_advantages
-        else:
-            logger.warning(f"Unsupported estimator {algorithm_config.estimator} in rLLMAdvantageEstimator, using GRPO")
-            advantage_fn = partial(_calculate_grpo_advantages, norm_adv_by_std_in_grpo=algorithm_config.norm_adv_by_std_in_grpo)
-        return advantage_fn
-
     advantages_by_group = defaultdict(list)
     rewards_by_group = defaultdict(list)
 
@@ -121,7 +141,7 @@ def collect_reward_and_advantage_from_trajectory_groups(
             rewards_by_group[group_role].extend(traj_rewards)
 
             if collect_advantage:
-                advantage_fn = get_advantage_fn(algorithm_config.estimator_map.get(group_role, algorithm_config.estimator))
+                advantage_fn = get_rllm_adv_estimator(algorithm_config.estimator_map.get(group_role, algorithm_config.estimator))
                 advantages = advantage_fn(traj_rewards)
                 advantages_by_group[group_role].extend(advantages)
                 # broadcast the advantage to all steps in the trajectory
