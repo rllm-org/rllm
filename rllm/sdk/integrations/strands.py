@@ -21,6 +21,7 @@ Usage::
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from typing import Any
@@ -47,6 +48,8 @@ try:
 except ImportError:
     _STRANDS_AVAILABLE = False
 
+logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Bedrock (Strands) <-> OpenAI format converters
@@ -61,6 +64,17 @@ def _safe_json(obj: Any) -> str:
         return json.dumps(obj, ensure_ascii=False)
     except (TypeError, ValueError):
         return str(obj)
+
+
+def _extract_reasoning_text(block: dict) -> str | None:
+    """Extract plain text from a ``reasoningContent`` content block."""
+    rc = block.get("reasoningContent")
+    if not isinstance(rc, dict):
+        return None
+    rt = rc.get("reasoningText")
+    if isinstance(rt, dict) and "text" in rt:
+        return rt["text"]
+    return None
 
 
 def _strands_messages_to_openai(
@@ -85,6 +99,12 @@ def _strands_messages_to_openai(
         if not content_blocks:
             continue
 
+        # Handle plain-string content (OpenAI format) vs list of content
+        # blocks (Bedrock format).  Strands' OpenAIModel uses plain strings.
+        if isinstance(content_blocks, str):
+            openai_messages.append({"role": role, "content": content_blocks})
+            continue
+
         text_parts: list[str] = []
         tool_calls: list[dict] = []
         tool_results: list[dict] = []
@@ -95,6 +115,11 @@ def _strands_messages_to_openai(
 
             if "text" in block:
                 text_parts.append(block["text"])
+
+            elif "reasoningContent" in block:
+                reasoning = _extract_reasoning_text(block)
+                if reasoning:
+                    text_parts.append(reasoning)
 
             elif "toolUse" in block:
                 tu = block["toolUse"]
@@ -147,6 +172,12 @@ def _strands_message_to_openai(message: dict) -> dict:
         return {"role": "assistant", "content": ""}
 
     content_blocks = message.get("content", [])
+
+    # Handle plain-string content (OpenAI format) vs list of content
+    # blocks (Bedrock format).  Strands' OpenAIModel uses plain strings.
+    if isinstance(content_blocks, str):
+        return {"role": "assistant", "content": content_blocks}
+
     text_parts: list[str] = []
     tool_calls: list[dict] = []
 
@@ -156,6 +187,10 @@ def _strands_message_to_openai(message: dict) -> dict:
 
         if "text" in block:
             text_parts.append(block["text"])
+        elif "reasoningContent" in block:
+            reasoning = _extract_reasoning_text(block)
+            if reasoning:
+                text_parts.append(reasoning)
         elif "toolUse" in block:
             tu = block["toolUse"]
             tool_calls.append(
@@ -258,9 +293,19 @@ def _extract_text_from_message(message: dict | None) -> str | None:
     """Extract plain text content from a Strands Message."""
     if not message:
         return None
-    for block in message.get("content", []):
+    content = message.get("content", [])
+    # Handle plain-string content (OpenAI format)
+    if isinstance(content, str):
+        return content
+    for block in content:
         if isinstance(block, dict) and "text" in block:
             return block["text"]
+    # Fall back to reasoning content (e.g. Qwen3 thinking tokens)
+    for block in content:
+        if isinstance(block, dict) and "reasoningContent" in block:
+            reasoning = _extract_reasoning_text(block)
+            if reasoning:
+                return reasoning
     return None
 
 
@@ -461,8 +506,16 @@ class RLLMTrajectoryHookProvider:
     # ---- internal helpers -----------------------------------------------------
 
     def _build_trajectories(self) -> None:
-        """Build Trajectory from collected traces."""
-        if self._trajectory_built or not self._traces:
+        """Build Trajectory from collected traces.
+
+        Always builds a trajectory even when ``_traces`` is empty (e.g. the
+        model call raised an exception before any trace was recorded).  This
+        matches the ADK plugin's ``after_run_callback`` behaviour and ensures
+        that ``output`` / ``input`` are preserved on the resulting Trajectory
+        so downstream code (SdkWorkflow, train.py fallbacks) never sees a
+        null output.
+        """
+        if self._trajectory_built:
             return
         self._trajectory_built = True
 

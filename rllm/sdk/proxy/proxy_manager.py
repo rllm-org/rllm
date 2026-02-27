@@ -501,6 +501,7 @@ class TinkerProxyManager(ProxyManager):
                         "model": f"hosted_vllm/{self.model_name}",
                         "api_base": self._backend_server.base_url,
                         "drop_params": True,
+                        "fake_stream": True,
                     },
                     "model_info": {
                         "id": "tinker-backend-0",

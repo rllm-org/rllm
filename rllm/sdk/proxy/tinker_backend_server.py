@@ -18,14 +18,17 @@ through ``provider_specific_fields``.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 import time
 import uuid
+from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
@@ -41,7 +44,24 @@ logger = logging.getLogger(__name__)
 
 class _ChatMessage(BaseModel):
     role: str
-    content: str | None = None
+    content: str | list | None = None
+
+    def flat_content(self) -> str | None:
+        """Return content as a plain string, flattening content-block arrays."""
+        if self.content is None:
+            return None
+        if isinstance(self.content, str):
+            return self.content
+        # Flatten [{"type": "text", "text": "..."}, ...] arrays
+        parts: list[str] = []
+        for block in self.content:
+            if isinstance(block, dict):
+                text = block.get("text")
+                if text:
+                    parts.append(text)
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(parts) if parts else None
 
 
 class _ChatCompletionRequest(BaseModel):
@@ -52,6 +72,7 @@ class _ChatCompletionRequest(BaseModel):
     max_tokens: int | None = None
     max_completion_tokens: int | None = None
     stop: list[str] | str | None = None
+    stream: bool = False
     # LiteLLM may forward extra fields; accept silently
     extra_body: dict[str, Any] | None = None
 
@@ -131,8 +152,9 @@ class TinkerBackendServer:
 
         return app
 
-    async def _handle(self, body: _ChatCompletionRequest) -> dict[str, Any]:
-        messages = [{"role": m.role, "content": m.content} for m in body.messages]
+    async def _run_inference(self, body: _ChatCompletionRequest) -> dict[str, Any]:
+        """Run inference and return a dict with all response fields."""
+        messages = [{"role": m.role, "content": m.flat_content()} for m in body.messages]
 
         kwargs: dict[str, Any] = {}
         if body.temperature is not None:
@@ -163,6 +185,32 @@ class TinkerBackendServer:
             response_message["reasoning"] = model_output.reasoning
 
         return {
+            "response_text": response_text,
+            "response_message": response_message,
+            "prompt_ids": prompt_ids,
+            "completion_ids": completion_ids,
+            "logprobs": logprobs,
+            "finish_reason": finish_reason,
+            "prompt_length": model_output.prompt_length or len(prompt_ids),
+            "completion_length": model_output.completion_length or len(completion_ids),
+        }
+
+    async def _handle(self, body: _ChatCompletionRequest) -> dict[str, Any] | StreamingResponse:
+        logger.debug("TinkerBackendServer._handle: stream=%s, model=%s", body.stream, body.model)
+        result = await self._run_inference(body)
+
+        if body.stream:
+            return StreamingResponse(
+                self._stream_sse(body, result),
+                media_type="text/event-stream",
+            )
+
+        return self._build_non_streaming_response(body, result)
+
+    def _build_non_streaming_response(self, body: _ChatCompletionRequest, result: dict[str, Any]) -> dict[str, Any]:
+        prompt_len = result["prompt_length"]
+        completion_len = result["completion_length"]
+        return {
             "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
             "object": "chat.completion",
             "created": int(time.time()),
@@ -170,24 +218,90 @@ class TinkerBackendServer:
             "choices": [
                 {
                     "index": 0,
-                    "message": response_message,
-                    "finish_reason": finish_reason,
+                    "message": result["response_message"],
+                    "finish_reason": result["finish_reason"],
                     # token_ids and response_logprobs must be top-level choice
                     # fields (not nested in provider_specific_fields) because
                     # LiteLLM's convert_to_model_response_object collects
                     # non-standard choice fields into provider_specific_fields
                     # automatically; a nested dict would be silently dropped.
-                    "token_ids": completion_ids,
-                    "response_logprobs": logprobs,
+                    "token_ids": result["completion_ids"],
+                    "response_logprobs": result["logprobs"],
                 }
             ],
             "usage": {
-                "prompt_tokens": model_output.prompt_length or len(prompt_ids),
-                "completion_tokens": model_output.completion_length or len(completion_ids),
-                "total_tokens": (model_output.prompt_length or len(prompt_ids)) + (model_output.completion_length or len(completion_ids)),
+                "prompt_tokens": prompt_len,
+                "completion_tokens": completion_len,
+                "total_tokens": prompt_len + completion_len,
             },
-            "prompt_token_ids": prompt_ids,
+            "prompt_token_ids": result["prompt_ids"],
         }
+
+    async def _stream_sse(self, body: _ChatCompletionRequest, result: dict[str, Any]) -> AsyncGenerator[str, None]:
+        """Yield OpenAI-compatible SSE chunks for the completed inference result."""
+        chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        created = int(time.time())
+        model = body.model or self.model_name
+        prompt_len = result["prompt_length"]
+        completion_len = result["completion_length"]
+
+        def _sse(data: str) -> str:
+            return f"data: {data}\n\n"
+
+        # Chunk 1: role
+        yield _sse(
+            json.dumps(
+                {
+                    "id": chat_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
+                }
+            )
+        )
+
+        # Chunk 2: full content
+        yield _sse(
+            json.dumps(
+                {
+                    "id": chat_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": result["response_text"]},
+                            "finish_reason": None,
+                            "token_ids": result["completion_ids"],
+                            "response_logprobs": result["logprobs"],
+                        }
+                    ],
+                    "prompt_token_ids": result["prompt_ids"],
+                }
+            )
+        )
+
+        # Chunk 3: finish + usage
+        yield _sse(
+            json.dumps(
+                {
+                    "id": chat_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": result["finish_reason"]}],
+                    "usage": {
+                        "prompt_tokens": prompt_len,
+                        "completion_tokens": completion_len,
+                        "total_tokens": prompt_len + completion_len,
+                    },
+                }
+            )
+        )
+
+        yield _sse("[DONE]")
 
     # ------------------------------------------------------------------
     # Lifecycle

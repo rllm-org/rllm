@@ -300,6 +300,14 @@ class SdkWorkflow(Workflow):
         # Collect traces from the store (session_uid is unique per invocation,
         # so all returned traces already belong to this session)
         traces = await self.store.get_by_session_uid(session_uid, since=rollout_start_time)
+
+        # If no traces found, the proxy may have written them asynchronously.
+        # Flush the proxy tracer and retry once (applies to clients like Strands
+        # that don't do local tracing via get_chat_client()).
+        if not traces and self.proxy_manager is not None and hasattr(self.proxy_manager, "flush_tracer"):
+            await self.proxy_manager.flush_tracer(timeout=10.0)
+            traces = await self.store.get_by_session_uid(session_uid, since=rollout_start_time)
+
         traces_for_session = [(tc.id, Trace(**tc.data)) for tc in traces]
 
         # Unpack output (may be float, list[Trajectory], or tuple)
@@ -370,18 +378,30 @@ class SdkWorkflow(Workflow):
                 traj.reward = output
             is_correct = output >= 1.0
         elif isinstance(output, list):
-            # List[Trajectory] – user-defined trajectory structure
+            # List[Trajectory] – user-defined trajectory structure.
+            # Steps are matched by ID first; if IDs don't match (e.g. Strands
+            # hook provider generates different IDs than the proxy), fall back
+            # to positional matching within each trajectory.
             assert all(isinstance(tv, BaseTrajectory) for tv in output)
             trajectories = []
+            steps_by_position = list(steps)  # proxy-captured steps in order
+            pos_offset = 0
             for tv in output:
                 traj_steps = []
-                for sv in tv.steps:
+                for i, sv in enumerate(tv.steps):
                     step = step_id_to_step.get(sv.id)
                     if step is None:
-                        logger.warning("Step %s not found in store – skipped", sv.id)
-                        continue
+                        # Positional fallback: proxy traces and user steps
+                        # are in the same chronological order.
+                        pos_idx = pos_offset + i
+                        if pos_idx < len(steps_by_position):
+                            step = steps_by_position[pos_idx]
+                        else:
+                            logger.warning("Step %s not found in store and no positional match – skipped", sv.id)
+                            continue
                     step.reward = sv.reward
                     traj_steps.append(step)
+                pos_offset += len(tv.steps)
                 trajectories.append(Trajectory(name=tv.name, steps=traj_steps, reward=tv.reward))
             is_correct = trajectories[-1].reward >= 1.0 if trajectories else False
         else:
