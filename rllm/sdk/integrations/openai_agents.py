@@ -474,8 +474,14 @@ class RLLMTrajectoryHooks(RunHooksBase):  # type: ignore[misc]
         return None
 
     def _ensure_trajectories(self) -> None:
-        """Rebuild trajectories from traces if they are stale."""
-        if self._trajectory_built or not self._traces:
+        """Rebuild trajectories from traces if they are stale.
+
+        Always builds a trajectory even when ``_traces`` is empty (e.g. the
+        model call raised an exception before any trace was recorded).  This
+        ensures that ``output`` / ``input`` are preserved on the resulting
+        Trajectory so downstream code never sees a null output.
+        """
+        if self._trajectory_built:
             return
         self._trajectory_built = True
 
