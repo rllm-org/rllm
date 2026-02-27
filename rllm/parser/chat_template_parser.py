@@ -514,34 +514,38 @@ class QwenChatTemplateParser(ChatTemplateParser):
 
             return self.user_token + tool_outputs_str + self.eot_token
 
+    def _strip_special_tokens(self, text):
+        if text.endswith(self.eos_token):
+            text = text[: -len(self.eos_token)]
+        if text.endswith(self.eot_token):
+            text = text[: -len(self.eot_token)]
+        return text.strip()
+
     def parse_completion(self, completion_ids):
         completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=False)
         if completion_text.count("</think>") == 1:
             reasoning, _, content = completion_text.partition("</think>")
             if reasoning.startswith("<think>"):
                 reasoning = reasoning[len("<think>") :]
-            if content.endswith("<|im_end|>"):
-                content = content[: -len("<|im_end|>")]
-            if content.endswith("<|endoftext|>"):
-                content = content[: -len("<|endoftext|>")]
             reasoning = reasoning.strip()
-            content = content.strip()
+            content = self._strip_special_tokens(content)
         elif not self.disable_thinking:
-            # generation was cut short during reasoning
-            reasoning = completion_text
-            if reasoning.startswith("<think>"):
-                reasoning = reasoning[len("<think>") :]
-            reasoning = reasoning.strip()
-            content = ""
+            # Two cases where the model didn't output </think>:
+            # 1. Started <think> but no </think> -> thinking model, treat rest as reasoning, content=""
+            # 2. No <think> at all -> non-thinking model (e.g. instruct), treat full text as content
+            if "<think>" in completion_text:
+                reasoning = completion_text
+                if reasoning.startswith("<think>"):
+                    reasoning = reasoning[len("<think>") :]
+                reasoning = reasoning.strip()
+                content = ""
+            else:
+                reasoning = ""
+                content = self._strip_special_tokens(completion_text)
         else:
             # thinking is disabled, so everything is content
             reasoning = ""
-            content = completion_text
-            if content.endswith("<|im_end|>"):
-                content = content[: -len("<|im_end|>")]
-            if content.endswith("<|endoftext|>"):
-                content = content[: -len("<|endoftext|>")]
-            content = content.strip()
+            content = self._strip_special_tokens(completion_text)
 
         if content:
             # parse tool calls from content
