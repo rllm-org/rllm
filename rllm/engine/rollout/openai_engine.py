@@ -82,6 +82,10 @@ class OpenAIEngine(RolloutEngine):
         kwargs.pop("validate", None)
         kwargs.pop("model", None)
         kwargs.pop("enforce_max_prompt_length", None)
+        # Filter out Strands-specific kwargs that shouldn't be passed to OpenAI
+        kwargs.pop("system_prompt_content", None)
+        kwargs.pop("tool_execution_handler", None)
+        kwargs.pop("event_handler", None)
 
         sampling_params = self.sampling_params.copy()
         sampling_params.update(kwargs)
