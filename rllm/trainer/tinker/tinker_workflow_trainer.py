@@ -141,7 +141,7 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
     async def validate_agent(self, dataloader, sampling_client):
         all_episodes = []
         all_episode_metrics = {}  # episode_id -> episode.metrics dict
-        val_group_size = self.config.training.get('val_group_size', 1)
+        val_group_size = self.config.training.get("val_group_size", 1)
         self.agent_execution_engine.rollout_engine.set_sampling_client(sampling_client)
         self.agent_execution_engine.rollout_engine.validate = True
 

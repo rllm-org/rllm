@@ -647,7 +647,7 @@ class HarmonyChatTemplateParser(ChatTemplateParser):
 
         self.enc = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
         self.generation_prompt = "<|start|>assistant"
-        self.stop_sequences = [200002, 199999, 200012] # <|endoftext|>, <|return|>, <|call|>
+        self.stop_sequences = [200002, 199999, 200012]  # <|endoftext|>, <|return|>, <|call|>
 
     def parse(self, messages, add_generation_prompt=False, is_first_msg=False, **kwargs) -> str:
         return self.parse_prompt_from_messages(messages, add_generation_prompt=add_generation_prompt, is_first_msg=is_first_msg, **kwargs)
@@ -827,6 +827,7 @@ class DeepSeekV32ExpChatTemplateParser(ChatTemplateParser):
             "tool_calls": [],
         }
 
+
 class KimiK2ThinkingChatTemplateParser(ChatTemplateParser):
     def __init__(self, tokenizer):
         super().__init__(tokenizer)
@@ -898,13 +899,13 @@ class KimiK2ThinkingChatTemplateParser(ChatTemplateParser):
 
         # Remove end token if present
         if completion_text.endswith(self.eos_token):
-            completion_text = completion_text[:-len(self.eos_token)]
+            completion_text = completion_text[: -len(self.eos_token)]
 
         # Parse thinking tags
         if completion_text.count("</think>") == 1:
             reasoning, _, content = completion_text.partition("</think>")
             if reasoning.startswith("<think>"):
-                reasoning = reasoning[len("<think>"):]
+                reasoning = reasoning[len("<think>") :]
             reasoning = reasoning.strip()
             content = content.strip()
         else:
@@ -912,7 +913,7 @@ class KimiK2ThinkingChatTemplateParser(ChatTemplateParser):
             if "<think>" in completion_text:
                 reasoning = completion_text
                 if reasoning.startswith("<think>"):
-                    reasoning = reasoning[len("<think>"):]
+                    reasoning = reasoning[len("<think>") :]
                 reasoning = reasoning.strip()
                 content = ""
             else:

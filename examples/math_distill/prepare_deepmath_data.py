@@ -35,14 +35,10 @@ def prepare_deepmath_data():
             "ground_truth": str(example["answer"]),
             "data_source": "aime2024",
         }
-    # Apply preprocessing
-    train_dataset = train_dataset.map(
-        preprocess_train, with_indices=True, remove_columns=train_dataset.column_names
 
-    )
-    test_dataset = test_dataset.map(
-        preprocess_test, with_indices=True, remove_columns=test_dataset.column_names
-    )
+    # Apply preprocessing
+    train_dataset = train_dataset.map(preprocess_train, with_indices=True, remove_columns=train_dataset.column_names)
+    test_dataset = test_dataset.map(preprocess_test, with_indices=True, remove_columns=test_dataset.column_names)
 
     # Register datasets under a new name for DeepMath OPD
     train_dataset = DatasetRegistry.register_dataset("deepmath_opd", train_dataset, "train")

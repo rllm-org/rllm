@@ -187,7 +187,7 @@ class OpenAIEngine(RolloutEngine):
                     try:
                         assert response.choices[0].prompt_logprobs is not None
                         prompt_logprobs: list[float] = [None]
-                        for tid, lp in zip(prompt_ids[1:], response.choices[0].prompt_logprobs[1:]):
+                        for tid, lp in zip(prompt_ids[1:], response.choices[0].prompt_logprobs[1:], strict=False):
                             prompt_logprobs.append(float(lp[str(tid)]["logprob"]))
                     except Exception:
                         prompt_logprobs = []

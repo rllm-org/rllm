@@ -1,8 +1,9 @@
 from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.engine import ModelOutput, RolloutEngine
-from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflow
-from rllm.trainer.distill import compute_step_distill_advantage
 from rllm.rewards.reward_fn import RewardFunction
+from rllm.trainer.distill import compute_step_distill_advantage
+from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflow
+
 
 class DistillationWorkflow(Workflow):
     def __init__(self, rollout_engine: RolloutEngine, reward_function: RewardFunction | None = None, teacher_engine: RolloutEngine | None = None, shared_tokenizer: bool = False, clip_min: float | None = None, clip_max: float | None = None, **kwargs):
@@ -33,7 +34,7 @@ class DistillationWorkflow(Workflow):
         step = Step(
             chat_completions=messages + [{"role": "assistant", "content": output.content, "reasoning": output.reasoning, "tool_calls": output.tool_calls}],
             model_output=output,
-            reward = self.reward_function(task, output.content).reward,
+            reward=self.reward_function(task, output.content).reward,
         )
         if not self.rollout_engine.is_validation:
             step.advantage = await compute_step_distill_advantage(

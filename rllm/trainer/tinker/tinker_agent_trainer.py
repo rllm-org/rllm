@@ -25,7 +25,6 @@ from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
 from rllm.trainer.tinker.tinker_metrics_utils import (
     compute_training_metrics,
-    print_episodes,
     print_metrics_table,
 )
 from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer
@@ -348,7 +347,7 @@ class TinkerAgentTrainer:
 
     async def validate_agent(self, dataloader, sampling_client):
         episodes_ls = []
-        val_group_size = self.config.training.get('val_group_size', 1)
+        val_group_size = self.config.training.get("val_group_size", 1)
         self.agent_execution_engine.rollout_engine.set_sampling_client(sampling_client)
         self.agent_execution_engine.rollout_engine.validate = True
         try:

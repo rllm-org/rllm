@@ -544,12 +544,7 @@ async def process_episodes(
     training_datums = []
 
     # Check if any steps have pre-computed advantages
-    has_precomputed = any(
-        isinstance(step.advantage, list) and len(step.advantage) == len(step.response_ids)
-        for episode in episodes
-        for trajectory in episode.trajectories
-        for step in trajectory.steps
-    )
+    has_precomputed = any(isinstance(step.advantage, list) and len(step.advantage) == len(step.response_ids) for episode in episodes for trajectory in episode.trajectories for step in trajectory.steps)
 
     if has_precomputed:
         for episode in episodes:

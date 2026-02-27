@@ -62,7 +62,7 @@ def build_byte_offsets(tokenizer: PreTrainedTokenizer, token_ids: list[int]) -> 
         offsets.append(cumulative)
 
     reconstructed_bytes = b"".join(all_bytes)
-    reconstructed_text = reconstructed_bytes.decode('utf-8', errors='replace')
+    reconstructed_text = reconstructed_bytes.decode("utf-8", errors="replace")
     return offsets, reconstructed_text
 
 

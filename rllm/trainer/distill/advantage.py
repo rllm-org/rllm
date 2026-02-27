@@ -77,7 +77,7 @@ async def compute_step_distill_advantage(
         teacher_prompt_ids = teacher_tokenizer.encode(teacher_prompt, add_special_tokens=False)
         teacher_ids = teacher_prompt_ids + student_completion_ids
         teacher_full_logprobs = await teacher_engine.compute_logprobs(teacher_ids)
-        aligned_teacher_logprobs = teacher_full_logprobs[len(teacher_prompt_ids):]
+        aligned_teacher_logprobs = teacher_full_logprobs[len(teacher_prompt_ids) :]
 
     else:
         # Different tokenizers: re-encode through teacher chat parser and align
@@ -119,13 +119,13 @@ async def compute_step_distill_advantage(
             accumulate_reasoning=True,
         )
         if teacher_completion.startswith(teacher_chat_parser.generation_prompt):
-            teacher_completion = teacher_completion[len(teacher_chat_parser.generation_prompt):]
+            teacher_completion = teacher_completion[len(teacher_chat_parser.generation_prompt) :]
         teacher_ids = teacher_tokenizer.encode(teacher_prompt + teacher_completion, add_special_tokens=False)
-        teacher_completion_ids = teacher_ids[len(teacher_prompt_ids):]
+        teacher_completion_ids = teacher_ids[len(teacher_prompt_ids) :]
 
         # Query teacher for logprobs
         teacher_full_logprobs = await teacher_engine.compute_logprobs(teacher_ids)
-        teacher_logprobs = teacher_full_logprobs[len(teacher_prompt_ids):]
+        teacher_logprobs = teacher_full_logprobs[len(teacher_prompt_ids) :]
 
         # Align teacher logprobs to student tokens
         aligned_teacher_logprobs = align_teacher_logprobs(
@@ -141,6 +141,7 @@ async def compute_step_distill_advantage(
 
         if visualize:
             from rllm.trainer.distill import visualize_alignment
+
             visualize_alignment(
                 student_ids=student_completion_ids,
                 student_tokenizer=student_tokenizer,

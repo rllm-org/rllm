@@ -10,17 +10,12 @@ from functools import partial
 
 from rllm.agents.agent import Episode, Step
 from rllm.engine import ModelOutput, RolloutEngine
+from rllm.rewards.reward_fn import RewardFunction
 from rllm.trainer.distill import compute_step_distill_advantage
 from rllm.workflows.distillation_workflow import DistillationWorkflow
 from rllm.workflows.workflow import TerminationEvent, TerminationReason
-from rllm.rewards.reward_fn import RewardFunction
 
-
-REFERENCE_SOLUTION_TEMPLATE = (
-    "Here is a reference solution:\n{solution}\n\n"
-    "After understanding the reference solution, "
-    "please try to solve this problem using your own approach below."
-)
+REFERENCE_SOLUTION_TEMPLATE = "Here is a reference solution:\n{solution}\n\nAfter understanding the reference solution, please try to solve this problem using your own approach below."
 
 
 def inject_reference_solution(messages: list[dict], ground_truth: str) -> list[dict]:
@@ -48,7 +43,7 @@ class OPSDWorkflow(DistillationWorkflow):
         step = Step(
             chat_completions=messages + [{"role": "assistant", "content": output.content, "reasoning": output.reasoning, "tool_calls": output.tool_calls}],
             model_output=output,
-            reward = self.reward_function(task, output.text).reward,
+            reward=self.reward_function(task, output.text).reward,
         )
 
         teacher_prompt_fn = partial(inject_reference_solution, ground_truth=ground_truth) if ground_truth else None
