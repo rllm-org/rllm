@@ -19,9 +19,9 @@ from skyrl_train.training_batch import TrainingInputBatch
 
 from rllm.agents.agent import Episode, TrajectoryGroup
 from rllm.data import Dataset
-from rllm.experimental.rollout import RolloutEngine, SkyRLEngine
 from rllm.experimental.common.advantage import AlgorithmConfig
 from rllm.experimental.protocol import BackendProtocol
+from rllm.experimental.rollout import RolloutEngine, SkyRLEngine
 from rllm.experimental.skyrl.skyrl_metrics_utils import update_training_metrics
 
 if TYPE_CHECKING:
@@ -148,25 +148,14 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
         if dataset is None:
             raise ValueError("Dataset cannot be None for SkyRLBackend")
 
-        num_policy_gpus = (
-            self.full_config.trainer.placement.get("policy_num_gpus_per_node", 1)
-            * self.full_config.trainer.get("nnodes", 1)
-        )
+        num_policy_gpus = self.full_config.trainer.placement.get("policy_num_gpus_per_node", 1) * self.full_config.trainer.get("nnodes", 1)
         if trainer_state.is_training:
             per_gpu = self.full_config.data.get("train_batch_size_per_gpu", None)
-            batch_size = (
-                per_gpu * num_policy_gpus
-                if per_gpu is not None
-                else self.full_config.data.train_batch_size
-            )
+            batch_size = per_gpu * num_policy_gpus if per_gpu is not None else self.full_config.data.train_batch_size
             shuffle = True
         else:
             per_gpu = self.full_config.data.get("val_batch_size_per_gpu", None)
-            batch_size = (
-                per_gpu * num_policy_gpus
-                if per_gpu is not None
-                else self.full_config.data.get("val_batch_size", self.full_config.data.train_batch_size)
-            )
+            batch_size = per_gpu * num_policy_gpus if per_gpu is not None else self.full_config.data.get("val_batch_size", self.full_config.data.train_batch_size)
             shuffle = False
 
         return torch.utils.data.DataLoader(
@@ -254,7 +243,9 @@ class SkyRLBackend(BackendProtocol[Iterable, TrainingInputBatch], RayPPOTrainer)
 
         # Execute workflows directly - returns full Episodes with all metadata
         episodes: list[Episode] = await agent_workflow_engine.execute_tasks(
-            tasks, task_ids, is_validation=is_validation,
+            tasks,
+            task_ids,
+            is_validation=is_validation,
         )
 
         return episodes

@@ -24,7 +24,7 @@ class ChatTemplateParser:
         with_prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
         without_prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=False, tokenize=False)
 
-        generation_prompt = with_prompt[len(without_prompt):]
+        generation_prompt = with_prompt[len(without_prompt) :]
 
         return generation_prompt
 

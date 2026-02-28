@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
 def _remap_skyrl_key(key: str) -> str:
     """Map a SkyRL metric key to the rLLM logger format.
 
@@ -42,7 +43,7 @@ def _remap_skyrl_key(key: str) -> str:
 
 def _to_scalar(value: Any) -> float | int | None:
     """Convert *value* to a Python scalar, or return ``None`` on failure."""
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         return value
     if hasattr(value, "item"):  # torch.Tensor
         try:
@@ -55,6 +56,7 @@ def _to_scalar(value: Any) -> float | int | None:
 # ---------------------------------------------------------------------------
 # Composable metric extractors
 # ---------------------------------------------------------------------------
+
 
 def extract_skyrl_training_metrics(all_metrics: dict) -> dict[str, float | int]:
     """Iterate *all_metrics*, convert values to scalars & remap keys."""
@@ -105,6 +107,7 @@ def extract_learning_rate(backend: Any) -> float | None:
 # Orchestrator
 # ---------------------------------------------------------------------------
 
+
 def update_training_metrics(
     trainer_state: TrainerState,
     all_metrics: dict,
@@ -134,17 +137,8 @@ def update_training_metrics(
     metrics["training/epoch"] = trainer_state.epoch
 
     # 5. Debug summary
-    num_training_metrics = len(
-        [k for k in metrics if k.startswith(("training/", "reward/", "optim/"))]
-    )
-    logger.info(
-        f"Step {trainer_state.global_step}: Extracted {num_training_metrics} "
-        f"training metrics. Keys: {sorted(metrics.keys())}"
-    )
+    num_training_metrics = len([k for k in metrics if k.startswith(("training/", "reward/", "optim/"))])
+    logger.info(f"Step {trainer_state.global_step}: Extracted {num_training_metrics} training metrics. Keys: {sorted(metrics.keys())}")
 
     if len(metrics) <= 3:  # Only global_step, epoch, and maybe lr
-        logger.warning(
-            f"Step {trainer_state.global_step}: Very few metrics found. "
-            f"all_metrics keys were: {list(all_metrics.keys()) if all_metrics else 'empty'}. "
-            f"trainer_state.metrics: {list(metrics.keys())}"
-        )
+        logger.warning(f"Step {trainer_state.global_step}: Very few metrics found. all_metrics keys were: {list(all_metrics.keys()) if all_metrics else 'empty'}. trainer_state.metrics: {list(metrics.keys())}")
