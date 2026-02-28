@@ -107,7 +107,7 @@ class AlgorithmConfig:
     """Configuration for algorithm parameters."""
 
     estimator: rLLMAdvantageEstimator = rLLMAdvantageEstimator.GRPO
-    estimator_map: dict[str, rLLMAdvantageEstimator] = field(default_factory=dict)
+    estimator_map: dict[str, rLLMAdvantageEstimator | str] = field(default_factory=dict)
     # TODO(listar2000): eventually we will remove the `per_step` mode all-together. Now we keep it for backward compatibility.
     stepwise_advantage_mode: Literal["broadcast", "per_step"] = "broadcast"
     norm_adv_by_std_in_grpo: bool = True
