@@ -55,12 +55,13 @@ class SdkWorkflowFactory:
       inside the user function can reach the training model.
     - Creates a ``SqliteTraceStore`` for trace persistence.
     - Wraps ``agent_run_func`` with ``wrap_with_session_context()``.
+    - Optionally creates a ``SandboxOrchestrator`` for sandboxed execution.
     - Exposes ``get_workflow_args()`` for ``SdkWorkflow`` construction.
     """
 
     def __init__(
         self,
-        agent_run_func: Callable,
+        agent_run_func: Callable | None,
         rollout_engine: RolloutEngine,
         config: DictConfig,
     ) -> None:
@@ -72,6 +73,12 @@ class SdkWorkflowFactory:
         # SDK-specific config (may or may not exist – fall back to sensible defaults)
         self._sdk_cfg = self.rllm_config.get("sdk", {})
 
+        # Sandbox config
+        sandbox_cfg = self._sdk_cfg.get("sandbox", {})
+        self._sandbox_enabled = sandbox_cfg.get("enabled", False)
+        self.sandbox_orchestrator: Any = None
+        self.agent_config: dict[str, Any] = {}
+
         # Trace store
         db_path = self._sdk_cfg.get("store", {}).get("path", None)
         self.store = SqliteTraceStore(db_path=db_path)
@@ -81,15 +88,70 @@ class SdkWorkflowFactory:
         self.groupby_key: str | None = processing_cfg.get("groupby_key", None)
         self.traj_name_key: str | None = processing_cfg.get("traj_name_key", None)
 
-        # Wrapped agent function (adds session context)
-        self.wrapped_func = wrap_with_session_context(
-            self.agent_run_func,
-            tracer_service_name="agent-sdk-worker",
-        )
+        # Wrapped agent function (adds session context) — None when sandbox-only
+        if self.agent_run_func is not None:
+            self.wrapped_func = wrap_with_session_context(
+                self.agent_run_func,
+                tracer_service_name="agent-sdk-worker",
+            )
+        else:
+            self.wrapped_func = None
+
+        # Set up sandbox orchestrator if enabled
+        if self._sandbox_enabled:
+            self._setup_sandbox(sandbox_cfg)
 
         # Proxy setup – depends on backend engine type
         self.proxy_manager: Any = None
         self._setup_proxy()
+
+    # ----- sandbox setup -----
+
+    def _setup_sandbox(self, sandbox_cfg: dict) -> None:
+        """Create a SandboxOrchestrator from the config."""
+        from rllm.sdk.sandbox import create_sandbox_orchestrator
+        from rllm.sdk.sandbox.protocol import SandboxConfig
+
+        sc = SandboxConfig(
+            enabled=sandbox_cfg.get("enabled", False),
+            backend=sandbox_cfg.get("backend", "local"),
+            agent_dir=sandbox_cfg.get("agent_dir", ""),
+            agent_module=sandbox_cfg.get("agent_module", "agent"),
+            agent_func=sandbox_cfg.get("agent_func", "rollout"),
+            image=sandbox_cfg.get("image", "python:3.11-slim"),
+            dockerfile=sandbox_cfg.get("dockerfile", ""),
+            requirements_file=sandbox_cfg.get("requirements_file", ""),
+            install_rllm_sdk=sandbox_cfg.get("install_rllm_sdk", True),
+            pool_mode=sandbox_cfg.get("pool_mode", "persistent"),
+            num_workers=sandbox_cfg.get("num_workers", 8),
+            worker_port=sandbox_cfg.get("worker_port", 8100),
+            max_concurrent=sandbox_cfg.get("max_concurrent", 32),
+            task_setup_commands=list(sandbox_cfg.get("task_setup_commands", [])),
+            task_setup_timeout=sandbox_cfg.get("task_setup_timeout", 300),
+            teardown_on_complete=sandbox_cfg.get("teardown_on_complete", True),
+            execution_timeout=sandbox_cfg.get("execution_timeout", 600.0),
+            setup_commands=list(sandbox_cfg.get("setup_commands", [])),
+            extra=dict(sandbox_cfg.get("extra", {})),
+        )
+
+        self.sandbox_orchestrator = create_sandbox_orchestrator(sc)
+
+        # Build agent config to pass into each execution
+        model_name = self.rllm_config.get("model_name", "default")
+        self.agent_config = {"model_id": model_name}
+        self.agent_config.update(dict(sc.extra))
+
+    async def initialize_sandbox(self) -> None:
+        """Initialize the sandbox orchestrator (call after proxy is started)."""
+        if self.sandbox_orchestrator is None:
+            return
+
+        from rllm.sdk.sandbox.result_store import ExecutionResultStore
+
+        db_path = self._sdk_cfg.get("store", {}).get("path", None)
+        result_store = ExecutionResultStore(db_path=db_path)
+        proxy_url = self.proxy_manager.get_proxy_url() if self.proxy_manager else ""
+        await self.sandbox_orchestrator.initialize(proxy_url, result_store)
 
     # ----- proxy setup helpers -----
 
@@ -141,6 +203,7 @@ class SdkWorkflowFactory:
                 sync_tracer=sync_tracer,
                 add_logprobs=add_logprobs,
                 add_return_token_ids=True,
+                enable_result_store=self._sandbox_enabled,
             )
         elif proxy_mode == "external":
             self.proxy_manager.reload_proxy_config(config=config_payload)
@@ -189,6 +252,7 @@ class SdkWorkflowFactory:
                 sync_tracer=sync_tracer,
                 add_logprobs=True,
                 add_return_token_ids=True,
+                enable_result_store=self._sandbox_enabled,
             )
         elif proxy_mode == "external":
             self.proxy_manager.reload_proxy_config(config=config_payload)
@@ -203,7 +267,7 @@ class SdkWorkflowFactory:
 
     def get_workflow_args(self) -> dict[str, Any]:
         """Return kwargs to pass into each ``SdkWorkflow`` via the engine."""
-        return {
+        args = {
             "wrapped_func": self.wrapped_func,
             "store": self.store,
             "proxy_manager": self.proxy_manager,
@@ -211,6 +275,10 @@ class SdkWorkflowFactory:
             "traj_name_key": self.traj_name_key,
             "sdk_cfg": self._sdk_cfg,
         }
+        if self.sandbox_orchestrator is not None:
+            args["sandbox_orchestrator"] = self.sandbox_orchestrator
+            args["agent_config"] = self.agent_config
+        return args
 
     async def flush_traces_hook(self) -> None:
         """Batch-level trace flush – intended as ``post_execute_hook``."""
@@ -224,6 +292,20 @@ class SdkWorkflowFactory:
 
     def shutdown(self) -> None:
         """Release proxy / server resources."""
+        # Shutdown sandbox orchestrator first
+        if self.sandbox_orchestrator is not None:
+            try:
+                import asyncio
+
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self.sandbox_orchestrator.shutdown())
+                else:
+                    loop.run_until_complete(self.sandbox_orchestrator.shutdown())
+            except Exception:
+                pass
+            self.sandbox_orchestrator = None
+
         if self.proxy_manager is not None:
             self.proxy_manager.shutdown_proxy()
             self.proxy_manager = None
@@ -260,12 +342,14 @@ class SdkWorkflow(Workflow):
         self,
         rollout_engine: RolloutEngine,
         executor: ThreadPoolExecutor,
-        wrapped_func: Callable,
+        wrapped_func: Callable | None,
         store: SqliteTraceStore,
         proxy_manager: Any = None,
         groupby_key: str | None = None,
         traj_name_key: str | None = None,
         sdk_cfg: dict | None = None,
+        sandbox_orchestrator: Any = None,
+        agent_config: dict | None = None,
         **kwargs,
     ) -> None:
         super().__init__(rollout_engine=rollout_engine, executor=executor, **kwargs)
@@ -275,6 +359,8 @@ class SdkWorkflow(Workflow):
         self.groupby_key = groupby_key
         self.traj_name_key = traj_name_key
         self.sdk_cfg = sdk_cfg or {}
+        self.sandbox_orchestrator = sandbox_orchestrator
+        self.agent_config = agent_config or {}
 
     def is_multithread_safe(self) -> bool:
         return True
@@ -287,6 +373,45 @@ class SdkWorkflow(Workflow):
         """Execute the SDK agent function and build an Episode from traces."""
         rollout_start_time = time.time()
 
+        if self.sandbox_orchestrator is not None:
+            return await self._run_sandboxed(task, uid, rollout_start_time)
+
+        return await self._run_local(task, uid, rollout_start_time, **kwargs)
+
+    async def _run_sandboxed(self, task: dict, uid: str, rollout_start_time: float) -> Episode:
+        """Execute via sandbox orchestrator and build Episode from result."""
+        from rllm.sdk.sandbox.protocol import ExecutionResult
+
+        result: ExecutionResult = await self.sandbox_orchestrator.execute(task, self.agent_config)
+
+        if not result.success:
+            raise RuntimeError(f"Sandbox agent execution failed: {result.error}")
+
+        # Collect traces from the store using the session_uid from the sandbox
+        session_uid = result.session_uid
+        traces = await self.store.get_by_session_uid(session_uid, since=rollout_start_time)
+
+        if not traces and self.proxy_manager is not None and hasattr(self.proxy_manager, "flush_tracer"):
+            await self.proxy_manager.flush_tracer(timeout=10.0)
+            traces = await self.store.get_by_session_uid(session_uid, since=rollout_start_time)
+
+        traces_for_session = [(tc.id, Trace(**tc.data)) for tc in traces]
+
+        # Deserialize trajectories from the result
+        trajectories_output = [BaseTrajectory(**t) for t in result.trajectories] if result.trajectories else []
+
+        episode = self._build_episode(
+            uid=uid,
+            task=task,
+            traces=traces_for_session,
+            output=trajectories_output,
+            metrics={},
+            rollout_start_time=rollout_start_time,
+        )
+        return episode
+
+    async def _run_local(self, task: dict, uid: str, rollout_start_time: float, **kwargs) -> Episode:
+        """Execute the local agent function and build Episode from traces."""
         # Build metadata expected by wrap_with_session_context
         metadata: dict[str, Any] = {"session_name": uid, "task": task}
 

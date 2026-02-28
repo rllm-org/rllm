@@ -106,6 +106,26 @@ sdk:
     port: 4000
     mode: subprocess  # external | subprocess
     admin_token: my-shared-secret
+  sandbox:
+    enabled: false
+    backend: local  # local | docker | modal | agentcore
+    agent_dir: ""
+    agent_module: agent
+    agent_func: rollout
+    image: "python:3.11-slim"
+    dockerfile: ""
+    requirements_file: ""
+    install_rllm_sdk: true
+    pool_mode: persistent  # persistent | per_task
+    num_workers: 8
+    worker_port: 8100
+    max_concurrent: 32
+    task_setup_commands: []
+    task_setup_timeout: 300
+    teardown_on_complete: true
+    execution_timeout: 600.0
+    setup_commands: []
+    extra: {}
 
 # Episode Logging Configuration
 episode_logging:

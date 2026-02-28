@@ -107,8 +107,13 @@ class UnifiedTrainer:
         When ``agent_run_func`` is given, the trainer automatically creates an
         ``SdkWorkflow`` adapter so that SDK users can leverage the unified
         pipeline (rejection sampling, advantage computation, verl + tinker).
+
+        When ``sandbox.enabled`` is true in the SDK config, ``agent_run_func``
+        may be ``None`` — the sandbox orchestrator handles agent execution.
         """
-        assert (workflow_class is not None) ^ (agent_run_func is not None), "Exactly one of workflow_class or agent_run_func must be provided"
+        sandbox_enabled = config.rllm.get("sdk", {}).get("sandbox", {}).get("enabled", False)
+        if not sandbox_enabled:
+            assert (workflow_class is not None) ^ (agent_run_func is not None), "Exactly one of workflow_class or agent_run_func must be provided"
 
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
@@ -137,9 +142,9 @@ class UnifiedTrainer:
             algorithm_config=self.algorithm_config,
         )
 
-        # If agent_run_func is provided, set up SDK workflow via factory
+        # If agent_run_func is provided (or sandbox enabled), set up SDK workflow via factory
         post_execute_hook = None
-        if agent_run_func is not None:
+        if agent_run_func is not None or sandbox_enabled:
             from rllm.experimental.engine.sdk_workflow import SdkWorkflow, SdkWorkflowFactory
 
             self._sdk_factory = SdkWorkflowFactory(
@@ -234,6 +239,10 @@ class UnifiedTrainer:
 
     async def fit_async(self) -> None:
         """Public async entry point for the full training process."""
+        # Initialize sandbox orchestrator (if enabled) before the workflow pool
+        if self._sdk_factory is not None:
+            await self._sdk_factory.initialize_sandbox()
+
         # initialize the UnifiedWorkflowEngine (init the workflow pool)
         await self.agent_workflow_engine.initialize_pool()
 
@@ -514,7 +523,9 @@ class AgentTrainer:
         agent_run_func: Callable | None = None,
         **kwargs,
     ):
-        assert (workflow_class is not None) ^ (agent_run_func is not None), "Exactly one of workflow_class or agent_run_func must be provided"
+        sandbox_enabled = config.rllm.get("sdk", {}).get("sandbox", {}).get("enabled", False)
+        if not sandbox_enabled:
+            assert (workflow_class is not None) ^ (agent_run_func is not None), "Exactly one of workflow_class or agent_run_func must be provided"
 
         if backend == "verl":
             from rllm.experimental.verl.verl_launcher import VerlTrainerLauncher

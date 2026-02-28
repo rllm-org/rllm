@@ -45,6 +45,17 @@ class FlushTracerPayload(BaseModel):
     timeout: float = Field(default=30.0, description="Maximum time to wait for flush operation in seconds.")
 
 
+class ResultSubmission(BaseModel):
+    """Request body for sandbox worker result submission."""
+
+    success: bool = True
+    trajectories: list[dict] | None = None
+    session_uid: str = ""
+    reward: float | None = None
+    error: str | None = None
+    elapsed: float = 0.0
+
+
 class LiteLLMProxyRuntime:
     """Owns LiteLLM initialization and reload logic."""
 
@@ -180,6 +191,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="If set, automatically add logprobs=True to requests.",
     )
+    parser.add_argument(
+        "--enable-result-store",
+        action="store_true",
+        help="If set, enable execution result store routes for sandbox workers.",
+    )
     return parser.parse_args()
 
 
@@ -260,6 +276,29 @@ def main() -> None:
         except Exception as exc:
             logging.exception("Flush tracer failed")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+
+    # --- Execution result store routes (for sandbox workers) ---
+    if args.enable_result_store:
+        from rllm.sdk.sandbox.result_store import ExecutionResultStore
+
+        result_store = ExecutionResultStore(db_path=args.db_path)
+        logging.info("Execution result store enabled (db_path=%s)", args.db_path)
+
+        @litellm_app.post("/rllm/results/{execution_id}")
+        async def submit_result(execution_id: str, payload: ResultSubmission):
+            result_store.store_result(execution_id, payload.model_dump())
+            return {"status": "stored", "execution_id": execution_id}
+
+        @litellm_app.get("/rllm/results/{execution_id}")
+        async def get_result(execution_id: str):
+            result = result_store.get_result(execution_id)
+            if result is None:
+                from fastapi.responses import JSONResponse
+
+                return JSONResponse(status_code=202, content={"status": "pending", "execution_id": execution_id})
+            from rllm.sdk.sandbox.serialization import serialize_execution_result
+
+            return {"status": "completed", "execution_id": execution_id, "result": serialize_execution_result(result)}
 
     def _shutdown_handler(*_: int) -> None:
         raise SystemExit
