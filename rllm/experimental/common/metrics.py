@@ -25,7 +25,7 @@ def reduce_metrics_by_trajectory_name(trajectory_groups: list[TrajectoryGroup], 
     metrics, rewards_by_traj_name = {}, {}
     for group in trajectory_groups:
         for traj in group.trajectories:
-            rewards_by_traj_name.setdefault(traj.name, []).append(traj.reward)
+            rewards_by_traj_name[traj.name] = traj.reward
 
     for traj_name, rewards in rewards_by_traj_name.items():
         metrics[f"{prefix}/{traj_name}/mean"] = np.mean(rewards)
