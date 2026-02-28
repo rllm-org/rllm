@@ -21,7 +21,10 @@ import re
 
 from openai import OpenAI
 
-from rllm.types import Step, Trajectory
+try:
+    from rllm.types import Step, Trajectory
+except ModuleNotFoundError:
+    from rllm_types import Step, Trajectory  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 

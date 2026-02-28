@@ -1,0 +1,49 @@
+# Reference Dockerfile for deploying a sandbox agent on AWS Bedrock AgentCore.
+#
+# Normally you do NOT write this by hand — the agentcore CLI generates it:
+#
+#   agentcore configure \
+#       --entrypoint agentcore_worker.py \
+#       --name rllm_sandbox_math \
+#       --requirements-file requirements-agentcore.txt \
+#       --deployment-type container \
+#       --disable-memory \
+#       --non-interactive
+#
+# This file is provided as a reference and for local testing:
+#
+#   cp ../../../rllm/sdk/sandbox/agentcore_worker.py .
+#   docker build -f Dockerfile.agentcore -t rllm-sandbox-math:dev .
+#   docker run -p 8080:8080 rllm-sandbox-math:dev
+#   curl http://localhost:8080/ping
+
+FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+WORKDIR /app
+
+ENV UV_SYSTEM_PYTHON=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_NO_PROGRESS=1 \
+    PYTHONUNBUFFERED=1 \
+    DOCKER_CONTAINER=1
+
+# Install agent dependencies
+COPY requirements-agentcore.txt requirements-agentcore.txt
+RUN uv pip install -r requirements-agentcore.txt
+
+# Create non-root user (matches agentcore convention)
+RUN useradd -m -u 1000 bedrock_agentcore
+USER bedrock_agentcore
+
+# Copy application code
+COPY agent/ /app/agent/
+COPY agentcore_worker.py /app/agentcore_worker.py
+
+EXPOSE 8080
+
+# Agent config via environment variables (read by agentcore_worker.py).
+# RLLM_AGENT_DIR adds /app/agent to sys.path so "import agent" finds agent.py.
+ENV RLLM_AGENT_MODULE=agent \
+    RLLM_AGENT_FUNC=rollout \
+    RLLM_AGENT_DIR=/app/agent
+
+CMD ["python", "-m", "agentcore_worker"]

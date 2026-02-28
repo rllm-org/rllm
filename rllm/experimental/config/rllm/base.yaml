@@ -125,6 +125,13 @@ sdk:
     teardown_on_complete: true
     execution_timeout: 600.0
     setup_commands: []
+    # Backend-specific configuration.
+    # For agentcore backend:
+    #   agent_runtime_arn: ARN of the AgentCore runtime (required)
+    #   base_url: Reachable proxy URL for the ACR container, e.g. http://<host-ip>:4000/v1
+    #             Required unless the proxy is publicly reachable at its default address.
+    #   tps_limit: Max concurrent invocations (default: 25)
+    #   max_retry_attempts: boto3 adaptive retry attempts (default: 5)
     extra: {}
 
 # Episode Logging Configuration
