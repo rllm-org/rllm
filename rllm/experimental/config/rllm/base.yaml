@@ -38,7 +38,7 @@ rollout:
 trainer:
   total_epochs: 10
   total_batches: -1
-  logger: ['console', 'wandb']  # Options: 'console', 'wandb', 'tensorboard'
+  logger: ['console']  # Options: 'console', 'wandb', 'tensorboard'
   project_name: 'rllm-training'
   experiment_name: 'default'
   test_freq: 5

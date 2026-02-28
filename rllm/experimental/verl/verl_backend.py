@@ -28,15 +28,14 @@ from verl.utils.metric import reduce_metrics
 
 from rllm.agents.agent import Episode
 from rllm.data import Dataset
-from rllm.engine.rollout import RolloutEngine
-from rllm.engine.rollout.verl_engine import VerlEngine
 from rllm.experimental.common import (
     AlgorithmConfig,
     collect_reward_and_advantage_from_trajectory_groups,
     simple_timer,
 )
 from rllm.experimental.protocol import BackendProtocol
-from rllm.experimental.verl import compute_advantage_verl, transform_trajectory_groups_to_dataproto, update_dataproto_with_advantages
+from rllm.experimental.rollout import RolloutEngine, VerlEngine
+from rllm.experimental.verl import compute_advantage_verl, transform_episodes_to_dataproto, update_dataproto_with_advantages
 
 if TYPE_CHECKING:
     from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
@@ -189,16 +188,56 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         await self.rollout_engine.sleep()
         return episodes
 
-    def transform_trajectory_groups_to_backend_batch(self, trainer_state: TrainerState, **kwargs) -> DataProto:
-        """Transform trajectory groups to verl DataProto format."""
-        assert trainer_state.trajectory_groups is not None, "Trajectory groups are not set"
+    def transform_to_backend_batch(self, trainer_state: TrainerState, **kwargs) -> DataProto:
+        """Transform rllm-native data structures to verl DataProto format."""
+        assert trainer_state.episodes is not None, "Episodes are not set"
+        episodes: list[Episode] = trainer_state.episodes
         assert self.rollout_engine is not None, "rollout_engine is not initialized."
-        return transform_trajectory_groups_to_dataproto(
-            trainer_state.trajectory_groups,
-            self.rollout_engine,
-            self.config.data.max_prompt_length,
-            self.config.data.max_response_length,
-        )
+        return transform_episodes_to_dataproto(episodes, self.rollout_engine, self.config.data.max_prompt_length, self.config.data.max_response_length)
+
+    def _remove_padding(self, batch: DataProto) -> DataProto:
+        """Removes padded steps from the batch"""
+        is_pad_step = batch.non_tensor_batch["is_pad_step"]
+        non_pad_step_indices = np.where(is_pad_step == False)[0]
+        batch = batch.select_idxs(non_pad_step_indices)  # This batch only has non_pad steps
+        return batch
+
+    def _pad_dataproto_to_world_size(self, batch: DataProto) -> DataProto:
+        import math
+        from functools import reduce
+
+        from verl.protocol import pad_dataproto_to_divisor
+
+        world_sizes = []
+        if self.use_critic and self.critic_wg.world_size != 0:
+            world_sizes.append(self.critic_wg.world_size)
+        if self.use_reference_policy and self.ref_policy_wg.world_size != 0:
+            world_sizes.append(self.ref_policy_wg.world_size)
+        if self.use_rm and self.rm_wg.world_size != 0:
+            world_sizes.append(self.rm_wg.world_size)
+        if self.hybrid_engine:
+            if self.actor_rollout_wg.world_size != 0:
+                world_sizes.append(self.actor_rollout_wg.world_size)
+        else:
+            if hasattr(self, "actor_wg") and self.actor_wg.world_size != 0:
+                world_sizes.append(self.actor_wg.world_size)
+            if hasattr(self, "rollout_wg") and self.rollout_wg.world_size != 0:
+                world_sizes.append(self.rollout_wg.world_size)
+        if not world_sizes:
+            return batch
+
+        world_size = reduce(math.lcm, world_sizes)
+
+        batch = self._remove_padding(batch)  # Remove any padded steps from the batch (just in case)
+        original_batch_size = batch.batch["prompts"].shape[0]
+        batch, pad_size = pad_dataproto_to_divisor(batch, world_size)
+
+        # for the padded dataproto, make the traj mask to 0. is_last_step also False
+        pad_start, pad_end = original_batch_size, original_batch_size + pad_size
+        batch.non_tensor_batch["is_last_step"][pad_start:pad_end] = False
+        batch.non_tensor_batch["is_pad_step"][pad_start:pad_end] = True
+        batch.non_tensor_batch["is_valid"][pad_start:pad_end] = False
+        return batch
 
     async def process_backend_batch(self, trainer_state: TrainerState, **kwargs) -> None:
         """Compute step-level values: old_log_probs, ref_log_probs, critic values.
@@ -280,6 +319,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
 
         Note: This is async for protocol compatibility but operations are sync.
         """
+        assert trainer_state.episodes is not None, "Episodes are not set"
         assert trainer_state.trajectory_groups is not None, "Trajectory groups are not set"
         episodes, trajectory_groups = trainer_state.episodes, trainer_state.trajectory_groups
         batch: DataProto = trainer_state.backend_batch  # type: ignore[assignment]
