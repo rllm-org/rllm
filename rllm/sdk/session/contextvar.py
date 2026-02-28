@@ -5,7 +5,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
-from rllm.sdk.protocol import StepView, Trace, trace_to_step_view
+from rllm.sdk.protocol import Step, Trace, trace_to_step
 from rllm.sdk.session.session_buffer import SessionBuffer
 
 # Session-specific context variables
@@ -134,9 +134,9 @@ class ContextVarSession:
         return self.storage.get_traces(self._uid, self.name)
 
     @property
-    def steps(self) -> list[StepView]:
+    def steps(self) -> list[Step]:
         """Get all steps within this session."""
-        return [trace_to_step_view(trace) for trace in self.llm_calls]
+        return [trace_to_step(trace) for trace in self.llm_calls]
 
     def clear_calls(self) -> None:
         """Clear all traces for this session (SessionBuffer only)."""

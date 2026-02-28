@@ -1,0 +1,2 @@
+# Agent dependencies (beyond rllm[sdk] which is installed automatically)
+openai

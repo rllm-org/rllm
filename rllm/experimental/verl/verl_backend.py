@@ -112,6 +112,11 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         Returns:
             VerlEngine: The initialized rollout engine.
         """
+        # If SDK is enabled, instrument vLLM replicas before creating workers
+        sdk_enabled = self.full_config.rllm.get("sdk", {}).get("enable", False)
+        if sdk_enabled:
+            self._instrument_vllm_for_sdk()
+
         # Step 1: call RayPPOTrainer's `init_workers()` function to obtain the async_rollout_manager
         RayPPOTrainer.init_workers(self)
 
@@ -125,6 +130,43 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             processor=self.processor,
         )
         return self.rollout_engine
+
+    def _instrument_vllm_for_sdk(self) -> None:
+        """Monkey-patch vLLM replicas to add logprob/token-id instrumentation for SDK trace collection.
+
+        This replicates the logic from AgentSdkTrainer.init_workers() to ensure
+        that when SDK mode is used through the unified trainer, vLLM servers
+        return the token IDs and logprobs needed by the trace pipeline.
+        """
+        import ray
+        from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServerBase, vLLMReplica
+
+        @ray.remote(num_cpus=1)
+        class InstrumentedvLLMHttpServer(vLLMHttpServerBase):
+            """vLLM HTTP server with automatic vLLM instrumentation in Ray worker."""
+
+            def __init__(self, *args, **kwargs):
+                import importlib.util
+                import sys
+                from pathlib import Path
+
+                instrumentation_path = Path(__file__).parent.parent.parent / "patches" / "vllm_instrumentation.py"
+
+                spec = importlib.util.spec_from_file_location("rllm_vllm_instrumentation_isolated", str(instrumentation_path))
+                vllm_instrumentation = importlib.util.module_from_spec(spec)
+                sys.modules["rllm_vllm_instrumentation_isolated"] = vllm_instrumentation
+                spec.loader.exec_module(vllm_instrumentation)
+
+                vllm_instrumentation.instrument_vllm(add_response_logprobs=True)
+                super().__init__(*args, **kwargs)
+
+        _original_vllm_replica_init = vLLMReplica.__init__
+
+        def patched_vllm_replica_init(self, *args, **kwargs):
+            _original_vllm_replica_init(self, *args, **kwargs)
+            self.server_class = InstrumentedvLLMHttpServer
+
+        vLLMReplica.__init__ = patched_vllm_replica_init
 
     def validate_config(self) -> None:
         """Validate verl-specific configuration settings."""

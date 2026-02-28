@@ -35,7 +35,7 @@ In a multi-agent system, you have **multiple rollout functions** (Solver and Jud
 We will cover:
 
 - **`@trajectory` decorator**: Automatic session management and trace capture
-- **`TrajectoryView`**: Access to steps, results, and rewards
+- **`Trajectory`**: Access to steps, results, and rewards
 - **Multi-agent workflows**: Composing multiple agents with independent rewards
 
 ---
@@ -62,7 +62,7 @@ vllm serve Qwen/Qwen3-4B-Instruct-2507 \
 
 The `@trajectory` decorator automatically:
 - Tracks all LLM calls as steps
-- Returns a `TrajectoryView` with steps and result
+- Returns a `Trajectory` with steps and result
 
 ### 1.1 Basic usage
 
@@ -88,10 +88,10 @@ async def my_agent(prompt: str):
 ```python
 traj = await my_agent("What is 2+2?")
 
-# traj is a TrajectoryView with:
+# traj is a Trajectory with:
 print("My Agent: ", traj.name)        # "my_agent"
 print("Response: ", traj.result)      # "4" (your return value)
-print("Steps: ", traj.steps)       # [StepView(...)] - one per LLM call
+print("Steps: ", traj.steps)       # [Step(...)] - one per LLM call
 print("Reward: ", traj.reward)      # 0.0 (default, you can set this)
 ```
 
@@ -138,7 +138,7 @@ class Solver:
 
     @trajectory(name="solver")
     async def generate_solution(self, problem: str):
-        """Generate a single solution. Returns TrajectoryView automatically."""
+        """Generate a single solution. Returns Trajectory automatically."""
         prompt = SOLVER_PROMPT.format(problem=problem)
         
         response = await self.client.chat.completions.create(
@@ -288,7 +288,7 @@ Steps: 1
 Now combine Solver and Judge, assigning rewards to each trajectory.
 
 ```python
-from rllm.sdk import TrajectoryView
+from rllm.sdk import Trajectory
 from rllm.rewards.countdown_reward import countdown_reward_fn
 
 class SolverJudgeWorkflow:
@@ -298,7 +298,7 @@ class SolverJudgeWorkflow:
         self.solver = Solver(use_proxy=True)
         self.judge = Judge(use_proxy=True)
 
-    async def run(self, task: dict, **kwargs) -> list[TrajectoryView]:
+    async def run(self, task: dict, **kwargs) -> list[Trajectory]:
         """Run the full workflow and return all trajectories."""
         problem = task["question"]
 
@@ -358,7 +358,7 @@ import hydra
 from rllm.data.dataset import DatasetRegistry
 from rllm.trainer.agent_trainer import AgentTrainer
 
-async def run_workflow(**kwargs) -> list[TrajectoryView]:
+async def run_workflow(**kwargs) -> list[Trajectory]:
     """Training wrapper that returns trajectories."""
     workflow = SolverJudgeWorkflow(
         n_solutions=2,

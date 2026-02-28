@@ -55,7 +55,7 @@ async def solve_math_problem(problem: str):
     )
     return response2.choices[0].message.content
 
-# Returns TrajectoryView instead of string
+# Returns Trajectory instead of string
 traj = await solve_math_problem("What is 2+2?")
 print(f"Steps: {len(traj.steps)}")  # 2
 traj.steps[0].reward = 1.0  # Set rewards on each step
@@ -249,7 +249,7 @@ class Trace:
     ...
 
 # Trace with reward field (auto-generated from traces)
-class StepView:
+class Step:
     id: str
     input: str | list | dict
     output: str | dict
@@ -257,9 +257,9 @@ class StepView:
     ...
 
 # Collection of steps forming a trajectory
-class TrajectoryView:
+class Trajectory:
     name: str
-    steps: list[StepView]
+    steps: list[Step]
     reward: float
     input: dict  # Function arguments
     output: Any  # Function return value
@@ -280,7 +280,7 @@ output, session_uid = wrapped_fn(metadata, *args, **kwargs)
 ```
 rllm/sdk/
 ├── __init__.py              # Public exports
-├── protocol.py              # Data models (Trace, StepView, TrajectoryView)
+├── protocol.py              # Data models (Trace, Step, Trajectory)
 ├── decorators.py            # @trajectory decorator
 ├── shortcuts.py             # session(), get_chat_client()
 ├── data_process.py          # Trace-to-model-output conversion utilities

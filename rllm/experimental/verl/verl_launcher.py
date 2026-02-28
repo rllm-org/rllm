@@ -1,5 +1,6 @@
 import os
 import socket
+from collections.abc import Callable
 from pprint import pprint
 
 import ray
@@ -27,7 +28,7 @@ class TaskRunner:
     Adapted directly from `rllm.trainer.verl.train_agent_ppo.TaskRunner`.
     """
 
-    def run(self, config, workflow_class, workflow_args, **kwargs):
+    def run(self, config, workflow_class, workflow_args, agent_run_func=None, **kwargs):
         """Execute the main PPO training workflow.
 
         This method sets up the distributed training environment, initializes
@@ -37,6 +38,7 @@ class TaskRunner:
             config: Training configuration
             workflow_class: Workflow class
             workflow_args: Workflow arguments
+            agent_run_func: Optional SDK agent function (alternative to workflow_class)
         """
         # Print the initial configuration. `resolve=True` will evaluate symbolic values.
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
@@ -125,7 +127,7 @@ class TaskRunner:
 
         trainer = None
         try:
-            trainer = UnifiedTrainer(backend_cls=VerlBackend, config=config, workflow_class=workflow_class, train_dataset=None, val_dataset=None, workflow_args=workflow_args, backend_args=backend_args, **kwargs)
+            trainer = UnifiedTrainer(backend_cls=VerlBackend, config=config, workflow_class=workflow_class, train_dataset=None, val_dataset=None, workflow_args=workflow_args, backend_args=backend_args, agent_run_func=agent_run_func, **kwargs)
             trainer.fit()
         except Exception as e:
             print(f"Error training Verl: {e}")
@@ -143,14 +145,15 @@ class VerlTrainerLauncher(TrainerLauncher):
     def __init__(
         self,
         config: DictConfig,
-        workflow_class: type[Workflow],
+        workflow_class: type[Workflow] | None = None,
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
+        agent_run_func: Callable | None = None,
         **kwargs,
     ):
         """Initialize the VerlTrainerLauncher. The heavy lifting is done in the `run` method of the `TaskRunner` class."""
-        super().__init__(config, workflow_class, train_dataset, val_dataset, workflow_args, **kwargs)
+        super().__init__(config, workflow_class, train_dataset, val_dataset, workflow_args, agent_run_func=agent_run_func, **kwargs)
 
         # For Verl specifically, the datasets are not passed directly to the backend, which instead relies on the data paths
         # being set in the config. TODO(listar2000): check whether this can be deprecated in favor of a more standard approach.
@@ -175,6 +178,7 @@ class VerlTrainerLauncher(TrainerLauncher):
                 config=self.config,
                 workflow_class=self.workflow_class,
                 workflow_args=self.workflow_args,
+                agent_run_func=self.agent_run_func,
                 **self.kwargs,
             )
         )

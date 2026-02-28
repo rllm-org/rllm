@@ -115,6 +115,7 @@ class ProxyManager:
         sync_tracer: bool = False,
         add_logprobs: bool = False,
         add_return_token_ids: bool = False,
+        enable_result_store: bool = False,
     ) -> str:
         """Start LiteLLM proxy as subprocess (no GIL contention).
 
@@ -164,6 +165,9 @@ class ProxyManager:
 
         if add_return_token_ids:
             cmd.extend(["--add-return-token-ids"])
+
+        if enable_result_store:
+            cmd.extend(["--enable-result-store"])
 
         env = os.environ.copy()
         env["AIOHTTP_CONNECTOR_LIMIT"] = "4096"
@@ -430,3 +434,103 @@ class VerlProxyManager(ProxyManager):
     def __repr__(self) -> str:
         mode = "subprocess" if self._proxy_process else "external"
         return f"VerlProxyManager(model={self.model_name}, replicas={len(self._server_addresses)}, proxy={self.get_proxy_url()}, mode={mode})"
+
+
+class TinkerProxyManager(ProxyManager):
+    """Manages LiteLLM proxy configuration for Tinker rollout engines.
+
+    Architecture::
+
+        SDK client -> LiteLLM proxy (metadata routing, TracingCallback)
+            -> TinkerBackendServer -> TinkerEngine
+
+    A lightweight ``TinkerBackendServer`` wraps the TinkerEngine as an
+    OpenAI-compatible endpoint.  The LiteLLM proxy routes to it using
+    ``hosted_vllm/`` prefix so ``provider_specific_fields`` (token IDs,
+    logprobs) pass through to the ``TracingCallback``.
+    """
+
+    def __init__(
+        self,
+        rollout_engine,
+        model_name: str,
+        proxy_host: str = "127.0.0.1",
+        proxy_port: int = 4000,
+        backend_host: str = "127.0.0.1",
+        backend_port: int = 8090,
+        admin_token: str | None = None,
+        proxy_access_log: bool = False,
+    ) -> None:
+        if type(rollout_engine).__name__ != "TinkerEngine":
+            raise TypeError(f"TinkerProxyManager only supports TinkerEngine, got {type(rollout_engine).__name__}")
+
+        super().__init__(
+            proxy_host=proxy_host,
+            proxy_port=proxy_port,
+            admin_token=admin_token,
+            proxy_access_log=proxy_access_log,
+        )
+
+        self.model_name = model_name
+        self.rollout_engine = rollout_engine
+        self.backend_host = backend_host
+        self.backend_port = backend_port
+        self._backend_server = None
+
+        # Start the backend server immediately
+        self._start_backend_server()
+
+        # Snapshot config for debugging
+        self._snapshot_config_to_file(self._generate_litellm_config())
+
+    def _start_backend_server(self) -> None:
+        from rllm.sdk.proxy.tinker_backend_server import TinkerBackendServer
+
+        self._backend_server = TinkerBackendServer(
+            rollout_engine=self.rollout_engine,
+            host=self.backend_host,
+            port=self.backend_port,
+            model_name=self.model_name,
+        )
+        self._backend_server.start()
+        logger.info("TinkerBackendServer started at %s", self._backend_server.url)
+
+    def _generate_litellm_config(self) -> dict[str, Any]:
+        """Generate LiteLLM config pointing to the TinkerBackendServer."""
+        return {
+            "model_list": [
+                {
+                    "model_name": self.model_name,
+                    "litellm_params": {
+                        "model": f"hosted_vllm/{self.model_name}",
+                        "api_base": self._backend_server.base_url,
+                        "drop_params": True,
+                    },
+                    "model_info": {
+                        "id": "tinker-backend-0",
+                    },
+                }
+            ],
+            "litellm_settings": {
+                "drop_params": True,
+                "num_retries": 3,
+            },
+        }
+
+    def build_proxy_config(self) -> dict[str, Any]:
+        """Return a fresh LiteLLM configuration."""
+        return self._generate_litellm_config()
+
+    def shutdown_proxy(self) -> None:
+        """Shutdown both LiteLLM proxy and backend server."""
+        # Stop LiteLLM proxy first
+        super().shutdown_proxy()
+        # Then stop backend server
+        if self._backend_server is not None:
+            self._backend_server.stop()
+            self._backend_server = None
+            logger.info("TinkerBackendServer stopped")
+
+    def __repr__(self) -> str:
+        mode = "subprocess" if self._proxy_process else "external"
+        return f"TinkerProxyManager(model={self.model_name}, proxy={self.get_proxy_url()}, backend={self.backend_host}:{self.backend_port}, mode={mode})"

@@ -84,6 +84,7 @@ sdk = [
     "litellm[proxy]",
     "aiosqlite",
     "asgiref",
+    "aiohttp",
 ]
 
 tinker = [

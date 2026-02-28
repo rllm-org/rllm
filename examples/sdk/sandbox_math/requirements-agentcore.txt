@@ -1,0 +1,5 @@
+# Dependencies for running the sandbox math agent on AWS Bedrock AgentCore.
+# Used by: agentcore configure --requirements-file requirements-agentcore.txt
+bedrock-agentcore
+openai
+pydantic>=2.0

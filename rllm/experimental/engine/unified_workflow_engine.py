@@ -4,8 +4,9 @@ import asyncio
 import logging
 import uuid
 from collections import defaultdict
+from collections.abc import Callable, Coroutine
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from tqdm import tqdm
 
@@ -34,6 +35,7 @@ class UnifiedWorkflowEngine:
         retry_limit: int = 3,
         raise_on_error: bool = True,
         episode_logger: EpisodeLogger | None = None,
+        post_execute_hook: Callable[[], Coroutine[Any, Any, None]] | None = None,
         **kwargs,
     ):
         """
@@ -48,6 +50,9 @@ class UnifiedWorkflowEngine:
             retry_limit: Maximum number of retry attempts for failed tasks.
             raise_on_error: Whether to raise exceptions on permanent failures.
             episode_logger: Optional logger for saving episode data to files.
+            post_execute_hook: Optional async callback invoked after all tasks
+                in a batch complete but before results are returned.  Useful for
+                batch-level trace flushing in SDK async-tracer mode.
             **kwargs: Additional keyword arguments.
         """
         self.workflow_cls = workflow_cls
@@ -63,6 +68,9 @@ class UnifiedWorkflowEngine:
         self.n_parallel_tasks = n_parallel_tasks
         self.executor = ThreadPoolExecutor(max_workers=self.n_parallel_tasks)
         self.workflow_queue = None
+
+        # Post-execute hook (e.g. SDK trace flushing)
+        self.post_execute_hook = post_execute_hook
 
         # Episode logging support
         self.episode_logger = episode_logger
@@ -200,6 +208,10 @@ class UnifiedWorkflowEngine:
                 task_id, rollout_idx, idx, episode = await future
                 results[idx] = episode
                 pbar.update(1)
+
+        # Invoke post-execute hook (e.g. batch-level SDK trace flush)
+        if self.post_execute_hook is not None:
+            await self.post_execute_hook()
 
         ordered_results: list[Episode] = results  # type: ignore[assignment]
         # Log episodes if logger is provided

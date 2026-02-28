@@ -6,7 +6,7 @@ how the new decorators streamline the workflow implementation.
 
 Key improvements:
 - @step decorator eliminates manual session management
-- Automatic StepView creation with result field
+- Automatic Step creation with result field
 - Cleaner code with less boilerplate
 - Same functionality, better ergonomics
 """
@@ -16,7 +16,7 @@ import re
 
 from rllm.engine import RolloutEngine
 from rllm.rewards.reward_fn import RewardFunction
-from rllm.sdk import TrajectoryView, get_chat_client_async, trajectory
+from rllm.sdk import Trajectory, get_chat_client_async, trajectory
 from rllm.workflows.workflow import Workflow
 
 
@@ -33,7 +33,7 @@ class Solver:
         The decorator:
         - Creates a session internally
         - Tracks LLM calls automatically
-        - Returns StepView with result field set to the return value
+        - Returns Step with result field set to the return value
         """
         messages = [{"role": "user", "content": f"{problem}. Output the final answer within <answer>...</answer>"}]
         response = await self.client.chat.completions.create(
@@ -50,7 +50,7 @@ class Solver:
     async def generate_solutions(self, problem: str, n_solutions: int = 2):
         """Generate multiple solutions in parallel."""
         tasks = [asyncio.create_task(self.generate_solution(problem)) for _ in range(n_solutions)]
-        # Returns list of StepView objects
+        # Returns list of Step objects
         return await asyncio.gather(*tasks)
 
     def _parse_solver_response(self, response: str) -> str:
@@ -72,7 +72,7 @@ class Judge:
         """
         Judge solutions using @step decorator.
 
-        Returns StepView with the selected solution in the result field.
+        Returns Step with the selected solution in the result field.
         """
         messages = [{"role": "user", "content": self._create_judge_prompt(problem, solutions)}]
         response = await self.client.chat.completions.create(
@@ -131,13 +131,13 @@ class SolverJudgeWorkflowDecorated(Workflow):
         self.solver = Solver()
         self.judge = Judge()
 
-    async def run(self, task: dict, uid: str, **kwargs) -> list[TrajectoryView]:
+    async def run(self, task: dict, uid: str, **kwargs) -> list[Trajectory]:
         """
         Run workflow - manually construct trajectories for now.
 
         Note: We could use @trajectory decorator on helper methods,
         but the workflow engine expects a specific return format,
-        so we construct TrajectoryViews manually here.
+        so we construct Trajectorys manually here.
         """
         self.reset(task, uid)
         problem = task["question"]
