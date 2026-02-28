@@ -1,16 +1,18 @@
 from typing import TYPE_CHECKING
 
 from .rollout_engine import ModelOutput, RolloutEngine
-from .types import TinkerTokenInput, TinkerTokenOutput, TokenInput, Tokenizer, TokenOutput, VerlTokenInput, VerlTokenOutput
 
 if TYPE_CHECKING:
+    from .skyrl_engine import SkyRLEngine
     from .tinker_engine import TinkerEngine
+    from .types import TinkerTokenInput, TinkerTokenOutput, TokenInput, Tokenizer, TokenOutput, VerlTokenInput, VerlTokenOutput
     from .verl_engine import VerlEngine
 
 __all__ = [
     "ModelOutput",
     # Rollout engines
     "RolloutEngine",
+    "SkyRLEngine",
     "TinkerEngine",
     "VerlEngine",
     # Token input/output types
@@ -24,13 +26,61 @@ __all__ = [
 ]
 
 
-def __getattr__(name):
+def __getattr__(name: str):
+    """Lazy import for engines and types to avoid importing tinker/verl/skyrl when not needed."""
+    if name == "SkyRLEngine":
+        try:
+            from .skyrl_engine import SkyRLEngine as _SkyRLEngine
+
+            return _SkyRLEngine
+        except Exception:
+            raise AttributeError(name) from None
     if name == "TinkerEngine":
-        from .tinker_engine import TinkerEngine as _TinkerEngine
+        try:
+            from .tinker_engine import TinkerEngine as _TinkerEngine
 
-        return _TinkerEngine
+            return _TinkerEngine
+        except Exception:
+            raise AttributeError(name) from None
     if name == "VerlEngine":
-        from .verl_engine import VerlEngine as _VerlEngine
+        try:
+            from .verl_engine import VerlEngine as _VerlEngine
 
-        return _VerlEngine
+            return _VerlEngine
+        except Exception:
+            raise AttributeError(name) from None
+    # Lazy import for types
+    if name in ("TinkerTokenInput", "TinkerTokenOutput", "TokenInput", "TokenOutput", "VerlTokenInput", "VerlTokenOutput", "Tokenizer"):
+        from .types import (
+            TinkerTokenInput as _TinkerTokenInput,
+        )
+        from .types import (
+            TinkerTokenOutput as _TinkerTokenOutput,
+        )
+        from .types import (
+            TokenInput as _TokenInput,
+        )
+        from .types import (
+            Tokenizer as _Tokenizer,
+        )
+        from .types import (
+            TokenOutput as _TokenOutput,
+        )
+        from .types import (
+            VerlTokenInput as _VerlTokenInput,
+        )
+        from .types import (
+            VerlTokenOutput as _VerlTokenOutput,
+        )
+
+        type_map = {
+            "TinkerTokenInput": _TinkerTokenInput,
+            "TinkerTokenOutput": _TinkerTokenOutput,
+            "TokenInput": _TokenInput,
+            "TokenOutput": _TokenOutput,
+            "VerlTokenInput": _VerlTokenInput,
+            "VerlTokenOutput": _VerlTokenOutput,
+            "Tokenizer": _Tokenizer,
+        }
+        return type_map[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

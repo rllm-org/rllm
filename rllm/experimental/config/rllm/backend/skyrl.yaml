@@ -1,0 +1,45 @@
+# @package _global_
+
+# SkyRL Backend Configuration for rLLM
+# This config follows the Verl-style pattern:
+# 1. Include SkyRL native config (`ppo_base_config`)
+# 2. Normalize backend-native keys into rLLM-common keys via `oc.select`
+# 3. Keep only SkyRL-specific bridge values needed by the SkyRL launcher/backend
+
+defaults:
+  - /ppo_base_config
+  - _self_
+
+rllm:
+  backend: skyrl
+  disable_thinking: false
+  algorithm:
+    adv_estimator: ${oc.select:trainer.algorithm.advantage_estimator, grpo}
+    gamma: ${oc.select:trainer.algorithm.gamma, 1.0}
+    lam: ${oc.select:trainer.algorithm.lambd, 0.95}
+    norm_adv_by_std_in_grpo: ${oc.select:trainer.algorithm.grpo_norm_by_std, true}
+  rollout:
+    n: ${oc.select:generator.n_samples_per_prompt, 8}
+    n_val: ${oc.select:generator.eval_n_samples_per_prompt, 1}
+  trainer:
+    total_epochs: ${oc.select:trainer.epochs, 10}
+    project_name: ${oc.select:trainer.project_name, 'rllm-training'}
+    experiment_name: ${oc.select:trainer.run_name, 'default'}
+    test_freq: ${oc.select:trainer.eval_interval, 5}
+    save_freq: ${oc.select:trainer.ckpt_interval, 20}
+    val_before_train: ${oc.select:trainer.eval_before_train, true}
+
+trainer:
+  val_max_samples: -1  # max validation samples per eval (-1 = all)
+  algorithm:
+    max_seq_len: ${oc.select:data.max_prompt_length,1024}
+
+data:
+  # SkyRL backend reads batch sizes and max lengths from `data.*`
+  train_batch_size: ${trainer.train_batch_size}
+  val_batch_size: ${trainer.eval_batch_size}
+  max_prompt_length: ${trainer.max_prompt_length}
+  max_response_length: ${generator.sampling_params.max_generate_length}
+
+environment:
+  env_class: BaseTextEnv
