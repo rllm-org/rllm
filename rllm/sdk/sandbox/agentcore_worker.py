@@ -75,34 +75,49 @@ def _build_proxied_base_url(base_url: str, metadata: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
+_SUBMIT_MAX_RETRIES = 3
+_SUBMIT_BACKOFF_BASE = 1.0  # seconds
+
+
 def _submit_result(proxy_base_url: str, execution_id: str, result_data: dict) -> None:
-    """POST the execution result to the proxy's result store."""
+    """POST the execution result to the proxy's result store (with retry)."""
     base = proxy_base_url.rstrip("/")
     if base.endswith("/v1"):
         base = base[:-3]
     url = f"{base}/rllm/results/{execution_id}"
 
     payload = json.dumps(result_data).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            if resp.status >= 400:
+
+    for attempt in range(_SUBMIT_MAX_RETRIES):
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                if resp.status < 400:
+                    logger.debug("Result submitted for %s", execution_id)
+                    return
                 body = resp.read().decode("utf-8", errors="replace")
                 logger.error(
-                    "Failed to submit result for %s: HTTP %s – %s",
-                    execution_id,
-                    resp.status,
-                    body,
+                    "Failed to submit result for %s (attempt %d/%d): HTTP %s – %s",
+                    execution_id, attempt + 1, _SUBMIT_MAX_RETRIES, resp.status, body,
                 )
-            else:
-                logger.debug("Result submitted for %s", execution_id)
-    except Exception:
-        logger.exception("Failed to submit result for %s", execution_id)
+        except Exception:
+            logger.exception(
+                "Failed to submit result for %s (attempt %d/%d)",
+                execution_id, attempt + 1, _SUBMIT_MAX_RETRIES,
+            )
+
+        if attempt < _SUBMIT_MAX_RETRIES - 1:
+            import time
+            time.sleep(_SUBMIT_BACKOFF_BASE * (2 ** attempt))
+
+    logger.error(
+        "Giving up submitting result for %s after %d attempts", execution_id, _SUBMIT_MAX_RETRIES
+    )
 
 
 # ---------------------------------------------------------------------------

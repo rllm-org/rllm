@@ -127,7 +127,7 @@ class AgentCoreOrchestrator:
 
         1. Register execution_id in the result store.
         2. Invoke the ACR with the payload (execution_id, proxy_url, task, agent_config).
-        3. Poll the result store (same as local/docker backends).
+        3. Wait for the result via the result store.
         """
         if not self._initialized:
             raise RuntimeError("AgentCoreOrchestrator not initialized. Call initialize() first.")
@@ -154,11 +154,15 @@ class AgentCoreOrchestrator:
                     error=f"AgentCore invocation failed: {exc}",
                 )
 
-        # Wait for the result (blocking poll in a thread, same as SandboxOrchestrator)
+        # Wait for the result.  Use wait_async when available (falls back to
+        # threaded polling for the cross-process proxy case).
+        timeout = self._config.execution_timeout
+        if hasattr(self._result_store, "wait_async"):
+            return await self._result_store.wait_async(execution_id, timeout)
         return await asyncio.to_thread(
             self._result_store.wait,
             execution_id,
-            self._config.execution_timeout,
+            timeout,
         )
 
     def _invoke_runtime(self, execution_id: str, payload: dict) -> None:

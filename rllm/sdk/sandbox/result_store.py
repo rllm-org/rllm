@@ -7,11 +7,13 @@ access from the trainer process (register/wait) and the proxy subprocess
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import sqlite3
 import tempfile
+import threading
 import time
 
 from rllm.sdk.sandbox.protocol import ExecutionResult
@@ -59,6 +61,11 @@ class ExecutionResultStore:
         self.db_path = db_path
         self._pool_size = pool_size
         self._connections: list[sqlite3.Connection] = []
+        # In-process event notification: avoids 1s polling delay when
+        # store_result() and wait_async() run in the same process.
+        self._events: dict[str, asyncio.Event] = {}
+        self._events_lock = threading.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._init_database()
 
     def _create_connection(self) -> sqlite3.Connection:
@@ -84,14 +91,23 @@ class ExecutionResultStore:
         """Return a connection from the pool (round-robin)."""
         return self._connections[0] if self._connections else self._create_connection()
 
-    def register(self, execution_id: str) -> None:
-        """Register a pending execution (called by trainer before dispatch)."""
+    def register(self, execution_id: str, loop: asyncio.AbstractEventLoop | None = None) -> None:
+        """Register a pending execution (called by trainer before dispatch).
+
+        If *loop* is provided, creates an ``asyncio.Event`` on that loop so
+        ``wait_async`` can be used instead of the polling ``wait``.
+        """
         conn = self._conn()
         conn.execute(
             "INSERT OR IGNORE INTO execution_results (execution_id, status, created_at) VALUES (?, 'pending', ?)",
             (execution_id, time.time()),
         )
         conn.commit()
+        if loop is not None:
+            self._loop = loop
+            event = asyncio.Event()
+            with self._events_lock:
+                self._events[execution_id] = event
 
     def store_result(self, execution_id: str, data: dict) -> None:
         """Store a completed result (called by proxy route from worker push)."""
@@ -135,6 +151,18 @@ class ExecutionResultStore:
             )
         conn.commit()
 
+        # Notify any in-process waiter immediately.
+        with self._events_lock:
+            event = self._events.pop(execution_id, None)
+        if event is not None:
+            # store_result() may be called from a non-asyncio thread (e.g.
+            # the proxy's ASGI handler running in a thread pool), so use
+            # call_soon_threadsafe to set the event on the correct loop.
+            if self._loop is not None and self._loop.is_running():
+                self._loop.call_soon_threadsafe(event.set)
+            else:
+                event.set()
+
     def get_result(self, execution_id: str) -> ExecutionResult | None:
         """Get an execution result (returns None if pending or not found)."""
         conn = self._conn()
@@ -157,15 +185,80 @@ class ExecutionResultStore:
             "elapsed": row["elapsed"] or 0.0,
         })
 
-    def wait(self, execution_id: str, timeout: float = 600.0, poll_interval: float = 1.0) -> ExecutionResult:
+    def wait(self, execution_id: str, timeout: float = 600.0, poll_interval: float = 0.1) -> ExecutionResult:
         """Poll until result is available or timeout expires."""
-        deadline = time.time() + timeout
+        start = time.time()
+        deadline = start + timeout
+        warned = False
         while time.time() < deadline:
             result = self.get_result(execution_id)
             if result is not None:
                 return result
+            elapsed = time.time() - start
+            if not warned and elapsed > 60:
+                logger.warning(
+                    "Still waiting for execution %s after %.0fs (timeout=%.0fs)",
+                    execution_id, elapsed, timeout,
+                )
+                warned = True
             time.sleep(poll_interval)
 
+        logger.error("Timed out waiting for execution %s after %.0fs", execution_id, timeout)
+        return ExecutionResult(
+            success=False,
+            error=f"Timed out waiting for execution {execution_id} after {timeout}s",
+        )
+
+    async def wait_async(
+        self, execution_id: str, timeout: float = 600.0, poll_interval: float = 0.1,
+    ) -> ExecutionResult:
+        """Async version of ``wait`` that doesn't block threads.
+
+        If an in-process ``asyncio.Event`` was registered for this execution
+        (via ``register(..., loop=...)``), it is awaited for instant
+        notification.  Otherwise falls back to async polling with
+        ``asyncio.sleep`` — lighter than the threaded ``wait()`` fallback.
+        """
+        with self._events_lock:
+            event = self._events.get(execution_id)
+
+        if event is not None:
+            try:
+                await asyncio.wait_for(event.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                with self._events_lock:
+                    self._events.pop(execution_id, None)
+                logger.error("Timed out waiting for execution %s after %.0fs", execution_id, timeout)
+                return ExecutionResult(
+                    success=False,
+                    error=f"Timed out waiting for execution {execution_id} after {timeout}s",
+                )
+            result = self.get_result(execution_id)
+            if result is not None:
+                return result
+            return ExecutionResult(
+                success=False,
+                error=f"Event fired but no result found for {execution_id}",
+            )
+
+        # No event — async poll the DB (non-blocking, no thread needed).
+        start = time.time()
+        deadline = start + timeout
+        warned = False
+        while time.time() < deadline:
+            result = self.get_result(execution_id)
+            if result is not None:
+                return result
+            elapsed = time.time() - start
+            if not warned and elapsed > 60:
+                logger.warning(
+                    "Still waiting for execution %s after %.0fs (timeout=%.0fs)",
+                    execution_id, elapsed, timeout,
+                )
+                warned = True
+            await asyncio.sleep(poll_interval)
+
+        logger.error("Timed out waiting for execution %s after %.0fs", execution_id, timeout)
         return ExecutionResult(
             success=False,
             error=f"Timed out waiting for execution {execution_id} after {timeout}s",
@@ -179,3 +272,6 @@ class ExecutionResultStore:
             except Exception:
                 pass
         self._connections.clear()
+        with self._events_lock:
+            self._events.clear()
+        self._loop = None

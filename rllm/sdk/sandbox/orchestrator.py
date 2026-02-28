@@ -50,6 +50,8 @@ class SandboxOrchestrator:
         self._initialized = False
         # Atomic counter for assigning unique ports in per-task mode
         self._port_counter: int = 0
+        # Shared HTTP session for dispatching tasks to workers
+        self._session: aiohttp.ClientSession | None = None
 
     async def initialize(self, proxy_url: str, result_store: Any) -> None:
         """Initialize the orchestrator with proxy URL and result store.
@@ -59,6 +61,7 @@ class SandboxOrchestrator:
         """
         self._proxy_url = proxy_url
         self._result_store = result_store
+        self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
 
         if self._config.pool_mode == "persistent":
             await self._init_persistent_pool()
@@ -73,22 +76,27 @@ class SandboxOrchestrator:
         )
 
     async def _init_persistent_pool(self) -> None:
-        """Create and warm up all workers for persistent mode."""
-        for i in range(self._config.num_workers):
+        """Create and warm up all workers for persistent mode (in parallel)."""
+        async def _create_in_thread(i: int) -> Worker:
             port = self._config.worker_port + i
-            worker = await self._create_worker(f"worker-{i}", port)
-            self._workers.append(worker)
-            self._available.put_nowait(worker)
+            return await asyncio.to_thread(self._create_worker_sync, f"worker-{i}", port)
+
+        workers = await asyncio.gather(*[
+            _create_in_thread(i) for i in range(self._config.num_workers)
+        ])
+        for w in workers:
+            self._workers.append(w)
+            self._available.put_nowait(w)
         logger.info("Persistent pool ready: %d workers", len(self._workers))
 
-    async def _create_worker(self, name: str, port: int) -> Worker:
-        """Create one sandbox, upload code, install deps, start runner."""
+    def _create_worker_sync(self, name: str, port: int) -> Worker:
+        """Create one sandbox, upload code, install deps, start runner (sync)."""
         sandbox = self._sandbox_factory(
             name=name,
             image=self._config.image,
         )
 
-        await self._setup_sandbox(sandbox)
+        self._setup_sandbox_sync(sandbox)
 
         # Start the worker server
         cmd = (
@@ -101,8 +109,12 @@ class SandboxOrchestrator:
         sandbox.start_agent_process(cmd, port=port)
         return Worker(sandbox=sandbox, name=name, port=port)
 
-    async def _setup_sandbox(self, sandbox: Any) -> None:
-        """Upload agent code, runner, and install dependencies."""
+    async def _create_worker(self, name: str, port: int) -> Worker:
+        """Create one sandbox, upload code, install deps, start runner."""
+        return await asyncio.to_thread(self._create_worker_sync, name, port)
+
+    def _setup_sandbox_sync(self, sandbox: Any) -> None:
+        """Upload agent code, runner, and install dependencies (sync)."""
         is_local = self._config.backend == "local"
 
         # Upload agent project
@@ -127,6 +139,10 @@ class SandboxOrchestrator:
         for cmd in self._config.setup_commands:
             sandbox.exec(cmd)
 
+    async def _setup_sandbox(self, sandbox: Any) -> None:
+        """Upload agent code, runner, and install dependencies."""
+        await asyncio.to_thread(self._setup_sandbox_sync, sandbox)
+
     async def execute(self, task: dict, agent_config: dict) -> ExecutionResult:
         """Dispatch a task to a sandbox worker and wait for the result."""
         if not self._initialized:
@@ -145,23 +161,19 @@ class SandboxOrchestrator:
         worker = await self._available.get()
         try:
             url, headers = worker.sandbox.get_endpoint(worker.port)
-            async with aiohttp.ClientSession() as session:
-                await session.post(
-                    f"{url}/execute",
-                    json={
-                        "execution_id": execution_id,
-                        "proxy_url": self._proxy_url,
-                        "task": task,
-                        "agent_config": agent_config,
-                    },
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                )
+            assert self._session is not None
+            await self._session.post(
+                f"{url}/execute",
+                json={
+                    "execution_id": execution_id,
+                    "proxy_url": self._proxy_url,
+                    "task": task,
+                    "agent_config": agent_config,
+                },
+                headers=headers,
+            )
 
-            # Run the blocking wait in a thread to avoid blocking the event loop
-            # (the event loop must stay free to handle the worker's result POST)
-            return await asyncio.to_thread(
-                self._result_store.wait,
+            return await self._result_store.wait_async(
                 execution_id,
                 self._config.execution_timeout,
             )
@@ -205,21 +217,19 @@ class SandboxOrchestrator:
 
                 # Send task
                 url, headers = sandbox.get_endpoint(port)
-                async with aiohttp.ClientSession() as session:
-                    await session.post(
-                        f"{url}/execute",
-                        json={
-                            "execution_id": execution_id,
-                            "proxy_url": self._proxy_url,
-                            "task": task,
-                            "agent_config": agent_config,
-                        },
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=10),
-                    )
+                assert self._session is not None
+                await self._session.post(
+                    f"{url}/execute",
+                    json={
+                        "execution_id": execution_id,
+                        "proxy_url": self._proxy_url,
+                        "task": task,
+                        "agent_config": agent_config,
+                    },
+                    headers=headers,
+                )
 
-                return await asyncio.to_thread(
-                    self._result_store.wait,
+                return await self._result_store.wait_async(
                     execution_id,
                     self._config.execution_timeout,
                 )
@@ -245,6 +255,10 @@ class SandboxOrchestrator:
                 self._available.get_nowait()
             except asyncio.QueueEmpty:
                 break
+
+        if self._session is not None:
+            await self._session.close()
+            self._session = None
 
         if self._result_store is not None:
             self._result_store.close()

@@ -296,6 +296,9 @@ set `base_url` to a reachable address and bind the proxy to `0.0.0.0`:
 python -m examples.sdk.sandbox_math.train \
     rllm/backend=tinker \
     model.name=Qwen/Qwen3-8B \
+    training.group_size=8 \
+    data.train_batch_size=4 \
+    rllm.trainer.val_before_train=false
     rllm.sdk.proxy.host=0.0.0.0 \
     rllm.sdk.sandbox.backend=agentcore \
     'rllm.sdk.sandbox.extra={agent_runtime_arn: "arn:aws:bedrock-agentcore:us-west-2:123456789012:runtime/rllm_sandbox_math_abc123", base_url: "http://<YOUR_HOST_IP>:4000/v1"}'

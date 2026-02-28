@@ -66,25 +66,46 @@ def _build_proxied_base_url(base_url: str, metadata: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Inlined result submission
+# Inlined result submission (with retry)
 # ---------------------------------------------------------------------------
 
+_SUBMIT_MAX_RETRIES = 3
+_SUBMIT_BACKOFF_BASE = 1.0  # seconds
 
-async def _submit_result(proxy_base_url: str, execution_id: str, result_data: dict) -> None:
+
+async def _submit_result(
+    session: aiohttp.ClientSession,
+    proxy_base_url: str,
+    execution_id: str,
+    result_data: dict,
+) -> None:
     base = proxy_base_url.rstrip("/")
     if base.endswith("/v1"):
         base = base[:-3]
     url = f"{base}/rllm/results/{execution_id}"
-    try:
-        async with aiohttp.ClientSession() as session:
+
+    for attempt in range(_SUBMIT_MAX_RETRIES):
+        try:
             async with session.post(url, json=result_data, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                if resp.status >= 400:
-                    body = await resp.text()
-                    logger.error("Failed to submit result for %s: HTTP %s – %s", execution_id, resp.status, body)
-                else:
+                if resp.status < 400:
                     logger.debug("Result submitted for %s", execution_id)
-    except Exception:
-        logger.exception("Failed to submit result for %s", execution_id)
+                    return
+                body = await resp.text()
+                logger.error(
+                    "Failed to submit result for %s (attempt %d/%d): HTTP %s – %s",
+                    execution_id, attempt + 1, _SUBMIT_MAX_RETRIES, resp.status, body,
+                )
+        except Exception:
+            logger.exception(
+                "Failed to submit result for %s (attempt %d/%d)",
+                execution_id, attempt + 1, _SUBMIT_MAX_RETRIES,
+            )
+
+        if attempt < _SUBMIT_MAX_RETRIES - 1:
+            delay = _SUBMIT_BACKOFF_BASE * (2 ** attempt)
+            await asyncio.sleep(delay)
+
+    logger.error("Giving up submitting result for %s after %d attempts", execution_id, _SUBMIT_MAX_RETRIES)
 
 
 # ---------------------------------------------------------------------------
@@ -111,9 +132,20 @@ class WorkerServer:
     def __init__(self, agent_func, port: int = 8100):
         self.agent_func = agent_func
         self.port = port
+        self._http_session: aiohttp.ClientSession | None = None
         self.app = web.Application()
         self.app.router.add_post("/execute", self.handle_execute)
         self.app.router.add_get("/health", self.handle_health)
+        self.app.on_startup.append(self._on_startup)
+        self.app.on_cleanup.append(self._on_cleanup)
+
+    async def _on_startup(self, app: web.Application) -> None:
+        self._http_session = aiohttp.ClientSession()
+
+    async def _on_cleanup(self, app: web.Application) -> None:
+        if self._http_session is not None:
+            await self._http_session.close()
+            self._http_session = None
 
     async def handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
@@ -186,7 +218,8 @@ class WorkerServer:
             }
 
         # Push result to the proxy's result store
-        await _submit_result(proxy_url, execution_id, result_data)
+        assert self._http_session is not None
+        await _submit_result(self._http_session, proxy_url, execution_id, result_data)
 
     def run(self) -> None:
         web.run_app(self.app, host="0.0.0.0", port=self.port, print=logger.info)
