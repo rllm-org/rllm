@@ -131,6 +131,9 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         """Validate verl-specific configuration settings."""
         assert self.config.actor_rollout_ref.rollout.mode == "async", "Only async rollout mode is supported for VerlBackend"
         assert self.use_rm is False, "Reward models are not supported. Rewards should be assigned using a reward function in the workflow or environment."
+        if self.config.rllm.stepwise_advantage.mode != "broadcast":
+            # automatically set the stepwise_advantage_mode to "broadcast", the warning is already shown in AlgorithmConfig.from_config
+            self.config.rllm.stepwise_advantage.mode = "broadcast"
 
     def get_dataloader(self, dataset: Dataset | None, trainer_state: TrainerState) -> Iterable:
         """Get dataloader. Note that for Verl backend, the RayPPOTrainer init already creates the dataloaders."""
@@ -268,7 +271,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         # Mask truncated samples if configured
         if self.config.rllm.get("mask_truncated_samples", False):
             mask = batch.batch["attention_mask"][:, -1] == 1
-            batch = batch[~mask]  # type: ignore[assignment]
+            batch = batch[~mask]
 
         trainer_state.backend_batch = batch
 
@@ -284,7 +287,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         with simple_timer("adv", trainer_state.timing_dict):
             if algorithm_config.use_rllm:
                 adv_metrics = collect_reward_and_advantage_from_trajectory_groups(trajectory_groups, algorithm_config)
-                updated_batch = update_dataproto_with_advantages(batch, episodes, mode=self.config.rllm.stepwise_advantage.mode)
+                updated_batch = update_dataproto_with_advantages(batch, episodes, mode=algorithm_config.stepwise_advantage_mode)
             else:
                 updated_batch, adv_metrics = compute_advantage_verl(batch, self.config)
 
@@ -351,13 +354,14 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
                 self._save_checkpoint()
 
         # Update metrics
+        batch: DataProto = trainer_state.backend_batch  # type: ignore[attr-defined]
         metrics = trainer_state.metrics
         metrics.update({"training/global_step": trainer_state.global_step, "training/epoch": trainer_state.epoch})
-        metrics.update(compute_data_metrics(batch=trainer_state.backend_batch, use_critic=self.use_critic))
-        metrics.update(compute_timing_metrics(batch=trainer_state.backend_batch, timing_raw=trainer_state.timing_dict))
+        metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+        metrics.update(compute_timing_metrics(batch=batch, timing_raw=trainer_state.timing_dict))
 
         n_gpus = self.resource_pool_manager.get_n_gpus()
-        metrics.update(compute_throughout_metrics(batch=trainer_state.backend_batch, timing_raw=trainer_state.timing_dict, n_gpus=n_gpus))
+        metrics.update(compute_throughout_metrics(batch=batch, timing_raw=trainer_state.timing_dict, n_gpus=n_gpus))
 
     async def on_validation_start(self, trainer_state: TrainerState) -> bool:
         """Called at the start of validation."""

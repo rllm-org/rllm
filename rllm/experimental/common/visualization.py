@@ -80,10 +80,9 @@ def _visualize_metadata(trajectory: Trajectory, metadata: dict, config: Visualiz
     Visualizes workflow metadata for a given trajectory.
     """
     header_parts = []
-    if "episode_id" in metadata:
-        task_id, rollout_idx = metadata["episode_id"].split(":")
-        header_parts.append(f"Task ID: {task_id}")
-        header_parts.append(f"Rollout: #{rollout_idx}")
+    if "task_id" in metadata and "rollout_idx" in metadata:
+        header_parts.append(f"Task ID: {metadata['task_id']}")
+        header_parts.append(f"Rollout: #{metadata['rollout_idx']}")
     header_parts.append(f"Trajectory: {trajectory.name}")
     colorful_print(" | ".join(header_parts), **config.header_style)
 
@@ -152,7 +151,12 @@ def visualize_trajectory_last_steps(
         prompt_ids = last_step.prompt_ids
         response_ids = last_step.response_ids
 
-        prompt_str = abbreviate_string(tokenizer.decode(prompt_ids))
+        # special handling for prompt ids, we will skip any non-int elements
+        clean_prompt_ids = [elem for elem in prompt_ids if isinstance(elem, int)]
+        if len(clean_prompt_ids) != len(prompt_ids):
+            colorful_warning(f"During visualization, skipped {len(prompt_ids) - len(clean_prompt_ids)} non-int elements in prompt_ids.")
+
+        prompt_str = abbreviate_string(tokenizer.decode(clean_prompt_ids))
 
         print(_format_token(prompt_str, config.masked_token_style))
         print("----------------")

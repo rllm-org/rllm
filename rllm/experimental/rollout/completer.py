@@ -11,11 +11,9 @@ from collections.abc import Callable
 from dataclasses import field
 from typing import Any
 
-from transformers import PreTrainedTokenizer
-
 from rllm.agents.agent import Step
 from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
-from rllm.experimental.rollout.types import TokenInput, TokenOutput
+from rllm.experimental.rollout.types import TokenInput, Tokenizer, TokenOutput
 from rllm.parser import ChatTemplateParser
 
 
@@ -47,17 +45,12 @@ class Completer:
         model_output: ModelOutput = await self.rollout_engine.get_model_response(messages, **kwargs)
 
         # construct the step
-        chat_completions = messages + [{"role": "assistant", "content": model_output.content or "", "reasoning": model_output.reasoning or ""}]
         action = action_hook(model_output) if action_hook is not None else None
-        return Step(
-            prompt_ids=model_output.prompt_ids or [],  # type: ignore
-            response_ids=model_output.completion_ids or [],
-            logprobs=model_output.logprobs or [],
-            chat_completions=chat_completions,
-            thought=model_output.reasoning or "",
-            action=action,
-            model_output=model_output,  # type: ignore
-        )
+        return Step.from_model_output(model_output, messages, action)  # type: ignore
+
+    def reset(self):
+        """Reset the completer to its initial state."""
+        return  # nothing to do for the basic completer
 
 
 class TITOCompleter(Completer):
@@ -65,6 +58,8 @@ class TITOCompleter(Completer):
     Completer that ensures the "token-in-token-out" property. This is achieved by caching the previous messages and token input, and when
     a new message contains the previous messages as a prefix, we only compute the token ids for the "delta" (difference) part of the new message.
     And the new token id is the concatenation of the previous token id and the "delta" token id.
+
+    Note that using this completer will automatically accumulate the reasoning of the assistant messages.
 
     Args:
         rollout_engine: The rollout engine to use.
@@ -74,10 +69,12 @@ class TITOCompleter(Completer):
     """
 
     chat_parser: ChatTemplateParser
-    tokenizer: PreTrainedTokenizer
+    tokenizer: Tokenizer
     # stateful data taht this completer tracks over `complete` calls
     _prev_messages_str: str = ""  # the messages after applying chat template
     _prev_token_input: TokenInput = field(default_factory=list)
+    _n_completions: int = 0
+    _n_prefixes: int = 0
 
     def __init__(self, rollout_engine: RolloutEngine):
         super().__init__(rollout_engine)
@@ -87,12 +84,12 @@ class TITOCompleter(Completer):
             raise ValueError(f"The rollout engine {cls_name} does not support token-in-token-out")
         # we also require the rollout engine has a chat parser and a tokenizer
         if rollout_engine.chat_parser is None or rollout_engine.tokenizer is None:
-            raise ValueError("The rollout engine must have a chat parser and a tokenizer")
+            raise ValueError("The rollout engine must have a chat parser and a tokenizer. For Tinker engine, make sure you have set bypass_render_with_parser=True.")
         self.tokenizer = rollout_engine.tokenizer
         self.chat_parser = rollout_engine.chat_parser
 
     def _parse_message_delta(self, messages: list[dict]) -> tuple[bool, TokenInput]:
-        cur_messages_str = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True)
+        cur_messages_str = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, accumulate_reasoning=True)
         # check if the previous message string is a prefix of the current message string
         if len(self._prev_messages_str) > 0 and self._prev_messages_str.startswith(cur_messages_str):
             message_str_delta = cur_messages_str[len(self._prev_messages_str) :]
@@ -116,16 +113,35 @@ class TITOCompleter(Completer):
         action = action_hook(model_output) if action_hook is not None else None
 
         # update the previous messages and token input
-        self._prev_messages_str = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True)
-        self._prev_token_input = curr_token_input + curr_token_output.completion_ids
+        self._prev_messages_str = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, accumulate_reasoning=True)
+        # backend-specific handling for retrieving the completion ids
+        if hasattr(curr_token_output, "token_ids"):  # Verl
+            curr_completion_ids: list[int] = curr_token_output.token_ids  # type: ignore[assignment]
+        elif hasattr(curr_token_output, "tokens"):  # Tinker
+            curr_completion_ids: list[int] = curr_token_output.tokens
+        else:
+            raise ValueError(f"Unsupported token output type: {type(curr_token_output)}")
+        # update the number of completions and prefixes
+        self._n_completions += 1
+        self._n_prefixes += int(is_prefix)
+        self._prev_token_input = curr_token_input + curr_completion_ids
+        return Step.from_model_output(model_output, messages, action)  # type: ignore
 
-        return Step(
-            prompt_ids=model_output.prompt_ids or [],  # type: ignore
-            response_ids=model_output.completion_ids or [],
-            logprobs=model_output.logprobs or [],
-            chat_completions=messages + [{"role": "assistant", "content": model_output.content, "reasoning": model_output.reasoning}],
-            thought=model_output.reasoning or "",
-            action=action,
-            model_response=model_output.content or "",
-            model_output=model_output,  # type: ignore
-        )
+    def reset(self):
+        """Reset the completer to its initial state."""
+        self._prev_messages_str = ""
+        self._prev_token_input = []
+        self._n_completions = 0
+        self._n_prefixes = 0
+
+    @property
+    def n_completions(self) -> int:
+        return self._n_completions
+
+    @property
+    def n_prefixes(self) -> int:
+        return self._n_prefixes
+
+    @property
+    def prefix_ratio(self) -> float:
+        return self._n_prefixes / self._n_completions if self._n_completions > 0 else 0.0

@@ -107,11 +107,18 @@ class AlgorithmConfig:
     """Configuration for algorithm parameters."""
 
     estimator: rLLMAdvantageEstimator = rLLMAdvantageEstimator.GRPO
+    # TODO(listar2000): eventually we will remove the `per_step` mode all-together. Now we keep it for backward compatibility.
     stepwise_advantage_mode: Literal["broadcast", "per_step"] = "broadcast"
     norm_adv_by_std_in_grpo: bool = True
     use_rllm: bool = False
+    # When True, always use pre-computed step.advantage from the workflow and skip
+    # advantage computation (GRPO/REINFORCE). Steps missing advantages default to 0.0.
+    # When False (default), always compute advantages normally.
+    use_precomputed_advantage: bool = False
     # for tinker backend only
     loss_fn: Literal["importance_sampling", "ppo", "cispo", "dro", "cross_entropy"] | None = None
+    lr_schedule: Literal["linear", "cosine", "constant"] = "constant"
+    warmup_steps_ratio: float = 0.0
 
     @classmethod
     def from_config(cls, config: DictConfig) -> "AlgorithmConfig":
@@ -127,5 +134,19 @@ class AlgorithmConfig:
             stepwise_advantage_mode=config.rllm.stepwise_advantage.mode,
             norm_adv_by_std_in_grpo=config.rllm.stepwise_advantage.get("norm_adv_by_std_in_grpo", True),
             use_rllm=config.rllm.stepwise_advantage.get("use_rllm", False),
+            use_precomputed_advantage=config.rllm.algorithm.get("use_precomputed_advantage", False),
             loss_fn=config.rllm.algorithm.get("loss_fn", None),
+            lr_schedule=config.rllm.algorithm.get("lr_schedule", "constant"),
+            warmup_steps_ratio=config.rllm.algorithm.get("warmup_steps_ratio", 0.0),
         )
+
+    def __post_init__(self):
+        if self.stepwise_advantage_mode == "per_step":
+            from warnings import warn
+
+            warn(
+                "The `per_step` mode is deprecated in experimental unified trainer. Set to `broadcast` mode automatically.Please either use the legacy trainers (`agent_workflow_trainer` for `Verl` or `tinker_workflow_trainer` for `Tinker`) with the `per_step` configuration. Or manually pass in a hook with the implementation of `per_step` advantage computation logic. Read the documentation for a comprehensive guide on the migration (TBD).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self.stepwise_advantage_mode = "broadcast"

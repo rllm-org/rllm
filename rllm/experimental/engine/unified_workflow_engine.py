@@ -123,6 +123,7 @@ class UnifiedWorkflowEngine:
         try:
             for retry_attempt in range(1, self.retry_limit + 1):
                 uid = f"{task_id}:{rollout_idx}"
+                workflow.reset(task=task, uid=uid)
                 episode = await workflow.run_with_termination_handling(task=task, uid=uid, **kwargs)
 
                 # We will make sure that the episode has the correct `uid` and `task` fields.

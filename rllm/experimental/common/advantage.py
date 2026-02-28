@@ -35,6 +35,39 @@ def _calculate_reinforce_advantages(rewards: np.ndarray) -> np.ndarray:
     return rewards
 
 
+def _collect_precomputed_advantages(group: TrajectoryGroup, group_role: str) -> list[float]:
+    """Collect pre-computed per-token advantages from all steps.
+
+    Called when use_precomputed_advantage is True. Steps with None or length-mismatched
+    advantages are defaulted to zero lists. Raises if step.advantage is a scalar float
+    (pre-computed advantages must be per-token lists).
+    """
+    flattened_advantages = []
+    steps_missing = 0
+    total_steps = 0
+
+    for traj in group.trajectories:
+        for step in traj.steps:
+            total_steps += 1
+            if step.advantage is None:
+                step.advantage = [0.0] * len(step.response_ids)
+                flattened_advantages.extend(step.advantage)
+                steps_missing += 1
+            elif isinstance(step.advantage, list):
+                if len(step.advantage) != len(step.response_ids):
+                    logger.warning(f"[group={group_role}] Step has advantage length {len(step.advantage)} but response_ids length {len(step.response_ids)}. Defaulting to zeros.")
+                    step.advantage = [0.0] * len(step.response_ids)
+                    steps_missing += 1
+                flattened_advantages.extend(step.advantage)
+            else:
+                raise ValueError(f"[group={group_role}] step.advantage must be a list when use_precomputed_advantage is True, got {type(step.advantage)}")
+
+    if steps_missing > 0:
+        logger.warning(f"[group={group_role}] {steps_missing}/{total_steps} steps missing pre-computed advantages, defaulted to zeros.")
+
+    return flattened_advantages
+
+
 def collect_reward_and_advantage_from_trajectory_groups(
     groups: list[TrajectoryGroup],
     algorithm_config: AlgorithmConfig,
@@ -52,6 +85,8 @@ def collect_reward_and_advantage_from_trajectory_groups(
     Returns:
         Dictionary of metrics
     """
+    assert algorithm_config.stepwise_advantage_mode == "broadcast", "Only broadcast mode is supported in experimental unified trainer."
+
     if collect_advantage:
         if algorithm_config.estimator == rLLMAdvantageEstimator.GRPO:
             advantage_fn = partial(_calculate_grpo_advantages, norm_adv_by_std_in_grpo=algorithm_config.norm_adv_by_std_in_grpo)
@@ -66,9 +101,21 @@ def collect_reward_and_advantage_from_trajectory_groups(
     rewards_by_group = defaultdict(list)
     # TODO(listar2000): in the future, we should support per-trajectory-group advantage modes
     for group in groups:
-        # extract the role of the group (e.g. "solver" or "judge") or assign the default name
-        group_role = group.group_id.split(":")[1] if ":" in group.group_id[:-1] else "all_groups"
-        if algorithm_config.stepwise_advantage_mode == "broadcast":
+        group_role = group.group_role
+
+        if algorithm_config.use_precomputed_advantage:
+            # Distillation mode: always use pre-computed per-token advantages from the workflow.
+            if collect_advantage:
+                flattened_advantages = _collect_precomputed_advantages(group, group_role)
+                advantages_by_group[group_role].extend(flattened_advantages)
+        else:
+            # RL mode: compute advantages from trajectory rewards.
+            if collect_advantage:
+                # Warn if steps have pre-computed advantages that will be overwritten.
+                has_any = any(step.advantage is not None for traj in group.trajectories for step in traj.steps)
+                if has_any:
+                    logger.warning(f"[group={group_role}] Steps have pre-computed advantages but use_precomputed_advantage is False. Overwriting with {algorithm_config.estimator.value}.")
+
             assert all(traj.reward is not None for traj in group.trajectories), "Trajectory reward cannot be None in broadcast mode"
             traj_rewards = np.array([traj.reward for traj in group.trajectories])
             rewards_by_group[group_role].extend(traj_rewards)
@@ -79,19 +126,6 @@ def collect_reward_and_advantage_from_trajectory_groups(
                 # broadcast the advantage to all steps in the trajectory
                 for traj, advantage in zip(group.trajectories, advantages, strict=False):
                     for step in traj.steps:
-                        step.advantage = advantage
-
-        elif algorithm_config.stepwise_advantage_mode == "per_step":
-            assert len(set([len(traj.steps) for traj in group.trajectories])) == 1, "All trajectories must have the same number of steps in per_step mode"
-            # compute advantage step by step for all trajectories
-            for step_idx in range(len(group.trajectories[0].steps)):
-                steps = [traj.steps[step_idx] for traj in group.trajectories]
-                step_rewards = np.array([step.reward for step in steps])
-                rewards_by_group[f"{group_role}_step_{step_idx}"].extend(step_rewards)
-                if collect_advantage:
-                    advantages = advantage_fn(step_rewards)
-                    advantages_by_group[f"{group_role}_step_{step_idx}"].extend(advantages)
-                    for step, advantage in zip(steps, advantages, strict=False):
                         step.advantage = advantage
 
     # reduce metrics by group

@@ -198,7 +198,7 @@ rllm/registry/
 .cursor/rules/*
 claude/*
 CLAUDE.md
-.claude/*
+.claude/
 
 # Strands outputs ignore
 examples/strands_outputs/*

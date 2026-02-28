@@ -25,6 +25,8 @@ rLLM is an open-source framework for post-training language agents via reinforce
 
 ## Releases 📰
 
+<strong>[2026/02/11]</strong> We release [`rLLM-FinQA-4B`](https://rllm-project.com/blog), a 4B financial analysis agent trained with RL that outperforms Qwen3-235B (**59.7% vs 51.4%**) and rivals Gemini 2.5 Pro on Snorkel Finance Benchmark. [[Blog]](https://rllm-project.com/blog) [[Model]](https://huggingface.co/rLLM/rLLM-FinQA-4B) [[Dataset]](https://huggingface.co/datasets/rLLM/finqa)
+
 <strong>[2025/12/11]</strong> We release rLLM [v0.2.1](https://github.com/rllm-org/rllm/tree/v0.2.1) which comes with support for Tinker backend, LoRA and VLM training, and support for Eval Protocol. We also bumped our `verl` backend to `v0.6.1`. [[SDK Blogpost]](https://rllm-project.com/post.html?post=sdk.md)
 
 <strong>[2025/10/16]</strong> rLLM [v0.2](https://github.com/rllm-org/rllm/tree/v0.2) is now officially released! We introduce `AgentWorkflowEngine` for training over arbitrary agentic programs. It also comes integrated with the official `verl-0.5.0`, featuring support for Megatron training. Check out this [blog post](https://rllm-project.com/post.html?post=rllm_v0.2.md) for more.
@@ -109,8 +111,9 @@ For more detailed installation guide, including using `sglang` for `verl` backen
 * [PettingLLMs](https://pettingllms-ai.github.io/): Using On-Policy Reinforcement Learning for Stronger Multi-Agent System [![GitHub Repo stars](https://img.shields.io/github/stars/pettingllms-ai/PettingLLMs)](https://github.com/pettingllms-ai/PettingLLMs)
 * [Cut the Bill, Keep the Turns](https://agate-slipper-ef0.notion.site/Cut-the-Bill-Keep-the-Turns-Affordable-Multi-Turn-Search-RL-003f78214a4d451fb06f453d084e666c): Affordable Multi-Turn Search RL
 * [SETA](https://eigent-ai.notion.site/SETA-Scaling-Environment-for-Terminal-Agent-2d2511c70ba280a9b7c0fe3e7f1b6ab8): Scaling Environments for Terminal Agents [![GitHub Repo stars](https://img.shields.io/github/stars/camel-ai/seta)](https://github.com/camel-ai/seta)
-
-
+* [LLM-in-Sandbox](https://arxiv.org/abs/2601.16206): Building General Agents by running LLMs in a sandbox (virtual computer) [![GitHub Repo stars](https://img.shields.io/github/stars/llm-in-sandbox/llm-in-sandbox?style=social)](https://github.com/llm-in-sandbox/llm-in-sandbox)
+* [Experiential Reinforcement Learning](https://arxiv.org/pdf/2602.13949v1): Reinforcement Learning with a Experience–Reflection–Consolidation Loop.
+* [rLLM-FinQA-4B](https://rllm-project.com/blog): A 4B Financial Analysis Agent that Outperforms 235B and Rivals Gemini 2.5 Pro [[Model]](https://huggingface.co/rLLM/rLLM-FinQA-4B) [[Dataset]](https://huggingface.co/datasets/rLLM/finqa)
 
 ## Acknowledgements
 Our work is done as part of [Berkeley Sky Computing Lab](https://sky.cs.berkeley.edu/). The rLLM team is generously supported by grants from [Laude Institute](https://www.laude.org/), [AWS](https://aws.amazon.com/), [Hyperbolic](https://www.hyperbolic.ai/), [Fireworks AI](https://fireworks.ai/), and [Modal](https://modal.com/). We pay special thanks to [Together AI](https://www.together.ai/) for the research partnership and compute support. 
