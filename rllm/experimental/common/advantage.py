@@ -47,7 +47,7 @@ def get_rllm_adv_estimator(name: str | rLLMAdvantageEstimator) -> Callable:
 
 @register_rllm_adv_estimator(rLLMAdvantageEstimator.GRPO)
 def calculate_grpo_advantages(rewards: list[np.ndarray], norm_adv_by_std_in_grpo=True, episilon=1e-6, **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    advantages_by_group, returns_by_group = zip(*[calculate_grpo_advantages_per_group(group_rewards, norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo, episilon=episilon) for group_rewards in rewards], strict=False)
+    advantages_by_group, returns_by_group = zip(*[calculate_grpo_advantages_per_group(group_rewards, norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo, episilon=episilon) for group_rewards in rewards], strict=True)
 
     return advantages_by_group, returns_by_group
 
@@ -84,7 +84,7 @@ def calculate_reinforce_plus_plus_baseline_advantages(rewards: list[np.ndarray],
 @register_rllm_adv_estimator(rLLMAdvantageEstimator.RLOO)
 def calculate_rloo_advantages(rewards: list[np.ndarray], **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Reinforce Leave-one-out (RLOO): https://arxiv.org/abs/2402.14740"""
-    advantages_by_group, returns_by_group = zip(*[calculate_rloo_advantages_per_group(group_rewards) for group_rewards in rewards], strict=False)
+    advantages_by_group, returns_by_group = zip(*[calculate_rloo_advantages_per_group(group_rewards) for group_rewards in rewards], strict=True)
     return advantages_by_group, returns_by_group
 
 
