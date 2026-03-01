@@ -543,25 +543,7 @@ async def process_episodes(
 
     training_datums = []
 
-    # Check if any steps have pre-computed advantages
-    has_precomputed = any(isinstance(step.advantage, list) and len(step.advantage) == len(step.response_ids) for episode in episodes for trajectory in episode.trajectories for step in trajectory.steps)
-
-    if has_precomputed:
-        for episode in episodes:
-            for trajectory in episode.trajectories:
-                for step in trajectory.steps:
-                    if not isinstance(step.advantage, list) or len(step.advantage) != len(step.response_ids):
-                        continue
-                    datum = TinkerDatumBuilder.build_distillation_datum(
-                        prompt_ids=step.prompt_ids,
-                        response_ids=step.response_ids,
-                        logprobs=step.logprobs,
-                        advantages=step.advantage,
-                    )
-                    training_datums.append(datum)
-                    all_advantages.append(float(np.mean(step.advantage)))
-
-    elif advantage_computer.distill_enabled:
+    if advantage_computer.distill_enabled:
         import asyncio
 
         teacher_chat_parser = None

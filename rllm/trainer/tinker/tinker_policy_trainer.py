@@ -86,7 +86,7 @@ class TinkerPolicyTrainer:
                 # Handle different checkpoint name formats
                 if checkpoint_name == "final":
                     batch = 0
-                    logger.info("Loading from 'final' checkpoint - starting OPD from batch 0")
+                    logger.info("Loading from 'final' checkpoint - starting from batch 0")
                 else:
                     try:
                         batch = int(checkpoint_name)

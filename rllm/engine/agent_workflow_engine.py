@@ -253,7 +253,6 @@ class AgentWorkflowEngine:
         multi_modal_inputs_list = []
         chat_completions_list = []
         rollout_log_probs_list = []
-        advantages_list = []
 
         for i, episode in enumerate(episodes):
             total_steps = 0
@@ -291,7 +290,6 @@ class AgentWorkflowEngine:
                         responses.append(response)
                         traj_mask.append(mask)
                         multi_modal_inputs_list.append({})  # empty dict
-                        advantages_list.append(torch.zeros(len(response), dtype=torch.float32))
 
                     elif isinstance(trajectory.steps[0].model_output, ModelOutput):
                         step = trajectory.steps[0]
@@ -311,11 +309,6 @@ class AgentWorkflowEngine:
                         logprobs = torch.tensor(step.model_output.logprobs, dtype=torch.float32)
                         rollout_log_probs_list.append(logprobs)
 
-                        if isinstance(step.advantage, list) and len(step.advantage) == len(step.model_output.completion_ids):
-                            advantages_list.append(torch.tensor(step.advantage, dtype=torch.float32))
-                        else:
-                            advantages_list.append(torch.zeros_like(response_ids, dtype=torch.float32))
-
                     else:
                         chat_completions = trajectory.steps[0].chat_completions
                         chat_completions_list.append(chat_completions)
@@ -324,7 +317,6 @@ class AgentWorkflowEngine:
                         responses.append(response)
                         traj_mask.append(mask)
                         multi_modal_inputs_list.append({})  # empty dict
-                        advantages_list.append(torch.zeros(len(response), dtype=torch.float32))
 
                     step_rewards.append(trajectory.reward)
                     step_ids.append(trajectory_id)
@@ -348,11 +340,6 @@ class AgentWorkflowEngine:
                             logprobs = torch.tensor(step.model_output.logprobs, dtype=torch.float32)
                             rollout_log_probs_list.append(logprobs)
 
-                            if isinstance(step.advantage, list) and len(step.advantage) == len(step.model_output.completion_ids):
-                                advantages_list.append(torch.tensor(step.advantage, dtype=torch.float32))
-                            else:
-                                advantages_list.append(torch.zeros_like(response_ids, dtype=torch.float32))
-
                         else:
                             chat_completions = step.chat_completions
                             chat_completions_list.append(chat_completions)
@@ -361,7 +348,6 @@ class AgentWorkflowEngine:
                             responses.append(response)
                             traj_mask.append(mask)
                             multi_modal_inputs_list.append({})  # empty dict
-                            advantages_list.append(torch.zeros(len(response), dtype=torch.float32))
 
                         step_rewards.append(step.reward)
                         step_ids.append(f"{trajectory_id}_step{step_idx}")  # unique step identifier e.g., 1234567890_solver_step0
@@ -445,18 +431,6 @@ class AgentWorkflowEngine:
             rollout_log_probs_batch = pad_sequence_to_length(rollout_log_probs_batch, max_response_length, 0.0, left_pad=False)
             rollout_log_probs_batch = rollout_log_probs_batch[:, :max_response_length]
 
-        advantages_batch = None
-        if advantages_list:
-            advantages_batch = torch.nn.utils.rnn.pad_sequence(
-                advantages_list,
-                batch_first=True,
-                padding_value=0.0,
-            )
-            advantages_batch = pad_sequence_to_length(advantages_batch, max_response_length, 0.0, left_pad=False)
-            advantages_batch = advantages_batch[:, :max_response_length]
-            if not advantages_batch.any():
-                advantages_batch = None
-
         # compact filtering
         cf = self.config.rllm.compact_filtering
         is_valid = [True] * len(episode_ids)
@@ -497,9 +471,6 @@ class AgentWorkflowEngine:
 
         if rollout_log_probs_batch is not None:
             tensors["rollout_log_probs"] = rollout_log_probs_batch
-
-        if advantages_batch is not None:
-            tensors["advantages"] = advantages_batch
 
         return DataProto.from_dict(
             tensors=tensors,

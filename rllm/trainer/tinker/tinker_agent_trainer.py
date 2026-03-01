@@ -25,6 +25,7 @@ from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
 from rllm.trainer.tinker.tinker_metrics_utils import (
     compute_training_metrics,
+    print_episodes,
     print_metrics_table,
 )
 from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer
@@ -242,7 +243,7 @@ class TinkerAgentTrainer:
                 time_metrics["time/one_batch_generate_and_train"] = time.time() - train_step_start
 
                 # Print episodes
-                # print_episodes(episodes, self.tokenizer, num_episodes_to_print=2)
+                print_episodes(episodes, self.tokenizer, num_episodes_to_print=2)
 
                 # Step 4: Compute and log metrics
                 time_metrics["time/total"] = time.time() - t_start

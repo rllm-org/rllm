@@ -69,7 +69,7 @@ class Workflow(ABC):
         Args:
             task: The task to execute.
             uid: The unique identifier for the task.
-            **kwargs: Additional keyword arguments (including optional 'timeout' to override self.timeout).
+            **kwargs: Additional keyword arguments.
         """
         # Extract timeout from kwargs, default to self.timeout
         timeout = kwargs.pop("timeout", self.timeout)
