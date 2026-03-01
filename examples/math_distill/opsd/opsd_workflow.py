@@ -29,6 +29,19 @@ def inject_reference_solution(messages: list[dict], ground_truth: str) -> list[d
 
 
 class OPSDWorkflow(DistillationWorkflow):
+    """On-Policy Self-Distillation workflow where student and teacher share the same model.
+
+    The teacher sees the ground-truth solution as privileged context in its prompt,
+    providing dense per-token feedback to guide the student's learning.
+
+    Args:
+        rollout_engine: The rollout engine for generating student responses.
+        reward_function: Optional reward function for computing step rewards.
+        clip_min: Minimum value for clipping per-token advantages (e.g., -5.0).
+        clip_max: Maximum value for clipping per-token advantages (e.g., 5.0).
+        **kwargs: Additional arguments passed to DistillationWorkflow.
+    """
+
     def __init__(self, rollout_engine: RolloutEngine, reward_function: RewardFunction | None = None, clip_min: float | None = None, clip_max: float | None = None, **kwargs):
         super().__init__(rollout_engine, reward_function=reward_function, teacher_engine=None, shared_tokenizer=True, clip_min=clip_min, clip_max=clip_max, **kwargs)
 
@@ -64,4 +77,4 @@ class OPSDWorkflow(DistillationWorkflow):
         if output.finish_reason == "length":
             raise TerminationEvent(TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED)
 
-        raise TerminationEvent(TerminationReason.ENV_DONE)
+        return self.collect_trajectories()

@@ -8,6 +8,72 @@ from rllm.agents.agent import Step
 logger = logging.getLogger(__name__)
 
 
+def discounted_future_sum(values: list[float], discount_factor: float) -> list[float]:
+    """Compute discounted future sum for a sequence of values.
+
+    For each position i, computes: sum_{j=i}^{n-1} discount_factor^{j-i} * values[j]
+
+    Args:
+        values: Sequence of values.
+        discount_factor: Discount factor (gamma), typically in [0, 1].
+
+    Returns:
+        Discounted future sums for each position.
+    """
+    if not values:
+        return []
+    n = len(values)
+    result = [0.0] * n
+    result[-1] = values[-1]
+    for i in range(n - 2, -1, -1):
+        result[i] = values[i] + discount_factor * result[i + 1]
+    return result
+
+
+def compute_distill_reverse_kl(
+    teacher_logprobs: list[float],
+    student_logprobs: list[float],
+    clip_min: float,
+    clip_max: float,
+    kl_penalty_coef: float = 1.0,
+    kl_discount_factor: float = 0.0,
+) -> list[float]:
+    """Compute per-token distillation advantages from teacher and student logprobs.
+
+    Computes: advantage = kl_penalty_coef * (teacher_logprob - student_logprob)
+
+    Applies clipping and optionally discounted future sum.
+
+    Args:
+        teacher_logprobs: Per-token log probabilities from teacher.
+        student_logprobs: Per-token log probabilities from student.
+        clip_min: Lower bound for clipping advantages (e.g., -5.0).
+        clip_max: Upper bound for clipping advantages (e.g., 5.0).
+        kl_penalty_coef: Optional coefficient for the KL penalty (default 1.0).
+        kl_discount_factor: Optional discount factor for future sum (default 0.0, no discounting).
+
+    Returns:
+        Per-token advantages.
+    """
+    if len(teacher_logprobs) != len(student_logprobs):
+        min_len = min(len(teacher_logprobs), len(student_logprobs))
+        teacher_logprobs = teacher_logprobs[:min_len]
+        student_logprobs = student_logprobs[:min_len]
+
+    # Compute reverse KL: student_lp - teacher_lp, then negate with coefficient
+    # This gives: advantage = kl_penalty_coef * (teacher_lp - student_lp)
+    advantages = [kl_penalty_coef * (t_lp - s_lp) for t_lp, s_lp in zip(teacher_logprobs, student_logprobs, strict=True)]
+
+    # Apply discounted future sum if requested
+    if kl_discount_factor > 0:
+        advantages = discounted_future_sum(advantages, kl_discount_factor)
+
+    # Clip advantages
+    advantages = [max(clip_min, min(clip_max, adv)) for adv in advantages]
+
+    return advantages
+
+
 async def compute_step_distill_advantage(
     step: Step,
     teacher_engine,
@@ -18,13 +84,15 @@ async def compute_step_distill_advantage(
     teacher_prompt_fn: Callable[[list[dict]], list[dict]] | None = None,
     clip_min: float | None = None,
     clip_max: float | None = None,
+    kl_penalty_coef: float = 1.0,
+    kl_discount_factor: float = 0.0,
     visualize: bool = False,
 ) -> list[float]:
     """
     Compute per-token distillation advantages for a single Step.
 
     Queries the teacher for logprobs on the same completion, aligns them to student
-    tokens, and computes advantages = teacher_logprob - student_logprob.
+    tokens, and computes advantages using compute_distill_reverse_kl.
 
     Args:
         step: Step with populated prompt_ids, response_ids, logprobs, and chat_completions.
@@ -38,6 +106,9 @@ async def compute_step_distill_advantage(
             for privileged-context distillation (OPSD).
         clip_min: Optional lower bound for clipping advantages.
         clip_max: Optional upper bound for clipping advantages.
+        kl_penalty_coef: Coefficient for the KL penalty (default 1.0).
+        kl_discount_factor: Discount factor for future sum (default 0.0, no discounting).
+        visualize: Whether to visualize cross-tokenizer alignment (for debugging).
 
     Returns:
         Per-token advantages.
@@ -153,15 +224,17 @@ async def compute_step_distill_advantage(
                 content_str=content_str,
             )
 
-    # Compute per-token advantages: teacher_logprob - student_logprob
-    advantages = [t_lp - s_lp for t_lp, s_lp in zip(aligned_teacher_logprobs, student_logprobs, strict=False)]
-    if len(advantages) < len(student_logprobs):
-        advantages.extend([0.0] * (len(student_logprobs) - len(advantages)))
+    # Pad aligned_teacher_logprobs if needed
+    if len(aligned_teacher_logprobs) < len(student_logprobs):
+        aligned_teacher_logprobs = list(aligned_teacher_logprobs) + [0.0] * (len(student_logprobs) - len(aligned_teacher_logprobs))
 
-    # Optionally clip
-    if clip_min is not None or clip_max is not None:
-        lo = clip_min if clip_min is not None else float("-inf")
-        hi = clip_max if clip_max is not None else float("inf")
-        advantages = [max(lo, min(hi, adv)) for adv in advantages]
-
-    return advantages
+    # Compute advantages using the pure algo function
+    # Use -inf/inf as defaults if clip bounds not specified
+    return compute_distill_reverse_kl(
+        teacher_logprobs=aligned_teacher_logprobs,
+        student_logprobs=student_logprobs,
+        clip_min=clip_min if clip_min is not None else float("-inf"),
+        clip_max=clip_max if clip_max is not None else float("inf"),
+        kl_penalty_coef=kl_penalty_coef,
+        kl_discount_factor=kl_discount_factor,
+    )
