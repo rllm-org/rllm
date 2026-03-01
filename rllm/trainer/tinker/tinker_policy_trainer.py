@@ -6,24 +6,63 @@ It does NOT contain any environment or agent logic.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
-from typing import TYPE_CHECKING
+from functools import wraps
+from typing import TYPE_CHECKING, Literal
 
 import tinker
 from omegaconf import OmegaConf
-from tinker import types
+from tinker.types import AdamParams
 from tinker_cookbook import checkpoint_utils
+from tinker_cookbook.tokenizer_utils import Tokenizer
 
-from rllm.trainer.tinker.tinker_data_processor import (
-    TinkerAdvantageComputer,
-    TinkerTrajectoryFilter,
-    process_episodes,
+from rllm.agents.agent import TrajectoryGroup
+from rllm.experimental.common import (
+    AlgorithmConfig,
+    CompactFilteringConfig,
+    TransformConfig,
+    rLLMAdvantageEstimator,
 )
+from rllm.trainer.tinker.transform import transform_trajectory_groups_to_datums
 
 if TYPE_CHECKING:
     import torch
 
 logger = logging.getLogger(__name__)
+
+
+# Mapping from rLLMAdvantageEstimator to their default Tinker loss function (overriding is allowed through config)
+ADV_TO_LOSS_FN_AUTO_MAP = {
+    rLLMAdvantageEstimator.REINFORCE: "importance_sampling",
+    rLLMAdvantageEstimator.GRPO: "ppo",
+    rLLMAdvantageEstimator.OTHER: "importance_sampling",
+}
+
+
+# helper decorator for any function requiring a training client to be initialized
+def require_training_client(func):
+    def _check_training_client(self):
+        if self.training_client is None:
+            raise RuntimeError("Training client not initialized. Call initialize_async() first.")
+
+    if inspect.iscoroutinefunction(func):
+
+        @wraps(func)
+        async def async_wrapper(self, *args, **kwargs):
+            _check_training_client(self)
+            return await func(self, *args, **kwargs)
+
+        return async_wrapper
+    else:
+
+        @wraps(func)
+        def sync_wrapper(self, *args, **kwargs):
+            _check_training_client(self)
+            return func(self, *args, **kwargs)
+
+        return sync_wrapper
 
 
 class TinkerPolicyTrainer:
@@ -47,6 +86,9 @@ class TinkerPolicyTrainer:
         self,
         config,
         service_client: tinker.ServiceClient,
+        cf_config: CompactFilteringConfig | None = None,
+        transform_config: TransformConfig | None = None,
+        algorithm_config: AlgorithmConfig | None = None,
     ):
         """
         Initialize the policy trainer.
@@ -58,8 +100,10 @@ class TinkerPolicyTrainer:
         self.config = config
         self.service_client = service_client
         self.training_client = None
-        self.advantage_computer = None
-        self.trajectory_filter = None
+        # fill in the default versions of the configs if not provided
+        self.cf_config = cf_config or CompactFilteringConfig.from_config(self.config.rllm.compact_filtering)
+        self.transform_config = transform_config or TransformConfig()
+        self.algorithm_config = algorithm_config or AlgorithmConfig.from_config(self.config)
 
     async def initialize_async(self, resume_from_checkpoint: bool = True):
         """
@@ -72,33 +116,17 @@ class TinkerPolicyTrainer:
         resume_info = None
         if resume_from_checkpoint:
             # Check if a Tinker model ID is provided in config
-            tinker_model_id = OmegaConf.select(self.config, "trainer.resume_from_tinker_id", default=None)
-            if tinker_model_id:
-                if not tinker_model_id.startswith("tinker://"):
-                    raise ValueError(f"Invalid Tinker model ID format: {tinker_model_id}. Expected format: tinker://uuid/weights/checkpoint_name")
-
-                # Extract checkpoint name (e.g., "000060" or "final") from path
-                if "/weights/" not in tinker_model_id:
-                    raise ValueError(f"Invalid Tinker model ID format: {tinker_model_id}. Expected format: tinker://uuid/weights/checkpoint_name")
-
+            tinker_model_id = OmegaConf.select(self.config, "training.resume_from_tinker_id", default=None)
+            if tinker_model_id and tinker_model_id.startswith("tinker://") and "/weights/" in tinker_model_id:
                 checkpoint_name = tinker_model_id.split("/weights/")[-1]
-
-                # Handle different checkpoint name formats
-                if checkpoint_name == "final":
+                try:
+                    batch = int(checkpoint_name)
+                except ValueError:
                     batch = 0
-                    logger.info("Loading from 'final' checkpoint - starting from batch 0")
-                else:
-                    try:
-                        batch = int(checkpoint_name)
-                    except ValueError:
-                        logger.warning(f"Could not parse checkpoint name '{checkpoint_name}' as integer, defaulting to batch 0")
-                        batch = 0
-
-                sampler_path = tinker_model_id.replace("/weights/", "/sampler_weights/")
 
                 resume_info = {
                     "state_path": tinker_model_id,
-                    "sampler_path": sampler_path,
+                    "sampler_path": tinker_model_id.replace("/weights/", "/sampler_weights/"),
                     "batch": batch,
                 }
                 logger.info(f"Resuming from Tinker model ID: {tinker_model_id}")
@@ -115,8 +143,6 @@ class TinkerPolicyTrainer:
                 logger.error(f"Failed to resume from checkpoint: {e}")
                 raise
 
-            self._initialize_data_processors()
-
             if "sampler_path" in resume_info:
                 logger.info(f"Using sampler checkpoint: {resume_info['sampler_path']}")
                 sampling_client = self.create_sampling_client(resume_info["sampler_path"])
@@ -126,11 +152,8 @@ class TinkerPolicyTrainer:
                 logger.info(f"No sampler_path in checkpoint, using: {sampler_path}")
                 sampling_client = self.create_sampling_client(sampler_path)
 
-            # Checkpoint batch number represents the last completed batch
-            # So we should resume from the next batch (batch + 1)
-            checkpoint_batch = resume_info["batch"]
-            start_batch = checkpoint_batch + 1
-            logger.info(f"Resuming from checkpoint at batch {checkpoint_batch}, starting training at batch {start_batch}")
+            start_batch = resume_info["batch"]
+            logger.info(f"Resuming from batch {start_batch}")
             return start_batch, sampling_client
         else:
             # Start from scratch
@@ -148,111 +171,10 @@ class TinkerPolicyTrainer:
                 train_mlp=train_mlp,
             )
             logger.info(f"Starting training from scratch with model: {self.config.model.name}")
-
-            self._initialize_data_processors()
-
             sampler_future = await self.training_client.save_weights_for_sampler_async(name="000000")
             sampler_result = await sampler_future.result_async()
             sampling_client = self.create_sampling_client(sampler_result.path)
             return 0, sampling_client
-
-    def _validate_tokenizer_compatibility(self, student_tokenizer, teacher_tokenizer, shared_tokenizer: bool):
-        """Validate that student and teacher tokenizers are compatible when shared_tokenizer=True.
-
-        This helps catch subtle tokenizer mismatches that could cause issues in distillation.
-        """
-        if not shared_tokenizer:
-            return  # No validation needed for cross-tokenizer distillation
-
-        issues = []
-
-        # Check vocabulary size
-        student_vocab_size = len(student_tokenizer)
-        teacher_vocab_size = len(teacher_tokenizer)
-        if student_vocab_size != teacher_vocab_size:
-            issues.append(f"Vocabulary size mismatch: student={student_vocab_size}, teacher={teacher_vocab_size}")
-
-        # Check special tokens
-        special_tokens = ["bos_token_id", "eos_token_id", "pad_token_id", "unk_token_id"]
-        for token_name in special_tokens:
-            student_id = getattr(student_tokenizer, token_name, None)
-            teacher_id = getattr(teacher_tokenizer, token_name, None)
-            if student_id != teacher_id:
-                issues.append(f"{token_name} mismatch: student={student_id}, teacher={teacher_id}")
-
-        # Check encoding of a sample text
-        test_texts = [
-            "Hello, world!",
-            "The answer is 42.",
-            "Let me think step by step.",
-        ]
-        for text in test_texts:
-            student_ids = student_tokenizer.encode(text, add_special_tokens=False)
-            teacher_ids = teacher_tokenizer.encode(text, add_special_tokens=False)
-            if student_ids != teacher_ids:
-                issues.append(f"Encoding mismatch for '{text}': student={student_ids[:10]}..., teacher={teacher_ids[:10]}...")
-                break  # One mismatch is enough to flag
-
-        if issues:
-            issues_str = "\n".join(f"  - {issue}" for issue in issues)
-            logger.warning("[Tokenizer Validation] shared_tokenizer=True but tokenizers may not be fully compatible:\n%s\n  Consider setting algorithm.shared_tokenizer=False for cross-tokenizer distillation.", issues_str)
-        else:
-            logger.info("[Tokenizer Validation] Student and teacher tokenizers are compatible (shared_tokenizer=True).")
-
-    def _initialize_data_processors(self):
-        """Initialize data processors (teacher engine, advantage computer, filter) after training_client is ready."""
-
-        self.student_tokenizer = self.training_client.get_tokenizer()
-
-        # Initialize teacher engine if distillation is enabled
-        distill_enabled = self.config.algorithm.adv_estimator == "distill"
-        self.teacher_engine = None
-        self.teacher_tokenizer = None
-        if distill_enabled:
-            teacher_rollout_args = self.config.algorithm.get("teacher_rollout_args")
-            teacher_model = teacher_rollout_args.get("model")
-            if not teacher_model:
-                raise ValueError("model must be specified in algorithm.teacher_rollout_args when using distill adv_estimator")
-
-            from transformers import AutoTokenizer
-
-            self.teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_model)
-
-            # Validate tokenizer compatibility
-            shared_tokenizer = self.config.algorithm.get("shared_tokenizer", False)
-            self._validate_tokenizer_compatibility(self.student_tokenizer, self.teacher_tokenizer, shared_tokenizer)
-
-            teacher_backend = teacher_rollout_args.get("backend")
-            if teacher_backend == "openai":
-                from rllm.engine.rollout.openai_engine import OpenAIEngine
-
-                self.teacher_engine = OpenAIEngine(
-                    **teacher_rollout_args,
-                    tokenizer=self.teacher_tokenizer,
-                )
-            elif teacher_backend == "tinker":
-                from rllm.engine.rollout.tinker_engine import TinkerEngine
-
-                teacher_service_client = tinker.ServiceClient()
-                teacher_sampling_client = teacher_service_client.create_sampling_client(base_model=teacher_model)
-                self.teacher_engine = TinkerEngine(
-                    model_name=teacher_model,
-                    tokenizer=self.teacher_tokenizer,
-                    service_client=teacher_service_client,
-                    sampling_client=teacher_sampling_client,
-                    bypass_render_with_parser=True,
-                )
-            else:
-                raise ValueError(f"Unsupported teacher backend: {teacher_backend}, must be one of ['openai', 'tinker']")
-
-        # Initialize advantage computer and filter
-        self.advantage_computer = TinkerAdvantageComputer(
-            self.config.algorithm,
-            teacher_engine=self.teacher_engine,
-            student_tokenizer=self.student_tokenizer,
-            teacher_tokenizer=self.teacher_tokenizer,
-        )
-        self.trajectory_filter = TinkerTrajectoryFilter(self.config.algorithm)
 
     def _remove_mask(self, datum: tinker.Datum) -> tinker.Datum:
         """Remove mask from datum (not needed by forward_backward)."""
@@ -261,148 +183,188 @@ class TinkerPolicyTrainer:
             loss_fn_inputs={k: v for k, v in datum.loss_fn_inputs.items() if k != "mask"},
         )
 
-    async def step(
+    @require_training_client
+    async def _get_forward_backward_futures(
         self,
-        episodes: list,
-        learning_rate: float = None,
+        training_datums: list[tinker.Datum] | dict[str, list[tinker.Datum]],
+        estimator_map: dict[str, rLLMAdvantageEstimator],
+        algorithm_config: AlgorithmConfig,
+    ) -> list[tinker.APIFuture]:
+        fwd_bwd_futures = []
+        if isinstance(training_datums, dict):
+            for group_role, datums in training_datums.items():
+                estimator = estimator_map.get(group_role, self.algorithm_config.estimator)
+                loss_fn = algorithm_config.loss_fn or ADV_TO_LOSS_FN_AUTO_MAP[estimator]
+                fwd_bwd_future = await self.training_client.forward_backward_async(
+                    [self._remove_mask(datum) for datum in datums],
+                    loss_fn=loss_fn,  # type: ignore[attr-defined]
+                )
+                fwd_bwd_futures.append(fwd_bwd_future)
+        else:
+            loss_fn = algorithm_config.loss_fn or ADV_TO_LOSS_FN_AUTO_MAP[algorithm_config.estimator]
+            fwd_bwd_future = await self.training_client.forward_backward_async(
+                [self._remove_mask(datum) for datum in training_datums],
+                loss_fn=loss_fn,  # type: ignore[attr-defined]
+            )
+            fwd_bwd_futures.append(fwd_bwd_future)
+
+        return fwd_bwd_futures
+
+    @require_training_client
+    async def forward_backward_from_trajectory_groups(
+        self,
+        trajectory_groups: list[TrajectoryGroup],
+        algorithm_config: AlgorithmConfig | None = None,
+    ) -> tuple[list[tinker.Datum] | dict[str, list[tinker.Datum]], list[torch.Tensor], dict]:
+        """
+        Run forward-backward pass from trajectory groups (skipping episode transformation).
+
+        This method is useful when trajectory groups have already been computed by the
+        unified trainer pipeline.
+
+        Args:
+            trajectory_groups: List of TrajectoryGroup objects (already filtered/transformed)
+            algorithm_config: Algorithm config for advantage computation (uses self.algorithm_config if None)
+
+        Returns:
+            Tuple of (training_datums, training_logprobs, adv_metrics)
+            - training_datums: List of datums WITH masks for metrics (or dictionary of datums, keyed by trajectory group role)
+            - training_logprobs: List of training logprobs from forward-backward
+            - adv_metrics: Dictionary of advantage metrics (rewards + advantages summary for each trajectory group)
+        """
+        if algorithm_config is None:
+            algorithm_config = self.algorithm_config
+
+        # Transform trajectory groups to datums (includes advantage computation)
+        training_datums, adv_metrics = transform_trajectory_groups_to_datums(
+            trajectory_groups,
+            algorithm_config=algorithm_config,
+        )
+
+        # Forward-backward pass
+        fwd_bwd_futures = await self._get_forward_backward_futures(
+            training_datums=training_datums,
+            estimator_map=algorithm_config.estimator_map,
+            algorithm_config=algorithm_config,
+        )
+
+        # Wait for completion and extract logprobs
+        fwd_bwd_results = await asyncio.gather(*fwd_bwd_futures)
+
+        # Extract training logprobs from loss_fn_outputs
+        training_logprobs = []
+        for fwd_bwd_result in fwd_bwd_results:
+            for output in fwd_bwd_result.loss_fn_outputs:
+                logprobs = output["logprobs"].to_torch()
+                training_logprobs.append(logprobs)
+
+        return training_datums, training_logprobs, adv_metrics
+
+    @require_training_client
+    async def optim_step_future(
+        self,
+        step: int,
+        total_steps: int,
+        learning_rate: float,
         beta1: float = 0.9,
         beta2: float = 0.95,
         eps: float = 1e-8,
-        optimizer_step: bool = True,
-    ) -> tuple[list[torch.Tensor], list[tinker.Datum], dict]:
-        """
-        Complete training step: process episodes and update policy.
-
-        This method:
-        1. Processes episodes to compute advantages and create datums
-        2. Performs forward-backward pass
-        3. Applies optimizer step
-
-        Args:
-            episodes: List of Episode objects
-            learning_rate: Learning rate (uses config value if None)
-            optimizer_step: Whether to apply optimizer step after forward-backward
-
-        Returns:
-            Tuple of (training_logprobs, training_datums, grouping_metrics)
-            - training_logprobs: List of training logprobs for KL computation
-            - training_datums: List of datums WITH masks for metrics
-            - grouping_metrics: Dict with grouping and advantage statistics
-        """
-        if learning_rate is None:
-            learning_rate = self.config.training.learning_rate
-
-        # Step 1: Process to datums (includes filtering and advantage computation)
-        training_datums, grouping_metrics = await process_episodes(
-            episodes,
-            self.advantage_computer,
-            self.trajectory_filter,
-            self.config.algorithm,
+    ) -> tuple[tinker.APIFuture[tinker.types.OptimStepResponse], float]:
+        scheduled_learning_rate = learning_rate * compute_schedule_lr_multiplier(
+            lr_schedule=self.algorithm_config.lr_schedule,
+            warmup_steps_ratio=self.algorithm_config.warmup_steps_ratio,
+            step=step,
+            total_steps=total_steps,
         )
 
-        # Guard: skip forward_backward when all episodes were filtered out (e.g. all
-        # length-exceeded in distillation mode).  Sending an empty list to Tinker's
-        # forward_backward_async causes it to hang indefinitely.
-        if not training_datums:
-            logger.warning(
-                "No training datums after processing %d episodes — skipping forward-backward and optimizer step for this minibatch.",
-                len(episodes),
-            )
-            return [], [], grouping_metrics
+        adam_params = AdamParams(
+            learning_rate=scheduled_learning_rate,
+            beta1=beta1,
+            beta2=beta2,
+            eps=eps,
+        )
+        optim_step_future = await self.training_client.optim_step_async(adam_params)  # type: ignore[attr-defined]
+        return optim_step_future, scheduled_learning_rate
 
-        # Step 3: Remove mask from datums (not needed by forward_backward)
-        datums_no_mask = [self._remove_mask(datum) for datum in training_datums]
+    @require_training_client
+    async def fused_forward_backward_and_optim_step(
+        self,
+        step: int,
+        total_steps: int,
+        trajectory_groups: list[TrajectoryGroup],
+        learning_rate: float,
+        beta1: float = 0.9,
+        beta2: float = 0.95,
+        eps: float = 1e-8,
+    ) -> tuple[list[tinker.Datum] | dict[str, list[tinker.Datum]], list[torch.Tensor], dict, float]:
+        """Run forward-backward pass and optimizer step from trajectory groups -- at the same time.
 
-        # Step 4: Forward-backward pass
-        fwd_bwd_future = await self.training_client.forward_backward_async(
-            datums_no_mask,
-            loss_fn="importance_sampling",
+        This follows from the best-practice with Tinker: https://tinker-docs.thinkingmachines.ai/async#performance-tips-overlap-requests
+        """
+        # Transform trajectory groups to datums (includes advantage computation)
+        training_datums, adv_metrics = transform_trajectory_groups_to_datums(
+            trajectory_groups,
+            algorithm_config=self.algorithm_config,
         )
 
-        # Step 5: Optimizer step
-        adam_params = types.AdamParams(
+        # Forward-backward and optimizer future together
+        fwd_bwd_futures = await self._get_forward_backward_futures(
+            training_datums=training_datums,
+            estimator_map=self.algorithm_config.estimator_map,
+            algorithm_config=self.algorithm_config,
+        )
+
+        optim_step_future, scheduled_learning_rate = await self.optim_step_future(
+            step=step,
+            total_steps=total_steps,
             learning_rate=learning_rate,
             beta1=beta1,
             beta2=beta2,
             eps=eps,
         )
-        if optimizer_step:
-            optim_step_future = await self.training_client.optim_step_async(adam_params)
+        # Retrieve the results together
+        fwd_bwd_results = await asyncio.gather(*fwd_bwd_futures)
+        await optim_step_future.result_async()
 
-        # Wait for completion and extract logprobs
-        fwd_bwd_result = await fwd_bwd_future.result_async()
+        training_logprobs = []
+        for fwd_bwd_result in fwd_bwd_results:
+            for output in fwd_bwd_result.loss_fn_outputs:
+                logprobs = output["logprobs"].to_torch()
+                training_logprobs.append(logprobs)
 
-        if optimizer_step:
-            await optim_step_future.result_async()
+        return training_datums, training_logprobs, adv_metrics, scheduled_learning_rate
 
-        # Extract training logprobs from loss_fn_outputs
-        training_logprobs_D = []
-        for output in fwd_bwd_result.loss_fn_outputs:
-            training_logprobs = output["logprobs"].to_torch()
-            training_logprobs_D.append(training_logprobs)
-
-        # Return logprobs, datums (with masks for metrics), and grouping metrics
-        return training_logprobs_D, training_datums, grouping_metrics
-
-    # TODO: is this dead code?
-    async def forward_backward_future(self, episodes: list):
-        training_datums, grouping_metrics = process_episodes(
-            episodes,
-            self.advantage_computer,
-            self.trajectory_filter,
-            self.config.algorithm,
-        )
-
-        if not training_datums:
-            logger.warning("No training datums — skipping forward_backward_future.")
-            return None, grouping_metrics
-
-        datums_no_mask = [self._remove_mask(datum) for datum in training_datums]
-
-        fwd_bwd_future = await self.training_client.forward_backward_async(
-            datums_no_mask,
-            loss_fn="importance_sampling",
-        )
-
-        return fwd_bwd_future, grouping_metrics
-
-    async def optim_step_future(self, learning_rate: float = None, beta1: float = 0.9, beta2: float = 0.95, eps: float = 1e-8):
-        if learning_rate is None:
-            learning_rate = self.config.training.learning_rate
-
-        adam_params = types.AdamParams(
-            learning_rate=learning_rate,
-            beta1=beta1,
-            beta2=beta2,
-            eps=eps,
-        )
-        optim_step_future = await self.training_client.optim_step_async(adam_params)
-        return optim_step_future
-
-    async def save_checkpoint_async(
+    @require_training_client
+    async def save_checkpoint_and_get_sampling_client(
         self,
         batch_idx: int,
-        kind: str = "sampler",
-    ) -> dict:
+        kind: str = "both",
+        do_save: bool = False,
+    ) -> tinker.SamplingClient:
         """
         Save checkpoint and return paths.
 
         Args:
             batch_idx: Current batch index
             kind: Checkpoint kind ("state", "sampler", or "both")
+            do_save: Whether to save the checkpoint
 
         Returns:
             Dictionary with checkpoint paths
         """
-        path_dict = await checkpoint_utils.save_checkpoint_async(
-            training_client=self.training_client,
-            name=f"{batch_idx:06d}",
-            log_path=self.config.trainer.default_local_dir,
-            kind=kind,
-            loop_state={"batch": batch_idx},
-        )
-        return path_dict
+        if do_save:
+            path_dict = await checkpoint_utils.save_checkpoint_async(
+                training_client=self.training_client,
+                name=f"{batch_idx:06d}",
+                log_path=self.config.training.default_local_dir,
+                kind=kind,
+                loop_state={"batch": batch_idx},
+            )
+            return self.training_client.create_sampling_client(path_dict["sampler_path"])
+        else:
+            return await self.training_client.save_weights_and_get_sampling_client_async()
 
+    @require_training_client
     def create_sampling_client(self, sampler_path: str) -> tinker.SamplingClient:
         """
         Create a sampling client from a checkpoint path.
@@ -413,7 +375,7 @@ class TinkerPolicyTrainer:
         Returns:
             Tinker sampling client
         """
-        return self.training_client.create_sampling_client(sampler_path)
+        return self.training_client.create_sampling_client(sampler_path)  # type: ignore[attr-defined]
 
     def get_last_checkpoint(self) -> dict | None:
         """
@@ -422,10 +384,47 @@ class TinkerPolicyTrainer:
         Returns:
             Resume info dictionary or None if no checkpoint exists
         """
-        return checkpoint_utils.get_last_checkpoint(self.config.trainer.default_local_dir)
+        return checkpoint_utils.get_last_checkpoint(self.config.training.default_local_dir)
 
-    def get_tokenizer(self):
+    @require_training_client
+    def get_tokenizer(self) -> Tokenizer:
         """Get tokenizer from training client."""
-        if self.training_client is None:
-            raise RuntimeError("Training client not initialized. Call initialize_async() first.")
-        return self.training_client.get_tokenizer()
+        return self.training_client.get_tokenizer()  # type: ignore[attr-defined]
+
+
+"""
+Learning rate scheduler for Tinker. Add warmup steps support.
+Adapted from https://github.com/thinking-machines-lab/tinker-cookbook/blob/main/tinker_cookbook/utils/lr_scheduling.py
+"""
+
+LRSchedule = Literal["linear", "cosine", "constant"]
+
+
+def compute_schedule_lr_multiplier(lr_schedule: LRSchedule, warmup_steps_ratio: float, step: int, total_steps: int) -> float:
+    """
+    What factor to multiply the base LR by due to the LR schedule
+
+    Args:
+        lr_schedule: Learning rate schedule
+        warmup_steps_ratio: Ratio of warmup steps to total steps
+        step: Current step
+        total_steps: Total steps
+
+    Returns:
+        Learning rate multiplier
+    """
+    import math
+
+    warmup_steps = int(total_steps * warmup_steps_ratio)
+    if step < warmup_steps:
+        return step / warmup_steps
+    # Adjust step and total_steps for warmup steps
+    step, total_steps = step - warmup_steps, total_steps - warmup_steps
+    if lr_schedule == "linear":
+        return 1 - step / total_steps
+    elif lr_schedule == "cosine":
+        return 0.5 * (1 + math.cos(math.pi * step / total_steps))
+    elif lr_schedule == "constant":
+        return 1
+    else:
+        raise ValueError(f"Unknown learning rate schedule: {lr_schedule}")

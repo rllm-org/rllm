@@ -1,8 +1,6 @@
 from collections.abc import Callable
 from typing import Any, Literal
 
-import ray
-
 from rllm.data import Dataset
 
 
@@ -98,10 +96,9 @@ class AgentTrainer:
             self._train_tinker()
 
     def _train_tinker(self):
-        from rllm.trainer.tinker.tinker_agent_trainer import TinkerAgentTrainer
-        from rllm.trainer.tinker.tinker_workflow_trainer import TinkerWorkflowTrainer
-
         if self.workflow_class is not None:
+            from rllm.trainer.deprecated.tinker_workflow_trainer import TinkerWorkflowTrainer
+
             trainer = TinkerWorkflowTrainer(
                 config=self.config,
                 workflow_class=self.workflow_class,
@@ -110,6 +107,8 @@ class AgentTrainer:
                 val_dataset=self.val_dataset,
             )
         else:
+            from rllm.trainer.deprecated.tinker_agent_trainer import TinkerAgentTrainer
+
             trainer = TinkerAgentTrainer(
                 config=self.config,
                 agent_class=self.agent_class,
@@ -126,6 +125,8 @@ class AgentTrainer:
         Train using the standard verl backend.
         Supports both workflow-based and agent/env-based training.
         """
+        import ray
+
         from rllm.trainer.verl.ray_runtime_env import get_ppo_ray_runtime_env
         from rllm.trainer.verl.train_agent_ppo import TaskRunner
 
@@ -158,6 +159,8 @@ class AgentTrainer:
         Train using the fireworks (pipeline) backend.
         Optimized for workflow-based training with the Fireworks API.
         """
+        import ray
+
         if not ray.is_initialized():
             # TODO: check whether we need a separate function to retrieve the runtime environment (for fireworks)
             from verl.trainer.constants_ppo import get_ppo_ray_runtime_env as get_fireworks_ray_runtime_env

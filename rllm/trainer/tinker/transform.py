@@ -3,16 +3,17 @@ Transformation utilities for converting token input (TinkerTokenInput) to Tinker
 Code is adapted from https://github.com/thinking-machines-lab/tinker-cookbook/blob/main/tinker_cookbook/rl/data_processing.py
 """
 
+from collections import defaultdict
 from typing import cast
 
+import tinker
+from tinker.types.tensor_data import TensorData
 from tinker_cookbook.supervised.common import create_rightshifted_model_input_and_leftshifted_targets
 
-import tinker
 from rllm.agents.agent import Trajectory, TrajectoryGroup
 from rllm.experimental.common import AlgorithmConfig, collect_reward_and_advantage_from_trajectory_groups
 from rllm.experimental.rollout.tinker_engine import _flat_token_input_length, _flat_token_input_to_model_input
 from rllm.experimental.rollout.types import TinkerTokenInput
-from tinker.types.tensor_data import TensorData
 
 
 def _is_prefix(seq1: TinkerTokenInput, seq2: TinkerTokenInput) -> bool:
@@ -127,20 +128,30 @@ def trajectory_to_datums(traj: Trajectory) -> list[tinker.Datum]:
 def transform_trajectory_groups_to_datums(
     trajectory_groups: list[TrajectoryGroup],
     algorithm_config: AlgorithmConfig,
-) -> tuple[list[tinker.Datum], dict]:
+) -> tuple[list[tinker.Datum] | dict[str, list[tinker.Datum]], dict]:
     """
     Transform a list of TrajectoryGroup objects to a list of Tinker Datum objects. Two things are done here:
     1. Compute the advantages for each group
     2. Build the Tinker Datum objects for each group
+
+    If the `estimator_map` is used in the algorithm config, we return a dictionary of datums, keyed by the trajectory group role.
+    Otherwise, we return a list of datums.
     """
     # step 1: compute the advantages for each group using the common functionality
     # this fills the `advantage` attribute of all the steps in the trajectory groups
     adv_metrics = collect_reward_and_advantage_from_trajectory_groups(trajectory_groups, algorithm_config)
 
+    if algorithm_config.estimator_map:
+        datums_dict = defaultdict(list)
+    else:
+        datums = []
+
     # step 2: iterate over all steps and build the Tinker Datum objects
-    datums = []
     for group in trajectory_groups:
         for trajectory in group.trajectories:
-            datums.extend(trajectory_to_datums(trajectory))
+            if algorithm_config.estimator_map:
+                datums_dict[group.group_role].extend(trajectory_to_datums(trajectory))
+            else:
+                datums.extend(trajectory_to_datums(trajectory))
 
-    return datums, adv_metrics
+    return (datums if not algorithm_config.estimator_map else datums_dict), adv_metrics

@@ -23,12 +23,12 @@ from transformers import AutoTokenizer
 
 from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
-from rllm.trainer.tinker.tinker_metrics_utils import (
+from rllm.trainer.deprecated.tinker_metrics_utils import (
     compute_training_metrics,
     print_episodes,
     print_metrics_table,
 )
-from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer
+from rllm.trainer.deprecated.tinker_policy_trainer import TinkerPolicyTrainer
 
 if TYPE_CHECKING:
     pass
