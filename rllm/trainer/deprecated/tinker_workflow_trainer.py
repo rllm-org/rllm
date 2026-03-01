@@ -100,14 +100,16 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
 
         sampling_params = self.config.sampling
         assert sampling_params.get("temperature", 1.0) == 1.0 and sampling_params.get("top_p", 1.0) == 1.0, "temperature and top_p must be 1.0 for tinker workflow trainer"
+        val_sampling_params = self.config.get("val_sampling", None)
         self.rollout_engine = TinkerEngine(
-            base_url=self.config.tinker_base_url,
             model_name=self.config.model.name,
             tokenizer=self.tokenizer,
             service_client=service_client,
             max_prompt_length=self.config.data.max_prompt_length,
             max_response_length=self.config.data.max_response_length,
+            max_model_length=self.config.training.max_length,
             sampling_params=sampling_params,
+            val_sampling_params=val_sampling_params,
             **self.config.rollout_engine,
             image_processor=image_processor,  # VLM support - explicit after spread to ensure it's used
         )
@@ -139,40 +141,54 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
     async def validate_agent(self, dataloader, sampling_client):
         all_episodes = []
         all_episode_metrics = {}  # episode_id -> episode.metrics dict
+        val_group_size = self.config.training.get("val_group_size", 1)
         self.agent_execution_engine.rollout_engine.set_sampling_client(sampling_client)
-        for batch in dataloader:
-            batch = self.build_interleave_batch(batch, 1)
-            self.init_envs_and_agents(batch)
-            # For validation, collect all episodes from generator
-            async for episodes, episode_metrics in self.generate_agent_episodes(group_size=1, minibatch_size=1, return_metrics=True):
-                all_episodes.extend(episodes)
-                all_episode_metrics.update(episode_metrics)
+        self.agent_execution_engine.rollout_engine.validate = True
 
-        # Collect workflow metrics per episode (deduplicated by episode.id)
-        # all_episode_metrics is: {episode_id: {metric_name: metric_value, ...}, ...}
+        try:
+            for batch in dataloader:
+                batch = self.build_interleave_batch(batch, val_group_size)
+                self.init_envs_and_agents(batch)
+                async for episodes, episode_metrics in self.generate_agent_episodes(group_size=val_group_size, minibatch_size=1, return_metrics=True):
+                    all_episodes.extend(episodes)
+                    all_episode_metrics.update(episode_metrics)
+        finally:
+            self.agent_execution_engine.rollout_engine.validate = False
+
+        # Collect workflow metrics per episode
         workflow_metrics = defaultdict(list)
         for episode_id, episode_metric_dict in all_episode_metrics.items():
-            if episode_metric_dict:  # Check if metrics dict is not None
+            if episode_metric_dict:
                 for key, value in episode_metric_dict.items():
                     workflow_metrics[key].append(float(value))
 
-        # Compute trajectory-level statistics from all episodes
+        # Compute trajectory-level statistics
         all_trajectories = []
         for episode in all_episodes:
             all_trajectories.extend(episode.trajectories)
 
-        mean_reward = sum([traj.reward for traj in all_trajectories]) / len(all_trajectories)
-        std_reward = sum([(traj.reward - mean_reward) ** 2 for traj in all_trajectories]) / len(all_trajectories)
-        min_reward = min([traj.reward for traj in all_trajectories])
-        max_reward = max([traj.reward for traj in all_trajectories])
-        mean_turns = sum([len(traj.steps) for traj in all_trajectories]) / len(all_trajectories)
-        metrics = {
-            "val/reward_mean": mean_reward,
-            "val/reward_std": std_reward,
-            "val/reward_min": min_reward,
-            "val/reward_max": max_reward,
-            "val/turns_mean": mean_turns,
-        }
+        if not all_trajectories:
+            logger.warning("Validation produced no trajectories — returning zero metrics.")
+            metrics = {
+                "val/reward_mean": 0.0,
+                "val/reward_std": 0.0,
+                "val/reward_min": 0.0,
+                "val/reward_max": 0.0,
+                "val/turns_mean": 0.0,
+            }
+        else:
+            mean_reward = sum([traj.reward for traj in all_trajectories]) / len(all_trajectories)
+            std_reward = sum([(traj.reward - mean_reward) ** 2 for traj in all_trajectories]) / len(all_trajectories)
+            min_reward = min([traj.reward for traj in all_trajectories])
+            max_reward = max([traj.reward for traj in all_trajectories])
+            mean_turns = sum([len(traj.steps) for traj in all_trajectories]) / len(all_trajectories)
+            metrics = {
+                "val/reward_mean": mean_reward,
+                "val/reward_std": std_reward,
+                "val/reward_min": min_reward,
+                "val/reward_max": max_reward,
+                "val/turns_mean": mean_turns,
+            }
 
         # Add workflow-provided metrics (e.g., solver_acc, judge_acc)
         for key, values in workflow_metrics.items():
@@ -230,9 +246,9 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
                     if not step.logprobs:
                         step.logprobs = model_output.logprobs
 
-        # For VLM prompts, prompt_ids may be empty list (to_ints() not supported for ImageChunks)
-        assert step.prompt_ids is not None, "prompt_ids is None"
-        assert step.response_ids, "response_ids is None"
-        assert step.logprobs, "logprobs is None"
+                    # For VLM prompts, prompt_ids may be empty list (to_ints() not supported for ImageChunks)
+                    assert step.prompt_ids is not None, "prompt_ids is None"
+                    assert step.response_ids, "response_ids is None"
+                    assert step.logprobs, "logprobs is None"
 
         return episodes

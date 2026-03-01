@@ -180,12 +180,18 @@ class OpenAIEngine(RolloutEngine):
                 except Exception:
                     logprobs = []
 
-                try:
-                    assert response.choices[0].prompt_logprobs is not None
-                    prompt_logprobs: list[float] = [None]
-                    for tid, lp in zip(prompt_ids[1:], response.choices[0].prompt_logprobs[1:], strict=False):
-                        prompt_logprobs.append(float(lp[str(tid)]["logprob"]))
-                except Exception:
+                if sampling_params.get("echo", False) and logprobs:
+                    prompt_logprobs = logprobs[:prompt_length]
+                    logprobs = logprobs[prompt_length:]
+                elif sampling_params.get("prompt_logprobs", False):
+                    try:
+                        assert response.choices[0].prompt_logprobs is not None
+                        prompt_logprobs: list[float] = [None]
+                        for tid, lp in zip(prompt_ids[1:], response.choices[0].prompt_logprobs[1:], strict=False):
+                            prompt_logprobs.append(float(lp[str(tid)]["logprob"]))
+                    except Exception:
+                        prompt_logprobs = []
+                else:
                     prompt_logprobs = []
 
                 return ModelOutput(
@@ -228,3 +234,8 @@ class OpenAIEngine(RolloutEngine):
             reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
             prompt = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, tools=tools, accumulate_reasoning=accumulate_reasoning, reasoning_effort=reasoning_effort)
             return await self.completion(prompt, **kwargs)
+
+    async def compute_logprobs(self, ids: list[int]) -> list[float]:
+        ids = ids[: self.max_model_length]
+        output = await self.completion(ids, max_tokens=1, echo=True, logprobs=1, temperature=1.0, top_p=1.0)
+        return output.prompt_logprobs
