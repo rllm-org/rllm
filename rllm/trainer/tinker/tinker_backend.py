@@ -16,21 +16,21 @@ import uuid
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
+import tinker
 import torch
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 
-import tinker
 from rllm.agents.agent import Episode
 from rllm.data import Dataset
 from rllm.experimental.common import AlgorithmConfig, simple_timer
 from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.rollout import RolloutEngine, TinkerEngine
-from rllm.experimental.tinker.tinker_metrics_utils import (
+from rllm.trainer.tinker.tinker_metrics_utils import (
     print_metrics_table,
     update_training_metrics,
 )
-from rllm.experimental.tinker.tinker_policy_trainer import TinkerPolicyTrainer
+from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer
 
 if TYPE_CHECKING:
     from transformers.tokenization_utils import PreTrainedTokenizer

@@ -19,8 +19,8 @@ from transformers import AutoProcessor, AutoTokenizer
 from rllm.agents.agent import Episode
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.tinker_engine import TinkerEngine
-from rllm.trainer.tinker.tinker_agent_trainer import TinkerAgentTrainer
-from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer
+from rllm.trainer.deprecated.tinker_agent_trainer import TinkerAgentTrainer
+from rllm.trainer.deprecated.tinker_policy_trainer import TinkerPolicyTrainer
 
 if TYPE_CHECKING:
     pass

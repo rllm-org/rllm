@@ -6,14 +6,14 @@ Code is adapted from https://github.com/thinking-machines-lab/tinker-cookbook/bl
 from collections import defaultdict
 from typing import cast
 
+import tinker
+from tinker.types.tensor_data import TensorData
 from tinker_cookbook.supervised.common import create_rightshifted_model_input_and_leftshifted_targets
 
-import tinker
 from rllm.agents.agent import Trajectory, TrajectoryGroup
 from rllm.experimental.common import AlgorithmConfig, collect_reward_and_advantage_from_trajectory_groups
 from rllm.experimental.rollout.tinker_engine import _flat_token_input_length, _flat_token_input_to_model_input
 from rllm.experimental.rollout.types import TinkerTokenInput
-from tinker.types.tensor_data import TensorData
 
 
 def _is_prefix(seq1: TinkerTokenInput, seq2: TinkerTokenInput) -> bool:
