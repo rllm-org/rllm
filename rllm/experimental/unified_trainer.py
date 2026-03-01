@@ -511,7 +511,7 @@ class AgentTrainer:
                 **kwargs,
             )
         elif backend == "tinker":
-            from rllm.experimental.tinker.tinker_launcher import TinkerTrainerLauncher
+            from rllm.trainer.tinker.tinker_launcher import TinkerTrainerLauncher
 
             self.launcher = TinkerTrainerLauncher(
                 config=config,

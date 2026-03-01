@@ -24,7 +24,7 @@ from rllm.experimental.common import (
     TransformConfig,
     rLLMAdvantageEstimator,
 )
-from rllm.experimental.tinker.transform import transform_trajectory_groups_to_datums
+from rllm.trainer.tinker.transform import transform_trajectory_groups_to_datums
 from tinker.types import AdamParams
 
 if TYPE_CHECKING:

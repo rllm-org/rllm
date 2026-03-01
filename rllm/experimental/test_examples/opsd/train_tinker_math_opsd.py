@@ -1,7 +1,7 @@
 import hydra
 
 from rllm.data.dataset import DatasetRegistry
-from rllm.experimental.tinker.tinker_backend import TinkerBackend
+from rllm.trainer.tinker.tinker_backend import TinkerBackend
 from rllm.experimental.unified_trainer import UnifiedTrainer
 
 from .math_opsd_workflow import MathOPSDWorkflow
