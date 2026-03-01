@@ -2,9 +2,9 @@
 
 import logging
 
+import tinker
 import torch
 
-import tinker
 from rllm.experimental.unified_trainer import TrainerState
 
 logger = logging.getLogger(__name__)

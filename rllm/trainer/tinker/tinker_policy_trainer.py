@@ -12,11 +12,12 @@ import logging
 from functools import wraps
 from typing import TYPE_CHECKING, Literal
 
+import tinker
 from omegaconf import OmegaConf
+from tinker.types import AdamParams
 from tinker_cookbook import checkpoint_utils
 from tinker_cookbook.tokenizer_utils import Tokenizer
 
-import tinker
 from rllm.agents.agent import TrajectoryGroup
 from rllm.experimental.common import (
     AlgorithmConfig,
@@ -25,7 +26,6 @@ from rllm.experimental.common import (
     rLLMAdvantageEstimator,
 )
 from rllm.trainer.tinker.transform import transform_trajectory_groups_to_datums
-from tinker.types import AdamParams
 
 if TYPE_CHECKING:
     import torch

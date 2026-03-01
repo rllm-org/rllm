@@ -3,8 +3,6 @@ from typing import Any, Literal
 
 from rllm.data import Dataset
 
-import os
-
 
 class AgentTrainer:
     """
@@ -100,7 +98,7 @@ class AgentTrainer:
     def _train_tinker(self):
         if self.workflow_class is not None:
             from rllm.trainer.deprecated.tinker_workflow_trainer import TinkerWorkflowTrainer
-            
+
             trainer = TinkerWorkflowTrainer(
                 config=self.config,
                 workflow_class=self.workflow_class,
@@ -162,7 +160,7 @@ class AgentTrainer:
         Optimized for workflow-based training with the Fireworks API.
         """
         import ray
-        
+
         if not ray.is_initialized():
             # TODO: check whether we need a separate function to retrieve the runtime environment (for fireworks)
             from verl.trainer.constants_ppo import get_ppo_ray_runtime_env as get_fireworks_ray_runtime_env

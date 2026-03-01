@@ -16,11 +16,11 @@ import uuid
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
+import tinker
 import torch
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 
-import tinker
 from rllm.agents.agent import Episode
 from rllm.data import Dataset
 from rllm.experimental.common import AlgorithmConfig, simple_timer
