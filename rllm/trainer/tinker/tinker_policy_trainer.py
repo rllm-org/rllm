@@ -37,8 +37,11 @@ logger = logging.getLogger(__name__)
 ADV_TO_LOSS_FN_AUTO_MAP = {
     rLLMAdvantageEstimator.REINFORCE: "importance_sampling",
     rLLMAdvantageEstimator.GRPO: "ppo",
+    rLLMAdvantageEstimator.RLOO: "importance_sampling",
     rLLMAdvantageEstimator.OTHER: "importance_sampling",
 }
+
+DEFAULT_LOSS_FN = "importance_sampling"
 
 
 # helper decorator for any function requiring a training client to be initialized
@@ -187,21 +190,21 @@ class TinkerPolicyTrainer:
     async def _get_forward_backward_futures(
         self,
         training_datums: list[tinker.Datum] | dict[str, list[tinker.Datum]],
-        estimator_map: dict[str, rLLMAdvantageEstimator],
+        estimator_map: dict[str, rLLMAdvantageEstimator | str],
         algorithm_config: AlgorithmConfig,
     ) -> list[tinker.APIFuture]:
         fwd_bwd_futures = []
         if isinstance(training_datums, dict):
             for group_role, datums in training_datums.items():
                 estimator = estimator_map.get(group_role, self.algorithm_config.estimator)
-                loss_fn = algorithm_config.loss_fn or ADV_TO_LOSS_FN_AUTO_MAP[estimator]
+                loss_fn = algorithm_config.loss_fn or ADV_TO_LOSS_FN_AUTO_MAP.get(estimator, DEFAULT_LOSS_FN)
                 fwd_bwd_future = await self.training_client.forward_backward_async(
                     [self._remove_mask(datum) for datum in datums],
                     loss_fn=loss_fn,  # type: ignore[attr-defined]
                 )
                 fwd_bwd_futures.append(fwd_bwd_future)
         else:
-            loss_fn = algorithm_config.loss_fn or ADV_TO_LOSS_FN_AUTO_MAP[algorithm_config.estimator]
+            loss_fn = algorithm_config.loss_fn or ADV_TO_LOSS_FN_AUTO_MAP.get(algorithm_config.estimator, DEFAULT_LOSS_FN)
             fwd_bwd_future = await self.training_client.forward_backward_async(
                 [self._remove_mask(datum) for datum in training_datums],
                 loss_fn=loss_fn,  # type: ignore[attr-defined]
