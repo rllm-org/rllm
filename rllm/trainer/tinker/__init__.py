@@ -1,5 +1,9 @@
-"""Tinker backend trainer for rLLM."""
+"""Compatibility exports for legacy tinker trainer imports."""
 
-from rllm.trainer.tinker.tinker_agent_trainer import TinkerAgentTrainer
+from rllm.trainer.deprecated import (
+    TinkerAgentTrainer,
+    TinkerSFTTrainer,
+    TinkerWorkflowTrainer,
+)
 
-__all__ = ["TinkerAgentTrainer"]
+__all__ = ["TinkerAgentTrainer", "TinkerSFTTrainer", "TinkerWorkflowTrainer"]

@@ -22,7 +22,7 @@ from tinker_cookbook.tokenizer_utils import get_tokenizer
 from tinker_cookbook.utils.lr_scheduling import compute_schedule_lr_multiplier
 from tinker_cookbook.utils.misc_utils import timed
 
-from rllm.trainer.tinker.tinker_sft_dataset import create_tinker_sft_datasets
+from rllm.trainer.deprecated.tinker_sft_dataset import create_tinker_sft_datasets
 
 logger = logging.getLogger(__name__)
 

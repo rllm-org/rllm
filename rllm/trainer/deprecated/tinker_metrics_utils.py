@@ -27,7 +27,7 @@ def print_episodes(
         tokenizer: Tokenizer for decoding
         num_episodes_to_print: Number of episodes to print
     """
-    from rllm.trainer.tinker.tinker_data_processor import TinkerDatumBuilder
+    from rllm.trainer.deprecated.tinker_data_processor import TinkerDatumBuilder
 
     buf = io.StringIO()
 
@@ -140,7 +140,7 @@ def print_trajectories(
         tokenizer: Tokenizer for decoding
         num_groups_to_print: Number of trajectory groups to print
     """
-    from rllm.trainer.tinker.tinker_data_processor import TinkerDatumBuilder
+    from rllm.trainer.deprecated.tinker_data_processor import TinkerDatumBuilder
 
     buf = io.StringIO()
 

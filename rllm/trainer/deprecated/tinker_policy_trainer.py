@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 from tinker import types
 from tinker_cookbook import checkpoint_utils
 
-from rllm.trainer.tinker.tinker_data_processor import (
+from rllm.trainer.deprecated.tinker_data_processor import (
     TinkerAdvantageComputer,
     TinkerTrajectoryFilter,
     process_episodes,
