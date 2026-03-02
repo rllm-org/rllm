@@ -24,7 +24,7 @@ backend-specific operations to a pluggable `BackendProtocol` implementation.
 
 The trainer itself is **backend-agnostic**: it knows nothing about model weights,
 optimizers, or inference servers. All of that is encapsulated behind the
-`BackendProtocol` interface (see [backend-protocol.md](backend-protocol.md)).
+`BackendProtocol` interface (see [backend-protocol](backend-protocol.md)).
 
 ---
 
@@ -80,6 +80,11 @@ trainer.fit()
 | `val_dataset` | `Dataset | None` | Validation dataset |
 | `workflow_args` | `dict | None` | Extra kwargs passed to each workflow instance |
 | `backend_args` | `dict | None` | Extra kwargs passed to the backend constructor |
+| `traj_grouping_hook` | `Callable | None` | Optional custom episode-to-trajectory-group hook |
+| `traj_group_adv_estimator_map` | `dict | None` | Optional per-role advantage estimator override map |
+| `**kwargs` | `Any` | Forwarded to the selected launcher/backend |
+
+When `traj_group_adv_estimator_map` is provided, `rllm.algorithm.use_rllm` must be `true`.
 
 ---
 ## `TrainerState`
@@ -91,6 +96,8 @@ backend throughout a training step. It is **reset at the start of each batch** v
 ```python
 @dataclass
 class TrainerState:
+    rs_state: RejectionSamplingState  # rejection-sampling accumulator/state
+
     # Progress
     global_step: int = 0
     epoch: int = 0
@@ -119,30 +126,28 @@ When the `UnifiedTrainer` is constructed, the following happens in order:
 
 | Step | Method | Description |
 |------|--------|-------------|
-| 1 | `_setup_event_loop()` | Spawn a background asyncio event loop thread |
-| 2 | `backend_cls(config, ...)` | Instantiate the backend |
-| 3 | `_validate_and_setup_configs()` | Build AlgorithmConfig, TransformConfig, etc. |
-| 4 | `_setup_logging()` | Init wandb / episode logger |
-| 5 | `backend.init_rollout_engine()` | Backend creates its RolloutEngine |
-| 6 | `UnifiedWorkflowEngine(...)` | Create the workflow engine with a pool of workflow instances (workflow_cls + workflow_args) |
-| 7 | `initialize_pool()` | Pre-create N workflow instances |
+| 1 | `backend_cls(config, ...)` | Instantiate the backend |
+| 2 | `_validate_and_setup_configs()` | Build AlgorithmConfig, TransformConfig, etc. |
+| 3 | `_setup_logging()` | Init tracking and optional episode logger |
+| 4 | `backend.init_rollout_engine()` | Backend creates its RolloutEngine |
+| 5 | `UnifiedWorkflowEngine(...)` | Create the workflow engine (workflow class + args + rollout engine) |
 
-If any step fails, `_cleanup_on_init_failure()` tears down all resources that were
-partially initialized (event loop, logger, backend, workflow engine).
+The workflow pool initialization (`initialize_pool`) happens when `fit_async()` starts, not in the constructor.
 
 ---
 
 ## Training Loop
 
-Calling `trainer.fit()` runs the async loop in the background thread. The high-level
+Calling `trainer.fit()` runs `fit_async()` via `asyncio.run(...)`. The high-level
 flow is shown in the below Mermaid diagram:
 
 ??? note "Training Loop Diagram (click to expand)"
 
     ``` mermaid
     graph TD
-      n1["fit()"] --> n2["_fit_entry_async()"]
-      n2 --> n3["backend.on_train_start(state)"]
+      n1["fit()"] --> n2["fit_async()"]
+      n2 --> p0["agent_workflow_engine.initialize_pool()"]
+      p0 --> n3["backend.on_train_start(state)"]
       n3 --> d1{"optional: _validate_async(state)?"}
 
       d1 -->|yes| v1["_validate_async(state)"]
@@ -170,6 +175,9 @@ flow is shown in the below Mermaid diagram:
 
       e1 --> te1["backend.on_train_end(state)"]
     ```
+
+!!! note
+    If `val_before_train=true` and `val_only=true`, training returns after initial validation and does not enter `_fit_async()`.
 
 ### The 8-Stage Batch Pipeline
 
@@ -200,7 +208,7 @@ Validation is triggered:
 
 - Before training (if `config.rllm.trainer.val_before_train` is true)
 - Periodically during training (every `config.rllm.trainer.test_freq` steps)
-- After training completes
+- After training completes (only when `test_freq > 0`)
 
 The validation loop calls `backend.generate_episodes(..., is_validation=True)`,
 transforms the results, and computes reward metrics (no advantage computation or
@@ -209,7 +217,7 @@ policy updates). Pass@1 and pass@K metrics are computed per data source and logg
 The backend can control validation via hooks:
 
 - `on_validation_start` returns a `bool` -- return `False` to skip validation entirely
-- `on_validation_end` is called after validation completes
+- `on_validation_end` is called when validation actually runs (i.e. not skipped)
 
 ---
 
@@ -232,10 +240,13 @@ full Hydra config). Key config groups:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `estimator` | `rLLMAdvantageEstimator` | `GRPO` | Advantage estimator (`GRPO`, `REINFORCE`) |
+| `estimator` | `rLLMAdvantageEstimator` | `GRPO` | Advantage estimator (`GRPO`, `REINFORCE`, `REINFORCE_PLUS_PLUS_BASELINE`, `RLOO`) |
+| `estimator_map` | `dict[str, rLLMAdvantageEstimator | str]` | `{}` | Per-role estimator override map (set by `traj_group_adv_estimator_map`) |
 | `stepwise_advantage_mode` | `"broadcast"` | `"broadcast"` | How advantages map to steps |
 | `norm_adv_by_std_in_grpo` | `bool` | `True` | Normalize advantages by std in GRPO |
-| `loss_fn` | `str \| None` | `None` | Backend loss function (e.g. `"importance_sampling"`) |
+| `use_rllm` | `bool` | `False` | Whether to use rLLM-native advantage path (relevant for Verl backend) |
+| `use_precomputed_advantage` | `bool` | `False` | Reuse pre-computed `step.advantage` from workflow instead of recomputing |
+| `loss_fn` | `str | None` | `None` | Backend loss function (e.g. `"importance_sampling"`) |
 | `lr_schedule` | `str` | `"constant"` | LR schedule: `"constant"`, `"linear"`, `"cosine"` |
 | `warmup_steps_ratio` | `float` | `0.0` | Fraction of total steps for LR warmup |
 
@@ -245,14 +256,11 @@ full Hydra config). Key config groups:
 
 The trainer uses an **async-prioritized** design:
 
-- A dedicated `asyncio` event loop runs in a background daemon thread
-- The public `fit()` method is synchronous -- it submits the async entry point to the
-  loop via `asyncio.run_coroutine_threadsafe` and blocks on the result
-- All backend pipeline methods are `async def`, which naturally accommodates backends
-  with async APIs (like Tinker) while allowing sync backends to simply `await` their
-  sync operations
-- The `_run_async(coro)` helper is available for running one-off coroutines from
-  synchronous code
+- `fit()` is the sync entry point and runs `fit_async()` via `asyncio.run(...)`
+- `fit_async()` is available directly if you are already in an async context
+- The pipeline mixes async and sync steps:
+  - async: `generate_episodes`, `process_backend_batch`, `compute_advantages`, `update_policy`
+  - sync: transformation/rejection-sampling steps, dataloader access, logging, visualization
 
 ---
 
@@ -260,10 +268,9 @@ The trainer uses an **async-prioritized** design:
 
 Always call `trainer.shutdown()` when done (or use a `try/finally` block). This:
 
-1. Stops the background event loop thread
-2. Shuts down the workflow engine (including its thread pool)
-3. Calls `backend.shutdown()` for backend-specific cleanup
-4. Calls `logger.finish()` to flush and close the tracking backend (e.g. wandb)
+1. Shuts down the workflow engine
+2. Calls `backend.shutdown()` for backend-specific cleanup
+3. Calls `logger.finish()` to flush and close the tracking backend (e.g. wandb)
 
 ```python
 try:

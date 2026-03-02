@@ -136,6 +136,8 @@ nav:
         - Unified Training Loop: experimental/unified-trainer.md
         - Backend Protocol: experimental/backend-protocol.md
         - Configuration: experimental/rllm-and-backend-config.md
+      - rLLM Supported Algorithms:
+        - rLLM RL Advantage Estimator: experimental/rllm-rl-advantage-estimator.md
       - rLLM UI:
         - Training Dashboard: experimental/rllm-ui.md
   - Projects:
@@ -143,6 +145,8 @@ nav:
       - FinQA: projects/finqa.md
   - API Reference:
       - Overview: api/index.md
+      - Experimental:
+          - rLLM Advantage Estimator: api/experimental/rllm-advantage-estimator.md
       - Agents:
           - Agent Base: api/agents/agent.md
           - Agent Utils: api/agents/utils.md

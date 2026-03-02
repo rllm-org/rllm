@@ -35,6 +35,11 @@ The trainer module provides RL training capabilities:
 - **Agent Trainer**: Main training interface for RL algorithms
 - **Ray Runtime Environment**: Configuration for Ray runtime environment
 
+### 🧪 Experimental
+Experimental APIs for unified backend-agnostic training:
+
+- **rLLM Advantage Estimator**: Registry, built-in estimators, and config types ([docs](experimental/rllm-advantage-estimator.md))
+
 ### 🛠️ Tools
 The tools module provides a comprehensive framework for creating and managing tools:
 
