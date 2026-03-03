@@ -82,6 +82,7 @@ nav:
       - Core Concepts:
         - rLLM's Main Components: core-concepts/overview.md
         - Agent and Environment: core-concepts/agent_env.md
+        - rLLM Agent Run Format: core-concepts/agent-run-format.md
         - AgentExecutionEngine for Trajectory Rollout: core-concepts/execution-engine.md
         - AgentWorkflowEngine for Episode Rollout: core-concepts/workflow-engine.md
         - AgentTrainer for RL Training: core-concepts/training.md
@@ -108,6 +109,7 @@ nav:
   - Core Concepts:
       - rLLM's Main Components: core-concepts/overview.md
       - Agent and Environment: core-concepts/agent_env.md
+      - rLLM Agent Run Format: core-concepts/agent-run-format.md
       - AgentExecutionEngine for Trajectory Rollout: core-concepts/execution-engine.md
       - AgentWorkflowEngine for Episode Rollout: core-concepts/workflow-engine.md
       - AgentTrainer for RL Training: core-concepts/training.md
@@ -149,6 +151,7 @@ nav:
       - Experimental:
           - rLLM Advantage Estimator: api/experimental/rllm-advantage-estimator.md
       - Agents:
+          - rLLM Data Structures: api/agents/rllm-data-structures.md
           - Agent Base: api/agents/agent.md
           - Agent Utils: api/agents/utils.md
       - Environments:

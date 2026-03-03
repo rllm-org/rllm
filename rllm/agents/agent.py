@@ -13,6 +13,30 @@ if TYPE_CHECKING:
 
 @dataclass
 class Step:
+    """
+    Atomic unit of one model interaction in a rollout.
+
+    A step stores token-level fields from the rollout engine (`prompt_ids`,
+    `response_ids`, `logprobs`) together with execution context and training
+    signals.
+
+    Attributes:
+        prompt_ids: Input token IDs for this model call.
+        response_ids: Generated token IDs for this model call.
+        logprobs: Token-level log probabilities aligned with `response_ids`.
+        chat_completions: Chat message history at this step.
+        observation: Environment/workflow observation before generation.
+        thought: Optional model reasoning text.
+        action: Parsed action emitted from the model response.
+        model_response: Raw response content from the model.
+        model_output: Original rollout engine output payload.
+        info: Additional per-step metadata.
+        reward: Step-level reward signal.
+        done: Whether this step ends the trajectory.
+        mc_return: Monte-Carlo return (if computed by workflow logic).
+        advantage: Step advantage signal; can be scalar or token-level list.
+    """
+
     # this is to accomodate the fact that for backend like `tinker`, the prompt_ids might contain special image blocks
     prompt_ids: list[int] | list[Any] = field(default_factory=list)
     response_ids: list[int] = field(default_factory=list)
@@ -119,6 +143,21 @@ _DEFAULT_TRAJ_NAME = "default_traj_name"
 
 @dataclass
 class Trajectory:
+    """
+    Ordered sequence of steps for one role/agent thread.
+
+    A trajectory is the primary container for per-role rollout history and
+    trajectory-level reward.
+
+    Attributes:
+        uid: Unique trajectory identifier.
+        name: Role/name for grouping and metrics (for example, `solver`).
+        task: Task payload associated with the trajectory.
+        steps: Ordered list of step records.
+        reward: Optional trajectory-level reward.
+        info: Additional trajectory metadata.
+    """
+
     uid: str = field(default_factory=lambda: str(uuid.uuid4()))  # unique id to deduplicate on
     name: str = _DEFAULT_TRAJ_NAME
     task: Any = None
@@ -173,6 +212,22 @@ class Trajectory:
 
 @dataclass
 class Episode:
+    """
+    Workflow-level rollout output containing one or more trajectories.
+
+    Episode is the unit returned by `Workflow.run(...)` and usually represents
+    one `(task_id, rollout_idx)` execution.
+
+    Attributes:
+        id: Rollout identifier, typically `{task_id}:{rollout_idx}`.
+        task: Original task payload.
+        termination_reason: Workflow termination status.
+        is_correct: Workflow-level correctness flag.
+        trajectories: Trajectories generated in this rollout.
+        metrics: Workflow-defined episode metrics.
+        info: Additional episode metadata.
+    """
+
     id: str = ""  # rollout id e.g., task_id:rollout_idx
     task: Any = None
     termination_reason: TerminationReason | None = None  # noqa: F821
