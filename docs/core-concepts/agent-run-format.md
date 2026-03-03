@@ -14,7 +14,7 @@ If you need exact field-level APIs, see [rLLM Data Structures API](../api/agents
 
 ## 1. Step: The Atomic Rollout Unit
 
-![step](https://hackmd.io/_uploads/BJnM2x4KWl.png)
+![step](../assets/run_format/step.png)
 
 A `Step` is the smallest training-relevant unit in an rLLM run. It captures one model interaction:
 
@@ -32,7 +32,7 @@ This makes it both:
 
 ## 2. Trajectory: Same-Role Steps Sharing Outcome
 
-![trajectory](https://hackmd.io/_uploads/rJuICZ4Y-l.png)
+![trajectory](../assets/run_format/trajectory.png)
 
 A `Trajectory` is an ordered list of `Step`s from a single role (for example, `solver`, `judge`, or `debater_1`).
 
@@ -47,7 +47,7 @@ This is an intentional design decision. If you need different reward/advantage b
 
 ## 3. Episode: Workflow/Agent-Level Grouping
 
-![episode](https://hackmd.io/_uploads/SJxeLsEtbl.png)
+![episode](../assets/run_format/episode.png)
 
 An `Episode` is what `Workflow.run(...)` returns for one rollout.
 It groups all trajectories produced in that rollout, potentially from multiple roles.
