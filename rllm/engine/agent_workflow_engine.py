@@ -1,6 +1,13 @@
+"""Deprecated legacy workflow engine.
+
+This module is deprecated and will be removed in a future release.
+Use `rllm.experimental.engine.agent_workflow_engine.AgentWorkflowEngine` instead.
+"""
+
 import asyncio
 import logging
 import uuid
+import warnings
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
@@ -36,6 +43,11 @@ class AgentWorkflowEngine:
             episode_logger: Optional logger for saving episode data to files.
             **kwargs: Additional keyword arguments.
         """
+        warnings.warn(
+            "rllm.engine.agent_workflow_engine.AgentWorkflowEngine is deprecated and will be removed in a future release. Use rllm.experimental.engine.agent_workflow_engine.AgentWorkflowEngine instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.workflow_cls = workflow_cls
         self.workflow_args = workflow_args or {}
 

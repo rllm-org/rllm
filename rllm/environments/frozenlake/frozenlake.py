@@ -169,7 +169,8 @@ class FrozenLakeEnv(GymFrozenLakeEnv, BaseEnv):
         is_slippery = kwargs.pop("is_slippery", False)
         size = kwargs.pop("size", 8)
         p = kwargs.pop("p", 0.8)
-        seed = kwargs.pop("seed", 42)
+        # Gymnasium's seeding utility requires a Python int, not numpy scalar types.
+        seed = int(kwargs.pop("seed", 42))
         self.seed = seed
         self.size = size
         self.p = p
