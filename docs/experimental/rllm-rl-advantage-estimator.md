@@ -191,6 +191,7 @@ traj_group_adv_estimator_map = {
 
 ## Related References
 
+- [Pre-computing Advantage in Workflow](rllm-precompute-advantage.md)
 - [API: rLLM Advantage Estimator](../api/experimental/rllm-advantage-estimator.md)
 - [Unified Trainer](unified-trainer.md)
 - [rLLM and Backend Config](rllm-and-backend-config.md)

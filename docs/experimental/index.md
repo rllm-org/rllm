@@ -11,6 +11,7 @@ This section contains a high-level overview of the `UnifiedTrainer` and its rela
 ### rLLM Supported Algorithms
 
 - [rLLM RL Advantage Estimator](rllm-rl-advantage-estimator.md): rLLM-native advantage estimation concepts and customization
+- [Pre-computing Advantage in Workflow](rllm-precompute-advantage.md): step-level precomputed training signals and mixed-mode training
 
 ### rLLM UI
 

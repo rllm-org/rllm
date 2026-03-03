@@ -13,8 +13,10 @@ import numpy as np
 from rllm.agents.agent import TrajectoryGroup
 from rllm.experimental.common.config import AlgorithmConfig, rLLMAdvantageEstimator
 from rllm.experimental.common.rl_algo import calculate_grpo_advantages_per_group, calculate_rloo_advantages_per_group
+from rllm.utils.logging import DuplicateLoggingFilter
 
 logger = logging.getLogger(__name__)
+logger.addFilter(DuplicateLoggingFilter())  # prevent duplicate logging messages
 
 
 RLLM_ADV_ESTIMATOR_REGISTRY: dict[str, Callable] = {}
@@ -102,18 +104,17 @@ def _collect_precomputed_advantages(group: TrajectoryGroup, group_role: str) -> 
     for traj in group.trajectories:
         for step in traj.steps:
             total_steps += 1
-            if step.advantage is None:
-                step.advantage = [0.0] * len(step.response_ids)
-                flattened_advantages.extend(step.advantage)
-                steps_missing += 1
+            if isinstance(step.advantage, float):
+                step.advantage = [step.advantage] * len(step.response_ids)
             elif isinstance(step.advantage, list):
                 if len(step.advantage) != len(step.response_ids):
                     logger.warning(f"[group={group_role}] Step has advantage length {len(step.advantage)} but response_ids length {len(step.response_ids)}. Defaulting to zeros.")
                     step.advantage = [0.0] * len(step.response_ids)
                     steps_missing += 1
-                flattened_advantages.extend(step.advantage)
             else:
-                raise ValueError(f"[group={group_role}] step.advantage must be a list when use_precomputed_advantage is True, got {type(step.advantage)}")
+                raise ValueError(f"[group={group_role}] step.advantage must be a scalar or a list when use_precomputed_advantage is True, got {type(step.advantage)}")
+
+            flattened_advantages.extend(step.advantage)
 
     if steps_missing > 0:
         logger.warning(f"[group={group_role}] {steps_missing}/{total_steps} steps missing pre-computed advantages, defaulted to zeros.")
@@ -161,19 +162,17 @@ def collect_reward_and_advantage_from_trajectory_groups(
 
     for group in groups:
         group_role = group.group_role
+        has_precomputed_advantage = any(step.advantage is not None for traj in group.trajectories for step in traj.steps)
 
-        if algorithm_config.use_precomputed_advantage:
-            # Distillation mode: always use pre-computed per-token advantages from the workflow.
+        if has_precomputed_advantage and algorithm_config.use_precomputed_advantage:
+            # Precompute mode (e.g. OPD, SFT): always use pre-computed per-token advantages from the workflow.
             if collect_advantage:
                 flattened_advantages = _collect_precomputed_advantages(group, group_role)
                 advantages_by_role[group_role].extend(flattened_advantages)
         else:
             # RL mode: compute advantages from trajectory rewards.
-            if collect_advantage:
-                # Warn if steps have pre-computed advantages that will be overwritten.
-                has_any = any(step.advantage is not None for traj in group.trajectories for step in traj.steps)
-                if has_any:
-                    logger.warning(f"[group={group_role}] Steps have pre-computed advantages but use_precomputed_advantage is False. Overwriting with {algorithm_config.estimator.value}.")
+            if collect_advantage and has_precomputed_advantage:
+                logger.warning(f"[group={group_role}] Steps have pre-computed advantages but use_precomputed_advantage is False. Overwriting with {algorithm_config.estimator.value}.")
 
             assert all(traj.reward is not None for traj in group.trajectories), "Trajectory reward cannot be None in broadcast mode"
             traj_rewards = np.array([traj.reward for traj in group.trajectories])

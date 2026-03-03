@@ -138,6 +138,7 @@ nav:
         - Configuration: experimental/rllm-and-backend-config.md
       - rLLM Supported Algorithms:
         - rLLM RL Advantage Estimator: experimental/rllm-rl-advantage-estimator.md
+        - Pre-computing Advantage in Workflow: experimental/rllm-precompute-advantage.md
       - rLLM UI:
         - Training Dashboard: experimental/rllm-ui.md
   - Projects:
