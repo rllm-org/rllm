@@ -15,4 +15,4 @@ This section contains a high-level overview of the `UnifiedTrainer` and its rela
 
 ### rLLM UI
 
-- [rLLM UI](rllm-ui.md): Training dashboard and visualization
+- [rLLM UI](rllm-ui.md): Real-time monitoring agent training and evaluation

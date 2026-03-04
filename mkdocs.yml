@@ -142,7 +142,7 @@ nav:
         - rLLM RL Advantage Estimator: experimental/rllm-rl-advantage-estimator.md
         - Pre-computing Advantage in Workflow: experimental/rllm-precompute-advantage.md
       - rLLM UI:
-        - Training Dashboard: experimental/rllm-ui.md
+        - User Interface for rLLM: experimental/rllm-ui.md
   - Projects:
       - Overview: projects/index.md
       - FinQA: projects/finqa.md
