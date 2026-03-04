@@ -324,7 +324,7 @@ class UILogger:
         headers = {}
         if api_key:
             headers["X-API-Key"] = api_key
-        self.client = httpx.Client(base_url=self.ui_url, timeout=5.0, headers=headers)
+        self.client = httpx.Client(base_url=self.ui_url, timeout=5.0, headers=headers, transport=httpx.HTTPTransport(retries=3))
         self._heartbeat_stop = threading.Event()
 
         try:
