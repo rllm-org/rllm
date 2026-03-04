@@ -101,6 +101,9 @@ For solver-judge, default grouping typically yields:
 
 ## 6. Overriding Default Grouping
 
+!!! warning "As for rLLM v0.3, this remains an experimental feature shipped with the [Unified Trainer](../experimental/unified-trainer.md)"
+    If you are still using the legacy trainers (`agent_workflow_trainer` for `Verl` or `tinker_workflow_trainer` for `Tinker`), the grouping rules are not explicit, and the stepwise advantage computation pattern follows the [Stepwise GRPO guide](./rl-algos.md).
+
 You can override grouping by passing `traj_grouping_hook` to `AgentTrainer` / `UnifiedTrainer`.
 
 ```python

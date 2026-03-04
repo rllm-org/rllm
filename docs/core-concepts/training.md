@@ -1,5 +1,8 @@
 # RL Training with AgentTrainer
 
+!!! warning "Deprecation warning"
+    The current `AgentTrainer` will be soon replaced with a newer, [`UnifiedTrainer`](../experimental/unified-trainer.md)-based agent trainer. If you are working with `Tinker`, we highly recommend you to migrate to the new [`UnifiedTrainer`](../experimental/unified-trainer.md)-based workflow trainer. See [RL Training with Tinker (with Unified Trainer)](../examples/tinker_rl.md) for an upgraded solver-judge workflow example.
+
 Training in rLLM uses reinforcement learning algorithms to update agent policies based on rewards. This page explains the training architecture, available algorithms, and how to configure and run training jobs.
 
 ## Overview

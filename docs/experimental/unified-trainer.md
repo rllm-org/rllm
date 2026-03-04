@@ -7,6 +7,8 @@ It manages the full training loop -- episode generation, data transformation, ad
 computation, policy updates, validation, and logging -- while delegating all
 backend-specific operations to a pluggable `BackendProtocol` implementation.
 
+This page contains the technical details of the Unified Trainer training loop. For anyone simply wanting to use the Unified Trainer, please refer to [RL Training with Tinker (with Unified Trainer)](../examples/tinker_rl.md) for a complete example with the solver-judge workflow.
+
 ---
 
 ## Architecture Overview

@@ -7,7 +7,7 @@ This section contains examples demonstrating how to use rLLM to train agents for
 ### 🧩 [rLLM SDK](../core-concepts/sdk.md)
 Train agents using the rLLM SDK, including tutorials for a math agent, solver-judge workflow, and LangGraph RAG agent.
 
-### 🚀 [RL Training with Tinker](tinker_rl.md)
+### 🚀 [RL Training with Tinker (with Unified Trainer)](tinker_rl.md)
 Train a solver‑judge RL workflow using Tinker's hosted GPU service.
 
 ### 🧪 [Verifiers (Prime Intellect Hub)](verifiers.md)
