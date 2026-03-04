@@ -91,7 +91,6 @@ if __name__ == "__main__":
             pass
 
     rollout_engine = TinkerEngine(
-        base_url=base_url,
         model_name=model_name,
         tokenizer=tokenizer,
         service_client=service_client,

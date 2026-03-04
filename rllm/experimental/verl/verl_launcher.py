@@ -171,7 +171,7 @@ class VerlTrainerLauncher(TrainerLauncher):
         runner = TaskRunner.remote()  # type: ignore
 
         ray.get(
-            runner.run.remote(  # type: ignore
+            runner.run.remote(
                 config=self.config,
                 workflow_class=self.workflow_class,
                 workflow_args=self.workflow_args,

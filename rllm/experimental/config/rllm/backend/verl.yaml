@@ -63,3 +63,6 @@ rllm:
     save_freq: ${oc.select:trainer.save_freq, 20}
     val_before_train: ${oc.select:trainer.val_before_train, true}
     val_only: ${oc.select:trainer.val_only, false}
+
+  hydra.searchpath:
+    - pkg://verl.trainer.config

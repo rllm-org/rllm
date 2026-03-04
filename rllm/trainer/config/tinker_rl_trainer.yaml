@@ -17,6 +17,7 @@ model:
 # Training Configuration
 training:
   group_size: 16  # Number of rollouts per prompt (for GRPO)
+  val_group_size: 1  # Number of rollouts per validation prompt
   learning_rate: 2e-5  # 2e-5 for MATH dataset
   beta1: 0.9
   beta2: 0.95
@@ -24,10 +25,14 @@ training:
   max_length: 32768
   num_minibatches: 1
 
-# Sampling Configuration
 sampling:
-  temperature: 0.6
-  top_p: 0.95
+  temperature: 1.0
+  top_p: 1.0
+
+val_sampling:
+  temperature: ${sampling.temperature}
+  top_p: ${sampling.top_p}
+  max_tokens: ${data.max_response_length}
 
 # Algorithm Configuration (compatible with verl)
 algorithm:
@@ -39,16 +44,17 @@ algorithm:
   remove_constant_reward_groups: false
   shared_tokenizer: False
   teacher_rollout_args:
-    model: "deepseek-ai/DeepSeek-Math-V2"
+    backend: tinker # openai, tinker
+    model: "Qwen/Qwen3-32B"
     base_url: "http://localhost:8000/v1"
     api_key: "EMPTY"
-    max_prompt_length: 32768
+    max_prompt_length: ${training.max_length}
     
 
 # Workflow Configuration (for workflow training mode)
 workflow:
   n_parallel_tasks: 256
-  retry_limit: 3 
+  retry_limit: 3
 
 # Agent Configuration (for agent training mode)
 agent:
@@ -64,6 +70,7 @@ rollout_engine:
   accumulate_reasoning: false
   disable_thinking: false
   bypass_render_with_parser: false
+  renderer_name: null  # Override renderer name (null = auto-detect from model)
 
 # Data Configuration
 data:

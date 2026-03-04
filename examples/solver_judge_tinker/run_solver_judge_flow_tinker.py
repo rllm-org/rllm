@@ -95,7 +95,6 @@ if __name__ == "__main__":
     service_client = tinker.ServiceClient(base_url=None)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     rollout_engine = TinkerEngine(
-        base_url=None,
         model_name=model_name,
         tokenizer=tokenizer,
         service_client=service_client,

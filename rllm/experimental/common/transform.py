@@ -166,7 +166,7 @@ def _get_transform_metrics(episodes: list[Episode], groups: list[TrajectoryGroup
     return metrics
 
 
-def _default_trajectory_grouping_hook(episodes: list[Episode], transform_config: TransformConfig | None = None, compact_filtering_config: CompactFilteringConfig | None = None) -> list[TrajectoryGroup]:
+def _default_traj_grouping_hook(episodes: list[Episode], transform_config: TransformConfig, compact_filtering_config: CompactFilteringConfig | None = None) -> list[TrajectoryGroup]:
     """
     Default trajectory grouping hook.
 
@@ -192,10 +192,10 @@ def _default_trajectory_grouping_hook(episodes: list[Episode], transform_config:
 
 def transform_episodes_to_trajectory_groups(
     episodes: list[Episode],
-    transform_config: TransformConfig | None = None,
+    transform_config: TransformConfig,
     compact_filtering_config: CompactFilteringConfig | None = None,
     metrics_prefix: str = "grouping",
-    trajectory_grouping_hook: Callable[[list[Episode], TransformConfig | None, CompactFilteringConfig | None], list[TrajectoryGroup]] = _default_trajectory_grouping_hook,
+    traj_grouping_hook: Callable[[list[Episode], TransformConfig, CompactFilteringConfig | None], list[TrajectoryGroup]] = _default_traj_grouping_hook,
 ) -> tuple[list[TrajectoryGroup], dict]:
     """
     Transform a list of Episodes into a list of TrajectoryGroups for advantage computation.
@@ -210,7 +210,7 @@ def transform_episodes_to_trajectory_groups(
         transform_config: Transform configuration (uses defaults if not provided)
         compact_filtering_config: Compact filtering configuration (uses defaults if not provided)
         metrics_prefix: Prefix for the metrics generated in this pipeline
-        trajectory_grouping_hook: A hook function to override the default trajectory grouping logic
+        traj_grouping_hook: A hook function to override the default trajectory grouping logic
 
     Returns:
         Tuple of (list of TrajectoryGroups, metrics)
@@ -240,7 +240,7 @@ def transform_episodes_to_trajectory_groups(
         logger.warning(f"Skipping {len(rename_warnings) - LOG_N_WARNINGS} more similar warnings with trajectory names")
 
     # Step 2: Invoke the trajectory grouping hook
-    groups = trajectory_grouping_hook(episodes, transform_config, compact_filtering_config)
+    groups = traj_grouping_hook(episodes, transform_config, compact_filtering_config)
 
     # Step 3: Get metrics
     metrics = _get_transform_metrics(episodes, groups, prefix=metrics_prefix)

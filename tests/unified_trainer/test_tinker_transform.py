@@ -1,5 +1,5 @@
 """
-Tests for trajectory_to_datums function in rllm.experimental.tinker.transform.
+Tests for trajectory_to_datums function in rllm.trainer.tinker.transform.
 
 These tests verify that trajectories are correctly converted to Tinker Datum objects,
 especially the logic for merging consecutive steps that share a prefix relationship.
@@ -14,7 +14,7 @@ import tinker
 from tinker.types import ImageChunk
 
 from rllm.agents.agent import Step, Trajectory
-from rllm.experimental.tinker.transform import (
+from rllm.trainer.tinker.transform import (
     _flatten_token_input,
     _is_prefix,
     trajectory_to_datums,

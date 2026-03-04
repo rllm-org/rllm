@@ -65,7 +65,7 @@ class AgentSFTTrainer:
 
     def _train_tinker(self):
         """Train using Tinker backend."""
-        from rllm.trainer.tinker.tinker_sft_trainer import TinkerSFTTrainer
+        from rllm.trainer.deprecated.tinker_sft_trainer import TinkerSFTTrainer
 
         trainer = TinkerSFTTrainer(
             config=self.config,

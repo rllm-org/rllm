@@ -11,6 +11,7 @@ rLLM is a library for training LLM agents with reinforcement learning. The API i
 ### 🤖 Agents
 The agents module contains various agent implementations that can be trained with reinforcement learning:
 
+- **rLLM Data Structures**: `Step`, `Trajectory`, `Episode`, and `TrajectoryGroup`
 - **Base Agent**: Core agent interface and base functionality
 
 ### 🌍 Environments
@@ -34,6 +35,11 @@ The trainer module provides RL training capabilities:
 
 - **Agent Trainer**: Main training interface for RL algorithms
 - **Ray Runtime Environment**: Configuration for Ray runtime environment
+
+### 🧪 Experimental
+Experimental APIs for unified backend-agnostic training:
+
+- **rLLM Advantage Estimator**: Registry, built-in estimators, and config types ([docs](experimental/rllm-advantage-estimator.md))
 
 ### 🛠️ Tools
 The tools module provides a comprehensive framework for creating and managing tools:

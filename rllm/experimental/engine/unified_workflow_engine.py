@@ -221,41 +221,32 @@ class UnifiedWorkflowEngine:
         return ordered_results
 
     # TODO(listar2000): eventually the agent_workflow_engine should be backend agnostic.
-    async def execute_tasks_verl(self, batch: DataProto, **kwargs) -> list[Episode]:
+    async def execute_tasks_verl(self, batch: DataProto, is_validation: bool = False, **kwargs) -> list[Episode]:
         """Execute tasks from a Verl DataProto batch and return results.
 
         Args:
             batch: Verl DataProto containing tasks and metadata.
+            is_validation: Whether the generation is for validation.
             **kwargs: Additional arguments passed to execute_tasks.
 
         Returns:
-            DataProto: Transformed results compatible with Verl training.
+            list[Episode]: List of completed episodes.
         """
         from rllm.experimental.rollout import VerlEngine
 
         assert isinstance(self.rollout_engine, VerlEngine), "Rollout engine must be a VerlEngine to invoke execute_tasks_verl"
         await self.rollout_engine.wake_up()
 
-        is_validation = batch.meta_info.get("validate", False)
-        if is_validation:
-            self.rollout_engine.is_validation = True
-            self.current_mode = "val"
-        else:
-            self.current_mode = "train"
         tasks = batch.non_tensor_batch["extra_info"].tolist()
         task_ids = batch.non_tensor_batch["task_ids"].tolist()
-        episodes = await self.execute_tasks(tasks, task_ids, **kwargs)  # list of Episodes
+        episodes = await self.execute_tasks(tasks, task_ids, is_validation=is_validation, **kwargs)
         # handle data sources in the input dataproto
         if "data_source" in batch.non_tensor_batch:
             data_sources = batch.non_tensor_batch["data_source"].tolist()
             for episode, data_source in zip(episodes, data_sources, strict=True):
                 episode.info["data_source"] = data_source
 
-        self.rollout_engine.is_validation = False
-
         await self.rollout_engine.sleep()
-
-        self.current_mode = "train"
         return episodes
 
     def shutdown(self):

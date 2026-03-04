@@ -91,7 +91,7 @@ class TITOCompleter(Completer):
     def _parse_message_delta(self, messages: list[dict]) -> tuple[bool, TokenInput]:
         cur_messages_str = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, accumulate_reasoning=True)
         # check if the previous message string is a prefix of the current message string
-        if len(self._prev_messages_str) > 0 and self._prev_messages_str.startswith(cur_messages_str):
+        if len(self._prev_messages_str) > 0 and cur_messages_str.startswith(self._prev_messages_str):
             message_str_delta = cur_messages_str[len(self._prev_messages_str) :]
             is_prefix = True
         else:

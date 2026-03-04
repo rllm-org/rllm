@@ -38,25 +38,32 @@ def _token_str_to_bytes(token_str: str | None) -> bytes:
         return token_str.encode("utf-8", errors="replace")
 
 
-def build_byte_offsets(tokenizer: PreTrainedTokenizer, token_ids: list[int]) -> list[int]:
+def build_byte_offsets(tokenizer: PreTrainedTokenizer, token_ids: list[int]) -> tuple[list[int], str]:
     """
-    Build cumulative byte offsets for token sequence.
+    Build cumulative byte offsets and reconstructed text for token sequence.
 
-    Returns list of length n+1 where offsets[i] is byte position where token i starts,
-    and offsets[n] is total byte length.
+    Returns (offsets, text) where:
+    - offsets[i] is byte position where token i starts
+    - text is the reconstructed text from token bytes (consistent with offsets)
+
+    The reconstructed text is guaranteed to match the byte offsets.
     """
     if not token_ids:
-        return [0]
+        return [0], ""
 
     token_strs = tokenizer.convert_ids_to_tokens(token_ids)
     offsets = [0]
+    all_bytes = []
     cumulative = 0
     for token_str in token_strs:
         token_bytes = _token_str_to_bytes(token_str)
+        all_bytes.append(token_bytes)
         cumulative += len(token_bytes)
         offsets.append(cumulative)
 
-    return offsets
+    reconstructed_bytes = b"".join(all_bytes)
+    reconstructed_text = reconstructed_bytes.decode("utf-8", errors="replace")
+    return offsets, reconstructed_text
 
 
 def find_content_byte_ranges(
@@ -230,11 +237,9 @@ def align_teacher_logprobs(
     n_student = len(student_ids)
     n_teacher = len(teacher_ids)
 
-    student_offsets = build_byte_offsets(student_tokenizer, student_ids)
-    teacher_offsets = build_byte_offsets(teacher_tokenizer, teacher_ids)
-
-    student_text = student_tokenizer.decode(student_ids, skip_special_tokens=False, clean_up_tokenization_spaces=False)
-    teacher_text = teacher_tokenizer.decode(teacher_ids, skip_special_tokens=False, clean_up_tokenization_spaces=False)
+    # Build byte offsets and get consistent text representation
+    student_offsets, student_text = build_byte_offsets(student_tokenizer, student_ids)
+    teacher_offsets, teacher_text = build_byte_offsets(teacher_tokenizer, teacher_ids)
 
     student_regions = find_content_byte_ranges(student_text, reasoning_str, content_str)
     teacher_regions = find_content_byte_ranges(teacher_text, reasoning_str, content_str)
@@ -268,14 +273,20 @@ def align_teacher_logprobs(
     for i in range(n_student):
         teacher_indices = student_to_teachers[i]
 
+        # Format/special token with no teacher overlap
         if not teacher_indices:
-            aligned_logprobs.append(0.0)
-        else:
-            total = 0.0
-            for j in teacher_indices:
-                usage = max(1, teacher_usage_count[j])
-                total += teacher_logprobs[j] / usage
-            aligned_logprobs.append(total)
+            aligned_logprobs.append(student_logprobs[i])
+            continue
+
+        # Teacher was truncated in the middle of a student token
+        if teacher_indices[-1] >= len(teacher_logprobs):
+            aligned_logprobs.extend(student_logprobs[i:])
+            break
+
+        total = 0.0
+        for j in teacher_indices:
+            total += teacher_logprobs[j] / teacher_usage_count[j]
+        aligned_logprobs.append(total)
 
     return aligned_logprobs
 
@@ -289,7 +300,7 @@ def visualize_alignment(
     student_logprobs: list[float],
     reasoning_str: str,
     content_str: str,
-    max_tokens: int = 50,
+    max_tokens: int = 100,
 ) -> None:
     """
     Visualize alignment between student and teacher tokens.
@@ -328,10 +339,8 @@ def visualize_alignment(
     print("teacher -> " + " ".join(teacher_parts))
     print()
 
-    student_offsets = build_byte_offsets(student_tokenizer, student_ids)
-    teacher_offsets = build_byte_offsets(teacher_tokenizer, teacher_ids)
-    student_text = student_tokenizer.decode(student_ids, skip_special_tokens=False, clean_up_tokenization_spaces=False)
-    teacher_text = teacher_tokenizer.decode(teacher_ids, skip_special_tokens=False, clean_up_tokenization_spaces=False)
+    student_offsets, student_text = build_byte_offsets(student_tokenizer, student_ids)
+    teacher_offsets, teacher_text = build_byte_offsets(teacher_tokenizer, teacher_ids)
     student_regions = find_content_byte_ranges(student_text, reasoning_str, content_str)
     teacher_regions = find_content_byte_ranges(teacher_text, reasoning_str, content_str)
 

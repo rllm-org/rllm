@@ -50,6 +50,10 @@ class TinkerAdvantageComputer:
         self.student_tokenizer = student_tokenizer
         self.teacher_tokenizer = teacher_tokenizer
         self.shared_tokenizer = algorithm_config.get("shared_tokenizer", False)
+        # Advantage clipping for distillation to stabilize training (off by default to not affect other training)
+        self.clip_advantages = algorithm_config.get("clip_advantages", False)
+        self.adv_clip_min = algorithm_config.get("adv_clip_min", -5.0)
+        self.adv_clip_max = algorithm_config.get("adv_clip_max", 5.0)
 
     def compute_grpo_advantages(self, group_rewards: list[float]) -> list[float]:
         """
@@ -129,12 +133,16 @@ class TinkerAdvantageComputer:
             teacher_logprobs: Aligned teacher logprobs for each completion token (same length as student)
 
         Returns:
-            List of per-token advantages
+            List of per-token advantages (optionally clipped to stabilize training)
         """
         if len(student_logprobs) != len(teacher_logprobs):
             raise ValueError(f"Length mismatch: student_logprobs={len(student_logprobs)}, teacher_logprobs={len(teacher_logprobs)}")
 
         advantages = [t_lp - s_lp for t_lp, s_lp in zip(teacher_logprobs, student_logprobs, strict=False)]
+
+        if self.clip_advantages:
+            advantages = [max(self.adv_clip_min, min(self.adv_clip_max, adv)) for adv in advantages]
+
         return advantages
 
 
@@ -531,6 +539,7 @@ async def process_episodes(
     # Track metrics
     all_advantages = []
     group_sizes = []
+    filtered_groups = []
 
     training_datums = []
 
@@ -538,12 +547,13 @@ async def process_episodes(
         import asyncio
 
         teacher_chat_parser = None
+        # For different tokenizers, we need the chat parser to re-encode for the teacher
         if not advantage_computer.shared_tokenizer:
             if not hasattr(advantage_computer.teacher_engine, "chat_parser") or advantage_computer.teacher_engine.chat_parser is None:
                 raise ValueError("Teacher engine does not have a chat_parser.")
             teacher_chat_parser = advantage_computer.teacher_engine.chat_parser
 
-        async def process_step(global_idx: int, step: Step) -> tuple[tinker.Datum, float]:
+        async def process_step(global_idx: int, step: Step) -> tuple[tinker.Datum, float] | None:
             """
             Process a single step: query teacher, align, compute advantages, build datum.
 
@@ -552,14 +562,14 @@ async def process_episodes(
                 step: The step to process
 
             Returns:
-                Tuple of (datum, avg_advantage)
+                Tuple of (datum, avg_advantage) or None if step should be skipped
             """
             if not step.model_output or not step.model_output.completion_ids or not step.model_output.logprobs:
                 raise ValueError("Missing model_output with completion_ids or logprobs for distillation.")
 
-            prompt_ids = step.prompt_ids or step.model_output.prompt_ids
-            if not prompt_ids:
-                raise ValueError("Missing prompt_ids in step for distillation.")
+            student_prompt_ids = step.prompt_ids or step.model_output.prompt_ids
+            if not student_prompt_ids:
+                raise ValueError("Missing student's prompt_ids in step for distillation.")
 
             student_completion_ids = step.model_output.completion_ids
             student_logprobs = step.model_output.logprobs
@@ -567,22 +577,13 @@ async def process_episodes(
             if advantage_computer.shared_tokenizer:
                 # Fast path: student and teacher use the same tokenizer
                 # Directly use student token IDs for teacher query
-                student_prompt_ids = prompt_ids
                 teacher_ids = student_prompt_ids + student_completion_ids
                 teacher_prompt_length = len(student_prompt_ids)
-
-                teacher_resp = await advantage_computer.teacher_engine.completion(
-                    teacher_ids,
-                    max_tokens=1,
-                    extra_body={"prompt_logprobs": 1},
-                )
-                if not teacher_resp.prompt_logprobs:
-                    raise ValueError("Teacher missing prompt_logprobs.")
-
-                aligned_teacher_logprobs = teacher_resp.prompt_logprobs[teacher_prompt_length:]
+                teacher_full_logprobs = await advantage_computer.teacher_engine.compute_logprobs(teacher_ids)
+                aligned_teacher_logprobs = teacher_full_logprobs[teacher_prompt_length:]
 
             else:
-                # Slow path: different tokenizers, need byte-level alignment
+                # Different tokenizers path: re-encode through chat parser and align
                 from rllm.trainer.distill import align_teacher_logprobs
 
                 if not step.chat_completions:
@@ -594,7 +595,7 @@ async def process_episodes(
                 reasoning_str = teacher_completion_messages[0].get("reasoning", "")
                 content_str = teacher_completion_messages[0].get("content", "")
                 if not reasoning_str and not content_str:
-                    raise ValueError("Missing both reasoning and content in teacher completion message.")
+                    return None
 
                 # Build teacher prompt and completion
                 teacher_prompt = teacher_chat_parser.parse(
@@ -615,20 +616,14 @@ async def process_episodes(
                 )
                 if teacher_completion.startswith(teacher_chat_parser.generation_prompt):
                     teacher_completion = teacher_completion[len(teacher_chat_parser.generation_prompt) :]
+                teacher_completion_ids = advantage_computer.teacher_tokenizer.encode(teacher_completion, add_special_tokens=False)
 
                 # Query teacher for logprobs (async)
-                teacher_full_prompt = teacher_prompt + teacher_completion
-                teacher_resp = await advantage_computer.teacher_engine.completion(
-                    teacher_full_prompt,
-                    max_tokens=1,
-                    extra_body={"prompt_logprobs": 1},
-                )
-                if not teacher_resp.prompt_logprobs:
-                    raise ValueError("Teacher missing prompt_logprobs.")
+                teacher_ids = teacher_prompt_ids + teacher_completion_ids
+                teacher_full_logprobs = await advantage_computer.teacher_engine.compute_logprobs(teacher_ids)
 
                 teacher_prompt_len = len(teacher_prompt_ids)
-                teacher_completion_ids = teacher_resp.prompt_ids[teacher_prompt_len:]
-                teacher_logprobs = teacher_resp.prompt_logprobs[teacher_prompt_len:]
+                teacher_logprobs = teacher_full_logprobs[teacher_prompt_len:]
 
                 # Align teacher logprobs to student tokens
                 aligned_teacher_logprobs = align_teacher_logprobs(
@@ -665,7 +660,7 @@ async def process_episodes(
             )
 
             datum = TinkerDatumBuilder.build_distillation_datum(
-                prompt_ids=prompt_ids,
+                prompt_ids=student_prompt_ids,
                 response_ids=student_completion_ids,
                 logprobs=student_logprobs,
                 advantages=advantages,
@@ -681,21 +676,33 @@ async def process_episodes(
                 for step in trajectory.steps:
                     all_steps.append(step)
 
+        if not all_steps:
+            logger.warning("No steps found in episodes. No training data for this batch.")
+            return [], {}
+
         import time
 
         start_time = time.time()
-        print(f"[Distillation] Processing {len(all_steps)} steps in parallel...")
+        logger.info(f"[Distillation] Processing {len(all_steps)} steps in parallel...")
 
-        # Process all steps in parallel
         tasks = [process_step(idx, step) for idx, step in enumerate(all_steps)]
-        results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        print(f"[Distillation] Processing complete in {time.time() - start_time:.2f} seconds.")
-
-        # Collect results
-        for datum, avg_advantage in results:
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning(f"[Distillation] Step failed with error: {result}")
+                continue
+            if result is None:
+                continue
+            datum, avg_advantage = result
             training_datums.append(datum)
             all_advantages.append(avg_advantage)
+
+        logger.info(f"[Distillation] Processing complete in {time.time() - start_time:.2f}s. {len(training_datums)}/{len(results)} steps succeeded.")
+
+        if len(training_datums) == 0:
+            logger.error("[Distillation] All steps failed. Check teacher model connectivity/health.")
+            return [], {}
     else:
         # Standard RL mode: group trajectories and compute advantages from rewards
         grouping_level = algorithm_config.get("grouping_level", "episode")

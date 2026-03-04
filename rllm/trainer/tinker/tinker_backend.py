@@ -16,21 +16,21 @@ import uuid
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
+import tinker
 import torch
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 
-import tinker
 from rllm.agents.agent import Episode
 from rllm.data import Dataset
 from rllm.experimental.common import AlgorithmConfig, simple_timer
 from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.rollout import RolloutEngine, TinkerEngine
-from rllm.experimental.tinker.tinker_metrics_utils import (
+from rllm.trainer.tinker.tinker_metrics_utils import (
     print_metrics_table,
     update_training_metrics,
 )
-from rllm.experimental.tinker.tinker_policy_trainer import TinkerPolicyTrainer
+from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer
 
 if TYPE_CHECKING:
     from transformers.tokenization_utils import PreTrainedTokenizer
@@ -291,8 +291,14 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
                     eps=self.eps,
                 )
 
-        # Store datums as backend batch
-        trainer_state.backend_batch = training_datums
+        # Store datums as backend batch, flatten if `training_datums` is a dict
+        if isinstance(training_datums, dict):
+            flattened_datums = []
+            for _, value in training_datums.items():
+                flattened_datums.extend(value)
+            trainer_state.backend_batch = flattened_datums
+        else:
+            trainer_state.backend_batch = training_datums
         # Also store the training logprobs
         trainer_state.extra_info["training_logprobs"] = training_logprobs
         # scheduled_learning_rate is only available when fused; set in update_policy otherwise
