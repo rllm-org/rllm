@@ -1,8 +1,16 @@
+"""Deprecated legacy execution engine.
+
+This module is deprecated and will be removed in a future release.
+Use `rllm.experimental.engine.agent_execution_workflow.AgentExecutionWorkflowEngine`
+instead.
+"""
+
 import asyncio
 import logging
 import time
 import traceback
 import uuid
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 
 import torch
@@ -49,6 +57,11 @@ class AgentExecutionEngine:
         overlong_filter=False,  # Filter for overlong trajectories (i.e. TRUNCATION, MAX_STEPS, TIMEOUT)
         **kwargs,
     ):
+        warnings.warn(
+            "rllm.engine.agent_execution_engine.AgentExecutionEngine is deprecated and will be removed in a future release. Use rllm.experimental.engine.agent_execution_workflow.AgentExecutionWorkflowEngine instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if agent_args is None:
             agent_args = {}
         if rollout_engine_args is None:
@@ -158,6 +171,9 @@ class AgentExecutionEngine:
             return output
         elif self.engine_name == "tinker":
             output = await self.rollout_engine.get_model_response(prompt, application_id=application_id, enforce_max_prompt_length=False, **sampling_params)
+
+            # print(f"Tinker output: {output.text}, prompt {prompt}, application_id {application_id}, sampling_params {sampling_params}")
+
             return output
         else:
             raise NotImplementedError(f"Engine type '{self.engine_name}' not supported")
