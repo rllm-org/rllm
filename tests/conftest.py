@@ -99,6 +99,7 @@ for _name in _STUB_MODULES:
 
 # Provide minimal attributes expected by some modules during import
 if hasattr(sys.modules.get("transformers"), "__dict__"):
+
     class PreTrainedTokenizerBase:  # noqa: D401
         pass
 
