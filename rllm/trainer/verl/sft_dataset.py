@@ -2,7 +2,8 @@ import logging
 
 import torch
 from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
-from verl.utils.parser.chat_template_parser import ChatTemplateParser
+
+from rllm.parser import ChatTemplateParser
 
 logger = logging.getLogger(__name__)
 
