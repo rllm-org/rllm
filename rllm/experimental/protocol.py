@@ -214,6 +214,15 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
         trainer_state.is_training = False
         return True
 
+    async def on_policy_updated(self, trainer_state: TrainerState) -> None:
+        """Hook called immediately after update_policy(). Backends sync weights here.
+
+        For Tinker: save checkpoint, create new sampling_client.
+        For Verl (future): trigger NCCL sync to rollout workers.
+        Default: no-op (sync mode uses on_batch_end for this).
+        """
+        pass
+
     async def on_validation_end(self, trainer_state: TrainerState) -> None:
         """Hook method called at the end of validation."""
         trainer_state.is_training = True

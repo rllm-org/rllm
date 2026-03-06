@@ -107,6 +107,13 @@ sdk:
     mode: subprocess  # external | subprocess
     admin_token: my-shared-secret
 
+# Async Training Configuration
+async_training:
+  enabled: false           # When false, use current synchronous pipeline
+  max_staleness: 0         # Max policy version gap (0 = effectively synchronous)
+  buffer_size: 1           # Max buffered experiences
+  requeue_stale: true      # Requeue stale batches for regeneration
+
 # Episode Logging Configuration
 episode_logging:
   log_episodes: false

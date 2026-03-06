@@ -12,6 +12,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from rllm.agents.agent import Episode, TrajectoryGroup
 from rllm.data import Dataset
+from rllm.experimental.async_config import AsyncTrainingConfig
 from rllm.experimental.common.advantage import (
     AlgorithmConfig,
     collect_reward_and_advantage_from_trajectory_groups,
@@ -30,6 +31,7 @@ from rllm.experimental.common.rejection_sampling import (
 from rllm.experimental.common.transform import _default_traj_grouping_hook, transform_episodes_to_trajectory_groups
 from rllm.experimental.common.visualization import visualize_trajectory_last_steps
 from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
+from rllm.experimental.experience_buffer import AsyncioExperienceBuffer, BufferedExperience, ExperienceBufferProtocol
 from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.rollout import RolloutEngine
 from rllm.utils import EpisodeLogger, Tracking, extract_source_metadata
@@ -45,6 +47,7 @@ class TrainerState:
     epoch: int = 0
     total_steps: int = 0
     is_training: bool = True
+    policy_version: int = 0
     # For timing and metrics
     timing_dict: dict = field(default_factory=dict)
     metrics: dict = field(default_factory=dict)
@@ -122,6 +125,15 @@ class UnifiedTrainer:
 
         self._validate_and_setup_configs()
         self._setup_logging()
+
+        # Async training config
+        async_cfg = self.rllm_config.get("async_training", {})
+        self.async_config = AsyncTrainingConfig(
+            enabled=async_cfg.get("enabled", False),
+            max_staleness=async_cfg.get("max_staleness", 0),
+            buffer_size=async_cfg.get("buffer_size", 1),
+            requeue_stale=async_cfg.get("requeue_stale", True),
+        )
 
         rollout_engine: RolloutEngine = self.backend.init_rollout_engine(
             cf_config=self.cf_config,
@@ -242,7 +254,14 @@ class UnifiedTrainer:
         await self.backend.on_train_end(trainer_state)
 
     async def _fit_async(self, trainer_state: TrainerState) -> None:
-        """Internal async main training loop."""
+        """Dispatch to sync or concurrent training based on config."""
+        if self.async_config.enabled:
+            await self._fit_async_concurrent(trainer_state)
+        else:
+            await self._fit_sync(trainer_state)
+
+    async def _fit_sync(self, trainer_state: TrainerState) -> None:
+        """Synchronous training loop (original behavior)."""
         train_dataloader: Iterable = self.backend.get_dataloader(self.train_dataset, trainer_state)
         break_via_total_batches = False  # used to break the training loop via the `total_batches` parameter
         use_total_batches = self.rllm_config.trainer.get("total_batches") is not None and self.rllm_config.trainer.total_batches > 0
@@ -352,6 +371,162 @@ class UnifiedTrainer:
         total_counts = max(sum(termination_counts.values()), 1)
         for r in TerminationReason:
             trainer_state.metrics[f"batch/termination_reason/{r.value}"] = termination_counts[r.value] / total_counts
+
+    # =========================================================================
+    # Concurrent (async) training methods
+    # =========================================================================
+
+    async def _fit_async_concurrent(self, trainer_state: TrainerState) -> None:
+        """Concurrent generation + training with experience buffer."""
+        buffer = AsyncioExperienceBuffer(
+            max_size=self.async_config.buffer_size,
+            max_staleness=self.async_config.max_staleness,
+            requeue_stale=self.async_config.requeue_stale,
+        )
+
+        # Compute total_steps for LR scheduling
+        train_dataloader = self.backend.get_dataloader(self.train_dataset, trainer_state)
+        use_total_batches = self.rllm_config.trainer.get("total_batches", -1) > 0
+        if use_total_batches:
+            trainer_state.total_steps = self.rllm_config.trainer.total_batches
+        else:
+            trainer_state.total_steps = len(train_dataloader) * self.rllm_config.trainer.total_epochs
+
+        await asyncio.gather(
+            self._generation_loop(trainer_state, buffer),
+            self._training_loop(trainer_state, buffer),
+        )
+
+    async def _generation_loop(self, trainer_state: TrainerState, buffer: ExperienceBufferProtocol) -> None:
+        """Generate episodes and push to buffer. Runs concurrently with training."""
+        try:
+            for epoch in range(self.rllm_config.trainer.total_epochs):
+                train_dataloader = self.backend.get_dataloader(self.train_dataset, trainer_state)
+                for batch in train_dataloader:
+                    # Check for requeued stale batches first
+                    requeue_batch = await buffer.get_requeue_batch()
+                    if requeue_batch is not None:
+                        batch = requeue_batch
+
+                    # Snapshot current policy version BEFORE generation starts
+                    gen_policy_version = trainer_state.policy_version
+
+                    # Set training step metadata on workflow engine
+                    self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="train", epoch=epoch)
+
+                    # Stage 1: Generate episodes (async)
+                    episodes = await self.backend.generate_episodes(
+                        batch,
+                        agent_workflow_engine=self.agent_workflow_engine,
+                        is_validation=False,
+                    )
+                    if not episodes:
+                        continue
+
+                    # Stage 2: Transform to trajectory groups (sync)
+                    trajectory_groups, _ = transform_episodes_to_trajectory_groups(
+                        episodes,
+                        self.transform_config,
+                        self.cf_config,
+                        traj_grouping_hook=self.traj_grouping_hook,
+                    )
+
+                    # Stage 3: Rejection sampling (sync)
+                    filtered_groups, filtered_episodes, _ = apply_rejection_sampling_and_filtering(
+                        episodes,
+                        trajectory_groups,
+                        self.rs_config,
+                        RejectionSamplingState(),
+                    )
+                    if not filtered_groups:
+                        continue
+
+                    # Push to buffer (blocks if full = backpressure)
+                    experience = BufferedExperience(
+                        trajectory_groups=filtered_groups,
+                        episodes=filtered_episodes,
+                        policy_version=gen_policy_version,
+                        batch_source=batch,
+                    )
+                    await buffer.put(experience)
+
+                    # Check total_batches limit
+                    use_total_batches = self.rllm_config.trainer.get("total_batches", -1) > 0
+                    if use_total_batches and trainer_state.global_step >= self.rllm_config.trainer.total_batches:
+                        break
+        finally:
+            buffer.mark_generation_complete()
+
+    async def _training_loop(self, trainer_state: TrainerState, buffer: ExperienceBufferProtocol) -> None:
+        """Consume from buffer and train. Runs concurrently with generation."""
+        while True:
+            experience = await buffer.get(current_policy_version=trainer_state.policy_version)
+            if experience is None:
+                break  # Generation complete and buffer drained
+
+            # Load experience into trainer_state
+            trainer_state.reset_batch()
+            trainer_state.trajectory_groups = experience.trajectory_groups
+            trainer_state.episodes = experience.episodes
+
+            # Collect workflow metrics
+            workflow_metrics, termination_counts = self._collect_workflow_metrics_from_episodes(trainer_state.episodes)
+
+            # Stages 4-7: Backend training pipeline
+            await self.backend.on_batch_start(trainer_state)
+
+            # Stage 4: Transform to backend batch
+            trainer_state.backend_batch = self.backend.transform_to_backend_batch(trainer_state)
+
+            # Stage 5: Process backend batch (forward pass)
+            await self.backend.process_backend_batch(trainer_state)
+
+            # Stage 6: Compute advantages
+            await self.backend.compute_advantages(trainer_state, self.algorithm_config)
+
+            # Stage 7: Update policy
+            await self.backend.update_policy(trainer_state)
+
+            # Increment policy version (AFTER update, BEFORE on_policy_updated)
+            trainer_state.policy_version += 1
+
+            # Notify backend of policy update (sampling_client refresh for Tinker)
+            await self.backend.on_policy_updated(trainer_state)
+
+            # Stage 8: Logging, visualization, metrics
+            trainer_state.metrics.update(buffer.stats())
+            trainer_state.metrics["async/experience_staleness"] = trainer_state.policy_version - 1 - experience.policy_version
+
+            # Visualization
+            if self.tokenizer is not None:
+                visualize_trajectory_last_steps(
+                    trainer_state.trajectory_groups,
+                    tokenizer=self.tokenizer,
+                    max_steps_to_visualize=2,
+                    show_workflow_metadata=True,
+                )
+
+            for key, value in workflow_metrics.items():
+                trainer_state.metrics[f"batch/{key}"] = np.mean(value)
+
+            total_counts = max(sum(termination_counts.values()), 1)
+            for r in TerminationReason:
+                trainer_state.metrics[f"batch/termination_reason/{r.value}"] = termination_counts[r.value] / total_counts
+
+            await self.backend.on_batch_end(trainer_state)
+
+            self.logger.log(
+                data=trainer_state.metrics,
+                step=trainer_state.global_step,
+                episodes=trainer_state.episodes,
+                trajectory_groups=trainer_state.trajectory_groups,
+            )
+
+            # Periodic validation
+            if self.rllm_config.trainer.test_freq > 0 and trainer_state.global_step % self.rllm_config.trainer.test_freq == 0:
+                await self._validate_async(trainer_state)
+
+            trainer_state.global_step += 1
 
     async def _validate_async(self, trainer_state: TrainerState) -> dict:
         """Validate the model (async implementation)."""

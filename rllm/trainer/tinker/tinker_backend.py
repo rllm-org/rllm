@@ -98,6 +98,9 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Store algorithm config for use in process_backend_batch
         self._algorithm_config: AlgorithmConfig | None = None
 
+        # Track whether on_policy_updated was called this step (for backward compat)
+        self._policy_updated_this_step: bool = False
+
         # Specific optimizer parameters for Tinker
         self.learning_rate = self.full_config.training.get("learning_rate", 1e-6)
         self.beta1 = self.full_config.training.get("beta1", 0.9)
@@ -383,20 +386,30 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             logger.info(f"Saving final checkpoint at step {trainer_state.global_step}")
             await self.policy_trainer.save_checkpoint_and_get_sampling_client(trainer_state.global_step, kind="both", do_save=True)
 
+    async def on_policy_updated(self, trainer_state: TrainerState) -> None:
+        """Save checkpoint and update sampling_client after policy update."""
+        assert self.policy_trainer is not None, "policy_trainer is not initialized"
+        self._policy_updated_this_step = True
+
+        global_step = trainer_state.global_step
+        save_freq = self.full_config.rllm.trainer.save_freq
+        do_save = save_freq > 0 and global_step % save_freq == 0
+        self.sampling_client = await self.policy_trainer.save_checkpoint_and_get_sampling_client(global_step, kind="both", do_save=do_save)
+
     async def on_batch_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of each batch.
 
-        Saves checkpoint, updates sampling client, and prints metrics.
+        In sync mode, on_policy_updated() is not called separately, so we
+        do the checkpoint/sampling_client update here for backward compat.
         """
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
-        global_step = trainer_state.global_step
-        # Save sampler checkpoint after each batch
-        with simple_timer("save_checkpoint", trainer_state.timing_dict):
-            logger.info(f"Saving state checkpoint and sampler at step {global_step}")
-            save_freq = self.full_config.rllm.trainer.save_freq
-            do_save = save_freq > 0 and global_step % save_freq == 0
-            self.sampling_client = await self.policy_trainer.save_checkpoint_and_get_sampling_client(global_step, kind="both", do_save=do_save)
+        # If on_policy_updated() wasn't called (sync mode), do checkpoint here
+        if not self._policy_updated_this_step:
+            with simple_timer("save_checkpoint", trainer_state.timing_dict):
+                logger.info(f"Saving state checkpoint and sampler at step {trainer_state.global_step}")
+                await self.on_policy_updated(trainer_state)
+        self._policy_updated_this_step = False
 
         # Update metrics
         learning_rate = trainer_state.extra_info.get("scheduled_learning_rate", self.learning_rate)
@@ -404,7 +417,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
         # Print metrics table
         if trainer_state.metrics:
-            print_metrics_table(trainer_state.metrics, global_step)
+            print_metrics_table(trainer_state.metrics, trainer_state.global_step)
 
     async def on_epoch_start(self, trainer_state: TrainerState) -> None:
         """Called at the start of an epoch."""
