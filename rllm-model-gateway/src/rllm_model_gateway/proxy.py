@@ -9,7 +9,6 @@ import json
 import logging
 import time
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 from starlette.requests import Request
@@ -143,7 +142,7 @@ class ReverseProxy:
         originally_requested_logprobs: bool = False,
     ) -> Response:
         worker = self.router.route(session_id)
-        url = self._build_url(worker.url, request.url.path, str(request.url.query))
+        url = self._build_url(worker.api_url, request.url.path, str(request.url.query))
         headers = self._forward_headers(request)
         t0 = time.perf_counter()
         try:
@@ -208,7 +207,7 @@ class ReverseProxy:
         originally_requested_logprobs: bool = False,
     ) -> StreamingResponse:
         worker = self.router.route(session_id)
-        url = self._build_url(worker.url, request.url.path, str(request.url.query))
+        url = self._build_url(worker.api_url, request.url.path, str(request.url.query))
         headers = self._forward_headers(request)
 
         assert self._http is not None
@@ -326,14 +325,13 @@ class ReverseProxy:
             logger.exception("Failed to persist trace %s", trace_id)
 
     @staticmethod
-    def _build_url(worker_url: str, path: str, query: str) -> str:
+    def _build_url(worker_url: str, path: str, query: str, *, gateway_prefix: str = "/v1") -> str:
         base = worker_url.rstrip("/")
-        # Avoid double path prefixes.  If the worker URL already contains
-        # a path component (e.g. /v1) that matches the start of the
-        # request path, strip the overlap so we don't get /v1/v1/...
-        worker_path = urlparse(base).path
-        if len(worker_path) > 1 and path.startswith(worker_path):
-            path = path[len(worker_path) :]
+        # Strip the gateway's own prefix to get the tail (e.g. /chat/completions).
+        # The gateway always exposes routes under /v1/{path}, so request paths
+        # arrive as /v1/... regardless of the worker's actual api_path.
+        if path.startswith(gateway_prefix):
+            path = path[len(gateway_prefix) :]
         url = f"{base}{path}"
         if query:
             url = f"{url}?{query}"

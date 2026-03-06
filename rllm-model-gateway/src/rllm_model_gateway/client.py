@@ -100,11 +100,12 @@ class GatewayClient:
     def add_worker(
         self,
         url: str,
+        api_path: str = "/v1",
         model_name: str | None = None,
         weight: int = 1,
     ) -> str:
         """Register a worker.  Returns worker_id."""
-        body: dict[str, Any] = {"url": url, "weight": weight}
+        body: dict[str, Any] = {"url": url, "api_path": api_path, "weight": weight}
         if model_name:
             body["model_name"] = model_name
         resp = self._http.post(f"{self.gateway_url}/admin/workers", json=body)
@@ -220,10 +221,11 @@ class AsyncGatewayClient:
     async def add_worker(
         self,
         url: str,
+        api_path: str = "/v1",
         model_name: str | None = None,
         weight: int = 1,
     ) -> str:
-        body: dict[str, Any] = {"url": url, "weight": weight}
+        body: dict[str, Any] = {"url": url, "api_path": api_path, "weight": weight}
         if model_name:
             body["model_name"] = model_name
         resp = await self._http.post(f"{self.gateway_url}/admin/workers", json=body)
