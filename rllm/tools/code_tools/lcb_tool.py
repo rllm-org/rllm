@@ -138,32 +138,35 @@ def lcb_sandbox(code, timeout):
 
     # Use multiprocessing to isolate code execution in a separate process
     manager = multiprocessing.Manager()
-    result_queue = manager.Queue()
-
-    # Create and start the process
-    p = multiprocessing.Process(
-        target=_wrapper_exec_fn,
-        args=(code, timeout, result_queue),
-    )
-    p.start()
-
-    # Wait for the process to complete with additional buffer time
-    p.join(timeout=(timeout + 1) + 5)
-
     try:
-        # Get the result from the queue
-        res = result_queue.get()
-        return res
-    except queue.Empty:
-        # Return timeout message if no result is available
-        return "Timeout", "", ""
-    finally:
-        # Ensure the process is terminated if still running
-        if p.is_alive():
-            p.terminate()
-            p.join(timeout=1)
+        result_queue = manager.Queue()
+
+        # Create and start the process
+        p = multiprocessing.Process(
+            target=_wrapper_exec_fn,
+            args=(code, timeout, result_queue),
+        )
+        p.start()
+
+        # Wait for the process to complete with additional buffer time
+        p.join(timeout=(timeout + 1) + 5)
+
+        try:
+            # Get the result from the queue
+            res = result_queue.get()
+            return res
+        except queue.Empty:
+            # Return timeout message if no result is available
+            return "Timeout", "", ""
+        finally:
+            # Ensure the process is terminated if still running
             if p.is_alive():
-                p.kill()
+                p.terminate()
+                p.join(timeout=1)
+                if p.is_alive():
+                    p.kill()
+    finally:
+        manager.shutdown()
 
 
 class LCBPythonInterpreter(CodeTool):
