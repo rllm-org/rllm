@@ -1,0 +1,41 @@
+name: Question
+description: Ask a question about using rLLM
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have a question? Fill out the sections below. For general discussion, consider joining our [Discord](https://discord.gg/BDH46HT9en).
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What do you want to know?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What are you trying to accomplish? What have you already tried?
+    validations:
+      required: true
+
+  - type: textarea
+    id: relevant-code
+    attributes:
+      label: Relevant Code / Config
+      description: Paste any relevant code, config, or script.
+      render: python
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: rLLM version, backend (verl/tinker), Python version, GPU info — if relevant to your question.
+    validations:
+      required: false
