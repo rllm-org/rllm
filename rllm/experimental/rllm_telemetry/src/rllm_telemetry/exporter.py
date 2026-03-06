@@ -50,26 +50,56 @@ class BaseExporter(ABC):
 # ---------------------------------------------------------------------------
 
 
+# ANSI color codes for stdout exporter
+_COLORS: dict[str, str] = {
+    "session": "\033[36m",  # cyan
+    "invocation.start": "\033[34m",  # blue
+    "invocation.end": "\033[34m",
+    "agent.start": "\033[35m",  # magenta
+    "agent.end": "\033[35m",
+    "llm.start": "\033[33m",  # yellow
+    "llm.end": "\033[33m",
+    "tool.start": "\033[32m",  # green
+    "tool.end": "\033[32m",
+    "event": "\033[37m",  # white/gray
+    "experiment.start": "\033[96m",  # bright cyan
+    "experiment.end": "\033[96m",
+    "experiment.case": "\033[94m",  # bright blue
+}
+_RESET = "\033[0m"
+
+
 class StdoutExporter(BaseExporter):
     """Exporter that pretty-prints trace envelopes to stdout.
 
     Useful for local development and debugging — no backend required.
+
+    When ``color=True`` (the default), output is color-coded by span type:
+
+    - **Cyan**: session
+    - **Blue**: invocation
+    - **Magenta**: agent spans
+    - **Yellow**: LLM calls
+    - **Green**: tool executions
+    - **Gray**: events
+    - **Bright cyan/blue**: experiment records
     """
 
     def __init__(self, config: RllmConfig) -> None:
         self._config = config
         self._closed = False
+        self._color = config.color
 
     def enqueue(self, span_type: SpanType, data: dict[str, Any]) -> None:
         if self._closed:
             return
         envelope = TraceEnvelope(type=span_type, data=data)
         payload = json.loads(envelope.model_dump_json(exclude_none=True))
-        print(
-            json.dumps(payload, indent=2),
-            file=sys.stdout,
-            flush=True,
-        )
+        text = json.dumps(payload, indent=2)
+        if self._color:
+            color = _COLORS.get(span_type, "")
+            text = f"{color}{text}{_RESET}"
+        print(text, file=sys.stdout, flush=True)
 
     async def start(self) -> None:
         self._closed = False

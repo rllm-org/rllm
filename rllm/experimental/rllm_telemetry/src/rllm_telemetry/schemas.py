@@ -137,6 +137,9 @@ SpanType = Literal[
     "tool.start",
     "tool.end",
     "event",
+    "experiment.start",
+    "experiment.end",
+    "experiment.case",
 ]
 
 
@@ -284,6 +287,55 @@ class EventRecord(BaseModel):
 
     error_code: str | None = None
     error_message: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Experiment records
+# ---------------------------------------------------------------------------
+
+
+class ScoreRecord(BaseModel):
+    """Result of a single scorer on one test case."""
+
+    name: str
+    value: float
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExperimentCaseRecord(BaseModel):
+    """One test case within an experiment run."""
+
+    case_id: str
+    experiment_id: str
+    input: Any
+    expected: Any | None = None
+    output: Any | None = None
+    scores: list[ScoreRecord] = Field(default_factory=list)
+    error: str | None = None
+    duration_ms: float | None = None
+
+
+class ExperimentSummary(BaseModel):
+    """Aggregated scores across all cases in an experiment."""
+
+    scores: dict[str, float] = Field(default_factory=dict)
+    """Scorer name → mean score across all cases."""
+
+    total_cases: int = 0
+    error_count: int = 0
+    total_duration_ms: float = 0.0
+
+
+class ExperimentRecord(BaseModel):
+    """Metadata for a single experiment run."""
+
+    experiment_id: str
+    name: str
+    created_at: float
+    ended_at: float | None = None
+    duration_ms: float | None = None
+    summary: ExperimentSummary | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

@@ -41,3 +41,6 @@ class RllmConfig:
     flush_interval_seconds: float = 2.0
     headers: dict[str, str] = field(default_factory=dict)
     timeout_seconds: float = 10.0
+    color: bool = True
+    """Enable ANSI color output for the ``stdout`` backend.  Ignored by
+    other backends."""

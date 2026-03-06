@@ -1,6 +1,9 @@
 """Rllm Telemetry — Agent observability plugin for Google ADK."""
 
+from .compare import ComparisonResult, compare
 from .config import RllmConfig
+from .dataset import load_dataset
+from .eval import AsyncEval, Eval, ExperimentResult
 from .exporter import BaseExporter, HttpExporter, StdoutExporter, create_exporter
 from .plugin import RllmTelemetryPlugin
 from .schemas import (
@@ -8,17 +11,22 @@ from .schemas import (
     AgentSpanRecord,
     EventActionsData,
     EventRecord,
+    ExperimentCaseRecord,
+    ExperimentRecord,
+    ExperimentSummary,
     GenerationConfig,
     InvocationRecord,
     LlmRequest,
     LlmResponseData,
     LlmSpanRecord,
+    ScoreRecord,
     SessionRecord,
     ToolInfo,
     ToolSpanRecord,
     TraceEnvelope,
     UsageMetadata,
 )
+from .scorers import JUDGE_PROMPTS, Contains, ExactMatch, LlmJudge, Score, Scorer
 
 __all__ = [
     # Plugin (primary API)
@@ -29,6 +37,22 @@ __all__ = [
     "HttpExporter",
     "StdoutExporter",
     "create_exporter",
+    # Scorers
+    "Score",
+    "Scorer",
+    "ExactMatch",
+    "Contains",
+    "LlmJudge",
+    "JUDGE_PROMPTS",
+    # Experiments
+    "Eval",
+    "AsyncEval",
+    "ExperimentResult",
+    # Comparison
+    "compare",
+    "ComparisonResult",
+    # Dataset loading
+    "load_dataset",
     # Convenience
     "instrument",
     # Schemas (for custom backends / testing)
@@ -44,6 +68,10 @@ __all__ = [
     "SessionRecord",
     "ToolInfo",
     "ToolSpanRecord",
+    "ExperimentRecord",
+    "ExperimentCaseRecord",
+    "ExperimentSummary",
+    "ScoreRecord",
     "TraceEnvelope",
     "UsageMetadata",
 ]
