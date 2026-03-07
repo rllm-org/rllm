@@ -15,7 +15,7 @@ from rllm.workflows import TerminationEvent, TerminationReason
 
 
 class OpenAIEngine(RolloutEngine):
-    def __init__(self, model: str = "", tokenizer=None, max_prompt_length: int = 4096, max_response_length: int = 4096, max_model_length: int | None = None, api_retries: int = 3, base_url: str = "https://api.openai.com/v1", api_key: str = os.getenv("OPENAI_API_KEY"), sampling_params: dict | None = None, tools: list[Tool | dict] = None, accumulate_reasoning: bool = False, **kwargs):
+    def __init__(self, model: str = "", tokenizer=None, chat_parser=None, max_prompt_length: int = 4096, max_response_length: int = 4096, max_model_length: int | None = None, api_retries: int = 3, base_url: str = "https://api.openai.com/v1", api_key: str = os.getenv("OPENAI_API_KEY"), sampling_params: dict | None = None, tools: list[Tool | dict] = None, accumulate_reasoning: bool = False, **kwargs):
         self.model = model
         self.max_prompt_length = max_prompt_length
         self.max_response_length = max_response_length
@@ -28,7 +28,10 @@ class OpenAIEngine(RolloutEngine):
 
         self.tokenizer = tokenizer
         if self.tokenizer is not None:
-            self.chat_parser = ChatTemplateParser.get_parser(self.tokenizer, disable_thinking=kwargs.get("disable_thinking", False))
+            # If the caller provides a custom chat parser (e.g. via AgentExecutionEngine),
+            # we must use it to ensure consistent tokenization between the execution
+            # engine and the rollout engine.
+            self.chat_parser = chat_parser or ChatTemplateParser.get_parser(self.tokenizer, disable_thinking=kwargs.get("disable_thinking", False))
             self._use_chat_completions = False
         else:
             # In this case, we cannot enforce max prompt length or dynamically adjust max_tokens <= max_response_length if needed
