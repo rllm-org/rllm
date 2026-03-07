@@ -115,6 +115,12 @@ class PipelineTaskRunner:
 
         elif config.actor_rollout_ref.actor.strategy == "megatron":
             assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
+            import warnings
+
+            warnings.warn(
+                "verl 0.7.0 removed verl.single_controller.ray.megatron.NVMegatronRayWorkerGroup. The following import will likely crash. Megatron support needs to be updated.",
+                stacklevel=2,
+            )
             from verl.single_controller.ray.megatron import NVMegatronRayWorkerGroup
             from verl.workers.megatron_workers import (
                 ActorRolloutRefWorker,

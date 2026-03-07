@@ -53,12 +53,8 @@ def reduce_metrics_with_flatten(metrics: dict[str, Any]) -> dict[str, Any]:
     Returns:
         A dictionary with the same keys but with each list replaced by its reduced value.
     """
-    from verl.utils.metric.utils import Metric
-
     for key, val in metrics.items():
-        if isinstance(val, Metric):
-            metrics[key] = val.aggregate()
-        elif "max" in key:
+        if "max" in key:
             val = _flatten_if_nested(val)
             metrics[key] = np.max(val)
         elif "min" in key:

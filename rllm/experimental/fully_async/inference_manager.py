@@ -19,7 +19,7 @@ from verl.experimental.fully_async_policy.ray_trainer import FullyAsyncRayPPOTra
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.utils import Role, WorkerType
-from verl.utils.net_utils import get_free_port
+from verl.workers.rollout.utils import get_free_port
 
 
 @ray.remote(num_cpus=10, max_concurrency=100)
