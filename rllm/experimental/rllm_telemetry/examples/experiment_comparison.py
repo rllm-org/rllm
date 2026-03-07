@@ -12,13 +12,14 @@ Usage:
 
 import asyncio
 import math
+from types import SimpleNamespace
 
 import rllm_telemetry
 from google.adk.agents.llm_agent import Agent
 from google.adk.models.lite_llm import LiteLlm
 from google.adk.runners import InMemoryRunner
 from google.genai import types
-from rllm_telemetry import AsyncEval, LlmJudge, compare
+from rllm_telemetry import AsyncEval, LlmJudge, compare, export_trajectories
 
 # ---------------------------------------------------------------------------
 # Config
@@ -244,6 +245,32 @@ async def main():
             label = "UNCHANGED"
         print(f"\n  Delta: {delta:+.2f} ({label})")
         print(f"  {'-' * 50}")
+
+    # -----------------------------------------------------------------
+    # Export trajectories — build trajectory-like objects from results
+    # -----------------------------------------------------------------
+    trajectories = []
+    for result, prompt_label in [(baseline, "minimal"), (candidate, "detailed")]:
+        for case in result.cases:
+            step = SimpleNamespace(
+                input=case.input,
+                output=case.output,
+                reward=case.scores[0].value if case.scores else 0.0,
+                done=True,
+                metadata={"expected": case.expected},
+            )
+            traj = SimpleNamespace(
+                uid=case.case_id,
+                name=f"{prompt_label}_agent",
+                task={"input": case.input, "expected": case.expected},
+                steps=[step],
+                reward=case.scores[0].value if case.scores else 0.0,
+                signals={s.name: s.value for s in case.scores},
+                metadata=result.record.metadata,
+            )
+            trajectories.append(traj)
+
+    export_trajectories(trajectories)
 
 
 if __name__ == "__main__":

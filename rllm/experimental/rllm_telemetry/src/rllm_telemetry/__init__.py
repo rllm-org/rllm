@@ -27,6 +27,7 @@ from .schemas import (
     UsageMetadata,
 )
 from .scorers import JUDGE_PROMPTS, Contains, ExactMatch, LlmJudge, Score, Scorer
+from .trajectory_export import export_trajectories
 
 __all__ = [
     # Plugin (primary API)
@@ -53,6 +54,8 @@ __all__ = [
     "ComparisonResult",
     # Dataset loading
     "load_dataset",
+    # Trajectory export
+    "export_trajectories",
     # Convenience
     "instrument",
     # Schemas (for custom backends / testing)

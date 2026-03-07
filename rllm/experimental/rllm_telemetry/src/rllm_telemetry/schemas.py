@@ -140,6 +140,11 @@ SpanType = Literal[
     "experiment.start",
     "experiment.end",
     "experiment.case",
+    "episode.start",
+    "episode.end",
+    "trajectory.start",
+    "trajectory.step",
+    "trajectory.end",
 ]
 
 
