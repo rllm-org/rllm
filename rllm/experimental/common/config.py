@@ -9,6 +9,29 @@ from rllm.workflows.workflow import TerminationReason
 
 
 @dataclass
+class AsyncTrainingConfig:
+    """Controls the async training behavior spectrum.
+
+    When `enabled` is False, the trainer uses the current synchronous pipeline.
+    When `enabled` is True, the trainer runs concurrent generation + training
+    with episode-level streaming and staleness-based filtering.
+
+    Behavior spectrum (following the Verl fully-async pattern):
+        - staleness_threshold=0, trigger_parameter_sync_step=1: On-policy (panel a)
+        - staleness_threshold=0, trigger_parameter_sync_step=K: Stream off-policy (panel b)
+        - staleness_threshold>0, partial_rollout=False: Async with staleness (panel c)
+        - staleness_threshold>0, partial_rollout=True: Async with partial rollout (panel d)
+    """
+
+    enabled: bool = False
+    staleness_threshold: float = 0.0  # 0.0 = on-policy. Fraction of extra samples allowed.
+    trigger_parameter_sync_step: int = 1  # gradient updates between weight syncs
+    partial_rollout: bool = True  # True = don't wait for in-flight to finish at sync
+    num_minibatches: int = 1  # gradient accumulation within a training step
+    requeue_stale: bool = True  # re-schedule stale episodes' tasks for generation
+
+
+@dataclass
 class CompactFilteringConfig:
     """Configuration for compact filtering of episodes based on termination reasons.
 

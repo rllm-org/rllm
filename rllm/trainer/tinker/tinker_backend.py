@@ -225,6 +225,29 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
         return episodes
 
+    async def generate_episodes_streaming(
+        self,
+        batch: Any,
+        agent_workflow_engine: UnifiedWorkflowEngine,
+        episode_queue,
+        is_validation: bool = False,
+        **kwargs,
+    ) -> None:
+        """Generate episodes using streaming — push each to queue as it completes.
+
+        Same setup as generate_episodes but uses execute_tasks_streaming.
+        """
+        assert self.rollout_engine is not None, "rollout_engine is not initialized"
+        assert self.sampling_client is not None, "sampling_client is not initialized"
+
+        self.rollout_engine.set_sampling_client(self.sampling_client)
+
+        group_size = self.full_config.rllm.rollout.n_val if is_validation else self.full_config.rllm.rollout.n
+        interleaved_batch = _build_interleave_batch(batch, group_size)
+        task_ids = [item["uid"] for item in interleaved_batch]
+
+        await agent_workflow_engine.execute_tasks_streaming(interleaved_batch, task_ids, queue=episode_queue, is_validation=is_validation, **kwargs)
+
     def transform_to_backend_batch(
         self,
         trainer_state: TrainerState,

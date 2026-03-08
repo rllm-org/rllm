@@ -106,6 +106,30 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
         """
         raise NotImplementedError("Subclasses must implement this method.")
 
+    async def generate_episodes_streaming(
+        self,
+        batch: TBatch,
+        agent_workflow_engine: UnifiedWorkflowEngine,
+        episode_queue,
+        is_validation: bool = False,
+        **kwargs,
+    ) -> None:
+        """Generate episodes and push each to episode_queue as it completes.
+
+        Default: falls back to generate_episodes() and pushes all to queue.
+        Backends can override for true streaming.
+
+        Args:
+            batch: The input batch.
+            agent_workflow_engine: The workflow engine to use.
+            episode_queue: asyncio.Queue to push (task_id, rollout_idx, result_idx, episode) tuples.
+            is_validation: Whether the generation is for validation.
+            **kwargs: Additional arguments.
+        """
+        episodes = await self.generate_episodes(batch, agent_workflow_engine, is_validation, **kwargs)
+        for i, ep in enumerate(episodes):
+            await episode_queue.put((ep.task_id, getattr(ep, "rollout_idx", 0), i, ep))
+
     @abstractmethod
     def transform_to_backend_batch(
         self,
@@ -217,8 +241,8 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
     async def on_policy_updated(self, trainer_state: TrainerState) -> None:
         """Hook called immediately after update_policy(). Backends sync weights here.
 
-        For Tinker: save checkpoint, create new sampling_client.
-        For Verl (future): trigger NCCL sync to rollout workers.
+        For Tinker-like remote/distributed backends: save checkpoint, create new sampling_client.
+        For Verl-like colocated backends: trigger NCCL sync to rollout workers.
         Default: no-op (sync mode uses on_batch_end for this).
         """
         pass
