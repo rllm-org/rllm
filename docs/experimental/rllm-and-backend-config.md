@@ -112,7 +112,7 @@ Settings for computing advantages at each step in multi-step trajectories.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `enable` | bool | `False` | Whether to enable stepwise advantage computation |
-| `mode` | str | `broadcast` | Advantage computation mode (options: `broadcast`, `per_step`) |
+| `mode` | str | `broadcast` | Advantage computation mode (`broadcast`) |
 | `normalize_by_steps` | bool | `False` | Whether to normalize advantages by number of steps |
 
 ### Trajectory Processing Flags

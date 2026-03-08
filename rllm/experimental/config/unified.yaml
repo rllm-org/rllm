@@ -14,5 +14,4 @@ hydra:
     dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
   searchpath:
     - pkg://verl.trainer.config
-    - pkg://skyrl_train.config
 

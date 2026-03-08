@@ -103,6 +103,107 @@ def extract_learning_rate(backend: Any) -> float | None:
     return None
 
 
+def compute_progress_metrics(trainer_state: TrainerState) -> dict[str, float | int]:
+    """Return Tinker-like progress metrics."""
+    metrics: dict[str, float | int] = {
+        "progress/batch": trainer_state.global_step,
+        "progress/epoch": trainer_state.epoch,
+        # Keep the existing aliases for compatibility with other backends.
+        "training/global_step": trainer_state.global_step,
+        "training/epoch": trainer_state.epoch,
+    }
+    if trainer_state.total_steps > 0:
+        metrics["progress/done_frac"] = (trainer_state.global_step + 1) / trainer_state.total_steps
+    return metrics
+
+
+def compute_timing_metrics(trainer_state: TrainerState) -> dict[str, float]:
+    """Return Tinker-compatible timing metrics."""
+    return {f"time/{key}": value for key, value in trainer_state.timing_dict.items()}
+
+
+def compute_env_metrics_from_trajectory_groups(trajectory_groups: list) -> dict[str, float]:
+    """Compute env/all/* metrics from trajectory groups (Tinker-compatible).
+
+    Data is available in trajectory_groups; this mirrors Tinker's compute_env_metrics
+    but works with TrajectoryGroup instead of Episode.
+    """
+    all_rewards: list[float] = []
+    prompt_token_counts: list[int] = []
+    response_token_counts: list[int] = []
+    total_trajectories = 0
+    total_steps = 0
+    ac_tokens_per_trajectory: list[int] = []
+    ob_tokens_per_trajectory: list[int] = []
+    episode_stats = {"all_good": 0, "all_bad": 0, "mixed": 0}
+    good_threshold = 0.5
+    all_step_metrics: list[dict] = []
+
+    for group in trajectory_groups:
+        group_rewards = [traj.reward if traj.reward is not None else 0.0 for traj in group.trajectories]
+        all_rewards.extend(group_rewards)
+
+        for traj in group.trajectories:
+            total_trajectories += 1
+            traj_ob_tokens = 0
+            traj_ac_tokens = 0
+            for step in traj.steps:
+                ob = len(getattr(step, "prompt_ids", None) or [])
+                ac = len(getattr(step, "response_ids", None) or [])
+                if ob == 0 and hasattr(step, "model_output") and step.model_output is not None:
+                    ob = len(getattr(step.model_output, "prompt_ids", None) or [])
+                if ac == 0 and hasattr(step, "model_output") and step.model_output is not None:
+                    ac = len(getattr(step.model_output, "completion_ids", None) or [])
+                prompt_token_counts.append(ob)
+                response_token_counts.append(ac)
+                traj_ob_tokens += ob
+                traj_ac_tokens += ac
+                total_steps += 1
+                if hasattr(step, "info") and step.info:
+                    all_step_metrics.append(step.info)
+            ob_tokens_per_trajectory.append(traj_ob_tokens)
+            ac_tokens_per_trajectory.append(traj_ac_tokens)
+
+        unique_rewards = len(set(group_rewards))
+        if unique_rewards == 1:
+            if group_rewards[0] >= good_threshold:
+                episode_stats["all_good"] += 1
+            else:
+                episode_stats["all_bad"] += 1
+        else:
+            episode_stats["mixed"] += 1
+
+    n_episodes = len(trajectory_groups)
+    metrics: dict[str, float] = {
+        "env/all/reward/total": float(np.mean(all_rewards)) if all_rewards else 0.0,
+        "env/all/ob_tokens_per_turn": float(np.mean(prompt_token_counts)) if prompt_token_counts else 0.0,
+        "env/all/ac_tokens_per_turn": float(np.mean(response_token_counts)) if response_token_counts else 0.0,
+        "env/all/ob_tokens_per_trajectory": float(np.mean(ob_tokens_per_trajectory)) if ob_tokens_per_trajectory else 0.0,
+        "env/all/ac_tokens_per_trajectory": float(np.mean(ac_tokens_per_trajectory)) if ac_tokens_per_trajectory else 0.0,
+        "env/all/total_episodes": float(total_trajectories),
+        "env/all/total_turns": float(total_steps),
+        "env/all/turns_per_episode": total_steps / total_trajectories if total_trajectories > 0 else 0.0,
+        "env/all/total_ob_tokens": float(sum(prompt_token_counts)),
+        "env/all/total_ac_tokens": float(sum(response_token_counts)),
+        "env/all/by_episode/frac_all_good": episode_stats["all_good"] / n_episodes if n_episodes > 0 else 0.0,
+        "env/all/by_episode/frac_all_bad": episode_stats["all_bad"] / n_episodes if n_episodes > 0 else 0.0,
+        "env/all/by_episode/frac_mixed": episode_stats["mixed"] / n_episodes if n_episodes > 0 else 0.0,
+    }
+
+    if all_step_metrics:
+        metric_sums: dict[str, float] = {}
+        metric_counts: dict[str, int] = {}
+        for step_metric in all_step_metrics:
+            for key, value in step_metric.items():
+                if isinstance(value, int | float):
+                    metric_sums[key] = metric_sums.get(key, 0) + float(value)
+                    metric_counts[key] = metric_counts.get(key, 0) + 1
+        for key in metric_sums:
+            metrics[f"env/all/{key}"] = metric_sums[key] / metric_counts[key]
+
+    return metrics
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
@@ -123,21 +224,22 @@ def update_training_metrics(
     # 1. SkyRL training metrics (policy/critic/loss from train_critic_and_policy, etc.)
     metrics.update(extract_skyrl_training_metrics(all_metrics))
 
-    # 2. Reward metrics from trajectory groups
+    # 2. Reward and env metrics from trajectory groups
     if hasattr(trainer_state, "trajectory_groups") and trainer_state.trajectory_groups:
         metrics.update(compute_reward_metrics(trainer_state.trajectory_groups))
+        metrics.update(compute_env_metrics_from_trajectory_groups(trainer_state.trajectory_groups))
 
     # 3. Learning rate
     lr = extract_learning_rate(backend)
     if lr is not None:
         metrics["optim/lr"] = lr
 
-    # 4. Progress metrics
-    metrics["training/global_step"] = trainer_state.global_step
-    metrics["training/epoch"] = trainer_state.epoch
+    # 4. Progress and timing metrics (match Tinker naming)
+    metrics.update(compute_progress_metrics(trainer_state))
+    metrics.update(compute_timing_metrics(trainer_state))
 
     # 5. Debug summary
-    num_training_metrics = len([k for k in metrics if k.startswith(("training/", "reward/", "optim/"))])
+    num_training_metrics = len([k for k in metrics if k.startswith(("training/", "reward/", "optim/", "progress/", "time/", "env/"))])
     logger.info(f"Step {trainer_state.global_step}: Extracted {num_training_metrics} training metrics. Keys: {sorted(metrics.keys())}")
 
     if len(metrics) <= 3:  # Only global_step, epoch, and maybe lr

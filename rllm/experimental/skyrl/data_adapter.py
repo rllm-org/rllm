@@ -1,11 +1,21 @@
 """
-Data adapter for converting rLLM batch format to SkyRL format.
+Data adapter utilities for the SkyRL backend.
 
-This module provides functions to adapt rLLM dataset batches to the format
-expected by SkyRL's prepare_generator_input function.
+This module normalizes rLLM datasets into SkyRL-compatible records and, when
+needed, materializes temporary parquet files for SkyRL PromptDataset loading.
 """
 
+from __future__ import annotations
+
+import os
+import tempfile
+from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
+
+import pandas as pd
+
+from rllm.data import Dataset
 
 # Priority order for prompt keys
 PROMPT_KEYS = ["prompt", "question", "problem"]
@@ -14,27 +24,32 @@ PROMPT_KEYS = ["prompt", "question", "problem"]
 RESERVED_KEYS = {"prompt", "question", "problem", "env_class", "uid", "unique_id", "data_source"}
 
 
+@dataclass(frozen=True)
+class SkyRLDatasetFile:
+    """A dataset file reference used to build SkyRL PromptDataset."""
+
+    path: str
+    cleanup_required: bool = False
+
+
+def _is_chat_prompt(prompt: Any) -> bool:
+    return isinstance(prompt, list) and all(isinstance(msg, dict) and "role" in msg and "content" in msg for msg in prompt)
+
+
+def _is_skyrl_compatible_dataset(data: list[dict[str, Any]]) -> bool:
+    """Return True when records are already in SkyRL PromptDataset-ready shape."""
+    if not data:
+        return True
+    for item in data:
+        if not _is_chat_prompt(item.get("prompt")):
+            return False
+        if item.get("env_class") is None:
+            return False
+    return True
+
+
 def adapt_single_item(item: dict[str, Any]) -> dict[str, Any]:
-    """Adapt a single rLLM dataset item to SkyRL format.
-
-    This function:
-    1. Finds the prompt in one of: prompt, question, problem keys
-    2. Converts string prompts to chat format: [{"role": "user", "content": text}]
-    3. Passes through prompts already in chat format (list)
-    4. Extracts env_class from env_class or data_source fields
-    5. Extracts uid from uid or unique_id fields
-    6. Puts all other fields into env_extras
-
-    Args:
-        item: A single dataset item from rLLM format.
-
-    Returns:
-        A dictionary in SkyRL format with keys: prompt, env_class, uid, env_extras.
-
-    Raises:
-        ValueError: If no valid prompt key is found in the item.
-    """
-    # Find the prompt
+    """Adapt a single rLLM dataset item to SkyRL format."""
     prompt = None
     prompt_key = None
 
@@ -47,80 +62,89 @@ def adapt_single_item(item: dict[str, Any]) -> dict[str, Any]:
     if prompt is None:
         raise ValueError(f"Cannot find prompt in item. Expected one of {PROMPT_KEYS}, but found keys: {list(item.keys())}")
 
-    # Convert prompt to chat format if it's a string
     if isinstance(prompt, str):
         prompt = [{"role": "user", "content": prompt}]
     elif isinstance(prompt, list):
-        # Already in chat format, pass through
-        # Validate it's a list of dicts with role/content
-        if not all(isinstance(msg, dict) and "role" in msg and "content" in msg for msg in prompt):
+        if not _is_chat_prompt(prompt):
             raise ValueError(f"Prompt in list format must be a list of dicts with 'role' and 'content' keys. Got: {prompt}")
     else:
         raise ValueError(f"Prompt must be either a string or a list of dicts. Got type: {type(prompt)}, value: {prompt}")
 
-    # Extract env_class from env_class or data_source
     env_class = item.get("env_class")
     if env_class is None:
         env_class = item.get("data_source")
 
-    # Extract uid from uid or unique_id
     uid = item.get("uid")
     if uid is None:
         uid = item.get("unique_id")
 
-    # Put all other fields into env_extras
     env_extras = {}
     for key, value in item.items():
         if key not in RESERVED_KEYS and key != prompt_key:
             env_extras[key] = value
 
-    # Store original prompt info in env_extras for downstream reconstruction
-    # This allows us to convert back to rLLM format for the workflow
     if prompt_key:
         env_extras["_rllm_original_prompt_key"] = prompt_key
-        # Store original string value if it was a string
         if isinstance(item[prompt_key], str):
             env_extras["_rllm_original_prompt_value"] = item[prompt_key]
 
-    # Build the adapted item
     adapted_item = {
-        "prompt": prompt,  # SkyRL expects this in chat format
+        "prompt": prompt,
         "env_extras": env_extras,
     }
 
-    # Add env_class if available
     if env_class is not None:
         adapted_item["env_class"] = env_class
-
-    # Add uid if available
     if uid is not None:
         adapted_item["uid"] = uid
 
     return adapted_item
 
 
-def adapt_rllm_batch_to_skyrl(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Adapt a batch of rLLM dataset items to SkyRL format.
-
-    This function processes each item in the batch using adapt_single_item.
-
-    Args:
-        batch: A list of dataset items from rLLM format.
-
-    Returns:
-        A list of dictionaries in SkyRL format.
-
-    Examples:
-        >>> batch = [{"question": "What is 2+2?", "answer": "4", "data_source": "math"}]
-        >>> result = adapt_rllm_batch_to_skyrl(batch)
-        >>> result[0]["prompt"]
-        [{"role": "user", "content": "What is 2+2?"}]
-        >>> result[0]["env_class"]
-        "math"
-        >>> result[0]["env_extras"]["answer"]
-        "4"
-    """
+def adapt_rllm_batch_to_skyrl(batch: list[dict[str, Any]], default_env_class: str | None = None) -> list[dict[str, Any]]:
+    """Adapt a batch of rLLM dataset items to SkyRL format."""
     if not batch:
         return []
 
-    return [adapt_single_item(item) for item in batch]
+    adapted = [adapt_single_item(item) for item in batch]
+    if default_env_class is not None:
+        for item in adapted:
+            item.setdefault("env_class", default_env_class)
+    return adapted
+
+
+def prepare_skyrl_dataset_file(dataset: Dataset | None, default_env_class: str = "BaseTextEnv") -> SkyRLDatasetFile | None:
+    """Return a PromptDataset-ready parquet path for SkyRL.
+
+    Reuses the existing registered parquet file when records are already
+    SkyRL-compatible. Otherwise creates a temporary converted parquet file.
+    """
+    if dataset is None:
+        return None
+
+    data = dataset.get_data()
+    dataset_path = dataset.get_data_path()
+    if dataset_path and os.path.exists(dataset_path) and _is_skyrl_compatible_dataset(data):
+        return SkyRLDatasetFile(path=dataset_path, cleanup_required=False)
+
+    converted_data = adapt_rllm_batch_to_skyrl(data, default_env_class=default_env_class)
+
+    temp_fd, temp_path = tempfile.mkstemp(suffix=".parquet")
+    os.close(temp_fd)
+    try:
+        pd.DataFrame(converted_data).to_parquet(temp_path)
+    except Exception as exc:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+        raise RuntimeError(f"Failed to convert rLLM Dataset to SkyRL format: {exc}") from exc
+
+    return SkyRLDatasetFile(path=temp_path, cleanup_required=True)
+
+
+def cleanup_temporary_dataset_files(dataset_files: Iterable[SkyRLDatasetFile | None]) -> None:
+    """Remove temporary parquet files created by prepare_skyrl_dataset_file."""
+    for dataset_file in dataset_files:
+        if dataset_file is None:
+            continue
+        if dataset_file.cleanup_required and os.path.exists(dataset_file.path):
+            os.unlink(dataset_file.path)

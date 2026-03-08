@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from rllm.agents.agent import TrajectoryGroup
-from rllm.engine.rollout import ModelOutput
+from rllm.experimental.rollout import ModelOutput
 
 if TYPE_CHECKING:
     from skyrl_train.training_batch import TrainingInputBatch
@@ -37,18 +37,6 @@ def transform_trajectory_groups_to_training_input(
 
     tokenizer = rollout_engine.tokenizer
     assert tokenizer is not None and hasattr(tokenizer, "pad_token_id"), "Tokenizer must have a pad token ID"
-
-    # Match the VERL pattern:
-    # - "broadcast": use trajectory reward on the final token of the final step
-    # - "per_step": use each step reward on the final token of each step
-    stepwise_mode = "broadcast"
-    config = getattr(rollout_engine, "config", None)
-    if config is not None and hasattr(config, "rllm") and hasattr(config.rllm, "stepwise_advantage"):
-        configured_mode = config.rllm.stepwise_advantage.get("mode", "broadcast")
-        if configured_mode is not None:
-            stepwise_mode = str(configured_mode)
-    if stepwise_mode not in {"broadcast", "per_step"}:
-        raise ValueError(f"Unsupported stepwise mode for SkyRL transform: {stepwise_mode}")
 
     # Extract data from trajectory groups
     prompt_token_ids: list[list[int]] = []
@@ -120,14 +108,10 @@ def transform_trajectory_groups_to_training_input(
                     # No generated tokens in this step; no token-level reward can be assigned.
                     step_reward = []
                 else:
-                    # Match VERL reward source policy:
-                    # - per_step: use each step.reward
-                    # - broadcast: use trajectory-level reward on final step only
-                    if stepwise_mode == "per_step":
-                        token_reward = float(step.reward if step.reward is not None else 0.0)
-                    else:  # broadcast
-                        is_last_step = step_idx == len(trajectory.steps) - 1
-                        token_reward = float(trajectory_reward) if is_last_step else 0.0
+                    # Broadcast-only behavior in unified trainer:
+                    # apply trajectory-level reward to the final token of the final step.
+                    is_last_step = step_idx == len(trajectory.steps) - 1
+                    token_reward = float(trajectory_reward) if is_last_step else 0.0
                     step_reward = [0.0] * (len(step_response) - 1) + [token_reward]
                 reward_list.extend(step_reward)
 

@@ -9,7 +9,6 @@ Follows the BasePPOExp pattern from skyrl_train.entrypoints.main_base.
 
 import os
 import socket
-import tempfile
 from pprint import pprint
 
 import ray
@@ -29,6 +28,7 @@ from skyrl_train.utils.utils import get_ray_pg_ready_with_timeout, initialize_ra
 from transformers import AutoTokenizer
 
 from rllm.data import Dataset
+from rllm.experimental.skyrl.data_adapter import SkyRLDatasetFile, cleanup_temporary_dataset_files, prepare_skyrl_dataset_file
 from rllm.experimental.skyrl.skyrl_backend import SkyRLBackend
 from rllm.experimental.unified_trainer import TrainerLauncher, UnifiedTrainer
 from rllm.workflows.workflow import Workflow
@@ -64,6 +64,7 @@ class SkyRLExp:
         self.kwargs = kwargs
         self.tokenizer = self.get_tokenizer()
         self.colocate_pg = self.get_colocate_pg()
+        self._temporary_dataset_files: list[SkyRLDatasetFile] = []
 
     @staticmethod
     def get_cfg_as_str(dict_cfg: DictConfig) -> str:
@@ -104,70 +105,6 @@ class SkyRLExp:
         else:
             return None
 
-    def _convert_rllm_dataset_to_skyrl_file(self, rllm_dataset: Dataset | None) -> str | None:
-        """Convert rLLM Dataset to SkyRL format and save to file.
-
-        Following Verl pattern: save to file and return path.
-
-        Note: PromptDataset will load the data into memory (keep_in_memory=True) when created,
-        so the file is only needed during PromptDataset initialization. The dataloader state
-        checkpointing is separate and handled by StatefulDataLoader.
-
-        Args:
-            rllm_dataset: rLLM Dataset object or None
-
-        Returns:
-            File path to saved dataset or None
-        """
-        if rllm_dataset is None:
-            return None
-
-        import pandas as pd
-
-        # Convert rLLM Dataset data to format expected by PromptDataset
-        # PromptDataset expects: prompt (chat format), env_class, and other fields
-        data = rllm_dataset.get_data()
-
-        # Save to temporary parquet file
-        temp_fd, temp_path = tempfile.mkstemp(suffix=".parquet")
-        os.close(temp_fd)  # Close file descriptor, we'll use pandas to write
-
-        try:
-            # Convert data to DataFrame and save
-            # Ensure data has required fields for PromptDataset
-            df_data = []
-            for item in data:
-                # Ensure prompt is in chat format (list of dicts)
-                if "prompt" not in item:
-                    # If no prompt, create from available fields
-                    prompt = [{"role": "user", "content": str(item.get("question", item.get("input", "")))}]
-                elif isinstance(item["prompt"], str):
-                    # Convert string to chat format
-                    prompt = [{"role": "user", "content": item["prompt"]}]
-                else:
-                    prompt = item["prompt"]
-
-                df_item = {
-                    "prompt": prompt,
-                    "env_class": item.get("env_class", self.cfg.environment.get("env_class", "BaseTextEnv")),
-                }
-                # Add any other fields
-                for key, value in item.items():
-                    if key not in ["prompt", "env_class"]:
-                        df_item[key] = value
-
-                df_data.append(df_item)
-
-            df = pd.DataFrame(df_data)
-            df.to_parquet(temp_path)
-
-            return temp_path
-        except Exception as e:
-            # Clean up temp file on error
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
-            raise RuntimeError(f"Failed to convert rLLM Dataset to SkyRL format: {e}") from e
-
     def _setup_trainer(self):
         """Setup and return the UnifiedTrainer.
 
@@ -188,32 +125,36 @@ class SkyRLExp:
 
         inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
 
-        # Convert rLLM Datasets to SkyRL format and build PromptDatasets
-        # SkyRL's RayPPOTrainer expects PromptDataset objects (unlike Verl which reads from config)
+        # Build PromptDatasets for RayPPOTrainer initialization.
+        # Prefer existing registered parquet files when already SkyRL-compatible.
         from skyrl_train.dataset.dataset import PromptDataset
 
         train_prompt_dataset = None
         eval_prompt_dataset = None
+        self._temporary_dataset_files.clear()
+        default_env_class = self.cfg.environment.get("env_class", "BaseTextEnv")
 
-        if self.train_dataset is not None:
-            train_file_path = self._convert_rllm_dataset_to_skyrl_file(self.train_dataset)
-            if train_file_path is not None:
-                train_prompt_dataset = PromptDataset(
-                    datasets=train_file_path,
-                    tokenizer=tokenizer,
-                    max_prompt_length=self.cfg.data.max_prompt_length,
-                    num_workers=8,
-                )
+        train_dataset_file = prepare_skyrl_dataset_file(self.train_dataset, default_env_class=default_env_class)
+        if train_dataset_file is not None:
+            if train_dataset_file.cleanup_required:
+                self._temporary_dataset_files.append(train_dataset_file)
+            train_prompt_dataset = PromptDataset(
+                datasets=train_dataset_file.path,
+                tokenizer=tokenizer,
+                max_prompt_length=self.cfg.data.max_prompt_length,
+                num_workers=8,
+            )
 
-        if self.val_dataset is not None:
-            val_file_path = self._convert_rllm_dataset_to_skyrl_file(self.val_dataset)
-            if val_file_path is not None:
-                eval_prompt_dataset = PromptDataset(
-                    datasets=val_file_path,
-                    tokenizer=tokenizer,
-                    max_prompt_length=self.cfg.data.max_prompt_length,
-                    num_workers=8,
-                )
+        val_dataset_file = prepare_skyrl_dataset_file(self.val_dataset, default_env_class=default_env_class)
+        if val_dataset_file is not None:
+            if val_dataset_file.cleanup_required:
+                self._temporary_dataset_files.append(val_dataset_file)
+            eval_prompt_dataset = PromptDataset(
+                datasets=val_dataset_file.path,
+                tokenizer=tokenizer,
+                max_prompt_length=self.cfg.data.max_prompt_length,
+                num_workers=8,
+            )
 
         # Create tracker for RayPPOTrainer (SkyRL's Tracking, not rLLM's)
         # NOTE: We disable wandb here to avoid duplicate logging - rLLM's UnifiedTrainer
@@ -276,12 +217,15 @@ class SkyRLExp:
         print("Starting training loop")
         print("train dataset is ", self.train_dataset)
         print("val dataset is ", self.val_dataset)
-        trainer = self._setup_trainer()
+        trainer = None
         try:
-            # Start the training loop
+            trainer = self._setup_trainer()
             trainer.fit()
         finally:
-            trainer.shutdown()
+            if trainer is not None:
+                trainer.shutdown()
+            cleanup_temporary_dataset_files(self._temporary_dataset_files)
+            self._temporary_dataset_files.clear()
 
 
 @ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head

@@ -21,8 +21,7 @@ Optional configs:
     - trainer.strategy: Training strategy (fsdp2, fsdp, megatron, deepspeed)
     - trainer.algorithm.advantage_estimator: Advantage estimator (grpo, gae, rloo, reinforce++)
     - algorithm.use_rllm: Whether to use rLLM-native advantage computation (default: false)
-    - rllm.stepwise_advantage.enable: Enable stepwise advantage computation
-    - rllm.stepwise_advantage.mode: Stepwise mode (broadcast or per_step)
+    - rllm.stepwise_advantage.enable: Enable stepwise advantage computation (broadcast only in unified trainer)
 """
 
 import hydra

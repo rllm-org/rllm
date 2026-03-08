@@ -7,18 +7,14 @@ This adapter allows rLLM workflows to use SkyRL's inference backends
 """
 
 import re
-import sys
-from pathlib import Path
 
-# Add skyrl-train to Python path
-skyrl_train_path = Path(__file__).parent.parent.parent.parent / "skyrl" / "skyrl-train"
-if skyrl_train_path.exists():
-    sys.path.insert(0, str(skyrl_train_path))
+from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
+from rllm.parser import ChatTemplateParser
 
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient  # noqa: E402
-
-from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine  # noqa: E402
-from rllm.parser import ChatTemplateParser  # noqa: E402
+try:
+    from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+except ImportError as exc:
+    raise ImportError("SkyRLEngine requires SkyRL dependencies. Install them via `pip install -e .[skyrl]`.") from exc
 
 
 class SkyRLEngine(RolloutEngine):
