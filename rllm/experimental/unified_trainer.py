@@ -1,5 +1,6 @@
 import asyncio
 import time
+import uuid
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
@@ -28,10 +29,13 @@ from rllm.experimental.common.rejection_sampling import (
     RejectionSamplingState,
     apply_rejection_sampling_and_filtering,
 )
-from rllm.experimental.common.transform import _default_traj_grouping_hook, transform_episodes_to_trajectory_groups
+from rllm.experimental.common.transform import (
+    _default_traj_grouping_hook,
+    transform_episodes_to_trajectory_groups,
+)
 from rllm.experimental.common.visualization import visualize_trajectory_last_steps
 from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
-from rllm.experimental.episode_buffer import AsyncioEpisodeBuffer, BufferedEpisode
+from rllm.experimental.episode_buffer import AsyncioEpisodeBuffer, BufferedEpisodeGroup, EpisodeGroupAccumulator
 from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.rollout import RolloutEngine
 from rllm.experimental.sync_coordinator import SyncCoordinator, SyncCoordinatorConfig
@@ -131,11 +135,11 @@ class UnifiedTrainer:
         async_cfg = self.rllm_config.get("async_training", {})
         self.async_config = AsyncTrainingConfig(
             enabled=async_cfg.get("enabled", False),
+            mini_batch_size=async_cfg.get("mini_batch_size", 1),
+            streaming_chunks=async_cfg.get("streaming_chunks", 1),
             staleness_threshold=async_cfg.get("staleness_threshold", 0.0),
             trigger_parameter_sync_step=async_cfg.get("trigger_parameter_sync_step", 1),
             partial_rollout=async_cfg.get("partial_rollout", True),
-            num_minibatches=async_cfg.get("num_minibatches", 1),
-            requeue_stale=async_cfg.get("requeue_stale", True),
         )
 
         rollout_engine: RolloutEngine = self.backend.init_rollout_engine(
@@ -186,6 +190,7 @@ class UnifiedTrainer:
             mode=rs_mode,
             min_partial_solve_tasks=self.rllm_config.rejection_sample.min_partial_solve_tasks,
             min_trajs_per_group=self.rllm_config.rejection_sample.min_trajs_per_group,
+            filter_uniform_groups=self.rllm_config.rejection_sample.get("filter_uniform_groups", False),
         )
 
         # algorithm config (used for rLLM-native advantage computation)
@@ -381,14 +386,13 @@ class UnifiedTrainer:
     # =========================================================================
 
     async def _fit_fully_async(self, trainer_state: TrainerState) -> None:
-        """Fully-async generation + training with episode-level streaming."""
+        """Fully-async generation + training with group-level streaming."""
+        assert self.config.data.train_batch_size == 1, f"Async training requires train_batch_size=1, got {self.config.data.train_batch_size}"
         coord_config = SyncCoordinatorConfig(
-            train_batch_size=self.config.data.train_batch_size,
+            mini_batch_size=self.async_config.mini_batch_size,
             group_size=self.rllm_config.rollout.n,
             staleness_threshold=self.async_config.staleness_threshold,
             trigger_parameter_sync_step=self.async_config.trigger_parameter_sync_step,
-            requeue_stale=self.async_config.requeue_stale,
-            num_minibatches=self.async_config.num_minibatches,
         )
         coordinator = SyncCoordinator(coord_config)
         buffer = AsyncioEpisodeBuffer()
@@ -407,147 +411,174 @@ class UnifiedTrainer:
         )
 
     async def _generation_loop(self, trainer_state: TrainerState, buffer: AsyncioEpisodeBuffer, coordinator: SyncCoordinator) -> None:
-        """Generate episodes and stream to buffer. Quota-controlled by SyncCoordinator."""
-        try:
-            group_size = self.rllm_config.rollout.n
-            use_total_batches = self.rllm_config.trainer.get("total_batches", -1) > 0
+        """Generate episodes and stream to buffer. Continuous fire-and-forget per prompt."""
+        group_size = self.rllm_config.rollout.n
+        accumulator = EpisodeGroupAccumulator(
+            group_size=group_size,
+            buffer=buffer,
+            filter_uniform_groups=self.rs_config.filter_uniform_groups,
+            on_group_filtered=coordinator.on_group_filtered,
+        )
 
+        try:
             for epoch in range(self.rllm_config.trainer.total_epochs):
                 train_dataloader = self.backend.get_dataloader(self.train_dataset, trainer_state)
+                self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="train", epoch=epoch)
 
-                # Flatten to individual tasks
-                all_tasks = []
                 for batch in train_dataloader:
-                    all_tasks.extend(batch)
+                    # async training uses train_batch_size=1
+                    task = batch[0]
 
-                task_idx = 0
-                while task_idx < len(all_tasks):
-                    # Check total_batches limit
-                    if use_total_batches and trainer_state.global_step >= self.rllm_config.trainer.total_batches:
-                        return
+                    # Block during validation / non-partial sync
+                    await coordinator.wait_for_generation_allowed()
 
-                    # 1. Compute quota
-                    quota = coordinator.compute_new_schedule_count(buffer.qsize())
-                    if quota <= 0:
-                        coordinator.sync_complete_event.clear()
-                        await coordinator.sync_complete_event.wait()
-                        continue
+                    # Dispatch-time throttle: block if quota exhausted
+                    if not coordinator.has_quota():
+                        await coordinator.wait_for_throttle()
 
-                    # 2. Pick tasks up to quota (convert episodes to prompt count)
-                    prompts_to_schedule = min(quota // group_size, len(all_tasks) - task_idx)
-                    if prompts_to_schedule <= 0:
-                        await asyncio.sleep(0.1)
-                        continue
-                    chunk = all_tasks[task_idx : task_idx + prompts_to_schedule]
-                    task_idx += prompts_to_schedule
+                    coordinator.on_group_dispatched()
 
-                    total_episodes = prompts_to_schedule * group_size
-                    coordinator.on_episodes_scheduled(total_episodes)
-                    gen_policy_version = coordinator.policy_version
+                    # Generate a unique task_id for this prompt
+                    task_id = str(uuid.uuid4())
 
-                    # Set training step metadata
-                    self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="train", epoch=epoch)
+                    # Fire-and-forget n rollout tasks for this prompt
+                    for rollout_idx in range(group_size):
 
-                    # 3. Stream generation — episodes pushed to episode_queue as they complete
-                    episode_queue: asyncio.Queue = asyncio.Queue()
-                    gen_task = asyncio.create_task(self.backend.generate_episodes_streaming(chunk, self.agent_workflow_engine, episode_queue, is_validation=False))
+                        async def _run_rollout(t=task, tid=task_id, ridx=rollout_idx):
+                            try:
+                                _, _, _, episode = await self.agent_workflow_engine.process_task_with_retry(task=t, task_id=tid, rollout_idx=ridx, result_idx=0)
+                                await accumulator.add_episode(tid, episode)
+                            except Exception:
+                                # Group can never complete — free the throttle slot to prevent deadlock
+                                coordinator.on_group_consumed()
+                                raise
 
-                    # 4. Drain episodes into buffer as they arrive
-                    received = 0
-                    while received < total_episodes:
-                        try:
-                            task_id, rollout_idx, _, episode = await asyncio.wait_for(episode_queue.get(), timeout=300.0)
-                        except asyncio.TimeoutError:
-                            break
-                        if episode is not None and episode.trajectories:
-                            await buffer.put(
-                                BufferedEpisode(
-                                    episode=episode,
-                                    policy_version=gen_policy_version,
-                                    task=episode.task,
-                                    task_id=episode.task_id,
-                                )
-                            )
-                        coordinator.on_episode_generated(1)
-                        received += 1
+                        asyncio.create_task(_run_rollout())
 
-                    await gen_task  # ensure streaming task completes
+            # Wait for all in-flight rollouts to finish before marking generation complete
+            await self._wait_for_all_workflows_idle()
         finally:
             coordinator.generation_done = True
             buffer.mark_generation_complete()
 
     async def _training_loop(self, trainer_state: TrainerState, buffer: AsyncioEpisodeBuffer, coordinator: SyncCoordinator) -> None:
-        """Collect episodes from buffer, group, train, and sync. Runs concurrently with generation."""
-        episodes_per_step = coordinator.config.episodes_per_train_step
+        """Collect episode groups from buffer, train with streaming grad accumulation. Runs concurrently with generation."""
+        mini_batch_size = self.async_config.mini_batch_size
+        streaming_chunks = self.async_config.streaming_chunks
+        groups_per_chunk = mini_batch_size // streaming_chunks
         use_total_batches = self.rllm_config.trainer.get("total_batches", -1) > 0
+        rollout_engine = self.agent_workflow_engine.rollout_engine
 
         while True:
-            # 1. Collect episodes for one training step
-            collected: list[BufferedEpisode] = []
-            while len(collected) < episodes_per_step:
-                item = await buffer.get()
-                if item is None:
-                    break  # generation done + buffer empty
-                if coordinator.is_episode_stale(item.policy_version):
-                    coordinator.on_stale_discarded(1, requeue=coordinator.config.requeue_stale)
-                    continue
-                collected.append(item)
+            trainer_state.reset_batch()
+            step_start = time.perf_counter()
+            all_collected: list[BufferedEpisodeGroup] = []
+            all_episodes: list[Episode] = []
+            buffer_wait_time = 0.0
 
-            if not collected:
+            # 1. Streaming gradient accumulation across chunks
+            for chunk_idx in range(streaming_chunks):
+                # Pull groups_per_chunk groups from buffer
+                chunk_groups: list[BufferedEpisodeGroup] = []
+                while len(chunk_groups) < groups_per_chunk:
+                    t0 = time.perf_counter()
+                    item = await buffer.get()
+                    buffer_wait_time += time.perf_counter() - t0
+                    if item is None:
+                        break  # generation done + buffer empty
+                    chunk_groups.append(item)
+
+                if not chunk_groups:
+                    break
+
+                for _ in chunk_groups:
+                    coordinator.on_group_consumed()
+                all_collected.extend(chunk_groups)
+
+                # Flatten episodes from groups
+                episodes = []
+                for group in chunk_groups:
+                    episodes.extend(group.episodes)
+                all_episodes.extend(episodes)
+
+                # Transform → rejection sampling → backend pipeline
+                trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(
+                    episodes,
+                    self.transform_config,
+                    self.cf_config,
+                    traj_grouping_hook=self.traj_grouping_hook,
+                )
+                trainer_state.trajectory_groups = trajectory_groups
+                trainer_state.episodes = episodes
+                trainer_state.metrics.update(transform_metrics)
+
+                filtered_groups, filtered_episodes, rs_metrics = apply_rejection_sampling_and_filtering(
+                    episodes,
+                    trajectory_groups,
+                    self.rs_config,
+                    RejectionSamplingState(),
+                )
+                trainer_state.metrics.update(rs_metrics)
+                trainer_state.trajectory_groups = filtered_groups
+                trainer_state.episodes = filtered_episodes
+                if not trainer_state.has_trajectory_groups:
+                    continue
+
+                await self.backend.on_batch_start(trainer_state)
+                trainer_state.backend_batch = self.backend.transform_to_backend_batch(trainer_state)
+                await self.backend.process_backend_batch(trainer_state)
+                await self.backend.compute_advantages(trainer_state, self.algorithm_config)
+
+            if not all_collected:
                 if coordinator.generation_done and buffer.qsize() == 0:
                     break
                 continue
 
-            # 2. Extract episodes, transform to trajectory groups (at consumption time)
-            episodes = [be.episode for be in collected]
-            trainer_state.reset_batch()
-            trainer_state.episodes = episodes
-            trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(
-                episodes,
-                self.transform_config,
-                self.cf_config,
-                traj_grouping_hook=self.traj_grouping_hook,
-            )
-            trainer_state.trajectory_groups = trajectory_groups
-            trainer_state.metrics.update(transform_metrics)
-
-            # 3. Rejection sampling
-            filtered_groups, filtered_episodes, rs_metrics = apply_rejection_sampling_and_filtering(
-                episodes,
-                trajectory_groups,
-                self.rs_config,
-                RejectionSamplingState(),
-            )
-            trainer_state.metrics.update(rs_metrics)
-            trainer_state.trajectory_groups = filtered_groups
-            trainer_state.episodes = filtered_episodes
-            if not trainer_state.has_trajectory_groups:
-                continue
-
-            # 4. Stages 4-7: backend training pipeline
-            await self.backend.on_batch_start(trainer_state)
-            trainer_state.backend_batch = self.backend.transform_to_backend_batch(trainer_state)
-            await self.backend.process_backend_batch(trainer_state)
-            await self.backend.compute_advantages(trainer_state, self.algorithm_config)
+            # 2. Single optimizer step
+            trainer_state.episodes = all_episodes
             await self.backend.update_policy(trainer_state)
 
-            # 5. Training step done — check sync
+            # 3. Training step done — check sync
             coordinator.on_training_step_complete()
+            sync_time = 0.0
             if coordinator.should_sync():
-                trainer_state.policy_version = coordinator.policy_version + 1
-                await self.backend.on_policy_updated(trainer_state)
-                coordinator.on_sync_complete()
+                t0 = time.perf_counter()
+                await self._perform_weight_sync(trainer_state, coordinator, rollout_engine)
+                sync_time = time.perf_counter() - t0
 
-            # 6. Metrics, logging, visualization
-            workflow_metrics, termination_counts = self._collect_workflow_metrics_from_episodes(trainer_state.episodes)
+            # 4. Metrics, logging, visualization
+            workflow_metrics, termination_counts = self._collect_workflow_metrics_from_episodes(all_episodes)
 
-            # Compute average staleness of consumed episodes
-            avg_staleness = np.mean([coordinator.policy_version - be.policy_version for be in collected])
-            trainer_state.metrics["async/avg_episode_staleness"] = avg_staleness
-            trainer_state.metrics.update(buffer.stats())
+            staleness_values = [coordinator.policy_version - g.weight_version for g in all_collected]
+            trainer_state.metrics["async/staleness_mean"] = np.mean(staleness_values)
+            trainer_state.metrics["async/staleness_min"] = np.min(staleness_values)
+            trainer_state.metrics["async/staleness_max"] = np.max(staleness_values)
+            trainer_state.metrics["async/groups_consumed"] = len(all_collected)
+
+            # Timing
+            trainer_state.metrics["time/step"] = time.perf_counter() - step_start
+            trainer_state.metrics["time/buffer_wait"] = buffer_wait_time
+            if sync_time > 0:
+                trainer_state.metrics["time/weight_sync"] = sync_time
+
+            # Weight version delta within trajectories (meaningful in partial_rollout mode)
+            traj_deltas = []
+            for ep in all_episodes:
+                for traj in ep.trajectories:
+                    versions = [s.weight_version for s in traj.steps if s.weight_version is not None]
+                    if len(versions) >= 2:
+                        traj_deltas.append(max(versions) - min(versions))
+            if traj_deltas:
+                trainer_state.metrics["async/traj_weight_delta_mean"] = np.mean(traj_deltas)
+                trainer_state.metrics["async/traj_weight_delta_min"] = np.min(traj_deltas)
+                trainer_state.metrics["async/traj_weight_delta_max"] = np.max(traj_deltas)
+
+            buffer_stats = buffer.stats()
+            trainer_state.metrics["async/gen_train_ratio"] = buffer_stats["async/total_produced"] / max(trainer_state.global_step, 1)
+            trainer_state.metrics.update(buffer_stats)
             trainer_state.metrics.update(coordinator.stats())
 
-            if self.tokenizer is not None:
+            if self.tokenizer is not None and trainer_state.has_trajectory_groups:
                 visualize_trajectory_last_steps(
                     trainer_state.trajectory_groups,
                     tokenizer=self.tokenizer,
@@ -567,19 +598,62 @@ class UnifiedTrainer:
             self.logger.log(
                 data=trainer_state.metrics,
                 step=trainer_state.global_step,
-                episodes=trainer_state.episodes,
+                episodes=all_episodes,
                 trajectory_groups=trainer_state.trajectory_groups,
             )
 
             # Periodic validation
             if self.rllm_config.trainer.test_freq > 0 and trainer_state.global_step % self.rllm_config.trainer.test_freq == 0:
-                await self._validate_async(trainer_state)
+                await self._validate_async_with_pause(trainer_state, coordinator)
 
             trainer_state.global_step += 1
 
             # Check total_batches limit
             if use_total_batches and trainer_state.global_step >= self.rllm_config.trainer.total_batches:
                 break
+
+    async def _perform_weight_sync(self, trainer_state: TrainerState, coordinator: SyncCoordinator, rollout_engine: RolloutEngine) -> None:
+        """Synchronize weights between training and rollout engines.
+
+        Two modes depending on partial_rollout:
+        - partial_rollout=True: Uses rollout engine gate (model-call level).
+          Workflows block between turns, resume with new weights.
+        - partial_rollout=False: Uses coordinator generation pause (dispatch level).
+          Workflows finish naturally, gate stays open.
+        """
+        if self.async_config.partial_rollout:
+            # Block new model calls; in-flight calls finish, workflows pause between turns
+            rollout_engine.close_gate()
+            await rollout_engine.wait_for_drain()
+        else:
+            # Stop dispatching new prompts, let all workflows finish naturally
+            coordinator.pause_generation()
+            await self._wait_for_all_workflows_idle()
+
+        trainer_state.policy_version = coordinator.policy_version + 1
+        await self.backend.on_policy_updated(trainer_state)
+        rollout_engine.weight_version = trainer_state.policy_version
+        coordinator.on_sync_complete()
+
+        if self.async_config.partial_rollout:
+            rollout_engine.open_gate()
+        else:
+            coordinator.resume_generation()
+
+    async def _wait_for_all_workflows_idle(self) -> None:
+        """Wait for all n_parallel_tasks workflows to return to the pool."""
+        pool = self.agent_workflow_engine
+        while pool.workflow_queue.qsize() < pool.n_parallel_tasks:
+            await asyncio.sleep(0.1)
+
+    async def _validate_async_with_pause(self, trainer_state: TrainerState, coordinator: SyncCoordinator) -> dict:
+        """Validation with dispatch-level pause. Waits for workflows to drain, then runs validation."""
+        coordinator.pause_generation()
+        await self._wait_for_all_workflows_idle()
+        try:
+            return await self._validate_async(trainer_state)
+        finally:
+            coordinator.resume_generation()
 
     async def _validate_async(self, trainer_state: TrainerState) -> dict:
         """Validate the model (async implementation)."""
@@ -724,7 +798,7 @@ class AgentTrainer:
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
-        backend: Literal["verl", "tinker"] = "verl",
+        backend: Literal["verl", "tinker", "fireworks"] = "verl",
         **kwargs,
     ):
         if backend == "verl":
@@ -742,6 +816,19 @@ class AgentTrainer:
             from rllm.trainer.tinker.tinker_launcher import TinkerTrainerLauncher
 
             self.launcher = TinkerTrainerLauncher(
+                config=config,
+                workflow_class=workflow_class,
+                train_dataset=train_dataset,
+                val_dataset=val_dataset,
+                workflow_args=workflow_args,
+                **kwargs,
+            )
+        elif backend == "fireworks":
+            from rllm.trainer.fireworks.fireworks_launcher import (
+                FireworksTrainerLauncher,
+            )
+
+            self.launcher = FireworksTrainerLauncher(
                 config=config,
                 workflow_class=workflow_class,
                 train_dataset=train_dataset,

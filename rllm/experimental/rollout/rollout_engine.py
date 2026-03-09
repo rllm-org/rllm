@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 
 from rllm.experimental.rollout.types import TokenInput, Tokenizer, TokenOutput
@@ -16,9 +17,11 @@ class ModelOutput:
     multi_modal_inputs: dict[str, list] | None = None
     logprobs: list[float] | None = None  # completion logprobs
     prompt_logprobs: list[float] | None = None  # prompt logprobs aligned to prompt_ids
+    routing_matrices: list[str] | None = None  # per-token routing matrices (R3, transient)
     prompt_length: int = 0
     completion_length: int = 0
     finish_reason: str | None = None
+    weight_version: int | None = None  # policy version at time of generation
 
     def to_dict(self):
         return {
@@ -34,6 +37,7 @@ class ModelOutput:
             "prompt_length": self.prompt_length,
             "completion_length": self.completion_length,
             "finish_reason": self.finish_reason,
+            "weight_version": self.weight_version,
         }
 
     @classmethod
@@ -51,6 +55,7 @@ class ModelOutput:
             prompt_length=data.get("prompt_length", 0),
             completion_length=data.get("completion_length", 0),
             finish_reason=data.get("finish_reason"),
+            weight_version=data.get("weight_version"),
         )
 
 
@@ -60,7 +65,42 @@ class RolloutEngine:
     is_validation: bool = False  # flag enabled/disabled by AgentWorkflowEngine.execute_tasks
 
     def __init__(self, *args, **kwargs):
-        pass
+        # Gate mechanism for pausing model calls during weight sync
+        self._gate: asyncio.Event = asyncio.Event()
+        self._gate.set()  # open by default
+        self._active_calls: int = 0
+        self._drained_event: asyncio.Event = asyncio.Event()
+        self._drained_event.set()  # initially drained (no active calls)
+        self.weight_version: int = 0
+
+    # --- Gate mechanism ---
+
+    def close_gate(self) -> None:
+        """Close the gate. New model calls will block at wait_for_gate()."""
+        self._gate.clear()
+
+    def open_gate(self) -> None:
+        """Open the gate, releasing any blocked model calls."""
+        self._gate.set()
+
+    async def wait_for_gate(self) -> None:
+        """Wait until gate is open, then register as active call.
+        Engines must call this at the START of get_model_response()."""
+        await self._gate.wait()
+        self._active_calls += 1
+        self._drained_event.clear()
+
+    def on_model_call_complete(self) -> None:
+        """Unregister active call. Engines must call this at the END of
+        get_model_response() (in a finally block)."""
+        self._active_calls -= 1
+        if self._active_calls <= 0:
+            self._active_calls = 0
+            self._drained_event.set()
+
+    async def wait_for_drain(self) -> None:
+        """Wait until all active model calls complete. Used during weight sync."""
+        await self._drained_event.wait()
 
     async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         raise NotImplementedError("get_model_response is not implemented")

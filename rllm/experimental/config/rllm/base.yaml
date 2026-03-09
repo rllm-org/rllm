@@ -59,6 +59,20 @@ algorithm:
   # for tinker backend only (avaiable options: importance_sampling, ppo, cispo, dro, cross_entropy)
   loss_fn: null
 
+  # Custom loss / rollout correction (used by Fireworks backend with cookbook losses)
+  kl_beta: 0.0           # KL penalty coefficient; >0 enables reference forward pass
+  eps_clip: 0.2           # PPO clip epsilon
+  eps_clip_high: null     # Asymmetric upper clip bound (null = symmetric)
+
+  # Router Replay (R3): replay MoE expert routing from inference during training
+  router_replay: false
+
+  # Rollout correction: corrects FP8 (inference) vs FP32 (training) drift
+  rollout_correction:
+    mode: null            # null = disabled, "token" or "sequence" = enable custom callable loss
+    bypass_mode: true     # true = use rollout logprobs as pi_old (2-policy), false = proximal forward (3-policy)
+    tis_cap: 5.0          # Upper clamp on TIS importance weight
+
 # Stepwise advantage
 # TODO(listar2000): deprecate the `per_step` mode and refactor this config.
 stepwise_advantage:
@@ -93,6 +107,7 @@ rejection_sample:
   multiplier: 1
   min_partial_solve_tasks: 1
   min_trajs_per_group: 2
+  filter_uniform_groups: false
 
 # SDK Configuration
 sdk:
@@ -109,12 +124,12 @@ sdk:
 
 # Async Training Configuration
 async_training:
-  enabled: false                    # When false, use current synchronous pipeline
-  staleness_threshold: 0.0          # 0.0 = on-policy. Fraction of extra samples allowed.
-  trigger_parameter_sync_step: 1    # gradient updates between weight syncs
-  partial_rollout: true             # True = don't wait for in-flight to finish at sync
-  num_minibatches: 1                # gradient accumulation within a training step
-  requeue_stale: true               # re-schedule stale episodes' tasks for generation
+  enabled: false
+  mini_batch_size: 1
+  streaming_chunks: 1
+  staleness_threshold: 0.0
+  trigger_parameter_sync_step: 1
+  partial_rollout: true
 
 # Episode Logging Configuration
 episode_logging:
