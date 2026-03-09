@@ -4,7 +4,10 @@ Answer checker API that uses sympy to simplify expressions and check for equalit
 Call grade_answer(given_answer: str, ground_truth: str).
 """
 
+import os
 import re
+import signal
+import threading
 
 import sympy
 from pylatexenc import latex2text
@@ -347,17 +350,74 @@ def should_allow_eval(expr: str):
     return True
 
 
+def _get_sympy_timeout_s() -> float:
+    """Timeout (in seconds) for sympy parsing/simplification.
+
+    Sympy can hang on adversarial / very complex expressions. In long-running
+    training (e.g. Ray workers), a single stuck simplify can block progress.
+
+    Set via env var `RLLM_SYMPY_TIMEOUT_S`.
+    - <= 0 disables the timeout.
+    """
+
+    try:
+        return float(os.getenv("RLLM_SYMPY_TIMEOUT_S", "2.0"))
+    except Exception:
+        return 2.0
+
+
+def _run_with_alarm_timeout(timeout_s: float, fn):
+    """Run `fn()` with a SIGALRM timeout (main-thread only)."""
+
+    if timeout_s <= 0:
+        return fn()
+
+    # SIGALRM only works reliably in the main thread.
+    if threading.current_thread() is not threading.main_thread():
+        return fn()
+
+    # Windows doesn't have SIGALRM.
+    if not hasattr(signal, "SIGALRM"):
+        return fn()
+
+    old_handler = signal.getsignal(signal.SIGALRM)
+
+    def _handler(signum, frame):  # noqa: ARG001
+        raise TimeoutError("sympy operation timed out")
+
+    try:
+        signal.signal(signal.SIGALRM, _handler)
+        signal.setitimer(signal.ITIMER_REAL, timeout_s)
+        return fn()
+    finally:
+        # Disable timer and restore original handler.
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        except Exception:
+            pass
+        try:
+            signal.signal(signal.SIGALRM, old_handler)
+        except Exception:
+            pass
+
+
 def are_equal_under_sympy(ground_truth_normalized: str, given_normalized: str):
     are_equal = False
-    try:
+
+    def _compute():
+        nonlocal are_equal
         expr = f"({ground_truth_normalized})-({given_normalized})"
         if should_allow_eval(expr):
             sympy_diff = _sympy_parse(expr)
             simplified = sympy.simplify(sympy_diff)
             if simplified == 0:
                 are_equal = True
+
+    try:
+        _run_with_alarm_timeout(_get_sympy_timeout_s(), _compute)
     except Exception:
         pass
+
     return are_equal
 
 
