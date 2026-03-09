@@ -62,7 +62,7 @@ rollout_engine:
   reasoning_effort: "medium"
   accumulate_reasoning: false
   disable_thinking: false
-  bypass_render_with_parser: true
+  bypass_render_with_parser: false
   renderer_name: null
 
 # Data Configuration

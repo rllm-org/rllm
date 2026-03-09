@@ -48,7 +48,7 @@ trainer:
 
 # Algorithm Configuration
 algorithm:
-  adv_estimator: grpo # [grpo, reinforce, gae]
+  adv_estimator: grpo # [grpo, reinforce, reinforce_plus_plus_baseline, rloo, gae]
   gamma: 1.0
   lam: 0.95
   norm_adv_by_std_in_grpo: true

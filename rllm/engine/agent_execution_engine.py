@@ -103,6 +103,7 @@ class AgentExecutionEngine:
                 **rollout_engine_args,
                 api_retries=api_retries,
                 tokenizer=self.tokenizer,
+                chat_parser=self.chat_parser,
                 max_prompt_length=self.max_prompt_length,
                 max_response_length=self.max_response_length,
                 disable_thinking=self.disable_thinking,

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Literal
 
@@ -89,12 +89,14 @@ class RejectionSamplingConfig:
 class rLLMAdvantageEstimator(str, Enum):
     """
     A unified advantage estimator for rLLM. Work with both `tinker` and `verl` backends at the expense of
-    losing some flexibility. Currently only supporting GRPO and REINFORCE.
+    losing some flexibility.
     TODO(listar2000): add more estimators.
     """
 
     GRPO = "grpo"
     REINFORCE = "reinforce"
+    REINFORCE_PLUS_PLUS_BASELINE = "reinforce_plus_plus_baseline"
+    RLOO = "rloo"
     OTHER = "other"
 
     @classmethod
@@ -106,11 +108,12 @@ class rLLMAdvantageEstimator(str, Enum):
 class AlgorithmConfig:
     """Configuration for algorithm parameters."""
 
+    use_rllm: bool = False  # This is ignored (assumed True) for tinker backend.
     estimator: rLLMAdvantageEstimator = rLLMAdvantageEstimator.GRPO
+    estimator_map: dict[str, rLLMAdvantageEstimator | str] = field(default_factory=dict)
     # TODO(listar2000): eventually we will remove the `per_step` mode all-together. Now we keep it for backward compatibility.
     stepwise_advantage_mode: Literal["broadcast", "per_step"] = "broadcast"
     norm_adv_by_std_in_grpo: bool = True
-    use_rllm: bool = False
     # When True, always use pre-computed step.advantage from the workflow and skip
     # advantage computation (GRPO/REINFORCE). Steps missing advantages default to 0.0.
     # When False (default), always compute advantages normally.
@@ -145,7 +148,7 @@ class AlgorithmConfig:
             from warnings import warn
 
             warn(
-                "The `per_step` mode is deprecated in experimental unified trainer. Set to `broadcast` mode automatically.Please either use the legacy trainers (`agent_workflow_trainer` for `Verl` or `tinker_workflow_trainer` for `Tinker`) with the `per_step` configuration. Or manually pass in a hook with the implementation of `per_step` advantage computation logic. Read the documentation for a comprehensive guide on the migration (TBD).",
+                "The `per_step` mode is deprecated in experimental unified trainer. Set to `broadcast` mode automatically. Please either use the legacy trainers (`agent_workflow_trainer` for `Verl` or `tinker_workflow_trainer` for `Tinker`) with the `per_step` configuration. Or manually pass in a hook with the implementation of `per_step` advantage computation logic.",
                 DeprecationWarning,
                 stacklevel=2,
             )

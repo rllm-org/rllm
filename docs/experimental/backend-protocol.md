@@ -296,7 +296,7 @@ trainer.fit()
 
 ## Reference: TinkerBackend
 
-The `TinkerBackend` (`rllm.experimental.tinker.tinker_backend`) is the primary
+The `TinkerBackend` (`rllm.trainer.tinker.tinker_backend`) is the primary
 production backend. It serves as a comprehensive reference implementation. Below
 is a summary of how it implements each part of the protocol.
 

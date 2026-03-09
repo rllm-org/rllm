@@ -1,5 +1,8 @@
 In rLLM, we categorize agents into two types based on how they accumulate context over time:
 
+!!! warning "Deprecation warning"
+    The stepwise mode `per_step` will be soon deprecated, together with the legacy trainers (`agent_workflow_trainer` for `Verl` or `tinker_workflow_trainer` for `Tinker`). For the new [`UnifiedTrainer`](../experimental/unified-trainer.md)-based workflow trainer, the advantage calculation (via grouping) and broadcasting pattern is explicitly codified in the [run format guide](./agent-run-format.md), and will allow user-customization.
+
 1. **Cumulative Agents**
     
     These agents accumulate their full interaction history across turns. At each step, the environment observation and the model’s response are appended to the existing prompt, forming a single long trajectory containing all previous interactions. This setting is suitable when the entire context fits within the model’s window.
