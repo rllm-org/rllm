@@ -1,3 +1,4 @@
+import importlib
 import sys
 import types
 
@@ -92,8 +93,6 @@ _STUB_MODULES = [
     "codetiming",
     "click",
 ]
-
-import importlib
 
 for _name in _STUB_MODULES:
     if _name in sys.modules:
