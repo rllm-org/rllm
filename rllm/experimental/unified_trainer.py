@@ -12,6 +12,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from rllm.agents.agent import Episode, TrajectoryGroup
 from rllm.data import Dataset
+from rllm.engine.rollout import RolloutEngine
 from rllm.experimental.common.advantage import (
     AlgorithmConfig,
     collect_reward_and_advantage_from_trajectory_groups,
@@ -31,7 +32,6 @@ from rllm.experimental.common.transform import _default_traj_grouping_hook, tran
 from rllm.experimental.common.visualization import visualize_trajectory_last_steps
 from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
 from rllm.experimental.protocol import BackendProtocol
-from rllm.experimental.rollout import RolloutEngine
 from rllm.utils import EpisodeLogger, Tracking, extract_source_metadata
 from rllm.workflows.workflow import TerminationReason, Workflow
 

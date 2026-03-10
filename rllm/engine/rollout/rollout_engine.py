@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+from rllm.engine.rollout.types import TokenInput, Tokenizer, TokenOutput
+from rllm.parser import ChatTemplateParser
 from rllm.tools.tool_base import ToolCall
 
 
@@ -9,7 +11,7 @@ class ModelOutput:
     content: str | None = None
     reasoning: str | None = None
     tool_calls: list[ToolCall] | None = None
-    prompt_ids: list[int] | None = None
+    prompt_ids: TokenInput | None = None
     completion_ids: list[int] | None = None
     multi_modal_inputs: dict[str, list] | None = None
     logprobs: list[float] | None = None  # completion logprobs
@@ -53,11 +55,30 @@ class ModelOutput:
 
 
 class RolloutEngine:
+    chat_parser: ChatTemplateParser | None = None
+    tokenizer: Tokenizer | None = None
+    is_validation: bool = False  # flag enabled/disabled by AgentWorkflowEngine.execute_tasks
+
     def __init__(self, *args, **kwargs):
         pass
 
     async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         raise NotImplementedError("get_model_response is not implemented")
+
+    def assemble_model_output(self, token_input: TokenInput, token_output: TokenOutput) -> ModelOutput:
+        """
+        Assemble model output from a token output.
+        """
+        raise NotImplementedError("assemble_model_output is not implemented")
+
+    async def get_token_output_from_token_input(self, token_input: TokenInput, **kwargs) -> TokenOutput:
+        """Obtain the token output from the given token input."""
+        raise NotImplementedError("get_token_output_from_token_input is not implemented")
+
+    @property
+    def supports_token_in_token_out(self) -> bool:
+        """Whether the engine supports token-in-token-out (TITO) generation. Defaults to false."""
+        return False
 
     async def wake_up(self):
         pass

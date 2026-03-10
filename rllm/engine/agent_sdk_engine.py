@@ -444,11 +444,11 @@ class AgentSdkEngine:
             self.rollout_engine.wake_up()
 
         if batch.meta_info.get("validate", False):
-            self.rollout_engine.validate = True
+            self.rollout_engine.is_validation = True
         tasks = batch.non_tensor_batch["extra_info"].tolist()
         task_ids = batch.non_tensor_batch["task_ids"].tolist()
         episodes = await self.execute_tasks(tasks, task_ids, **kwargs)  # list of Episodes
-        self.rollout_engine.validate = False
+        self.rollout_engine.is_validation = False
 
         if isinstance(self.rollout_engine, VerlEngine):
             await self.rollout_engine.sleep()

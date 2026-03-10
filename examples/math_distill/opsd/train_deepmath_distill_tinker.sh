@@ -25,5 +25,4 @@ python -m examples.math_distill.opsd.train_deepmath_distill_tinker \
     training.default_local_dir='./outputs/opsd-deepmath-8b-rllm' \
     rllm.algorithm.use_precomputed_advantage=true \
     rllm.algorithm.loss_fn=importance_sampling \
-    rollout_engine.bypass_render_with_parser=True \
     rllm.workflow.n_parallel_tasks=512
