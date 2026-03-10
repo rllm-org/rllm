@@ -110,8 +110,8 @@ class TinkerEngine(RolloutEngine):
         if "strip_thinking_from_history" in kwargs and isinstance(kwargs["strip_thinking_from_history"], bool) and hasattr(renderer, "strip_thinking_from_history"):
             renderer.strip_thinking_from_history = kwargs["strip_thinking_from_history"]
 
-        self.tinker_chat_parser: TinkerChatTemplateParser = TinkerChatTemplateParser(renderer)
-        self.stop_sequences = self.tinker_chat_parser.stop_sequences
+        self.chat_parser: TinkerChatTemplateParser = TinkerChatTemplateParser(renderer)
+        self.stop_sequences = self.chat_parser.stop_sequences
 
         # Sampling client will be set via set_sampling_client()
         self.sampling_client: tinker.SamplingClient | None = None
@@ -206,7 +206,7 @@ class TinkerEngine(RolloutEngine):
         response_tokens, logprobs = sampled_sequence.tokens, sampled_sequence.logprobs
 
         # Parse response using parser (handles content, reasoning, tool_calls)
-        parsed_output = self.tinker_chat_parser.parse_completion(response_tokens)
+        parsed_output = self.chat_parser.parse_completion(response_tokens)
         content = parsed_output.get("content", "")
         reasoning = parsed_output.get("reasoning", "")
         tool_calls = parsed_output.get("tool_calls", [])
@@ -257,7 +257,7 @@ class TinkerEngine(RolloutEngine):
         tools = kwargs.pop("tools", [])
 
         # Build prompt using TinkerChatTemplateParser (handles tools, images, etc.)
-        tinker_prompt = self.tinker_chat_parser.build_prompt(messages, tools=tools)
+        tinker_prompt = self.chat_parser.build_prompt(messages, tools=tools)
         token_input: TinkerTokenInput = tinker_prompt.chunks
 
         sampled_sequence = await self.get_token_output_from_token_input(token_input=token_input, **kwargs)

@@ -113,6 +113,8 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
         Args:
             **kwargs: Additional arguments, including the various configurations
+                - strip_thinking_from_history: Whether to strip thinking from history (default = true)
+                - renderer_name: Name of the renderer to use (default = auto-detect from model)
 
         Returns:
             TinkerEngine: The initialized rollout engine.
