@@ -1,7 +1,7 @@
 import asyncio
 from dataclasses import dataclass
 
-from rllm.experimental.rollout.types import TokenInput, Tokenizer, TokenOutput
+from rllm.engine.rollout.types import TokenInput, Tokenizer, TokenOutput
 from rllm.parser import ChatTemplateParser
 from rllm.tools.tool_base import ToolCall
 

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from tqdm import tqdm
 
 from rllm.agents.agent import Episode
-from rllm.experimental.rollout import RolloutEngine
+from rllm.engine.rollout import RolloutEngine
 from rllm.utils import colorful_print
 from rllm.workflows.workflow import TerminationReason, Workflow
 
@@ -277,7 +277,7 @@ class UnifiedWorkflowEngine:
         Returns:
             list[Episode]: List of completed episodes.
         """
-        from rllm.experimental.rollout import VerlEngine
+        from rllm.engine.rollout import VerlEngine
 
         assert isinstance(self.rollout_engine, VerlEngine), "Rollout engine must be a VerlEngine to invoke execute_tasks_verl"
         await self.rollout_engine.wake_up()

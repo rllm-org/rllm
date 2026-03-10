@@ -238,7 +238,6 @@ This file contains:
 | `rollout_engine.reasoning_effort` | `str` | `medium` | Reasoning effort mode |
 | `rollout_engine.accumulate_reasoning` | `bool` | `false` | Whether to accumulate reasoning across steps |
 | `rollout_engine.disable_thinking` | `bool` | `false` | Whether to disable thinking tokens |
-| `rollout_engine.bypass_render_with_parser` | `bool` | `false` | Whether to bypass render parsing |
 | `rollout_engine.renderer_name` | `str | null` | `null` | Optional renderer name |
 | `data.max_prompt_length` | `int` | `2048` | Max prompt length |
 | `data.max_response_length` | `int` | `2048` | Max response length |
