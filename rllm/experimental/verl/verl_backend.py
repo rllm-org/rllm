@@ -28,13 +28,13 @@ from verl.utils.metric import reduce_metrics
 
 from rllm.agents.agent import Episode
 from rllm.data import Dataset
+from rllm.engine.rollout import RolloutEngine, VerlEngine
 from rllm.experimental.common import (
     AlgorithmConfig,
     collect_reward_and_advantage_from_trajectory_groups,
     simple_timer,
 )
 from rllm.experimental.protocol import BackendProtocol
-from rllm.experimental.rollout import RolloutEngine, VerlEngine
 from rllm.experimental.verl import compute_advantage_verl, transform_episodes_to_dataproto, update_dataproto_with_advantages
 
 if TYPE_CHECKING:
@@ -409,10 +409,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             return False
         else:
             trainer_state.is_training = False
-            self.rollout_engine.validate = True  # type: ignore[attr-defined]
+            self.rollout_engine.is_validation = True
             return True
 
     async def on_validation_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of validation."""
         trainer_state.is_training = True
-        self.rollout_engine.validate = False  # type: ignore[attr-defined]
+        self.rollout_engine.is_validation = False

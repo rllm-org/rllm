@@ -208,14 +208,14 @@ class AgentWorkflowEngine:
 
         is_validation = batch.meta_info.get("validate", False)
         if is_validation:
-            self.rollout_engine.validate = True
+            self.rollout_engine.is_validation = True
             self.current_mode = "val"
         else:
             self.current_mode = "train"
         tasks = batch.non_tensor_batch["extra_info"].tolist()
         task_ids = batch.non_tensor_batch["task_ids"].tolist()
         results = await self.execute_tasks(tasks, task_ids, **kwargs)  # list of Episodes
-        self.rollout_engine.validate = False
+        self.rollout_engine.is_validation = False
 
         await self.rollout_engine.sleep()
 
