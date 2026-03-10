@@ -75,12 +75,6 @@ class RolloutEngine:
         """Obtain the token output from the given token input."""
         raise NotImplementedError("get_token_output_from_token_input is not implemented")
 
-    async def wake_up(self):
-        pass
-
-    async def sleep(self):
-        pass
-
     @property
     def supports_token_in_token_out(self) -> bool:
         """Whether the engine supports token-in-token-out (TITO) generation. Defaults to false."""

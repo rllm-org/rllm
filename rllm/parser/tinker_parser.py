@@ -9,17 +9,16 @@ from rllm.tools.tool_base import Tool, ToolCall
 logger = logging.getLogger(__name__)
 
 
-def _check_tinker_cookbook():
-    try:
-        import tinker_cookbook.renderers  # noqa: F401
-    except ImportError:
-        raise ImportError("tinker-cookbook is required for TinkerChatTemplateParser. Install it with: pip install tinker-cookbook") from None
+try:
+    import tinker
+    from tinker.types import ModelInput
+    from tinker_cookbook.renderers.base import RenderContext, Renderer, TrainOnWhat
+except ImportError as e:
+    raise ImportError("tinker-cookbook and tinker are required for TinkerChatTemplateParser. Install them with: pip install tinker-cookbook tinker") from e
 
 
 def _make_render_context(idx, is_last, prev_message=None, last_user_index=-1):
     """Create a RenderContext, handling version differences in tinker-cookbook."""
-    from tinker_cookbook.renderers.base import RenderContext
-
     try:
         return RenderContext(
             idx=idx,
@@ -51,14 +50,9 @@ class TinkerChatTemplateParser(ChatTemplateParser):
         prompt = parser.parse(messages, add_generation_prompt=True, is_first_msg=True)
     """
 
-    def __init__(self, renderer):
-        _check_tinker_cookbook()
-
-        from tinker_cookbook.renderers.base import Renderer
-
+    def __init__(self, renderer: Renderer) -> None:
         if not isinstance(renderer, Renderer):
             raise TypeError(f"Expected a tinker_cookbook Renderer, got {type(renderer)}")
-
         self.renderer = renderer
         self.tokenizer = renderer.tokenizer
         self.processor = None
@@ -70,7 +64,7 @@ class TinkerChatTemplateParser(ChatTemplateParser):
 
         self.stop_sequences = self.renderer.get_stop_sequences()
 
-    def _convert_message(self, msg, accumulate_reasoning=False):
+    def _convert_message(self, msg: dict) -> dict:
         """Convert an rllm message dict to a tinker Message dict."""
         tinker_msg = {"role": msg["role"]}
 
@@ -78,7 +72,7 @@ class TinkerChatTemplateParser(ChatTemplateParser):
         reasoning = (msg.get("reasoning", "") or "").strip()
 
         # Build structured content when reasoning or images are present
-        if reasoning and accumulate_reasoning:
+        if reasoning:
             parts = []
             parts.append({"type": "thinking", "thinking": reasoning})
             if content:
@@ -144,11 +138,11 @@ class TinkerChatTemplateParser(ChatTemplateParser):
 
         return tinker_msg
 
-    def _convert_messages(self, messages, accumulate_reasoning=False):
+    def _convert_messages(self, messages: list[dict]) -> list[dict]:
         """Convert a list of rllm message dicts to tinker Message format."""
-        return [self._convert_message(m, accumulate_reasoning) for m in messages]
+        return [self._convert_message(m) for m in messages]
 
-    def _convert_tools(self, tools):
+    def _convert_tools(self, tools: list[Tool | dict]) -> list[dict]:
         """Convert rllm tools to tinker ToolSpec format."""
         tool_specs = []
         for tool in tools:
@@ -184,9 +178,8 @@ class TinkerChatTemplateParser(ChatTemplateParser):
                     )
         return tool_specs
 
-    def _render_to_tokens(self, tinker_messages, add_bos=False, add_generation_prompt=False):
+    def _render_to_tokens(self, tinker_messages: list[dict], add_bos: bool = False, add_generation_prompt: bool = False) -> list[int]:
         """Render tinker messages to a flat list of token IDs."""
-        import tinker
 
         chunks = []
 
@@ -233,30 +226,22 @@ class TinkerChatTemplateParser(ChatTemplateParser):
 
         return tokens
 
-    def parse(self, messages, add_generation_prompt=False, is_first_msg=False, tools=None, accumulate_reasoning=False, **kwargs):
-        """Parse messages into a prompt string.
+    def _prepare_messages(self, messages: list[dict], tools: list[Tool | dict] | None = None) -> list[dict]:
+        """Convert rllm messages to tinker format and prepend tool context if needed.
 
         Args:
             messages: List of rllm message dicts.
-            add_generation_prompt: Whether to append the generation prompt.
-            is_first_msg: Whether this is the first message (adds BOS token).
-            tools: Optional list of tools to include in the prompt.
-            accumulate_reasoning: Whether to include reasoning/thinking content.
+            tools: Optional list of tools to include in the system prompt.
 
         Returns:
-            The rendered prompt string.
+            List of tinker-format message dicts ready for rendering.
         """
-        if not messages:
-            return ""
+        tinker_messages = self._convert_messages(messages)
 
-        tinker_messages = self._convert_messages(messages, accumulate_reasoning=accumulate_reasoning)
-
-        # Handle tools by prepending tool context messages
         if tools:
             tool_specs = self._convert_tools(tools)
             if tool_specs:
                 try:
-                    # Extract system prompt if first message is system
                     system_prompt = ""
                     if tinker_messages and tinker_messages[0]["role"] == "system":
                         content = tinker_messages[0]["content"]
@@ -267,6 +252,46 @@ class TinkerChatTemplateParser(ChatTemplateParser):
                     tinker_messages = prefix + tinker_messages
                 except NotImplementedError:
                     logger.warning(f"Renderer {type(self.renderer).__name__} does not support tool calling. Tools will be ignored.")
+
+        return tinker_messages
+
+    def build_prompt(self, messages: list[dict], tools: list[Tool | dict] | None = None) -> ModelInput:
+        """Build a ModelInput prompt from messages, preserving image chunks for VLM.
+
+        Unlike parse() which decodes to a string, this returns a ModelInput directly
+        via the renderer's build_generation_prompt, avoiding the token->string->token
+        round-trip and preserving ImageChunks for vision-language models.
+
+        Args:
+            messages: List of rllm message dicts.
+            tools: Optional list of tools to include in the prompt.
+
+        Returns:
+            tinker ModelInput with generation prompt appended.
+        """
+        tinker_messages = self._prepare_messages(messages, tools=tools)
+        return self.renderer.build_generation_prompt(tinker_messages)
+
+    def parse(self, messages: list[dict], add_generation_prompt: bool = False, is_first_msg: bool = False, tools: list[Tool | dict] | None = None, **kwargs) -> str:
+        """Parse messages into a prompt string.
+
+        Note: For TinkerEngine, prefer build_prompt() which returns a ModelInput
+        directly and preserves image chunks. This method is for compatibility with
+        non-Tinker rollout engines.
+
+        Args:
+            messages: List of rllm message dicts.
+            add_generation_prompt: Whether to append the generation prompt.
+            is_first_msg: Whether this is the first message (adds BOS token).
+            tools: Optional list of tools to include in the prompt.
+
+        Returns:
+            The rendered prompt string.
+        """
+        if not messages:
+            return ""
+
+        tinker_messages = self._prepare_messages(messages, tools=tools)
 
         tokens = self._render_to_tokens(tinker_messages, add_bos=is_first_msg, add_generation_prompt=add_generation_prompt)
         result = self.tokenizer.decode(tokens, skip_special_tokens=False)
@@ -329,9 +354,7 @@ class TinkerChatTemplateParser(ChatTemplateParser):
         Returns:
             Tuple of (prompt_ids, response_ids, response_mask) as torch tensors.
         """
-        from tinker_cookbook.renderers.base import TrainOnWhat
-
-        tinker_messages = self._convert_messages(messages, accumulate_reasoning=True)
+        tinker_messages = self._convert_messages(messages)
         model_input, weights = self.renderer.build_supervised_example(tinker_messages, train_on_what=TrainOnWhat.LAST_ASSISTANT_MESSAGE)
 
         all_tokens = model_input.to_ints()
@@ -352,9 +375,7 @@ class TinkerChatTemplateParser(ChatTemplateParser):
         Returns:
             Tuple of (prompt_ids, response_ids, response_mask) as torch tensors.
         """
-        from tinker_cookbook.renderers.base import TrainOnWhat
-
-        tinker_messages = self._convert_messages(messages, accumulate_reasoning=True)
+        tinker_messages = self._convert_messages(messages)
         model_input, weights = self.renderer.build_supervised_example(tinker_messages, train_on_what=TrainOnWhat.ALL_ASSISTANT_MESSAGES)
 
         all_tokens = model_input.to_ints()

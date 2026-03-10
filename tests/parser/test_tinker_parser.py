@@ -186,7 +186,7 @@ def test_tinker_parser_message_conversion(qwen_tinker_parser):
             "tool_calls": [{"function": {"name": "search", "arguments": '{"q": "test"}'}}],
         },
     ]
-    converted = qwen_tinker_parser._convert_messages(messages, accumulate_reasoning=False)
+    converted = qwen_tinker_parser._convert_messages(messages)
     assert len(converted) == 3
     assert converted[0]["role"] == "system"
     assert converted[1]["role"] == "user"
@@ -195,18 +195,30 @@ def test_tinker_parser_message_conversion(qwen_tinker_parser):
 
 def test_import_error_without_tinker():
     """Verify helpful ImportError when tinker-cookbook is not installed."""
-    # Temporarily remove tinker_cookbook from sys.modules
+    # The module-level import in tinker_parser.py raises ImportError if tinker-cookbook
+    # is not installed. Since the module is already imported, we verify the error message
+    # by checking the module-level try/except pattern exists.
+    import importlib
+
     saved_modules = {}
-    modules_to_remove = [key for key in sys.modules if key.startswith("tinker_cookbook")]
+    modules_to_remove = [key for key in sys.modules if key.startswith(("tinker_cookbook", "tinker"))]
+    # Also remove the cached tinker_parser module so it can be re-imported
+    if "rllm.parser.tinker_parser" in sys.modules:
+        saved_modules["rllm.parser.tinker_parser"] = sys.modules.pop("rllm.parser.tinker_parser")
     for key in modules_to_remove:
         saved_modules[key] = sys.modules.pop(key)
 
     try:
-        with patch.dict(sys.modules, {"tinker_cookbook": None, "tinker_cookbook.renderers": None}):
-            with pytest.raises(ImportError, match="tinker-cookbook is required"):
-                from rllm.parser.tinker_parser import _check_tinker_cookbook
-
-                _check_tinker_cookbook()
+        with patch.dict(
+            sys.modules,
+            {
+                "tinker_cookbook": None,
+                "tinker_cookbook.renderers": None,
+                "tinker_cookbook.renderers.base": None,
+                "tinker": None,
+            },
+        ):
+            with pytest.raises(ImportError, match="tinker-cookbook and tinker are required"):
+                importlib.import_module("rllm.parser.tinker_parser")
     finally:
-        # Restore modules
         sys.modules.update(saved_modules)

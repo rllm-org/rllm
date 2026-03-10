@@ -1,14 +1,13 @@
-from typing import Any, cast
+from typing import cast
 
 import tinker
 from tinker.types import ModelInput
 from tinker_cookbook import model_info, renderers
-from tinker_cookbook.renderers import Message
 from typing_extensions import override  # need to use typing_extensions for python < 3.12
 
 from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
-from rllm.experimental.rollout.types import ImageProcessor, Processor, TinkerTokenInput, TinkerTokenOutput, TokenInput, Tokenizer, TokenOutput
-from rllm.parser import ChatTemplateParser
+from rllm.experimental.rollout.types import ImageProcessor, TinkerTokenInput, TinkerTokenOutput, TokenInput, Tokenizer, TokenOutput
+from rllm.parser.tinker_parser import TinkerChatTemplateParser
 from rllm.workflows import TerminationEvent, TerminationReason
 
 """
@@ -52,28 +51,13 @@ def _flat_token_input_length(token_input: TokenInput) -> int:
     return length
 
 
-def _parse_tinker_message(message: Message) -> tuple[str, str, list[Any]]:
-    tinker_content = message["content"]
-    if isinstance(tinker_content, list):
-        text_parts, think_parts = [], []
-        for part in tinker_content:
-            if part["type"] == "text":
-                text_parts.append(part)
-            elif part["type"] == "thinking":
-                think_parts.append(part)
-        content = "\n".join([text["text"] for text in text_parts])
-        reasoning = "\n".join([think["thinking"] for think in think_parts])
-    else:  # no reasoning parsed
-        content = tinker_content
-        reasoning = ""
-    # TODO(listar2000): the Tinker tool_calls is not fully compatible with the rLLM one
-    tool_calls = message.get("tool_calls", [])
-    return content, reasoning, tool_calls
-
-
 class TinkerEngine(RolloutEngine):
     """
     RolloutEngine implementation using Tinker for model inference.
+
+    Wraps the tinker renderer with a TinkerChatTemplateParser, which provides
+    unified prompt building (including tool spec injection) and response parsing
+    (content, reasoning, tool_calls).
     """
 
     def __init__(
@@ -86,12 +70,7 @@ class TinkerEngine(RolloutEngine):
         max_response_length: int = 4096,
         max_model_length: int = 32768,
         sampling_params: dict | None = None,
-        bypass_render_with_parser: bool = True,  # default to True now
-        processor: Processor | None = None,
         image_processor: ImageProcessor | None = None,
-        disable_thinking: bool = False,
-        accumulate_reasoning: bool = False,
-        reasoning_effort: str = "medium",
         renderer_name: str | None = None,
         **kwargs,
     ):
@@ -107,11 +86,10 @@ class TinkerEngine(RolloutEngine):
             max_response_length: Maximum response length in tokens
             max_model_length: Maximum total length (prompt + response) in tokens
             sampling_params: Default sampling parameters (temperature, top_p, etc.)
-            bypass_render_with_parser: If True, use ChatTemplateParser instead of Tinker's renderer
-            processor: Optional processor for multimodal models (used when bypass_render_with_parser=True)
             image_processor: Optional image processor for vision-language models (used with renderer)
-            disable_thinking: Whether to disable thinking in generation prompt (used when bypass_render_with_parser=True)
-            accumulate_reasoning: Whether to accumulate reasoning (used when bypass_render_with_parser=True)
+            renderer_name: Optional renderer name to use (None = auto-detect from model)
+            kwargs: Additional keyword arguments
+                - strip_thinking_from_history: Whether to strip thinking from history (only for Qwen3Renderer)
         """
         self.base_url = base_url
         self.model_name = model_name
@@ -119,36 +97,26 @@ class TinkerEngine(RolloutEngine):
         self.max_response_length = max_response_length
         self.max_model_length = max_model_length - 1
         self.tokenizer = tokenizer
-        self.bypass_render_with_parser = bypass_render_with_parser
-        self.accumulate_reasoning = accumulate_reasoning
-        self.reasoning_effort = reasoning_effort
 
         self.train_sampling_params = dict(sampling_params.get("train", {})) if sampling_params else {}
         self.val_sampling_params = dict(sampling_params.get("val", {})) if sampling_params else {}
         # Initialize Tinker service client
         self.service_client = service_client
 
-        # Initialize the renderer
+        # Initialize the renderer and wrap with TinkerChatTemplateParser
         renderer_name = renderer_name or model_info.get_recommended_renderer_name(self.model_name)
-        # Pass image_processor for VLM support with Tinker renderer
-        self.renderer = renderers.get_renderer(renderer_name, self.tokenizer, image_processor=image_processor)
+        renderer = renderers.get_renderer(renderer_name, self.tokenizer, image_processor=image_processor)
 
-        if bypass_render_with_parser:
-            self.chat_parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=disable_thinking)
-            if hasattr(self.chat_parser, "stop_sequences") and self.chat_parser.stop_sequences:
-                self.stop_sequences = self.chat_parser.stop_sequences
-            elif hasattr(tokenizer, "eos_token_id") and tokenizer.eos_token_id:
-                self.stop_sequences = [tokenizer.eos_token_id]
-            else:
-                raise ValueError("No stop sequences found for tokenizer or chat parser")
-        else:
-            self.chat_parser = None
-            self.stop_sequences = self.renderer.get_stop_sequences()
+        if "strip_thinking_from_history" in kwargs and isinstance(kwargs["strip_thinking_from_history"], bool) and hasattr(renderer, "strip_thinking_from_history"):
+            renderer.strip_thinking_from_history = kwargs["strip_thinking_from_history"]
+
+        self.tinker_chat_parser: TinkerChatTemplateParser = TinkerChatTemplateParser(renderer)
+        self.stop_sequences = self.tinker_chat_parser.stop_sequences
 
         # Sampling client will be set via set_sampling_client()
-        self.sampling_client = None
+        self.sampling_client: tinker.SamplingClient | None = None
 
-    def set_sampling_client(self, sampling_client):
+    def set_sampling_client(self, sampling_client: tinker.SamplingClient) -> None:
         """
         Set the sampling client for inference.
 
@@ -156,34 +124,6 @@ class TinkerEngine(RolloutEngine):
             sampling_client: Tinker SamplingClient instance
         """
         self.sampling_client = sampling_client
-
-    def _convert_images_to_content_list(self, messages: list[dict]) -> list[dict]:
-        """
-        Convert messages from standard format to Tinker renderer format.
-
-        Standard format: {"role": "user", "content": "text", "images": [PIL.Image]}
-        Tinker format:   {"role": "user", "content": [{"type": "image", "image": img}, {"type": "text", "text": "..."}]}
-
-        Args:
-            messages: List of messages in standard format
-
-        Returns:
-            List of messages in Tinker renderer format
-        """
-        converted = []
-        for msg in messages:
-            if "images" in msg and msg["images"]:
-                # Convert to content list format
-                content_list = []
-                for img in msg["images"]:
-                    content_list.append({"type": "image", "image": img})
-                content_list.append({"type": "text", "text": msg.get("content", "")})
-                converted.append({**msg, "content": content_list})
-                # Remove the images key since it's now in content
-                del converted[-1]["images"]
-            else:
-                converted.append(msg)
-        return converted
 
     def _prepare_max_tokens(self, requested_max_tokens: int, prompt_length: int) -> int:
         """
@@ -265,16 +205,11 @@ class TinkerEngine(RolloutEngine):
         sampled_sequence = cast(TinkerTokenOutput, token_output)
         response_tokens, logprobs = sampled_sequence.tokens, sampled_sequence.logprobs
 
-        if self.bypass_render_with_parser:
-            assert self.chat_parser is not None, "chat_parser must be set when bypass_render_with_parser=True"
-            parsed_output = self.chat_parser.parse_completion(response_tokens)
-            content = parsed_output.get("content", "")
-            reasoning = parsed_output.get("reasoning", "")
-            tool_calls = parsed_output.get("tool_calls", [])
-        else:
-            assert isinstance(self.renderer, renderers.Renderer), "self.renderer must be a valid Tinker Renderer"
-            response_message, _ = self.renderer.parse_response(response_tokens)
-            content, reasoning, tool_calls = _parse_tinker_message(response_message)
+        # Parse response using parser (handles content, reasoning, tool_calls)
+        parsed_output = self.tinker_chat_parser.parse_completion(response_tokens)
+        content = parsed_output.get("content", "")
+        reasoning = parsed_output.get("reasoning", "")
+        tool_calls = parsed_output.get("tool_calls", [])
 
         # decode full text
         completion_text = self.tokenizer.decode(response_tokens, skip_special_tokens=True)  # type: ignore
@@ -310,8 +245,7 @@ class TinkerEngine(RolloutEngine):
             **kwargs: Additional parameters including:
                 - application_id: Session/application ID for tracing
                 - enforce_max_prompt_length: Whether to enforce max prompt length
-                - tools: List of tools (used when bypass_render_with_parser=True)
-                - accumulate_reasoning: Whether to accumulate reasoning (used when bypass_render_with_parser=True)
+                - tools: List of tools for tool-augmented generation
 
         Returns:
             ModelOutput with generated text and metadata
@@ -319,28 +253,12 @@ class TinkerEngine(RolloutEngine):
         # Extract unused kwargs
         kwargs.pop("application_id", None)
 
-        # Extract parser-specific kwargs
+        # Extract tools
         tools = kwargs.pop("tools", [])
-        accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
-        reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
 
-        if self.bypass_render_with_parser:
-            # Use ChatTemplateParser
-            prompt = self.chat_parser.parse(  # type: ignore
-                messages,
-                add_generation_prompt=True,
-                is_first_msg=True,
-                tools=tools,
-                reasoning_effort=reasoning_effort,
-                accumulate_reasoning=accumulate_reasoning,
-            )
-            token_input = self.tokenizer.encode(prompt, add_special_tokens=False)  # type: ignore
-        else:
-            # Use Tinker renderer
-            # Convert standard image format to Tinker renderer format
-            converted_messages = self._convert_images_to_content_list(messages)
-            # Build prompt using renderer
-            token_input: TinkerTokenInput = self.renderer.build_generation_prompt(converted_messages).chunks  # type: ignore
+        # Build prompt using TinkerChatTemplateParser (handles tools, images, etc.)
+        tinker_prompt = self.tinker_chat_parser.build_prompt(messages, tools=tools)
+        token_input: TinkerTokenInput = tinker_prompt.chunks
 
         sampled_sequence = await self.get_token_output_from_token_input(token_input=token_input, **kwargs)
         return self.assemble_model_output(token_input=token_input, token_output=sampled_sequence)
