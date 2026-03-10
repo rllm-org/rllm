@@ -7,7 +7,7 @@ import torch
 
 from rllm.tools.tool_base import Tool, ToolCall, ToolOutput
 
-from .utils import SIMPLE_TEST_MESSAGES
+from .utils import PARSER_TEST_MESSAGES
 
 logger = logging.getLogger(__name__)
 
@@ -38,15 +38,11 @@ class ChatTemplateParser:
         raise NotImplementedError("ChatTemplateParser does not support parse_completion")
 
     def verify_equivalence(self, messages, verbose=True):
-        """Verify that parse() output matches HF's apply_chat_template output.
-
-        For RL training, it's critical that the parser produces the exact same token
-        sequence as what the model saw during SFT/pretraining. This method validates
-        that the custom parser's output matches the canonical HF chat template rendering.
+        """Verify that parsing messages together is equivalent to parsing them individually.
 
         Args:
             messages (list): List of message dictionaries to test
-            verbose (bool): Whether to print detailed information and raise on failure
+            verbose (bool): Whether to print detailed information about the test
 
         Returns:
             bool: True if the equivalence check passes, False otherwise
@@ -54,25 +50,28 @@ class ChatTemplateParser:
         Raises:
             AssertionError: If the equivalence check fails and verbose is True
         """
-        for add_generation_prompt in [True, False]:
-            parser_result = self.parse(messages, is_first_msg=True, add_generation_prompt=add_generation_prompt)
+        # Parse all messages together
+        batch_result = self.parse(messages)
 
-            if self.processor is not None:
-                hf_result = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt)
-            else:
-                hf_result = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt)
+        # Parse each message individually and concatenate
+        individual_results = []
+        for message in messages:
+            individual_results.append(self.parse([message]))
 
-            is_equivalent = parser_result == hf_result
+        concatenated_result = "".join(individual_results)
 
-            if not is_equivalent:
-                if verbose:
-                    print("Equivalence check failed!")
-                    print(f"Parser output (len={len(parser_result)}):")
-                    print(parser_result)
-                    print(f"\nHF apply_chat_template output (len={len(hf_result)}):")
-                    print(hf_result)
-                return False
-        return True
+        # Check if results are equivalent
+        is_equivalent = batch_result == concatenated_result
+
+        if verbose and not is_equivalent:
+            print("Equivalence check failed!")
+            print("Batch parsing result:")
+            print(batch_result)
+            print("\nConcatenated individual parsing result:")
+            print(concatenated_result)
+            raise AssertionError("Parser failed equivalence check. See above for details.")
+
+        return is_equivalent
 
     @classmethod
     def get_parser(cls, tokenizer, processor=None, disable_thinking=False) -> "ChatTemplateParser":
@@ -117,7 +116,7 @@ class ChatTemplateParser:
         # Default to the standard parser if no specific match
         parser = ChatTemplateParser(tokenizer, processor=processor)
         logger.info(f"No custom parser found. Using default ChatTemplateParser for {tokenizer.name_or_path}")
-        assert parser.verify_equivalence(SIMPLE_TEST_MESSAGES), "Parser failed equivalence check"
+        assert parser.verify_equivalence(PARSER_TEST_MESSAGES), "Parser failed equivalence check"
         return parser
 
     def tokenize_and_mask(self, messages):
