@@ -16,6 +16,7 @@ from rllm.workflows.workflow import TerminationReason, Workflow
 
 # Avoid hard dependency on verl at import time; only for typing
 if TYPE_CHECKING:
+    from omegaconf import DictConfig
     from verl import DataProto
 
     from rllm.utils.episode_logger import EpisodeLogger
@@ -29,7 +30,7 @@ class UnifiedWorkflowEngine:
         workflow_cls: type[Workflow],
         workflow_args: dict,
         rollout_engine: RolloutEngine,
-        config=None,
+        config: DictConfig | None = None,
         n_parallel_tasks: int = 128,
         retry_limit: int = 3,
         raise_on_error: bool = True,

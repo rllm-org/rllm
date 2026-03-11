@@ -382,7 +382,7 @@ class UnifiedTrainer:
             trainer_state.metrics[f"batch/termination_reason/{r.value}"] = termination_counts[r.value] / total_counts
 
     # =========================================================================
-    # Concurrent (async) training methods
+    # Fully-asynchronous training pipeline
     # =========================================================================
 
     async def _fit_fully_async(self, trainer_state: TrainerState) -> None:

@@ -107,7 +107,9 @@ class RolloutEngine:
     async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         await self.wait_for_gate()
         try:
-            return await self._get_model_response(messages, **kwargs)
+            result = await self._get_model_response(messages, **kwargs)
+            result.weight_version = self.weight_version
+            return result
         finally:
             self.on_model_call_complete()
 

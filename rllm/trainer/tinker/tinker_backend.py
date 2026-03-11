@@ -399,6 +399,9 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Initialize training client and load checkpoint
         start_batch, self.sampling_client = await self.policy_trainer.initialize_async(resume_from_checkpoint=True)
 
+        # Propagate sampling_client to rollout engine so it can make inference calls
+        self.rollout_engine.set_sampling_client(self.sampling_client)
+
         # Update trainer state with the start batch from checkpoint
         trainer_state.global_step = start_batch
 
@@ -420,6 +423,9 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         save_freq = self.full_config.rllm.trainer.save_freq
         do_save = save_freq > 0 and global_step % save_freq == 0
         self.sampling_client = await self.policy_trainer.save_checkpoint_and_get_sampling_client(global_step, kind="both", do_save=do_save)
+
+        # Propagate updated sampling_client to rollout engine for async weight sync
+        self.rollout_engine.set_sampling_client(self.sampling_client)
 
     async def on_batch_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of each batch.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
@@ -41,6 +42,7 @@ class Step:
     prompt_ids: list[int] | list[Any] = field(default_factory=list)
     response_ids: list[int] = field(default_factory=list)
     logprobs: list[float] = field(default_factory=list)
+    routing_matrices: list[str] | None = None  # per-token routing matrices (R3, transient)
 
     chat_completions: list[dict[str, str]] = field(default_factory=list)
 
@@ -60,7 +62,13 @@ class Step:
     # TODO: potentially rename this as "advantages" so its clearer that it allows a generic list.
     advantage: list[float] | float | None = None
 
+    # weight version at time of generation (for async training staleness tracking)
+    weight_version: int | None = None
+
     def __post_init__(self):
+        self.chat_completions = deepcopy(self.chat_completions)
+        self.info = deepcopy(self.info)
+
         if self.model_output is None:
             return
         # backfill fields like prompt_ids, response_ids, logprobs, etc.
@@ -70,22 +78,34 @@ class Step:
             self.response_ids = self.model_output.completion_ids
         if len(self.logprobs) == 0 and self.model_output.logprobs is not None:
             self.logprobs = self.model_output.logprobs
-
-        # check that the token ids are filled
-        # TODO(listar2000): this might cause compatibility issue. Double check if we should make these assertions.
-        # assert len(self.prompt_ids) > 0, "prompt_ids is empty"
-        # assert len(self.response_ids) > 0, "response_ids is empty"
+        if self.routing_matrices is None and getattr(self.model_output, "routing_matrices", None) is not None:
+            self.routing_matrices = self.model_output.routing_matrices
+        if self.weight_version is None and hasattr(self.model_output, "weight_version"):
+            self.weight_version = self.model_output.weight_version
 
         # check that the lengths would match up
         if len(self.logprobs) > 0:
             assert len(self.response_ids) == len(self.logprobs), f"length mismatch between response_ids and logprobs, got {len(self.response_ids)}, {len(self.logprobs)}"
 
     def to_dict(self) -> dict:
+        from rllm.tools.tool_base import ToolCall, ToolOutput
+
+        # Helper function to recursively convert ToolCall and ToolOutput objects to dicts
+        def _serialize_value(value):
+            if isinstance(value, ToolCall | ToolOutput):
+                return value.to_dict()
+            elif isinstance(value, list):
+                return [_serialize_value(item) for item in value]
+            elif isinstance(value, dict):
+                return {k: _serialize_value(v) for k, v in value.items()}
+            else:
+                return value
+
         return {
             "prompt_ids": self.prompt_ids,
             "response_ids": self.response_ids,
             "logprobs": self.logprobs,
-            "chat_completions": self.chat_completions,
+            "chat_completions": _serialize_value(self.chat_completions),
             "observation": self.observation,
             "thought": self.thought,
             "action": self.action.action if isinstance(self.action, Action) else self.action,
@@ -96,6 +116,7 @@ class Step:
             "done": self.done,
             "mc_return": self.mc_return,
             "advantage": self.advantage,
+            "weight_version": self.weight_version,
         }
 
     @classmethod
@@ -116,7 +137,8 @@ class Step:
             reward=data["reward"],
             done=data["done"],
             mc_return=data["mc_return"],
-            advantage=data["advantage"],
+            advantage=data.get("advantage", 0.0),
+            weight_version=data.get("weight_version"),
         )
 
     @classmethod
@@ -125,6 +147,7 @@ class Step:
             prompt_ids=model_output.prompt_ids or [],
             response_ids=model_output.completion_ids or [],
             logprobs=model_output.logprobs or [],
+            routing_matrices=getattr(model_output, "routing_matrices", None),
             chat_completions=(messages or []) + [{"role": "assistant", "content": model_output.content, "reasoning": model_output.reasoning}],
             thought=model_output.reasoning or "",
             action=action,
