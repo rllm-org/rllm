@@ -225,7 +225,7 @@ class OpenAIEngine(RolloutEngine):
                 print(f"Error: {e}, retrying...")
                 await asyncio.sleep(1)
 
-    async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
+    async def _get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         if self._use_chat_completions:
             accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
             if accumulate_reasoning:

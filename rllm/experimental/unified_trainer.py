@@ -801,41 +801,30 @@ class AgentTrainer:
         backend: Literal["verl", "tinker", "fireworks"] = "verl",
         **kwargs,
     ):
-        if backend == "verl":
-            from rllm.experimental.verl.verl_launcher import VerlTrainerLauncher
+        match backend:
+            case "verl":
+                from rllm.experimental.verl.verl_launcher import VerlTrainerLauncher
 
-            self.launcher = VerlTrainerLauncher(
-                config=config,
-                workflow_class=workflow_class,
-                train_dataset=train_dataset,
-                val_dataset=val_dataset,
-                workflow_args=workflow_args,
-                **kwargs,
-            )
-        elif backend == "tinker":
-            from rllm.trainer.tinker.tinker_launcher import TinkerTrainerLauncher
+                launcher_cls = VerlTrainerLauncher
+            case "tinker":
+                from rllm.trainer.tinker.tinker_launcher import TinkerTrainerLauncher
 
-            self.launcher = TinkerTrainerLauncher(
-                config=config,
-                workflow_class=workflow_class,
-                train_dataset=train_dataset,
-                val_dataset=val_dataset,
-                workflow_args=workflow_args,
-                **kwargs,
-            )
-        elif backend == "fireworks":
-            from rllm.trainer.fireworks.fireworks_launcher import (
-                FireworksTrainerLauncher,
-            )
+                launcher_cls = TinkerTrainerLauncher
+            case "fireworks":
+                from rllm.trainer.fireworks.fireworks_launcher import FireworksTrainerLauncher
 
-            self.launcher = FireworksTrainerLauncher(
-                config=config,
-                workflow_class=workflow_class,
-                train_dataset=train_dataset,
-                val_dataset=val_dataset,
-                workflow_args=workflow_args,
-                **kwargs,
-            )
+                launcher_cls = FireworksTrainerLauncher
+            case _:
+                raise ValueError(f"Unsupported backend: {backend}, must be one of ['verl', 'tinker', 'fireworks']")
+
+        self.launcher = launcher_cls(
+            config=config,
+            workflow_class=workflow_class,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            workflow_args=workflow_args,
+            **kwargs,
+        )
 
     def train(self):
         self.launcher.train()

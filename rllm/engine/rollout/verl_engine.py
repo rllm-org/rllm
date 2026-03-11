@@ -71,7 +71,7 @@ class VerlEngine(RolloutEngine):
         return token_output
 
     @override
-    async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
+    async def _get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         # these go to the parser
         tools = kwargs.pop("tools", [])
         accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)

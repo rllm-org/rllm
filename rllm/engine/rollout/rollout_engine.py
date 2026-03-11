@@ -84,16 +84,14 @@ class RolloutEngine:
         self._gate.set()
 
     def on_model_call_complete(self) -> None:
-        """Unregister active call. Engines must call this at the END of
-        get_model_response() (in a finally block)."""
+        """Unregister active call. Engines will call this at the END of get_model_response()."""
         self._active_calls -= 1
         if self._active_calls <= 0:
             self._active_calls = 0
             self._drained_event.set()
 
     async def wait_for_gate(self) -> None:
-        """Wait until gate is open, then register as active call.
-        Engines must call this at the START of get_model_response()."""
+        """Wait until gate is open, then register as active call. Engines will call this at the START of get_model_response()."""
         await self._gate.wait()
         self._active_calls += 1
         self._drained_event.clear()
@@ -103,9 +101,15 @@ class RolloutEngine:
         await self._drained_event.wait()
 
     # --- Model response ---
+    async def _get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
+        raise NotImplementedError(f"_get_model_response is not implemented for {self.__class__.__name__}")
 
     async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
-        raise NotImplementedError("get_model_response is not implemented")
+        await self.wait_for_gate()
+        try:
+            return await self._get_model_response(messages, **kwargs)
+        finally:
+            self.on_model_call_complete()
 
     def assemble_model_output(self, token_input: TokenInput, token_output: TokenOutput) -> ModelOutput:
         """

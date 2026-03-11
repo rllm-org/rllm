@@ -236,7 +236,7 @@ class TinkerEngine(RolloutEngine):
         )
 
     @override
-    async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
+    async def _get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         """
         Generate model response for a given set of messages.
 
