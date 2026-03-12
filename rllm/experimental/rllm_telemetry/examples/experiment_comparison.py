@@ -188,9 +188,21 @@ async def main():
     runner_minimal = InMemoryRunner(agent=agent_minimal, app_name=APP_NAME)
     runner_detailed = InMemoryRunner(agent=agent_detailed, app_name=APP_NAME)
 
-    # Attach observability telemetry (color-coded stdout traces)
-    rllm_telemetry.instrument(runner_minimal, backend="stdout", capture_content=False)
-    rllm_telemetry.instrument(runner_detailed, backend="stdout", capture_content=False)
+    # Attach observability telemetry (stdout + stream to rllm_ui backend)
+    rllm_telemetry.instrument(
+        runner_minimal,
+        backend="stdout",
+        capture_content=False,
+        agent_endpoint="http://localhost:8000",
+        agent_session_name="minimal-prompt",
+    )
+    rllm_telemetry.instrument(
+        runner_detailed,
+        backend="stdout",
+        capture_content=False,
+        agent_endpoint="http://localhost:8000",
+        agent_session_name="detailed-prompt",
+    )
 
     # LLM judge scorer
     judge = LlmJudge(

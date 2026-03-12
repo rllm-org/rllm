@@ -44,3 +44,17 @@ class RllmConfig:
     color: bool = True
     """Enable ANSI color output for the ``stdout`` backend.  Ignored by
     other backends."""
+
+    # --- Agent trajectory streaming (to rllm_ui backend) ---
+    agent_endpoint: str = ""
+    """Base URL of the rllm_ui backend for real-time agent trajectory
+    streaming.  When set, trajectory spans are sent here per-record.
+    Example: ``"http://localhost:8000"``."""
+
+    agent_api_key: str = ""
+    """API key for authenticating with the rllm_ui agent endpoint.
+    Falls back to ``api_key`` if not set."""
+
+    agent_session_name: str = ""
+    """Human-readable name for the agent session.  Auto-generated if
+    empty."""

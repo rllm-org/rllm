@@ -2,7 +2,7 @@
 
 > **Repository**: [rllm-org/rllm-ui](https://github.com/rllm-org/rllm-ui)
 
-Web interface for monitoring and analyzing [rLLM](https://github.com/rllm-org/rllm) training runs in real time. Think of wandb dedicated to rLLM, with powerful features such as episode/trajectory search, observability AI agent and more.
+Web interface for monitoring and analyzing training runs in real time. Think of wandb dedicated to rLLM, with powerful features such as episode/trajectory search, observability AI agent and more. **Only supports training runs using Unified Trainer**.
 
 ---
 

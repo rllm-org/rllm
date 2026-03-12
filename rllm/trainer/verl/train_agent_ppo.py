@@ -29,11 +29,9 @@ def main(config):
 def run_ppo_agent(config):
     # Check if Ray is not initialized
     if not ray.is_initialized():
-        # read off all the `ray_init` settings from the config
-        if config is not None and hasattr(config, "ray_init"):
-            ray_init_settings = {k: v for k, v in config.ray_init.items() if v is not None}
-        else:
-            ray_init_settings = {}
+        from rllm.trainer.ray_init_utils import get_ray_init_settings
+
+        ray_init_settings = get_ray_init_settings(config)
         ray.init(runtime_env=get_ppo_ray_runtime_env(), **ray_init_settings)
 
     # Create a remote instance of the TaskRunner class, and

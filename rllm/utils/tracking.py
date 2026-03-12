@@ -311,6 +311,7 @@ class UILogger:
 
     def __init__(self, project_name: str, experiment_name: str, config, source_metadata=None):
         import logging
+        import queue
         import threading
 
         import httpx
@@ -348,6 +349,12 @@ class UILogger:
             self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
             self._heartbeat_thread.start()
 
+            # Background log worker
+            self._queue = queue.Queue(maxsize=64)
+            self._worker_stop = threading.Event()
+            self._worker_thread = threading.Thread(target=self._log_worker, daemon=True)
+            self._worker_thread.start()
+
             # Install TeeStream to capture stdout/stderr
             self._original_stdout = sys.stdout
             self._original_stderr = sys.stderr
@@ -367,89 +374,120 @@ class UILogger:
             except Exception:
                 pass
 
+    def _log_worker(self):
+        """Background worker that sends log data to the UI backend."""
+        import queue
+
+        while True:
+            try:
+                item = self._queue.get(timeout=1.0)
+            except queue.Empty:
+                if self._worker_stop.is_set():
+                    return
+                continue
+            if item is None:  # sentinel for shutdown
+                self._queue.task_done()
+                return
+            step, metrics_payload, episodes_payloads, groups_payloads = item
+            try:
+                self._send_log_data(step, metrics_payload, episodes_payloads, groups_payloads)
+            except Exception as e:
+                self.logger.warning(f"UILogger worker failed for step {step}: {e}")
+            finally:
+                self._queue.task_done()
+
+    def _send_log_data(self, step, metrics_payload, episodes_payloads, groups_payloads):
+        """Send pre-serialized data to UI backend. Runs on worker thread."""
+        if metrics_payload is not None:
+            try:
+                self.logger.info(f"Sending metrics to UI [step {step}]")
+                self.client.post("/api/metrics", json=metrics_payload)
+            except Exception as e:
+                self.logger.warning(f"Failed to send metrics to UI: {e}")
+
+        if episodes_payloads:
+            try:
+                self.logger.info(f"Sending {len(episodes_payloads)} episodes to UI [step {step}]")
+                for ep in episodes_payloads:
+                    self.client.post("/api/episodes", json=ep)
+            except Exception as e:
+                self.logger.warning(f"Failed to send episodes to UI: {e}")
+
+        if groups_payloads:
+            try:
+                self.logger.info(f"Sending {len(groups_payloads)} trajectory groups to UI [step {step}]")
+                for gp in groups_payloads:
+                    self.client.post("/api/trajectory-groups", json=gp)
+            except Exception as e:
+                self.logger.warning(f"Failed to send trajectory groups to UI: {e}")
+
     def log(self, data, step, episodes=None, trajectory_groups=None):
         """Log metrics and optionally episodes/trajectory_groups.
 
-        Args:
-            data: Dictionary of metrics to log
-            step: Current training step
-            episodes: Optional list of Episode objects with trajectory data
-            trajectory_groups: Optional list of TrajectoryGroup objects
+        Serializes data immediately (to snapshot before mutation), then
+        enqueues for background sending so the training loop is not blocked.
         """
         if self.session_id is None:
             return
 
         import json
+        import queue
 
-        # Send metrics
-        try:
-            metrics_json = json.loads(json.dumps(data, default=self._json_serializer))
-            self.client.post(
-                "/api/metrics",
-                json={"session_id": self.session_id, "step": step, "data": metrics_json},
-            )
-        except Exception as e:
-            self.logger.warning(f"Failed to send metrics to UI: {e}")
+        # Serialize metrics (snapshot before mutation), skip empty data
+        metrics_payload = None
+        if data:
+            try:
+                metrics_json = json.loads(json.dumps(data, default=self._json_serializer))
+                metrics_payload = {"session_id": self.session_id, "step": step, "data": metrics_json}
+                self.logger.info(f"Queueing metrics to send to UI [step {step}]")
+            except Exception as e:
+                self.logger.warning(f"Failed to serialize metrics: {e}")
 
-        # Send episodes
+        # Serialize episodes
+        episodes_payloads = None
         if episodes:
             try:
-                self.logger.info(f"Sending {len(episodes)} episodes to UI")
+                _STEP_DROP_KEYS = {"prompt_ids", "response_ids", "logprobs", "model_output"}
+                episodes_payloads = []
                 for episode in episodes:
-                    episode_data = episode.to_dict()
-
-                    # Add API context fields and remap id to episode_id
-                    episode_data["session_id"] = self.session_id
-                    episode_data["step"] = step
-                    episode_data["episode_id"] = episode_data.pop("id")
-
-                    # Strip fields from steps to keep UI payloads lightweight
-                    _STEP_DROP_KEYS = {"prompt_ids", "response_ids", "logprobs", "model_output"}
-                    for traj in episode_data.get("trajectories", []):
+                    ep = episode.to_dict()
+                    ep["session_id"] = self.session_id
+                    ep["step"] = step
+                    ep["episode_id"] = ep.pop("id")
+                    for traj in ep.get("trajectories", []):
                         for s in traj.get("steps", []):
                             for key in _STEP_DROP_KEYS:
                                 s.pop(key, None)
-
-                    # Serialize to handle numpy types
-                    episode_json = json.loads(json.dumps(episode_data, default=self._json_serializer))
-                    response = self.client.post("/api/episodes", json=episode_json)
-                    self.logger.debug(f"Episode {episode.id} sent, status: {response.status_code}")
+                    episodes_payloads.append(json.loads(json.dumps(ep, default=self._json_serializer)))
+                self.logger.info(f"Queueing {len(episodes_payloads)} episodes to send to UI [step {step}]")
             except Exception as e:
-                self.logger.warning(f"Failed to send episodes to UI: {e}")
-                import traceback
+                self.logger.warning(f"Failed to serialize episodes: {e}")
 
-                self.logger.warning(f"Traceback: {traceback.format_exc()}")
-
-        # Send trajectory groups (only metadata is sent)
+        # Serialize trajectory groups
+        groups_payloads = None
         if trajectory_groups:
             try:
-                self.logger.info(f"Sending {len(trajectory_groups)} trajectory groups to UI")
+                groups_payloads = []
                 for group in trajectory_groups:
-                    # Compute aggregates from trajectories
-                    num_trajectories = len(group.trajectories)
                     rewards = [float(t.reward) for t in group.trajectories if t.reward is not None]
-                    avg_reward = sum(rewards) / len(rewards) if rewards else None
-
-                    # Slim metadata: only episode_id references
-                    metadata = [{"episode_id": f"{m['task_id']}:{m['rollout_idx']}"} for m in group.metadata]
-
-                    group_data = {
+                    gd = {
                         "session_id": self.session_id,
                         "step": step,
                         "group_id": group.group_id,
-                        "num_trajectories": num_trajectories,
-                        "avg_reward": avg_reward,
-                        "metadata": metadata,
+                        "num_trajectories": len(group.trajectories),
+                        "avg_reward": sum(rewards) / len(rewards) if rewards else None,
+                        "metadata": [{"episode_id": f"{m['task_id']}:{m['rollout_idx']}"} for m in group.metadata],
                     }
-                    # Serialize to handle numpy types
-                    group_json = json.loads(json.dumps(group_data, default=self._json_serializer))
-                    response = self.client.post("/api/trajectory-groups", json=group_json)
-                    self.logger.debug(f"TrajectoryGroup {group.group_id} sent, status: {response.status_code}")
+                    groups_payloads.append(json.loads(json.dumps(gd, default=self._json_serializer)))
+                self.logger.info(f"Queueing {len(groups_payloads)} trajectory groups to send to UI [step {step}]")
             except Exception as e:
-                self.logger.warning(f"Failed to send trajectory groups to UI: {e}")
-                import traceback
+                self.logger.warning(f"Failed to serialize trajectory groups: {e}")
 
-                self.logger.warning(f"Traceback: {traceback.format_exc()}")
+        # Enqueue for background sending
+        try:
+            self._queue.put((step, metrics_payload, episodes_payloads, groups_payloads), timeout=10)
+        except queue.Full:
+            self.logger.warning("UILogger queue full, dropping log for step %d", step)
 
     def _json_serializer(self, obj):
         """Convert numpy types and other non-JSON types to native Python."""
@@ -476,6 +514,14 @@ class UILogger:
         """
         if self.session_id is None:
             return
+
+        # Drain the log queue and stop worker
+        if hasattr(self, "_worker_thread"):
+            self._worker_stop.set()
+            self._queue.put(None)  # sentinel
+            self._worker_thread.join(timeout=30)
+            if self._worker_thread.is_alive():
+                self.logger.warning("UILogger worker thread did not finish within 30s")
 
         # Stop heartbeat thread
         self._heartbeat_stop.set()
