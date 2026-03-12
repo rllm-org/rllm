@@ -381,11 +381,15 @@ def train_cmd(
 ):
     """Train a model on a benchmark dataset using RL."""
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
+    _ui_explicit = enable_ui is not None
     if enable_ui is None:
         from rllm.experimental.eval.config import load_ui_config
 
         ui_config = load_ui_config()
         enable_ui = bool(os.environ.get("RLLM_API_KEY") or ui_config.get("ui_api_key"))
+
+    if not enable_ui and not _ui_explicit:
+        console.print("  [blue]Tip: Try rllm UI for live monitoring! Run [bold]rllm login[/bold] to get started.[/]")
 
     if experiment is None:
         experiment = benchmark

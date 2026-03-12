@@ -48,7 +48,7 @@ class EvalRunner:
         self.benchmark_name = benchmark_name
         self._executor = ThreadPoolExecutor(max_workers=concurrency)
 
-    async def run(self, dataset, agent: AgentFlow, evaluator: Evaluator, agent_name: str = "") -> tuple[EvalResult, list]:
+    async def run(self, dataset, agent: AgentFlow, evaluator: Evaluator, agent_name: str = "", on_episode_complete=None) -> tuple[EvalResult, list]:
         """Run evaluation on a dataset using the given agent and evaluator.
 
         Args:
@@ -56,6 +56,7 @@ class EvalRunner:
             agent: AgentFlow instance with a .run() method.
             evaluator: Evaluator instance with an .evaluate() method.
             agent_name: Name of the agent for reporting.
+            on_episode_complete: Optional callback called with each completed episode for progressive logging.
 
         Returns:
             Tuple of (EvalResult with per-example and aggregate metrics, list of Episodes).
@@ -116,6 +117,13 @@ class EvalRunner:
 
                     # Clear sandbox artifact before returning (not serializable)
                     episode.artifacts.pop("_sandbox", None)
+
+                    # Notify caller for progressive logging
+                    if on_episode_complete is not None:
+                        try:
+                            on_episode_complete(episode)
+                        except Exception:
+                            logger.debug("on_episode_complete callback error", exc_info=True)
 
                     return (
                         EvalItem(

@@ -152,7 +152,52 @@ def _run_eval(benchmark: str, agent_name: str, evaluator_name: str | None, base_
         catalog_entry=catalog_entry,
         benchmark_name=benchmark,
     )
-    result, episodes = asyncio.run(runner.run(dataset, agent, evaluator, agent_name=agent_name))
+
+    # Create UI logger before run for progressive episode uploads
+    ui_logger = None
+    on_episode_complete = None
+    _flush_episode_buffer = None
+    if enable_ui:
+        from datetime import datetime, timezone
+
+        from rllm.utils.tracking import UILogger
+
+        timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+        experiment = f"{model}_{agent_name}_{timestamp}".replace("/", "_")
+        ui_logger = UILogger(
+            project_name=benchmark,
+            experiment_name=experiment,
+            config={"model": model, "agent": agent_name, "benchmark": benchmark, "split": split},
+            session_type="eval",
+        )
+        if ui_logger.session_id:
+            import threading
+
+            _episode_buffer = []
+            _buffer_lock = threading.Lock()
+            _BATCH_SIZE = 50
+
+            def _flush_episode_buffer():
+                with _buffer_lock:
+                    if _episode_buffer:
+                        ui_logger.log(data={}, step=0, episodes=list(_episode_buffer))
+                        _episode_buffer.clear()
+
+            def on_episode_complete(episode):
+                with _buffer_lock:
+                    _episode_buffer.append(episode)
+                    should_flush = len(_episode_buffer) >= _BATCH_SIZE
+                    batch = list(_episode_buffer) if should_flush else None
+                    if should_flush:
+                        _episode_buffer.clear()
+                if batch:
+                    ui_logger.log(data={}, step=0, episodes=batch)
+
+    result, episodes = asyncio.run(runner.run(dataset, agent, evaluator, agent_name=agent_name, on_episode_complete=on_episode_complete))
+
+    # Flush remaining buffered episodes
+    if _flush_episode_buffer is not None:
+        _flush_episode_buffer()
 
     # Print results
     pct = f"{result.score * 100:.1f}%"
@@ -175,29 +220,10 @@ def _run_eval(benchmark: str, agent_name: str, evaluator_name: str | None, base_
     saved_path = result.save(output_path)
     console.print(f"\n  [dim]Saved to {saved_path}[/]")
 
-    # Send to UI if requested
-    if enable_ui:
-        import os
-        from datetime import datetime, timezone
-
-        from rllm.utils.tracking import UILogger
-
-        ui_url = os.environ.get("RLLM_UI_URL", "https://ui.rllm-project.com")
-        timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
-        experiment = f"{model}_{agent_name}_{timestamp}".replace("/", "_")
-        ui_logger = UILogger(
-            project_name=benchmark,
-            experiment_name=experiment,
-            config={"model": model, "agent": agent_name, "benchmark": benchmark, "split": split},
-            session_type="eval",
-        )
-        if ui_logger.session_id:
-            for episode in episodes:
-                ui_logger.log(data={}, step=0, episodes=[episode])
-            # Send eval result
-            ui_logger.log_eval_result(result)
-            ui_logger.finish()
-            console.print(f"  [dim]Sent to UI at {ui_url}[/]")
+    # Send eval result and finish UI session
+    if ui_logger is not None and ui_logger.session_id:
+        ui_logger.log_eval_result(result)
+        ui_logger.finish()
 
     console.print()
 
@@ -219,6 +245,7 @@ def _run_eval(benchmark: str, agent_name: str, evaluator_name: str | None, base_
 def eval_cmd(benchmark: str, agent_name: str | None, evaluator_name: str | None, base_url: str | None, model: str | None, split: str | None, concurrency: int, max_examples: int | None, output_path: str | None, search_backend: str | None, sandbox_backend: str | None, sandbox_concurrency: int | None, enable_ui: bool | None):
     """Evaluate a model on a benchmark dataset."""
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
+    _ui_explicit = enable_ui is not None
     if enable_ui is None:
         import os
 
@@ -226,6 +253,9 @@ def eval_cmd(benchmark: str, agent_name: str | None, evaluator_name: str | None,
 
         ui_config = load_ui_config()
         enable_ui = bool(os.environ.get("RLLM_API_KEY") or ui_config.get("ui_api_key"))
+
+    if not enable_ui and not _ui_explicit:
+        console.print("  [blue]Tip: Try rllm UI for live monitoring! Run [bold]rllm login[/bold] to get started.[/]")
 
     proxy_manager = None
 
