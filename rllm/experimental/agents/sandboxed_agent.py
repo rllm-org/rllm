@@ -15,7 +15,7 @@ import subprocess
 import uuid
 from abc import ABC, abstractmethod
 
-from rllm.experimental.eval.types import AgentConfig
+from rllm.experimental.eval.types import AgentConfig, Task
 from rllm.sdk.sandbox.protocol import Sandbox
 from rllm.types import Episode
 
@@ -78,7 +78,7 @@ class SandboxedAgentFlow(ABC):
         # Subclass hook for additional setup
         self.on_sandbox_ready(task, config)
 
-    def on_sandbox_ready(self, task: dict, config: AgentConfig) -> None:
+    def on_sandbox_ready(self, task: dict, config: AgentConfig) -> None:  # noqa: B027
         """Hook for subclasses to run additional setup after sandbox creation."""
 
     def teardown_sandbox(self) -> None:
@@ -95,7 +95,7 @@ class SandboxedAgentFlow(ABC):
         return self.image
 
     @abstractmethod
-    def run(self, task: dict, config: AgentConfig) -> Episode: ...
+    def run(self, task: Task, config: AgentConfig) -> Episode: ...
 
 
 def create_sandbox(backend: str, name: str, image: str, **kwargs) -> Sandbox:
@@ -113,14 +113,10 @@ def create_sandbox(backend: str, name: str, image: str, **kwargs) -> Sandbox:
 
         return ModalSandbox(name=name, **kwargs)
     else:
-        raise ValueError(
-            f"Unknown sandbox backend: {backend}. Available: docker, local, modal"
-        )
+        raise ValueError(f"Unknown sandbox backend: {backend}. Available: docker, local, modal")
 
 
-def _safe_exec(
-    sandbox: Sandbox, command: str, timeout: float | None = None
-) -> str:
+def _safe_exec(sandbox: Sandbox, command: str, timeout: float | None = None) -> str:
     """Execute command, returning stderr on non-zero exit instead of raising."""
     try:
         return sandbox.exec(command, timeout=timeout)

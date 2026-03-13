@@ -130,10 +130,10 @@ class CompetitionCodingAgent(BaseAgent):
         if response.count("</think>") == 1:
             thought, sep, action = response.partition("</think>")
             thought = thought + sep
-            action = Action(action.strip())
+            action = Action(action=action.strip())
         else:
             thought = None
-            action = Action(response.strip())
+            action = Action(action=response.strip())
 
         cur_step.thought = thought
         cur_step.action = action

@@ -711,53 +711,127 @@ class TestERQATransform:
 class TestVLMOutputSchema:
     """Verify all VLM transforms produce the expected fields."""
 
-    @pytest.mark.parametrize("transform_fn,row", [
-        (mmmu_transform, {
-            "question": "Q", "options": '["A", "B"]', "answer": "A", "subfield": "S",
-        }),
-        (mmmu_pro_transform, {
-            "question": "Q", "options": '["A", "B"]', "answer": "A", "subject": "S",
-        }),
-        (mathvision_transform, {
-            "question": "Q", "options": [], "answer": "42",
-        }),
-        (mathvista_transform, {
-            "query": "Q", "answer": "42", "answer_type": "int", "choices": None,
-        }),
-        (dynamath_transform, {
-            "question": "Q", "ground_truth": "42", "answer_type": "int",
-        }),
-        (zerobench_transform, {
-            "question_text": "Q", "question_answer": "A",
-        }),
-        (zerobench_sub_transform, {
-            "question_text": "Q", "question_answer": "A",
-        }),
-        (vlmsareblind_transform, {
-            "prompt": "Q", "groundtruth": "{1}",
-        }),
-        (babyvision_transform, {
-            "question": "Q", "ansType": "blank", "blankAns": "A",
-        }),
-        (ai2d_transform, {
-            "question": "Q", "options": ["A", "B"], "answer": "A",
-        }),
-        (ocrbench_transform, {
-            "question": "Q", "answer": ["text"],
-        }),
-        (charxiv_transform, {
-            "reasoning_q": "Q", "reasoning_a": "A",
-        }),
-        (cc_ocr_transform, {
-            "question": "Q", "answer": "A",
-        }),
-        (countbenchqa_transform, {
-            "question": "Q", "number": 5,
-        }),
-        (erqa_transform, {
-            "question": "Q", "images": [], "answer": "A",
-        }),
-    ])
+    @pytest.mark.parametrize(
+        "transform_fn,row",
+        [
+            (
+                mmmu_transform,
+                {
+                    "question": "Q",
+                    "options": '["A", "B"]',
+                    "answer": "A",
+                    "subfield": "S",
+                },
+            ),
+            (
+                mmmu_pro_transform,
+                {
+                    "question": "Q",
+                    "options": '["A", "B"]',
+                    "answer": "A",
+                    "subject": "S",
+                },
+            ),
+            (
+                mathvision_transform,
+                {
+                    "question": "Q",
+                    "options": [],
+                    "answer": "42",
+                },
+            ),
+            (
+                mathvista_transform,
+                {
+                    "query": "Q",
+                    "answer": "42",
+                    "answer_type": "int",
+                    "choices": None,
+                },
+            ),
+            (
+                dynamath_transform,
+                {
+                    "question": "Q",
+                    "ground_truth": "42",
+                    "answer_type": "int",
+                },
+            ),
+            (
+                zerobench_transform,
+                {
+                    "question_text": "Q",
+                    "question_answer": "A",
+                },
+            ),
+            (
+                zerobench_sub_transform,
+                {
+                    "question_text": "Q",
+                    "question_answer": "A",
+                },
+            ),
+            (
+                vlmsareblind_transform,
+                {
+                    "prompt": "Q",
+                    "groundtruth": "{1}",
+                },
+            ),
+            (
+                babyvision_transform,
+                {
+                    "question": "Q",
+                    "ansType": "blank",
+                    "blankAns": "A",
+                },
+            ),
+            (
+                ai2d_transform,
+                {
+                    "question": "Q",
+                    "options": ["A", "B"],
+                    "answer": "A",
+                },
+            ),
+            (
+                ocrbench_transform,
+                {
+                    "question": "Q",
+                    "answer": ["text"],
+                },
+            ),
+            (
+                charxiv_transform,
+                {
+                    "reasoning_q": "Q",
+                    "reasoning_a": "A",
+                },
+            ),
+            (
+                cc_ocr_transform,
+                {
+                    "question": "Q",
+                    "answer": "A",
+                },
+            ),
+            (
+                countbenchqa_transform,
+                {
+                    "question": "Q",
+                    "number": 5,
+                },
+            ),
+            (
+                erqa_transform,
+                {
+                    "question": "Q",
+                    "images": [],
+                    "answer": "A",
+                },
+            ),
+        ],
+    )
     def test_has_required_fields(self, transform_fn, row):
         result = transform_fn(row)
         assert "question" in result

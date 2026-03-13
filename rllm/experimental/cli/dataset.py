@@ -6,9 +6,37 @@
 from __future__ import annotations
 
 import click
+from rich import box
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 
-from rllm.experimental.cli._display import format_table
 from rllm.experimental.cli._pull import load_dataset_catalog, pull_dataset
+
+_console = Console()
+
+_CATEGORY_ICONS = {
+    "math": "📐",
+    "code": "💻",
+    "qa": "❓",
+    "mcq": "🔘",
+    "agentic": "🤖",
+    "instruction_following": "📋",
+    "translation": "🌐",
+    "vlm": "👁️ ",
+    "search": "🔍",
+}
+
+_CATEGORY_LABELS = {
+    "instruction_following": "instruct",
+}
+
+_STATUS_STYLES = {
+    "pulled": ("bold green", "●"),
+    "available": ("dim", "○"),
+    "local": ("bold yellow", "◆"),
+}
 
 
 @click.group()
@@ -17,8 +45,8 @@ def dataset():
 
 
 @dataset.command(name="list")
-@click.option("--all", "show_all", is_flag=True, help="Show all available datasets from the catalog including undownloaded ones.")
-def list_datasets(show_all: bool):
+@click.option("--local", "local_only", is_flag=True, help="Show only locally pulled datasets.")
+def list_datasets(local_only: bool):
     """List datasets."""
     from rllm.data import DatasetRegistry
 
@@ -26,30 +54,103 @@ def list_datasets(show_all: bool):
     catalog_datasets = catalog.get("datasets", {})
     local_names = set(DatasetRegistry.get_dataset_names())
 
-    if show_all:
-        headers = ["Name", "Category", "Status", "Description"]
-        rows = []
+    if not local_only:
+        # Group datasets by category
+        by_category: dict[str, list[tuple[str, dict, str]]] = {}
         for name, info in sorted(catalog_datasets.items()):
             status = "pulled" if name in local_names else "available"
-            rows.append([name, info.get("category", ""), status, info.get("description", "")])
-        # Also show locally registered datasets not in catalog
+            cat = info.get("category", "other")
+            by_category.setdefault(cat, []).append((name, info, status))
         for name in sorted(local_names - set(catalog_datasets.keys())):
             ds_info = DatasetRegistry.get_dataset_info(name)
-            cat = ds_info.get("metadata", {}).get("category", "") if ds_info else ""
-            rows.append([name, cat, "local", ""])
-        click.echo(format_table(headers, rows))
+            cat = ds_info.get("metadata", {}).get("category", "other") if ds_info else "other"
+            by_category.setdefault(cat, []).append((name, {"description": ""}, "local"))
+
+        total = sum(len(v) for v in by_category.values())
+        pulled = sum(1 for entries in by_category.values() for _, _, s in entries if s == "pulled")
+
+        table = Table(
+            box=box.ROUNDED,
+            show_header=True,
+            header_style="bold #00D4FF",
+            padding=(0, 1),
+            border_style="dim #0077FF",
+            title=f"[bold]Dataset Catalog[/]  [dim]({total} datasets, {pulled} pulled)[/]",
+            title_style="bold",
+            expand=False,
+            width=min(_console.width, 96),
+        )
+        table.add_column("Dataset", style="bold #00CCFF", min_width=18, no_wrap=True)
+        table.add_column("Status", justify="center", width=13, no_wrap=True)
+        table.add_column("Description", style="dim", overflow="ellipsis", no_wrap=True)
+
+        first_category = True
+        for cat in sorted(by_category.keys()):
+            entries = by_category[cat]
+            icon = _CATEGORY_ICONS.get(cat, "📁")
+            label = _CATEGORY_LABELS.get(cat, cat).upper()
+            if not first_category:
+                table.add_row("", "", "")
+            first_category = False
+            table.add_row(
+                f"[bold #FFD700]{icon} {label}[/]",
+                "",
+                f"[dim]{len(entries)} dataset{'s' if len(entries) != 1 else ''}[/]",
+            )
+            for name, info, status in entries:
+                style, dot = _STATUS_STYLES.get(status, ("dim", "○"))
+                status_text = f"[{style}]{dot} {status}[/]"
+                desc = info.get("description", "")
+                if len(desc) > 44:
+                    desc = desc[:41] + "..."
+                table.add_row(f"  {name}", status_text, desc)
+
+        _console.print()
+        _console.print(table)
+        _console.print()
+        _console.print(Text("  Legend: ", style="bold") + Text("● pulled  ", style="bold green") + Text("○ available  ", style="dim") + Text("◆ local", style="bold yellow"))
+        _console.print(Text("  Run ", style="dim") + Text("rllm dataset pull <name>", style="bold #00D4FF") + Text(" to download a dataset.", style="dim"))
+        _console.print()
     else:
         if not local_names:
-            click.echo("No datasets pulled yet. Use 'rllm dataset list --all' to see available datasets.")
+            _console.print()
+            _console.print(
+                Panel(
+                    "[dim]No datasets pulled yet.[/]\n\nRun [bold #00D4FF]rllm dataset list --all[/] to see available datasets.",
+                    border_style="dim #0077FF",
+                    title="[bold]Datasets[/]",
+                    expand=False,
+                    padding=(1, 3),
+                )
+            )
+            _console.print()
             return
-        headers = ["Name", "Splits", "Category"]
-        rows = []
+
+        table = Table(
+            box=box.ROUNDED,
+            show_header=True,
+            header_style="bold #00D4FF",
+            padding=(0, 2),
+            border_style="dim #0077FF",
+            title=f"[bold]Local Datasets[/]  [dim]({len(local_names)} pulled)[/]",
+            title_style="bold",
+            expand=False,
+        )
+        table.add_column("Dataset", style="bold #00CCFF", min_width=20)
+        table.add_column("Category", justify="center", min_width=10)
+        table.add_column("Splits", style="#88BBFF")
+
         for name in sorted(local_names):
             splits = DatasetRegistry.get_dataset_splits(name)
             ds_info = DatasetRegistry.get_dataset_info(name)
             cat = ds_info.get("metadata", {}).get("category", "") if ds_info else ""
-            rows.append([name, ", ".join(splits), cat])
-        click.echo(format_table(headers, rows))
+            icon = _CATEGORY_ICONS.get(cat, "📁")
+            label = _CATEGORY_LABELS.get(cat, cat)
+            table.add_row(name, f"{icon} {label}" if cat else "", ", ".join(splits))
+
+        _console.print()
+        _console.print(table)
+        _console.print()
 
 
 @dataset.command()

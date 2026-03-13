@@ -24,7 +24,7 @@ class Step(_StepBase):
     response_ids: list[int] = Field(default_factory=list)
     logprobs: list[float] = Field(default_factory=list)
 
-    chat_completions: list[dict[str, str]] = Field(default_factory=list)
+    chat_completions: list[dict[str, Any]] = Field(default_factory=list)
 
     observation: Any = None
     thought: str = ""

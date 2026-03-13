@@ -11,16 +11,15 @@ and associated kwargs that define the constraint parameters.
 from __future__ import annotations
 
 import re
-import string
 from typing import Any
 
 from rllm.experimental.eval.types import EvalOutput, Signal, _extract_agent_answer
 from rllm.types import Episode
 
-
 # ---------------------------------------------------------------------------
 # Instruction verification functions
 # ---------------------------------------------------------------------------
+
 
 def _verify_keywords_existence(response: str, keywords: list[str], **kwargs) -> bool:
     """Check if ALL specified keywords exist in the response."""
@@ -72,7 +71,7 @@ def _verify_length_number_words(response: str, num_words: int, relation: str = "
 
 def _verify_length_number_sentences(response: str, num_sentences: int, relation: str = "at least", **kwargs) -> bool:
     """Check sentence count constraint."""
-    sentences = re.split(r'[.!?]+', response.strip())
+    sentences = re.split(r"[.!?]+", response.strip())
     sentences = [s.strip() for s in sentences if s.strip()]
     count = len(sentences)
     if relation == "at least":
@@ -92,26 +91,27 @@ def _verify_length_number_paragraphs(response: str, num_paragraphs: int, **kwarg
 
 def _verify_detectable_format_number_bullet_lists(response: str, num_bullets: int, **kwargs) -> bool:
     """Check bullet list count constraint."""
-    bullet_count = len(re.findall(r'^\s*[-*•]\s', response, re.MULTILINE))
-    numbered_count = len(re.findall(r'^\s*\d+[.)]\s', response, re.MULTILINE))
+    bullet_count = len(re.findall(r"^\s*[-*•]\s", response, re.MULTILINE))
+    numbered_count = len(re.findall(r"^\s*\d+[.)]\s", response, re.MULTILINE))
     return (bullet_count + numbered_count) >= num_bullets
 
 
 def _verify_detectable_format_number_highlighted_sections(response: str, num_highlights: int, **kwargs) -> bool:
     """Check highlighted section count (markdown headers or bold)."""
-    highlights = len(re.findall(r'^\s*#{1,6}\s', response, re.MULTILINE))
-    highlights += len(re.findall(r'\*\*[^*]+\*\*', response))
+    highlights = len(re.findall(r"^\s*#{1,6}\s", response, re.MULTILINE))
+    highlights += len(re.findall(r"\*\*[^*]+\*\*", response))
     return highlights >= num_highlights
 
 
 def _verify_detectable_format_title(response: str, **kwargs) -> bool:
     """Check that response includes a title (wrapped in << >>)."""
-    return bool(re.search(r'<<[^>]+>>', response))
+    return bool(re.search(r"<<[^>]+>>", response))
 
 
 def _verify_detectable_format_json_format(response: str, **kwargs) -> bool:
     """Check that the response is valid JSON or contains a JSON block."""
     import json
+
     # Try direct JSON parse
     try:
         json.loads(response.strip())
@@ -119,7 +119,7 @@ def _verify_detectable_format_json_format(response: str, **kwargs) -> bool:
     except (json.JSONDecodeError, ValueError):
         pass
     # Try to find JSON in markdown code block
-    match = re.search(r'```(?:json)?\s*\n(.*?)\n```', response, re.DOTALL)
+    match = re.search(r"```(?:json)?\s*\n(.*?)\n```", response, re.DOTALL)
     if match:
         try:
             json.loads(match.group(1).strip())
@@ -138,7 +138,7 @@ def _verify_detectable_format_constrained_response(response: str, **kwargs) -> b
 
 def _verify_detectable_content_number_placeholders(response: str, num_placeholders: int, **kwargs) -> bool:
     """Check placeholder count (e.g., [placeholder])."""
-    placeholders = re.findall(r'\[[A-Z][A-Z_ ]*\]', response)
+    placeholders = re.findall(r"\[[A-Z][A-Z_ ]*\]", response)
     return len(placeholders) >= num_placeholders
 
 
@@ -287,6 +287,7 @@ class IFEvalEvaluator:
             kw = instruction_kwargs[i] if i < len(instruction_kwargs) else {}
             if isinstance(kw, str):
                 import json
+
                 try:
                     kw = json.loads(kw)
                 except (json.JSONDecodeError, ValueError):
@@ -305,9 +306,6 @@ class IFEvalEvaluator:
                 Signal(name="loose_accuracy", value=loose_accuracy),
             ],
             metadata={
-                "instruction_results": {
-                    inst_id: passed
-                    for inst_id, passed in zip(instruction_ids, results)
-                },
+                "instruction_results": {inst_id: passed for inst_id, passed in zip(instruction_ids, results, strict=False)},
             },
         )

@@ -20,7 +20,7 @@ def parse_oai_response(response):
     try:
         function_name = response.choices[0].message.tool_calls[0].function.name
         parameters = json.loads(response.choices[0].message.tool_calls[0].function.arguments)
-        action = SWEAction(function_name, parameters)
+        action = SWEAction(function_name=function_name, parameters=parameters)
     except Exception:
         action = SWEAction(function_name="", parameters={})
     return thought, action

@@ -7,7 +7,6 @@ against ground truth function calls using AST matching.
 from __future__ import annotations
 
 import json
-import re
 
 from rllm.experimental.eval.types import EvalOutput, Signal, _extract_agent_answer
 from rllm.types import Episode
@@ -17,7 +16,7 @@ def _normalize_arg_value(value):
     """Normalize argument values for comparison."""
     if isinstance(value, str):
         return value.strip().lower()
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         return float(value)
     if isinstance(value, list):
         return [_normalize_arg_value(v) for v in value]
@@ -48,9 +47,7 @@ def _parse_function_call(call_str: str) -> list[dict]:
     return []
 
 
-def _compare_function_calls(
-    model_calls: list[dict], ground_truth_calls: list
-) -> tuple[bool, dict]:
+def _compare_function_calls(model_calls: list[dict], ground_truth_calls: list) -> tuple[bool, dict]:
     """Compare model function calls against ground truth.
 
     Returns (is_correct, details).

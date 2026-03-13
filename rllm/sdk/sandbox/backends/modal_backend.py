@@ -115,10 +115,7 @@ class ModalSandbox:
                 command,
                 stderr[:500],
             )
-            raise RuntimeError(
-                f"Command failed (exit {exit_code}) in sandbox {self.name}: "
-                f"{command}\n{stderr[:500]}"
-            )
+            raise RuntimeError(f"Command failed (exit {exit_code}) in sandbox {self.name}: {command}\n{stderr[:500]}")
         return stdout
 
     def upload_file(self, local_path: str, remote_path: str) -> None:
@@ -138,9 +135,7 @@ class ModalSandbox:
         import base64
 
         b64 = base64.b64encode(content).decode("ascii")
-        self._exec_unchecked(
-            f"echo '{b64}' | base64 -d > {remote_path}"
-        )
+        self._exec_unchecked(f"echo '{b64}' | base64 -d > {remote_path}")
         logger.debug("Uploaded %s -> %s in sandbox %s", local_path, remote_path, self.name)
 
     def upload_dir(self, local_path: str, remote_path: str) -> None:
@@ -166,9 +161,7 @@ class ModalSandbox:
         b64 = base64.b64encode(tar_buf.read()).decode("ascii")
 
         # Write tar to sandbox and extract
-        self._exec_unchecked(
-            f"echo '{b64}' | base64 -d | tar xzf - -C {remote_parent}"
-        )
+        self._exec_unchecked(f"echo '{b64}' | base64 -d | tar xzf - -C {remote_parent}")
         logger.debug("Uploaded dir %s -> %s in sandbox %s", local_path, remote_path, self.name)
 
     def start_agent_process(self, command: str, port: int) -> None:
@@ -181,9 +174,7 @@ class ModalSandbox:
         self._exec_unchecked(bg_command)
 
         self._wait_for_ready(port, timeout=60.0)
-        logger.info(
-            "Agent process started in sandbox %s on port %d", self.name, port
-        )
+        logger.info("Agent process started in sandbox %s on port %d", self.name, port)
 
     def _wait_for_ready(self, port: int, timeout: float = 60.0) -> None:
         """Poll the health endpoint inside the sandbox."""
@@ -191,7 +182,8 @@ class ModalSandbox:
         while time.time() - start < timeout:
             try:
                 process = self._sandbox.exec(
-                    "bash", "-c",
+                    "bash",
+                    "-c",
                     f"curl -sf http://127.0.0.1:{port}/health",
                 )
                 process.wait()
@@ -200,9 +192,7 @@ class ModalSandbox:
             except Exception:
                 pass
             time.sleep(1.0)
-        raise TimeoutError(
-            f"Worker server did not start within {timeout}s in sandbox {self.name}"
-        )
+        raise TimeoutError(f"Worker server did not start within {timeout}s in sandbox {self.name}")
 
     def get_endpoint(self, port: int) -> tuple[str, dict[str, str]]:
         """Return the URL to reach the given port.

@@ -105,15 +105,19 @@ class TestPullDatasetWithTransform:
         from rllm.experimental.cli._pull import pull_dataset
 
         mock_hf = MagicMock()
-        mock_hf.__iter__ = MagicMock(return_value=iter([
-            {
-                "Question": "Test Q",
-                "Correct Answer": "Right",
-                "Incorrect Answer 1": "Wrong1",
-                "Incorrect Answer 2": "Wrong2",
-                "Incorrect Answer 3": "Wrong3",
-            }
-        ]))
+        mock_hf.__iter__ = MagicMock(
+            return_value=iter(
+                [
+                    {
+                        "Question": "Test Q",
+                        "Correct Answer": "Right",
+                        "Incorrect Answer 1": "Wrong1",
+                        "Incorrect Answer 2": "Wrong2",
+                        "Incorrect Answer 3": "Wrong3",
+                    }
+                ]
+            )
+        )
         mock_hf.__len__ = MagicMock(return_value=1)
         mock_load_dataset.return_value = mock_hf
 
@@ -158,7 +162,8 @@ class TestDisableImageDecoding:
 
     def test_casts_sequence_image_columns(self):
         """Sequence(Image()) columns should also be cast with decode=False."""
-        from datasets import Image as HFImage, Sequence
+        from datasets import Image as HFImage
+        from datasets import Sequence
 
         mock_ds = MagicMock()
         mock_ds.features = {"images": Sequence(HFImage()), "text": MagicMock()}

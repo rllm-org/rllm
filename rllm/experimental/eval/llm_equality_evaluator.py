@@ -127,9 +127,7 @@ class LLMEqualityEvaluator:
 
             client = OpenAI(base_url=self.judge_base_url, api_key="EMPTY")
 
-            user_message = EQUALITY_USER_TEMPLATE.format(
-                reference=reference, candidate=candidate
-            )
+            user_message = EQUALITY_USER_TEMPLATE.format(reference=reference, candidate=candidate)
 
             response = client.chat.completions.create(
                 model=self.judge_model or "gpt-4o-mini",

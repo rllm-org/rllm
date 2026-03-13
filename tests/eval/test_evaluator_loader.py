@@ -21,7 +21,6 @@ from rllm.experimental.eval.types import (
     Evaluator,
     F1Evaluator,
     MathEvaluator,
-    Signal,
 )
 from rllm.types import Episode
 
@@ -90,6 +89,7 @@ class TestResolveEvaluatorFromCatalog:
 
 # --- Helpers for entry-point tests ---
 
+
 class _DummyEvaluator:
     """A class that conforms to Evaluator protocol."""
 
@@ -139,7 +139,7 @@ class TestEntryPointDiscovery:
         assert evaluator is instance
 
     def test_builtin_takes_priority_over_plugin(self, monkeypatch):
-        """Built-in evaluators take priority over plugins with the same name."""
+        """Built-in evaluators take priority over agenthub entries with the same name."""
         mock_ep = MagicMock()
         mock_ep.name = "math_reward_fn"
         mock_ep.load.return_value = _DummyEvaluator
@@ -225,6 +225,7 @@ class TestRegisterEvaluator:
     def test_persists_to_disk(self, tmp_path):
         register_evaluator("test_eval", "rllm.experimental.eval.types:MathEvaluator")
         import json
+
         data = json.loads((tmp_path / "evaluators.json").read_text())
         assert "test_eval" in data
 

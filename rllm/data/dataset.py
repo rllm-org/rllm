@@ -158,9 +158,11 @@ class Dataset:
                     data.append(json.loads(line))
         elif file_ext == ".csv":
             import pandas as pd
+
             data = pd.read_csv(path).to_dict("records")
         elif file_ext == ".parquet":
             import pandas as pd
+
             data = pd.read_parquet(path).to_dict("records")
         elif file_ext == ".arrow":
             data = DatasetRegistry._load_arrow_ipc(path)
@@ -211,6 +213,7 @@ class DatasetRegistry:
                         os.symlink(os.path.abspath(abs_path), new_abs_path)
                     except OSError:
                         import shutil
+
                         shutil.copy2(abs_path, new_abs_path)
                     # Also handle verl files
                     verl_old = abs_path.replace(".parquet", "_verl.parquet")
@@ -220,6 +223,7 @@ class DatasetRegistry:
                             os.symlink(os.path.abspath(verl_old), verl_new)
                         except OSError:
                             import shutil
+
                             shutil.copy2(verl_old, verl_new)
 
                 split_info: dict[str, Any] = {"path": rel_path}
@@ -228,6 +232,7 @@ class DatasetRegistry:
                 if target and os.path.exists(target):
                     try:
                         import polars as pl
+
                         num = len(pl.read_parquet(target))
                         split_info["num_examples"] = num
                         split_info["fields"] = list(pl.read_parquet(target).columns)
@@ -501,6 +506,7 @@ class DatasetRegistry:
             data = cls._load_arrow_ipc(dataset_path)
         else:
             import polars as pl
+
             data = pl.read_parquet(dataset_path).to_dicts()
 
         logger.info(f"Loaded dataset '{name}' split '{split}' with {len(data)} examples.")

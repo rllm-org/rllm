@@ -15,8 +15,20 @@ try:
 except Exception:
     RLLMTrajectoryHookProvider = None  # type: ignore[assignment,misc]
 
+try:
+    from rllm.sdk.integrations.smolagents import RLLMSmolAgentsTracer
+except Exception:
+    RLLMSmolAgentsTracer = None  # type: ignore[assignment,misc]
+
+try:
+    from rllm.sdk.integrations.langgraph import RLLMTrajectoryCallbackHandler
+except Exception:
+    RLLMTrajectoryCallbackHandler = None  # type: ignore[assignment,misc]
+
 __all__ = [
     "RLLMTrajectoryPlugin",
     "RLLMTrajectoryHooks",
     "RLLMTrajectoryHookProvider",
+    "RLLMSmolAgentsTracer",
+    "RLLMTrajectoryCallbackHandler",
 ]

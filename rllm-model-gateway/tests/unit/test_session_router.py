@@ -1,6 +1,7 @@
 """Tests for SessionRouter and routing policies."""
 
-from unittest.mock import AsyncMock, patch
+import asyncio
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from rllm_model_gateway.models import WorkerInfo
@@ -10,8 +11,8 @@ from rllm_model_gateway.session_router import (
 )
 
 
-def _w(wid: str, url: str) -> WorkerInfo:
-    return WorkerInfo(worker_id=wid, url=url)
+def _w(wid: str, url: str, api_path: str = "/v1") -> WorkerInfo:
+    return WorkerInfo(worker_id=wid, url=url, api_path=api_path)
 
 
 class TestStickyLeastLoadedPolicy:
@@ -198,3 +199,54 @@ class TestHealthLoop:
 
         assert "http://w1" not in router.dead_workers
         assert router.failure_counts["http://w1"] == 0
+
+
+class TestWorkerApiUrl:
+    def test_worker_api_url(self):
+        w = WorkerInfo(worker_id="w1", url="http://host:4000", api_path="/v1")
+        assert w.api_url == "http://host:4000/v1"
+
+    def test_worker_api_url_custom_path(self):
+        w = WorkerInfo(worker_id="w1", url="http://host:4000", api_path="/v2")
+        assert w.api_url == "http://host:4000/v2"
+
+    def test_worker_api_url_trailing_slash(self):
+        w = WorkerInfo(worker_id="w1", url="http://host:4000/", api_path="/v1")
+        assert w.api_url == "http://host:4000/v1"
+
+    def test_worker_api_url_default(self):
+        w = WorkerInfo(worker_id="w1", url="http://host:4000")
+        assert w.api_url == "http://host:4000/v1"
+
+
+class TestHealthCheckURL:
+    @pytest.mark.asyncio
+    async def test_health_check_hits_base_url(self):
+        """Health check should use base URL, not api_url."""
+        router = SessionRouter(health_check_interval=0.01)
+        router.add_worker(_w("w1", "http://w1:4000"))
+
+        calls = []
+
+        async def mock_check(url):
+            calls.append(url)
+            return (url, True)
+
+        with patch.object(router, "_check", side_effect=mock_check):
+            await router.start_health_checks()
+            await asyncio.sleep(0.05)
+            await router.stop_health_checks()
+
+        # Should check base URL, not http://w1:4000/v1
+        assert all(u == "http://w1:4000" for u in calls)
+
+    @pytest.mark.asyncio
+    async def test_check_appends_health_to_base(self):
+        """_check() should GET {base_url}/health."""
+        router = SessionRouter()
+        router._http = AsyncMock()
+        router._http.get = AsyncMock(return_value=Mock(status_code=200))
+
+        url, ok = await router._check("http://localhost:4000")
+        assert ok
+        router._http.get.assert_called_with("http://localhost:4000/health")

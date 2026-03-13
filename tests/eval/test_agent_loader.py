@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,25 +15,25 @@ from rllm.experimental.eval.agent_loader import (
 
 
 class TestLoadAgent:
-    def test_load_builtin_math_agent(self):
-        agent = load_agent("math")
+    def test_load_builtin_react_agent(self):
+        agent = load_agent("react")
         assert hasattr(agent, "run") and callable(agent.run)
 
-    def test_load_builtin_code_agent(self):
-        agent = load_agent("code")
+    def test_load_builtin_search_agent(self):
+        agent = load_agent("search")
         assert hasattr(agent, "run") and callable(agent.run)
 
     def test_load_by_import_path_instance(self):
         """Loading a module:instance path returns the instance directly."""
-        agent = load_agent("rllm.experimental.agents.math_agent:math_agent")
+        agent = load_agent("rllm.experimental.agents.react_agent:react_agent")
         assert hasattr(agent, "run") and callable(agent.run)
 
     def test_load_by_import_path_class_auto_instantiates(self):
         """Loading a module:ClassName path auto-instantiates the class."""
-        agent = load_agent("rllm.experimental.agents.math_agent:MathAgentFlow")
-        from rllm.experimental.agents.math_agent import MathAgentFlow
+        agent = load_agent("rllm.experimental.agents.react_agent:ReactAgentFlow")
+        from rllm.experimental.agents.react_agent import ReactAgentFlow
 
-        assert isinstance(agent, MathAgentFlow)
+        assert isinstance(agent, ReactAgentFlow)
         assert not isinstance(agent, type)
 
     def test_load_bad_import_path_raises(self):
@@ -55,11 +54,11 @@ class TestLoadAgent:
 
     def test_entry_point_discovery(self, monkeypatch):
         """Plugin agents are discoverable via entry points."""
-        from rllm.experimental.agents.math_agent import math_agent
+        from rllm.experimental.agents.react_agent import react_agent
 
         mock_ep = MagicMock()
         mock_ep.name = "my_plugin_agent"
-        mock_ep.load.return_value = math_agent
+        mock_ep.load.return_value = react_agent
 
         def fake_entry_points(group):
             if group == "rllm.agents":
@@ -72,16 +71,16 @@ class TestLoadAgent:
         )
 
         agent = load_agent("my_plugin_agent")
-        assert agent is math_agent
+        assert agent is react_agent
         mock_ep.load.assert_called_once()
 
     def test_entry_point_class_auto_instantiates(self, monkeypatch):
         """Plugin agents that are classes get auto-instantiated."""
-        from rllm.experimental.agents.math_agent import MathAgentFlow
+        from rllm.experimental.agents.react_agent import ReactAgentFlow
 
         mock_ep = MagicMock()
         mock_ep.name = "my_class_plugin"
-        mock_ep.load.return_value = MathAgentFlow
+        mock_ep.load.return_value = ReactAgentFlow
 
         def fake_entry_points(group):
             if group == "rllm.agents":
@@ -94,20 +93,20 @@ class TestLoadAgent:
         )
 
         agent = load_agent("my_class_plugin")
-        assert isinstance(agent, MathAgentFlow)
+        assert isinstance(agent, ReactAgentFlow)
 
 
 class TestListAgents:
     def test_includes_builtin_agents(self):
         agents = list_agents()
         names = {a["name"] for a in agents}
-        assert "math" in names
-        assert "code" in names
+        assert "react" in names
+        assert "search" in names
 
     def test_builtin_source(self):
         agents = list_agents()
         for a in agents:
-            if a["name"] == "math":
+            if a["name"] == "react":
                 assert a["source"] == "built-in"
                 break
 
@@ -146,39 +145,43 @@ class TestRegisterAgent:
         monkeypatch.setattr("rllm.experimental.eval.agent_loader._RLLM_HOME", str(tmp_path))
 
     def test_register_string_path_and_load(self):
-        register_agent("test_agent", "rllm.experimental.agents.math_agent:MathAgentFlow")
+        register_agent("test_agent", "rllm.experimental.agents.react_agent:ReactAgentFlow")
         agent = load_agent("test_agent")
-        from rllm.experimental.agents.math_agent import MathAgentFlow
-        assert isinstance(agent, MathAgentFlow)
+        from rllm.experimental.agents.react_agent import ReactAgentFlow
+
+        assert isinstance(agent, ReactAgentFlow)
 
     def test_register_class(self):
-        from rllm.experimental.agents.math_agent import MathAgentFlow
-        register_agent("test_agent", MathAgentFlow)
+        from rllm.experimental.agents.react_agent import ReactAgentFlow
+
+        register_agent("test_agent", ReactAgentFlow)
         agent = load_agent("test_agent")
-        assert isinstance(agent, MathAgentFlow)
+        assert isinstance(agent, ReactAgentFlow)
 
     def test_register_instance(self):
-        from rllm.experimental.agents.math_agent import MathAgentFlow
-        register_agent("test_agent", MathAgentFlow())
+        from rllm.experimental.agents.react_agent import ReactAgentFlow
+
+        register_agent("test_agent", ReactAgentFlow())
         agent = load_agent("test_agent")
-        assert isinstance(agent, MathAgentFlow)
+        assert isinstance(agent, ReactAgentFlow)
 
     def test_persists_to_disk(self, tmp_path):
-        register_agent("test_agent", "rllm.experimental.agents.math_agent:MathAgentFlow")
+        register_agent("test_agent", "rllm.experimental.agents.react_agent:ReactAgentFlow")
         import json
+
         data = json.loads((tmp_path / "agents.json").read_text())
         assert "test_agent" in data
-        assert data["test_agent"]["import_path"] == "rllm.experimental.agents.math_agent:MathAgentFlow"
+        assert data["test_agent"]["import_path"] == "rllm.experimental.agents.react_agent:ReactAgentFlow"
 
     def test_appears_in_list(self):
-        register_agent("test_agent", "rllm.experimental.agents.math_agent:MathAgentFlow")
+        register_agent("test_agent", "rllm.experimental.agents.react_agent:ReactAgentFlow")
         agents = list_agents()
         registered = [a for a in agents if a["name"] == "test_agent"]
         assert len(registered) == 1
         assert registered[0]["source"] == "registered"
 
     def test_unregister(self):
-        register_agent("test_agent", "rllm.experimental.agents.math_agent:MathAgentFlow")
+        register_agent("test_agent", "rllm.experimental.agents.react_agent:ReactAgentFlow")
         assert unregister_agent("test_agent") is True
         with pytest.raises(KeyError):
             load_agent("test_agent")

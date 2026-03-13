@@ -7,7 +7,7 @@ import pytest
 from click.testing import CliRunner
 
 from rllm.experimental.cli.main import cli
-from rllm.experimental.eval.types import AgentConfig, EvalOutput, Signal
+from rllm.experimental.eval.types import AgentConfig, EvalOutput, Signal, Task
 from rllm.types import Episode, Step, Trajectory
 
 
@@ -17,6 +17,7 @@ def tmp_rllm_home(monkeypatch, tmp_path):
     rllm_home = str(tmp_path / ".rllm")
     monkeypatch.setenv("RLLM_HOME", rllm_home)
     from rllm.data.dataset import DatasetRegistry
+
     monkeypatch.setattr(DatasetRegistry, "_RLLM_HOME", rllm_home)
     monkeypatch.setattr(DatasetRegistry, "_REGISTRY_FILE", os.path.join(rllm_home, "datasets", "registry.json"))
     monkeypatch.setattr(DatasetRegistry, "_DATASET_DIR", os.path.join(rllm_home, "datasets"))
@@ -36,6 +37,7 @@ def runner():
 def mock_train_dataset(tmp_rllm_home):
     """Register a small test dataset with train and test splits."""
     from rllm.data import DatasetRegistry
+
     train_data = [
         {"question": "What is 1+1?", "ground_truth": "2", "data_source": "test"},
         {"question": "What is 2+2?", "ground_truth": "4", "data_source": "test"},
@@ -53,13 +55,16 @@ def mock_train_dataset(tmp_rllm_home):
 
 class _MockAgentFlow:
     """Mock AgentFlow that returns a fixed Episode."""
-    def run(self, task: dict, config: AgentConfig) -> Episode:
-        step = Step(input=task.get("question", ""), output="mock answer", done=True)
-        return Episode(task=task, trajectories=[Trajectory(name="mock", steps=[step])], artifacts={"answer": "mock answer"})
+
+    def run(self, task: Task, config: AgentConfig) -> Episode:
+        data = task.data if isinstance(task, Task) else task
+        step = Step(input=data.get("question", ""), output="mock answer", done=True)
+        return Episode(task=data, trajectories=[Trajectory(name="mock", steps=[step])], artifacts={"answer": "mock answer"})
 
 
 class _MockEvaluator:
     """Mock evaluator that always returns correct."""
+
     def evaluate(self, task: dict, episode: Episode) -> EvalOutput:
         return EvalOutput(reward=1.0, is_correct=True, signals=[Signal(name="accuracy", value=1.0)])
 
@@ -88,6 +93,7 @@ class TestBuildTrainConfig:
         )
 
         from omegaconf import DictConfig
+
         assert isinstance(cfg, DictConfig)
 
         # Check model config
@@ -207,81 +213,6 @@ class TestBuildTrainConfig:
         assert cfg.rllm.workflow.use_workflow is True
 
 
-class TestMakeAgentRunFunc:
-    """Tests for make_agent_run_func()."""
-
-    def test_returns_callable(self):
-        """make_agent_run_func should return a callable."""
-        from rllm.experimental.cli.train import make_agent_run_func
-
-        agent = _MockAgentFlow()
-        evaluator = _MockEvaluator()
-        func = make_agent_run_func(agent, evaluator, "test-model")
-
-        assert callable(func)
-
-    def test_returns_float_reward(self):
-        """The callable should return a float reward."""
-        from rllm.experimental.cli.train import make_agent_run_func
-
-        agent = _MockAgentFlow()
-        evaluator = _MockEvaluator()
-        func = make_agent_run_func(agent, evaluator, "test-model")
-
-        result = func(question="What is 1+1?", ground_truth="2")
-
-        assert isinstance(result, float)
-        assert result == 1.0
-
-    def test_uses_env_base_url(self, monkeypatch):
-        """The callable should use RLLM_SDK_BASE_URL from environment."""
-        from rllm.experimental.cli.train import make_agent_run_func
-
-        monkeypatch.setenv("RLLM_SDK_BASE_URL", "http://custom:9999/v1")
-
-        agent = MagicMock()
-        agent.run.return_value = Episode(
-            task={}, trajectories=[Trajectory(name="t", steps=[Step(input="q", output="a", done=True)])]
-        )
-        evaluator = MagicMock()
-        evaluator.evaluate.return_value = EvalOutput(reward=0.5, is_correct=False)
-
-        func = make_agent_run_func(agent, evaluator, "test-model")
-        result = func(question="test")
-
-        # Verify the agent was called with the custom base_url
-        call_args = agent.run.call_args
-        config_arg = call_args[0][1]  # second positional arg is AgentConfig
-        assert config_arg.base_url == "http://custom:9999/v1"
-        assert result == 0.5
-
-    def test_injects_session_metadata_into_url(self, monkeypatch):
-        """When session context is active, the URL should include routing metadata."""
-        from rllm.experimental.cli.train import make_agent_run_func
-        from rllm.sdk.session.contextvar import ContextVarSession
-
-        monkeypatch.setenv("RLLM_SDK_BASE_URL", "http://127.0.0.1:4000/v1")
-
-        agent = MagicMock()
-        agent.run.return_value = Episode(
-            task={}, trajectories=[Trajectory(name="t", steps=[Step(input="q", output="a", done=True)])]
-        )
-        evaluator = MagicMock()
-        evaluator.evaluate.return_value = EvalOutput(reward=1.0, is_correct=True)
-
-        func = make_agent_run_func(agent, evaluator, "test-model")
-
-        # Call inside a session context (like wrap_with_session_context does)
-        with ContextVarSession(name="test-session") as session:
-            func(question="test")
-
-        call_args = agent.run.call_args
-        config_arg = call_args[0][1]
-        # URL should contain the metadata slug (starts with /meta/rllm1:)
-        assert "/meta/rllm1:" in config_arg.base_url
-        assert config_arg.base_url.endswith("/v1")
-
-
 class TestTrainCommand:
     """Tests for the train CLI command."""
 
@@ -327,10 +258,7 @@ class TestTrainCommand:
         mock_evaluator = _MockEvaluator()
         mock_trainer = MagicMock()
 
-        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), \
-             patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent) as mock_load_agent, \
-             patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator), \
-             patch("rllm.experimental.unified_trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls:
+        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent) as mock_load_agent, patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator), patch("rllm.experimental.unified_trainer.AgentTrainer", return_value=mock_trainer):
             result = runner.invoke(cli, ["train", "test_math", "--model", "test-model"])
 
         assert result.exit_code == 0
@@ -344,16 +272,20 @@ class TestTrainCommand:
         mock_evaluator = _MockEvaluator()
         mock_trainer = MagicMock()
 
-        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), \
-             patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent) as mock_load_agent, \
-             patch("rllm.experimental.eval.evaluator_loader.load_evaluator", return_value=mock_evaluator) as mock_load_eval, \
-             patch("rllm.experimental.unified_trainer.AgentTrainer", return_value=mock_trainer):
-            result = runner.invoke(cli, [
-                "train", "test_math",
-                "--agent", "custom_agent",
-                "--evaluator", "custom_evaluator",
-                "--model", "test-model",
-            ])
+        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent) as mock_load_agent, patch("rllm.experimental.eval.evaluator_loader.load_evaluator", return_value=mock_evaluator) as mock_load_eval, patch("rllm.experimental.unified_trainer.AgentTrainer", return_value=mock_trainer):
+            result = runner.invoke(
+                cli,
+                [
+                    "train",
+                    "test_math",
+                    "--agent",
+                    "custom_agent",
+                    "--evaluator",
+                    "custom_evaluator",
+                    "--model",
+                    "test-model",
+                ],
+            )
 
         assert result.exit_code == 0
         mock_load_agent.assert_called_once_with("custom_agent")
@@ -366,16 +298,20 @@ class TestTrainCommand:
         mock_evaluator = _MockEvaluator()
         mock_trainer = MagicMock()
 
-        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), \
-             patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent), \
-             patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator), \
-             patch("rllm.experimental.unified_trainer.AgentTrainer", return_value=mock_trainer):
-            result = runner.invoke(cli, [
-                "train", "test_math",
-                "--model", "my-model",
-                "--group-size", "4",
-                "--batch-size", "16",
-            ])
+        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent), patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator), patch("rllm.experimental.unified_trainer.AgentTrainer", return_value=mock_trainer):
+            result = runner.invoke(
+                cli,
+                [
+                    "train",
+                    "test_math",
+                    "--model",
+                    "my-model",
+                    "--group-size",
+                    "4",
+                    "--batch-size",
+                    "16",
+                ],
+            )
 
         assert result.exit_code == 0
         assert "rLLM Train" in result.output
@@ -389,15 +325,18 @@ class TestTrainCommand:
         mock_evaluator = _MockEvaluator()
         mock_trainer = MagicMock()
 
-        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), \
-             patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent), \
-             patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator), \
-             patch("rllm.experimental.unified_trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls:
-            result = runner.invoke(cli, [
-                "train", "test_math",
-                "--model", "test-model",
-                "--max-examples", "2",
-            ])
+        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent), patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator), patch("rllm.experimental.unified_trainer.AgentTrainer", return_value=mock_trainer):
+            result = runner.invoke(
+                cli,
+                [
+                    "train",
+                    "test_math",
+                    "--model",
+                    "test-model",
+                    "--max-examples",
+                    "2",
+                ],
+            )
 
         assert result.exit_code == 0
         # Header should show 2 examples
@@ -410,23 +349,27 @@ class TestTrainCommand:
         mock_evaluator = _MockEvaluator()
         mock_trainer = MagicMock()
 
-        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), \
-             patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent), \
-             patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator), \
-             patch("rllm.experimental.unified_trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls:
-            result = runner.invoke(cli, [
-                "train", "test_math",
-                "--model", "test-model",
-                "--group-size", "4",
-                "--lr", "1e-4",
-            ])
+        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent), patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator), patch("rllm.experimental.unified_trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls:
+            result = runner.invoke(
+                cli,
+                [
+                    "train",
+                    "test_math",
+                    "--model",
+                    "test-model",
+                    "--group-size",
+                    "4",
+                    "--lr",
+                    "1e-4",
+                ],
+            )
 
         assert result.exit_code == 0
         # Verify AgentTrainer was called with correct kwargs
         call_kwargs = mock_at_cls.call_args[1]
         assert call_kwargs["backend"] == "tinker"
-        assert call_kwargs["agent_run_func"] is not None
-        assert callable(call_kwargs["agent_run_func"])
+        assert call_kwargs["agent_flow"] is not None
+        assert call_kwargs["evaluator"] is not None
         assert call_kwargs["train_dataset"] is not None
         assert call_kwargs["config"].model.name == "test-model"
         assert call_kwargs["config"].training.group_size == 4
@@ -435,6 +378,7 @@ class TestTrainCommand:
     def test_train_separate_val_dataset(self, runner, tmp_rllm_home):
         """Train with --val-dataset should use a different validation dataset."""
         from rllm.data import DatasetRegistry
+
         train_data = [{"question": "q1", "ground_truth": "a1", "data_source": "test"}]
         val_data = [{"question": "q2", "ground_truth": "a2", "data_source": "test"}]
         DatasetRegistry.register_dataset("train_bench", train_data, split="train")
@@ -450,15 +394,18 @@ class TestTrainCommand:
         mock_evaluator = _MockEvaluator()
         mock_trainer = MagicMock()
 
-        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), \
-             patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent), \
-             patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator), \
-             patch("rllm.experimental.unified_trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls:
-            result = runner.invoke(cli, [
-                "train", "train_bench",
-                "--val-dataset", "val_bench",
-                "--model", "test-model",
-            ])
+        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent), patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator), patch("rllm.experimental.unified_trainer.AgentTrainer", return_value=mock_trainer):
+            result = runner.invoke(
+                cli,
+                [
+                    "train",
+                    "train_bench",
+                    "--val-dataset",
+                    "val_bench",
+                    "--model",
+                    "test-model",
+                ],
+            )
 
         assert result.exit_code == 0
         # Both datasets should be in header
@@ -470,9 +417,7 @@ class TestTrainCommand:
         catalog = {"datasets": {"test_math": {"default_agent": "math"}}}
         mock_agent = _MockAgentFlow()
 
-        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), \
-             patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent), \
-             patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=None):
+        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent), patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=None):
             result = runner.invoke(cli, ["train", "test_math", "--model", "test-model"])
 
         assert result.exit_code != 0
@@ -485,27 +430,22 @@ class TestTrainCommand:
         mock_evaluator = _MockEvaluator()
         mock_trainer = MagicMock()
 
-        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), \
-             patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent), \
-             patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator), \
-             patch("rllm.experimental.unified_trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls:
+        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent), patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator), patch("rllm.experimental.unified_trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls:
             result = runner.invoke(cli, ["train", "test_math", "--model", "test-model"])
 
         assert result.exit_code == 0
         call_kwargs = mock_at_cls.call_args[1]
         assert call_kwargs["config"].rllm.trainer.experiment_name == "test_math"
 
-    def test_train_default_no_ui_logger(self, runner, tmp_rllm_home, mock_train_dataset):
-        """By default, 'ui' should NOT be in the logger list."""
+    def test_train_default_no_ui_logger(self, runner, tmp_rllm_home, mock_train_dataset, monkeypatch):
+        """When not logged in, 'ui' should NOT be in the logger list by default."""
+        monkeypatch.delenv("RLLM_API_KEY", raising=False)
         catalog = {"datasets": {"test_math": {"default_agent": "math", "reward_fn": "math_reward_fn", "eval_split": "test"}}}
         mock_agent = _MockAgentFlow()
         mock_evaluator = _MockEvaluator()
         mock_trainer = MagicMock()
 
-        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), \
-             patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent), \
-             patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator), \
-             patch("rllm.experimental.unified_trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls:
+        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent), patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator), patch("rllm.experimental.unified_trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls:
             result = runner.invoke(cli, ["train", "test_math", "--model", "test-model"])
 
         assert result.exit_code == 0
@@ -521,10 +461,7 @@ class TestTrainCommand:
         mock_evaluator = _MockEvaluator()
         mock_trainer = MagicMock()
 
-        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), \
-             patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent), \
-             patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator), \
-             patch("rllm.experimental.unified_trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls:
+        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent), patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator), patch("rllm.experimental.unified_trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls:
             result = runner.invoke(cli, ["train", "test_math", "--model", "test-model", "--ui"])
 
         assert result.exit_code == 0
@@ -539,10 +476,7 @@ class TestTrainCommand:
         mock_evaluator = _MockEvaluator()
         mock_trainer = MagicMock()
 
-        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), \
-             patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent), \
-             patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator), \
-             patch("rllm.experimental.unified_trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls:
+        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent), patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator), patch("rllm.experimental.unified_trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls:
             result = runner.invoke(cli, ["train", "test_math", "--model", "test-model", "--ui-url", "http://localhost:3000"])
 
         assert result.exit_code == 0
@@ -559,9 +493,7 @@ class TestTrainCommand:
         mock_agent = _MockAgentFlow()
         mock_evaluator = _MockEvaluator()
 
-        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), \
-             patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent), \
-             patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator):
+        with patch("rllm.experimental.cli.train.load_dataset_catalog", return_value=catalog), patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent), patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator):
             result = runner.invoke(cli, ["train", "test_math", "--model", "test-model", "--ui"])
 
         assert result.exit_code != 0

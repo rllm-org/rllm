@@ -10,18 +10,20 @@ from rich.theme import Theme
 
 from rllm.experimental.eval.config import (
     PROVIDER_MODELS,
-    SUPPORTED_PROVIDERS,
+    PROVIDER_REGISTRY,
     RllmConfig,
 )
 
-theme = Theme({
-    "option": "cyan",
-    "option.selected": "bold cyan",
-    "label": "dim",
-    "success": "bold green",
-    "error": "bold red",
-    "key": "yellow",
-})
+theme = Theme(
+    {
+        "option": "cyan",
+        "option.selected": "bold cyan",
+        "label": "dim",
+        "success": "bold green",
+        "error": "bold red",
+        "key": "yellow",
+    }
+)
 console = Console(theme=theme)
 
 
@@ -47,6 +49,7 @@ def _get_terminal_menu():
     """Lazy-import TerminalMenu. Returns the class or None if unavailable."""
     try:
         from simple_term_menu import TerminalMenu
+
         return TerminalMenu
     except ImportError:
         return None
@@ -85,22 +88,34 @@ def _select_from_menu(title: str, choices: list[str], cursor: int = 0) -> int | 
 
 
 def _select_provider(existing: RllmConfig) -> str:
-    """Interactive provider selection."""
-    choices = list(SUPPORTED_PROVIDERS)
+    """Interactive provider selection using display labels."""
+    choices = [p.label for p in PROVIDER_REGISTRY]
+    provider_ids = [p.id for p in PROVIDER_REGISTRY]
+
     cursor = 0
-    if existing.provider in choices:
-        cursor = choices.index(existing.provider)
+    if existing.provider in provider_ids:
+        cursor = provider_ids.index(existing.provider)
 
     idx = _select_from_menu("Provider", choices, cursor)
     if idx is None:
         console.print("\n  [dim]Aborted.[/]")
         raise SystemExit(1)
-    return choices[idx]
+    return provider_ids[idx]
 
 
 def _select_model(provider: str, existing: RllmConfig) -> str:
     """Interactive model selection with option to enter a custom model."""
     models = PROVIDER_MODELS.get(provider, [])
+
+    # For custom provider or providers with no curated list, prompt for free-text
+    if provider == "custom" or not models:
+        default = existing.model if existing.model else ""
+        model = Prompt.ask("  Enter model name", default=default or None, console=console).strip()
+        if not model:
+            console.print("  [error]Model is required.[/]")
+            raise SystemExit(1)
+        return model
+
     choices = list(models) + ["Other (enter manually)"]
 
     cursor = 0
@@ -124,3 +139,13 @@ def _select_model(provider: str, existing: RllmConfig) -> str:
         model = choices[idx]
 
     return model
+
+
+def _prompt_base_url() -> str:
+    """Prompt for a custom endpoint URL."""
+    console.print("  [dim]Examples: http://localhost:8000/v1, https://my-api.example.com/v1[/]")
+    url = Prompt.ask("  [label]Base URL[/]", console=console).strip()
+    if not url:
+        console.print("  [error]Base URL is required for custom provider.[/]")
+        raise SystemExit(1)
+    return url

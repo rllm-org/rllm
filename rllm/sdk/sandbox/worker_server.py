@@ -23,7 +23,6 @@ import importlib
 import inspect
 import json
 import logging
-import os
 import sys
 import time
 import traceback
@@ -93,16 +92,22 @@ async def _submit_result(
                 body = await resp.text()
                 logger.error(
                     "Failed to submit result for %s (attempt %d/%d): HTTP %s – %s",
-                    execution_id, attempt + 1, _SUBMIT_MAX_RETRIES, resp.status, body,
+                    execution_id,
+                    attempt + 1,
+                    _SUBMIT_MAX_RETRIES,
+                    resp.status,
+                    body,
                 )
         except Exception:
             logger.exception(
                 "Failed to submit result for %s (attempt %d/%d)",
-                execution_id, attempt + 1, _SUBMIT_MAX_RETRIES,
+                execution_id,
+                attempt + 1,
+                _SUBMIT_MAX_RETRIES,
             )
 
         if attempt < _SUBMIT_MAX_RETRIES - 1:
-            delay = _SUBMIT_BACKOFF_BASE * (2 ** attempt)
+            delay = _SUBMIT_BACKOFF_BASE * (2**attempt)
             await asyncio.sleep(delay)
 
     logger.error("Giving up submitting result for %s after %d attempts", execution_id, _SUBMIT_MAX_RETRIES)

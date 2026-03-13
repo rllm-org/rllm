@@ -51,10 +51,7 @@ class AgentCoreOrchestrator:
         # Validate required extra fields
         arn = config.extra.get("agent_runtime_arn")
         if not arn:
-            raise ValueError(
-                "AgentCore backend requires 'agent_runtime_arn' in sandbox.extra. "
-                "Example: rllm.sdk.sandbox.extra.agent_runtime_arn=arn:aws:bedrock-agentcore:..."
-            )
+            raise ValueError("AgentCore backend requires 'agent_runtime_arn' in sandbox.extra. Example: rllm.sdk.sandbox.extra.agent_runtime_arn=arn:aws:bedrock-agentcore:...")
         self._arn: str = arn
         self._region: str = _extract_region(arn)
 
@@ -82,10 +79,7 @@ class AgentCoreOrchestrator:
             import boto3  # type: ignore[import-untyped]
             from botocore.config import Config as BotoConfig  # type: ignore[import-untyped]
         except ImportError as exc:
-            raise ImportError(
-                "boto3 is required for the agentcore backend. "
-                "Install it with: pip install boto3"
-            ) from exc
+            raise ImportError("boto3 is required for the agentcore backend. Install it with: pip install boto3") from exc
 
         boto_config = BotoConfig(
             region_name=self._region,
@@ -105,9 +99,7 @@ class AgentCoreOrchestrator:
         else:
             self._proxy_url = proxy_url
             logger.warning(
-                "No base_url override in sandbox.extra — using proxy_url=%s. "
-                "If the ACR container cannot reach this address, set "
-                "rllm.sdk.sandbox.extra.base_url to a reachable URL.",
+                "No base_url override in sandbox.extra — using proxy_url=%s. If the ACR container cannot reach this address, set rllm.sdk.sandbox.extra.base_url to a reachable URL.",
                 proxy_url,
             )
 

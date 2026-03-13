@@ -45,7 +45,7 @@ def _parse_markdown_table(text: str) -> tuple[list[str], list[dict[str, str]]]:
     Returns ([], []) if no table is found.
     """
     lines = text.strip().splitlines()
-    table_lines = [l.strip() for l in lines if "|" in l]
+    table_lines = [line.strip() for line in lines if "|" in line]
     if len(table_lines) < 2:
         return [], []
 
@@ -160,9 +160,7 @@ class WideSearchEvaluator:
             ],
         )
 
-    def _extract_gold_table(
-        self, evaluation: dict | str | list
-    ) -> tuple[list[str], list[dict[str, str]]]:
+    def _extract_gold_table(self, evaluation: dict | str | list) -> tuple[list[str], list[dict[str, str]]]:
         """Extract gold table from evaluation spec.
 
         Handles several formats:
@@ -185,7 +183,7 @@ class WideSearchEvaluator:
                     if isinstance(r, dict):
                         rows.append(r)
                     elif isinstance(r, list):
-                        rows.append(dict(zip(cols, r)))
+                        rows.append(dict(zip(cols, r, strict=False)))
                 return cols, rows
             # Try finding any markdown table in stringified spec
             return _parse_markdown_table(str(evaluation))

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "langgraph-agent"
+version = "0.1.0"
+description = "LangGraph framework ReAct agent plugin for rLLM"
+requires-python = ">=3.10"
+dependencies = ["rllm", "langgraph>=0.2.0", "langchain-openai>=0.2.0"]
+
+[tool.setuptools.packages.find]
+include = ["langgraph_agent*"]
+
+# Plugin discovery: rllm CLI finds these by name
+[project.entry-points."rllm.agents"]
+langgraph = "langgraph_agent.agent:langgraph_agent"

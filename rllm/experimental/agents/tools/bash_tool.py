@@ -32,8 +32,5 @@ class BashTool:
     def execute(self, sandbox: Sandbox, command: str = "", **kwargs) -> str:
         output = _safe_exec(sandbox, command, timeout=120)
         if len(output) > self.OUTPUT_LIMIT:
-            output = (
-                output[: self.OUTPUT_LIMIT]
-                + f"\n... [truncated, {len(output)} chars total]"
-            )
+            output = output[: self.OUTPUT_LIMIT] + f"\n... [truncated, {len(output)} chars total]"
         return output

@@ -87,18 +87,15 @@ class _ChatCompletionRequest(BaseModel):
 class TinkerBackendServer:
     """FastAPI server that wraps a TinkerEngine behind ``/v1/chat/completions``.
 
-    The response embeds token IDs and logprobs so that after LiteLLM's
-    ``convert_to_model_response_object()`` they end up where
-    ``data_process.py`` extractors expect:
+    The response embeds token IDs and logprobs in vLLM-compatible format so
+    that the model gateway's ``data_process.py`` extractors can capture them:
 
-    - ``prompt_token_ids`` at response root level (non-standard root field,
-      preserved via ``setattr`` by LiteLLM)
-    - ``token_ids`` and ``response_logprobs`` as top-level choice fields
-      (LiteLLM auto-collects non-standard choice fields into
-      ``choices[].provider_specific_fields``)
+    - ``prompt_token_ids`` at response root level
+    - ``token_ids`` as a top-level choice field
+    - ``logprobs.content`` in vLLM standard format (list of ``{logprob: float}``)
 
-    No trace storage is performed here -- that is handled by the LiteLLM
-    proxy's ``TracingCallback``.
+    No trace storage is performed here -- that is handled by the model
+    gateway's trace capture.
 
     Lifecycle follows the same pattern as ``InferenceAPIServer``: runs in a
     background daemon thread with its own asyncio event loop.
@@ -220,13 +217,10 @@ class TinkerBackendServer:
                     "index": 0,
                     "message": result["response_message"],
                     "finish_reason": result["finish_reason"],
-                    # token_ids and response_logprobs must be top-level choice
-                    # fields (not nested in provider_specific_fields) because
-                    # LiteLLM's convert_to_model_response_object collects
-                    # non-standard choice fields into provider_specific_fields
-                    # automatically; a nested dict would be silently dropped.
                     "token_ids": result["completion_ids"],
-                    "response_logprobs": result["logprobs"],
+                    "logprobs": {
+                        "content": [{"logprob": lp} for lp in (result["logprobs"] or [])],
+                    },
                 }
             ],
             "usage": {
@@ -275,7 +269,9 @@ class TinkerBackendServer:
                             "delta": {"content": result["response_text"]},
                             "finish_reason": None,
                             "token_ids": result["completion_ids"],
-                            "response_logprobs": result["logprobs"],
+                            "logprobs": {
+                                "content": [{"logprob": lp} for lp in (result["logprobs"] or [])],
+                            },
                         }
                     ],
                     "prompt_token_ids": result["prompt_ids"],

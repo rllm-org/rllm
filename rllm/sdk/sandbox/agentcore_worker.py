@@ -103,21 +103,26 @@ def _submit_result(proxy_base_url: str, execution_id: str, result_data: dict) ->
                 body = resp.read().decode("utf-8", errors="replace")
                 logger.error(
                     "Failed to submit result for %s (attempt %d/%d): HTTP %s – %s",
-                    execution_id, attempt + 1, _SUBMIT_MAX_RETRIES, resp.status, body,
+                    execution_id,
+                    attempt + 1,
+                    _SUBMIT_MAX_RETRIES,
+                    resp.status,
+                    body,
                 )
         except Exception:
             logger.exception(
                 "Failed to submit result for %s (attempt %d/%d)",
-                execution_id, attempt + 1, _SUBMIT_MAX_RETRIES,
+                execution_id,
+                attempt + 1,
+                _SUBMIT_MAX_RETRIES,
             )
 
         if attempt < _SUBMIT_MAX_RETRIES - 1:
             import time
-            time.sleep(_SUBMIT_BACKOFF_BASE * (2 ** attempt))
 
-    logger.error(
-        "Giving up submitting result for %s after %d attempts", execution_id, _SUBMIT_MAX_RETRIES
-    )
+            time.sleep(_SUBMIT_BACKOFF_BASE * (2**attempt))
+
+    logger.error("Giving up submitting result for %s after %d attempts", execution_id, _SUBMIT_MAX_RETRIES)
 
 
 # ---------------------------------------------------------------------------
@@ -251,8 +256,7 @@ def _create_app():
             return {
                 "status": "ok",
                 "agent": agent_name,
-                "message": "rLLM AgentCore worker is running. "
-                "Send a training payload with execution_id, proxy_url, task, and agent_config to run a rollout.",
+                "message": "rLLM AgentCore worker is running. Send a training payload with execution_id, proxy_url, task, and agent_config to run a rollout.",
             }
 
         execution_id = payload["execution_id"]
@@ -264,9 +268,7 @@ def _create_app():
 
         # Fire background task and return immediately
         task_id = app.add_async_task("rollout")
-        asyncio.create_task(
-            _run_and_push(execution_id, proxy_url, task, agent_config, task_id)
-        )
+        asyncio.create_task(_run_and_push(execution_id, proxy_url, task, agent_config, task_id))
 
         return {"status": "accepted", "execution_id": execution_id}
 
@@ -279,26 +281,21 @@ def _create_app():
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="AgentCore worker for rLLM sandboxed execution"
-    )
+    parser = argparse.ArgumentParser(description="AgentCore worker for rLLM sandboxed execution")
     parser.add_argument(
         "--agent-module",
         default=os.environ.get("RLLM_AGENT_MODULE", "agent"),
-        help="Python module containing the agent function "
-        "(default: $RLLM_AGENT_MODULE or 'agent')",
+        help="Python module containing the agent function (default: $RLLM_AGENT_MODULE or 'agent')",
     )
     parser.add_argument(
         "--agent-func",
         default=os.environ.get("RLLM_AGENT_FUNC", "rollout"),
-        help="Function name in the agent module "
-        "(default: $RLLM_AGENT_FUNC or 'rollout')",
+        help="Function name in the agent module (default: $RLLM_AGENT_FUNC or 'rollout')",
     )
     parser.add_argument(
         "--agent-dir",
         default=os.environ.get("RLLM_AGENT_DIR"),
-        help="Directory to add to sys.path for agent import "
-        "(default: $RLLM_AGENT_DIR)",
+        help="Directory to add to sys.path for agent import (default: $RLLM_AGENT_DIR)",
     )
     return parser.parse_args()
 

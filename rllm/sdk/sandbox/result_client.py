@@ -48,16 +48,22 @@ async def submit_result(
                     body = await resp.text()
                     logger.error(
                         "Failed to submit result for %s (attempt %d/%d): HTTP %s – %s",
-                        execution_id, attempt + 1, _MAX_RETRIES, resp.status, body,
+                        execution_id,
+                        attempt + 1,
+                        _MAX_RETRIES,
+                        resp.status,
+                        body,
                     )
             except Exception:
                 logger.exception(
                     "Failed to submit result for %s (attempt %d/%d)",
-                    execution_id, attempt + 1, _MAX_RETRIES,
+                    execution_id,
+                    attempt + 1,
+                    _MAX_RETRIES,
                 )
 
             if attempt < _MAX_RETRIES - 1:
-                await asyncio.sleep(_BACKOFF_BASE * (2 ** attempt))
+                await asyncio.sleep(_BACKOFF_BASE * (2**attempt))
 
         logger.error("Giving up submitting result for %s after %d attempts", execution_id, _MAX_RETRIES)
     finally:

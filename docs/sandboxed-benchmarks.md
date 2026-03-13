@@ -40,12 +40,12 @@ SandboxedAgentFlow (ABC)
 │   setup_sandbox() / teardown_sandbox() / create_instance()
 │   sandbox_backend, image, max_concurrent, setup_commands
 │
-├── SWEAgentFlow (plugin: plugins/swe_agent/)
+├── SWEAgentFlow (agenthub/swe_agent/)
 │       Uses ToolCallingMixin + BashTool
 │       Per-instance images from swebench harness
 │       Supports both Docker and Modal backends
 │
-└── TerminalAgentFlow (plugin stub: plugins/terminal_agent/)
+└── TerminalAgentFlow (agenthub/terminal_agent/)
         Uses ToolCallingMixin + BashTool
         Docker Compose environments (TODO)
 ```
@@ -56,7 +56,7 @@ SandboxedAgentFlow (ABC)
 
 ```bash
 # Install the plugin
-cd plugins/swe_agent && pip install -e .
+cd agenthub/swe_agent && pip install -e .
 
 # Run evaluation
 rllm eval swebench_verified --agent swe --model gpt-4o --max-examples 3
@@ -159,7 +159,7 @@ rllm/sdk/sandbox/backends/
 ├── local.py                    # LocalSandbox
 └── modal_backend.py            # ModalSandbox (fully implemented)
 
-plugins/
-├── swe_agent/                  # SWE-bench plugin (Docker + Modal)
-└── terminal_agent/             # Terminal-Bench plugin (stub)
+agenthub/
+├── swe_agent/                  # SWE-bench agent (Docker + Modal)
+└── terminal_agent/             # Terminal-Bench agent (stub)
 ```

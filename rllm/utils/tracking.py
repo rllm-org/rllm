@@ -96,6 +96,22 @@ class Tracking:
         self.logger = {}
         self._finished = False  # Track whether finish() has been called
 
+        # Nudge users to enable UI logging
+        if "ui" not in default_backend:
+            try:
+                import os as _os
+
+                from rllm.experimental.eval.config import load_ui_config
+
+                ui_config = load_ui_config()
+                has_key = bool(_os.getenv("RLLM_API_KEY") or ui_config.get("ui_api_key"))
+                if has_key:
+                    print("\033[1;34mrllm-ui\033[0m: Add \033[1m'ui'\033[0m to your logger list for live monitoring in rllm UI")
+                else:
+                    print("\033[1;34mrllm-ui\033[0m: Run \033[1mrllm login\033[0m to enable live monitoring in rllm UI")
+            except Exception:
+                pass
+
         rllm_config = config.get("rllm", {}) if config is not None else {}
 
         if "tracking" in default_backend or "wandb" in default_backend:
@@ -309,7 +325,7 @@ class UILogger:
         config: Training configuration dict
     """
 
-    def __init__(self, project_name: str, experiment_name: str, config, source_metadata=None):
+    def __init__(self, project_name: str, experiment_name: str, config, source_metadata=None, session_type: str = "training"):
         import logging
         import queue
         import threading
@@ -317,7 +333,11 @@ class UILogger:
         import httpx
 
         self.logger = logging.getLogger(__name__)
-        api_key = os.getenv("RLLM_API_KEY")
+        self.session_type = session_type
+        from rllm.experimental.eval.config import load_ui_config
+
+        ui_config = load_ui_config()
+        api_key = os.getenv("RLLM_API_KEY") or ui_config.get("ui_api_key")
         ui_url = os.getenv("RLLM_UI_URL")
         if not ui_url:
             ui_url = "https://ui.rllm-project.com" if api_key else "http://localhost:3000"
@@ -332,12 +352,31 @@ class UILogger:
             # Create session with source metadata
             response = self.client.post(
                 "/api/sessions",
-                json={"project": project_name, "experiment": experiment_name, "config": config, "source_metadata": source_metadata or {}},
+                json={"project": project_name, "experiment": experiment_name, "config": config, "source_metadata": source_metadata or {}, "session_type": session_type},
             )
             response.raise_for_status()
             resp_data = response.json()
             self.session_id = resp_data.get("id") or resp_data.get("session_id")
             self.logger.info(f"UILogger initialized with session_id: {self.session_id}")
+
+            # Build clickable session URL
+            # For local dev, the frontend runs on a different port (default 5173)
+            # than the API backend (default 3000). In production they share a domain.
+            from urllib.parse import urlparse
+
+            parsed = urlparse(self.ui_url)
+            if parsed.hostname in ("localhost", "127.0.0.1"):
+                frontend_base = f"{parsed.scheme}://localhost:5173"
+            else:
+                frontend_base = self.ui_url
+
+            if session_type == "eval":
+                self.session_url = f"{frontend_base}/evaluation/{self.session_id}"
+            else:
+                self.session_url = f"{frontend_base}/runs/{self.session_id}"
+
+            # Print before TeeStream install so it goes to real stdout
+            print(f"\033[1;34mrllm-ui\033[0m: View run at \033[4;34m{self.session_url}\033[0m")
 
             # Send initial heartbeat
             try:
@@ -408,18 +447,38 @@ class UILogger:
         if episodes_payloads:
             try:
                 self.logger.info(f"Sending {len(episodes_payloads)} episodes to UI [step {step}]")
+                # Batch upload — single request for all episodes
+                batch_payload = {"session_id": self.session_id, "episodes": episodes_payloads}
+                resp = self.client.post("/api/episodes/batch", json=batch_payload)
+                resp.raise_for_status()
+                self.logger.info(f"Sent {len(episodes_payloads)} episodes via batch endpoint")
+            except Exception as batch_err:
+                # Fallback to individual POSTs for older UI servers without batch endpoint
+                self.logger.info(f"Batch endpoint failed ({batch_err}), falling back to individual POSTs")
                 for ep in episodes_payloads:
-                    self.client.post("/api/episodes", json=ep)
-            except Exception as e:
-                self.logger.warning(f"Failed to send episodes to UI: {e}")
+                    try:
+                        self.client.post("/api/episodes", json=ep)
+                    except Exception as e:
+                        self.logger.warning(f"Failed to send episode to UI: {e}")
+                else:
+                    self.logger.info(f"Sent {len(episodes_payloads)} episodes individually")
 
         if groups_payloads:
             try:
                 self.logger.info(f"Sending {len(groups_payloads)} trajectory groups to UI [step {step}]")
+                batch_payload = {"session_id": self.session_id, "groups": groups_payloads}
+                resp = self.client.post("/api/trajectory-groups/batch", json=batch_payload)
+                resp.raise_for_status()
+                self.logger.info(f"Sent {len(groups_payloads)} trajectory groups via batch endpoint")
+            except Exception as batch_err:
+                self.logger.info(f"Trajectory groups batch endpoint failed ({batch_err}), falling back to individual POSTs")
                 for gp in groups_payloads:
-                    self.client.post("/api/trajectory-groups", json=gp)
-            except Exception as e:
-                self.logger.warning(f"Failed to send trajectory groups to UI: {e}")
+                    try:
+                        self.client.post("/api/trajectory-groups", json=gp)
+                    except Exception as e:
+                        self.logger.warning(f"Failed to send trajectory group to UI: {e}")
+                else:
+                    self.logger.info(f"Sent {len(groups_payloads)} trajectory groups individually")
 
     def log(self, data, step, episodes=None, trajectory_groups=None):
         """Log metrics and optionally episodes/trajectory_groups.
@@ -450,8 +509,9 @@ class UILogger:
                 _STEP_DROP_KEYS = {"prompt_ids", "response_ids", "logprobs", "model_output"}
                 episodes_payloads = []
                 for episode in episodes:
-                    ep = episode.to_dict()
+                    ep = episode.to_dict() if hasattr(episode, "to_dict") else episode.model_dump()
                     ep["session_id"] = self.session_id
+                    ep["session_type"] = self.session_type
                     ep["step"] = step
                     ep["episode_id"] = ep.pop("id")
                     for traj in ep.get("trajectories", []):
@@ -488,6 +548,34 @@ class UILogger:
             self._queue.put((step, metrics_payload, episodes_payloads, groups_payloads), timeout=10)
         except queue.Full:
             self.logger.warning("UILogger queue full, dropping log for step %d", step)
+
+    def log_eval_result(self, result) -> None:
+        """Post an EvalResult to the UI backend.
+
+        Args:
+            result: An EvalResult dataclass from rllm.experimental.eval.results
+        """
+        if self.session_id is None:
+            return
+
+        try:
+            payload = {
+                "session_id": self.session_id,
+                "dataset_name": result.dataset_name,
+                "model": result.model,
+                "agent": result.agent,
+                "score": result.score,
+                "total": result.total,
+                "correct": result.correct,
+                "errors": result.errors,
+                "signal_averages": result.signal_averages,
+                "items": [{"idx": item.idx, "reward": item.reward, "is_correct": item.is_correct, "error": item.error, "signals": item.signals} for item in result.items],
+            }
+            payload_json = json.loads(json.dumps(payload, default=self._json_serializer))
+            response = self.client.post("/api/eval-results", json=payload_json)
+            self.logger.info(f"Eval result posted, status: {response.status_code}")
+        except Exception as e:
+            self.logger.warning(f"Failed to send eval result to UI: {e}")
 
     def _json_serializer(self, obj):
         """Convert numpy types and other non-JSON types to native Python."""
@@ -542,6 +630,13 @@ class UILogger:
         except Exception as e:
             self.logger.warning(f"Failed to complete session: {e}")
         finally:
+            # Drain the log queue and stop worker
+            if hasattr(self, "_worker_thread"):
+                self._worker_stop.set()
+                self._queue.put(None)  # sentinel
+                self._worker_thread.join(timeout=30)
+                if self._worker_thread.is_alive():
+                    self.logger.warning("UILogger worker thread did not finish within 30s")
             self.client.close()
 
 

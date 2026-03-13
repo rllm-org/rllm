@@ -15,18 +15,19 @@ from rllm.experimental.eval.types import (
     F1Evaluator,
     MathEvaluator,
     Signal,
+    Task,
     _extract_agent_answer,
 )
 from rllm.types import Episode, Step, Trajectory
-
 
 # ---------------------------------------------------------------------------
 # Protocol conformance
 # ---------------------------------------------------------------------------
 
+
 class _DummyAgent:
-    def run(self, task: dict, config: AgentConfig) -> Episode:
-        return Episode(task=task, trajectories=[], artifacts={"answer": "42"})
+    def run(self, task: Task, config: AgentConfig) -> Episode:
+        return Episode(task=task.data, trajectories=[], artifacts={"answer": "42"})
 
 
 class _DummyEvaluator:
@@ -44,16 +45,10 @@ def test_evaluator_protocol():
     assert isinstance(evaluator, Evaluator)
 
 
-def test_builtin_agents_are_agent_flows():
-    from rllm.experimental.agents import math_agent, countdown_agent, code_agent, qa_agent
-    for agent in [math_agent, countdown_agent, code_agent, qa_agent]:
-        assert isinstance(agent, AgentFlow), f"{type(agent).__name__} is not an AgentFlow"
+def test_react_agent_is_agent_flow():
+    from rllm.experimental.agents import react_agent
 
-
-def test_vlm_agents_are_agent_flows():
-    from rllm.experimental.agents import vlm_mcq_agent, vlm_math_agent, vlm_open_agent
-    for agent in [vlm_mcq_agent, vlm_math_agent, vlm_open_agent]:
-        assert isinstance(agent, AgentFlow), f"{type(agent).__name__} is not an AgentFlow"
+    assert isinstance(react_agent, AgentFlow), "react_agent is not an AgentFlow"
 
 
 def test_builtin_evaluators_are_evaluators():
@@ -65,6 +60,7 @@ def test_builtin_evaluators_are_evaluators():
 # ---------------------------------------------------------------------------
 # _extract_agent_answer
 # ---------------------------------------------------------------------------
+
 
 def test_extract_answer_from_artifacts():
     ep = Episode(artifacts={"answer": "42"})
@@ -92,6 +88,7 @@ def test_extract_answer_empty_episode():
 # ---------------------------------------------------------------------------
 # MathEvaluator
 # ---------------------------------------------------------------------------
+
 
 class TestMathEvaluator:
     def test_correct_answer(self):
@@ -138,6 +135,7 @@ class TestMathEvaluator:
 # CountdownEvaluator
 # ---------------------------------------------------------------------------
 
+
 class TestCountdownEvaluator:
     def test_correct_countdown(self):
         evaluator = CountdownEvaluator()
@@ -165,6 +163,7 @@ class TestCountdownEvaluator:
 # ---------------------------------------------------------------------------
 # F1Evaluator
 # ---------------------------------------------------------------------------
+
 
 class TestF1Evaluator:
     def test_exact_match(self):
@@ -210,6 +209,7 @@ class TestF1Evaluator:
 # CompoundEvaluator
 # ---------------------------------------------------------------------------
 
+
 class TestCompoundEvaluator:
     def test_weighted_average(self):
         e1 = _DummyEvaluator()  # reward=1.0
@@ -235,7 +235,8 @@ class _FixedEvaluator:
 
     def evaluate(self, task: dict, episode: Episode) -> EvalOutput:
         return EvalOutput(
-            reward=self._reward, is_correct=self._is_correct,
+            reward=self._reward,
+            is_correct=self._is_correct,
             signals=[Signal(name="test", value=self._reward)],
         )
 
@@ -243,6 +244,7 @@ class _FixedEvaluator:
 # ---------------------------------------------------------------------------
 # AgentConfig
 # ---------------------------------------------------------------------------
+
 
 def test_agent_config_defaults():
     config = AgentConfig(base_url="http://localhost:8000", model="test-model", session_uid="s1")
@@ -253,6 +255,7 @@ def test_agent_config_defaults():
 # Signal and EvalOutput
 # ---------------------------------------------------------------------------
 
+
 def test_signal_creation():
     sig = Signal(name="accuracy", value=0.95)
     assert sig.name == "accuracy"
@@ -262,7 +265,8 @@ def test_signal_creation():
 
 def test_eval_output_creation():
     output = EvalOutput(
-        reward=1.0, is_correct=True,
+        reward=1.0,
+        is_correct=True,
         signals=[Signal(name="accuracy", value=1.0)],
     )
     assert output.reward == 1.0
@@ -272,6 +276,7 @@ def test_eval_output_creation():
 # ---------------------------------------------------------------------------
 # Trajectory.signals and Episode.artifacts
 # ---------------------------------------------------------------------------
+
 
 def test_trajectory_signals_field():
     traj = Trajectory(name="t")

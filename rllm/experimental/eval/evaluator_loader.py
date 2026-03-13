@@ -15,10 +15,13 @@ from rllm.experimental.eval.translation_evaluator import TranslationEvaluator
 from rllm.experimental.eval.types import (
     CodeEvaluator,
     CountdownEvaluator,
+    DepthEvaluator,
     Evaluator,
     F1Evaluator,
-    MCQEvaluator,
+    IoUEvaluator,
     MathEvaluator,
+    MCQEvaluator,
+    PointInMaskEvaluator,
 )
 from rllm.experimental.eval.widesearch_evaluator import WideSearchEvaluator
 
@@ -93,20 +96,14 @@ def unregister_evaluator(name: str) -> bool:
 def _validate_evaluator(obj: object, name: str) -> None:
     """Validate that an object conforms to the Evaluator protocol."""
     if not hasattr(obj, "evaluate") or not callable(obj.evaluate):
-        raise TypeError(
-            f"Evaluator '{name}' must have an .evaluate() method, "
-            f"got {type(obj).__name__}"
-        )
+        raise TypeError(f"Evaluator '{name}' must have an .evaluate() method, got {type(obj).__name__}")
 
 
 def _validate_evaluator_class(cls: type, name: str) -> None:
     """Validate that a class has an .evaluate method."""
     eval_attr = getattr(cls, "evaluate", None)
     if eval_attr is None or not callable(eval_attr):
-        raise TypeError(
-            f"Evaluator '{name}' must be a class with an .evaluate() method, "
-            f"got {cls.__name__}"
-        )
+        raise TypeError(f"Evaluator '{name}' must be a class with an .evaluate() method, got {cls.__name__}")
 
 
 _EVALUATOR_REGISTRY: dict[str, type] = {
@@ -121,6 +118,9 @@ _EVALUATOR_REGISTRY: dict[str, type] = {
     "llm_equality_reward_fn": LLMEqualityEvaluator,
     "translation_reward_fn": TranslationEvaluator,
     "widesearch_reward_fn": WideSearchEvaluator,
+    "iou_reward_fn": IoUEvaluator,
+    "point_in_mask_reward_fn": PointInMaskEvaluator,
+    "depth_reward_fn": DepthEvaluator,
 }
 
 
@@ -185,7 +185,7 @@ def load_evaluator(name_or_path: str) -> Evaluator:
             return obj
 
     available = ", ".join(sorted(_EVALUATOR_REGISTRY.keys()))
-    raise KeyError(f"Evaluator '{name_or_path}' not found in registry or plugins. Available built-in: {available}")
+    raise KeyError(f"Evaluator '{name_or_path}' not found in registry or agenthub. Available built-in: {available}")
 
 
 def resolve_evaluator_from_catalog(benchmark: str) -> Evaluator | None:
@@ -223,7 +223,7 @@ def resolve_evaluator_from_catalog(benchmark: str) -> Evaluator | None:
 
 
 def list_evaluators() -> list[dict]:
-    """List all available evaluators (user-registered + built-in + plugins).
+    """List all available evaluators (user-registered + built-in + agenthub).
 
     Returns:
         A list of dicts with keys: name, source, type.
@@ -232,21 +232,25 @@ def list_evaluators() -> list[dict]:
 
     # User-registered evaluators
     for name, info in sorted(_load_user_evaluators().items()):
-        results.append({
-            "name": name,
-            "source": "registered",
-            "type": info["import_path"],
-        })
+        results.append(
+            {
+                "name": name,
+                "source": "registered",
+                "type": info["import_path"],
+            }
+        )
 
     # Built-in evaluators from registry
     seen_names = {r["name"] for r in results}
     for name, cls in sorted(_EVALUATOR_REGISTRY.items()):
         if name not in seen_names:
-            results.append({
-                "name": name,
-                "source": "built-in",
-                "type": f"{cls.__module__}.{cls.__name__}",
-            })
+            results.append(
+                {
+                    "name": name,
+                    "source": "built-in",
+                    "type": f"{cls.__module__}.{cls.__name__}",
+                }
+            )
 
     # Plugin evaluators from entry points
     seen_names = {r["name"] for r in results}
@@ -254,10 +258,12 @@ def list_evaluators() -> list[dict]:
     for ep in eps:
         if ep.name not in seen_names:
             pkg = ep.dist.name if ep.dist else "unknown"
-            results.append({
-                "name": ep.name,
-                "source": f"plugin ({pkg})",
-                "type": str(ep.value),
-            })
+            results.append(
+                {
+                    "name": ep.name,
+                    "source": f"plugin ({pkg})",
+                    "type": str(ep.value),
+                }
+            )
 
     return results

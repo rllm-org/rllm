@@ -26,10 +26,11 @@ console = Console(theme=theme)
 def _suggest_benchmarks(name: str, catalog_names: list[str], max_suggestions: int = 3) -> list[str]:
     """Return catalog names similar to *name*, ordered by edit distance."""
     from difflib import get_close_matches
+
     return get_close_matches(name, catalog_names, n=max_suggestions, cutoff=0.5)
 
 
-def _run_eval(benchmark: str, agent_name: str, evaluator_name: str | None, base_url: str, model: str, split: str, concurrency: int, max_examples: int | None, output_path: str | None, agent_metadata: dict | None = None):
+def _run_eval(benchmark: str, agent_name: str, evaluator_name: str | None, base_url: str, model: str, split: str, concurrency: int, max_examples: int | None, output_path: str | None, agent_metadata: dict | None = None, enable_ui: bool = False):
     """Core eval logic, extracted for clean proxy lifecycle management."""
     from rllm.data import DatasetRegistry
     from rllm.experimental.eval.agent_loader import load_agent
@@ -69,7 +70,7 @@ def _run_eval(benchmark: str, agent_name: str, evaluator_name: str | None, base_
         agent = load_agent(agent_name)
     except (KeyError, ImportError, AttributeError, TypeError) as e:
         console.print(f"  [error]Error loading agent '{agent_name}': {e}[/]")
-        raise SystemExit(1)
+        raise SystemExit(1) from None
 
     # Apply sandbox CLI overrides to agent
     if agent_metadata:
@@ -90,7 +91,7 @@ def _run_eval(benchmark: str, agent_name: str, evaluator_name: str | None, base_
             evaluator_display = evaluator_name
         except (KeyError, ImportError, AttributeError, TypeError) as e:
             console.print(f"  [error]Error loading evaluator '{evaluator_name}': {e}[/]")
-            raise SystemExit(1)
+            raise SystemExit(1) from None
     else:
         # Auto-resolve from catalog
         evaluator = resolve_evaluator_from_catalog(benchmark)
@@ -122,6 +123,7 @@ def _run_eval(benchmark: str, agent_name: str, evaluator_name: str | None, base_
     agent_desc = ""
     if ":" not in agent_name:
         from rllm.experimental.cli._pull import load_agent_catalog
+
         agent_catalog = load_agent_catalog()
         agent_entry = agent_catalog.get("agents", {}).get(agent_name, {})
         agent_desc = agent_entry.get("description", "")
@@ -142,8 +144,60 @@ def _run_eval(benchmark: str, agent_name: str, evaluator_name: str | None, base_
     console.print()
 
     # Run evaluation
-    runner = EvalRunner(base_url=base_url, model=model, concurrency=concurrency, agent_metadata=agent_metadata or {})
-    result = asyncio.run(runner.run(dataset, agent, evaluator, agent_name=agent_name))
+    runner = EvalRunner(
+        base_url=base_url,
+        model=model,
+        concurrency=concurrency,
+        agent_metadata=agent_metadata or {},
+        catalog_entry=catalog_entry,
+        benchmark_name=benchmark,
+    )
+
+    # Create UI logger before run for progressive episode uploads
+    ui_logger = None
+    on_episode_complete = None
+    _flush_episode_buffer = None
+    if enable_ui:
+        from datetime import datetime, timezone
+
+        from rllm.utils.tracking import UILogger
+
+        timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+        experiment = f"{model}_{agent_name}_{timestamp}".replace("/", "_")
+        ui_logger = UILogger(
+            project_name=benchmark,
+            experiment_name=experiment,
+            config={"model": model, "agent": agent_name, "benchmark": benchmark, "split": split},
+            session_type="eval",
+        )
+        if ui_logger.session_id:
+            import threading
+
+            _episode_buffer = []
+            _buffer_lock = threading.Lock()
+            _BATCH_SIZE = 50
+
+            def _flush_episode_buffer():
+                with _buffer_lock:
+                    if _episode_buffer:
+                        ui_logger.log(data={}, step=0, episodes=list(_episode_buffer))
+                        _episode_buffer.clear()
+
+            def on_episode_complete(episode):
+                with _buffer_lock:
+                    _episode_buffer.append(episode)
+                    should_flush = len(_episode_buffer) >= _BATCH_SIZE
+                    batch = list(_episode_buffer) if should_flush else None
+                    if should_flush:
+                        _episode_buffer.clear()
+                if batch:
+                    ui_logger.log(data={}, step=0, episodes=batch)
+
+    result, episodes = asyncio.run(runner.run(dataset, agent, evaluator, agent_name=agent_name, on_episode_complete=on_episode_complete))
+
+    # Flush remaining buffered episodes
+    if _flush_episode_buffer is not None:
+        _flush_episode_buffer()
 
     # Print results
     pct = f"{result.score * 100:.1f}%"
@@ -165,6 +219,12 @@ def _run_eval(benchmark: str, agent_name: str, evaluator_name: str | None, base_
     # Save results
     saved_path = result.save(output_path)
     console.print(f"\n  [dim]Saved to {saved_path}[/]")
+
+    # Send eval result and finish UI session
+    if ui_logger is not None and ui_logger.session_id:
+        ui_logger.log_eval_result(result)
+        ui_logger.finish()
+
     console.print()
 
 
@@ -181,8 +241,22 @@ def _run_eval(benchmark: str, agent_name: str, evaluator_name: str | None, base_
 @click.option("--search-backend", "search_backend", default=None, type=click.Choice(["serper", "brave"], case_sensitive=False), help="Search backend for the search agent (auto-detected from API keys if omitted).")
 @click.option("--sandbox-backend", "sandbox_backend", default=None, type=click.Choice(["docker", "local", "modal"], case_sensitive=False), help="Sandbox backend for sandboxed agents (auto-detected from agent if omitted).")
 @click.option("--sandbox-concurrency", "sandbox_concurrency", default=None, type=int, help="Override max concurrent sandboxes (default: agent's max_concurrent).")
-def eval_cmd(benchmark: str, agent_name: str | None, evaluator_name: str | None, base_url: str | None, model: str | None, split: str | None, concurrency: int, max_examples: int | None, output_path: str | None, search_backend: str | None, sandbox_backend: str | None, sandbox_concurrency: int | None):
+@click.option("--ui/--no-ui", "enable_ui", default=None, help="Enable/disable live UI logging. Default: auto-enabled when logged in (see 'rllm login').")
+def eval_cmd(benchmark: str, agent_name: str | None, evaluator_name: str | None, base_url: str | None, model: str | None, split: str | None, concurrency: int, max_examples: int | None, output_path: str | None, search_backend: str | None, sandbox_backend: str | None, sandbox_concurrency: int | None, enable_ui: bool | None):
     """Evaluate a model on a benchmark dataset."""
+    # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
+    _ui_explicit = enable_ui is not None
+    if enable_ui is None:
+        import os
+
+        from rllm.experimental.eval.config import load_ui_config
+
+        ui_config = load_ui_config()
+        enable_ui = bool(os.environ.get("RLLM_API_KEY") or ui_config.get("ui_api_key"))
+
+    if not enable_ui and not _ui_explicit:
+        console.print("  [blue]Tip: Try rllm UI for live monitoring! Run [bold]rllm login[/bold] to get started.[/]")
+
     proxy_manager = None
 
     if base_url is not None:
@@ -193,7 +267,6 @@ def eval_cmd(benchmark: str, agent_name: str | None, evaluator_name: str | None,
     else:
         # Proxy mode: auto-start LiteLLM proxy from config
         from rllm.experimental.eval.config import load_config
-        from rllm.experimental.eval.proxy import EvalProxyManager
 
         config = load_config()
         if not config.is_configured():
@@ -206,21 +279,32 @@ def eval_cmd(benchmark: str, agent_name: str | None, evaluator_name: str | None,
         if model is None:
             model = config.model
 
-        proxy_manager = EvalProxyManager(
-            provider=config.provider,
-            model_name=model,
-            api_key=config.api_key,
-        )
-        with Status(f"[dim]Starting LiteLLM proxy for [bold]{config.provider}/{model}[/bold]...[/]", console=console):
-            try:
-                proxy_manager.start_proxy_subprocess(proxy_manager.build_proxy_config())
-            except (RuntimeError, TimeoutError) as e:
-                console.print(f"\n  [error]Failed to start LiteLLM proxy.[/]\n\n  {e}")
-                console.print("\n  [dim]Make sure litellm is installed:[/] [bold]pip install litellm\\[proxy][/]")
-                console.print()
-                raise SystemExit(1)
-        base_url = proxy_manager.get_proxy_url()
-        console.print(f"  [success]Proxy ready[/] at [dim]{base_url}[/]")
+        if config.provider == "custom":
+            # Custom provider: skip LiteLLM proxy, use base_url directly
+            import os as _os
+
+            base_url = config.base_url
+            if config.api_key:
+                _os.environ.setdefault("OPENAI_API_KEY", config.api_key)
+            console.print(f"  [success]Using custom endpoint[/] at [dim]{base_url}[/]")
+        else:
+            from rllm.experimental.eval.proxy import EvalProxyManager
+
+            proxy_manager = EvalProxyManager(
+                provider=config.provider,
+                model_name=model,
+                api_key=config.api_key,
+            )
+            with Status(f"[dim]Starting LiteLLM proxy for [bold]{config.provider}/{model}[/bold]...[/]", console=console):
+                try:
+                    proxy_manager.start_proxy_subprocess(proxy_manager.build_proxy_config())
+                except (RuntimeError, TimeoutError) as e:
+                    console.print(f"\n  [error]Failed to start LiteLLM proxy.[/]\n\n  {e}")
+                    console.print("\n  [dim]Make sure litellm is installed:[/] [bold]pip install litellm\\[proxy][/]")
+                    console.print()
+                    raise SystemExit(1) from None
+            base_url = proxy_manager.get_proxy_url()
+            console.print(f"  [success]Proxy ready[/] at [dim]{base_url}[/]")
 
     # Build agent metadata from CLI options
     agent_metadata = {}
@@ -232,7 +316,7 @@ def eval_cmd(benchmark: str, agent_name: str | None, evaluator_name: str | None,
         agent_metadata["sandbox_concurrency"] = sandbox_concurrency
 
     try:
-        _run_eval(benchmark, agent_name, evaluator_name, base_url, model, split, concurrency, max_examples, output_path, agent_metadata=agent_metadata)
+        _run_eval(benchmark, agent_name, evaluator_name, base_url, model, split, concurrency, max_examples, output_path, agent_metadata=agent_metadata, enable_ui=enable_ui)
     finally:
         if proxy_manager is not None:
             proxy_manager.shutdown_proxy()

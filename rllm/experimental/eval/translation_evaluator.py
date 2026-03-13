@@ -8,7 +8,6 @@ configured (for XCOMET-style evaluation).
 from __future__ import annotations
 
 import logging
-import math
 from collections import Counter
 
 from rllm.experimental.eval.types import EvalOutput, Signal, _extract_agent_answer
@@ -86,6 +85,6 @@ class TranslationEvaluator:
         if avg_precision + avg_recall == 0:
             return 0.0
 
-        beta_sq = self.beta ** 2
+        beta_sq = self.beta**2
         chrf = (1 + beta_sq) * avg_precision * avg_recall / (beta_sq * avg_precision + avg_recall)
         return chrf

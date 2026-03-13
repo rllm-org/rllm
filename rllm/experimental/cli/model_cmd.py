@@ -13,18 +13,19 @@ from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
+from rllm.experimental.cli._ui import (
+    _mask_key,
+    _prompt_base_url,
+    _select_model,
+    _select_provider,
+    console,
+)
 from rllm.experimental.eval.config import (
     PROVIDER_ENV_KEYS,
     RllmConfig,
+    get_provider_info,
     load_config,
     save_config,
-)
-
-from rllm.experimental.cli._ui import (
-    console,
-    _mask_key,
-    _select_model,
-    _select_provider,
 )
 
 
@@ -40,13 +41,32 @@ def _prompt_api_key(provider: str) -> str:
     return api_key
 
 
+def _prompt_optional_api_key(provider: str) -> str:
+    """Prompt for an API key that is optional (e.g. for local endpoints)."""
+    env_key = PROVIDER_ENV_KEYS.get(provider, "")
+    if env_key:
+        console.print(f"  [dim]Tip: you can also set {env_key} in your environment[/]")
+    console.print("  [dim]API key is optional for local endpoints (press Enter to skip)[/]")
+    api_key = Prompt.ask("  [label]API key[/]", password=True, default="", console=console).strip()
+    return api_key
+
+
+def _provider_label(provider_id: str) -> str:
+    """Return the display label for a provider, falling back to the raw ID."""
+    info = get_provider_info(provider_id)
+    return info.label if info else provider_id
+
+
 def _print_config_table(config: RllmConfig, title: str = "[dim]current config[/]", border: str = "dim") -> None:
     """Print a config summary panel."""
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column(style="label", width=10)
     table.add_column()
-    table.add_row("Provider", config.provider)
-    table.add_row("API key", f"[key]{_mask_key(config.api_key)}[/]")
+    table.add_row("Provider", _provider_label(config.provider))
+    if config.base_url:
+        table.add_row("Base URL", f"[dim]{config.base_url}[/]")
+    if config.provider != "custom" or config.api_key:
+        table.add_row("API key", f"[key]{_mask_key(config.api_key)}[/]")
     table.add_row("Model", config.model)
     console.print(Panel(table, title=title, border_style=border, expand=False))
 
@@ -56,8 +76,11 @@ def _print_saved_summary(config: RllmConfig, path: str) -> None:
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column(style="label", width=10)
     table.add_column()
-    table.add_row("Provider", f"[bold]{config.provider}[/]")
-    table.add_row("API key", f"[key]{_mask_key(config.api_key)}[/]")
+    table.add_row("Provider", f"[bold]{_provider_label(config.provider)}[/]")
+    if config.base_url:
+        table.add_row("Base URL", f"[dim]{config.base_url}[/]")
+    if config.provider != "custom" or config.api_key:
+        table.add_row("API key", f"[key]{_mask_key(config.api_key)}[/]")
     table.add_row("Model", f"[bold]{config.model}[/]")
     table.add_row("Saved to", f"[dim]{path}[/]")
     console.print(Panel(table, title="[success]Configuration saved[/]", border_style="green", expand=False))
@@ -70,9 +93,32 @@ def _do_swap(existing: RllmConfig) -> None:
     provider = _select_provider(existing)
     console.print()
 
+    # Base URL — for custom provider
+    base_url = ""
+    if provider == "custom":
+        if existing.base_url:
+            console.print(f"  [label]Base URL[/]  [dim]{existing.base_url}[/]  [dim](on file)[/]")
+            change = Confirm.ask("  Change URL?", default=False, console=console)
+            if change:
+                base_url = _prompt_base_url()
+            else:
+                base_url = existing.base_url
+        else:
+            base_url = _prompt_base_url()
+        console.print()
+
     # API key — use stored key if available, otherwise prompt
     api_keys = dict(existing.api_keys)
-    if provider in api_keys:
+    if provider == "custom":
+        # API key is optional for custom endpoints
+        if provider in api_keys and api_keys[provider]:
+            console.print(f"  [label]API key[/]  [key]{_mask_key(api_keys[provider])}[/]  [dim](on file)[/]")
+            change = Confirm.ask("  Change key?", default=False, console=console)
+            if change:
+                api_keys[provider] = _prompt_optional_api_key(provider)
+        else:
+            api_keys[provider] = _prompt_optional_api_key(provider)
+    elif provider in api_keys:
         console.print(f"  [label]API key[/]  [key]{_mask_key(api_keys[provider])}[/]  [dim](on file)[/]")
         change = Confirm.ask("  Change key?", default=False, console=console)
         if change:
@@ -86,7 +132,7 @@ def _do_swap(existing: RllmConfig) -> None:
     model = _select_model(provider, model_existing)
     console.print()
 
-    config = RllmConfig(provider=provider, model=model, api_keys=api_keys)
+    config = RllmConfig(provider=provider, model=model, api_keys=api_keys, base_url=base_url)
     errors = config.validate()
     if errors:
         for err in errors:
@@ -123,18 +169,28 @@ def model_setup():
         _do_swap(existing)
         return
 
-    # Fresh setup: provider -> key -> model
+    # Fresh setup: provider -> (base_url?) -> key -> model
     provider = _select_provider(existing)
     console.print()
 
-    api_key = _prompt_api_key(provider)
+    base_url = ""
+    if provider == "custom":
+        base_url = _prompt_base_url()
+        console.print()
+
+    if provider == "custom":
+        api_key = _prompt_optional_api_key(provider)
+    else:
+        api_key = _prompt_api_key(provider)
     console.print()
 
     model_name = _select_model(provider, existing)
     console.print()
 
-    api_keys = {provider: api_key}
-    config = RllmConfig(provider=provider, model=model_name, api_keys=api_keys)
+    api_keys = {}
+    if api_key:
+        api_keys[provider] = api_key
+    config = RllmConfig(provider=provider, model=model_name, api_keys=api_keys, base_url=base_url)
     errors = config.validate()
     if errors:
         for err in errors:

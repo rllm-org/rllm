@@ -4,6 +4,7 @@ from rllm.experimental.eval.evaluator_loader import load_evaluator, resolve_eval
 from rllm.experimental.eval.proxy import EvalProxyManager
 from rllm.experimental.eval.results import EvalItem, EvalResult
 from rllm.experimental.eval.runner import EvalRunner
+from rllm.experimental.eval.task_spec import TaskSpec, build_task_spec
 from rllm.experimental.eval.types import (
     AgentConfig,
     AgentFlow,
@@ -11,6 +12,7 @@ from rllm.experimental.eval.types import (
     EvalOutput,
     Evaluator,
     Signal,
+    run_agent_flow,
 )
 
 __all__ = [
@@ -30,4 +32,7 @@ __all__ = [
     "EvalOutput",
     "Signal",
     "CompoundEvaluator",
+    "TaskSpec",
+    "build_task_spec",
+    "run_agent_flow",
 ]

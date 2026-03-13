@@ -1,0 +1,37 @@
+name: Test rllm-model-gateway
+
+on:
+  push:
+    branches: [main, "rllm-model-gateway*"]
+    paths:
+      - "rllm-model-gateway/**"
+      - ".github/workflows/test-model-gateway.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "rllm-model-gateway/**"
+      - ".github/workflows/test-model-gateway.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rllm-model-gateway
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Run unit tests
+        run: uv run pytest tests/unit/ -q

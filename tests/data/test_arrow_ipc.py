@@ -1,6 +1,5 @@
 """Tests for Arrow IPC save/load and format-aware dataset registry."""
 
-import json
 import os
 
 import pytest

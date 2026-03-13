@@ -98,7 +98,6 @@ class UnifiedTrainer:
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
         backend_args: dict | None = None,
-        agent_run_func: Callable | None = None,
         *,
         traj_grouping_hook: Callable | None = None,
         traj_group_adv_estimator_map: dict | None = None,
@@ -106,17 +105,11 @@ class UnifiedTrainer:
     ):
         """Initialize the UnifiedTrainer.
 
-        Provide exactly one of ``workflow_class`` or ``agent_run_func``.
-        When ``agent_run_func`` is given, the trainer automatically creates an
-        ``SdkWorkflow`` adapter so that SDK users can leverage the unified
-        pipeline (rejection sampling, advantage computation, verl + tinker).
-
-        When ``sandbox.enabled`` is true in the SDK config, ``agent_run_func``
-        may be ``None`` — the sandbox orchestrator handles agent execution.
+        Provide exactly one of ``workflow_class`` or (``agent_flow`` AND ``evaluator``).
         """
-        sandbox_enabled = config.rllm.get("sdk", {}).get("sandbox", {}).get("enabled", False)
-        if not sandbox_enabled:
-            assert (workflow_class is not None) ^ (agent_run_func is not None), "Exactly one of workflow_class or agent_run_func must be provided"
+        has_agent_flow = kwargs.get("agent_flow") is not None and kwargs.get("evaluator") is not None
+        if not has_agent_flow:
+            assert workflow_class is not None, "Either workflow_class or (agent_flow AND evaluator) must be provided"
 
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
@@ -132,9 +125,6 @@ class UnifiedTrainer:
         # Extract the TrajectoryGroup-specific estimator from kwargs
         self.traj_group_adv_estimator_map = traj_group_adv_estimator_map or {}
 
-        # SDK factory (set up later if agent_run_func is provided)
-        self._sdk_factory = None
-
         self.backend = backend_cls(config=config, **(backend_args or {}))
 
         self._validate_and_setup_configs()
@@ -147,31 +137,43 @@ class UnifiedTrainer:
             algorithm_config=self.algorithm_config,
         )
 
-        # If agent_run_func is provided (or sandbox enabled), set up SDK workflow via factory
-        post_execute_hook = None
-        if agent_run_func is not None or sandbox_enabled:
-            from rllm.experimental.engine.sdk_workflow import SdkWorkflow, SdkWorkflowFactory
+        # Determine which engine path to use:
+        # 1. agent_flow + evaluator → AgentFlowEngine (gateway-based)
+        # 2. workflow_class → UnifiedWorkflowEngine (direct)
+        self._gateway = None
 
-            self._sdk_factory = SdkWorkflowFactory(
-                agent_run_func=agent_run_func,
+        agent_flow = kwargs.get("agent_flow")
+        evaluator = kwargs.get("evaluator")
+
+        if agent_flow is not None and evaluator is not None:
+            from rllm.experimental.engine.agent_flow_engine import AgentFlowEngine
+            from rllm.experimental.engine.gateway_manager import GatewayManager
+
+            gateway_mode = "process" if kwargs.get("backend_name") == "verl" else "thread"
+            self._gateway = GatewayManager(self.config, mode=gateway_mode)
+            self._gateway.start(rollout_engine)
+
+            self.agent_workflow_engine = AgentFlowEngine(
+                agent_flow=agent_flow,
+                evaluator=evaluator,
+                gateway=self._gateway,
+                model=self.config.get("model", {}).get("name", "default"),
+                n_parallel_tasks=self.rllm_config.workflow.n_parallel_tasks,
+                retry_limit=self.rllm_config.workflow.retry_limit,
+                raise_on_error=self.rllm_config.workflow.get("raise_on_error", True),
+                episode_logger=self.episode_logger,
+            )
+        else:
+            self.agent_workflow_engine = UnifiedWorkflowEngine(
+                workflow_cls=self.workflow_class,
+                workflow_args=self.workflow_args,
                 rollout_engine=rollout_engine,
                 config=self.config,
+                n_parallel_tasks=self.rllm_config.workflow.n_parallel_tasks,
+                retry_limit=self.rllm_config.workflow.retry_limit,
+                raise_on_error=self.rllm_config.workflow.raise_on_error,
+                episode_logger=self.episode_logger,
             )
-            self.workflow_class = SdkWorkflow
-            self.workflow_args = self._sdk_factory.get_workflow_args()
-            post_execute_hook = self._sdk_factory.flush_traces_hook
-
-        self.agent_workflow_engine = UnifiedWorkflowEngine(
-            workflow_cls=self.workflow_class,
-            workflow_args=self.workflow_args,
-            rollout_engine=rollout_engine,
-            config=self.config,
-            n_parallel_tasks=self.rllm_config.workflow.n_parallel_tasks,
-            retry_limit=self.rllm_config.workflow.retry_limit,
-            raise_on_error=self.rllm_config.workflow.raise_on_error,
-            episode_logger=self.episode_logger,
-            post_execute_hook=post_execute_hook,
-        )
 
         self.tokenizer = None
         if hasattr(self.backend, "tokenizer"):
@@ -253,12 +255,10 @@ class UnifiedTrainer:
 
     async def fit_async(self) -> None:
         """Public async entry point for the full training process."""
-        # Initialize sandbox orchestrator (if enabled) before the workflow pool
-        if self._sdk_factory is not None:
-            await self._sdk_factory.initialize_sandbox()
-
         # initialize the UnifiedWorkflowEngine (init the workflow pool)
-        await self.agent_workflow_engine.initialize_pool()
+        # AgentFlowEngine doesn't need pool initialization
+        if hasattr(self.agent_workflow_engine, "initialize_pool"):
+            await self.agent_workflow_engine.initialize_pool()
 
         trainer_state = TrainerState()
 
@@ -457,9 +457,9 @@ class UnifiedTrainer:
 
     def shutdown(self):
         """Shutdown the trainer and cleanup resources."""
-        if hasattr(self, "_sdk_factory") and self._sdk_factory is not None:
-            self._sdk_factory.shutdown()
-            self._sdk_factory = None
+        if hasattr(self, "_gateway") and self._gateway is not None:
+            self._gateway.stop()
+            self._gateway = None
         if hasattr(self, "agent_workflow_engine") and self.agent_workflow_engine is not None:
             self.agent_workflow_engine.shutdown()
         self.backend.shutdown()
@@ -504,7 +504,6 @@ class TrainerLauncher(ABC):
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
-        agent_run_func: Callable | None = None,
         **kwargs,
     ):
         """Initialize the TrainerLauncher."""
@@ -513,7 +512,6 @@ class TrainerLauncher(ABC):
         self.workflow_args = workflow_args or {}
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
-        self.agent_run_func = agent_run_func
         self.kwargs = kwargs
 
     @abstractmethod
@@ -528,7 +526,7 @@ class AgentTrainer:
 
     This trainer will simply delegate the task to the corresponding launcher class.
 
-    Provide exactly one of ``workflow_class`` or ``agent_run_func``.
+    Provide exactly one of ``workflow_class`` or (``agent_flow`` AND ``evaluator``).
     """
 
     def __init__(
@@ -539,12 +537,20 @@ class AgentTrainer:
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
         backend: Literal["verl", "tinker"] = "verl",
-        agent_run_func: Callable | None = None,
+        agent_flow: Any = None,
+        evaluator: Any = None,
         **kwargs,
     ):
-        sandbox_enabled = config.rllm.get("sdk", {}).get("sandbox", {}).get("enabled", False)
-        if not sandbox_enabled:
-            assert (workflow_class is not None) ^ (agent_run_func is not None), "Exactly one of workflow_class or agent_run_func must be provided"
+        has_agent_flow = agent_flow is not None and evaluator is not None
+        if not has_agent_flow:
+            assert workflow_class is not None, "Either workflow_class or (agent_flow AND evaluator) must be provided"
+
+        # Pass agent_flow and evaluator through kwargs for UnifiedTrainer
+        if agent_flow is not None:
+            kwargs["agent_flow"] = agent_flow
+        if evaluator is not None:
+            kwargs["evaluator"] = evaluator
+        kwargs["backend_name"] = backend
 
         if backend == "verl":
             from rllm.experimental.verl.verl_launcher import VerlTrainerLauncher
@@ -555,7 +561,6 @@ class AgentTrainer:
                 train_dataset=train_dataset,
                 val_dataset=val_dataset,
                 workflow_args=workflow_args,
-                agent_run_func=agent_run_func,
                 **kwargs,
             )
         elif backend == "tinker":
@@ -567,7 +572,6 @@ class AgentTrainer:
                 train_dataset=train_dataset,
                 val_dataset=val_dataset,
                 workflow_args=workflow_args,
-                agent_run_func=agent_run_func,
                 **kwargs,
             )
 

@@ -94,20 +94,14 @@ def _import_from_path(import_path: str) -> object:
 def _validate_agent(obj: object, name: str) -> None:
     """Validate that an object conforms to the AgentFlow protocol."""
     if not hasattr(obj, "run") or not callable(obj.run):
-        raise TypeError(
-            f"Agent '{name}' must be an AgentFlow with a .run() method, "
-            f"got {type(obj).__name__}"
-        )
+        raise TypeError(f"Agent '{name}' must be an AgentFlow with a .run() method, got {type(obj).__name__}")
 
 
 def _validate_agent_class(cls: type, name: str) -> None:
     """Validate that a class has a .run method."""
     run_attr = getattr(cls, "run", None)
     if run_attr is None or not callable(run_attr):
-        raise TypeError(
-            f"Agent '{name}' must be an AgentFlow class with a .run() method, "
-            f"got {cls.__name__}"
-        )
+        raise TypeError(f"Agent '{name}' must be an AgentFlow class with a .run() method, got {cls.__name__}")
 
 
 def _load_and_instantiate(import_path: str, name: str) -> AgentFlow:
@@ -164,11 +158,11 @@ def load_agent(name_or_path: str) -> AgentFlow:
             return obj
 
     available = ", ".join(sorted(agents.keys()))
-    raise KeyError(f"Agent '{name_or_path}' not found in registry or plugins. Available built-in: {available}")
+    raise KeyError(f"Agent '{name_or_path}' not found in registry or agenthub. Available built-in: {available}")
 
 
 def list_agents() -> list[dict]:
-    """List all available agents (user-registered + built-in + plugins).
+    """List all available agents (user-registered + built-in + agenthub).
 
     Returns:
         A list of dicts with keys: name, source, description, module.
@@ -177,12 +171,14 @@ def list_agents() -> list[dict]:
 
     # User-registered agents
     for name, info in sorted(_load_user_agents().items()):
-        results.append({
-            "name": name,
-            "source": "registered",
-            "description": "",
-            "module": info["import_path"],
-        })
+        results.append(
+            {
+                "name": name,
+                "source": "registered",
+                "description": "",
+                "module": info["import_path"],
+            }
+        )
 
     # Built-in agents from catalog
     seen_names = {r["name"] for r in results}
@@ -193,12 +189,14 @@ def list_agents() -> list[dict]:
 
     for name, info in sorted(catalog.get("agents", {}).items()):
         if name not in seen_names:
-            results.append({
-                "name": name,
-                "source": "built-in",
-                "description": info.get("description", ""),
-                "module": f"{info.get('module', '')}.{info.get('function', '')}",
-            })
+            results.append(
+                {
+                    "name": name,
+                    "source": "built-in",
+                    "description": info.get("description", ""),
+                    "module": f"{info.get('module', '')}.{info.get('function', '')}",
+                }
+            )
 
     # Plugin agents from entry points
     seen_names = {r["name"] for r in results}
@@ -206,11 +204,13 @@ def list_agents() -> list[dict]:
     for ep in eps:
         if ep.name not in seen_names:
             pkg = ep.dist.name if ep.dist else "unknown"
-            results.append({
-                "name": ep.name,
-                "source": f"plugin ({pkg})",
-                "description": "",
-                "module": str(ep.value),
-            })
+            results.append(
+                {
+                    "name": ep.name,
+                    "source": f"plugin ({pkg})",
+                    "description": "",
+                    "module": str(ep.value),
+                }
+            )
 
     return results

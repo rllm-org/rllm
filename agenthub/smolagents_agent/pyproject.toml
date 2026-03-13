@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smolagents-agent"
+version = "0.1.0"
+description = "SmolAgents framework ReAct agent plugin for rLLM"
+requires-python = ">=3.10"
+dependencies = ["rllm", "smolagents>=1.20.0"]
+
+[tool.setuptools.packages.find]
+include = ["smolagents_agent*"]
+
+# Plugin discovery: rllm CLI finds these by name
+[project.entry-points."rllm.agents"]
+smolagents = "smolagents_agent.agent:smolagents_agent"

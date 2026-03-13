@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import sqlite3
-import tempfile
 import threading
 import time
 
@@ -176,14 +175,16 @@ class ExecutionResultStore:
             return None
 
         trajectories = json.loads(row["trajectories"]) if row["trajectories"] else None
-        return deserialize_execution_result({
-            "success": row["error"] is None,
-            "trajectories": trajectories,
-            "session_uid": row["session_uid"] or "",
-            "reward": row["reward"],
-            "error": row["error"],
-            "elapsed": row["elapsed"] or 0.0,
-        })
+        return deserialize_execution_result(
+            {
+                "success": row["error"] is None,
+                "trajectories": trajectories,
+                "session_uid": row["session_uid"] or "",
+                "reward": row["reward"],
+                "error": row["error"],
+                "elapsed": row["elapsed"] or 0.0,
+            }
+        )
 
     def wait(self, execution_id: str, timeout: float = 600.0, poll_interval: float = 0.1) -> ExecutionResult:
         """Poll until result is available or timeout expires."""
@@ -198,7 +199,9 @@ class ExecutionResultStore:
             if not warned and elapsed > 60:
                 logger.warning(
                     "Still waiting for execution %s after %.0fs (timeout=%.0fs)",
-                    execution_id, elapsed, timeout,
+                    execution_id,
+                    elapsed,
+                    timeout,
                 )
                 warned = True
             time.sleep(poll_interval)
@@ -210,7 +213,10 @@ class ExecutionResultStore:
         )
 
     async def wait_async(
-        self, execution_id: str, timeout: float = 600.0, poll_interval: float = 0.1,
+        self,
+        execution_id: str,
+        timeout: float = 600.0,
+        poll_interval: float = 0.1,
     ) -> ExecutionResult:
         """Async version of ``wait`` that doesn't block threads.
 
@@ -253,7 +259,9 @@ class ExecutionResultStore:
             if not warned and elapsed > 60:
                 logger.warning(
                     "Still waiting for execution %s after %.0fs (timeout=%.0fs)",
-                    execution_id, elapsed, timeout,
+                    execution_id,
+                    elapsed,
+                    timeout,
                 )
                 warned = True
             await asyncio.sleep(poll_interval)

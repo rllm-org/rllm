@@ -9,9 +9,13 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Optional
 
-import numpy as np
-import torch
 from tqdm import tqdm
+
+try:
+    import numpy as np
+    import torch
+except ImportError as err:
+    raise ImportError("AgentSdkEngine requires extra dependencies. Install with: pip install rllm[train]") from err
 
 from rllm.agents.agent import Episode, Trajectory
 from rllm.engine.rollout import ModelOutput, RolloutEngine

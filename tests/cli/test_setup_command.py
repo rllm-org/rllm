@@ -1,13 +1,12 @@
 """Tests for rllm setup CLI command (deprecated alias for rllm model setup)."""
 
-import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
 
 from rllm.experimental.cli.main import cli
-from rllm.experimental.eval.config import load_config, save_config, RllmConfig
+from rllm.experimental.eval.config import RllmConfig, load_config, save_config
 
 
 @pytest.fixture
@@ -49,6 +48,7 @@ def test_setup_select_different_model(runner, tmp_rllm_home):
 def test_setup_custom_model(runner, tmp_rllm_home):
     """Setup should allow entering a custom model name."""
     from rllm.experimental.eval.config import PROVIDER_MODELS
+
     other_num = len(PROVIDER_MODELS["openai"]) + 1  # "Other (enter manually)"
 
     result = runner.invoke(cli, ["setup"], input=f"1\nsk-testkey\n{other_num}\nmy-custom-model\n")
@@ -170,8 +170,7 @@ def test_setup_with_tty_uses_terminal_menu(tmp_rllm_home):
     mock_menu_instance.show.return_value = 0
     mock_menu_cls = MagicMock(return_value=mock_menu_instance)
 
-    with patch("rllm.experimental.cli._ui._has_tty", return_value=True), \
-         patch("rllm.experimental.cli._ui._get_terminal_menu", return_value=mock_menu_cls):
+    with patch("rllm.experimental.cli._ui._has_tty", return_value=True), patch("rllm.experimental.cli._ui._get_terminal_menu", return_value=mock_menu_cls):
         runner = CliRunner()
         result = runner.invoke(cli, ["setup"], input="sk-testkey\n")
 

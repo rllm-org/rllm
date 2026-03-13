@@ -95,6 +95,9 @@ rejection_sample:
   min_trajs_per_group: 2
 
 # SDK Configuration
+# DEPRECATED: This section is only kept for backward compatibility with
+# standalone SDK usage (rllm/sdk/). The unified trainer no longer uses the
+# SDK/agent_run_func path — use AgentFlow + Evaluator instead.
 sdk:
   store:
     path: ~/.rllm/traces.db
@@ -133,6 +136,12 @@ sdk:
     #   tps_limit: Max concurrent invocations (default: 25)
     #   max_retry_attempts: boto3 adaptive retry attempts (default: 5)
     extra: {}
+
+# Gateway Configuration (model gateway for AgentFlow-based training)
+gateway:
+  port: 9090
+  host: "127.0.0.1"
+  db_path: null       # Defaults to temp file
 
 # Episode Logging Configuration
 episode_logging:

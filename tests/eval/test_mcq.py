@@ -1,122 +1,12 @@
-"""Tests for MCQ agent flow and MCQ evaluator."""
+"""Tests for MCQ evaluator."""
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
-
-import pytest
-
 from rllm.experimental.eval.types import (
-    AgentConfig,
-    AgentFlow,
     Evaluator,
     MCQEvaluator,
-    Signal,
 )
-from rllm.types import Episode, Step, Trajectory
-
-
-def _mock_openai_response(content: str):
-    """Create a mock OpenAI chat completion response."""
-    mock_response = MagicMock()
-    mock_choice = MagicMock()
-    mock_choice.message.content = content
-    mock_response.choices = [mock_choice]
-    return mock_response
-
-
-@pytest.fixture
-def base_config():
-    return AgentConfig(
-        base_url="http://localhost:8000/v1",
-        model="test-model",
-        session_uid="test-001",
-    )
-
-
-# ---------------------------------------------------------------------------
-# MCQAgentFlow
-# ---------------------------------------------------------------------------
-
-
-class TestMCQAgentFlow:
-    def test_returns_episode(self, base_config):
-        from rllm.experimental.agents.mcq_agent import mcq_agent
-
-        task = {
-            "question": "What is the capital of France?",
-            "choices": ["London", "Paris", "Berlin", "Madrid"],
-            "ground_truth": "B",
-            "data_source": "test",
-        }
-
-        with patch("rllm.experimental.agents.mcq_agent.OpenAI") as MockOpenAI:
-            mock_client = MagicMock()
-            mock_client.chat.completions.create.return_value = _mock_openai_response("B")
-            MockOpenAI.return_value = mock_client
-
-            result = mcq_agent.run(task, base_config)
-
-        assert isinstance(result, Episode)
-        assert len(result.trajectories) == 1
-        assert result.trajectories[0].steps[0].done is True
-        assert result.artifacts["answer"] == "B"
-
-    def test_formats_choices(self, base_config):
-        from rllm.experimental.agents.mcq_agent import mcq_agent
-
-        task = {
-            "question": "Pick one",
-            "choices": ["Alpha", "Beta", "Gamma"],
-            "ground_truth": "A",
-        }
-
-        with patch("rllm.experimental.agents.mcq_agent.OpenAI") as MockOpenAI:
-            mock_client = MagicMock()
-            mock_client.chat.completions.create.return_value = _mock_openai_response("A")
-            MockOpenAI.return_value = mock_client
-
-            mcq_agent.run(task, base_config)
-
-            call_args = mock_client.chat.completions.create.call_args
-            user_msg = call_args[1]["messages"][1]["content"]
-            assert "A) Alpha" in user_msg
-            assert "B) Beta" in user_msg
-            assert "C) Gamma" in user_msg
-
-    def test_llm_failure(self, base_config):
-        from rllm.experimental.agents.mcq_agent import mcq_agent
-
-        task = {"question": "Test", "choices": ["A", "B"], "ground_truth": "A"}
-
-        with patch("rllm.experimental.agents.mcq_agent.OpenAI") as MockOpenAI:
-            mock_client = MagicMock()
-            mock_client.chat.completions.create.side_effect = Exception("Connection error")
-            MockOpenAI.return_value = mock_client
-
-            result = mcq_agent.run(task, base_config)
-
-        assert isinstance(result, Episode)
-        assert result.artifacts["answer"] == ""
-
-    def test_no_reward_computed(self, base_config):
-        from rllm.experimental.agents.mcq_agent import mcq_agent
-
-        task = {"question": "Test", "choices": ["A", "B"], "ground_truth": "A"}
-
-        with patch("rllm.experimental.agents.mcq_agent.OpenAI") as MockOpenAI:
-            mock_client = MagicMock()
-            mock_client.chat.completions.create.return_value = _mock_openai_response("A")
-            MockOpenAI.return_value = mock_client
-
-            result = mcq_agent.run(task, base_config)
-
-        assert result.trajectories[0].reward is None
-
-    def test_is_agent_flow(self):
-        from rllm.experimental.agents.mcq_agent import mcq_agent
-        assert isinstance(mcq_agent, AgentFlow)
-
+from rllm.types import Episode
 
 # ---------------------------------------------------------------------------
 # MCQEvaluator

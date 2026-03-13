@@ -67,9 +67,7 @@ class FileEditorTool:
             view_range = kwargs.get("view_range")
             if view_range and len(view_range) == 2:
                 start, end = view_range
-                return _safe_exec(
-                    sandbox, f"sed -n '{start},{end}p' {shlex.quote(path)} | cat -n"
-                )
+                return _safe_exec(sandbox, f"sed -n '{start},{end}p' {shlex.quote(path)} | cat -n")
             return _safe_exec(sandbox, f"cat -n {shlex.quote(path)}")
 
         elif command == "create":
@@ -88,19 +86,10 @@ class FileEditorTool:
             if not old_str:
                 return "Error: old_str is required for str_replace"
             # Use python for exact string replacement (avoids sed escaping issues)
-            py_script = (
-                "import sys; "
-                "content = open(sys.argv[1]).read(); "
-                "old = sys.argv[2]; new = sys.argv[3]; "
-                "count = content.count(old); "
-                "print(f'Replaced {count} occurrence(s)') if count > 0 "
-                "else print('Error: old_str not found in file'); "
-                "open(sys.argv[1], 'w').write(content.replace(old, new, 1)) if count > 0 else None"
-            )
+            py_script = "import sys; content = open(sys.argv[1]).read(); old = sys.argv[2]; new = sys.argv[3]; count = content.count(old); print(f'Replaced {count} occurrence(s)') if count > 0 else print('Error: old_str not found in file'); open(sys.argv[1], 'w').write(content.replace(old, new, 1)) if count > 0 else None"
             return _safe_exec(
                 sandbox,
-                f"python3 -c {shlex.quote(py_script)} {shlex.quote(path)} "
-                f"{shlex.quote(old_str)} {shlex.quote(new_str)}",
+                f"python3 -c {shlex.quote(py_script)} {shlex.quote(path)} {shlex.quote(old_str)} {shlex.quote(new_str)}",
             )
 
         elif command == "insert":

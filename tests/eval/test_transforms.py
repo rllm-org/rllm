@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from rllm.data.transforms import (
     ceval_transform,
     countdown_transform,
@@ -174,7 +172,10 @@ class TestMMLUReduxTransform:
     def test_string_answer(self):
         row = {
             "question": "Test",
-            "A": "A", "B": "B", "C": "C", "D": "D",
+            "A": "A",
+            "B": "B",
+            "C": "C",
+            "D": "D",
             "answer": "C",
         }
         result = mmlu_redux_transform(row)

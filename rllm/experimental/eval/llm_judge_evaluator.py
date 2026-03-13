@@ -55,11 +55,7 @@ class LLMJudgeEvaluator:
 
         # Format conversation for judge
         if conversation:
-            conv_text = "\n".join(
-                f"{msg['role'].upper()}: {msg.get('content', '')}"
-                for msg in conversation
-                if msg.get("role") != "system"
-            )
+            conv_text = "\n".join(f"{msg['role'].upper()}: {msg.get('content', '')}" for msg in conversation if msg.get("role") != "system")
         else:
             question = task.get("question", "")
             conv_text = f"USER: {question}\nASSISTANT: {answer}"
@@ -107,9 +103,7 @@ class LLMJudgeEvaluator:
 
             client = OpenAI(base_url=self.judge_base_url, api_key="EMPTY")
 
-            user_message = JUDGE_USER_TEMPLATE.format(
-                conversation=conversation, rubric=rubric
-            )
+            user_message = JUDGE_USER_TEMPLATE.format(conversation=conversation, rubric=rubric)
 
             response = client.chat.completions.create(
                 model=self.judge_model or "gpt-4o-mini",
@@ -125,7 +119,7 @@ class LLMJudgeEvaluator:
             # Parse JSON response
             try:
                 # Try to extract JSON from the response
-                json_match = re.search(r'\{[^}]+\}', result_text)
+                json_match = re.search(r"\{[^}]+\}", result_text)
                 if json_match:
                     result = json.loads(json_match.group())
                     return float(result.get("score", 0))

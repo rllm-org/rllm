@@ -1,70 +1,10 @@
 {
   "version": 1,
   "agents": {
-    "math": {
-      "description": "Single-turn math reasoning with step-by-step and boxed answer",
-      "module": "rllm.experimental.agents.math_agent",
-      "function": "math_agent"
-    },
-    "code": {
-      "description": "Single-turn code generation",
-      "module": "rllm.experimental.agents.code_agent",
-      "function": "code_agent"
-    },
-    "countdown": {
-      "description": "Countdown arithmetic with answer tags",
-      "module": "rllm.experimental.agents.math_agent",
-      "function": "countdown_agent"
-    },
-    "qa": {
-      "description": "Question answering with short answer extraction",
-      "module": "rllm.experimental.agents.qa_agent",
-      "function": "qa_agent"
-    },
-    "mcq": {
-      "description": "Multiple choice question answering with letter selection",
-      "module": "rllm.experimental.agents.mcq_agent",
-      "function": "mcq_agent"
-    },
-    "ifeval": {
-      "description": "Instruction following with exact constraint satisfaction",
-      "module": "rllm.experimental.agents.ifeval_agent",
-      "function": "ifeval_agent"
-    },
-    "bfcl": {
-      "description": "Function calling with tool definitions",
-      "module": "rllm.experimental.agents.bfcl_agent",
-      "function": "bfcl_agent"
-    },
-    "multiturn": {
-      "description": "Multi-turn conversation agent",
-      "module": "rllm.experimental.agents.multiturn_agent",
-      "function": "multiturn_agent"
-    },
-    "reasoning": {
-      "description": "General-purpose chain-of-thought reasoning with ANSWER: marker",
-      "module": "rllm.experimental.agents.reasoning_agent",
-      "function": "reasoning_agent"
-    },
-    "translation": {
-      "description": "Machine translation agent",
-      "module": "rllm.experimental.agents.translation_agent",
-      "function": "translation_agent"
-    },
-    "vlm_mcq": {
-      "description": "VLM multiple-choice question answering with images",
-      "module": "rllm.experimental.agents.vlm_agent",
-      "function": "vlm_mcq_agent"
-    },
-    "vlm_math": {
-      "description": "VLM math reasoning with images and boxed answer",
-      "module": "rllm.experimental.agents.vlm_agent",
-      "function": "vlm_math_agent"
-    },
-    "vlm_open": {
-      "description": "VLM open-ended question answering with images",
-      "module": "rllm.experimental.agents.vlm_agent",
-      "function": "vlm_open_agent"
+    "react": {
+      "description": "General-purpose ReAct agent driven by TaskSpec",
+      "module": "rllm.experimental.agents.react_agent",
+      "function": "react_agent"
     },
     "search": {
       "description": "Multi-turn search agent with web search tool calling",

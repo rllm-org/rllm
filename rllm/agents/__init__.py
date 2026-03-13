@@ -1,6 +1,5 @@
 from rllm.agents.agent import Action, BaseAgent, Episode, Step, Trajectory
 from rllm.agents.math_agent import MathAgent
-from rllm.agents.tool_agent import ToolAgent
 
 __all__ = ["BaseAgent", "Action", "Step", "Trajectory", "Episode", "MathAgent", "ToolAgent"]
 
@@ -13,8 +12,9 @@ def safe_import(module_path, class_name):
         return None
 
 
-# Define all agent imports
+# Define all agent imports (lazy, since they may have heavy/optional dependencies)
 AGENT_IMPORTS = [
+    ("rllm.agents.tool_agent", "ToolAgent"),
     ("rllm.agents.miniwob_agent", "MiniWobAgent"),
     ("rllm.agents.frozenlake_agent", "FrozenLakeAgent"),
     ("rllm.agents.swe_agent", "SWEAgent"),
@@ -26,4 +26,5 @@ for module_path, class_name in AGENT_IMPORTS:
     imported_class = safe_import(module_path, class_name)
     if imported_class is not None:
         globals()[class_name] = imported_class
-        __all__.append(class_name)
+        if class_name not in __all__:
+            __all__.append(class_name)

@@ -77,13 +77,12 @@ class SandboxOrchestrator:
 
     async def _init_persistent_pool(self) -> None:
         """Create and warm up all workers for persistent mode (in parallel)."""
+
         async def _create_in_thread(i: int) -> Worker:
             port = self._config.worker_port + i
             return await asyncio.to_thread(self._create_worker_sync, f"worker-{i}", port)
 
-        workers = await asyncio.gather(*[
-            _create_in_thread(i) for i in range(self._config.num_workers)
-        ])
+        workers = await asyncio.gather(*[_create_in_thread(i) for i in range(self._config.num_workers)])
         for w in workers:
             self._workers.append(w)
             self._available.put_nowait(w)
@@ -99,13 +98,7 @@ class SandboxOrchestrator:
         self._setup_sandbox_sync(sandbox)
 
         # Start the worker server
-        cmd = (
-            f"python /app/runner/worker_server.py "
-            f"--agent-module {self._config.agent_module} "
-            f"--agent-func {self._config.agent_func} "
-            f"--port {port} "
-            f"--agent-dir /app/agent"
-        )
+        cmd = f"python /app/runner/worker_server.py --agent-module {self._config.agent_module} --agent-func {self._config.agent_func} --port {port} --agent-dir /app/agent"
         sandbox.start_agent_process(cmd, port=port)
         return Worker(sandbox=sandbox, name=name, port=port)
 
@@ -206,13 +199,7 @@ class SandboxOrchestrator:
                     sandbox.exec(cmd, timeout=self._config.task_setup_timeout)
 
                 # Start runner
-                cmd = (
-                    f"python /app/runner/worker_server.py "
-                    f"--agent-module {self._config.agent_module} "
-                    f"--agent-func {self._config.agent_func} "
-                    f"--port {port} "
-                    f"--agent-dir /app/agent"
-                )
+                cmd = f"python /app/runner/worker_server.py --agent-module {self._config.agent_module} --agent-func {self._config.agent_func} --port {port} --agent-dir /app/agent"
                 sandbox.start_agent_process(cmd, port=port)
 
                 # Send task

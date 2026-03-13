@@ -175,7 +175,4 @@ def resolve_search_backend(name: str | None = None) -> SerperSearchTool | BraveS
     if os.environ.get("BRAVE_API_KEY"):
         return BraveSearchTool()
 
-    raise ValueError(
-        "No search backend configured. Set SERPER_API_KEY or BRAVE_API_KEY, "
-        "or pass --search-backend explicitly."
-    )
+    raise ValueError("No search backend configured. Set SERPER_API_KEY or BRAVE_API_KEY, or pass --search-backend explicitly.")

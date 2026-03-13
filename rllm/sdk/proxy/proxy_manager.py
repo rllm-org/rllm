@@ -18,7 +18,6 @@ import sys
 import time
 from typing import Any
 
-import aiohttp
 import requests
 import yaml
 
@@ -50,6 +49,8 @@ class ProxyManager:
             headers["Authorization"] = f"Bearer {self.admin_token}"
 
         try:
+            import aiohttp
+
             request_timeout = aiohttp.ClientTimeout(total=timeout + 5.0)
             async with aiohttp.ClientSession(timeout=request_timeout) as session:
                 async with session.post(url, json={"timeout": timeout}, headers=headers) as resp:

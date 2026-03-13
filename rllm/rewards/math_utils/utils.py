@@ -9,9 +9,19 @@ import re
 import signal
 import threading
 
-import sympy
-from pylatexenc import latex2text
-from sympy.parsing import sympy_parser
+try:
+    import sympy
+    from pylatexenc import latex2text
+    from sympy.parsing import sympy_parser
+except ImportError:
+    sympy = None
+    latex2text = None
+    sympy_parser = None
+
+
+def _check_rewards_deps():
+    if sympy is None:
+        raise ImportError("Math reward utilities require extra dependencies. Install with: pip install rllm[rewards]")
 
 
 # Dan Hendrycks' code
@@ -174,6 +184,7 @@ TUPLE_CHARS = "()[]"
 
 def _sympy_parse(expr: str):
     """Parses an expression with sympy."""
+    _check_rewards_deps()
     py_expr = expr.replace("^", "**")
     return sympy_parser.parse_expr(
         py_expr,
@@ -183,6 +194,7 @@ def _sympy_parse(expr: str):
 
 def _parse_latex(expr: str) -> str:
     """Attempts to parse latex to an expression sympy can read."""
+    _check_rewards_deps()
     expr = expr.replace("\\tfrac", "\\frac")
     expr = expr.replace("\\dfrac", "\\frac")
     expr = expr.replace("\\frac", " \\frac")  # Play nice with mixed numbers.
@@ -402,6 +414,7 @@ def _run_with_alarm_timeout(timeout_s: float, fn):
 
 
 def are_equal_under_sympy(ground_truth_normalized: str, given_normalized: str):
+    _check_rewards_deps()
     are_equal = False
 
     def _compute():

@@ -1,6 +1,6 @@
 # Supported Benchmarks
 
-rLLM ships with **49 benchmarks** across 10 categories, all accessible via `rllm eval <benchmark>`. Datasets are auto-pulled from HuggingFace on first use and cached locally under `~/.rllm/datasets/`.
+rLLM ships with **57 benchmarks** across 10 categories, all accessible via `rllm eval <benchmark>`. Datasets are auto-pulled from HuggingFace on first use and cached locally under `~/.rllm/datasets/`.
 
 ## Quick Reference
 
@@ -150,7 +150,9 @@ rllm dataset list                           # List all available benchmarks
 
 ---
 
-## Vision-Language (16 benchmarks)
+## Vision-Language (23 benchmarks)
+
+### Visual Math & Understanding
 
 | Benchmark | CLI Name | Size | Description | Agent | Evaluator |
 |---|---|---|---|---|---|
@@ -163,28 +165,45 @@ rllm dataset list                           # List all available benchmarks
 | ZEROBench Sub | `zerobench_sub` | 334 test | Decomposed visual reasoning subquestions | `vlm_open` | `llm_equality_reward_fn` |
 | VLMs Are Blind | `vlmsareblind` | 8,020 test | Visual perception (counting, spatial, etc.) | `vlm_open` | `f1_reward_fn` |
 | BabyVision | `babyvision` | 388 test | Early visual understanding (MCQ + fill-blank) | `vlm_open` | `llm_equality_reward_fn` |
+| Geometry3K | `geo3k` | 2.4K train, 601 test | Geometry problem solving with diagrams | `vlm_math` | `math_reward_fn` |
+
+### Text Recognition & Document Understanding
+
+| Benchmark | CLI Name | Size | Description | Agent | Evaluator |
+|---|---|---|---|---|---|
 | AI2D | `ai2d` | 3,088 test | Science diagram understanding MCQ | `vlm_mcq` | `mcq_reward_fn` |
 | OCRBench | `ocrbench` | 1,000 test | OCR and text recognition | `vlm_open` | `f1_reward_fn` |
 | CharXiv | `charxiv` | 1,000 validation | Chart understanding reasoning questions | `vlm_open` | `llm_equality_reward_fn` |
 | CC-OCR | `cc_ocr` | 7,058 test | Multi-scene OCR with 4 sub-tasks (base64 images) | `vlm_open` | `f1_reward_fn` |
+| OmniDocBench | `omnidocbench` | test | Comprehensive document understanding | `vlm_open` | `f1_reward_fn` |
+| DocVQA | `docvqa` | 5,188 validation | Single-page document visual QA | `vlm_open` | `f1_reward_fn` |
+
+### Spatial Intelligence
+
+| Benchmark | CLI Name | Size | Description | Agent | Evaluator |
+|---|---|---|---|---|---|
 | CountBenchQA | `countbenchqa` | 491 test | Visual object counting QA | `vlm_open` | `f1_reward_fn` |
 | ERQA | `erqa` | 400 test | Entity recognition QA (multi-image) | `vlm_mcq` | `mcq_reward_fn` |
-| Geometry3K | `geo3k` | 2.4K train, 601 test | Geometry problem solving with diagrams | `vlm_math` | `math_reward_fn` |
+| RefCOCO | `refcoco` | test | Referring expression comprehension (bbox grounding) | `vlm_grounding` | `iou_reward_fn` |
+| RefSpatial-Bench | `refspatial` | test | Referential spatial reasoning (point prediction) | `vlm_open` | `point_in_mask_reward_fn` |
+| LingoQA | `lingoqa` | test | Language-grounded QA for autonomous driving | `vlm_open` | `f1_reward_fn` |
+| SUN RGB-D | `sunrgbd` | test | Depth estimation and scene understanding | `vlm_open` | `depth_reward_fn` |
 
 **Agents:**
 - `vlm_mcq` — formats image + options, expects single letter answer.
 - `vlm_math` — image-based math reasoning, expects `\boxed{}` answer.
 - `vlm_open` — open-ended visual QA, free-form response.
+- `vlm_grounding` — visual grounding, expects `[x1, y1, x2, y2]` bounding box output.
 
 All VLM agents embed images as base64 in OpenAI-compatible multimodal content blocks, supporting PNG, JPEG, and WebP formats.
 
-**Note:** `cc_ocr` uses `aggregate_configs` to merge 4 sub-tasks (doc_parsing, kie, multi_lan_ocr, multi_scene_ocr) and its images are base64-encoded strings in HuggingFace (decoded to bytes by the transform). `erqa` supports multi-image inputs (1-16 images per question).
+**Note:** `cc_ocr` uses `aggregate_configs` to merge 4 sub-tasks (doc_parsing, kie, multi_lan_ocr, multi_scene_ocr) and its images are base64-encoded strings in HuggingFace (decoded to bytes by the transform). `erqa` supports multi-image inputs (1-16 images per question). `mmlongbench_doc` involves multi-page PDFs which may hit API limits for 40+ page documents. `lingoqa` is originally a video QA benchmark — the transform uses key frames as static images.
 
 ---
 
 ## Agents Summary
 
-14 built-in agents are available, each implementing the `AgentFlow` protocol:
+15 built-in agents are available, each implementing the `AgentFlow` protocol:
 
 | Agent | Description |
 |---|---|
@@ -202,12 +221,13 @@ All VLM agents embed images as base64 in OpenAI-compatible multimodal content bl
 | `vlm_mcq` | Multimodal MCQ with images |
 | `vlm_math` | Multimodal math with images |
 | `vlm_open` | Multimodal open-ended QA |
+| `vlm_grounding` | Visual grounding → `[x1, y1, x2, y2]` bounding box |
 
 ---
 
 ## Evaluators Summary
 
-11 built-in evaluators score agent outputs:
+14 built-in evaluators score agent outputs:
 
 | Evaluator | Method |
 |---|---|
@@ -222,6 +242,9 @@ All VLM agents embed images as base64 in OpenAI-compatible multimodal content bl
 | `llm_equality_reward_fn` | Exact match → LLM judge → F1 fallback |
 | `translation_reward_fn` | ChrF character n-gram score |
 | `widesearch_reward_fn` | Structured table row-level F1 matching |
+| `iou_reward_fn` | Bounding box IoU ≥ 0.5 for visual grounding |
+| `point_in_mask_reward_fn` | Point-in-mask check for spatial reasoning |
+| `depth_reward_fn` | Absolute relative error for depth estimation |
 
 ---
 

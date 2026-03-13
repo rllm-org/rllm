@@ -3,7 +3,6 @@
 import csv
 import json
 import os
-import tempfile
 
 import pytest
 from click.testing import CliRunner
@@ -18,6 +17,7 @@ def tmp_rllm_home(monkeypatch, tmp_path):
     monkeypatch.setenv("RLLM_HOME", rllm_home)
     # Patch DatasetRegistry class variables (both new and legacy paths)
     from rllm.data.dataset import DatasetRegistry
+
     monkeypatch.setattr(DatasetRegistry, "_RLLM_HOME", rllm_home)
     monkeypatch.setattr(DatasetRegistry, "_REGISTRY_FILE", os.path.join(rllm_home, "datasets", "registry.json"))
     monkeypatch.setattr(DatasetRegistry, "_DATASET_DIR", os.path.join(rllm_home, "datasets"))
@@ -153,12 +153,20 @@ class TestDatasetRegister:
         f = tmp_path / "data.json"
         f.write_text(json.dumps(data))
 
-        result = runner.invoke(cli, [
-            "dataset", "register", "meta_ds",
-            "--file", str(f),
-            "--category", "qa",
-            "--description", "A test dataset",
-        ])
+        result = runner.invoke(
+            cli,
+            [
+                "dataset",
+                "register",
+                "meta_ds",
+                "--file",
+                str(f),
+                "--category",
+                "qa",
+                "--description",
+                "A test dataset",
+            ],
+        )
         assert result.exit_code == 0
 
         # Verify metadata via info command
