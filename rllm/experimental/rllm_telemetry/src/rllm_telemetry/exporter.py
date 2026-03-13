@@ -1,10 +1,11 @@
 """Exporters that ship trace records to various backends.
 
-The :class:`BaseExporter` protocol defines the interface.  Three concrete
+The :class:`BaseExporter` protocol defines the interface.  Four concrete
 implementations are provided:
 
 * :class:`HttpExporter` — async batching HTTP exporter (NDJSON).
 * :class:`StdoutExporter` — pretty-prints traces to stdout for local testing.
+* :class:`BigQueryExporter` — async batching exporter to Google BigQuery.
 * :class:`AgentSpanExporter` — composite exporter that routes all span
   events to the rllm_ui backend in real-time (per-record).
 """
@@ -12,6 +13,7 @@ implementations are provided:
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import logging
 import sys
@@ -228,6 +230,282 @@ class HttpExporter(BaseExporter):
 
 
 # ---------------------------------------------------------------------------
+# BigQuery exporter
+# ---------------------------------------------------------------------------
+
+
+class BigQueryValidationError(Exception):
+    """Raised when the configured BigQuery dataset or table cannot be found."""
+
+
+def _epoch_to_iso(epoch: Any) -> str | None:
+    """Convert an epoch float (seconds since 1970) to an ISO 8601 UTC string."""
+    if epoch is None:
+        return None
+    try:
+        return datetime.datetime.fromtimestamp(float(epoch), tz=datetime.timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _extract_id(span_type: str, data: dict[str, Any]) -> str:
+    """Extract the most appropriate ID from a span record.
+
+    Falls back to a random UUID if no known ID field is present.
+    """
+    if span_type == "session":
+        return data.get("session_id") or str(uuid.uuid4())
+    if span_type.startswith("invocation."):
+        return data.get("invocation_id") or str(uuid.uuid4())
+    if span_type.startswith(("agent.", "llm.", "tool.")):
+        return data.get("span_id") or str(uuid.uuid4())
+    if span_type == "event":
+        return data.get("event_id") or str(uuid.uuid4())
+    if span_type.startswith("experiment."):
+        if span_type == "experiment.case":
+            return data.get("case_id") or str(uuid.uuid4())
+        return data.get("experiment_id") or str(uuid.uuid4())
+    if span_type.startswith("trajectory."):
+        return data.get("trajectory_uid") or data.get("span_id") or str(uuid.uuid4())
+    return str(uuid.uuid4())
+
+
+def get_bq_table_schema() -> list:
+    """Return the BigQuery ``SchemaField`` list for the spans table.
+
+    Uses a deferred import so the module remains loadable without
+    ``google-cloud-bigquery`` installed.
+    """
+    from google.cloud.bigquery import SchemaField
+
+    return [
+        SchemaField("id", "STRING", mode="REQUIRED", description="Primary ID extracted per span type"),
+        SchemaField("span_type", "STRING", mode="REQUIRED", description="Span discriminator (e.g. llm.end, tool.start)"),
+        SchemaField("session_id", "STRING", mode="REQUIRED", description="Agent session ID"),
+        SchemaField("invocation_id", "STRING", mode="NULLABLE", description="Invocation ID (all except session spans)"),
+        SchemaField("span_id", "STRING", mode="NULLABLE", description="Span ID for agent/llm/tool spans"),
+        SchemaField("agent_name", "STRING", mode="NULLABLE", description="Name of the agent that produced the span"),
+        SchemaField("model", "STRING", mode="NULLABLE", description="LLM model name"),
+        SchemaField("tool_name", "STRING", mode="NULLABLE", description="Tool name for tool spans"),
+        SchemaField("duration_ms", "FLOAT", mode="NULLABLE", description="Span duration in milliseconds"),
+        SchemaField("input_tokens", "INTEGER", mode="NULLABLE", description="LLM input token count"),
+        SchemaField("output_tokens", "INTEGER", mode="NULLABLE", description="LLM output token count"),
+        SchemaField("error", "STRING", mode="NULLABLE", description="Error message if the span errored"),
+        SchemaField("started_at", "TIMESTAMP", mode="NULLABLE", description="Span start time (UTC)"),
+        SchemaField("ended_at", "TIMESTAMP", mode="NULLABLE", description="Span end time (UTC)"),
+        SchemaField("ingested_at", "TIMESTAMP", mode="REQUIRED", description="Row insertion time (UTC, partition key)"),
+        SchemaField("data", "JSON", mode="REQUIRED", description="Full raw span payload as JSON"),
+    ]
+
+
+class BigQueryExporter(BaseExporter):
+    """Async batching exporter that writes span records to a Google BigQuery table.
+
+    All span types are written to a single table using a hybrid schema:
+    promoted columns for frequently-queried fields, plus a JSON ``data``
+    column containing the full raw payload.
+
+    When ``bq_auto_create`` is ``True``, the dataset and table are created
+    automatically if they don't exist.  Otherwise :meth:`start` raises
+    :class:`BigQueryValidationError` if either is missing.
+
+    The table is partitioned by ``ingested_at`` (DAY) and clustered by
+    ``(span_type, session_id)`` for efficient querying.
+    """
+
+    def __init__(self, config: RllmConfig) -> None:
+        self._config = config
+        self._buffer: list[tuple[str, dict[str, Any]]] = []
+        self._lock = asyncio.Lock()
+        self._flush_task: asyncio.Task[None] | None = None
+        self._client: Any = None  # bigquery.Client
+        self._table_ref: str = ""
+        self._closed = False
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def enqueue(self, span_type: SpanType, data: dict[str, Any]) -> None:
+        if self._closed:
+            return
+        self._buffer.append((span_type, data))
+        if len(self._buffer) >= self._config.batch_size:
+            self._schedule_flush()
+
+    async def start(self) -> None:
+        from google.cloud import bigquery
+
+        self._client = bigquery.Client(project=self._config.bq_project)
+        dataset_ref = f"{self._config.bq_project}.{self._config.bq_dataset}"
+        self._table_ref = f"{dataset_ref}.{self._config.bq_table}"
+
+        loop = asyncio.get_running_loop()
+
+        if self._config.bq_auto_create:
+            await self._ensure_dataset_and_table(loop, bigquery, dataset_ref)
+        else:
+            await self._validate_dataset_and_table(loop, dataset_ref)
+
+        self._closed = False
+        self._flush_task = asyncio.create_task(self._flush_loop())
+        logger.info("BigQuery exporter started — writing to %s", self._table_ref)
+
+    async def close(self) -> None:
+        self._closed = True
+        if self._flush_task is not None:
+            self._flush_task.cancel()
+            try:
+                await self._flush_task
+            except asyncio.CancelledError:
+                pass
+        # Final drain
+        await self._flush()
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+
+    # ------------------------------------------------------------------
+    # Setup helpers
+    # ------------------------------------------------------------------
+
+    async def _validate_dataset_and_table(self, loop: asyncio.AbstractEventLoop, dataset_ref: str) -> None:
+        """Raise :class:`BigQueryValidationError` if dataset or table is missing."""
+        try:
+            await loop.run_in_executor(None, self._client.get_dataset, dataset_ref)
+        except Exception as exc:
+            raise BigQueryValidationError(f"BigQuery dataset '{self._config.bq_dataset}' not found in project '{self._config.bq_project}'. Set bq_auto_create=True to create it automatically: {exc}") from exc
+
+        try:
+            await loop.run_in_executor(None, self._client.get_table, self._table_ref)
+        except Exception as exc:
+            raise BigQueryValidationError(f"BigQuery table '{self._table_ref}' not found. Set bq_auto_create=True to create it automatically: {exc}") from exc
+
+    async def _ensure_dataset_and_table(self, loop: asyncio.AbstractEventLoop, bigquery: Any, dataset_ref: str) -> None:
+        """Create dataset and table if they don't already exist."""
+        # --- Dataset ---
+        try:
+            await loop.run_in_executor(None, self._client.get_dataset, dataset_ref)
+            logger.debug("BigQuery dataset '%s' already exists.", dataset_ref)
+        except Exception:
+            logger.info("Creating BigQuery dataset '%s'...", dataset_ref)
+            dataset = bigquery.Dataset(dataset_ref)
+            await loop.run_in_executor(
+                None,
+                lambda: self._client.create_dataset(dataset, exists_ok=True),
+            )
+            logger.info("BigQuery dataset '%s' created.", dataset_ref)
+
+        # --- Table ---
+        try:
+            await loop.run_in_executor(None, self._client.get_table, self._table_ref)
+            logger.debug("BigQuery table '%s' already exists.", self._table_ref)
+        except Exception:
+            logger.info("Creating BigQuery table '%s'...", self._table_ref)
+            table = bigquery.Table(self._table_ref, schema=get_bq_table_schema())
+            table.time_partitioning = bigquery.TimePartitioning(
+                type_=bigquery.TimePartitioningType.DAY,
+                field="ingested_at",
+            )
+            table.clustering_fields = ["span_type", "session_id"]
+            await loop.run_in_executor(
+                None,
+                lambda: self._client.create_table(table, exists_ok=True),
+            )
+            logger.info("BigQuery table '%s' created.", self._table_ref)
+
+    # ------------------------------------------------------------------
+    # Flush internals
+    # ------------------------------------------------------------------
+
+    async def _flush_loop(self) -> None:
+        try:
+            while not self._closed:
+                await asyncio.sleep(self._config.flush_interval_seconds)
+                await self._flush()
+        except asyncio.CancelledError:
+            pass
+
+    def _schedule_flush(self) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._flush())
+        except RuntimeError:
+            pass
+
+    async def _flush(self) -> None:
+        async with self._lock:
+            if not self._buffer:
+                return
+            batch = self._buffer[:]
+            self._buffer.clear()
+
+        rows = [self._build_row(span_type, data) for span_type, data in batch]
+
+        loop = asyncio.get_running_loop()
+        try:
+            errors = await loop.run_in_executor(
+                None,
+                lambda: self._client.insert_rows_json(self._table_ref, rows),
+            )
+            if errors:
+                logger.warning("BigQuery streaming insert errors: %s", errors)
+        except Exception as exc:
+            from google.api_core.exceptions import NotFound
+
+            if isinstance(exc, NotFound) and self._config.bq_auto_create:
+                logger.info("Table not found during flush — auto-creating %s", self._table_ref)
+                try:
+                    from google.cloud import bigquery
+
+                    dataset_ref = f"{self._config.bq_project}.{self._config.bq_dataset}"
+                    await self._ensure_dataset_and_table(loop, bigquery, dataset_ref)
+                    # Retry the insert after creation
+                    errors = await loop.run_in_executor(
+                        None,
+                        lambda: self._client.insert_rows_json(self._table_ref, rows),
+                    )
+                    if errors:
+                        logger.warning("BigQuery streaming insert errors (after auto-create): %s", errors)
+                except Exception:
+                    logger.exception("Failed to auto-create table and retry flush for %d rows.", len(rows))
+            else:
+                logger.exception("Failed to flush %d rows to BigQuery.", len(rows))
+
+    def _build_row(self, span_type: str, data: dict[str, Any]) -> dict[str, Any]:
+        """Transform a span record into a BigQuery row with promoted columns."""
+        now = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+
+        # Extract promoted fields from nested data
+        nested_data = data.get("data", {}) or {}
+        request = nested_data.get("request", {}) or {}
+        response = nested_data.get("response", {}) or {}
+        usage = response.get("usage", {}) or nested_data.get("usage", {}) or {}
+
+        row: dict[str, Any] = {
+            "id": _extract_id(span_type, data),
+            "span_type": span_type,
+            "session_id": data.get("session_id", ""),
+            "invocation_id": data.get("invocation_id"),
+            "span_id": data.get("span_id"),
+            "agent_name": data.get("agent_name"),
+            "model": request.get("model") or data.get("model"),
+            "tool_name": data.get("tool_name"),
+            "duration_ms": data.get("duration_ms"),
+            "input_tokens": usage.get("input_tokens") or data.get("input_tokens"),
+            "output_tokens": usage.get("output_tokens") or data.get("output_tokens"),
+            "error": data.get("error"),
+            "started_at": _epoch_to_iso(data.get("started_at")),
+            "ended_at": _epoch_to_iso(data.get("ended_at")),
+            "ingested_at": now,
+            "data": json.dumps(data, default=str),
+        }
+
+        # Strip None values — BQ streaming inserts handle missing nullable fields
+        return {k: v for k, v in row.items() if v is not None}
+
+
+# ---------------------------------------------------------------------------
 # Agent trajectory exporter (composite)
 # ---------------------------------------------------------------------------
 
@@ -365,6 +643,7 @@ class AgentSpanExporter(BaseExporter):
 _EXPORTERS: dict[str, type[BaseExporter]] = {
     "http": HttpExporter,
     "stdout": StdoutExporter,
+    "bigquery": BigQueryExporter,
 }
 
 

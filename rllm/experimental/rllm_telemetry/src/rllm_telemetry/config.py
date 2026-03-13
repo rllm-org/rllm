@@ -31,7 +31,7 @@ class RllmConfig:
         timeout_seconds: HTTP request timeout.
     """
 
-    backend: Literal["http", "stdout"] = "stdout"
+    backend: Literal["http", "stdout", "bigquery"] = "stdout"
     api_key: str = ""
     endpoint: str = "http://localhost:8100/v1/traces"
     capture_content: bool = True
@@ -58,3 +58,18 @@ class RllmConfig:
     agent_session_name: str = ""
     """Human-readable name for the agent session.  Auto-generated if
     empty."""
+
+    # --- BigQuery backend ---
+    bq_project: str = ""
+    """Google Cloud project ID for BigQuery."""
+
+    bq_dataset: str = ""
+    """BigQuery dataset name."""
+
+    bq_table: str = "rllm_traces"
+    """BigQuery table name within the dataset."""
+
+    bq_auto_create: bool = False
+    """Automatically create the BigQuery dataset and table if they don't
+    exist.  When ``False`` (the default), :meth:`start` raises
+    :class:`BigQueryValidationError` if either is missing."""

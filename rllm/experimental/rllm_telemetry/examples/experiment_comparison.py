@@ -6,12 +6,19 @@ multiple tools (knowledge base lookup, calculator) to arrive at an answer.
 Results are scored with LlmJudge and compared side-by-side.
 
 Usage:
-    # Requires an LLM API key (any litellm-supported provider)
-    ANTHROPIC_API_KEY=sk-... python examples/experiment_comparison.py
+    # Requires an LLM API key and GCP credentials
+    ANTHROPIC_API_KEY=sk-... \
+    GOOGLE_APPLICATION_CREDENTIALS=gcp-key.json \
+    python examples/experiment_comparison.py
+
+    # Override BigQuery destination via env vars (optional):
+    BQ_PROJECT=my-project BQ_DATASET=my_dataset BQ_TABLE=my_table \
+    python examples/experiment_comparison.py
 """
 
 import asyncio
 import math
+import os
 from types import SimpleNamespace
 
 import rllm_telemetry
@@ -30,6 +37,10 @@ JUDGE_MODEL = "anthropic/claude-haiku-4-5-20251001"
 
 APP_NAME = "experiment_comparison"
 USER_ID = "eval_user"
+
+BQ_PROJECT = os.environ.get("BQ_PROJECT", "rllm-platform-test")
+BQ_DATASET = os.environ.get("BQ_DATASET", "agent_traces")
+BQ_TABLE = os.environ.get("BQ_TABLE", "rllm_traces")
 
 # ---------------------------------------------------------------------------
 # Tools — shared by both agents
@@ -188,20 +199,24 @@ async def main():
     runner_minimal = InMemoryRunner(agent=agent_minimal, app_name=APP_NAME)
     runner_detailed = InMemoryRunner(agent=agent_detailed, app_name=APP_NAME)
 
-    # Attach observability telemetry (stdout + stream to rllm_ui backend)
+    # Attach observability telemetry (BigQuery backend + stream to rllm_ui)
     rllm_telemetry.instrument(
         runner_minimal,
-        backend="stdout",
+        backend="bigquery",
+        bq_project=BQ_PROJECT,
+        bq_dataset=BQ_DATASET,
+        bq_table=BQ_TABLE,
+        bq_auto_create=True,
         capture_content=False,
-        agent_endpoint="http://localhost:8000",
-        agent_session_name="minimal-prompt",
     )
     rllm_telemetry.instrument(
         runner_detailed,
-        backend="stdout",
+        backend="bigquery",
+        bq_project=BQ_PROJECT,
+        bq_dataset=BQ_DATASET,
+        bq_table=BQ_TABLE,
+        bq_auto_create=True,
         capture_content=False,
-        agent_endpoint="http://localhost:8000",
-        agent_session_name="detailed-prompt",
     )
 
     # LLM judge scorer

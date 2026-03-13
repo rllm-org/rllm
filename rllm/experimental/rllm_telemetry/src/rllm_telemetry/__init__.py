@@ -4,7 +4,7 @@ from .compare import ComparisonResult, compare
 from .config import RllmConfig
 from .dataset import load_dataset
 from .eval import AsyncEval, Eval, ExperimentResult
-from .exporter import AgentSpanExporter, AgentTrajectoryExporter, BaseExporter, HttpExporter, StdoutExporter, create_exporter
+from .exporter import AgentSpanExporter, AgentTrajectoryExporter, BaseExporter, BigQueryExporter, BigQueryValidationError, HttpExporter, StdoutExporter, create_exporter, get_bq_table_schema
 from .plugin import RllmTelemetryPlugin
 from .schemas import (
     AgentInfo,
@@ -37,9 +37,12 @@ __all__ = [
     "AgentSpanExporter",
     "AgentTrajectoryExporter",
     "BaseExporter",
+    "BigQueryExporter",
+    "BigQueryValidationError",
     "HttpExporter",
     "StdoutExporter",
     "create_exporter",
+    "get_bq_table_schema",
     # Scorers
     "Score",
     "Scorer",
