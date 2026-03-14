@@ -143,7 +143,7 @@ class VerlTrainerLauncher(TrainerLauncher):
     def __init__(
         self,
         config: DictConfig,
-        workflow_class: type[Workflow],
+        workflow_class: type[Workflow] | None = None,
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
@@ -161,11 +161,9 @@ class VerlTrainerLauncher(TrainerLauncher):
 
     def train(self):
         if not ray.is_initialized():
-            # read off all the `ray_init` settings from the config
-            if self.config is not None and hasattr(self.config, "ray_init"):
-                ray_init_settings = {k: v for k, v in self.config.ray_init.items() if v is not None}
-            else:
-                ray_init_settings = {}
+            from rllm.trainer.ray_init_utils import get_ray_init_settings
+
+            ray_init_settings = get_ray_init_settings(self.config)
             ray.init(runtime_env=get_ppo_ray_runtime_env(), **ray_init_settings)
 
         runner = TaskRunner.remote()  # type: ignore

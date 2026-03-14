@@ -8,6 +8,7 @@ This module provides utilities to:
 
 from __future__ import annotations
 
+import asyncio
 import atexit
 import logging
 import os
@@ -17,7 +18,6 @@ import sys
 import time
 from typing import Any
 
-import aiohttp
 import requests
 import yaml
 
@@ -49,6 +49,8 @@ class ProxyManager:
             headers["Authorization"] = f"Bearer {self.admin_token}"
 
         try:
+            import aiohttp
+
             request_timeout = aiohttp.ClientTimeout(total=timeout + 5.0)
             async with aiohttp.ClientSession(timeout=request_timeout) as session:
                 async with session.post(url, json={"timeout": timeout}, headers=headers) as resp:
@@ -115,6 +117,7 @@ class ProxyManager:
         sync_tracer: bool = False,
         add_logprobs: bool = False,
         add_return_token_ids: bool = False,
+        enable_result_store: bool = False,
     ) -> str:
         """Start LiteLLM proxy as subprocess (no GIL contention).
 
@@ -164,6 +167,9 @@ class ProxyManager:
 
         if add_return_token_ids:
             cmd.extend(["--add-return-token-ids"])
+
+        if enable_result_store:
+            cmd.extend(["--enable-result-store"])
 
         env = os.environ.copy()
         env["AIOHTTP_CONNECTOR_LIMIT"] = "4096"
@@ -430,3 +436,97 @@ class VerlProxyManager(ProxyManager):
     def __repr__(self) -> str:
         mode = "subprocess" if self._proxy_process else "external"
         return f"VerlProxyManager(model={self.model_name}, replicas={len(self._server_addresses)}, proxy={self.get_proxy_url()}, mode={mode})"
+
+
+class TinkerProxyManager(ProxyManager):
+    """Manages a lightweight TinkerProxy that calls TinkerEngine directly.
+
+    Architecture::
+
+        Agent → HTTP → TinkerProxy (single server) → TinkerEngine (in-process)
+
+    Replaces the previous dual-hop setup (LiteLLM proxy → TinkerBackendServer)
+    with a single HTTP hop.  The TinkerProxy handles metadata-slug routing,
+    inference, and trace persistence in one process.
+    """
+
+    def __init__(
+        self,
+        rollout_engine,
+        model_name: str,
+        proxy_host: str = "127.0.0.1",
+        proxy_port: int = 4000,
+        admin_token: str | None = None,
+        proxy_access_log: bool = False,
+        **kwargs,
+    ) -> None:
+        if type(rollout_engine).__name__ != "TinkerEngine":
+            raise TypeError(f"TinkerProxyManager only supports TinkerEngine, got {type(rollout_engine).__name__}")
+
+        super().__init__(
+            proxy_host=proxy_host,
+            proxy_port=proxy_port,
+            admin_token=admin_token,
+            proxy_access_log=proxy_access_log,
+        )
+
+        self.model_name = model_name
+        self.rollout_engine = rollout_engine
+        self._server = None  # TinkerProxy instance
+        self._tracer = None  # SqliteTracer instance
+
+    def start(self, db_path: str | None = None, project: str | None = None, sync_tracer: bool = False) -> None:
+        """Start the TinkerProxy server.
+
+        Args:
+            db_path: Path to SQLite database file for trace storage.
+            project: Project name / namespace for the tracer.
+            sync_tracer: If True, await trace persistence before returning response.
+        """
+        from rllm.sdk.proxy.tinker_proxy import TinkerProxy
+        from rllm.sdk.tracers import SqliteTracer
+
+        self._tracer = SqliteTracer(db_path=db_path, namespace=project or "default")
+        self._server = TinkerProxy(
+            rollout_engine=self.rollout_engine,
+            model_name=self.model_name,
+            tracer=self._tracer,
+            host=self.proxy_host,
+            port=self.proxy_port,
+            sync_tracer=sync_tracer,
+        )
+        self._server.start()
+        logger.info("TinkerProxy started at %s", self._server.url)
+
+    async def flush_tracer(self, timeout: float = 60.0) -> bool:
+        """Flush tracer directly — no HTTP round-trip needed.
+
+        Awaits the tracer's internal queue drain in a thread so this can
+        safely be called from a running event loop (unlike the synchronous
+        ``SqliteTracer.flush()`` which calls ``loop.run_until_complete``).
+        """
+        if self._tracer is None:
+            return True
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(self._tracer._store_queue.join),
+                timeout=timeout,
+            )
+            return True
+        except asyncio.TimeoutError:
+            logger.warning("Tracer flush timed out after %.1fs", timeout)
+            return False
+
+    def shutdown_proxy(self) -> None:
+        """Shutdown the TinkerProxy and tracer."""
+        if self._server is not None:
+            self._server.stop()
+            self._server = None
+        if self._tracer is not None:
+            self._tracer.close_sync()
+            self._tracer = None
+            logger.info("TinkerProxy stopped")
+
+    def __repr__(self) -> str:
+        running = self._server is not None
+        return f"TinkerProxyManager(model={self.model_name}, proxy={self.get_proxy_url()}, running={running})"

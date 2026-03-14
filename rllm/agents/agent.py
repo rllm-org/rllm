@@ -2,65 +2,54 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from functools import cached_property
 from typing import TYPE_CHECKING, Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from rllm.types import Episode as _EpisodeBase
+from rllm.types import Step as _StepBase
+from rllm.types import Trajectory as _TrajectoryBase
 
 if TYPE_CHECKING:
     from rllm.engine.rollout import ModelOutput
-    from rllm.workflows.workflow import TerminationReason
 
 
-@dataclass
-class Step:
-    """
-    Atomic unit of one model interaction in a rollout.
+class Step(_StepBase):
+    """Training step with token IDs, logprobs, advantage."""
 
-    A step stores token-level fields from the rollout engine (`prompt_ids`,
-    `response_ids`, `logprobs`) together with execution context and training
-    signals.
+    model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
 
-    Attributes:
-        prompt_ids: Input token IDs for this model call.
-        response_ids: Generated token IDs for this model call.
-        logprobs: Token-level log probabilities aligned with `response_ids`.
-        chat_completions: Chat message history at this step.
-        observation: Environment/workflow observation before generation.
-        thought: Optional model reasoning text.
-        action: Parsed action emitted from the model response.
-        model_response: Raw response content from the model.
-        model_output: Original rollout engine output payload.
-        info: Additional per-step metadata.
-        reward: Step-level reward signal.
-        done: Whether this step ends the trajectory.
-        mc_return: Monte-Carlo return (if computed by workflow logic).
-        advantage: Step advantage signal; can be scalar or token-level list.
-    """
+    # Training-specific fields
+    prompt_ids: list[int] | list[Any] = Field(default_factory=list)
+    response_ids: list[int] = Field(default_factory=list)
+    logprobs: list[float] = Field(default_factory=list)
 
-    # this is to accomodate the fact that for backend like `tinker`, the prompt_ids might contain special image blocks
-    prompt_ids: list[int] | list[Any] = field(default_factory=list)
-    response_ids: list[int] = field(default_factory=list)
-    logprobs: list[float] = field(default_factory=list)
-
-    chat_completions: list[dict[str, str]] = field(default_factory=list)
+    chat_completions: list[dict[str, Any]] = Field(default_factory=list)
 
     observation: Any = None
     thought: str = ""
-    action: Any = None
+    # action: inherited from _StepBase
     model_response: str = ""
-    model_output: ModelOutput | None = None
-    info: dict = field(default_factory=dict)  # Store any additional info.
+    model_output: Any = None  # Runtime type is ModelOutput | None; uses Any to avoid circular import
 
-    # field below are filled by the engine
-    reward: float = 0.0
-    done: bool = False
+    # reward, done: inherited from _StepBase
     mc_return: float = 0.0
 
-    # field below are filled by the advantage computer. Note when advantage is a list, it is per-token advantages.
-    # TODO: potentially rename this as "advantages" so its clearer that it allows a generic list.
+    # Per-token or scalar advantages
     advantage: list[float] | float | None = None
 
-    def __post_init__(self):
+    @property
+    def info(self) -> dict:
+        """Alias for metadata. Auto-initializes to {} if None so mutation works."""
+        if self.metadata is None:
+            self.metadata = {}
+        return self.metadata
+
+    @info.setter
+    def info(self, value: dict) -> None:
+        self.metadata = value
+
+    def model_post_init(self, __context: Any) -> None:
         if self.model_output is None:
             return
         # backfill fields like prompt_ids, response_ids, logprobs, etc.
@@ -70,11 +59,6 @@ class Step:
             self.response_ids = self.model_output.completion_ids
         if len(self.logprobs) == 0 and self.model_output.logprobs is not None:
             self.logprobs = self.model_output.logprobs
-
-        # check that the token ids are filled
-        # TODO(listar2000): this might cause compatibility issue. Double check if we should make these assertions.
-        # assert len(self.prompt_ids) > 0, "prompt_ids is empty"
-        # assert len(self.response_ids) > 0, "response_ids is empty"
 
         # check that the lengths would match up
         if len(self.logprobs) > 0:
@@ -112,7 +96,7 @@ class Step:
             action=data["action"],
             model_response=data["model_response"],
             model_output=ModelOutput.from_dict(data["model_output"]) if data.get("model_output", None) is not None else None,
-            info=data.get("info", {}),
+            metadata=data.get("info", data.get("metadata", {})),
             reward=data["reward"],
             done=data["done"],
             mc_return=data["mc_return"],
@@ -133,37 +117,29 @@ class Step:
         )
 
 
-@dataclass
-class Action:
+class Action(BaseModel):
     action: Any = None
 
 
 _DEFAULT_TRAJ_NAME = "default_traj_name"
 
 
-@dataclass
-class Trajectory:
-    """
-    Ordered sequence of steps for one role/agent thread.
+class Trajectory(_TrajectoryBase):
+    """Training trajectory extending the canonical Trajectory with core defaults."""
 
-    A trajectory is the primary container for per-role rollout history and
-    trajectory-level reward.
+    name: str = _DEFAULT_TRAJ_NAME  # Override canonical default for core compat
+    steps: list[Step] = Field(default_factory=list)  # Narrow type to training Step
 
-    Attributes:
-        uid: Unique trajectory identifier.
-        name: Role/name for grouping and metrics (for example, `solver`).
-        task: Task payload associated with the trajectory.
-        steps: Ordered list of step records.
-        reward: Optional trajectory-level reward.
-        info: Additional trajectory metadata.
-    """
+    @property
+    def info(self) -> dict:
+        """Alias for metadata. Auto-initializes to {} if None so mutation works."""
+        if self.metadata is None:
+            self.metadata = {}
+        return self.metadata
 
-    uid: str = field(default_factory=lambda: str(uuid.uuid4()))  # unique id to deduplicate on
-    name: str = _DEFAULT_TRAJ_NAME
-    task: Any = None
-    steps: list[Step] = field(default_factory=list)
-    reward: float | None = None  # it is possible that the trajectory-level reward does not exist
-    info: dict = field(default_factory=dict)
+    @info.setter
+    def info(self, value: dict) -> None:
+        self.metadata = value
 
     def to_dict(self):
         # Remove large/non-serializable payloads (e.g., images) from task
@@ -191,7 +167,7 @@ class Trajectory:
             task=data["task"],
             steps=[Step.from_dict(step_data) for step_data in data.get("steps", [])],
             reward=data["reward"],
-            info=data.get("info", {}),
+            metadata=data.get("info", data.get("metadata", {})),
         )
 
     def is_cumulative(self) -> bool:
@@ -210,31 +186,19 @@ class Trajectory:
         return True
 
 
-@dataclass
-class Episode:
-    """
-    Workflow-level rollout output containing one or more trajectories.
+class Episode(_EpisodeBase):
+    """Training episode extending the canonical Episode."""
 
-    Episode is the unit returned by `Workflow.run(...)` and usually represents
-    one `(task_id, rollout_idx)` execution.
+    trajectories: list[Trajectory] = Field(default_factory=list)  # Narrow type
 
-    Attributes:
-        id: Rollout identifier, typically `{task_id}:{rollout_idx}`.
-        task: Original task payload.
-        termination_reason: Workflow termination status.
-        is_correct: Workflow-level correctness flag.
-        trajectories: Trajectories generated in this rollout.
-        metrics: Workflow-defined episode metrics.
-        info: Additional episode metadata.
-    """
+    @property
+    def info(self) -> dict:
+        """Alias for metadata. Auto-initializes to {} if None."""
+        return self.metadata
 
-    id: str = ""  # rollout id e.g., task_id:rollout_idx
-    task: Any = None
-    termination_reason: TerminationReason | None = None  # noqa: F821
-    is_correct: bool = False
-    trajectories: list[Trajectory] = field(default_factory=list)
-    metrics: dict = field(default_factory=dict)
-    info: dict = field(default_factory=dict)
+    @info.setter
+    def info(self, value: dict) -> None:
+        self.metadata = value
 
     def to_dict(self):
         # Remove large/non-serializable payloads (e.g., images) from task
@@ -266,20 +230,19 @@ class Episode:
             is_correct=data["is_correct"],
             trajectories=[Trajectory.from_dict(trajectory_data) for trajectory_data in data["trajectories"]],
             metrics=data.get("metrics", {}),
-            info=data.get("info", {}),
+            metadata=data.get("info", data.get("metadata", {})),
         )
 
-    @cached_property
+    @property
     def task_id(self) -> str:
         return self.id.split(":")[0]
 
-    @cached_property
+    @property
     def rollout_idx(self) -> str:
         return self.id.split(":")[1]
 
 
-@dataclass
-class TrajectoryGroup:
+class TrajectoryGroup(BaseModel):
     """
     A group of trajectories for advantage computation.
 
@@ -295,13 +258,13 @@ class TrajectoryGroup:
 
     trajectories: list[Trajectory]
     group_id: str = ""
-    metadata: list[dict] = field(default_factory=list)
+    metadata: list[dict] = Field(default_factory=list)
 
-    @cached_property
+    @property
     def group_role(self) -> str:
         return self.group_id.split(":")[1] if ":" in self.group_id[:-1] else "all_groups"
 
-    @cached_property
+    @property
     def task_id(self) -> str:
         return self.group_id.split(":")[0]
 

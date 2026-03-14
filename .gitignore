@@ -220,3 +220,6 @@ uv.lock
 
 # Ignore Skyrl
 /skyrl
+
+# Local venvs
+.venv*

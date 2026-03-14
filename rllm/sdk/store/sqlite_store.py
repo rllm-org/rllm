@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -55,16 +56,18 @@ class SqliteTraceStore:
     - Fast queries by session_uid (indexed junction table)
     - Single table for traces and signals (differentiated by context_type)
     - Batch insert support with transactions
-    - DELETE journal mode for compatibility (not WAL)
+    - WAL journal mode for concurrent read/write performance
+    - Connection pool to avoid per-operation connect/close overhead
     """
 
-    def __init__(self, db_path: str | None = None):
+    def __init__(self, db_path: str | None = None, pool_size: int = 4):
         """
         Initialize SQLite trace store.
 
         Args:
             db_path: Path to SQLite database file. If None, uses default location
                     (~/.rllm/traces.db or temp directory)
+            pool_size: Number of pre-configured connections to maintain in the pool
         """
         if db_path is None:
             db_dir = os.path.expanduser("~/.rllm")
@@ -86,6 +89,8 @@ class SqliteTraceStore:
 
         self.db_path = db_path
         self._sqlite_busy_timeout_ms = 20000
+        self._pool_size = pool_size
+        self._pool: asyncio.Queue[aiosqlite.Connection] | None = None
         self._initialized = False
 
     async def _ensure_initialized(self) -> None:
@@ -95,13 +100,13 @@ class SqliteTraceStore:
             self._initialized = True
 
     async def _configure_connection(self, conn: aiosqlite.Connection) -> None:
-        """Configure SQLite connection with pragmas for compatibility."""
+        """Configure SQLite connection with pragmas for performance."""
         pragmas = [
-            "PRAGMA journal_mode=DELETE",  # Use DELETE mode, not WAL (better compatibility)
+            "PRAGMA journal_mode=WAL",  # WAL mode for concurrent read/write
             "PRAGMA synchronous=NORMAL",
             f"PRAGMA busy_timeout={self._sqlite_busy_timeout_ms}",
             "PRAGMA temp_store=MEMORY",
-            "PRAGMA mmap_size=0",  # Disable mmap for network FS compatibility
+            "PRAGMA mmap_size=268435456",  # 256MB mmap for faster reads on local FS
         ]
         for pragma in pragmas:
             try:
@@ -109,15 +114,27 @@ class SqliteTraceStore:
             except Exception as exc:
                 logger.warning("SQLite pragma failed (%s): %s", pragma, exc)
 
-    async def _connect(self) -> aiosqlite.Connection:
+    async def _create_connection(self) -> aiosqlite.Connection:
         """Create a configured async SQLite connection."""
         conn = await aiosqlite.connect(self.db_path, timeout=self._sqlite_busy_timeout_ms / 1000.0)
         await self._configure_connection(conn)
         return conn
 
+    async def _acquire(self) -> aiosqlite.Connection:
+        """Acquire a connection from the pool."""
+        await self._ensure_initialized()
+        assert self._pool is not None
+        return await self._pool.get()
+
+    async def _release(self, conn: aiosqlite.Connection) -> None:
+        """Return a connection to the pool."""
+        assert self._pool is not None
+        await self._pool.put(conn)
+
     async def _init_database(self) -> None:
-        """Initialize the SQLite database with required schema."""
-        conn = await self._connect()
+        """Initialize the SQLite database with required schema and connection pool."""
+        # Use a temporary connection for schema setup
+        conn = await self._create_connection()
         try:
             await conn.execute("PRAGMA foreign_keys = ON")
 
@@ -159,6 +176,25 @@ class SqliteTraceStore:
         finally:
             await conn.close()
 
+        # Populate connection pool
+        self._pool = asyncio.Queue(maxsize=self._pool_size)
+        for _ in range(self._pool_size):
+            pool_conn = await self._create_connection()
+            await self._pool.put(pool_conn)
+
+    async def close(self) -> None:
+        """Drain the connection pool and close all connections."""
+        if self._pool is None:
+            return
+        while not self._pool.empty():
+            try:
+                conn = self._pool.get_nowait()
+                await conn.close()
+            except Exception:
+                pass
+        self._pool = None
+        self._initialized = False
+
     async def store(
         self,
         trace_id: str,
@@ -183,10 +219,9 @@ class SqliteTraceStore:
             metadata: Metadata dictionary (default: {})
             session_uids: List of session UIDs to associate with this trace (caller must provide)
         """
-        await self._ensure_initialized()
         now = time.time()
 
-        conn = await self._connect()
+        conn = await self._acquire()
         try:
             # Insert or replace trace
             await conn.execute(
@@ -232,7 +267,7 @@ class SqliteTraceStore:
 
             await conn.commit()
         finally:
-            await conn.close()
+            await self._release(conn)
 
     async def store_batch(
         self,
@@ -260,11 +295,10 @@ class SqliteTraceStore:
         Returns:
             List of stored TraceContext objects
         """
-        await self._ensure_initialized()
         now = time.time()
         stored = []
 
-        conn = await self._connect()
+        conn = await self._acquire()
         try:
             for trace in traces:
                 trace_id = trace["id"]
@@ -327,7 +361,7 @@ class SqliteTraceStore:
 
             await conn.commit()
         finally:
-            await conn.close()
+            await self._release(conn)
 
         return stored
 
@@ -341,8 +375,7 @@ class SqliteTraceStore:
         Returns:
             TraceContext object or None if not found
         """
-        await self._ensure_initialized()
-        conn = await self._connect()
+        conn = await self._acquire()
         try:
             conn.row_factory = aiosqlite.Row
             async with conn.execute("SELECT * FROM traces WHERE id = ?", (trace_id,)) as cursor:
@@ -361,7 +394,7 @@ class SqliteTraceStore:
                     updated_at=row["updated_at"],
                 )
         finally:
-            await conn.close()
+            await self._release(conn)
 
     async def query(
         self,
@@ -385,8 +418,7 @@ class SqliteTraceStore:
             List of TraceContext objects matching the filters
         """
 
-        await self._ensure_initialized()
-        conn = await self._connect()
+        conn = await self._acquire()
         try:
             conn.row_factory = aiosqlite.Row
 
@@ -464,7 +496,7 @@ class SqliteTraceStore:
 
                 return results
         finally:
-            await conn.close()
+            await self._release(conn)
 
     async def get_session_uids_for_trace(self, trace_id: str) -> list[str]:
         """
@@ -479,8 +511,7 @@ class SqliteTraceStore:
         Returns:
             List of session_uids that this trace belongs to
         """
-        await self._ensure_initialized()
-        conn = await self._connect()
+        conn = await self._acquire()
         try:
             async with conn.execute(
                 "SELECT session_uid FROM trace_sessions WHERE trace_id = ?",
@@ -489,7 +520,7 @@ class SqliteTraceStore:
                 rows = await cursor.fetchall()
                 return [row[0] for row in rows]
         finally:
-            await conn.close()
+            await self._release(conn)
 
     async def get_by_session_uid(
         self,
@@ -510,8 +541,7 @@ class SqliteTraceStore:
         Returns:
             List of TraceContext objects for this session context
         """
-        await self._ensure_initialized()
-        conn = await self._connect()
+        conn = await self._acquire()
         try:
             conn.row_factory = aiosqlite.Row
 
@@ -566,4 +596,4 @@ class SqliteTraceStore:
 
             return results
         finally:
-            await conn.close()
+            await self._release(conn)

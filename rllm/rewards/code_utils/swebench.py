@@ -362,6 +362,7 @@ def make_run_report(
     full_dataset: list,
     run_id: str,
     client: Optional[docker.DockerClient] = None,
+    report_dir: str = ".",
 ) -> Path:
     """
     Make a final evaluation and run report of the instances that have been run.
@@ -494,7 +495,9 @@ def make_run_report(
                 "unremoved_images": list(sorted(unremoved_images)),
             }
         )
-    report_file = Path(list(predictions.values())[0][KEY_MODEL].replace("/", "__") + f".{run_id}" + ".json")
+    report_dir_path = Path(report_dir)
+    report_dir_path.mkdir(parents=True, exist_ok=True)
+    report_file = report_dir_path / (list(predictions.values())[0][KEY_MODEL].replace("/", "__") + f".{run_id}" + ".json")
     with open(report_file, "w") as f:
         print(json.dumps(report, indent=4), file=f)
     print(f"Report written to {report_file}")
@@ -574,7 +577,7 @@ def run_evaluation(
     else:
         # build environment images + run instances
         if namespace is None and not rewrite_reports:
-            build_env_images(client, dataset, force_rebuild, max_workers)
+            build_env_images(client, dataset, force_rebuild, max_workers, instance_image_tag=instance_image_tag, env_image_tag=instance_image_tag)
         run_instances(
             actions,
             dataset,
@@ -593,7 +596,7 @@ def run_evaluation(
     clean_images(client, existing_images, cache_level, clean)
 
     # read from the report - generate the reward - return the reward
-    return make_run_report(actions, full_dataset, run_id, client)
+    return make_run_report(actions, full_dataset, run_id, client, report_dir=str(report_dir))
 
 
 def swebench_check_correctness(

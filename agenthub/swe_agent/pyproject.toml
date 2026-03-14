@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swe-agent"
+version = "0.1.0"
+description = "SWE-bench Verified agent plugin for rLLM"
+requires-python = ">=3.10"
+dependencies = ["rllm", "docker", "swebench"]
+
+[tool.setuptools.packages.find]
+include = ["swe_agent*"]
+
+# Plugin discovery: rllm CLI finds these by name
+[project.entry-points."rllm.agents"]
+swe = "swe_agent.agent:swe_agent"
+
+[project.entry-points."rllm.evaluators"]
+swebench_reward_fn = "swe_agent.evaluator:SWEBenchEvaluator"

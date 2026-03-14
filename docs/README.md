@@ -91,7 +91,7 @@ agent = Agent()
 The Material theme is configured in `mkdocs.yml`. You can customize:
 - Colors and palette
 - Navigation features
-- Extensions and plugins
+- Extensions and agenthub
 
 ### Extensions
 Currently enabled extensions:

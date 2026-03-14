@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 import tinker
 import torch
 from omegaconf import DictConfig
-from transformers import AutoTokenizer
+from transformers import AutoProcessor, AutoTokenizer
 
 from rllm.agents.agent import Episode
 from rllm.data import Dataset
@@ -127,7 +127,19 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # we need to get it from `AutoTokenizer` since the `policy_trainer` has not been initialized yet
         self.tokenizer = AutoTokenizer.from_pretrained(self.full_config.model.name)
 
-        self.rollout_engine = TinkerEngine(base_url=self.full_config.tinker_base_url, model_name=self.full_config.model.name, service_client=self.service_client, tokenizer=self.tokenizer, max_prompt_length=self.full_config.data.max_prompt_length, max_response_length=self.full_config.data.max_response_length, max_model_length=self.full_config.training.max_length, sampling_params=self.full_config.sampling, **self.full_config.rollout_engine)
+        # Load image processor for vision-language models
+        image_processor = None
+        model_name_lower = self.full_config.model.name.lower()
+        if "vl" in model_name_lower or "vision" in model_name_lower:
+            try:
+                processor = AutoProcessor.from_pretrained(self.full_config.model.name, trust_remote_code=True)
+                if hasattr(processor, "image_processor") and processor.image_processor is not None:
+                    image_processor = processor.image_processor
+                    logger.info(f"Loaded image_processor for VLM model: {self.full_config.model.name}")
+            except Exception as e:
+                logger.warning(f"Failed to load image_processor for VLM model: {e}")
+
+        self.rollout_engine = TinkerEngine(base_url=self.full_config.tinker_base_url, model_name=self.full_config.model.name, service_client=self.service_client, tokenizer=self.tokenizer, max_prompt_length=self.full_config.data.max_prompt_length, max_response_length=self.full_config.data.max_response_length, max_model_length=self.full_config.training.max_length, sampling_params=self.full_config.sampling, **self.full_config.rollout_engine, image_processor=image_processor)
         return self.rollout_engine
 
     def validate_config(self) -> None:

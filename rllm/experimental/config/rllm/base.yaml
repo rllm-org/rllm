@@ -43,7 +43,7 @@ trainer:
   experiment_name: 'default'
   test_freq: 5
   save_freq: 20
-  val_before_train: true
+  val_before_train: false
   val_only: false
 
 # Algorithm Configuration
@@ -95,6 +95,9 @@ rejection_sample:
   min_trajs_per_group: 2
 
 # SDK Configuration
+# DEPRECATED: This section is only kept for backward compatibility with
+# standalone SDK usage (rllm/sdk/). The unified trainer no longer uses the
+# SDK/agent_run_func path — use AgentFlow + Evaluator instead.
 sdk:
   store:
     path: ~/.rllm/traces.db
@@ -106,6 +109,39 @@ sdk:
     port: 4000
     mode: subprocess  # external | subprocess
     admin_token: my-shared-secret
+  sandbox:
+    enabled: false
+    backend: local  # local | docker | modal | agentcore
+    agent_dir: ""
+    agent_module: agent
+    agent_func: rollout
+    image: "python:3.11-slim"
+    dockerfile: ""
+    requirements_file: ""
+    install_rllm_sdk: true
+    pool_mode: persistent  # persistent | per_task
+    num_workers: 8
+    worker_port: 8100
+    max_concurrent: 32
+    task_setup_commands: []
+    task_setup_timeout: 300
+    teardown_on_complete: true
+    execution_timeout: 600.0
+    setup_commands: []
+    # Backend-specific configuration.
+    # For agentcore backend:
+    #   agent_runtime_arn: ARN of the AgentCore runtime (required)
+    #   base_url: Reachable proxy URL for the ACR container, e.g. http://<host-ip>:4000/v1
+    #             Required unless the proxy is publicly reachable at its default address.
+    #   tps_limit: Max concurrent invocations (default: 25)
+    #   max_retry_attempts: boto3 adaptive retry attempts (default: 5)
+    extra: {}
+
+# Gateway Configuration (model gateway for AgentFlow-based training)
+gateway:
+  port: 9090
+  host: "127.0.0.1"
+  db_path: null       # Defaults to temp file
 
 # Episode Logging Configuration
 episode_logging:

@@ -1,8 +1,13 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from rllm.experimental.rollout.types import TokenInput, Tokenizer, TokenOutput
-from rllm.parser import ChatTemplateParser
 from rllm.tools.tool_base import ToolCall
+
+if TYPE_CHECKING:
+    from rllm.parser import ChatTemplateParser
 
 
 @dataclass

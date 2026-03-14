@@ -5,10 +5,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import eval_protocol
-from eval_protocol.models import EvaluationRow, InputMetadata, Message
-from eval_protocol.pytest.default_mcp_gym_rollout_processor import MCPGymRolloutProcessor
-from eval_protocol.pytest.evaluation_test_utils import build_rollout_processor_config
+try:
+    import eval_protocol
+    from eval_protocol.models import EvaluationRow, InputMetadata, Message
+    from eval_protocol.pytest.default_mcp_gym_rollout_processor import MCPGymRolloutProcessor
+    from eval_protocol.pytest.evaluation_test_utils import build_rollout_processor_config
+except ImportError as err:
+    raise ImportError("EvalProtocolWorkflow requires extra dependencies. Install with: pip install rllm[eval-protocol]") from err
 
 from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.engine.rollout.openai_engine import OpenAIEngine

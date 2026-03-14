@@ -1,3 +1,4 @@
+import importlib
 import sys
 import types
 
@@ -35,33 +36,54 @@ if "PIL" not in sys.modules:
 
 
 # Provide a tiny openai stub (OpenAIEngine imports openai.AsyncOpenAI)
+# Only install the stub if the real openai package is NOT available.
 if "openai" not in sys.modules:
-    openai = types.ModuleType("openai")
+    try:
+        importlib.import_module("openai")
+    except Exception:
+        openai = types.ModuleType("openai")
 
-    class RateLimitError(Exception):
-        pass
+        class RateLimitError(Exception):
+            pass
 
-    class AsyncOpenAI:  # noqa: D401
-        """Stub openai.AsyncOpenAI."""
+        class AsyncOpenAI:  # noqa: D401
+            """Stub openai.AsyncOpenAI."""
 
-        def __init__(self, *args, **kwargs):  # noqa: ANN001, ANN002
-            self.args = args
-            self.kwargs = kwargs
+            def __init__(self, *args, **kwargs):  # noqa: ANN001, ANN002
+                self.args = args
+                self.kwargs = kwargs
 
-        class chat:  # noqa: D401
+            class chat:  # noqa: D401
+                class completions:  # noqa: D401
+                    @staticmethod
+                    async def create(*args, **kwargs):  # noqa: ANN001, ANN002
+                        raise NotImplementedError
+
             class completions:  # noqa: D401
                 @staticmethod
                 async def create(*args, **kwargs):  # noqa: ANN001, ANN002
                     raise NotImplementedError
 
-        class completions:  # noqa: D401
-            @staticmethod
-            async def create(*args, **kwargs):  # noqa: ANN001, ANN002
-                raise NotImplementedError
+        class OpenAI:  # noqa: D401
+            """Stub openai.OpenAI."""
 
-    openai.RateLimitError = RateLimitError
-    openai.AsyncOpenAI = AsyncOpenAI
-    sys.modules["openai"] = openai
+            def __init__(self, *args, **kwargs):  # noqa: ANN001, ANN002
+                self.args = args
+                self.kwargs = kwargs
+
+        openai.RateLimitError = RateLimitError
+        openai.AsyncOpenAI = AsyncOpenAI
+        openai.OpenAI = OpenAI
+        sys.modules["openai"] = openai
+
+        # Stub openai._models for rllm.sdk.chat.openai imports
+        openai_models = types.ModuleType("openai._models")
+
+        class _FinalRequestOptions:  # noqa: D401
+            pass
+
+        openai_models.FinalRequestOptions = _FinalRequestOptions
+        sys.modules["openai._models"] = openai_models
 
 
 # Many modules are optional / heavy (torch, transformers, ray, etc.).
@@ -94,7 +116,12 @@ _STUB_MODULES = [
 ]
 
 for _name in _STUB_MODULES:
-    if _name not in sys.modules:
+    if _name in sys.modules:
+        continue
+    try:
+        importlib.import_module(_name)
+        continue
+    except Exception:
         sys.modules[_name] = types.ModuleType(_name)
 
 # Provide minimal attributes expected by some modules during import
