@@ -10,9 +10,7 @@ defaults:
   - /ppo_base_config
   - _self_
 
-hydra:
-  searchpath:
-    - pkg://skyrl_train.config
+# ppo_base_config is resolved via hydra.searchpath in unified.yaml (pkg://skyrl_train.config)
 
 rllm:
   backend: skyrl
@@ -29,6 +27,7 @@ rllm:
     total_epochs: ${oc.select:trainer.epochs, 10}
     project_name: ${oc.select:trainer.project_name, 'rllm-training'}
     experiment_name: ${oc.select:trainer.run_name, 'default'}
+    logger: ${oc.select:trainer.logger, ['console']}
     test_freq: ${oc.select:trainer.eval_interval, 5}
     save_freq: ${oc.select:trainer.ckpt_interval, 20}
     val_before_train: ${oc.select:trainer.eval_before_train, true}
