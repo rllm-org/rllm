@@ -29,6 +29,10 @@ dependencies = [
     "openai",
     "tqdm",
     "requests",
+    # Core ML/AI packages
+    "torch",
+    "torchvision",
+    "transformers>=4.57.0,<5.0.0",
     # Data
     "datasets>=2.20.0",
     "pillow",
