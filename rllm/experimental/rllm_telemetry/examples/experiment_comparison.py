@@ -11,8 +11,8 @@ Usage:
     RLLM_API_KEY=your-key \
     python examples/experiment_comparison.py
 
-    # Override agent endpoint (optional):
-    AGENT_ENDPOINT=http://localhost:8000 \
+    # Override agent endpoint (optional, defaults to staging):
+    AGENT_ENDPOINT=https://rllm-ui-rllm-staging.up.railway.app \
     python examples/experiment_comparison.py
 """
 
@@ -38,7 +38,7 @@ JUDGE_MODEL = "anthropic/claude-haiku-4-5-20251001"
 APP_NAME = "experiment_comparison"
 USER_ID = "eval_user"
 
-AGENT_ENDPOINT = os.environ.get("AGENT_ENDPOINT", "http://localhost:8000")
+AGENT_ENDPOINT = os.environ.get("AGENT_ENDPOINT", "")  # empty = use RllmConfig default
 
 # ---------------------------------------------------------------------------
 # Tools — shared by both agents

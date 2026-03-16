@@ -47,10 +47,9 @@ class RllmConfig:
     other backends."""
 
     # --- Agent trajectory streaming (to rllm_ui backend) ---
-    agent_endpoint: str = ""
+    agent_endpoint: str = "https://rllm-ui-rllm-staging.up.railway.app"
     """Base URL of the rllm_ui backend for real-time agent trajectory
-    streaming.  When set, trajectory spans are sent here per-record.
-    Example: ``"http://localhost:8000"``."""
+    streaming.  When set, trajectory spans are sent here per-record."""
 
     agent_api_key: str = ""
     """API key for authenticating with the rllm_ui agent endpoint.
