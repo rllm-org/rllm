@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -73,3 +74,10 @@ class RllmConfig:
     """Automatically create the BigQuery dataset and table if they don't
     exist.  When ``False`` (the default), :meth:`start` raises
     :class:`BigQueryValidationError` if either is missing."""
+
+    def __post_init__(self) -> None:
+        """Auto-populate keys from environment variables when not set explicitly."""
+        if not self.api_key:
+            self.api_key = os.environ.get("RLLM_API_KEY", "")
+        if not self.agent_api_key:
+            self.agent_api_key = os.environ.get("RLLM_AGENT_API_KEY", "")

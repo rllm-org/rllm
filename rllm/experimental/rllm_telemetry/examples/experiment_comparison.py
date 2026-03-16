@@ -6,13 +6,13 @@ multiple tools (knowledge base lookup, calculator) to arrive at an answer.
 Results are scored with LlmJudge and compared side-by-side.
 
 Usage:
-    # Requires an LLM API key and GCP credentials
+    # Requires an LLM API key and rllm-ui running locally
     ANTHROPIC_API_KEY=sk-... \
-    GOOGLE_APPLICATION_CREDENTIALS=gcp-key.json \
+    RLLM_API_KEY=your-key \
     python examples/experiment_comparison.py
 
-    # Override BigQuery destination via env vars (optional):
-    BQ_PROJECT=my-project BQ_DATASET=my_dataset BQ_TABLE=my_table \
+    # Override agent endpoint (optional):
+    AGENT_ENDPOINT=http://localhost:8000 \
     python examples/experiment_comparison.py
 """
 
@@ -38,9 +38,7 @@ JUDGE_MODEL = "anthropic/claude-haiku-4-5-20251001"
 APP_NAME = "experiment_comparison"
 USER_ID = "eval_user"
 
-BQ_PROJECT = os.environ.get("BQ_PROJECT", "rllm-platform-test")
-BQ_DATASET = os.environ.get("BQ_DATASET", "agent_traces")
-BQ_TABLE = os.environ.get("BQ_TABLE", "rllm_traces")
+AGENT_ENDPOINT = os.environ.get("AGENT_ENDPOINT", "http://localhost:8000")
 
 # ---------------------------------------------------------------------------
 # Tools — shared by both agents
@@ -199,25 +197,19 @@ async def main():
     runner_minimal = InMemoryRunner(agent=agent_minimal, app_name=APP_NAME)
     runner_detailed = InMemoryRunner(agent=agent_detailed, app_name=APP_NAME)
 
-    # Attach observability telemetry (BigQuery backend + stream to rllm_ui)
-    rllm_telemetry.instrument(
+    # Attach observability telemetry (stdout + stream spans to rllm_ui → ClickHouse)
+    plugin_minimal = rllm_telemetry.instrument(
         runner_minimal,
-        backend="bigquery",
-        bq_project=BQ_PROJECT,
-        bq_dataset=BQ_DATASET,
-        bq_table=BQ_TABLE,
-        bq_auto_create=True,
-        capture_content=False,
+        backend="stdout",
+        agent_endpoint=AGENT_ENDPOINT,
     )
-    rllm_telemetry.instrument(
+    plugin_detailed = rllm_telemetry.instrument(
         runner_detailed,
-        backend="bigquery",
-        bq_project=BQ_PROJECT,
-        bq_dataset=BQ_DATASET,
-        bq_table=BQ_TABLE,
-        bq_auto_create=True,
-        capture_content=False,
+        backend="stdout",
+        agent_endpoint=AGENT_ENDPOINT,
     )
+    print(f"[debug] Telemetry endpoint: {AGENT_ENDPOINT}")
+    print(f"[debug] Exporter type: {type(plugin_minimal._exporter).__name__}")
 
     # LLM judge scorer
     judge = LlmJudge(
@@ -298,6 +290,10 @@ async def main():
             trajectories.append(traj)
 
     export_trajectories(trajectories)
+
+    # Close telemetry plugins so agent sessions are marked as completed
+    await plugin_minimal.close()
+    await plugin_detailed.close()
 
 
 if __name__ == "__main__":

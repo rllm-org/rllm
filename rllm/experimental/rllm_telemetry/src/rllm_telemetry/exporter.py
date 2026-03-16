@@ -58,6 +58,7 @@ class BaseExporter(ABC):
 # ANSI color codes for stdout exporter
 _COLORS: dict[str, str] = {
     "session": "\033[36m",  # cyan
+    "session.start": "\033[36m",  # cyan
     "invocation.start": "\033[34m",  # blue
     "invocation.end": "\033[34m",
     "agent.start": "\033[35m",  # magenta
@@ -66,6 +67,7 @@ _COLORS: dict[str, str] = {
     "llm.end": "\033[33m",
     "tool.start": "\033[32m",  # green
     "tool.end": "\033[32m",
+    "tool.data": "\033[32m",  # green
     "event": "\033[37m",  # white/gray
     "experiment.start": "\033[96m",  # bright cyan
     "experiment.end": "\033[96m",
@@ -253,7 +255,7 @@ def _extract_id(span_type: str, data: dict[str, Any]) -> str:
 
     Falls back to a random UUID if no known ID field is present.
     """
-    if span_type == "session":
+    if span_type in ("session", "session.start"):
         return data.get("session_id") or str(uuid.uuid4())
     if span_type.startswith("invocation."):
         return data.get("invocation_id") or str(uuid.uuid4())
@@ -556,10 +558,14 @@ class AgentSpanExporter(BaseExporter):
                 self._agent_session_id,
                 self._config.agent_endpoint,
             )
-        except Exception:
+        except Exception as exc:
             logger.exception(
                 "Failed to create agent session on %s — trajectory streaming disabled for this run.",
                 self._config.agent_endpoint,
+            )
+            print(
+                f"[rllm_telemetry] ERROR: Failed to create agent session on {self._config.agent_endpoint} — trajectory streaming disabled.\n  {type(exc).__name__}: {exc}",
+                file=sys.stderr,
             )
             self._agent_session_id = None
         await self._inner.start()
@@ -573,8 +579,12 @@ class AgentSpanExporter(BaseExporter):
                     f"{self._config.agent_endpoint}/api/agent-sessions/{self._agent_session_id}/complete",
                     headers=self._auth_headers(),
                 )
-            except Exception:
+            except Exception as exc:
                 logger.warning("Failed to complete agent session %s", self._agent_session_id)
+                print(
+                    f"[rllm_telemetry] Failed to complete agent session {self._agent_session_id}: {exc}",
+                    file=sys.stderr,
+                )
         if self._client:
             await self._client.aclose()
             self._client = None
@@ -624,15 +634,17 @@ class AgentSpanExporter(BaseExporter):
                 headers=self._auth_headers(),
             )
             if resp.status_code >= 400:
-                logger.warning(
-                    "Agent trajectory ingest returned %s: %s",
-                    resp.status_code,
-                    resp.text[:200],
-                )
+                msg = f"[rllm_telemetry] Span ingest returned {resp.status_code}: {resp.text[:200]}"
+                logger.warning(msg)
+                print(msg, file=sys.stderr)
         except httpx.HTTPError as exc:
-            logger.warning("Agent trajectory ingest failed: %s", exc)
-        except Exception:
-            logger.exception("Unexpected error sending trajectory span.")
+            msg = f"[rllm_telemetry] Span ingest failed: {exc}"
+            logger.warning(msg)
+            print(msg, file=sys.stderr)
+        except Exception as exc:
+            msg = f"[rllm_telemetry] Unexpected error sending span: {exc}"
+            logger.exception(msg)
+            print(msg, file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -659,6 +671,8 @@ def create_exporter(config: RllmConfig) -> BaseExporter:
         raise ValueError(f"Unknown exporter backend {config.backend!r}. Choose from: {', '.join(sorted(_EXPORTERS))}")
     inner = cls(config)
     if config.agent_endpoint:
+        if not (config.agent_api_key or config.api_key):
+            raise ValueError("An API key is required to stream spans to the rllm-ui backend. Set the RLLM_API_KEY environment variable or pass api_key= / agent_api_key= to RllmConfig.")
         return AgentSpanExporter(config, inner)
     return inner
 

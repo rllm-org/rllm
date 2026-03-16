@@ -128,6 +128,7 @@ class EventActionsData(BaseModel):
 # Discriminator values used in the NDJSON wire format ``{"type": ...}``.
 SpanType = Literal[
     "session",
+    "session.start",
     "invocation.start",
     "invocation.end",
     "agent.start",
@@ -136,6 +137,7 @@ SpanType = Literal[
     "llm.end",
     "tool.start",
     "tool.end",
+    "tool.data",
     "event",
     "experiment.start",
     "experiment.end",
@@ -159,6 +161,20 @@ class SessionRecord(BaseModel):
     app_name: str
     user_id: str
     created_at: float
+
+
+class SessionStartRecord(BaseModel):
+    """Captures the initial state of a session — system prompt, user input,
+    and any other context available at session start.
+
+    Emitted once per session before the first invocation begins.
+    """
+
+    session_id: str
+    agent_name: str | None = None
+    started_at: float | None = None
+    data: dict[str, Any] = Field(default_factory=dict)
+    """Free-form payload: system prompt, user message, case metadata, etc."""
 
 
 class InvocationRecord(BaseModel):
@@ -264,6 +280,23 @@ class ToolSpanRecord(BaseModel):
     started_at: float
     ended_at: float | None = None
     duration_ms: float | None = None
+
+
+class ToolDataRecord(BaseModel):
+    """Raw data returned by a tool execution.
+
+    Captures the observation/output payload from a tool call, separate
+    from the tool.start/tool.end lifecycle spans.  Useful for recording
+    large tool outputs (e.g. API responses, query results) that inform
+    the agent's next reasoning step.
+    """
+
+    span_id: str
+    session_id: str
+    agent_name: str | None = None
+    tool_name: str | None = None
+    data: dict[str, Any] = Field(default_factory=dict)
+    """Free-form payload: observation data, summary, display name, etc."""
 
 
 class EventRecord(BaseModel):
