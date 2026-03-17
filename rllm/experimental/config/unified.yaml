@@ -10,6 +10,8 @@ defaults:
 
 # Hydra configuration
 hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+    - pkg://skyrl_train.config
   run:
     dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
-

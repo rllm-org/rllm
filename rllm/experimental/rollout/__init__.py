@@ -4,6 +4,7 @@ from .rollout_engine import ModelOutput, RolloutEngine
 from .types import TinkerTokenInput, TinkerTokenOutput, TokenInput, Tokenizer, TokenOutput, VerlTokenInput, VerlTokenOutput
 
 if TYPE_CHECKING:
+    from .skyrl_engine import SkyRLEngine
     from .tinker_engine import TinkerEngine
     from .verl_engine import VerlEngine
 
@@ -11,6 +12,7 @@ __all__ = [
     "ModelOutput",
     # Rollout engines
     "RolloutEngine",
+    "SkyRLEngine",
     "TinkerEngine",
     "VerlEngine",
     # Token input/output types
@@ -24,7 +26,12 @@ __all__ = [
 ]
 
 
-def __getattr__(name):
+def __getattr__(name: str):
+    """Lazy import rollout engines to avoid importing optional backends eagerly."""
+    if name == "SkyRLEngine":
+        from .skyrl_engine import SkyRLEngine as _SkyRLEngine
+
+        return _SkyRLEngine
     if name == "TinkerEngine":
         from .tinker_engine import TinkerEngine as _TinkerEngine
 
