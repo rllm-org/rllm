@@ -672,6 +672,10 @@ def create_exporter(config: RllmConfig) -> BaseExporter:
     inner = cls(config)
     if config.agent_endpoint:
         if not (config.agent_api_key or config.api_key):
+            if config.backend == "bigquery":
+                # BigQuery uses Google Cloud credentials; skip agent span
+                # streaming when no RLLM API key is available.
+                return inner
             raise ValueError("An API key is required to stream spans to the rllm-ui backend. Set the RLLM_API_KEY environment variable or pass api_key= / agent_api_key= to RllmConfig.")
         return AgentSpanExporter(config, inner)
     return inner
