@@ -216,5 +216,9 @@ uv.lock
 
 # Legacy issue: we will ignore the "verl" folder, which was installed by many as submodule before
 /verl/
-# Local venvs
-.venv*
+
+# GCP service account keys
+gcp-key.json
+
+# IDE
+.vscode/

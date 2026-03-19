@@ -1,0 +1,37 @@
+[project]
+name = "rllm-telemetry"
+version = "0.1.0"
+description = "Agent observability plugin for Google ADK — captures traces, LLM calls, tool executions, and events."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Rllm" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "google-adk>=1.0.0",
+    "httpx>=0.27.0,<1.0.0",
+    "pydantic>=2.0.0,<3.0.0",
+    "google-cloud-bigquery>=3.20.0,<4.0.0",
+]
+
+[project.optional-dependencies]
+llm = [
+    "litellm>=1.0.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rllm_telemetry"]
