@@ -38,7 +38,7 @@ class Geo3KWorkflow(Workflow):
             messages = [{"role": "user", "content": question}]
 
         output: ModelOutput = await self.rollout_engine.get_model_response(messages, application_id=uid, **kwargs)
-        action = Action(output.content)
+        action = Action(action=output.content)
         reward_result = self.reward_fn(task, action)
 
         trajectory: Trajectory = self.agent.trajectory
