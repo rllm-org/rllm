@@ -381,7 +381,12 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         os.makedirs(self.full_config.training.default_local_dir, exist_ok=True)
 
         # Initialize training client and load checkpoint
-        start_batch, self.sampling_client = await self.policy_trainer.initialize_async(resume_from_checkpoint=True)
+        # Auto-resume from local checkpoints is disabled: the checkpoint dir is shared across
+        # all experiments, so it can load wrong model weights. To resume, use
+        # training.resume_from_tinker_id=tinker://... to target a specific checkpoint.
+        # TODO: enable auto-resume once checkpoint dir is scoped per-experiment.
+        resume = bool(self.full_config.training.resume_from_tinker_id)
+        start_batch, self.sampling_client = await self.policy_trainer.initialize_async(resume_from_checkpoint=resume)
 
         # Update trainer state with the start batch from checkpoint
         trainer_state.global_step = start_batch

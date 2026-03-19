@@ -141,11 +141,7 @@ class TinkerPolicyTrainer:
         if resume_info:
             # Resume from checkpoint
             logger.info(f"Resuming from checkpoint: {resume_info}")
-            try:
-                self.training_client = await self.service_client.create_training_client_from_state_async(resume_info["state_path"])
-            except Exception as e:
-                logger.error(f"Failed to resume from checkpoint: {e}")
-                raise
+            self.training_client = await self.service_client.create_training_client_from_state_async(resume_info["state_path"])
 
             if "sampler_path" in resume_info:
                 logger.info(f"Using sampler checkpoint: {resume_info['sampler_path']}")
@@ -388,6 +384,9 @@ class TinkerPolicyTrainer:
         Returns:
             Resume info dictionary or None if no checkpoint exists
         """
+        # TODO: default_local_dir is shared across all experiments (e.g. /tmp/rllm-tinker-checkpoints),
+        # so this can load checkpoints from a different model/experiment. Should scope by experiment
+        # name like tinker-cookbook does with its per-experiment log_path.
         return checkpoint_utils.get_last_checkpoint(self.config.training.default_local_dir)
 
     @require_training_client
