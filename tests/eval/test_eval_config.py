@@ -187,3 +187,54 @@ class TestConstants:
     def test_registry_has_labels(self):
         for p in PROVIDER_REGISTRY:
             assert p.label, f"Provider {p.id} has no label"
+
+    def test_minimax_provider_info(self):
+        """MiniMax provider should have correct metadata."""
+        info = get_provider_info("minimax")
+        assert info is not None
+        assert info.label == "MiniMax"
+        assert info.litellm_prefix == "minimax"
+        assert info.env_key == "MINIMAX_API_KEY"
+
+    def test_minimax_default_model_is_m27(self):
+        """MiniMax default model should be the latest M2.7."""
+        info = get_provider_info("minimax")
+        assert info is not None
+        assert info.default_model == "MiniMax-M2.7"
+
+    def test_minimax_models_include_m27_family(self):
+        """MiniMax model list should include M2.7 and M2.7-highspeed."""
+        info = get_provider_info("minimax")
+        assert info is not None
+        assert "MiniMax-M2.7" in info.models
+        assert "MiniMax-M2.7-highspeed" in info.models
+
+    def test_minimax_models_include_m25_family(self):
+        """MiniMax model list should still include M2.5 models for backward compat."""
+        info = get_provider_info("minimax")
+        assert info is not None
+        assert "MiniMax-M2.5" in info.models
+        assert "MiniMax-M2.5-highspeed" in info.models
+
+    def test_minimax_m27_is_first_model(self):
+        """M2.7 should be listed before M2.5 (newest first)."""
+        info = get_provider_info("minimax")
+        assert info is not None
+        m27_idx = info.models.index("MiniMax-M2.7")
+        m25_idx = info.models.index("MiniMax-M2.5")
+        assert m27_idx < m25_idx
+
+    def test_minimax_config_validates(self):
+        """A complete MiniMax config should pass validation."""
+        config = RllmConfig(
+            provider="minimax",
+            api_keys={"minimax": "test-key"},
+            model="MiniMax-M2.7",
+        )
+        assert config.is_configured()
+        assert config.validate() == []
+
+    def test_minimax_in_default_models(self):
+        """MiniMax should have an entry in DEFAULT_MODELS."""
+        assert "minimax" in DEFAULT_MODELS
+        assert DEFAULT_MODELS["minimax"] == "MiniMax-M2.7"

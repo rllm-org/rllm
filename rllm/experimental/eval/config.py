@@ -198,11 +198,12 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         label="MiniMax",
         litellm_prefix="minimax",
         env_key="MINIMAX_API_KEY",
-        default_model="MiniMax-M2.5",
+        default_model="MiniMax-M2.7",
         models=[
+            "MiniMax-M2.7",
+            "MiniMax-M2.7-highspeed",
             "MiniMax-M2.5",
             "MiniMax-M2.5-highspeed",
-            "MiniMax-M2.1",
         ],
     ),
     # --- Custom endpoint (last) ---
