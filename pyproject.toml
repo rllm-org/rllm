@@ -157,7 +157,7 @@ flash-attn = [
 ]
 
 [tool.ruff]
-line-length = 150  # slightly conservative value
+# line-length = 150  # slightly conservative value, turn this on later.
 
 [tool.ruff.lint]
 isort = {known-first-party = ["rllm"], known-third-party = ["verl"]}
