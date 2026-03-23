@@ -24,7 +24,7 @@ class AgentSFTTrainer:
             self._train_tinker()
 
     def _train_verl(self):
-        from verl.trainer.fsdp_sft_trainer import FSDPSFTTrainer
+        from verl.trainer.sft_trainer import SFTTrainer
         from verl.utils import hf_tokenizer
         from verl.utils.device import get_device_name
         from verl.utils.distributed import destroy_global_process_group, initialize_global_process_group
@@ -50,7 +50,7 @@ class AgentSFTTrainer:
         train_dataset = RLLMSFTDataset(config.data.train_files, tokenizer, config.data)
         val_dataset = RLLMSFTDataset(config.data.val_files, tokenizer, config.data)
 
-        trainer = FSDPSFTTrainer(
+        trainer = SFTTrainer(
             config=config,
             device_mesh=device_mesh,
             ulysses_device_mesh=ulysses_device_mesh,

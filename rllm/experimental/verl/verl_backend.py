@@ -139,10 +139,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         return the token IDs and logprobs needed by the trace pipeline.
         """
         import ray
-        from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServerBase, vLLMReplica
+        from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
 
         @ray.remote(num_cpus=1)
-        class InstrumentedvLLMHttpServer(vLLMHttpServerBase):
+        class InstrumentedvLLMHttpServer(vLLMHttpServer):
             """vLLM HTTP server with automatic vLLM instrumentation in Ray worker."""
 
             def __init__(self, *args, **kwargs):
