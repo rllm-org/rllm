@@ -26,7 +26,16 @@ class TinkerTrainerLauncher(TrainerLauncher):
     def train(self):
         trainer = None
         try:
-            trainer = UnifiedTrainer(backend_cls=TinkerBackend, config=self.config, workflow_class=self.workflow_class, train_dataset=self.train_dataset, val_dataset=self.val_dataset, workflow_args=self.workflow_args, **self.kwargs)
+            trainer = UnifiedTrainer(
+                backend_cls=TinkerBackend,
+                config=self.config,
+                workflow_class=self.workflow_class,
+                train_dataset=self.train_dataset,
+                val_dataset=self.val_dataset,
+                workflow_args=self.workflow_args,
+                store=self.store,
+                **self.kwargs,
+            )
             trainer.fit()
         except KeyboardInterrupt:
             print("\nTraining interrupted by user.")

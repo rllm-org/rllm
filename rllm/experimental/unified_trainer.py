@@ -33,6 +33,7 @@ from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngi
 from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.rollout import RolloutEngine
 from rllm.utils import EpisodeLogger, Tracking, extract_source_metadata
+from rllm.workflows.store import Store
 from rllm.workflows.workflow import TerminationReason, Workflow
 
 
@@ -101,6 +102,7 @@ class UnifiedTrainer:
         *,
         traj_grouping_hook: Callable | None = None,
         traj_group_adv_estimator_map: dict | None = None,
+        store: Store | None = None,
         **kwargs,
     ):
         """Initialize the UnifiedTrainer.
@@ -113,6 +115,7 @@ class UnifiedTrainer:
 
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
+        self.store = store
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
 
@@ -173,6 +176,7 @@ class UnifiedTrainer:
                 retry_limit=self.rllm_config.workflow.retry_limit,
                 raise_on_error=self.rllm_config.workflow.raise_on_error,
                 episode_logger=self.episode_logger,
+                store=self.store,
             )
 
         self.tokenizer = None
@@ -343,7 +347,9 @@ class UnifiedTrainer:
         workflow_metrics, termination_counts = self._collect_workflow_metrics_from_episodes(trainer_state.episodes)
 
         # stage 2: transform episodes to trajectory groups (sync)
-        trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(trainer_state.episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook)
+        trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(
+            trainer_state.episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook
+        )
         trainer_state.trajectory_groups = trajectory_groups
         trainer_state.metrics.update(transform_metrics)
 
@@ -408,8 +414,12 @@ class UnifiedTrainer:
         for batch in val_dataloader:
             # Generate episodes and transform to trajectory groups
             val_episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, is_validation=True)
-            val_trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(val_episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook)
-            reward_metrics = collect_reward_and_advantage_from_trajectory_groups(val_trajectory_groups, self.algorithm_config, collect_advantage=False)
+            val_trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(
+                val_episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook
+            )
+            reward_metrics = collect_reward_and_advantage_from_trajectory_groups(
+                val_trajectory_groups, self.algorithm_config, collect_advantage=False
+            )
 
             is_correct_lst.extend([episode.is_correct for episode in val_episodes])
             uid_lst.extend([episode.task_id for episode in val_episodes])
@@ -504,12 +514,14 @@ class TrainerLauncher(ABC):
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
+        store: Store | None = None,
         **kwargs,
     ):
         """Initialize the TrainerLauncher."""
         self.config = config
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
+        self.store = store
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
         self.kwargs = kwargs
@@ -539,6 +551,7 @@ class AgentTrainer:
         backend: Literal["verl", "tinker"] = "verl",
         agent_flow: Any = None,
         evaluator: Any = None,
+        store: Store | None = None,
         **kwargs,
     ):
         has_agent_flow = agent_flow is not None and evaluator is not None
@@ -561,6 +574,7 @@ class AgentTrainer:
                 train_dataset=train_dataset,
                 val_dataset=val_dataset,
                 workflow_args=workflow_args,
+                store=store,
                 **kwargs,
             )
         elif backend == "tinker":
@@ -572,6 +586,7 @@ class AgentTrainer:
                 train_dataset=train_dataset,
                 val_dataset=val_dataset,
                 workflow_args=workflow_args,
+                store=store,
                 **kwargs,
             )
 

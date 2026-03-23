@@ -13,6 +13,7 @@ from tqdm import tqdm
 from rllm.agents.agent import Episode
 from rllm.experimental.rollout import RolloutEngine
 from rllm.utils import colorful_print
+from rllm.workflows.store import Store
 from rllm.workflows.workflow import TerminationReason, Workflow
 
 # Avoid hard dependency on verl at import time; only for typing
@@ -36,6 +37,7 @@ class UnifiedWorkflowEngine:
         raise_on_error: bool = True,
         episode_logger: EpisodeLogger | None = None,
         post_execute_hook: Callable[[], Coroutine[Any, Any, None]] | None = None,
+        store: Store | None = None,
         **kwargs,
     ):
         """
@@ -53,10 +55,12 @@ class UnifiedWorkflowEngine:
             post_execute_hook: Optional async callback invoked after all tasks
                 in a batch complete but before results are returned.  Useful for
                 batch-level trace flushing in SDK async-tracer mode.
+            store: Optional cross-episode store shared across all workflow instances.
             **kwargs: Additional keyword arguments.
         """
         self.workflow_cls = workflow_cls
         self.workflow_args = workflow_args or {}
+        self.store = store
 
         self.rollout_engine = rollout_engine
         self.config = config  # if training
@@ -105,6 +109,7 @@ class UnifiedWorkflowEngine:
             workflow = self.workflow_cls(
                 rollout_engine=self.rollout_engine,
                 executor=self.executor,
+                store=self.store,
                 **self.workflow_args,
             )
             assert workflow.is_multithread_safe(), "Workflows must contain only thread-save environments"
@@ -217,7 +222,9 @@ class UnifiedWorkflowEngine:
         # Log episodes if logger is provided
         if self.episode_logger is not None:
             try:
-                logger.info(f"Logging {len(ordered_results)} episodes to step={self.current_step}, mode={self.current_mode}, epoch={self.current_epoch}")
+                logger.info(
+                    f"Logging {len(ordered_results)} episodes to step={self.current_step}, mode={self.current_mode}, epoch={self.current_epoch}"
+                )
                 self.episode_logger.log_episodes_batch(
                     ordered_results,
                     self.current_step,

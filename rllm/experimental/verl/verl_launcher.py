@@ -125,7 +125,16 @@ class TaskRunner:
 
         trainer = None
         try:
-            trainer = UnifiedTrainer(backend_cls=VerlBackend, config=config, workflow_class=workflow_class, train_dataset=None, val_dataset=None, workflow_args=workflow_args, backend_args=backend_args, **kwargs)
+            trainer = UnifiedTrainer(
+                backend_cls=VerlBackend,
+                config=config,
+                workflow_class=workflow_class,
+                train_dataset=None,
+                val_dataset=None,
+                workflow_args=workflow_args,
+                backend_args=backend_args,
+                **kwargs,
+            )
             trainer.fit()
         except Exception as e:
             print(f"Error training Verl: {e}")
@@ -173,6 +182,7 @@ class VerlTrainerLauncher(TrainerLauncher):
                 config=self.config,
                 workflow_class=self.workflow_class,
                 workflow_args=self.workflow_args,
+                store=self.store,
                 **self.kwargs,
             )
         )
