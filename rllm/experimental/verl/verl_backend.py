@@ -104,8 +104,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             role_worker_mapping=role_worker_mapping,
             resource_pool_manager=resource_pool_manager,
             ray_worker_group_cls=ray_worker_group_cls,
-            reward_fn=reward_fn,
-            val_reward_fn=val_reward_fn,
         )
 
         # Initialize BackendProtocol

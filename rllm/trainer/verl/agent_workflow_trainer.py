@@ -51,7 +51,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         workflow_class=None,
         workflow_args=None,
     ):
-        super().__init__(config=config, tokenizer=tokenizer, processor=processor, role_worker_mapping=role_worker_mapping, resource_pool_manager=resource_pool_manager, ray_worker_group_cls=ray_worker_group_cls, reward_fn=reward_fn, val_reward_fn=val_reward_fn)
+        super().__init__(config=config, tokenizer=tokenizer, processor=processor, role_worker_mapping=role_worker_mapping, resource_pool_manager=resource_pool_manager, ray_worker_group_cls=ray_worker_group_cls)
 
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}

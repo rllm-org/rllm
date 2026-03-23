@@ -53,7 +53,6 @@ def run_ppo_agent(config):
         ray.timeline(filename=timeline_json_file)
 
 
-@ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head
 class TaskRunner:
     """Ray remote class for executing distributed PPO training tasks.
 
@@ -233,13 +232,11 @@ class TaskRunner:
         reward_fn = load_reward_manager(
             config,
             tokenizer,
-            num_examine=0,
             **config.reward_model.get("reward_kwargs", {}),
         )
         val_reward_fn = load_reward_manager(
             config,
             tokenizer,
-            num_examine=1,
             **config.reward_model.get("reward_kwargs", {}),
         )
 
