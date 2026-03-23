@@ -112,7 +112,7 @@ async def solve_with_search(question: str):
     
     return answer.choices[0].message.content
 
-# Returns TrajectoryView with all steps captured
+# Returns Trajectory with all steps captured
 traj = await solve_with_search("What is the capital of France?")
 
 # Assign per-step rewards

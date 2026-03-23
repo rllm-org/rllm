@@ -1,3 +1,4 @@
+import json
 from typing import Any, cast
 
 import tinker
@@ -9,6 +10,7 @@ from typing_extensions import override  # need to use typing_extensions for pyth
 from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
 from rllm.experimental.rollout.types import ImageProcessor, Processor, TinkerTokenInput, TinkerTokenOutput, TokenInput, Tokenizer, TokenOutput
 from rllm.parser import ChatTemplateParser
+from rllm.tools.tool_base import ToolCall
 from rllm.workflows import TerminationEvent, TerminationReason
 
 """
@@ -52,6 +54,63 @@ def _flat_token_input_length(token_input: TokenInput) -> int:
     return length
 
 
+def _convert_openai_messages(messages: list[dict[str, Any]]) -> list[Message]:
+    """Convert OpenAI message dicts to tinker-cookbook Messages.
+
+    Follows the same pattern as tinker_cookbook.third_party.litellm.provider._convert_openai_messages.
+    TODO: once these helpers are refactored out of the litellm provider into a shared module
+    (e.g. tinker_cookbook.renderers.openai_compat), import directly instead of duplicating.
+    """
+    from tinker_cookbook.renderers.base import ToolCall as TinkerToolCall
+
+    out: list[Message] = []
+    for msg in messages:
+        tinker_msg: Message = {
+            "role": msg["role"],
+            "content": msg.get("content") or "",
+        }
+        if "name" in msg:
+            tinker_msg["name"] = msg["name"]
+        if "tool_call_id" in msg:
+            tinker_msg["tool_call_id"] = msg["tool_call_id"]
+        if "tool_calls" in msg:
+            tinker_msg["tool_calls"] = [TinkerToolCall.model_validate(tc) for tc in msg["tool_calls"]]
+        out.append(tinker_msg)
+    return out
+
+
+def _prepare_messages_with_tools(
+    renderer: renderers.Renderer,
+    messages: list[Message],
+    tools: list[dict[str, Any]],
+) -> list[Message]:
+    """Inject tool declarations into the message list via the renderer.
+
+    Follows the same pattern as tinker_cookbook.third_party.litellm.provider._prepare_messages_with_tools.
+    TODO: once these helpers are refactored out of the litellm provider into a shared module
+    (e.g. tinker_cookbook.renderers.openai_compat), import directly instead of duplicating.
+    """
+    from tinker_cookbook.renderers.base import ToolSpec
+
+    tool_specs: list[ToolSpec] = []
+    for tool in tools:
+        if tool.get("type") != "function":
+            continue
+        func = tool["function"]
+        tool_specs.append(ToolSpec(name=func["name"], description=func.get("description", ""), parameters=func.get("parameters", {})))
+
+    system_prompt = ""
+    if messages and messages[0]["role"] == "system":
+        content = messages[0].get("content") or ""
+        system_prompt = content if isinstance(content, str) else ""
+        remaining = list(messages[1:])
+    else:
+        remaining = list(messages)
+
+    prefix = renderer.create_conversation_prefix_with_tools(tool_specs, system_prompt)
+    return prefix + remaining
+
+
 def _parse_tinker_message(message: Message) -> tuple[str, str, list[Any]]:
     tinker_content = message["content"]
     if isinstance(tinker_content, list):
@@ -66,8 +125,20 @@ def _parse_tinker_message(message: Message) -> tuple[str, str, list[Any]]:
     else:  # no reasoning parsed
         content = tinker_content
         reasoning = ""
-    # TODO(listar2000): the Tinker tool_calls is not fully compatible with the rLLM one
-    tool_calls = message.get("tool_calls", [])
+    # Convert tinker-cookbook ToolCall (function.name/function.arguments) to rllm ToolCall (name/arguments)
+    raw_tool_calls = message.get("tool_calls", [])
+    tool_calls = []
+    for tc in raw_tool_calls:
+        if hasattr(tc, "function"):
+            # tinker-cookbook ToolCall: ToolCall(function=FunctionBody(name, arguments), id)
+            args = tc.function.arguments
+            tool_calls.append(ToolCall(name=tc.function.name, arguments=json.loads(args) if isinstance(args, str) else args))
+        elif isinstance(tc, ToolCall):
+            tool_calls.append(tc)
+        elif isinstance(tc, dict):
+            tool_calls.append(ToolCall(name=tc.get("name", ""), arguments=tc.get("arguments", {})))
+        else:
+            raise TypeError(f"Unrecognized tool_call type: {type(tc)}")
     return content, reasoning, tool_calls
 
 
@@ -157,29 +228,20 @@ class TinkerEngine(RolloutEngine):
         """
         self.sampling_client = sampling_client
 
-    def _convert_images_to_content_list(self, messages: list[dict]) -> list[dict]:
-        """
-        Convert messages from standard format to Tinker renderer format.
+    @staticmethod
+    def _convert_images_to_content_list(messages: list[dict]) -> list[dict]:
+        """Convert rllm image format to renderer content list format.
 
-        Standard format: {"role": "user", "content": "text", "images": [PIL.Image]}
-        Tinker format:   {"role": "user", "content": [{"type": "image", "image": img}, {"type": "text", "text": "..."}]}
-
-        Args:
-            messages: List of messages in standard format
-
-        Returns:
-            List of messages in Tinker renderer format
+        {"content": "text", "images": [PIL.Image]} -> {"content": [ImagePart, TextPart]}
         """
         converted = []
         for msg in messages:
             if "images" in msg and msg["images"]:
-                # Convert to content list format
                 content_list = []
                 for img in msg["images"]:
                     content_list.append({"type": "image", "image": img})
                 content_list.append({"type": "text", "text": msg.get("content", "")})
                 converted.append({**msg, "content": content_list})
-                # Remove the images key since it's now in content
                 del converted[-1]["images"]
             else:
                 converted.append(msg)
@@ -337,10 +399,14 @@ class TinkerEngine(RolloutEngine):
             token_input = self.tokenizer.encode(prompt, add_special_tokens=False)  # type: ignore
         else:
             # Use Tinker renderer
-            # Convert standard image format to Tinker renderer format
+            # Convert images, then convert OpenAI messages to renderer format
             converted_messages = self._convert_images_to_content_list(messages)
+            tinker_messages = _convert_openai_messages(converted_messages)
+            # Inject tool definitions via renderer if tools are provided
+            if tools:
+                tinker_messages = _prepare_messages_with_tools(self.renderer, tinker_messages, tools)
             # Build prompt using renderer
-            token_input: TinkerTokenInput = self.renderer.build_generation_prompt(converted_messages).chunks  # type: ignore
+            token_input: TinkerTokenInput = self.renderer.build_generation_prompt(tinker_messages).chunks  # type: ignore
 
         sampled_sequence = await self.get_token_output_from_token_input(token_input=token_input, **kwargs)
         return self.assemble_model_output(token_input=token_input, token_output=sampled_sequence)

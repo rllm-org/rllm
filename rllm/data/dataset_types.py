@@ -3,6 +3,17 @@ from dataclasses import dataclass, field
 from typing import cast
 
 
+@dataclass
+class DatasetMetadata:
+    """Metadata for a dataset in the catalog/registry."""
+
+    name: str = ""
+    description: str = ""
+    source: str = ""
+    category: str = ""
+    tags: list[str] = field(default_factory=list)
+
+
 class TrainDataset:
     class Math(enum.Enum):
         # The standard American beginner competitions.

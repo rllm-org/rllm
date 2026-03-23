@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "strands-agent"
+version = "0.1.0"
+description = "Strands Agents framework ReAct agent plugin for rLLM"
+requires-python = ">=3.10"
+dependencies = ["rllm", "strands-agents[openai]"]
+
+[tool.setuptools.packages.find]
+include = ["strands_agent*"]
+
+# Plugin discovery: rllm CLI finds these by name
+[project.entry-points."rllm.agents"]
+strands = "strands_agent.agent:strands_agent"

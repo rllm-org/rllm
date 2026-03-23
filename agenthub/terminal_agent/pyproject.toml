@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "terminal-agent"
+version = "0.1.0"
+description = "Terminal-Bench agent plugin for rLLM"
+requires-python = ">=3.10"
+dependencies = ["rllm"]
+
+[project.optional-dependencies]
+full = ["terminal-bench"]
+
+[tool.setuptools.packages.find]
+include = ["terminal_agent*"]
+
+[project.entry-points."rllm.agents"]
+terminal = "terminal_agent.agent:terminal_agent"
+
+[project.entry-points."rllm.evaluators"]
+terminal_bench_reward_fn = "terminal_agent.evaluator:TerminalBenchEvaluator"

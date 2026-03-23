@@ -4,14 +4,16 @@ import asyncio
 import logging
 import uuid
 from collections import defaultdict
+from collections.abc import Callable, Coroutine
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from tqdm import tqdm
 
 from rllm.agents.agent import Episode
 from rllm.experimental.rollout import RolloutEngine
 from rllm.utils import colorful_print
+from rllm.workflows.store import Store
 from rllm.workflows.workflow import TerminationReason, Workflow
 
 # Avoid hard dependency on verl at import time; only for typing
@@ -34,6 +36,8 @@ class UnifiedWorkflowEngine:
         retry_limit: int = 3,
         raise_on_error: bool = True,
         episode_logger: EpisodeLogger | None = None,
+        post_execute_hook: Callable[[], Coroutine[Any, Any, None]] | None = None,
+        store: Store | None = None,
         **kwargs,
     ):
         """
@@ -48,10 +52,15 @@ class UnifiedWorkflowEngine:
             retry_limit: Maximum number of retry attempts for failed tasks.
             raise_on_error: Whether to raise exceptions on permanent failures.
             episode_logger: Optional logger for saving episode data to files.
+            post_execute_hook: Optional async callback invoked after all tasks
+                in a batch complete but before results are returned.  Useful for
+                batch-level trace flushing in SDK async-tracer mode.
+            store: Optional cross-episode store shared across all workflow instances.
             **kwargs: Additional keyword arguments.
         """
         self.workflow_cls = workflow_cls
         self.workflow_args = workflow_args or {}
+        self.store = store
 
         self.rollout_engine = rollout_engine
         self.config = config  # if training
@@ -63,6 +72,9 @@ class UnifiedWorkflowEngine:
         self.n_parallel_tasks = n_parallel_tasks
         self.executor = ThreadPoolExecutor(max_workers=self.n_parallel_tasks)
         self.workflow_queue = None
+
+        # Post-execute hook (e.g. SDK trace flushing)
+        self.post_execute_hook = post_execute_hook
 
         # Episode logging support
         self.episode_logger = episode_logger
@@ -97,6 +109,7 @@ class UnifiedWorkflowEngine:
             workflow = self.workflow_cls(
                 rollout_engine=self.rollout_engine,
                 executor=self.executor,
+                store=self.store,
                 **self.workflow_args,
             )
             assert workflow.is_multithread_safe(), "Workflows must contain only thread-save environments"
@@ -201,11 +214,17 @@ class UnifiedWorkflowEngine:
                 results[idx] = episode
                 pbar.update(1)
 
+        # Invoke post-execute hook (e.g. batch-level SDK trace flush)
+        if self.post_execute_hook is not None:
+            await self.post_execute_hook()
+
         ordered_results: list[Episode] = results  # type: ignore[assignment]
         # Log episodes if logger is provided
         if self.episode_logger is not None:
             try:
-                logger.info(f"Logging {len(ordered_results)} episodes to step={self.current_step}, mode={self.current_mode}, epoch={self.current_epoch}")
+                logger.info(
+                    f"Logging {len(ordered_results)} episodes to step={self.current_step}, mode={self.current_mode}, epoch={self.current_epoch}"
+                )
                 self.episode_logger.log_episodes_batch(
                     ordered_results,
                     self.current_step,

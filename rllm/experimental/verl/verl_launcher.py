@@ -53,14 +53,27 @@ class WorkflowTaskRunner(TaskRunner):
         )
 
         # Download the checkpoint from HDFS to the local machine.
-        local_path = copy_to_local(config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False))
+        local_path = copy_to_local(
+            config.actor_rollout_ref.model.path,
+            use_shm=config.actor_rollout_ref.model.get("use_shm", False),
+        )
 
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
-        reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
-        val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {}))
+        reward_fn = load_reward_manager(
+            config,
+            tokenizer,
+            num_examine=0,
+            **config.reward_model.get("reward_kwargs", {}),
+        )
+        val_reward_fn = load_reward_manager(
+            config,
+            tokenizer,
+            num_examine=1,
+            **config.reward_model.get("reward_kwargs", {}),
+        )
         resource_pool_manager = self.init_resource_pool_mgr(config)
 
         # Assemble backend-specific arguments for initializing the verl backend.
@@ -76,7 +89,16 @@ class WorkflowTaskRunner(TaskRunner):
 
         trainer = None
         try:
-            trainer = UnifiedTrainer(backend_cls=VerlBackend, config=config, workflow_class=workflow_class, train_dataset=None, val_dataset=None, workflow_args=workflow_args, backend_args=backend_args, **kwargs)
+            trainer = UnifiedTrainer(
+                backend_cls=VerlBackend,
+                config=config,
+                workflow_class=workflow_class,
+                train_dataset=None,
+                val_dataset=None,
+                workflow_args=workflow_args,
+                backend_args=backend_args,
+                **kwargs,
+            )
             trainer.fit()
         except Exception as e:
             print(f"Error training Verl: {e}")
@@ -94,7 +116,7 @@ class VerlTrainerLauncher(TrainerLauncher):
     def __init__(
         self,
         config: DictConfig,
-        workflow_class: type[Workflow],
+        workflow_class: type[Workflow] | None = None,
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
@@ -112,11 +134,9 @@ class VerlTrainerLauncher(TrainerLauncher):
 
     def train(self):
         if not ray.is_initialized():
-            # read off all the `ray_init` settings from the config
-            if self.config is not None and hasattr(self.config, "ray_init"):
-                ray_init_settings = {k: v for k, v in self.config.ray_init.items() if v is not None}
-            else:
-                ray_init_settings = {}
+            from rllm.trainer.ray_init_utils import get_ray_init_settings
+
+            ray_init_settings = get_ray_init_settings(self.config)
             ray.init(runtime_env=get_ppo_ray_runtime_env(), **ray_init_settings)
 
         runner = WorkflowTaskRunner.remote()  # type: ignore
@@ -126,6 +146,7 @@ class VerlTrainerLauncher(TrainerLauncher):
                 config=self.config,
                 workflow_class=self.workflow_class,
                 workflow_args=self.workflow_args,
+                store=self.store,
                 **self.kwargs,
             )
         )

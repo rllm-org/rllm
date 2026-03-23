@@ -26,11 +26,9 @@ def run_workflow_pipeline(config):
         # Set environment variables in the runtime environment to control tokenizer parallelism,
         # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
 
-        # read off all the `ray_init` settings from the config
-        if config is not None and hasattr(config, "ray_init"):
-            ray_init_settings = {k: v for k, v in config.ray_init.items() if v is not None}
-        else:
-            ray_init_settings = {}
+        from rllm.trainer.ray_init_utils import get_ray_init_settings
+
+        ray_init_settings = get_ray_init_settings(config)
         ray.init(runtime_env=get_ppo_ray_runtime_env(), **ray_init_settings)
 
     # Create a remote instance of the TaskRunner class, and
@@ -80,7 +78,10 @@ class PipelineTaskRunner:
 
         # Download the checkpoint from HDFS to the local machine.
         # `use_shm` determines whether to use shared memory, which could lead to faster model loading if turned on
-        local_path = copy_to_local(config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False))
+        local_path = copy_to_local(
+            config.actor_rollout_ref.model.path,
+            use_shm=config.actor_rollout_ref.model.get("use_shm", False),
+        )
 
         # Instantiate the tokenizer and processor.
         from verl.utils import hf_tokenizer
@@ -167,8 +168,18 @@ class PipelineTaskRunner:
             mapping[Role.RefPolicy] = actor_pool_id
 
         # Load the reward manager for training and validation.
-        reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
-        val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {}))
+        reward_fn = load_reward_manager(
+            config,
+            tokenizer,
+            num_examine=0,
+            **config.reward_model.get("reward_kwargs", {}),
+        )
+        val_reward_fn = load_reward_manager(
+            config,
+            tokenizer,
+            num_examine=1,
+            **config.reward_model.get("reward_kwargs", {}),
+        )
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
         if workflow_class is None:

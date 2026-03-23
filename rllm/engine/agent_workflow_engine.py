@@ -5,9 +5,13 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
-import numpy as np
-import torch
 from tqdm import tqdm
+
+try:
+    import numpy as np
+    import torch
+except ImportError as err:
+    raise ImportError("AgentWorkflowEngine requires extra dependencies. Install with: pip install rllm[train]") from err
 
 from rllm.agents.agent import Episode
 from rllm.engine.rollout import ModelOutput, RolloutEngine
@@ -254,19 +258,35 @@ class AgentWorkflowEngine:
         chat_completions_list = []
         rollout_log_probs_list = []
 
+        dropped_episodes: list[dict] = []
+
         for i, episode in enumerate(episodes):
             total_steps = 0
 
             if episode is None:
                 print(f"Episode {i} is None (failed task), dropping it from the batch")
+                dropped_episodes.append(
+                    {
+                        "task_id": task_ids[i],
+                        "episode_id": None,
+                        "termination_reason": "unknown",
+                    }
+                )
                 repeat_counts.append(0)
                 continue
 
             if all(len(trajectory.steps) == 0 for trajectory in episode.trajectories):
-                # termination hits before an agent finishes it's first step
+                # Termination hits before an agent finishes its first step.
                 # (e.g., the initial prompt exceeds max_prompt_length or a timeout occurs)
-                # we delete the episode from the batch by setting repeat_counts to 0
+                # We delete the episode from the batch by setting repeat_counts to 0.
                 print(f"Episode {episode.id} has no valid trajectories, dropping it from the batch")
+                dropped_episodes.append(
+                    {
+                        "task_id": task_ids[i],
+                        "episode_id": episode.id,
+                        "termination_reason": episode.termination_reason.value if episode.termination_reason is not None else "unknown",
+                    }
+                )
                 repeat_counts.append(0)
                 continue
 
@@ -366,6 +386,18 @@ class AgentWorkflowEngine:
             termination_reasons.extend([episode.termination_reason if episode.termination_reason is not None else TerminationReason.UNKNOWN] * total_steps)
             metrics.extend([episode.metrics] * total_steps)
             repeat_counts.append(total_steps)
+
+        # If all episodes were dropped (e.g. all hit max_prompt_length_exceeded), return an empty DataProto.
+        # This avoids downstream crashes and allows trainers to account for dropped episodes via meta_info.
+        if len(prompts) == 0:
+            return DataProto.from_dict(
+                tensors={},
+                non_tensors={},
+                meta_info={
+                    "repeat_counts": repeat_counts,
+                    "dropped_episodes": dropped_episodes,
+                },
+            )
 
         prompts_batch = torch.nn.utils.rnn.pad_sequence(
             [torch.flip(i, dims=[0]) for i in prompts],
@@ -477,6 +509,7 @@ class AgentWorkflowEngine:
             non_tensors=non_tensors,
             meta_info={
                 "repeat_counts": repeat_counts,
+                "dropped_episodes": dropped_episodes,
             },
         )
 

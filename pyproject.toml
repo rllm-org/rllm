@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rllm"
-version = "0.2.1"
+version = "0.3.0.pre"
 description = "Reinforcement Learning for Language Agents"
 authors = [
     {name = "rLLM Team"}
@@ -18,41 +18,53 @@ classifiers = [
 ]
 license = {file = "LICENSE"}
 dependencies = [
-    # Core ML/AI packages
-    "torch",
-    "torchvision",
-    "transformers>=4.55.0",
-    # Data processing
+    "rllm-model-gateway",
+    # CLI
+    "click>=8.0",
+    "rich>=13.9.4",
+    "simple-term-menu>=1.6",
+    # Core
+    "pydantic",
+    "PyYAML",
+    "openai",
+    "tqdm",
+    "requests",
+    # Data
     "datasets>=2.20.0",
+    "pillow",
     "pandas",
     "polars",
-    "pillow",
-    # Infrastructure
-    "ray",
-    # Math and science
-    "numpy",
+    "pyarrow",
+    "litellm[proxy]",
+    "aiosqlite",
+    "hydra-core",
+    "codetiming",
+    "tinker ; python_version >= '3.11'",
+    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook ; python_version >= '3.11'",
+]
+
+[project.scripts]
+rllm = "rllm.experimental.cli.main:cli"
+
+[project.optional-dependencies]
+
+rewards = [
     "sympy",
     "pylatexenc",
     "antlr4-python3-runtime==4.9.3",
-    # Tools
-    "mcp",
-    # Integration with Eval Protocol
-    "eval-protocol",
-    # Utilities
-    "hydra-core",
-    "openai",
-    "fastapi",
-    "uvicorn",
-    "tqdm",
-    "PyYAML",
-    "pydantic",
-    "wrapt",
-    "asgiref>=3.7.0",
-    "wandb",
-    "codetiming",  # for timing tracking
 ]
 
-[project.optional-dependencies]
+tools = [
+    "mcp",
+]
+
+eval-protocol = [
+    "eval-protocol",
+]
+
+all = [
+    "rllm[train,rewards,sdk,tools,eval-protocol]",
+]
 
 ui = [
     "httpx>=0.26.0",
@@ -72,7 +84,11 @@ dev = [
 ]
 
 verl = [
-    "verl==0.7.0",
+    "torch",
+    "transformers>=4.55.0,<5.0.0",
+    "numpy",
+    "verl==0.7.1",
+    "ray",
     "torch>=2.8.0",
     "torchvision>=0.23.0",
     "vllm>=0.10.2,<=0.11.0",
@@ -81,9 +97,9 @@ verl = [
 ]
 
 sdk = [
-    "litellm[proxy]",
-    "aiosqlite",
-    "asgiref",
+    "aiohttp",
+    "fastapi",
+    "uvicorn",
 ]
 
 tinker = [
@@ -107,6 +123,11 @@ strands = [
     "strands-agents",
 ]
 
+langgraph = [
+    "langgraph>=0.2.0",
+    "langchain-openai>=0.2.0",
+]
+
 swe = [
     "docker",
     "kubernetes",
@@ -128,7 +149,6 @@ code-tools = [
 [tool.uv]
 override-dependencies = [
     "litellm[proxy]>=1.80.0",
-    "rich>=13.9.4",
 ]
 
 [tool.uv.extra-build-dependencies]
@@ -137,7 +157,7 @@ flash-attn = [
 ]
 
 [tool.ruff]
-line-length = 5000 # TODO: Reduce this to a more reasonable value
+line-length = 200  # slightly conservative value, turn this on later.
 
 [tool.ruff.lint]
 isort = {known-first-party = ["rllm"], known-third-party = ["verl"]}
@@ -178,7 +198,7 @@ where   = ["."]
 include = ["rllm", "rllm.*"]
 
 [tool.setuptools.package-data]
-rllm = ["trainer/config/*.yaml"]
+rllm = ["trainer/config/*.yaml", "registry/*.json", "experimental/config/**/*.yaml"]
 
 [tool.mypy]
 plugins = ["pydantic.mypy"]

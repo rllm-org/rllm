@@ -2,17 +2,9 @@
 
 > **Repository**: [rllm-org/rllm-ui](https://github.com/rllm-org/rllm-ui)
 
-Web interface for monitoring and analyzing training runs in real time. Think of wandb dedicated to rLLM, with powerful features such as episode/trajectory search, observability AI agent and more. **Only supports training runs using Unified Trainer**.
+Web interface for monitoring and analyzing rLLM training runs in real time. Think of wandb dedicated to rLLM, with powerful features such as episode/trajectory search, observability AI agent and more.
 
----
-
-## Features
-
-- **Real-time Dashboard** — Live metrics charts with SSE streaming, multi-experiment overlay with custom colors
-- **Episode & Trajectory Inspection** — Browse/search episodes, inspect agent trajectories step-by-step (observations, actions, rewards), view it in trajectory groups
-- **Training Logs** — Live stdout/stderr capture with ANSI color support, search with match navigation
-- **Code & Config Visibility** — View extracted workflow/agent source code, Hydra config snapshots
-- **Observability AI Agent** — Query your training data using natural language
+![rLLM UI Training Overview](../assets/training-overview.png)
 
 ---
 
@@ -20,54 +12,26 @@ Web interface for monitoring and analyzing training runs in real time. Think of 
 
 There are two ways to access rLLM UI:
 
-1. **Cloud** — Use our hosted service at [ui.rllm-project.com](https://ui.rllm-project.com). No setup required.
+1. **Cloud** — Use our hosted service at [ui.rllm-project.com](https://ui.rllm-project.com) (see [below](#cloud-setup)).
 2. **Self-hosted** — Run locally from the repository (see [below](#self-hosted-setup)).
 
-Regardless of the service you use, add `ui` to your trainer's logger list in your rLLM training script:
+---
 
-```bash
-trainer.logger="['console','ui']"
-```
+### Cloud Setup
+
+1. Run `rllm login`
+2. Sign up at [ui.rllm-project.com](https://ui.rllm-project.com)
+3. Copy your API key (shown once at registration) and paste it in terminal (or save it as RLLM_API_KEY in `.env`)
+
+That's it. No need to setup the database and other configurations.
+
+!!! note
+
+    The observability AI agent can be enabled by adding your ANTHROPIC_API_KEY in the **Settings** page in the UI — no extra configuration needed.
 
 ---
 
-## How It Works
-
-rLLM connects to the UI via the `UILogger` backend, registered as `"ui"` in the `Tracking` class ([`rllm/utils/tracking.py`](https://github.com/rllm-org/rllm/blob/main/rllm/utils/tracking.py)).
-
-**On init**, the logger:
-
-1. Creates a training session via `POST /api/sessions`
-2. Starts a background heartbeat thread (for crash detection)
-3. Wraps `stdout`/`stderr` with `TeeStream` to capture training logs
-
-**During training**, the logger sends data over HTTP.
-
-So the overall flow looks like:
-![rLLM UI Architecture](../assets/rllm-ui-architecture.png)
-
----
-
-## Cloud Setup
-
-1. Sign up at [ui.rllm-project.com](https://ui.rllm-project.com)
-2. Copy your API key (shown once at registration)
-3. Set the key in your training environment (either through export or in `.env`)
-
-That's it. Run your training script with 'ui' included, and you will see your training runs real-time.
-
-| Variable | Required | Scope | Default | Description |
-|----------|----------|-------|---------|-------------|
-| `RLLM_API_KEY` | Yes | Training script env | — | API key for authenticating training data ingestion (shown once at registration) |
-| `RLLM_UI_URL` | No | Training script env | `https://ui.rllm-project.com` | Defaults to cloud URL when `RLLM_API_KEY` is set |
-
-!!! note "AI Agent"
-
-    The observability AI agent can be enabled from the **Settings** page in the UI by entering your ANTHROPIC_API_KEY there.
-
----
-
-## Self-hosted Setup
+### Self-hosted Setup
 
 ```bash
 git clone https://github.com/rllm-org/rllm-ui.git
@@ -91,7 +55,7 @@ Open `http://localhost:5173` (or the port shown in the Vite output).
     - **rLLM training side** — `export RLLM_UI_URL="http://localhost:<port>"`
     - **rllm-ui frontend** — set `VITE_API_URL=http://localhost:<port>` in `frontend/.env.development`
 
-### Database
+#### Database
 
 rLLM UI stores sessions, metrics, episodes, trajectories, and logs in a database so they persist across restarts and are searchable.
 
@@ -102,15 +66,15 @@ rLLM UI stores sessions, metrics, episodes, trajectories, and logs in a database
 DATABASE_URL="postgresql://user:pass@localhost:5432/rllm"
 ```
 
-### Observability AI Agent
+#### Observability AI Agent
 
-rLLM UI includes a built-in AI agent that can query your training data using natural language. Currently experimental — more support coming soon. To enable it, set your Anthropic API key in `api/.env`:
+To enable the agent, set your Anthropic API key in `api/.env`:
 
 ```bash
 ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-### Configuration
+#### Configuration
 
 | Variable | Required | Scope | Default | Description |
 |----------|----------|-------|---------|-------------|
@@ -118,5 +82,46 @@ ANTHROPIC_API_KEY="sk-ant-..."
 | `DATABASE_URL` | No | `api/.env` | SQLite | PostgreSQL connection string. Defaults to SQLite if unset. |
 | `ANTHROPIC_API_KEY` | No | `api/.env` | — | Enables the built-in AI agent |
 | `VITE_API_URL` | No | `frontend/.env.development` | `http://localhost:3000` | Only needed if the API runs on a non-default port |
+
+---
+
+## Connecting rLLM to UI
+
+### Training runs with script
+
+Regardless of the service (cloud or self-hosted) you use, add `ui` to your trainer's logger list in your rLLM training script:
+
+```bash
+trainer.logger="['console','wandb','ui']"
+```
+
+### Training / Evaluation runs with rLLM CLI
+
+If using our cloud service and rLLM CLI, you can run training and eval runs as such:
+
+```bash
+rllm train [dataset name]
+rllm eval [dataset name]
+```
+
+If logged in, traces will automatically stream to the UI.
+
+---
+
+## How It Works
+
+rLLM connects to the UI via the `UILogger` backend, registered as `"ui"` in the `Tracking` class ([`rllm/utils/tracking.py`](https://github.com/rllm-org/rllm/blob/main/rllm/utils/tracking.py)).
+
+**On init**, the logger:
+
+1. Creates a training session via `POST /api/sessions`
+2. Starts a background heartbeat thread (for crash detection)
+3. Wraps `stdout`/`stderr` with `TeeStream` to capture training logs
+
+**During training**, the logger sends data over HTTP.
+
+So the overall flow looks like:
+
+![rLLM UI Architecture](../assets/rllm-ui-architecture.png)
 
 ---

@@ -1,4 +1,3 @@
-from rllm.parser.chat_template_parser import ChatTemplateParser, DeepseekQwenChatTemplateParser, LlamaChatTemplateParser, QwenChatTemplateParser
 from rllm.parser.tool_parser import QwenToolParser, R1ToolParser, ToolParser
 
 __all__ = [
@@ -10,6 +9,22 @@ __all__ = [
     "R1ToolParser",
     "QwenToolParser",
 ]
+
+
+def __getattr__(name):
+    _chat_template_classes = {
+        "ChatTemplateParser",
+        "DeepseekQwenChatTemplateParser",
+        "LlamaChatTemplateParser",
+        "QwenChatTemplateParser",
+    }
+    if name in _chat_template_classes:
+        import importlib
+
+        mod = importlib.import_module("rllm.parser.chat_template_parser")
+        return getattr(mod, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 PARSER_REGISTRY = {
     "r1": R1ToolParser,

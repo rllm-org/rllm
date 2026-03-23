@@ -2,6 +2,9 @@
 Global variables for the RLLM project.
 """
 
+import os
+import tempfile
+
 # Reward function constants
 THOUGHT_DELIMITER_START = "<think>"
 THOUGHT_DELIMITER_END = "</think>"
@@ -18,6 +21,6 @@ NAMESPACE = None
 REWRITE_REPORTS = False
 SPLIT = "test"
 INSTANCE_IMAGE_TAG = "latest"
-REPORT_DIR = "."
+REPORT_DIR = os.path.join(tempfile.gettempdir(), "rllm_swebench_reports")
 
 MODEL_NAME_OR_PATH = "rllm"

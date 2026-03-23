@@ -7,14 +7,18 @@ We further implements a `TITOCompleter` that ensures the "token-in-token-out" pr
 The name `completer` is inspired by `tinker_cookbook`.
 """
 
+from __future__ import annotations
+
 from collections.abc import Callable
 from dataclasses import field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rllm.agents.agent import Step
 from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
 from rllm.experimental.rollout.types import TokenInput, Tokenizer, TokenOutput
-from rllm.parser import ChatTemplateParser
+
+if TYPE_CHECKING:
+    from rllm.parser import ChatTemplateParser
 
 
 class Completer:

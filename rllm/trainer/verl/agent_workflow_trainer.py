@@ -226,6 +226,12 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                             episode_unique_idxs.append(i)
                     episode_unique_batch = new_batch.select_idxs(episode_unique_idxs)
 
+                    # Include termination reasons from episodes that were dropped before producing any steps.
+                    # These are reported via meta_info from AgentWorkflowEngine.transform_results_for_verl.
+                    dropped_episodes = final_gen_batch_output.meta_info.get("dropped_episodes", [])
+                    for ep in dropped_episodes:
+                        termination_counts.update([ep.get("termination_reason", "unknown")])
+
                     # log metrics returned by workflows
                     for metric_dict in episode_unique_batch.non_tensor_batch["metrics"]:
                         for key, value in metric_dict.items():
@@ -463,8 +469,10 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                 for key, value in workflow_metrics.items():
                     metrics[f"batch/{key}"] = np.mean(value)
 
+                # Denominator should be the number of attempted tasks (including those dropped before 1st step),
+                # otherwise metrics are biased/inflated.
                 for r in TerminationReason:
-                    metrics[f"batch/{r.value}"] = termination_counts[r.value] / len(set(new_batch.non_tensor_batch["episode_ids"]))
+                    metrics[f"batch/{r.value}"] = termination_counts[r.value] / max(1, num_tasks)
 
                 metrics["batch/num_tasks"] = num_tasks
 
@@ -515,7 +523,24 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
             test_batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"])  # these are not needed for environment based interaction
             test_batch.meta_info = {"validate": True}
 
+            # Keep a mapping from task_id -> data_source so we can account for dropped episodes.
+            base_data_sources = test_batch.non_tensor_batch.get("data_source", None)
+            if base_data_sources is None:
+                base_data_sources = ["unknown"] * len(test_batch)
+            task_to_source = dict(zip(test_batch.non_tensor_batch["task_ids"].tolist(), base_data_sources, strict=False))
+
             test_output_gen_batch = self.generate_trajectories(batch=test_batch)
+
+            # Account for dropped episodes in validation metrics to avoid inflated pass@k.
+            dropped_episodes = test_output_gen_batch.meta_info.get("dropped_episodes", [])
+            for ep in dropped_episodes:
+                uid = ep.get("task_id")
+                if uid is None:
+                    continue
+                is_correct_lst.append(False)
+                uid_lst.append(uid)
+                data_source_lst.append(task_to_source.get(uid, "unknown"))
+
             repeat_counts = test_output_gen_batch.meta_info["repeat_counts"]
             # need to repeat to make shape match
             test_batch = test_batch.sample_level_repeat(repeat_counts)

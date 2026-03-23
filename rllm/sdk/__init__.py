@@ -1,7 +1,7 @@
 """RLLM SDK for automatic LLM trace collection and RL training."""
 
 from rllm.sdk.decorators import trajectory
-from rllm.sdk.protocol import StepView, Trace, TrajectoryView
+from rllm.sdk.protocol import Step, Trace, Trajectory
 from rllm.sdk.session import (
     ContextVarSession,
     SessionBuffer,
@@ -19,12 +19,13 @@ from rllm.sdk.tracers import (
 )
 
 __all__ = [
+    # Canonical types
+    "Step",
+    "Trajectory",
     # Protocol / Data Models
     "Trace",  # Low-level LLM call trace
-    "StepView",  # Trace wrapper with reward field (auto-generated from traces)
-    "TrajectoryView",  # Collection of steps forming a workflow
     # Decorators
-    "trajectory",  # Decorator to mark function as trajectory (returns TrajectoryView)
+    "trajectory",  # Decorator to mark function as trajectory (returns Trajectory)
     # Sessions
     "SessionContext",  # Default (alias for ContextVarSession)
     "ContextVarSession",  # Explicit contextvars-based session
@@ -42,4 +43,25 @@ __all__ = [
     "TracerProtocol",  # Tracer interface
     "InMemorySessionTracer",  # In-memory tracer for immediate access
     "SqliteTracer",  # SQLite-based persistent tracer
+    # Integrations (lazy-imported, requires optional deps)
+    "RLLMTrajectoryPlugin",  # Google ADK plugin (requires google-adk)
+    "RLLMTrajectoryHooks",  # OpenAI Agents SDK hooks (requires openai-agents)
+    "RLLMTrajectoryHookProvider",  # Strands Agents SDK hooks (requires strands-agents)
 ]
+
+
+def __getattr__(name: str):
+    """Lazy-import integrations that require optional dependencies."""
+    if name == "RLLMTrajectoryPlugin":
+        from rllm.sdk.integrations.adk import RLLMTrajectoryPlugin
+
+        return RLLMTrajectoryPlugin
+    if name == "RLLMTrajectoryHooks":
+        from rllm.sdk.integrations.openai_agents import RLLMTrajectoryHooks
+
+        return RLLMTrajectoryHooks
+    if name == "RLLMTrajectoryHookProvider":
+        from rllm.sdk.integrations.strands import RLLMTrajectoryHookProvider
+
+        return RLLMTrajectoryHookProvider
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

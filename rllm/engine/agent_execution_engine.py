@@ -5,7 +5,10 @@ import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
-import torch
+try:
+    import torch
+except ImportError as err:
+    raise ImportError("AgentExecutionEngine requires extra dependencies. Install with: pip install rllm[train]") from err
 
 from rllm.agents.agent import Action, BaseAgent, Trajectory
 from rllm.agents.utils import (
@@ -103,6 +106,7 @@ class AgentExecutionEngine:
                 **rollout_engine_args,
                 api_retries=api_retries,
                 tokenizer=self.tokenizer,
+                chat_parser=self.chat_parser,
                 max_prompt_length=self.max_prompt_length,
                 max_response_length=self.max_response_length,
                 disable_thinking=self.disable_thinking,

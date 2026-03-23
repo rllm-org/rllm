@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "solver-judge-flow"
+version = "0.1.0"
+description = "Solver-Judge multi-agent flow plugin for rLLM (countdown task)"
+requires-python = ">=3.10"
+dependencies = ["rllm", "openai"]
+
+[tool.setuptools]
+py-modules = ["solver_judge_flow", "evaluator"]
+
+# Plugin discovery: rllm CLI finds these by name
+[project.entry-points."rllm.agents"]
+solver_judge = "solver_judge_flow:solver_judge_agent"
+
+[project.entry-points."rllm.evaluators"]
+solver_judge_countdown = "evaluator:SolverJudgeCountdownEvaluator"

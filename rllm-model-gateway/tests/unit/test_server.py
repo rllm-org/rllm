@@ -10,6 +10,8 @@ import httpx
 import pytest
 import pytest_asyncio
 from rllm_model_gateway import GatewayConfig, create_app
+from rllm_model_gateway.models import WorkerConfig, WorkerInfo, _split_worker_url
+from rllm_model_gateway.proxy import ReverseProxy
 
 from tests.helpers.mock_vllm import MockVLLMServer
 
@@ -119,10 +121,10 @@ class TestAdmin:
         data = resp.json()
         assert "worker_id" in data
 
-        # Verify it shows up in list
+        # Verify it shows up in list (URL is auto-split: base URL without /v1)
         workers = await client.get("/admin/workers")
         urls = [w["url"] for w in workers.json()]
-        assert "http://new-worker:8000/v1" in urls
+        assert "http://new-worker:8000" in urls
 
     @pytest.mark.asyncio
     async def test_add_worker_missing_url(self, client: httpx.AsyncClient):
@@ -133,7 +135,7 @@ class TestAdmin:
     async def test_remove_worker(self, client: httpx.AsyncClient):
         add_resp = await client.post(
             "/admin/workers",
-            json={"url": "http://temp:8000/v1"},
+            json={"url": "http://temp:8000"},
         )
         wid = add_resp.json()["worker_id"]
         resp = await client.delete(f"/admin/workers/{wid}")
@@ -502,3 +504,113 @@ class TestTraceCapture:
     async def test_get_trace_not_found(self, client: httpx.AsyncClient):
         resp = await client.get("/traces/nonexistent")
         assert resp.status_code == 404
+
+
+# ------------------------------------------------------------------
+# URL splitting and WorkerConfig auto-split
+# ------------------------------------------------------------------
+
+
+class TestUrlSplitting:
+    def test_worker_url_split_with_path(self):
+        result = _split_worker_url("http://localhost:4000/v1")
+        assert result == {"url": "http://localhost:4000", "api_path": "/v1"}
+
+    def test_worker_url_split_no_path(self):
+        result = _split_worker_url("http://localhost:4000")
+        assert result == {"url": "http://localhost:4000", "api_path": "/v1"}
+
+    def test_worker_url_split_custom_path(self):
+        result = _split_worker_url("http://localhost:4000/api/v2")
+        assert result == {"url": "http://localhost:4000", "api_path": "/api/v2"}
+
+    def test_worker_url_split_trailing_slash(self):
+        result = _split_worker_url("http://localhost:4000/v1/")
+        assert result == {"url": "http://localhost:4000", "api_path": "/v1"}
+
+
+class TestWorkerConfigAutoSplit:
+    def test_worker_config_auto_splits_url(self):
+        wc = WorkerConfig(url="http://localhost:4000/v1")
+        assert wc.url == "http://localhost:4000"
+        assert wc.api_path == "/v1"
+
+    def test_worker_config_explicit_api_path(self):
+        wc = WorkerConfig(url="http://localhost:4000", api_path="/v2")
+        assert wc.url == "http://localhost:4000"
+        assert wc.api_path == "/v2"
+
+    def test_worker_config_no_path_defaults(self):
+        wc = WorkerConfig(url="http://localhost:4000")
+        assert wc.url == "http://localhost:4000"
+        assert wc.api_path == "/v1"
+
+    def test_worker_config_dict_input(self):
+        """Backward compat: dict with url containing path auto-splits."""
+        wc = WorkerConfig(**{"url": "http://localhost:4000/v1", "worker_id": "w0"})
+        assert wc.url == "http://localhost:4000"
+        assert wc.api_path == "/v1"
+
+
+class TestBuildUrl:
+    """Test ReverseProxy._build_url with various api_path values."""
+
+    def test_default_v1_api_path(self):
+        url = ReverseProxy._build_url("http://host:4000/v1", "/v1/chat/completions", "")
+        assert url == "http://host:4000/v1/chat/completions"
+
+    def test_custom_api_path(self):
+        """Custom api_path like /api/v2 should work correctly."""
+        # Worker has api_path="/api/v2", so api_url is "http://host:4000/api/v2"
+        # Gateway request path is always /v1/... which gets stripped to /chat/completions
+        url = ReverseProxy._build_url("http://host:4000/api/v2", "/v1/chat/completions", "")
+        assert url == "http://host:4000/api/v2/chat/completions"
+
+    def test_with_query_string(self):
+        url = ReverseProxy._build_url("http://host:4000/v1", "/v1/models", "limit=10")
+        assert url == "http://host:4000/v1/models?limit=10"
+
+    def test_bare_v1_path(self):
+        url = ReverseProxy._build_url("http://host:4000/v1", "/v1", "")
+        assert url == "http://host:4000/v1"
+
+    def test_no_api_path_on_worker(self):
+        url = ReverseProxy._build_url("http://host:4000", "/v1/chat/completions", "")
+        assert url == "http://host:4000/chat/completions"
+
+
+class TestWorkerInfoAutoSplit:
+    """Test WorkerInfo._auto_split_url model validator."""
+
+    def test_auto_splits_url_with_path(self):
+        w = WorkerInfo(worker_id="w0", url="http://host:4000/v1")
+        assert w.url == "http://host:4000"
+        assert w.api_path == "/v1"
+
+    def test_explicit_api_path_not_overridden(self):
+        w = WorkerInfo(worker_id="w0", url="http://host:4000", api_path="/api/v2")
+        assert w.url == "http://host:4000"
+        assert w.api_path == "/api/v2"
+
+    def test_no_path_defaults_to_v1(self):
+        w = WorkerInfo(worker_id="w0", url="http://host:4000")
+        assert w.api_path == "/v1"
+
+
+class TestAdminWorkerAutoSplit:
+    @pytest.mark.asyncio
+    async def test_add_worker_auto_splits_url(self, client: httpx.AsyncClient):
+        """Admin add_worker should auto-split URL with path into url + api_path."""
+        resp = await client.post(
+            "/admin/workers",
+            json={"url": "http://new-worker:8000/v1"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["url"] == "http://new-worker:8000"
+        assert data["api_path"] == "/v1"
+
+        # Verify it shows up correctly in list
+        workers = await client.get("/admin/workers")
+        w = next(w for w in workers.json() if w["url"] == "http://new-worker:8000")
+        assert w["api_path"] == "/v1"

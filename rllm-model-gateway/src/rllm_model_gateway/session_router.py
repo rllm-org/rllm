@@ -154,6 +154,7 @@ class SessionRouter:
                 WorkerInfo(
                     worker_id=w.worker_id,
                     url=w.url,
+                    api_path=w.api_path,
                     model_name=w.model_name,
                     weight=w.weight,
                     healthy=w.url not in self.dead_workers,
@@ -234,7 +235,7 @@ class SessionRouter:
     async def _check(self, url: str) -> tuple[str, bool]:
         assert self._http is not None
         try:
-            resp = await self._http.get(f"{url}/health")
+            resp = await self._http.get(f"{url.rstrip('/')}/health")
             return url, resp.status_code == 200
         except Exception:
             return url, False
