@@ -43,6 +43,7 @@ ADV_TO_LOSS_FN_AUTO_MAP = {
 }
 
 DEFAULT_LOSS_FN = "importance_sampling"
+TINKER_KNOWN_LOSSES = {"importance_sampling", "ppo", "cispo", "dro", "cross_entropy"}
 
 
 # helper decorator for any function requiring a training client to be initialized
@@ -194,7 +195,10 @@ class TinkerPolicyTrainer:
         if isinstance(training_datums, dict):
             for group_role, datums in training_datums.items():
                 estimator = estimator_map.get(group_role, self.algorithm_config.estimator)
-                loss_fn = algorithm_config.loss_fn or ADV_TO_LOSS_FN_AUTO_MAP.get(estimator, DEFAULT_LOSS_FN)
+                loss_fn = algorithm_config.loss_fn_map.get(group_role) or algorithm_config.loss_fn or ADV_TO_LOSS_FN_AUTO_MAP.get(estimator, DEFAULT_LOSS_FN)
+                if loss_fn not in TINKER_KNOWN_LOSSES:
+                    logger.warning(f"Unknown Tinker loss '{loss_fn}' for role '{group_role}', falling back to '{DEFAULT_LOSS_FN}'")
+                    loss_fn = DEFAULT_LOSS_FN
                 fwd_bwd_future = await self.training_client.forward_backward_async(
                     [self._remove_mask(datum) for datum in datums],
                     loss_fn=loss_fn,  # type: ignore[attr-defined]

@@ -161,7 +161,9 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
 
     traj_mask = _pad_sequence_batch(accumulated.traj_mask, 0, max_response_length, left_pad=False)  # shape: [bs, max_response_length]
 
-    step_rewards_batch, traj_rewards_batch = _build_step_and_trajectory_rewards(accumulated.step_rewards, accumulated.traj_rewards, responses_batch, accumulated.responses)  # shape: [bs, max_response_length]
+    step_rewards_batch, traj_rewards_batch = _build_step_and_trajectory_rewards(
+        accumulated.step_rewards, accumulated.traj_rewards, responses_batch, accumulated.responses
+    )  # shape: [bs, max_response_length]
 
     non_tensors = {
         "episode_ids": np.array(accumulated.episode_ids),  # unique identifier for each rollout
@@ -176,6 +178,8 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
         "is_last_step": np.array(accumulated.is_last_step),
         # The padding is done after the transform (in `_pad_dataproto_to_world_size`), so we simply set all to False here
         "is_pad_step": np.zeros(len(accumulated.trajectory_ids), dtype=bool),
+        # Per-row trajectory role name (for per-role loss routing)
+        "group_roles": np.array(accumulated.group_roles, dtype=object),
     }
 
     # Include multi_modal_inputs in non_tensors if any are present
@@ -255,6 +259,7 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
             traj_reward=traj_reward,
             step_num=n_steps,
             is_last=step_idx == n_steps - 1,
+            group_role=name,
         )
 
     return n_steps
