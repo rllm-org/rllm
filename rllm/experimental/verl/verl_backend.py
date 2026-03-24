@@ -202,8 +202,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         else:
             repeat_times = self.full_config.rllm.rollout.n
         batch = batch.repeat(repeat_times=repeat_times)
-        batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"])
-
         # Step 2: execute tasks using the agent workflow engine (async)
         episodes = await agent_workflow_engine.execute_tasks_verl(batch, is_validation=is_validation, **kwargs)
 
