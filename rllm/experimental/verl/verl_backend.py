@@ -109,8 +109,13 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         # Initialize BackendProtocol
         BackendProtocol.__init__(self, config, **kwargs)
 
+        # RayPPOTrainer no longer accepts them, so we need to store manualll
+        self.reward_fn = reward_fn
+        self.val_reward_fn = val_reward_fn
+
         # Store full config reference (RayPPOTrainer uses self.config)
         self.full_config = config
+        self.algorithm_config: AlgorithmConfig | None = None  # to be set in init_rollout_engine
 
         # Rollout engine - will be created in init_rollout_engine
         self.rollout_engine: VerlEngine | None = None
@@ -149,6 +154,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             tokenizer=self.tokenizer,
             processor=self.processor,
         )
+
+        # Step 3: store the algorithm config
+        self.algorithm_config = kwargs.get("algorithm_config")
+
         return self.rollout_engine
 
     def _instrument_vllm_for_sdk(self) -> None:
@@ -398,7 +407,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
 
         import numpy as np
 
-        loss_fn_map = getattr(self._algorithm_config, "loss_fn_map", {})
+        loss_fn_map = self.algorithm_config.loss_fn_map if self.algorithm_config is not None else {}
         group_roles = batch.non_tensor_batch.get("group_roles") if hasattr(batch, "non_tensor_batch") and batch.non_tensor_batch is not None else None
 
         # Fast path: no per-role loss overrides or no role annotations.

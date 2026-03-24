@@ -306,7 +306,7 @@ class UnifiedTrainer:
                 trainer_state.reset_batch()
 
                 await self.backend.on_batch_start(trainer_state)
-                with simple_timer("total_step", trainer_state.timing_dict):
+                with simple_timer("step", trainer_state.timing_dict):
                     await self._train_batch_async(batch, trainer_state)
                 await self.backend.on_batch_end(trainer_state)
 
@@ -347,9 +347,7 @@ class UnifiedTrainer:
         workflow_metrics, termination_counts = self._collect_workflow_metrics_from_episodes(trainer_state.episodes)
 
         # stage 2: transform episodes to trajectory groups (sync)
-        trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(
-            trainer_state.episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook
-        )
+        trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(trainer_state.episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook)
         trainer_state.trajectory_groups = trajectory_groups
         trainer_state.metrics.update(transform_metrics)
 
@@ -414,12 +412,8 @@ class UnifiedTrainer:
         for batch in val_dataloader:
             # Generate episodes and transform to trajectory groups
             val_episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, is_validation=True)
-            val_trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(
-                val_episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook
-            )
-            reward_metrics = collect_reward_and_advantage_from_trajectory_groups(
-                val_trajectory_groups, self.algorithm_config, collect_advantage=False
-            )
+            val_trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(val_episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook)
+            reward_metrics = collect_reward_and_advantage_from_trajectory_groups(val_trajectory_groups, self.algorithm_config, collect_advantage=False)
 
             is_correct_lst.extend([episode.is_correct for episode in val_episodes])
             uid_lst.extend([episode.task_id for episode in val_episodes])
