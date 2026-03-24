@@ -203,18 +203,22 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             repeat_times = self.full_config.rllm.rollout.n
         batch = batch.repeat(repeat_times=repeat_times)
         # Step 2: execute tasks using the agent workflow engine (async)
-        episodes = await agent_workflow_engine.execute_tasks_verl(batch, is_validation=is_validation, **kwargs)
-
+        episodes = await self._execute_tasks_async(batch, agent_workflow_engine, **kwargs)
+        # Step 3: sleep the replicas to free kv_cache before weight sync (if free_cache_engine is enabled)
+        await self.checkpoint_manager.sleep_replicas()
         return episodes
 
     async def _execute_tasks_async(self, batch: DataProto, agent_workflow_engine: UnifiedWorkflowEngine, **kwargs) -> list[Episode]:
         """A Verl-specific helper function to execute tasks asynchronously."""
         assert self.rollout_engine is not None, "rollout_engine is not initialized."
-        await self.rollout_engine.wake_up()
         tasks = batch.non_tensor_batch["extra_info"].tolist()
         task_ids = batch.non_tensor_batch["task_ids"].tolist()
         episodes = await agent_workflow_engine.execute_tasks(tasks, task_ids, **kwargs)
-        await self.rollout_engine.sleep()
+        # handle data sources in the input dataproto
+        if "data_source" in batch.non_tensor_batch:
+            data_sources = batch.non_tensor_batch["data_source"].tolist()
+            for episode, data_source in zip(episodes, data_sources, strict=True):
+                episode.info["data_source"] = data_source
         return episodes
 
     def transform_to_backend_batch(self, trainer_state: TrainerState, **kwargs) -> DataProto:
@@ -448,8 +452,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         """Called at the start of training."""
         self.global_steps = trainer_state.global_step
         self._load_checkpoint()
+        await self.checkpoint_manager.update_weights(self.global_steps)
         # we need to set trainer's global_steps to sync with the loaded checkpoint
         trainer_state.global_step = self.global_steps
+        trainer_state.epoch = self.global_steps // len(self.train_dataloader)
 
     async def on_batch_start(self, trainer_state: TrainerState) -> None:
         """Called at the start of each batch."""
@@ -472,6 +478,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         if self.config.trainer.save_freq > 0 and trainer_state.global_step % self.config.trainer.save_freq == 0:
             with simple_timer("save_checkpoint", trainer_state.timing_dict):
                 self._save_checkpoint()
+
+        # Weight synchronization
+        with simple_timer("update_weights", trainer_state.timing_dict):
+            await self.checkpoint_manager.update_weights(trainer_state.global_step)
 
         # Update metrics
         batch: DataProto = trainer_state.backend_batch  # type: ignore[attr-defined]

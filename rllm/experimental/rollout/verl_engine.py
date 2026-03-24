@@ -1,4 +1,3 @@
-import asyncio
 import uuid
 from typing import cast
 
@@ -132,11 +131,3 @@ class VerlEngine(RolloutEngine):
             completion_length=len(completion_ids),
             finish_reason=finish_reason,
         )
-
-    async def wake_up(self):
-        """Wake up all rollout replica instances asynchronously."""
-        await asyncio.gather(*[replica.wake_up() for replica in self.rollout_manager.rollout_replicas])
-
-    async def sleep(self):
-        """Sleep all rollout replica instances asynchronously."""
-        await asyncio.gather(*[replica.sleep() for replica in self.rollout_manager.rollout_replicas])

@@ -43,7 +43,7 @@ class VerlEngine(RolloutEngine):
         print(f"train_sampling_params: {self.train_sampling_params}")
         print(f"val_sampling_params: {self.val_sampling_params}")
 
-        self.validate = False  # flag enabled/disabled by AgentWorkflowEngine.execute_tasks_verl
+        self.validate = False
 
     async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         application_id = kwargs.pop("application_id", str(uuid.uuid4()))
