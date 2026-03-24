@@ -661,7 +661,9 @@ class AgentSdkTrainer(RayPPOTrainer):
             traj_ep_to_scalar_adv[(traj_id, eps_id)] = scalar
 
         # Create new tensor for non_last_step_batch with per-token assignment
-        scalar_rows = torch.stack([torch.full_like(tgt_mask[i], fill_value=traj_ep_to_scalar_adv[(traj_id, eps_id)], dtype=torch.float32) for i, (traj_id, eps_id) in enumerate(zip(tgt_traj_ids, tgt_eps_ids, strict=False))])  # shape: (N2, T)
+        scalar_rows = torch.stack(
+            [torch.full_like(tgt_mask[i], fill_value=traj_ep_to_scalar_adv[(traj_id, eps_id)], dtype=torch.float32) for i, (traj_id, eps_id) in enumerate(zip(tgt_traj_ids, tgt_eps_ids, strict=False))]
+        )  # shape: (N2, T)
 
         # Apply the response mask of the target batch
         final_advantage = scalar_rows * tgt_mask
