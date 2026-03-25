@@ -45,7 +45,16 @@ class AgentPPOTrainer(RayPPOTrainer):
         env_args=None,
         agent_args=None,
     ):
-        super().__init__(config=config, tokenizer=tokenizer, role_worker_mapping=role_worker_mapping, resource_pool_manager=resource_pool_manager, ray_worker_group_cls=ray_worker_group_cls, reward_fn=reward_fn, val_reward_fn=val_reward_fn)
+        super().__init__(
+            config=config,
+            tokenizer=tokenizer,
+            role_worker_mapping=role_worker_mapping,
+            resource_pool_manager=resource_pool_manager,
+            ray_worker_group_cls=ray_worker_group_cls,
+        )
+
+        self.reward_fn = reward_fn
+        self.val_reward_fn = val_reward_fn
         self.env_class = env_class
         self.agent_class = agent_class
         self.env_args = env_args or {}
@@ -611,7 +620,9 @@ class AgentPPOTrainer(RayPPOTrainer):
             prompt_tokens = traj["prompt_tokens"]
             response_tokens = traj["response_tokens"]
             # test if trajectory is empty
-            assert prompt_tokens.numel() != 0 and response_tokens.numel() != 0, f"Both prompt {prompt_tokens.numel()} and response {response_tokens.numel()} of trajectory shouldn't be empty. Please check make sure environment is working and the config"
+            assert prompt_tokens.numel() != 0 and response_tokens.numel() != 0, (
+                f"Both prompt {prompt_tokens.numel()} and response {response_tokens.numel()} of trajectory shouldn't be empty.Please check make sure environment is working and the config is correct."
+            )
             all_initial_tokens_list.append(prompt_tokens)
             all_response_tokens_list.append(response_tokens)
             all_masks_list.append(traj["response_masks"])

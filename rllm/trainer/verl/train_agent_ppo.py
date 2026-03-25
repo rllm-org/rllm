@@ -37,13 +37,15 @@ def run_ppo_agent(config):
         ray_init_settings = get_ray_init_settings(config)
         ray.init(runtime_env=get_ppo_ray_runtime_env(), **ray_init_settings)
 
+    runner_cls = ray.remote(num_cpus=1)(TaskRunner)
+
     # Create a remote instance of the TaskRunner class, and
     # Execute the `run` method of the TaskRunner instance remotely and wait for it to complete
     if is_cuda_available and config.trainer.get("profile_steps") is not None and len(config.trainer.get("profile_steps", [])) > 0:
         nsight_options = OmegaConf.to_container(config.trainer.controller_nsight_options)
-        runner = TaskRunner.options(runtime_env={"nsight": nsight_options}).remote()
+        runner = runner_cls.options(runtime_env={"nsight": nsight_options}).remote()
     else:
-        runner = TaskRunner.remote()
+        runner = runner_cls.remote()
     ray.get(runner.run.remote(config))
 
     # [Optional] get the path of the timeline trace file from the configuration, default to None
@@ -209,7 +211,7 @@ class TaskRunner:
 
         validate_config(
             config=config,
-            use_reference_policy=need_reference_policy(self.role_worker_mapping),
+            use_reference_policy=need_reference_policy(config),
             use_critic=need_critic(config),
         )
 
