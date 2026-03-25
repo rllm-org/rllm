@@ -149,6 +149,7 @@ class AgentPPOTrainer(RayPPOTrainer):
 
         # load checkpoint before doing anything
         self._load_checkpoint()
+        self.checkpoint_manager.update_weights(self.global_steps)
 
         # perform validation before training
         import time
@@ -176,8 +177,6 @@ class AgentPPOTrainer(RayPPOTrainer):
 
                 metrics = {}
                 timing_raw = {}
-
-                batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"])
 
                 with marked_timer("step", timing_raw):
                     self.init_envs_and_agents(batch)
@@ -432,18 +431,23 @@ class AgentPPOTrainer(RayPPOTrainer):
                         # update actor
                         with marked_timer("update_actor", timing_raw):
                             actor_output = self.actor_rollout_wg.update_actor(batch)
+
+                        if self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq == 0:
+                            with marked_timer("save_checkpoint", timing_raw):
+                                self._save_checkpoint()
+
+                        # update weights from trainer to rollout
+                        with marked_timer("update_weights", timing_raw):
+                            self.checkpoint_manager.update_weights(self.global_steps)
+
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 
-                    # validate
-                    if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and self.global_steps % self.config.trainer.test_freq == 0:
-                        with marked_timer("testing", timing_raw):
-                            val_metrics: dict = self._validate_agent()
-                        metrics.update(val_metrics)
-
-                    if self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq == 0:
-                        with marked_timer("save_checkpoint", timing_raw):
-                            self._save_checkpoint()
+                # validate
+                if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and self.global_steps % self.config.trainer.test_freq == 0:
+                    with marked_timer("testing", timing_raw):
+                        val_metrics: dict = self._validate_agent()
+                    metrics.update(val_metrics)
 
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
@@ -471,7 +475,6 @@ class AgentPPOTrainer(RayPPOTrainer):
             test_batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(test_batch.batch))], dtype=object)
             n_val_samples = self.config.actor_rollout_ref.rollout.val_kwargs.n
             test_batch = test_batch.repeat(repeat_times=n_val_samples, interleave=True)
-            test_batch.pop(["input_ids", "attention_mask", "position_ids"])  # these are not needed for environment based interaction
             test_batch.meta_info = {
                 "eos_token_id": self.tokenizer.eos_token_id,
                 "pad_token_id": self.tokenizer.pad_token_id,

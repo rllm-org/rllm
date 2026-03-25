@@ -151,6 +151,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
 
         # load checkpoint before doing anything
         self._load_checkpoint()
+        self.checkpoint_manager.update_weights(self.global_steps)
 
         # perform validation before training
         import time
@@ -190,14 +191,13 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                 new_batch.non_tensor_batch["task_ids"] = np.array([str(uuid.uuid4()) for _ in range(len(new_batch.batch))], dtype=object)
                 new_batch = new_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n)
 
-                new_batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"])
-
                 # Update training step in engine for episode logging
                 self.agent_execution_engine.set_training_step(self.global_steps, mode="train", epoch=epoch)
 
                 with marked_timer("step", timing_raw):
                     # generate trajectories
                     final_gen_batch_output = self.generate_trajectories(batch=new_batch, timing_raw=timing_raw)
+                    self.checkpoint_manager.sleep_replicas()
 
                     # need to repeat to make shape match
                     repeat_counts = final_gen_batch_output.meta_info["repeat_counts"]
@@ -430,19 +430,18 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
                             actor_output = self.actor_rollout_wg.update_actor(batch)
+
+                        # save checkpoint
+                        if self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq == 0:
+                            with marked_timer("save_checkpoint", timing_raw, color="green"):
+                                self._save_checkpoint()
+
+                        # update weights from trainer to rollout
+                        with marked_timer("update_weights", timing_raw, color="red"):
+                            self.checkpoint_manager.update_weights(self.global_steps)
+
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
-
-                    # validate
-                    if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and self.global_steps % self.config.trainer.test_freq == 0:
-                        with marked_timer("testing", timing_raw, color="green"):
-                            self.agent_execution_engine.set_training_step(self.global_steps, mode="val", epoch=epoch)
-                            val_metrics: dict = self._validate_agent()
-                        metrics.update(val_metrics)
-
-                    if self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq == 0:
-                        with marked_timer("save_checkpoint", timing_raw, color="green"):
-                            self._save_checkpoint()
 
                     # Visualize some sample trajectories
                     if batch is not None and len(batch) > 0:
@@ -453,6 +452,13 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                             sample_indices = np.random.choice(batch_size, size=num_samples, replace=False)
                             for idx in sample_indices:
                                 self.visualize_trajectory_last_step(batch, sample_idx=idx, max_samples=1)
+
+                # validate
+                if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and self.global_steps % self.config.trainer.test_freq == 0:
+                    with marked_timer("testing", timing_raw, color="green"):
+                        self.agent_execution_engine.set_training_step(self.global_steps, mode="val", epoch=epoch)
+                        val_metrics: dict = self._validate_agent()
+                    metrics.update(val_metrics)
 
                 with marked_timer("stop_profile", timing_raw):
                     self._stop_profiling(do_profile)
@@ -529,7 +535,6 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
             n_val_samples = self.config.actor_rollout_ref.rollout.val_kwargs.n
             test_batch = test_batch.repeat(repeat_times=n_val_samples, interleave=True)
 
-            test_batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"])  # these are not needed for environment based interaction
             test_batch.meta_info = {"validate": True}
 
             # Keep a mapping from task_id -> data_source so we can account for dropped episodes.

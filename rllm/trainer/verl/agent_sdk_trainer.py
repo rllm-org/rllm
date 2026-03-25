@@ -210,8 +210,6 @@ class AgentSdkTrainer(RayPPOTrainer):
                 new_batch.non_tensor_batch["task_ids"] = np.array([str(uuid.uuid4()) for _ in range(len(new_batch.batch))], dtype=object)
                 new_batch = new_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n)
 
-                new_batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"])
-
                 with marked_timer("step", timing_raw):
                     # generate trajectories
                     final_gen_batch_output = self.generate_trajectories(batch=new_batch, timing_raw=timing_raw)
@@ -551,7 +549,6 @@ class AgentSdkTrainer(RayPPOTrainer):
             n_val_samples = self.config.actor_rollout_ref.rollout.val_kwargs.n
             test_batch = test_batch.repeat(repeat_times=n_val_samples, interleave=True)
 
-            test_batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"])  # these are not needed for environment based interaction
             test_batch.meta_info = {"validate": True}
 
             test_output_gen_batch = self.generate_trajectories(batch=test_batch)
