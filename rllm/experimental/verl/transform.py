@@ -378,14 +378,23 @@ def update_dataproto_with_advantages(batch: DataProto, container: list[Episode] 
     Updates a DataProto with advantages. Useful when we use rLLM-native advantage computation,
     after which we need to update the DataProto with the advantages.
     """
-    # flatten the steps in the container exactly like how we build it up
-    advantages = []
+    # Build a step_id → advantage mapping from episodes/trajectory groups.
+    # step_id format must match _process_trajectory: f"{task_id}_{trajectory.name}_step{step_idx}"
+    adv_by_step_id: dict[str, float] = {}
     for item in container:
         for trajectory in item.trajectories:
-            for step in trajectory.steps:
-                advantages.append(step.advantage)
+            trajectory_id = f"{item.task_id}_{trajectory.name}"
+            for step_idx, step in enumerate(trajectory.steps):
+                step_id = f"{trajectory_id}_step{step_idx}"
+                adv_by_step_id[step_id] = step.advantage if step.advantage is not None else 0.0
 
-    assert len(advantages) == len(batch.non_tensor_batch["trajectory_ids"]), "Advantages must have the same length as the number of total steps"
+    # Match advantages to batch entries by step_id (robust to batch reordering and padding)
+    n_total = len(batch.non_tensor_batch["trajectory_ids"])
+    step_ids = batch.non_tensor_batch["step_ids"]
+    is_pad = batch.non_tensor_batch.get("is_pad_step", np.zeros(n_total, dtype=bool))
+
+    advantages = [0.0 if is_pad[i] else adv_by_step_id.get(str(step_ids[i]), 0.0) for i in range(n_total)]
+
     advantage_tensor = _build_per_step_advantages(batch.batch["response_mask"], advantages)
     batch.batch["advantages"] = advantage_tensor
     batch.batch["returns"] = advantage_tensor
