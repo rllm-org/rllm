@@ -1,9 +1,17 @@
+"""Deprecated legacy SDK engine.
+
+This module is deprecated and will be removed in a future release.
+Use `rllm.experimental.engine.sdk_workflow.SdkWorkflow` with
+`rllm.experimental.engine.unified_workflow_engine.UnifiedWorkflowEngine` instead.
+"""
+
 import asyncio
 import functools
 import inspect
 import logging
 import time
 import uuid
+import warnings
 from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -61,6 +69,11 @@ class AgentSdkEngine:
             tracer: Optional tracer for logging.
             **kwargs: Additional arguments.
         """
+        warnings.warn(
+            "rllm.engine.agent_sdk_engine.AgentSdkEngine is deprecated and will be removed in a future release. Use rllm.experimental.engine.sdk_workflow.SdkWorkflow with rllm.experimental.engine.unified_workflow_engine.UnifiedWorkflowEngine instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.rollout_engine = rollout_engine
         self.agent_run_func = agent_run_func
         self.config = config  # if training

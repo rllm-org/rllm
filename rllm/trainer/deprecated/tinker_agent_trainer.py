@@ -474,10 +474,13 @@ class TinkerAgentTrainer:
         for traj in group:
             steps = []
             for step in traj["steps"]:
+                response_ids = step.get("response_ids", step.get("completion_ids"))
+                if response_ids is None:
+                    raise KeyError("Neither 'response_ids' nor 'completion_ids' found in step data")
                 steps.append(
                     Step(
                         prompt_ids=step["prompt_ids"],
-                        response_ids=step["response_ids"],
+                        response_ids=response_ids,
                         logprobs=step["logprobs"],
                     )
                 )
