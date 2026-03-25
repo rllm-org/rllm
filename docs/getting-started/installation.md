@@ -69,7 +69,7 @@ uv pip install -e .
 
 rLLM provides additional optional dependencies for specific agent domains and framework integrations. For example:
 - `web`: Tools for web agents (BrowserGym, Selenium).
-- `code-tools`: Sandboxed code execution (E2B, Together).
+- `code-tools`: Sandboxed code execution (E2B, Together, Daytona).
 - `smolagents`: Integration with Hugging Face's smolagents.
 
 See the full list of managed extras [here](pyproject.toml).
@@ -100,4 +100,4 @@ docker start rllm-container
 docker exec -it rllm-container bash
 ```
 
-For more help, refer to the [GitHub issues page](https://github.com/rllm-org/rllm/issues). 
+For more help, refer to the [GitHub issues page](https://github.com/rllm-org/rllm/issues).

@@ -142,6 +142,7 @@ web = [
 ]
 
 code-tools = [
+    "daytona-sdk",
     "e2b_code_interpreter",
     "together>=1.4",
 ]
