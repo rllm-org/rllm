@@ -141,10 +141,17 @@ web = [
     "gymnasium",
 ]
 
+agentcore = [
+    "agentcore-rl-toolkit>=0.1.2",
+]
+
 code-tools = [
     "e2b_code_interpreter",
     "together>=1.4",
 ]
+
+[tool.uv.sources]
+rllm-model-gateway = { path = "./rllm-model-gateway", editable = true }
 
 [tool.uv]
 override-dependencies = [

@@ -148,19 +148,19 @@ def process_input_output(inputs, outputs):
     try:
         if isinstance(inputs[0], dict):
             inputs = [{int(k): v for k, v in inputs[0].items()}]
-    except:
+    except Exception:
         True
 
     try:
         if isinstance(outputs, dict):
             outputs = [{int(k): v for k, v in outputs.items()}]
-    except:
+    except Exception:
         True
 
     try:
         if isinstance(outputs[0], dict):
             outputs = [{int(k): v for k, v in outputs[0].items()}]
-    except:
+    except Exception:
         True
 
     return inputs, outputs
@@ -190,7 +190,7 @@ def compile_and_get_func(program, which_type, method_name, timeout, debug):
         signal.alarm(timeout)
         method = getattr(tmp, method_name)  # get_attr second arg must be str
         signal.alarm(0)
-    except:
+    except Exception:
         signal.alarm(0)
         e = sys.exc_info()
         if debug:
@@ -325,7 +325,7 @@ def execute_cb_code(method, inputs_list, outputs_list, timeout, early_stop=True,
                 if isinstance(exec_outputs[0], tuple):
                     exec_outputs = [list(x) for x in exec_outputs]
                     tmp_result = tmp_result or (exec_outputs == outputs[0])
-            except:
+            except Exception:
                 True
             if tmp_result:
                 results.append((True, EXECUTION_RESULTS[1]))
