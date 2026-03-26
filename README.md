@@ -46,6 +46,40 @@ uv pip install rllm[verl] @ git+https://github.com/rllm-org/rllm.git
 
 For building from source or Docker, see the [installation guide](https://docs.rllm-project.com/installation).
 
+### Qwen 3.5 on B200 GPUs (verl FSDP)
+
+Qwen 3.5 requires newer versions of verl, vllm, and transformers that have conflicting dependency pins. Install in two steps:
+
+```bash
+# Step 1: Install rllm + compatible deps
+pip install -e ".[verl]"
+
+# Step 2: Install verl (with Qwen 3.5 FSDP patches) + conflicting deps
+bash scripts/setup_qwen35.sh
+```
+
+For B200 GPUs, also install CUDA 13 torch and JIT compilation tools:
+
+```bash
+# CUDA 13 torch (B200 needs sm_100 kernels)
+uv pip install "torch==2.10.0+cu130" "torchvision==0.25.0+cu130" "torchaudio==2.10.0+cu130" \
+    --index-url https://download.pytorch.org/whl/cu130 --no-deps
+
+# CUDA 13 nvcc + headers for flashinfer JIT
+uv pip install "nvidia-cuda-nvcc>=13" "nvidia-cuda-cccl"
+```
+
+Set these env vars before training:
+
+```bash
+export CUDA_HOME=$VIRTUAL_ENV/lib/python3.12/site-packages/nvidia/cu13
+export PATH=$CUDA_HOME/bin:$PATH
+export HF_HUB_OFFLINE=1
+unset NCCL_SOCKET_IFNAME NCCL_SOCKET_FAMILY
+```
+
+Requires verl with Qwen 3.5 FSDP patches ([verl-project/verl#5682](https://github.com/verl-project/verl/pull/5682)).
+
 ## Quickstart
 
 ### Option A: CLI (no code needed)
