@@ -310,6 +310,21 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         # then we just pad the batch size to a multiple of world size
                         batch = self._pad_dataproto_to_world_size(batch=batch)
 
+                    # Balance the number of valid tokens across DP ranks BEFORE compute operations.
+                    # This must happen before compute_log_prob to prevent NCCL desync when workers
+                    # process micro-batches with uneven token distributions.
+                    if self.config.trainer.balance_batch:
+                        self._balance_batch(batch, metrics=metrics)
+
+                    batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+                    # get images_seqlens
+                    images_seqlens_all = []
+                    for multi_modal_input in batch.non_tensor_batch["multi_modal_inputs"]:
+                        if "image_grid_thw" not in multi_modal_input.keys():
+                            continue
+                        images_seqlens_all.extend(multi_modal_input["images_seqlens"].tolist())
+                    batch.meta_info["images_seqlens"] = images_seqlens_all
+
                     # recompute old_log_probs
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
@@ -406,17 +421,6 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
 
                     # re-pad batch size to world size for gradient update
                     batch = self._pad_dataproto_to_world_size(batch=batch)
-
-                    # Balance the number of valid tokens across DP ranks.
-                    # NOTE: This usually changes the order of data in the `batch`,
-                    # which won't affect the advantage calculation (since it's based on uid),
-                    # but might affect the loss calculation (due to the change of mini-batching).
-                    # TODO: Decouple the DP balancing and mini-batching.
-                    if self.config.trainer.balance_batch:
-                        self._balance_batch(batch, metrics=metrics)
-
-                    # compute global_valid tokens
-                    batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
                     # update critic
                     if self.use_critic:

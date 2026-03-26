@@ -304,6 +304,13 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             self._balance_batch(batch, metrics=metrics)
 
         batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+        # get images_seqlens
+        images_seqlens_all = []
+        for multi_modal_input in batch.non_tensor_batch["multi_modal_inputs"]:
+            if "image_grid_thw" not in multi_modal_input.keys():
+                continue
+            images_seqlens_all.extend(multi_modal_input["images_seqlens"].tolist())
+        batch.meta_info["images_seqlens"] = images_seqlens_all
 
         with simple_timer("old_log_probs", timing_dict):
             # Compute old_log_probs from actor
@@ -386,6 +393,12 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         """
         global_steps = trainer_state.global_step
         batch = trainer_state.backend_batch
+
+        # Re-pad batch to world size before gradient updates.
+        # Filtering (e.g. mask_truncated_samples) in process_backend_batch may have
+        # shrunk the batch to a size that is no longer divisible by dp_size.
+        batch = self._pad_dataproto_to_world_size(batch)
+        trainer_state.backend_batch = batch
 
         # Update critic
         if self.use_critic:
