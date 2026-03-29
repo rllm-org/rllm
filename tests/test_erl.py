@@ -214,12 +214,54 @@ class TestErlWorkflow:
         assert "erl_second" in names
         assert "erl_distill" in names
 
-    def test_no_reflection_skips_updater(self):
-        wf = _make_workflow(erl_config_overrides={"no_reflection": True}, solver_fn=_make_solver_fn(0.0))
+    def test_no_reflection_skips_updater_but_injects_context(self):
+        """no_reflection=True skips the updater LLM but still injects failure context."""
+        captured_prompts: list[str] = []
+
+        async def capturing_solver(prompt, task, engine):
+            captured_prompts.append(prompt)
+            step = Step(
+                chat_completions=[{"role": "system", "content": prompt}, {"role": "assistant", "content": "a"}],
+                reward=0.0,
+                done=True,
+            )
+            return Trajectory(steps=[step], reward=0.0)
+
+        wf = _make_workflow(erl_config_overrides={"no_reflection": True}, solver_fn=capturing_solver)
         ep = _run(wf.run({"q": "test"}, "uid:0"))
         names = [t.name for t in ep.trajectories]
         assert "erl_updater" not in names
         assert "erl_second" in names
+        # Second attempt prompt should contain the retry instruction, not be identical to first
+        assert len(captured_prompts) == 2
+        assert captured_prompts[1] != captured_prompts[0]
+        assert "past attempt data" in captured_prompts[1].lower()
+
+    def test_compute_gate_skips_reflection(self):
+        """When no flags need reflection/second attempt, skip them entirely."""
+        call_count = 0
+
+        async def counting_solver(prompt, task, engine):
+            nonlocal call_count
+            call_count += 1
+            step = Step(
+                chat_completions=[{"role": "system", "content": prompt}, {"role": "assistant", "content": "a"}],
+                reward=0.0,
+                done=True,
+            )
+            return Trajectory(steps=[step], reward=0.0)
+
+        wf = _make_workflow(
+            erl_config_overrides={"train_second_attempt": False, "train_distilled": False, "train_updater": False},
+            solver_fn=counting_solver,
+        )
+        ep = _run(wf.run({"q": "test"}, "uid:0"))
+        # Only the first attempt should run (solver called once)
+        assert call_count == 1
+        names = [t.name for t in ep.trajectories]
+        assert "erl_second" not in names
+        assert "erl_distill" not in names
+        assert "erl_updater" not in names
 
     def test_train_flags_respected(self):
         wf = _make_workflow(

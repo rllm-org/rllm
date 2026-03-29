@@ -53,7 +53,7 @@ class ErlPromptUpdater:
         new_prompt = extracted if extracted else current_prompt
 
         step = Step(
-            chat_completions=messages + [{"role": "assistant", "content": content}],
+            chat_completions=messages + [{"role": "assistant", "content": content, "reasoning": output.reasoning or ""}],
             thought=output.reasoning or "",
             action=new_prompt,
             model_output=output,

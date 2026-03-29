@@ -33,6 +33,16 @@ UPDATER_SYSTEM_PROMPT = (
 
 
 # ---------------------------------------------------------------------------
+# Generic retry instruction (used when no_reflection=True)
+# ---------------------------------------------------------------------------
+GENERIC_RETRY_INSTRUCTION = (
+    "You are provided with the model's past attempt data, including observations, "
+    "actions, rewards, and feedback. Use this information as context to make a "
+    "better next-attempt decision policy. Follow the action/output format exactly."
+)
+
+
+# ---------------------------------------------------------------------------
 # RAFT advantage estimator
 # ---------------------------------------------------------------------------
 @register_rllm_adv_estimator("raft")

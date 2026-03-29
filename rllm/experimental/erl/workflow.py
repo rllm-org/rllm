@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 from rllm.agents.agent import Episode, Trajectory
 from rllm.engine.rollout.rollout_engine import RolloutEngine
 from rllm.experimental.erl.updater import ErlPromptUpdater
-from rllm.experimental.erl.utils import UPDATER_SYSTEM_PROMPT, default_feedback
+from rllm.experimental.erl.utils import GENERIC_RETRY_INSTRUCTION, UPDATER_SYSTEM_PROMPT, default_feedback
 from rllm.workflows.workflow import Workflow
 
 if TYPE_CHECKING:
@@ -163,6 +163,21 @@ class ErlWorkflow(Workflow):
                 is_correct=True,
             )
 
+        # ---- Compute-gate: skip reflection if no flags need it -----
+        needs_second = self.train_second_attempt or self.train_distilled
+        needs_reflection = needs_second or self.train_updater
+        if not needs_reflection:
+            return self._build_episode(
+                uid,
+                task,
+                trajectories,
+                metrics={
+                    "avg_first_reward": first_reward,
+                    "first_success_rate": 0.0,
+                },
+                is_correct=False,
+            )
+
         # ---- Phase 2: Self-reflection ------------------------------
         base_prompt = self.initial_system_prompt
         if self.store and not self.no_memory:
@@ -175,7 +190,8 @@ class ErlWorkflow(Workflow):
 
         updater_traj: Trajectory | None = None
         if self.no_reflection:
-            improved_prompt = base_prompt
+            # Inject failure context without the updater LLM call.
+            improved_prompt = self._build_generic_retry_prompt(base_prompt, state)
         else:
             improved_prompt, updater_traj = await self.updater.propose_prompt(state, base_prompt)
 
@@ -231,6 +247,15 @@ class ErlWorkflow(Workflow):
                 step.chat_completions[0]["content"] = self.initial_system_prompt
         return distilled
 
+    @staticmethod
+    def _build_generic_retry_prompt(base_prompt: str, state: str) -> str:
+        """Build a second-attempt prompt with failure context but without the updater LLM.
+
+        Used when ``no_reflection=True`` to still give the solver contextual
+        information about its previous failure.
+        """
+        return f"{base_prompt.strip()}\n\n{GENERIC_RETRY_INSTRUCTION}\n\n{state.strip()}"
+
     def _build_episode(
         self,
         uid: str,
@@ -239,10 +264,10 @@ class ErlWorkflow(Workflow):
         metrics: dict[str, float],
         is_correct: bool,
     ) -> Episode:
-        for traj in trajectories:
-            self.adjust_step_rewards(traj)
-            self.compute_trajectory_reward(traj)
-
+        # Note: we intentionally do NOT call adjust_step_rewards or
+        # compute_trajectory_reward here.  The solver_fn sets
+        # trajectory.reward directly, and the UnifiedTrainer's transform
+        # pipeline handles reward propagation in broadcast mode.
         return Episode(
             id=uid,
             task=task,
