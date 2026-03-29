@@ -255,6 +255,8 @@ def main(config: DictConfig):
         train_distilled=True,
         train_updater=True,
         success_reward_threshold=1.0,
+        no_memory=False,
+        no_reflection=False,
     )
 
     store = InMemoryStore()
