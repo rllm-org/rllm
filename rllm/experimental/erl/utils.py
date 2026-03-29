@@ -24,22 +24,21 @@ DEFAULT_ERL_ADV_ESTIMATOR_MAP: dict[str, str] = {
 # ---------------------------------------------------------------------------
 # Default updater system prompt
 # ---------------------------------------------------------------------------
-UPDATER_SYSTEM_PROMPT = (
-    "You are an expert prompt updater. Analyze recent task attempts, "
-    "their outcomes, and environmental feedback to improve the solver's "
-    "system prompt. Return ONLY the revised prompt wrapped in "
-    "<prompt>...</prompt> tags."
-)
+UPDATER_SYSTEM_PROMPT = """
+You are an expert prompt updater. Analyze recent task attempts, their outcomes,
+and environmental feedback to improve the solver's system prompt. Return ONLY
+the revised prompt wrapped in <prompt>...</prompt> tags.
+""".strip()
 
 
 # ---------------------------------------------------------------------------
 # Generic retry instruction (used when no_reflection=True)
 # ---------------------------------------------------------------------------
-GENERIC_RETRY_INSTRUCTION = (
-    "You are provided with the model's past attempt data, including observations, "
-    "actions, rewards, and feedback. Use this information as context to make a "
-    "better next-attempt decision policy. Follow the action/output format exactly."
-)
+GENERIC_RETRY_INSTRUCTION = """
+You are provided with the model's past attempt data, including observations,
+actions, rewards, and feedback. Use this information as context to make a
+better next-attempt decision policy. Follow the action/output format exactly.
+""".strip()
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +65,6 @@ def calculate_raft_advantages(
 # ---------------------------------------------------------------------------
 # Prompt extraction
 # ---------------------------------------------------------------------------
-
 _PROMPT_PATTERN = re.compile(r"<prompt>(.*?)</prompt>", flags=re.IGNORECASE | re.DOTALL)
 
 
@@ -81,8 +79,6 @@ def extract_prompt_from_response(text: str) -> str | None:
 # ---------------------------------------------------------------------------
 # Default feedback builder
 # ---------------------------------------------------------------------------
-
-
 def default_feedback(task: dict[str, Any], trajectory: Trajectory) -> str:
     """Build a generic one-line feedback string from a trajectory."""
     reward = trajectory.reward if trajectory.reward is not None else 0.0
