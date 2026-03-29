@@ -1,13 +1,11 @@
-"""Convert gateway TraceRecord to training-compatible Step."""
-
-from __future__ import annotations
+"""Convert gateway TraceRecord to training-compatible Step, plus shared metrics."""
 
 import json
 from typing import Any
 
 from rllm_model_gateway.models import TraceRecord
 
-from rllm.agents.agent import Step
+from rllm.agents.agent import Step, Trajectory
 from rllm.experimental.rollout import ModelOutput
 from rllm.tools.tool_base import ToolCall
 
@@ -69,3 +67,18 @@ def trace_record_to_step(trace: TraceRecord) -> Step:
         thought=reasoning,
         metadata=trace.metadata,
     )
+
+
+def compute_step_metrics(trajectories: list[Trajectory]) -> dict:
+    """Standard training metrics from trajectories (shared by local and remote engines)."""
+    all_response_lens = [len(s.response_ids) for t in trajectories for s in t.steps]
+    all_prompt_lens = [len(s.prompt_ids) for t in trajectories for s in t.steps]
+    return {
+        "num_trajectories": len(trajectories),
+        "steps_used": sum(len(t.steps) for t in trajectories),
+        "mean_response_len": (sum(all_response_lens) / len(all_response_lens) if all_response_lens else 0),
+        "max_response_len": max(all_response_lens, default=0),
+        "min_response_len": min(all_response_lens, default=0),
+        "max_prompt_len": max(all_prompt_lens, default=0),
+        "min_prompt_len": min(all_prompt_lens, default=0),
+    }

@@ -137,7 +137,8 @@ class AgentTrainer:
             ray_init_settings = get_ray_init_settings(self.config)
             ray.init(runtime_env=get_ppo_ray_runtime_env(), **ray_init_settings)
 
-        runner = TaskRunner.remote()
+        runner_cls = ray.remote(num_cpus=1)(TaskRunner)
+        runner = runner_cls.remote()
 
         ray.get(
             runner.run.remote(

@@ -21,8 +21,11 @@ class SessionManager:
         # In-memory metadata cache (not persisted — metadata is lightweight)
         self._metadata: dict[str, dict[str, Any]] = {}
         self._created_at: dict[str, float] = {}
+        self._sampling_params: dict[str, dict[str, Any]] = {}
 
-    def ensure_session(self, session_id: str, metadata: dict[str, Any] | None = None) -> str:
+    def ensure_session(
+        self, session_id: str, metadata: dict[str, Any] | None = None
+    ) -> str:
         """Ensure a session exists (create if needed).  Returns session_id."""
         if session_id not in self._created_at:
             self._created_at[session_id] = time.time()
@@ -34,13 +37,20 @@ class SessionManager:
         self,
         session_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        sampling_params: dict[str, Any] | None = None,
     ) -> str:
         """Create a new session and return its ID."""
         sid = session_id or str(uuid.uuid4())
         self._created_at[sid] = time.time()
         if metadata:
             self._metadata[sid] = metadata
+        if sampling_params:
+            self._sampling_params[sid] = sampling_params
         return sid
+
+    def get_sampling_params(self, session_id: str) -> dict[str, Any] | None:
+        """Return sampling params for a session, or None if not set."""
+        return self._sampling_params.get(session_id)
 
     async def get_session_info(self, session_id: str) -> SessionInfo | None:
         """Return session info including trace count."""
@@ -78,4 +88,5 @@ class SessionManager:
         """Delete a session and its traces.  Returns count of traces deleted."""
         self._metadata.pop(session_id, None)
         self._created_at.pop(session_id, None)
+        self._sampling_params.pop(session_id, None)
         return await self.store.delete_session(session_id)

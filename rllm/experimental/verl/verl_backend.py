@@ -41,6 +41,23 @@ if TYPE_CHECKING:
     from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
     from rllm.experimental.unified_trainer import TrainerState
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_VERL_LOSS = "vanilla"
+_VERL_KNOWN_LOSSES: set[str] | None = None
+
+
+def _get_verl_known_losses() -> set[str]:
+    """Lazily load the set of registered Verl policy loss function names."""
+    global _VERL_KNOWN_LOSSES
+    if _VERL_KNOWN_LOSSES is None:
+        from verl.trainer.ppo.core_algos import POLICY_LOSS_REGISTRY
+
+        _VERL_KNOWN_LOSSES = set(POLICY_LOSS_REGISTRY.keys())
+    return _VERL_KNOWN_LOSSES
+
 
 class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
     """
@@ -87,15 +104,18 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             role_worker_mapping=role_worker_mapping,
             resource_pool_manager=resource_pool_manager,
             ray_worker_group_cls=ray_worker_group_cls,
-            reward_fn=reward_fn,
-            val_reward_fn=val_reward_fn,
         )
 
         # Initialize BackendProtocol
         BackendProtocol.__init__(self, config, **kwargs)
 
+        # RayPPOTrainer no longer accepts them, so we need to store manualll
+        self.reward_fn = reward_fn
+        self.val_reward_fn = val_reward_fn
+
         # Store full config reference (RayPPOTrainer uses self.config)
         self.full_config = config
+        self.algorithm_config: AlgorithmConfig | None = None  # to be set in init_rollout_engine
 
         # Rollout engine - will be created in init_rollout_engine
         self.rollout_engine: VerlEngine | None = None
@@ -112,6 +132,11 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         Returns:
             VerlEngine: The initialized rollout engine.
         """
+        # Apply Verl actor patch for per-role loss mode support
+        from rllm.experimental.verl.patch import patch_verl_actor_for_loss_override
+
+        patch_verl_actor_for_loss_override()
+
         # If SDK is enabled, instrument vLLM replicas before creating workers
         sdk_enabled = self.full_config.rllm.get("sdk", {}).get("enable", False)
         if sdk_enabled:
@@ -129,44 +154,17 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             tokenizer=self.tokenizer,
             processor=self.processor,
         )
+
+        # Step 3: store the algorithm config
+        self.algorithm_config = kwargs.get("algorithm_config")
+
         return self.rollout_engine
 
     def _instrument_vllm_for_sdk(self) -> None:
-        """Monkey-patch vLLM replicas to add logprob/token-id instrumentation for SDK trace collection.
+        """Monkey-patch vLLM replicas to add logprob/token-id instrumentation for SDK trace collection."""
+        from rllm.experimental.verl.patch import patch_vllm_for_sdk
 
-        This replicates the logic from AgentSdkTrainer.init_workers() to ensure
-        that when SDK mode is used through the unified trainer, vLLM servers
-        return the token IDs and logprobs needed by the trace pipeline.
-        """
-        import ray
-        from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
-
-        @ray.remote(num_cpus=1)
-        class InstrumentedvLLMHttpServer(vLLMHttpServer):
-            """vLLM HTTP server with automatic vLLM instrumentation in Ray worker."""
-
-            def __init__(self, *args, **kwargs):
-                import importlib.util
-                import sys
-                from pathlib import Path
-
-                instrumentation_path = Path(__file__).parent.parent.parent / "patches" / "vllm_instrumentation.py"
-
-                spec = importlib.util.spec_from_file_location("rllm_vllm_instrumentation_isolated", str(instrumentation_path))
-                vllm_instrumentation = importlib.util.module_from_spec(spec)
-                sys.modules["rllm_vllm_instrumentation_isolated"] = vllm_instrumentation
-                spec.loader.exec_module(vllm_instrumentation)
-
-                vllm_instrumentation.instrument_vllm(add_response_logprobs=True)
-                super().__init__(*args, **kwargs)
-
-        _original_vllm_replica_init = vLLMReplica.__init__
-
-        def patched_vllm_replica_init(self, *args, **kwargs):
-            _original_vllm_replica_init(self, *args, **kwargs)
-            self.server_class = InstrumentedvLLMHttpServer
-
-        vLLMReplica.__init__ = patched_vllm_replica_init
+        patch_vllm_for_sdk()
 
     def validate_config(self) -> None:
         """Validate verl-specific configuration settings."""
@@ -213,21 +211,26 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         else:
             repeat_times = self.full_config.rllm.rollout.n
         batch = batch.repeat(repeat_times=repeat_times)
-        batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"])
-
         # Step 2: execute tasks using the agent workflow engine (async)
-        episodes = await agent_workflow_engine.execute_tasks_verl(batch, is_validation=is_validation, **kwargs)
-
+        episodes = await self._execute_tasks_async(batch, agent_workflow_engine, **kwargs)
+        # Step 3: sleep the replicas to free kv_cache before weight sync (if free_cache_engine is enabled)
+        # Only sleep during training — validation doesn't update weights, so there's no wake_up call after it.
+        # Sleeping after validation would leave replicas asleep, causing CUDA illegal memory access on the next generation.
+        if not is_validation:
+            await self.checkpoint_manager.sleep_replicas()
         return episodes
 
     async def _execute_tasks_async(self, batch: DataProto, agent_workflow_engine: UnifiedWorkflowEngine, **kwargs) -> list[Episode]:
         """A Verl-specific helper function to execute tasks asynchronously."""
         assert self.rollout_engine is not None, "rollout_engine is not initialized."
-        await self.rollout_engine.wake_up()
         tasks = batch.non_tensor_batch["extra_info"].tolist()
         task_ids = batch.non_tensor_batch["task_ids"].tolist()
         episodes = await agent_workflow_engine.execute_tasks(tasks, task_ids, **kwargs)
-        await self.rollout_engine.sleep()
+        # handle data sources in the input dataproto
+        if "data_source" in batch.non_tensor_batch:
+            data_sources = batch.non_tensor_batch["data_source"].tolist()
+            for episode, data_source in zip(episodes, data_sources, strict=True):
+                episode.info["data_source"] = data_source
         return episodes
 
     def transform_to_backend_batch(self, trainer_state: TrainerState, **kwargs) -> DataProto:
@@ -301,6 +304,14 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             self._balance_batch(batch, metrics=metrics)
 
         batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+        # get images_seqlens
+        if "multi_modal_inputs" in batch.non_tensor_batch.keys():
+            images_seqlens_all = []
+            for multi_modal_input in batch.non_tensor_batch["multi_modal_inputs"]:
+                if "image_grid_thw" not in multi_modal_input.keys():
+                    continue
+                images_seqlens_all.extend(multi_modal_input["images_seqlens"].tolist())
+            batch.meta_info["images_seqlens"] = images_seqlens_all
 
         with simple_timer("old_log_probs", timing_dict):
             # Compute old_log_probs from actor
@@ -384,6 +395,12 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         global_steps = trainer_state.global_step
         batch = trainer_state.backend_batch
 
+        # Re-pad batch to world size before gradient updates.
+        # Filtering (e.g. mask_truncated_samples) in process_backend_batch may have
+        # shrunk the batch to a size that is no longer divisible by dp_size.
+        batch = self._pad_dataproto_to_world_size(batch)
+        trainer_state.backend_batch = batch
+
         # Update critic
         if self.use_critic:
             with simple_timer("update_critic", trainer_state.timing_dict):
@@ -394,9 +411,60 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         # Update actor (after critic warmup)
         if self.config.trainer.get("critic_warmup", 0) <= global_steps:
             with simple_timer("update_actor", trainer_state.timing_dict):
-                actor_output = self.actor_rollout_wg.update_actor(batch)
-            actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
-            trainer_state.metrics.update(actor_output_metrics)
+                self._update_actor_with_loss_routing(batch, trainer_state)
+
+    def _update_actor_with_loss_routing(self, batch, trainer_state: TrainerState) -> None:
+        """Update actor with per-loss-group splitting when ``loss_fn_map`` is set.
+
+        Roles that share the same policy loss function are grouped together
+        into a single ``update_actor`` call, minimising the number of
+        optimiser steps.
+        """
+        from collections import defaultdict
+
+        import numpy as np
+
+        loss_fn_map = self.algorithm_config.loss_fn_map if self.algorithm_config is not None else {}
+        group_roles = batch.non_tensor_batch.get("group_roles") if hasattr(batch, "non_tensor_batch") and batch.non_tensor_batch is not None else None
+
+        # Fast path: no per-role loss overrides or no role annotations.
+        if not loss_fn_map or group_roles is None:
+            actor_output = self.actor_rollout_wg.update_actor(batch)
+            trainer_state.metrics.update(reduce_metrics(actor_output.meta_info["metrics"]))
+            return
+
+        # Resolve each role to a Verl loss name with validation + fallback.
+        known = _get_verl_known_losses()
+        role_to_loss: dict[str, str] = {}
+        for role in set(group_roles.tolist()):
+            loss_name = loss_fn_map.get(role, _DEFAULT_VERL_LOSS)
+            if loss_name not in known:
+                logger.warning(f"Unknown Verl loss '{loss_name}' for role '{role}', falling back to '{_DEFAULT_VERL_LOSS}'")
+                loss_name = _DEFAULT_VERL_LOSS
+            role_to_loss[role] = loss_name
+
+        # Regroup: collect roles by their loss function.
+        loss_to_roles: dict[str, list[str]] = defaultdict(list)
+        for role, loss in role_to_loss.items():
+            loss_to_roles[loss].append(role)
+
+        if len(loss_to_roles) <= 1:
+            # All roles share the same loss — single update.
+            loss_name = next(iter(loss_to_roles))
+            batch.meta_info["policy_loss_mode_override"] = loss_name
+            actor_output = self.actor_rollout_wg.update_actor(batch)
+            trainer_state.metrics.update(reduce_metrics(actor_output.meta_info["metrics"]))
+            return
+
+        # Multiple distinct losses: split batch by loss group, update each.
+        for loss_name, roles in loss_to_roles.items():
+            role_set = set(roles)
+            mask = np.array([r in role_set for r in group_roles])
+            indices = np.where(mask)[0]
+            sub_batch = batch[indices]
+            sub_batch.meta_info["policy_loss_mode_override"] = loss_name
+            actor_output = self.actor_rollout_wg.update_actor(sub_batch)
+            trainer_state.metrics.update(reduce_metrics(actor_output.meta_info["metrics"]))
 
     def shutdown(self) -> None:
         """Placeholder, just use the BackendProtocol's default shutdown method."""
@@ -410,8 +478,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         """Called at the start of training."""
         self.global_steps = trainer_state.global_step
         self._load_checkpoint()
+        await self.checkpoint_manager.update_weights(self.global_steps)
         # we need to set trainer's global_steps to sync with the loaded checkpoint
         trainer_state.global_step = self.global_steps
+        trainer_state.epoch = self.global_steps // len(self.train_dataloader)
 
     async def on_batch_start(self, trainer_state: TrainerState) -> None:
         """Called at the start of each batch."""
@@ -434,6 +504,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         if self.config.trainer.save_freq > 0 and trainer_state.global_step % self.config.trainer.save_freq == 0:
             with simple_timer("save_checkpoint", trainer_state.timing_dict):
                 self._save_checkpoint()
+
+        # Weight synchronization
+        with simple_timer("update_weights", trainer_state.timing_dict):
+            await self.checkpoint_manager.update_weights(trainer_state.global_step)
 
         # Update metrics
         batch: DataProto = trainer_state.backend_batch  # type: ignore[attr-defined]

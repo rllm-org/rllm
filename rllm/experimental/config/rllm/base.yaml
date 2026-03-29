@@ -137,10 +137,20 @@ sdk:
     #   max_retry_attempts: boto3 adaptive retry attempts (default: 5)
     extra: {}
 
+# Remote Runtime Configuration (for agent-in-container runtimes like AgentCore)
+remote_runtime:
+  enabled: false
+  backend: agentcore
+  backend_config:
+    agent_runtime_arn: ""
+    s3_bucket: ""
+    tps_limit: 25
+  session_timeout: 300.0
+
 # Gateway Configuration (model gateway for AgentFlow-based training)
 gateway:
   port: 9090
-  host: "127.0.0.1"
+  host: null          # Auto-detects routable IP; set explicitly to override
   db_path: null       # Defaults to temp file
 
 # Episode Logging Configuration

@@ -44,11 +44,12 @@ class WorkflowTaskRunner(TaskRunner):
 
         actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
         self.add_critic_worker(config)
+        # Add a reference policy worker if KL loss or KL reward is used.
         self.add_ref_policy_worker(config, actor_rollout_cls)
 
         validate_config(
             config=config,
-            use_reference_policy=need_reference_policy(self.role_worker_mapping),
+            use_reference_policy=need_reference_policy(config),
             use_critic=need_critic(config),
         )
 
@@ -65,13 +66,11 @@ class WorkflowTaskRunner(TaskRunner):
         reward_fn = load_reward_manager(
             config,
             tokenizer,
-            num_examine=0,
             **config.reward_model.get("reward_kwargs", {}),
         )
         val_reward_fn = load_reward_manager(
             config,
             tokenizer,
-            num_examine=1,
             **config.reward_model.get("reward_kwargs", {}),
         )
         resource_pool_manager = self.init_resource_pool_mgr(config)

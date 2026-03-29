@@ -60,6 +60,8 @@ def create_tinker_handler(engine: TinkerEngine) -> Callable[[dict[str, Any]], Aw
             kwargs["temperature"] = request_body["temperature"]
         if request_body.get("top_p") is not None:
             kwargs["top_p"] = request_body["top_p"]
+        if request_body.get("top_k") is not None:
+            kwargs["top_k"] = request_body["top_k"]
         if request_body.get("max_tokens") is not None:
             kwargs["max_tokens"] = request_body["max_tokens"]
         if request_body.get("max_completion_tokens") is not None:

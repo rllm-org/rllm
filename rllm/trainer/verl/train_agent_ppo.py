@@ -37,13 +37,15 @@ def run_ppo_agent(config):
         ray_init_settings = get_ray_init_settings(config)
         ray.init(runtime_env=get_ppo_ray_runtime_env(), **ray_init_settings)
 
+    runner_cls = ray.remote(num_cpus=1)(TaskRunner)
+
     # Create a remote instance of the TaskRunner class, and
     # Execute the `run` method of the TaskRunner instance remotely and wait for it to complete
     if is_cuda_available and config.trainer.get("profile_steps") is not None and len(config.trainer.get("profile_steps", [])) > 0:
         nsight_options = OmegaConf.to_container(config.trainer.controller_nsight_options)
-        runner = TaskRunner.options(runtime_env={"nsight": nsight_options}).remote()
+        runner = runner_cls.options(runtime_env={"nsight": nsight_options}).remote()
     else:
-        runner = TaskRunner.remote()
+        runner = runner_cls.remote()
     ray.get(runner.run.remote(config))
 
     # [Optional] get the path of the timeline trace file from the configuration, default to None
@@ -53,7 +55,6 @@ def run_ppo_agent(config):
         ray.timeline(filename=timeline_json_file)
 
 
-@ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head
 class TaskRunner:
     """Ray remote class for executing distributed PPO training tasks.
 
@@ -81,9 +82,14 @@ class TaskRunner:
 
             actor_rollout_cls = ActorRolloutRefWorker
             ray_worker_group_cls = RayWorkerGroup
+
+            lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
+            if lora_rank <= 0:
+                lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
+            ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
             # NOTE: In new model engine, ref policy and actor rollout are in same ActorRolloutRefWorker,
             # while in legacy model engine, ref policy is in a separate ActorRolloutRefWorker.
-            if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
+            if need_reference_policy(config) and not ref_in_actor:
                 role = Role.ActorRolloutRef
             else:
                 role = Role.ActorRollout
@@ -129,8 +135,13 @@ class TaskRunner:
 
         elif config.critic.strategy == "megatron":
             # TODO: switch this to TrainingWorker as well
-            from verl.workers.megatron_workers import CriticWorker
+            if use_legacy_worker_impl in ["auto", "enable"]:
+                from verl.workers.megatron_workers import CriticWorker
+            elif use_legacy_worker_impl == "disable":
+                from verl.workers.engine_workers import TrainingWorker
 
+                CriticWorker = TrainingWorker
+                print("Using new worker implementation")
         else:
             raise NotImplementedError
 
@@ -210,7 +221,7 @@ class TaskRunner:
 
         validate_config(
             config=config,
-            use_reference_policy=need_reference_policy(self.role_worker_mapping),
+            use_reference_policy=need_reference_policy(config),
             use_critic=need_critic(config),
         )
 
@@ -233,13 +244,11 @@ class TaskRunner:
         reward_fn = load_reward_manager(
             config,
             tokenizer,
-            num_examine=0,
             **config.reward_model.get("reward_kwargs", {}),
         )
         val_reward_fn = load_reward_manager(
             config,
             tokenizer,
-            num_examine=1,
             **config.reward_model.get("reward_kwargs", {}),
         )
 

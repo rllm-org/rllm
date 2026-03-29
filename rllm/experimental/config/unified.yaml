@@ -12,4 +12,5 @@ defaults:
 hydra:
   run:
     dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
-
+  searchpath:
+    - pkg://verl.trainer.config  # this is safe even if verl is not installed

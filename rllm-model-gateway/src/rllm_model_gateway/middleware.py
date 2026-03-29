@@ -34,10 +34,12 @@ class SessionRoutingMiddleware:
         *,
         add_logprobs: bool = True,
         add_return_token_ids: bool = True,
+        sessions: Any | None = None,
     ) -> None:
         self.app = app
         self.add_logprobs = add_logprobs
         self.add_return_token_ids = add_return_token_ids
+        self.sessions = sessions  # SessionManager — for per-session sampling params
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -63,14 +65,19 @@ class SessionRoutingMiddleware:
         if "raw_path" in scope:
             scope["raw_path"] = path.encode("utf-8")
 
-        # For methods that carry a body, inject sampling parameters
+        # Inject sampling parameters into POST request bodies (chat completions, etc.)
         method = scope.get("method", "").upper()
-        if method in ("POST", "PUT", "PATCH") and (self.add_logprobs or self.add_return_token_ids):
-            await self._inject_params(scope, receive, send)
+        needs_injection = (
+            self.add_logprobs or self.add_return_token_ids or self.sessions is not None
+        )
+        if method == "POST" and needs_injection:
+            await self._inject_params(scope, receive, send, session_id)
         else:
             await self.app(scope, receive, send)
 
-    async def _inject_params(self, scope: Scope, receive: Receive, send: Send) -> None:
+    async def _inject_params(
+        self, scope: Scope, receive: Receive, send: Send, session_id: str | None = None
+    ) -> None:
         """Read body, inject sampling params, then forward with mutated body."""
         body_parts: list[bytes] = []
         more = True
@@ -87,8 +94,10 @@ class SessionRoutingMiddleware:
                     # Record whether the client originally requested logprobs
                     # so the proxy can strip them from the response if not.
                     state = scope["state"]
-                    state["originally_requested_logprobs"] = "logprobs" in payload and payload["logprobs"]
-                    self._mutate(payload)
+                    state["originally_requested_logprobs"] = (
+                        "logprobs" in payload and payload["logprobs"]
+                    )
+                    self._mutate(payload, session_id)
                     raw = json.dumps(payload).encode("utf-8")
             except (json.JSONDecodeError, UnicodeDecodeError):
                 pass  # non-JSON body — forward as-is
@@ -111,8 +120,8 @@ class SessionRoutingMiddleware:
 
         await self.app(scope, patched_receive, send)
 
-    def _mutate(self, payload: dict[str, Any]) -> None:
-        """Inject ``logprobs`` and ``return_token_ids`` into the request body."""
+    def _mutate(self, payload: dict[str, Any], session_id: str | None = None) -> None:
+        """Inject ``logprobs``, ``return_token_ids``, and session sampling params."""
         if self.add_logprobs and "logprobs" not in payload:
             payload["logprobs"] = True
         if self.add_return_token_ids:
@@ -123,3 +132,10 @@ class SessionRoutingMiddleware:
             # Also set at root for direct vLLM calls
             if "return_token_ids" not in payload:
                 payload["return_token_ids"] = True
+        # Inject per-session sampling params (only if client didn't already set them)
+        if session_id and self.sessions is not None:
+            sp = self.sessions.get_sampling_params(session_id)
+            if sp:
+                for key, value in sp.items():
+                    if key not in payload:
+                        payload[key] = value

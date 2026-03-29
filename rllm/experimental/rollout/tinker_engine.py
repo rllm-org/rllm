@@ -183,6 +183,8 @@ class TinkerEngine(RolloutEngine):
             image_processor: Optional image processor for vision-language models (used with renderer)
             disable_thinking: Whether to disable thinking in generation prompt (used when bypass_render_with_parser=True)
             accumulate_reasoning: Whether to accumulate reasoning (used when bypass_render_with_parser=True)
+            reasoning_effort: The effort level for reasoning (used when bypass_render_with_parser=True)
+            renderer_name: The name of the renderer to use (used when bypass_render_with_parser=True)
         """
         self.base_url = base_url
         self.model_name = model_name

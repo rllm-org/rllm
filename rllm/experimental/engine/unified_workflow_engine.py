@@ -222,9 +222,7 @@ class UnifiedWorkflowEngine:
         # Log episodes if logger is provided
         if self.episode_logger is not None:
             try:
-                logger.info(
-                    f"Logging {len(ordered_results)} episodes to step={self.current_step}, mode={self.current_mode}, epoch={self.current_epoch}"
-                )
+                logger.info(f"Logging {len(ordered_results)} episodes to step={self.current_step}, mode={self.current_mode}, epoch={self.current_epoch}")
                 self.episode_logger.log_episodes_batch(
                     ordered_results,
                     self.current_step,
@@ -251,11 +249,6 @@ class UnifiedWorkflowEngine:
         Returns:
             list[Episode]: List of completed episodes.
         """
-        from rllm.experimental.rollout import VerlEngine
-
-        assert isinstance(self.rollout_engine, VerlEngine), "Rollout engine must be a VerlEngine to invoke execute_tasks_verl"
-        await self.rollout_engine.wake_up()
-
         tasks = batch.non_tensor_batch["extra_info"].tolist()
         task_ids = batch.non_tensor_batch["task_ids"].tolist()
         episodes = await self.execute_tasks(tasks, task_ids, is_validation=is_validation, **kwargs)
@@ -264,8 +257,6 @@ class UnifiedWorkflowEngine:
             data_sources = batch.non_tensor_batch["data_source"].tolist()
             for episode, data_source in zip(episodes, data_sources, strict=True):
                 episode.info["data_source"] = data_source
-
-        await self.rollout_engine.sleep()
         return episodes
 
     def shutdown(self):

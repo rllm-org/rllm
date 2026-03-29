@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 from tqdm import tqdm
 
 from rllm.agents.agent import Episode, Step, Trajectory
-from rllm.experimental.engine.trace_converter import trace_record_to_step
+from rllm.experimental.engine.trace_converter import compute_step_metrics, trace_record_to_step
 from rllm.experimental.eval.types import AgentConfig, EvalOutput, Task, run_agent_flow
 from rllm.utils import colorful_print
 from rllm.workflows.workflow import TerminationReason
@@ -329,19 +329,9 @@ class AgentFlowEngine:
             ]
 
         # Compute metrics
-        all_response_lens = [len(s.response_ids) for t in enriched_trajectories for s in t.steps]
-        all_prompt_lens = [len(s.prompt_ids) for t in enriched_trajectories for s in t.steps]
-        metrics = {
-            "empty": int(len(traces) == 0),
-            "num_trajectories": len(enriched_trajectories),
-            "steps_collected": len(traces),
-            "steps_used": sum(len(t.steps) for t in enriched_trajectories),
-            "mean_response_len": (sum(all_response_lens) / len(all_response_lens) if all_response_lens else 0),
-            "max_response_len": max(all_response_lens, default=0),
-            "min_response_len": min(all_response_lens, default=0),
-            "max_prompt_len": max(all_prompt_lens, default=0),
-            "min_prompt_len": min(all_prompt_lens, default=0),
-        }
+        metrics = compute_step_metrics(enriched_trajectories)
+        metrics["empty"] = int(len(traces) == 0)
+        metrics["steps_collected"] = len(traces)
         metrics.update(episode.metrics)
 
         return Episode(

@@ -131,6 +131,7 @@ def create_app(
         SessionRoutingMiddleware,
         add_logprobs=config.add_logprobs,
         add_return_token_ids=config.add_return_token_ids,
+        sessions=sessions,
     )
 
     # -- Health endpoints --------------------------------------------------
@@ -156,6 +157,7 @@ def create_app(
         sid = sessions.create_session(
             session_id=body.get("session_id"),
             metadata=body.get("metadata"),
+            sampling_params=body.get("sampling_params"),
         )
         return {"session_id": sid, "url": f"/sessions/{sid}/v1"}
 
@@ -272,7 +274,7 @@ def create_app(
 
     @app.api_route(
         "/v1/{path:path}",
-        methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+        methods=["GET", "POST"],
     )
     async def proxy_v1(request: Request, path: str):
         # Ensure session exists in manager (implicit creation)
@@ -357,7 +359,10 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
     # Workers from CLI --worker flags (WorkerConfig validator auto-splits URLs)
     worker_urls = getattr(args, "worker", None) or []
     if worker_urls:
-        data["workers"] = [{"url": raw_url, "worker_id": str(i)} for i, raw_url in enumerate(worker_urls)]
+        data["workers"] = [
+            {"url": raw_url, "worker_id": str(i)}
+            for i, raw_url in enumerate(worker_urls)
+        ]
 
     return GatewayConfig(**data)
 
@@ -368,7 +373,9 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="rllm-model-gateway: lightweight LLM call proxy for RL training")
+    parser = argparse.ArgumentParser(
+        description="rllm-model-gateway: lightweight LLM call proxy for RL training"
+    )
     parser.add_argument("--host", type=str, default=None)
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--config", type=str, default=None, help="Path to YAML config")
@@ -391,7 +398,9 @@ def main() -> None:
 
     import uvicorn
 
-    uvicorn.run(app, host=config.host, port=config.port, log_level=config.log_level.lower())
+    uvicorn.run(
+        app, host=config.host, port=config.port, log_level=config.log_level.lower()
+    )
 
 
 if __name__ == "__main__":

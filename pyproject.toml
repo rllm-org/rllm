@@ -35,7 +35,7 @@ dependencies = [
     "pandas",
     "polars",
     "pyarrow",
-    "litellm[proxy]",
+    "litellm[proxy]>=1.80.0,<1.82.7",
     "aiosqlite",
     "hydra-core",
     "codetiming",
@@ -91,7 +91,7 @@ verl = [
     "ray",
     "torch>=2.8.0",
     "torchvision>=0.23.0",
-    "vllm>=0.10.2,<=0.11.0",
+    "vllm>=0.10.2,<=0.12.0",
     "flash-attn>=2.8.1",
     "qwen-vl-utils",
 ]
@@ -141,14 +141,21 @@ web = [
     "gymnasium",
 ]
 
+agentcore = [
+    "agentcore-rl-toolkit>=0.1.2",
+]
+
 code-tools = [
     "e2b_code_interpreter",
     "together>=1.4",
 ]
 
+[tool.uv.sources]
+rllm-model-gateway = { path = "./rllm-model-gateway", editable = true }
+
 [tool.uv]
 override-dependencies = [
-    "litellm[proxy]>=1.80.0",
+    "litellm[proxy]>=1.80.0,<1.82.7",
 ]
 
 [tool.uv.extra-build-dependencies]

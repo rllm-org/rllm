@@ -110,8 +110,9 @@ class UnifiedTrainer:
         Provide exactly one of ``workflow_class`` or (``agent_flow`` AND ``evaluator``).
         """
         has_agent_flow = kwargs.get("agent_flow") is not None and kwargs.get("evaluator") is not None
-        if not has_agent_flow:
-            assert workflow_class is not None, "Either workflow_class or (agent_flow AND evaluator) must be provided"
+        remote_runtime_enabled = config.rllm.get("remote_runtime", {}).get("enabled", False)
+        if not has_agent_flow and not remote_runtime_enabled:
+            assert workflow_class is not None, "Either workflow_class, (agent_flow AND evaluator), or remote_runtime must be provided"
 
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
@@ -141,12 +142,16 @@ class UnifiedTrainer:
         )
 
         # Determine which engine path to use:
-        # 1. agent_flow + evaluator → AgentFlowEngine (gateway-based)
-        # 2. workflow_class → UnifiedWorkflowEngine (direct)
+        # 1. agent_flow + evaluator → AgentFlowEngine (gateway-based, local)
+        # 2. remote_runtime → RemoteAgentFlowEngine (gateway-based, remote)
+        # 3. workflow_class → UnifiedWorkflowEngine (direct)
         self._gateway = None
+        self._remote_runtime = None
 
         agent_flow = kwargs.get("agent_flow")
         evaluator = kwargs.get("evaluator")
+
+        remote_runtime_cfg = self.rllm_config.get("remote_runtime", {})
 
         if agent_flow is not None and evaluator is not None:
             from rllm.experimental.engine.agent_flow_engine import AgentFlowEngine
@@ -164,6 +169,38 @@ class UnifiedTrainer:
                 n_parallel_tasks=self.rllm_config.workflow.n_parallel_tasks,
                 retry_limit=self.rllm_config.workflow.retry_limit,
                 raise_on_error=self.rllm_config.workflow.get("raise_on_error", True),
+                episode_logger=self.episode_logger,
+            )
+        elif remote_runtime_cfg.get("enabled", False):
+            from rllm.experimental.engine.gateway_manager import GatewayManager
+            from rllm.experimental.engine.remote_agent_flow_engine import (
+                RemoteAgentFlowEngine,
+            )
+            from rllm.experimental.engine.remote_runtime import (
+                RemoteRuntimeConfig,
+                create_remote_runtime,
+            )
+
+            gateway_mode = "process" if kwargs.get("backend_name") == "verl" else "thread"
+            self._gateway = GatewayManager(self.config, mode=gateway_mode)
+            self._gateway.start(rollout_engine)
+
+            remote_runtime_config = RemoteRuntimeConfig(
+                enabled=True,
+                backend=remote_runtime_cfg.get("backend", "agentcore"),
+                backend_config=dict(remote_runtime_cfg.get("backend_config", {})),
+                session_timeout=remote_runtime_cfg.get("session_timeout", 900.0),
+            )
+            self._remote_runtime = create_remote_runtime(
+                remote_runtime_config,
+                exp_id=self.rllm_config.trainer.experiment_name,
+                model_id=self.config.get("model", {}).get("name", "default"),
+            )
+
+            self.agent_workflow_engine = RemoteAgentFlowEngine(
+                runtime=self._remote_runtime,
+                gateway=self._gateway,
+                session_timeout=remote_runtime_config.session_timeout,
                 episode_logger=self.episode_logger,
             )
         else:
@@ -259,8 +296,12 @@ class UnifiedTrainer:
 
     async def fit_async(self) -> None:
         """Public async entry point for the full training process."""
+        # Initialize remote runtime (if enabled) before the workflow pool
+        if self._remote_runtime is not None:
+            self._remote_runtime.initialize()
+
         # initialize the UnifiedWorkflowEngine (init the workflow pool)
-        # AgentFlowEngine doesn't need pool initialization
+        # AgentFlowEngine and RemoteAgentFlowEngine don't need pool initialization
         if hasattr(self.agent_workflow_engine, "initialize_pool"):
             await self.agent_workflow_engine.initialize_pool()
 
@@ -306,7 +347,7 @@ class UnifiedTrainer:
                 trainer_state.reset_batch()
 
                 await self.backend.on_batch_start(trainer_state)
-                with simple_timer("total_step", trainer_state.timing_dict):
+                with simple_timer("step", trainer_state.timing_dict):
                     await self._train_batch_async(batch, trainer_state)
                 await self.backend.on_batch_end(trainer_state)
 
@@ -347,9 +388,7 @@ class UnifiedTrainer:
         workflow_metrics, termination_counts = self._collect_workflow_metrics_from_episodes(trainer_state.episodes)
 
         # stage 2: transform episodes to trajectory groups (sync)
-        trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(
-            trainer_state.episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook
-        )
+        trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(trainer_state.episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook)
         trainer_state.trajectory_groups = trajectory_groups
         trainer_state.metrics.update(transform_metrics)
 
@@ -414,12 +453,8 @@ class UnifiedTrainer:
         for batch in val_dataloader:
             # Generate episodes and transform to trajectory groups
             val_episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, is_validation=True)
-            val_trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(
-                val_episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook
-            )
-            reward_metrics = collect_reward_and_advantage_from_trajectory_groups(
-                val_trajectory_groups, self.algorithm_config, collect_advantage=False
-            )
+            val_trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(val_episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook)
+            reward_metrics = collect_reward_and_advantage_from_trajectory_groups(val_trajectory_groups, self.algorithm_config, collect_advantage=False)
 
             is_correct_lst.extend([episode.is_correct for episode in val_episodes])
             uid_lst.extend([episode.task_id for episode in val_episodes])
@@ -467,6 +502,9 @@ class UnifiedTrainer:
 
     def shutdown(self):
         """Shutdown the trainer and cleanup resources."""
+        if hasattr(self, "_remote_runtime") and self._remote_runtime is not None:
+            self._remote_runtime.shutdown()
+            self._remote_runtime = None
         if hasattr(self, "_gateway") and self._gateway is not None:
             self._gateway.stop()
             self._gateway = None
@@ -555,8 +593,9 @@ class AgentTrainer:
         **kwargs,
     ):
         has_agent_flow = agent_flow is not None and evaluator is not None
-        if not has_agent_flow:
-            assert workflow_class is not None, "Either workflow_class or (agent_flow AND evaluator) must be provided"
+        remote_runtime_enabled = config.rllm.get("remote_runtime", {}).get("enabled", False)
+        if not has_agent_flow and not remote_runtime_enabled:
+            assert workflow_class is not None, "Either workflow_class, (agent_flow AND evaluator), or remote_runtime must be provided"
 
         # Pass agent_flow and evaluator through kwargs for UnifiedTrainer
         if agent_flow is not None:
