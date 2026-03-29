@@ -11,10 +11,30 @@ from rllm.agents.agent import Trajectory
 from rllm.experimental.common.advantage import register_rllm_adv_estimator
 
 # ---------------------------------------------------------------------------
+# Default advantage estimator map for the four ERL roles
+# ---------------------------------------------------------------------------
+DEFAULT_ERL_ADV_ESTIMATOR_MAP: dict[str, str] = {
+    "erl_first": "grpo",
+    "erl_updater": "grpo",
+    "erl_second": "grpo",
+    "erl_distill": "raft",
+}
+
+
+# ---------------------------------------------------------------------------
+# Default updater system prompt
+# ---------------------------------------------------------------------------
+UPDATER_SYSTEM_PROMPT = (
+    "You are an expert prompt updater. Analyze recent task attempts, "
+    "their outcomes, and environmental feedback to improve the solver's "
+    "system prompt. Return ONLY the revised prompt wrapped in "
+    "<prompt>...</prompt> tags."
+)
+
+
+# ---------------------------------------------------------------------------
 # RAFT advantage estimator
 # ---------------------------------------------------------------------------
-
-
 @register_rllm_adv_estimator("raft")
 def calculate_raft_advantages(
     rewards: list[np.ndarray],
@@ -32,17 +52,6 @@ def calculate_raft_advantages(
         advantages_by_group.append(adv)
     return advantages_by_group, advantages_by_group
 
-
-# ---------------------------------------------------------------------------
-# Default updater system prompt
-# ---------------------------------------------------------------------------
-
-UPDATER_SYSTEM_PROMPT = (
-    "You are an expert prompt updater. Analyze recent task attempts, "
-    "their outcomes, and environmental feedback to improve the solver's "
-    "system prompt. Return ONLY the revised prompt wrapped in "
-    "<prompt>...</prompt> tags."
-)
 
 # ---------------------------------------------------------------------------
 # Prompt extraction
@@ -70,15 +79,3 @@ def default_feedback(task: dict[str, Any], trajectory: Trajectory) -> str:
     n_steps = len(trajectory.steps)
     succeeded = reward > 0
     return f"Reward={reward:.2f}, steps={n_steps}, succeeded={succeeded}."
-
-
-# ---------------------------------------------------------------------------
-# Default advantage estimator map for the four ERL roles
-# ---------------------------------------------------------------------------
-
-DEFAULT_ERL_ADV_ESTIMATOR_MAP: dict[str, str] = {
-    "erl_first": "grpo",
-    "erl_updater": "grpo",
-    "erl_second": "grpo",
-    "erl_distill": "raft",
-}

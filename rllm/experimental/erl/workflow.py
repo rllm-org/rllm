@@ -1,7 +1,8 @@
 """ErlWorkflow — generic Experiential Reinforcement Learning workflow.
 
-Implements the 4-phase ERL training loop (first attempt → reflection →
-second attempt → internalization) as a :class:`~rllm.workflows.workflow.Workflow`
+Implements the 4-phase ERL training loop
+(first attempt → reflection → second attempt → internalization)
+as a :class:`~rllm.workflows.workflow.Workflow`
 subclass that works on both the Tinker and Verl backends.
 
 Users provide three task-specific callables (``solver_fn``,
@@ -13,19 +14,56 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Awaitable, Callable
-from typing import Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 from rllm.agents.agent import Episode, Trajectory
 from rllm.engine.rollout.rollout_engine import RolloutEngine
 from rllm.experimental.erl.updater import ErlPromptUpdater
 from rllm.experimental.erl.utils import UPDATER_SYSTEM_PROMPT, default_feedback
-from rllm.workflows.store import Store
 from rllm.workflows.workflow import Workflow
+
+if TYPE_CHECKING:
+    from concurrent.futures import ThreadPoolExecutor
+
+    from rllm.workflows.store import Store
 
 # Type aliases for the user-supplied callables.
 SolverFn = Callable[[str, dict, RolloutEngine], Awaitable[Trajectory]]
 FeedbackFn = Callable[[dict, Trajectory], str]
 StateBuilderFn = Callable[[str, dict, Trajectory, str], str]
+
+
+@dataclass
+class ErlConfig:
+    """Configuration for the ERL workflow.
+
+    Groups all serialisable / Hydra-friendly parameters.  Callables and
+    runtime objects (``solver_fn``, ``store``, ``rollout_engine``, …) are
+    passed directly to :class:`ErlWorkflow.__init__` instead.
+
+    Example with Hydra structured configs::
+
+        @dataclass
+        class MyConfig:
+            erl: ErlConfig = field(default_factory=ErlConfig)
+    """
+
+    # ---- prompt configuration ----
+    initial_system_prompt: str = ""
+    updater_system_prompt: str = UPDATER_SYSTEM_PROMPT
+    updater_sampling_params: dict[str, Any] = field(default_factory=lambda: {"temperature": 0.7, "top_p": 0.9})
+
+    # ---- phase control flags ----
+    train_first_attempt: bool = True
+    train_second_attempt: bool = True
+    train_distilled: bool = True
+    train_updater: bool = True
+
+    # ---- gating / ablation ----
+    success_reward_threshold: float = 1.0
+    no_memory: bool = False
+    no_reflection: bool = False
 
 
 class ErlWorkflow(Workflow):
@@ -49,26 +87,12 @@ class ErlWorkflow(Workflow):
     def __init__(
         self,
         rollout_engine: RolloutEngine,
-        executor,
+        executor: ThreadPoolExecutor,
         *,
-        # ---- task-specific callables ----
         solver_fn: SolverFn,
         state_builder_fn: StateBuilderFn,
-        initial_system_prompt: str,
         feedback_fn: FeedbackFn | None = None,
-        # ---- updater configuration ----
-        updater_system_prompt: str = UPDATER_SYSTEM_PROMPT,
-        updater_sampling_params: dict[str, Any] | None = None,
-        # ---- phase control flags ----
-        train_first_attempt: bool = True,
-        train_second_attempt: bool = True,
-        train_distilled: bool = True,
-        train_updater: bool = True,
-        # ---- gating / ablation ----
-        success_reward_threshold: float = 1.0,
-        no_memory: bool = False,
-        no_reflection: bool = False,
-        # ---- store (injected by the engine) ----
+        erl_config: ErlConfig | None = None,
         store: Store | None = None,
         **kwargs: Any,
     ) -> None:
@@ -78,23 +102,25 @@ class ErlWorkflow(Workflow):
             store=store,
             **kwargs,
         )
+        cfg = erl_config or ErlConfig()
+
         self.solver_fn = solver_fn
         self.feedback_fn: FeedbackFn = feedback_fn or default_feedback
         self.state_builder_fn = state_builder_fn
-        self.initial_system_prompt = initial_system_prompt
+        self.initial_system_prompt = cfg.initial_system_prompt
 
-        self.train_first_attempt = train_first_attempt
-        self.train_second_attempt = train_second_attempt
-        self.train_distilled = train_distilled
-        self.train_updater = train_updater
-        self.success_reward_threshold = success_reward_threshold
-        self.no_memory = no_memory
-        self.no_reflection = no_reflection
+        self.train_first_attempt = cfg.train_first_attempt
+        self.train_second_attempt = cfg.train_second_attempt
+        self.train_distilled = cfg.train_distilled
+        self.train_updater = cfg.train_updater
+        self.success_reward_threshold = cfg.success_reward_threshold
+        self.no_memory = cfg.no_memory
+        self.no_reflection = cfg.no_reflection
 
         self.updater = ErlPromptUpdater(
             rollout_engine=rollout_engine,
-            system_prompt=updater_system_prompt,
-            sampling_params=updater_sampling_params,
+            system_prompt=cfg.updater_system_prompt,
+            sampling_params=cfg.updater_sampling_params,
         )
 
     # ------------------------------------------------------------------

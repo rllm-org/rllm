@@ -3,6 +3,8 @@
 Provides reusable building blocks for implementing the ERL training
 paradigm (Shi et al., 2026) on top of rLLM's unified trainer.
 
+Reference official implementation of ERL: https://github.com/microsoft/experiential_rl
+
 Quick start::
 
     from rllm.experimental.erl import (
@@ -17,7 +19,6 @@ Quick start::
     )
 """
 
-from rllm.experimental.erl.erl_workflow import ErlWorkflow
 from rllm.experimental.erl.updater import ErlPromptUpdater
 from rllm.experimental.erl.utils import (
     DEFAULT_ERL_ADV_ESTIMATOR_MAP,
@@ -26,9 +27,11 @@ from rllm.experimental.erl.utils import (
     default_feedback,
     extract_prompt_from_response,
 )
+from rllm.experimental.erl.workflow import ErlConfig, ErlWorkflow
 
 __all__ = [
     "DEFAULT_ERL_ADV_ESTIMATOR_MAP",
+    "ErlConfig",
     "ErlPromptUpdater",
     "ErlWorkflow",
     "UPDATER_SYSTEM_PROMPT",

@@ -174,15 +174,19 @@ def _simple_state_builder(base_prompt, task, traj, feedback):
     return f"base={base_prompt} feedback={feedback}"
 
 
-def _make_workflow(**overrides):
-    from rllm.experimental.erl.erl_workflow import ErlWorkflow
+def _make_workflow(erl_config_overrides: dict | None = None, **overrides):
+    from rllm.experimental.erl.workflow import ErlConfig, ErlWorkflow
+
+    cfg_kwargs = {"initial_system_prompt": "initial prompt"}
+    cfg_kwargs.update(erl_config_overrides or {})
+    cfg = ErlConfig(**cfg_kwargs)
 
     defaults = {
         "rollout_engine": _mock_engine("<prompt>better</prompt>"),
         "executor": None,
         "solver_fn": _make_solver_fn(0.0),
         "state_builder_fn": _simple_state_builder,
-        "initial_system_prompt": "initial prompt",
+        "erl_config": cfg,
     }
     defaults.update(overrides)
     return ErlWorkflow(**defaults)
@@ -211,7 +215,7 @@ class TestErlWorkflow:
         assert "erl_distill" in names
 
     def test_no_reflection_skips_updater(self):
-        wf = _make_workflow(solver_fn=_make_solver_fn(0.0), no_reflection=True)
+        wf = _make_workflow(erl_config_overrides={"no_reflection": True}, solver_fn=_make_solver_fn(0.0))
         ep = _run(wf.run({"q": "test"}, "uid:0"))
         names = [t.name for t in ep.trajectories]
         assert "erl_updater" not in names
@@ -219,9 +223,8 @@ class TestErlWorkflow:
 
     def test_train_flags_respected(self):
         wf = _make_workflow(
+            erl_config_overrides={"train_first_attempt": False, "train_updater": False},
             solver_fn=_make_solver_fn(0.0),
-            train_first_attempt=False,
-            train_updater=False,
         )
         ep = _run(wf.run({"q": "test"}, "uid:0"))
         names = [t.name for t in ep.trajectories]
@@ -278,7 +281,7 @@ class TestErlWorkflow:
 
     def test_memory_not_written_when_disabled(self):
         store = InMemoryStore()
-        wf = _make_workflow(solver_fn=_make_solver_fn(0.0), store=store, no_memory=True)
+        wf = _make_workflow(erl_config_overrides={"no_memory": True}, solver_fn=_make_solver_fn(0.0), store=store)
         _run(wf.run({"q": "test"}, "uid:0"))
         assert _run(store.get("improved_prompt")) is None
 
