@@ -7,8 +7,10 @@ verl-specific implementations while reusing verl's worker group infrastructure.
 
 from __future__ import annotations
 
+import math
 import uuid
 from collections.abc import Iterable
+from functools import reduce
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -247,11 +249,8 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         batch = batch.select_idxs(non_pad_step_indices)  # This batch only has non_pad steps
         return batch
 
-    def _pad_dataproto_to_world_size(self, batch: DataProto) -> DataProto:
-        import math
-        from functools import reduce
-
-        from verl.protocol import pad_dataproto_to_divisor
+    def _get_dp_world_size(self) -> int | None:
+        """Compute the LCM of all worker group world sizes for DP splitting."""
 
         world_sizes = []
         if self.use_critic and self.critic_wg.world_size != 0:
@@ -269,9 +268,15 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             if hasattr(self, "rollout_wg") and self.rollout_wg.world_size != 0:
                 world_sizes.append(self.rollout_wg.world_size)
         if not world_sizes:
-            return batch
+            return None
+        return reduce(math.lcm, world_sizes)
 
-        world_size = reduce(math.lcm, world_sizes)
+    def _pad_dataproto_to_world_size(self, batch: DataProto) -> DataProto:
+        from verl.protocol import pad_dataproto_to_divisor
+
+        world_size = self._get_dp_world_size()
+        if world_size is None:
+            return batch
 
         batch = self._remove_padding(batch)  # Remove any padded steps from the batch (just in case)
         original_batch_size = batch.batch["prompts"].shape[0]
@@ -282,6 +287,36 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         batch.non_tensor_batch["is_last_step"][pad_start:pad_end] = False
         batch.non_tensor_batch["is_pad_step"][pad_start:pad_end] = True
         batch.non_tensor_batch["is_valid"][pad_start:pad_end] = False
+        return batch
+
+    def _pad_dataproto_for_megatron_training(self, batch: DataProto) -> DataProto:
+        """Pad batch for megatron actor update using uniform random sampling.
+
+        Megatron's make_minibatch_iterator requires per-GPU batch to be divisible
+        by ppo_mini_batch_size. Padded samples are randomly sampled real data that
+        participate in training as redundant samples from the same distribution.
+        """
+
+        world_size = self._get_dp_world_size()
+        if world_size is None:
+            return batch
+
+        ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+        rollout_n = self.config.actor_rollout_ref.rollout.n
+        divisor = math.lcm(world_size, ppo_mini_batch_size * rollout_n)
+
+        batch = self._remove_padding(batch)
+        original_batch_size = batch.batch["prompts"].shape[0]
+
+        pad_size = (-original_batch_size) % divisor
+        if pad_size > 0:
+            pad_indices = np.random.choice(original_batch_size, size=pad_size, replace=True)
+            pad_batch = batch.select_idxs(pad_indices)
+            batch = DataProto.concat([batch, pad_batch])
+            # Deliberately skip setting is_pad_step/is_last_step/is_valid on padded rows.
+            # This method is only called in update_policy (the last pipeline stage before
+            # actor update), so _remove_padding is never called on this output. The padded
+            # rows are real duplicates that participate in training with real advantages.
         return batch
 
     async def process_backend_batch(self, trainer_state: TrainerState, **kwargs) -> None:
@@ -395,13 +430,21 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         global_steps = trainer_state.global_step
         batch = trainer_state.backend_batch
 
-        # Re-pad batch to world size before gradient updates.
-        # Filtering (e.g. mask_truncated_samples) in process_backend_batch may have
-        # shrunk the batch to a size that is no longer divisible by dp_size.
-        batch = self._pad_dataproto_to_world_size(batch)
+        # Re-pad batch before gradient updates. For megatron, use the larger
+        # divisor (world_size * ppo_mini_batch_size) with uniform random sampling.
+        actor_strategy = self.config.actor_rollout_ref.actor.get("strategy", None)
+        if actor_strategy == "megatron":
+            batch = self._pad_dataproto_for_megatron_training(batch)
+        else:
+            batch = self._pad_dataproto_to_world_size(batch)
         trainer_state.backend_batch = batch
 
         # Update critic
+        # NOTE: The megatron-padded batch (with duplicated samples) is also used for
+        # the critic update. This is acceptable because: (1) GRPO disables the critic,
+        # and (2) if a megatron critic is used, it needs the same divisibility and the
+        # duplicated samples are real data from the same distribution. If the critic has
+        # a different ppo_mini_batch_size, the divisor may need to account for it.
         if self.use_critic:
             with simple_timer("update_critic", trainer_state.timing_dict):
                 critic_output = self.critic_wg.update_critic(batch)

@@ -201,7 +201,11 @@ class GatewayManager:
             cmd.extend(["--db-path", self.db_path])
 
         logger.info("Starting gateway subprocess: %s", " ".join(cmd))
-        self._process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Inherit parent's stdout/stderr so gateway logs are visible for debugging.
+        # subprocess.PIPE causes problems as without an active reader, the OS pipe
+        # buffer (~64KB on Linux) fills up under high-throughput logging, causing the
+        # gateway process to block on write and eventually hang.
+        self._process = subprocess.Popen(cmd)
 
         # Poll health endpoint
         deadline = time.monotonic() + _HEALTH_POLL_TIMEOUT
@@ -212,8 +216,7 @@ class GatewayManager:
                 return
             except Exception as e:
                 if self._process.poll() is not None:
-                    stderr = self._process.stderr.read().decode() if self._process.stderr else ""
-                    raise RuntimeError(f"Gateway process exited unexpectedly: {stderr}") from e
+                    raise RuntimeError(f"Gateway process exited unexpectedly (rc={self._process.returncode})") from e
                 time.sleep(_HEALTH_POLL_INTERVAL)
 
         self._process.terminate()
