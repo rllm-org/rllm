@@ -54,7 +54,7 @@ Qwen 3.5 requires newer versions of verl, vllm, and transformers that have confl
 # Step 1: Install rllm + compatible deps
 pip install -e ".[verl]"
 
-# Step 2: Install verl (with Qwen 3.5 FSDP patches) + conflicting deps
+# Step 2: Install verl + conflicting deps
 bash scripts/setup_qwen35.sh
 ```
 
@@ -78,7 +78,6 @@ export HF_HUB_OFFLINE=1
 unset NCCL_SOCKET_IFNAME NCCL_SOCKET_FAMILY
 ```
 
-Requires verl with Qwen 3.5 FSDP patches ([verl-project/verl#5682](https://github.com/verl-project/verl/pull/5682)).
 
 ## Quickstart
 
