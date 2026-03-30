@@ -230,6 +230,7 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
     # This corresponds to case when we have `per_step` mode for stepwise advantage computation
     traj_reward = 0.0 if trajectory.reward is None else trajectory.reward
 
+    added_steps = 0
     for step_idx, step in enumerate(trajectory.steps):
         if step.model_output is None or step.model_output.prompt_ids is None:
             logger.warning(f"Step {step_idx} in trajectory {trajectory_id} has no valid model_output, skipping")
@@ -241,9 +242,6 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
         # Extract multimodal inputs if available
         multi_modal_inputs = step.model_output.multi_modal_inputs or {}
         # Construct step_id from trajectory_id and step index
-        # Format: "{trajectory_id}_step{step_idx}"
-        # Example: "abc123_solver_step0", "abc123_judge_step1"
-        # Since trajectory_id doesn't contain rollout info, step_id doesn't either
         step_id = f"{trajectory_id}_step{step_idx}"
 
         step_data = ProcessedStepData(
@@ -264,8 +262,9 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
             is_last=step_idx == n_steps - 1,
             group_role=name,
         )
+        added_steps += 1
 
-    return n_steps
+    return added_steps
 
 
 def _process_episode(episode: Episode, task_id: str, accumulated: AccumulatedData) -> int:
