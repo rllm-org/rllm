@@ -192,6 +192,11 @@ class PipelineTaskRunner:
             workflow_args=workflow_args,
         )
 
+        # Apply NCCL dynamic batch sync patch (fixes verl#5750)
+        from rllm.experimental.verl.patch import patch_verl_dynamic_batch_sync
+
+        patch_verl_dynamic_batch_sync()
+
         trainer.init_workers()
         try:
             trainer.fit_agent()
