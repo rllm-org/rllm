@@ -7,7 +7,6 @@ from verl.protocol import DataProto
 from verl.utils.torch_functional import pad_sequence_to_length
 
 from rllm.agents.agent import Episode, Trajectory, TrajectoryGroup
-from rllm.engine.rollout.rollout_engine import ModelOutput
 from rllm.experimental.rollout import VerlEngine
 from rllm.experimental.verl.dataclass import AccumulatedData, ProcessedStepData
 from rllm.workflows.workflow import TerminationReason
@@ -232,7 +231,7 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
     traj_reward = 0.0 if trajectory.reward is None else trajectory.reward
 
     for step_idx, step in enumerate(trajectory.steps):
-        if step.model_output is None or not isinstance(step.model_output, ModelOutput):
+        if step.model_output is None or step.model_output.prompt_ids is None:
             logger.warning(f"Step {step_idx} in trajectory {trajectory_id} has no valid model_output, skipping")
             continue
         prompt_ids = torch.tensor(step.model_output.prompt_ids, dtype=torch.long)
