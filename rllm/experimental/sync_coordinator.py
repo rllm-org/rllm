@@ -15,23 +15,29 @@ class SyncCoordinatorConfig:
 
     @property
     def max_rollout_quota(self) -> int:
-        """Max outstanding groups (dispatched but not yet consumed by training)."""
+        """Max dispatches per sync window (Verl/AReaL formulation)."""
         return int((1 + self.staleness_threshold) * self.trigger_parameter_sync_step * self.mini_batch_size)
 
 
 class SyncCoordinator:
-    """Coordinates rollout scheduling and parameter sync between generation and training loops."""
+    """Coordinates rollout scheduling and parameter sync between generation and training loops.
+
+    Uses a per-sync-window dispatch counter (matching Verl/AReaL). The counter
+    resets only on weight sync, not on consume. This guarantees zero staleness
+    when staleness_threshold=0.
+    """
 
     def __init__(self, config: SyncCoordinatorConfig):
         self.config = config
 
         self._policy_version: int = 0
-        self._outstanding: int = 0          # groups dispatched but not yet consumed by training
+        self._dispatched_since_sync: int = 0  # groups dispatched in current sync window
+        self._in_flight: int = 0              # groups dispatched but not yet consumed/filtered
         self._steps_since_sync: int = 0
         self._total_syncs: int = 0
         self._total_groups_filtered: int = 0
 
-        # Throttle — blocks generation when outstanding >= max_rollout_quota
+        # Throttle — blocks generation when dispatched_since_sync >= max_rollout_quota
         self._throttle_event: asyncio.Event = asyncio.Event()
         self._throttle_event.set()
 
@@ -47,27 +53,27 @@ class SyncCoordinator:
 
     def on_group_dispatched(self) -> None:
         """Generation loop dispatched one prompt (n rollouts)."""
-        self._outstanding += 1
-        if self._outstanding >= self.config.max_rollout_quota:
+        self._dispatched_since_sync += 1
+        self._in_flight += 1
+        if self._dispatched_since_sync >= self.config.max_rollout_quota:
             self._throttle_event.clear()
 
     def on_group_consumed(self) -> None:
         """Training loop consumed one group from the buffer."""
-        self._outstanding = max(0, self._outstanding - 1)
-        self._throttle_event.set()
+        self._in_flight = max(0, self._in_flight - 1)
 
     def on_group_filtered(self) -> None:
-        """Accumulator filtered out a uniform group. Frees throttle slot and tracks count."""
+        """Accumulator filtered out a group. Decrements in-flight count and tracks stats."""
         self._total_groups_filtered += 1
-        self.on_group_consumed()
+        self._in_flight = max(0, self._in_flight - 1)
 
     async def wait_for_throttle(self) -> None:
-        """Generation loop blocks here when quota is full."""
+        """Generation loop blocks here when dispatch window is full."""
         await self._throttle_event.wait()
 
     def has_quota(self) -> bool:
         """Whether the generation loop can dispatch another group."""
-        return self._outstanding < self.config.max_rollout_quota
+        return self._dispatched_since_sync < self.config.max_rollout_quota
 
     # --- Weight sync ---
 
@@ -81,6 +87,11 @@ class SyncCoordinator:
         self._policy_version += 1
         self._steps_since_sync = 0
         self._total_syncs += 1
+        # Reset dispatch window. In-flight items span the sync boundary —
+        # they were dispatched with old weights and count toward the new window.
+        self._dispatched_since_sync = self._in_flight
+        if self._dispatched_since_sync < self.config.max_rollout_quota:
+            self._throttle_event.set()
 
     # --- Generation pause (for validation / weight sync if partial_rollout is False) ---
 
@@ -96,7 +107,8 @@ class SyncCoordinator:
     def stats(self) -> dict:
         return {
             "async/policy_version": self._policy_version,
-            "async/outstanding_groups": self._outstanding,
+            "async/dispatched_since_sync": self._dispatched_since_sync,
+            "async/in_flight_groups": self._in_flight,
             "async/steps_since_sync": self._steps_since_sync,
             "async/max_rollout_quota": self.config.max_rollout_quota,
             "async/total_syncs": self._total_syncs,
