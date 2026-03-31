@@ -4,7 +4,10 @@ Directly adapted from verl.utils.profiler.performance.py
 
 from contextlib import contextmanager
 
-from codetiming import Timer
+try:
+    from codetiming import Timer
+except ImportError as err:
+    raise ImportError("Performance timing requires extra dependencies. Install with: pip install rllm[train]") from err
 
 
 def _timer(name: str, timing_raw: dict[str, float]):

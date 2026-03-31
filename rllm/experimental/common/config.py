@@ -85,7 +85,15 @@ class CompactFilteringConfig:
         """
         if not self.enable:
             return False
-        return (self.mask_max_prompt_length_exceeded and termination_reason == TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED) or (self.mask_max_response_length_exceeded and termination_reason == TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED) or (self.mask_env_done and termination_reason == TerminationReason.ENV_DONE) or (self.mask_max_turns_exceeded and termination_reason == TerminationReason.MAX_TURNS_EXCEEDED) or (self.mask_timeout and termination_reason == TerminationReason.TIMEOUT) or (self.mask_unknown and termination_reason == TerminationReason.UNKNOWN) or (self.mask_error and termination_reason == TerminationReason.ERROR)
+        return (
+            (self.mask_max_prompt_length_exceeded and termination_reason == TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
+            or (self.mask_max_response_length_exceeded and termination_reason == TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED)
+            or (self.mask_env_done and termination_reason == TerminationReason.ENV_DONE)
+            or (self.mask_max_turns_exceeded and termination_reason == TerminationReason.MAX_TURNS_EXCEEDED)
+            or (self.mask_timeout and termination_reason == TerminationReason.TIMEOUT)
+            or (self.mask_unknown and termination_reason == TerminationReason.UNKNOWN)
+            or (self.mask_error and termination_reason == TerminationReason.ERROR)
+        )
 
 
 @dataclass
@@ -164,11 +172,23 @@ class rLLMAdvantageEstimator(str, Enum):
 
 @dataclass
 class AlgorithmConfig:
-    """Configuration for algorithm parameters."""
+    """Configuration for algorithm parameters.
+
+    ``estimator_map`` values may be:
+
+    * A bare estimator name or enum — only the advantage estimator is overridden.
+    * A ``(estimator, policy_loss)`` tuple — both the advantage estimator *and*
+      the backend policy loss function are overridden for that role.
+
+    During ``__post_init__``, tuples are split: the estimator goes into
+    ``estimator_map`` and the loss function goes into ``loss_fn_map``.
+    """
 
     use_rllm: bool = False  # This is ignored (assumed True) for tinker backend.
     estimator: rLLMAdvantageEstimator = rLLMAdvantageEstimator.GRPO
-    estimator_map: dict[str, rLLMAdvantageEstimator | str] = field(default_factory=dict)
+    estimator_map: dict[str, rLLMAdvantageEstimator | str | tuple] = field(default_factory=dict)
+    # Per-role policy loss overrides (populated from tuples in estimator_map during __post_init__)
+    loss_fn_map: dict[str, str] = field(default_factory=dict)
     # TODO(listar2000): eventually we will remove the `per_step` mode all-together. Now we keep it for backward compatibility.
     stepwise_advantage_mode: Literal["broadcast", "per_step"] = "broadcast"
     norm_adv_by_std_in_grpo: bool = True
@@ -176,8 +196,8 @@ class AlgorithmConfig:
     # advantage computation (GRPO/REINFORCE). Steps missing advantages default to 0.0.
     # When False (default), always compute advantages normally.
     use_precomputed_advantage: bool = False
-    # for tinker backend only
-    loss_fn: Literal["importance_sampling", "ppo", "cispo", "dro", "cross_entropy", "grpo", "dapo", "gspo"] | None = None
+    # Global loss_fn override (for tinker backend; Verl uses loss_fn_map per role)
+    loss_fn: Literal["importance_sampling", "ppo", "cispo", "dro", "cross_entropy"] | None = None
     lr_schedule: Literal["linear", "cosine", "constant"] = "constant"
     warmup_steps_ratio: float = 0.0
 
@@ -222,11 +242,29 @@ class AlgorithmConfig:
         )
 
     def __post_init__(self):
+        # Normalize estimator_map: split (estimator, loss_fn) tuples.
+        normalized_map: dict[str, rLLMAdvantageEstimator | str] = {}
+        for role, value in self.estimator_map.items():
+            if isinstance(value, tuple):
+                if len(value) != 2:
+                    raise ValueError(f"estimator_map tuple for role '{role}' must have exactly 2 elements (estimator, loss_fn), got {len(value)}")
+                estimator, loss_fn = value
+                normalized_map[role] = estimator
+                self.loss_fn_map[role] = str(loss_fn)
+            else:
+                normalized_map[role] = value
+        self.estimator_map = normalized_map
+
         if self.stepwise_advantage_mode == "per_step":
             from warnings import warn
 
             warn(
-                "The `per_step` mode is deprecated in experimental unified trainer. Set to `broadcast` mode automatically. Please either use the legacy trainers (`agent_workflow_trainer` for `Verl` or `tinker_workflow_trainer` for `Tinker`) with the `per_step` configuration. Or manually pass in a hook with the implementation of `per_step` advantage computation logic.",
+                "The `per_step` mode is deprecated in experimental unified trainer. "
+                "Set to `broadcast` mode automatically. Please either use the legacy "
+                "trainers (`agent_workflow_trainer` for `Verl` or "
+                "`tinker_workflow_trainer` for `Tinker`) with the `per_step` "
+                "configuration, or manually pass in a hook with the implementation "
+                "of `per_step` advantage computation logic.",
                 DeprecationWarning,
                 stacklevel=2,
             )

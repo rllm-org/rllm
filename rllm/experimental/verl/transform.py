@@ -6,7 +6,7 @@ from verl.protocol import DataProto
 from verl.utils.torch_functional import pad_sequence_to_length
 
 from rllm.agents.agent import Episode, Trajectory, TrajectoryGroup
-from rllm.engine.rollout import ModelOutput, VerlEngine
+from rllm.experimental.rollout import VerlEngine
 from rllm.experimental.verl.dataclass import AccumulatedData, ProcessedStepData
 from rllm.workflows.workflow import TerminationReason
 
@@ -161,7 +161,9 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
 
     traj_mask = _pad_sequence_batch(accumulated.traj_mask, 0, max_response_length, left_pad=False)  # shape: [bs, max_response_length]
 
-    step_rewards_batch, traj_rewards_batch = _build_step_and_trajectory_rewards(accumulated.step_rewards, accumulated.traj_rewards, responses_batch, accumulated.responses)  # shape: [bs, max_response_length]
+    step_rewards_batch, traj_rewards_batch = _build_step_and_trajectory_rewards(
+        accumulated.step_rewards, accumulated.traj_rewards, responses_batch, accumulated.responses
+    )  # shape: [bs, max_response_length]
 
     non_tensors = {
         "episode_ids": np.array(accumulated.episode_ids),  # unique identifier for each rollout
@@ -176,6 +178,8 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
         "is_last_step": np.array(accumulated.is_last_step),
         # The padding is done after the transform (in `_pad_dataproto_to_world_size`), so we simply set all to False here
         "is_pad_step": np.zeros(len(accumulated.trajectory_ids), dtype=bool),
+        # Per-row trajectory role name (for per-role loss routing)
+        "group_roles": np.array(accumulated.group_roles, dtype=object),
     }
 
     # Include multi_modal_inputs in non_tensors if any are present
@@ -224,9 +228,6 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
     traj_reward = 0.0 if trajectory.reward is None else trajectory.reward
 
     for step_idx, step in enumerate(trajectory.steps):
-        if not isinstance(step.model_output, ModelOutput):
-            raise TypeError(f"Step {step_idx} in trajectory {trajectory_id} must have a valid model output, but got {type(step.model_output)}")
-
         prompt_ids = torch.tensor(step.model_output.prompt_ids, dtype=torch.long)
         response_ids = torch.tensor(step.model_output.completion_ids, dtype=torch.long)
         mask = torch.ones_like(response_ids, dtype=torch.long)
@@ -255,6 +256,7 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
             traj_reward=traj_reward,
             step_num=n_steps,
             is_last=step_idx == n_steps - 1,
+            group_role=name,
         )
 
     return n_steps
@@ -373,14 +375,23 @@ def update_dataproto_with_advantages(batch: DataProto, container: list[Episode] 
     Updates a DataProto with advantages. Useful when we use rLLM-native advantage computation,
     after which we need to update the DataProto with the advantages.
     """
-    # flatten the steps in the container exactly like how we build it up
-    advantages = []
+    # Build a step_id → advantage mapping from episodes/trajectory groups.
+    # step_id format must match _process_trajectory: f"{task_id}_{trajectory.name}_step{step_idx}"
+    adv_by_step_id: dict[str, float] = {}
     for item in container:
         for trajectory in item.trajectories:
-            for step in trajectory.steps:
-                advantages.append(step.advantage)
+            trajectory_id = f"{item.task_id}_{trajectory.name}"
+            for step_idx, step in enumerate(trajectory.steps):
+                step_id = f"{trajectory_id}_step{step_idx}"
+                adv_by_step_id[step_id] = step.advantage if step.advantage is not None else 0.0
 
-    assert len(advantages) == len(batch.non_tensor_batch["trajectory_ids"]), "Advantages must have the same length as the number of total steps"
+    # Match advantages to batch entries by step_id (robust to batch reordering and padding)
+    n_total = len(batch.non_tensor_batch["trajectory_ids"])
+    step_ids = batch.non_tensor_batch["step_ids"]
+    is_pad = batch.non_tensor_batch.get("is_pad_step", np.zeros(n_total, dtype=bool))
+
+    advantages = [0.0 if is_pad[i] else adv_by_step_id.get(str(step_ids[i]), 0.0) for i in range(n_total)]
+
     advantage_tensor = _build_per_step_advantages(batch.batch["response_mask"], advantages)
     batch.batch["advantages"] = advantage_tensor
     batch.batch["returns"] = advantage_tensor

@@ -86,66 +86,69 @@ def check_correctness(tests: list[dict[str, str]] | dict[str, list[str]], code: 
             - dict: Detailed test results with test cases and pass/fail status
     """
     manager = Manager()
-    test_results = manager.list()
+    try:
+        test_results = manager.list()
 
-    def evaluate_code(tests, generation, debug, test_results, test_fn):
-        """Helper function to run tests in separate process."""
-        try:
-            test_results.append(test_fn(tests, test=generation, debug=debug, timeout=timeout_per_test))
-        except Exception as e:
-            print(f"Error in evaluate_code: {e}")
+        def evaluate_code(tests, generation, debug, test_results, test_fn):
+            """Helper function to run tests in separate process."""
+            try:
+                test_results.append(test_fn(tests, test=generation, debug=debug, timeout=timeout_per_test))
+            except Exception as e:
+                print(f"Error in evaluate_code: {e}")
 
-    original_tests = tests
-    if isinstance(tests, list):
-        list_tests = tests
-        total_tests = len(list_tests)
-        if total_tests > max_tests:
-            # Sort indices by test input length and take the max_tests longest ones
-            selected_indices = sorted(range(total_tests), key=lambda i: len(list_tests[i]["input"]), reverse=True)[:max_tests]
-            tests = [list_tests[i] for i in selected_indices]
-        num_tests = len(tests)
-    else:
-        dict_tests = tests
-        total_tests = len(dict_tests["inputs"])
-        if total_tests > max_tests:
-            # Select the tests with the longest input length.
-            selected_indices = sorted(range(total_tests), key=lambda i: len(dict_tests["inputs"][i]), reverse=True)[:max_tests]
-            # Create a new dict with only the selected test cases
-            selected_tests: dict[str, list[str]] = {"inputs": [dict_tests["inputs"][i] for i in selected_indices], "outputs": [dict_tests["outputs"][i] for i in selected_indices]}
-            tests = selected_tests
-        num_tests = len(tests["inputs"])
+        original_tests = tests
+        if isinstance(tests, list):
+            list_tests = tests
+            total_tests = len(list_tests)
+            if total_tests > max_tests:
+                # Sort indices by test input length and take the max_tests longest ones
+                selected_indices = sorted(range(total_tests), key=lambda i: len(list_tests[i]["input"]), reverse=True)[:max_tests]
+                tests = [list_tests[i] for i in selected_indices]
+            num_tests = len(tests)
+        else:
+            dict_tests = tests
+            total_tests = len(dict_tests["inputs"])
+            if total_tests > max_tests:
+                # Select the tests with the longest input length.
+                selected_indices = sorted(range(total_tests), key=lambda i: len(dict_tests["inputs"][i]), reverse=True)[:max_tests]
+                # Create a new dict with only the selected test cases
+                selected_tests: dict[str, list[str]] = {"inputs": [dict_tests["inputs"][i] for i in selected_indices], "outputs": [dict_tests["outputs"][i] for i in selected_indices]}
+                tests = selected_tests
+            num_tests = len(tests["inputs"])
 
-    process = multiprocessing.Process(target=evaluate_code, args=(tests, code, False, test_results, test_fn))
-    process.start()
-    process.join()
+        process = multiprocessing.Process(target=evaluate_code, args=(tests, code, False, test_results, test_fn))
+        process.start()
+        process.join()
 
-    if process.is_alive():
-        process.kill()
-    test_results_list = list(test_results)
+        if process.is_alive():
+            process.kill()
+        test_results_list = list(test_results)
 
-    detailed_results: dict[str, Any] = {"all_passed": False, "test_results": [], "total_tests": num_tests, "passed_tests": 0}
+        detailed_results: dict[str, Any] = {"all_passed": False, "test_results": [], "total_tests": num_tests, "passed_tests": 0}
 
-    if len(test_results_list) == 0:
-        return False, detailed_results
+        if len(test_results_list) == 0:
+            return False, detailed_results
 
-    test_results_data = test_results_list[0]
-    passed_results = [r == True for r in test_results_data]
+        test_results_data = test_results_list[0]
+        passed_results = [r == True for r in test_results_data]
 
-    # Create detailed test results
-    test_results_list_typed: list[dict[str, Any]] = detailed_results["test_results"]
-    if isinstance(original_tests, list):
-        assert isinstance(tests, list)
-        for i, (test, result) in enumerate(zip(tests, passed_results, strict=False)):
-            test_results_list_typed.append({"input": test.get("input", ""), "expected": test.get("output", ""), "passed": result})
-    else:
-        assert isinstance(tests, dict)
-        for i, (inp, out, result) in enumerate(zip(tests["inputs"], tests["outputs"], passed_results, strict=False)):
-            test_results_list_typed.append({"input": inp, "expected": out, "passed": result})
+        # Create detailed test results
+        test_results_list_typed: list[dict[str, Any]] = detailed_results["test_results"]
+        if isinstance(original_tests, list):
+            assert isinstance(tests, list)
+            for i, (test, result) in enumerate(zip(tests, passed_results, strict=False)):
+                test_results_list_typed.append({"input": test.get("input", ""), "expected": test.get("output", ""), "passed": result})
+        else:
+            assert isinstance(tests, dict)
+            for i, (inp, out, result) in enumerate(zip(tests["inputs"], tests["outputs"], passed_results, strict=False)):
+                test_results_list_typed.append({"input": inp, "expected": out, "passed": result})
 
-    detailed_results["passed_tests"] = sum(passed_results)
-    detailed_results["all_passed"] = all(passed_results)
+        detailed_results["passed_tests"] = sum(passed_results)
+        detailed_results["all_passed"] = all(passed_results)
 
-    return all(passed_results), detailed_results
+        return all(passed_results), detailed_results
+    finally:
+        manager.shutdown()
 
 
 def postprocess_lcb_sample(sample):
@@ -213,41 +216,44 @@ def lcb_check_correctness_v2(sample, generation, timeout=6, debug=False):
     sample = postprocess_lcb_sample(sample)
 
     manager = multiprocessing.Manager()
-    result = manager.list()
-    metadata_list = manager.list()
+    try:
+        result = manager.list()
+        metadata_list = manager.list()
 
-    p = multiprocessing.Process(
-        target=_temp_run,
-        args=(sample, generation, debug, result, metadata_list, timeout),
-    )
-    p.start()
-    p.join(timeout=(timeout + 1) * len(json.loads(sample["input_output"])["inputs"]) + 5)
+        p = multiprocessing.Process(
+            target=_temp_run,
+            args=(sample, generation, debug, result, metadata_list, timeout),
+        )
+        p.start()
+        p.join(timeout=(timeout + 1) * len(json.loads(sample["input_output"])["inputs"]) + 5)
 
-    detailed_results = {"all_passed": False, "test_results": [], "total_tests": 0, "passed_tests": 0}
+        detailed_results = {"all_passed": False, "test_results": [], "total_tests": 0, "passed_tests": 0}
 
-    if p.is_alive():
-        p.kill()
-    if not result:
+        if p.is_alive():
+            p.kill()
+        if not result:
+            in_outs = json.loads(sample["input_output"])
+            # consider that all tests failed
+            result.extend([[-1 for i in range(len(in_outs["inputs"]))]])
+            detailed_results["total_tests"] = len(in_outs["inputs"])
+            detailed_results["test_results"] = [{"input": inp, "expected": out, "passed": False, "error": "global timeout"} for inp, out in zip(in_outs["inputs"], in_outs["outputs"], strict=False)]
+            if debug:
+                print("global timeout")
+            return False, detailed_results
+
+        if not result:
+            return False, detailed_results
+
+        # Create detailed test results
         in_outs = json.loads(sample["input_output"])
-        # consider that all tests failed
-        result.extend([[-1 for i in range(len(in_outs["inputs"]))]])
-        detailed_results["total_tests"] = len(in_outs["inputs"])
-        detailed_results["test_results"] = [{"input": inp, "expected": out, "passed": False, "error": "global timeout"} for inp, out in zip(in_outs["inputs"], in_outs["outputs"], strict=False)]
-        if debug:
-            print("global timeout")
-        return False, detailed_results
+        detailed_results["total_tests"] = len(result[0])
+        detailed_results["test_results"] = [{"input": inp, "expected": out, "passed": res == True, "error": metadata_list[0].get("error", None), "error_message": metadata_list[0].get("error_message", None), "output": metadata_list[0].get("output", None)} for inp, out, res in zip(in_outs["inputs"], in_outs["outputs"], result[0], strict=False)]
+        detailed_results["passed_tests"] = sum(1 for r in result[0] if r == True)
+        detailed_results["all_passed"] = all(r == True for r in result[0])
 
-    if not result:
-        return False, detailed_results
-
-    # Create detailed test results
-    in_outs = json.loads(sample["input_output"])
-    detailed_results["total_tests"] = len(result[0])
-    detailed_results["test_results"] = [{"input": inp, "expected": out, "passed": res == True, "error": metadata_list[0].get("error", None), "error_message": metadata_list[0].get("error_message", None), "output": metadata_list[0].get("output", None)} for inp, out, res in zip(in_outs["inputs"], in_outs["outputs"], result[0], strict=False)]
-    detailed_results["passed_tests"] = sum(1 for r in result[0] if r == True)
-    detailed_results["all_passed"] = all(r == True for r in result[0])
-
-    return all(x == True for x in result[0]), detailed_results
+        return all(x == True for x in result[0]), detailed_results
+    finally:
+        manager.shutdown()
 
 
 def leetcode_check_correctness(tests: dict[str, str], code: str) -> tuple[bool, dict[str, Any]]:

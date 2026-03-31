@@ -80,11 +80,11 @@ class AgentSdkTrainer(RayPPOTrainer):
     def init_workers(self):
         """Initialize workers with instrumented vLLM servers for distributed rollouts."""
         import ray
-        from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServerBase, vLLMReplica
+        from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
 
         # Create an instrumented vLLM HTTP server class
         @ray.remote(num_cpus=1)
-        class InstrumentedvLLMHttpServer(vLLMHttpServerBase):
+        class InstrumentedvLLMHttpServer(vLLMHttpServer):
             """vLLM HTTP server with automatic vLLM instrumentation in Ray worker."""
 
             def __init__(self, *args, **kwargs):
@@ -209,8 +209,6 @@ class AgentSdkTrainer(RayPPOTrainer):
 
                 new_batch.non_tensor_batch["task_ids"] = np.array([str(uuid.uuid4()) for _ in range(len(new_batch.batch))], dtype=object)
                 new_batch = new_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n)
-
-                new_batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"])
 
                 with marked_timer("step", timing_raw):
                     # generate trajectories
@@ -551,7 +549,6 @@ class AgentSdkTrainer(RayPPOTrainer):
             n_val_samples = self.config.actor_rollout_ref.rollout.val_kwargs.n
             test_batch = test_batch.repeat(repeat_times=n_val_samples, interleave=True)
 
-            test_batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"])  # these are not needed for environment based interaction
             test_batch.meta_info = {"validate": True}
 
             test_output_gen_batch = self.generate_trajectories(batch=test_batch)
@@ -661,7 +658,9 @@ class AgentSdkTrainer(RayPPOTrainer):
             traj_ep_to_scalar_adv[(traj_id, eps_id)] = scalar
 
         # Create new tensor for non_last_step_batch with per-token assignment
-        scalar_rows = torch.stack([torch.full_like(tgt_mask[i], fill_value=traj_ep_to_scalar_adv[(traj_id, eps_id)], dtype=torch.float32) for i, (traj_id, eps_id) in enumerate(zip(tgt_traj_ids, tgt_eps_ids, strict=False))])  # shape: (N2, T)
+        scalar_rows = torch.stack(
+            [torch.full_like(tgt_mask[i], fill_value=traj_ep_to_scalar_adv[(traj_id, eps_id)], dtype=torch.float32) for i, (traj_id, eps_id) in enumerate(zip(tgt_traj_ids, tgt_eps_ids, strict=False))]
+        )  # shape: (N2, T)
 
         # Apply the response mask of the target batch
         final_advantage = scalar_rows * tgt_mask

@@ -8,8 +8,8 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 from starlette.requests import Request
@@ -78,12 +78,14 @@ class ReverseProxy:
         strip_vllm: bool = True,
         sync_traces: bool = False,
         max_retries: int = 2,
+        local_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
         self.router = router
         self.store = store
         self.strip_vllm = strip_vllm
         self.sync_traces = sync_traces
         self.max_retries = max_retries
+        self.local_handler = local_handler
         self._http: httpx.AsyncClient | None = None
         self._pending_traces: set[asyncio.Task[None]] = set()
 
@@ -142,57 +144,57 @@ class ReverseProxy:
         session_id: str | None,
         originally_requested_logprobs: bool = False,
     ) -> Response:
-        worker = self.router.route(session_id)
-        url = self._build_url(worker.url, request.url.path, str(request.url.query))
-        headers = self._forward_headers(request)
         t0 = time.perf_counter()
-        try:
-            resp = await self._send_with_retry(
-                method=request.method,
-                url=url,
-                content=raw_body,
-                headers=headers,
-            )
-            content = resp.content
-        finally:
-            self.router.release(worker.url)
-        latency_ms = (time.perf_counter() - t0) * 1000
 
-        # Parse response for trace extraction
-        try:
-            response_body = json.loads(content)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            response_body = {}
+        if self.local_handler is not None:
+            # In-process path: call handler directly, no HTTP
+            response_body = await self.local_handler(request_body)
+            status_code = 200
+        else:
+            # HTTP proxy path
+            worker = self.router.route(session_id)
+            url = self._build_url(worker.api_url, request.url.path, str(request.url.query))
+            headers = self._forward_headers(request)
+            try:
+                resp = await self._send_with_retry(
+                    method=request.method,
+                    url=url,
+                    content=raw_body,
+                    headers=headers,
+                )
+                content = resp.content
+                status_code = resp.status_code
+            finally:
+                self.router.release(worker.url)
+
+            # Parse response for trace extraction
+            try:
+                response_body = json.loads(content)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                response_body = {}
+
+        latency_ms = (time.perf_counter() - t0) * 1000
 
         # Persist trace
         if session_id and response_body:
             trace = build_trace_record(session_id, request_body, response_body, latency_ms)
             await self._persist(trace)
 
-        # Sanitise response — fast path when nothing needs modifying
+        # Sanitise response
         needs_strip_vllm = self.strip_vllm
         needs_strip_logprobs = not originally_requested_logprobs
-        if not needs_strip_vllm and not needs_strip_logprobs:
-            return Response(
-                content=content,
-                status_code=resp.status_code,
-                media_type=resp.headers.get("content-type", "application/json"),
-            )
 
+        sanitized = response_body
         if isinstance(response_body, dict) and response_body:
-            sanitized = strip_vllm_fields(response_body) if needs_strip_vllm else response_body
+            if needs_strip_vllm:
+                sanitized = strip_vllm_fields(response_body)
             if needs_strip_logprobs:
                 sanitized = _strip_logprobs(sanitized)
-            return Response(
-                content=json.dumps(sanitized),
-                status_code=resp.status_code,
-                media_type="application/json",
-            )
 
         return Response(
-            content=content,
-            status_code=resp.status_code,
-            media_type=resp.headers.get("content-type", "application/json"),
+            content=json.dumps(sanitized),
+            status_code=status_code,
+            media_type="application/json",
         )
 
     # ------------------------------------------------------------------
@@ -207,8 +209,11 @@ class ReverseProxy:
         session_id: str | None,
         originally_requested_logprobs: bool = False,
     ) -> StreamingResponse:
+        if self.local_handler is not None:
+            return await self._handle_streaming_local(request_body, session_id, originally_requested_logprobs)
+
         worker = self.router.route(session_id)
-        url = self._build_url(worker.url, request.url.path, str(request.url.query))
+        url = self._build_url(worker.api_url, request.url.path, str(request.url.query))
         headers = self._forward_headers(request)
 
         assert self._http is not None
@@ -279,6 +284,107 @@ class ReverseProxy:
             status_code=resp.status_code,
         )
 
+    async def _handle_streaming_local(
+        self,
+        request_body: dict[str, Any],
+        session_id: str | None,
+        originally_requested_logprobs: bool = False,
+    ) -> StreamingResponse:
+        """Handle streaming when using a local handler (fake-streaming)."""
+        assert self.local_handler is not None
+        t0 = time.perf_counter()
+        response_body = await self.local_handler(request_body)
+        latency_ms = (time.perf_counter() - t0) * 1000
+
+        # Persist trace from the full response
+        if session_id and response_body:
+            trace = build_trace_record(session_id, request_body, response_body, latency_ms)
+            await self._persist(trace)
+
+        needs_strip_vllm = self.strip_vllm
+        needs_strip_logprobs = not originally_requested_logprobs
+
+        # Build SSE chunks from the complete response
+        chat_id = response_body.get("id", "chatcmpl-local")
+        created = response_body.get("created", int(time.time()))
+        model = response_body.get("model", "")
+        choices = response_body.get("choices", [])
+        first_choice = choices[0] if choices else {}
+        message = first_choice.get("message", {})
+        finish_reason = first_choice.get("finish_reason", "stop")
+
+        def _sanitize_chunk(chunk: dict[str, Any]) -> dict[str, Any]:
+            sanitized = strip_vllm_fields(chunk) if needs_strip_vllm else chunk
+            if needs_strip_logprobs:
+                sanitized = _strip_logprobs(sanitized)
+            return sanitized
+
+        async def event_generator():
+            def _sse(data: str) -> str:
+                return f"data: {data}\n\n"
+
+            # Chunk 1: role
+            yield _sse(
+                json.dumps(
+                    _sanitize_chunk(
+                        {
+                            "id": chat_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
+                        }
+                    )
+                )
+            )
+
+            # Chunk 2: full content + token data
+            delta: dict[str, Any] = {}
+            if message.get("content"):
+                delta["content"] = message["content"]
+            if message.get("reasoning"):
+                delta["reasoning"] = message["reasoning"]
+            if message.get("tool_calls"):
+                delta["tool_calls"] = message["tool_calls"]
+
+            content_chunk: dict[str, Any] = {
+                "id": chat_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": delta,
+                        "finish_reason": None,
+                        "token_ids": first_choice.get("token_ids", []),
+                        "logprobs": first_choice.get("logprobs"),
+                    }
+                ],
+                "prompt_token_ids": response_body.get("prompt_token_ids", []),
+            }
+            yield _sse(json.dumps(_sanitize_chunk(content_chunk)))
+
+            # Chunk 3: finish + usage
+            yield _sse(
+                json.dumps(
+                    _sanitize_chunk(
+                        {
+                            "id": chat_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+                            "usage": response_body.get("usage", {}),
+                        }
+                    )
+                )
+            )
+
+            yield _sse("[DONE]")
+
+        return StreamingResponse(event_generator(), media_type="text/event-stream", status_code=200)
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
@@ -326,14 +432,13 @@ class ReverseProxy:
             logger.exception("Failed to persist trace %s", trace_id)
 
     @staticmethod
-    def _build_url(worker_url: str, path: str, query: str) -> str:
+    def _build_url(worker_url: str, path: str, query: str, *, gateway_prefix: str = "/v1") -> str:
         base = worker_url.rstrip("/")
-        # Avoid double path prefixes.  If the worker URL already contains
-        # a path component (e.g. /v1) that matches the start of the
-        # request path, strip the overlap so we don't get /v1/v1/...
-        worker_path = urlparse(base).path
-        if len(worker_path) > 1 and path.startswith(worker_path):
-            path = path[len(worker_path) :]
+        # Strip the gateway's own prefix to get the tail (e.g. /chat/completions).
+        # The gateway always exposes routes under /v1/{path}, so request paths
+        # arrive as /v1/... regardless of the worker's actual api_path.
+        if path.startswith(gateway_prefix):
+            path = path[len(gateway_prefix) :]
         url = f"{base}{path}"
         if query:
             url = f"{url}?{query}"

@@ -177,8 +177,6 @@ class FireworksAgentWorkflowPPOTrainer(AgentWorkflowPPOTrainer):
                 new_batch.non_tensor_batch["task_ids"] = np.array([str(uuid.uuid4()) for _ in range(len(new_batch.batch))], dtype=object)
                 new_batch = new_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n)
 
-                new_batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"])
-
                 with marked_timer("step", timing_raw):
                     # generate trajectories
                     final_gen_batch_output = self.generate_trajectories(batch=new_batch, timing_raw=timing_raw)

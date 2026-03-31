@@ -1,4 +1,3 @@
-import asyncio
 import uuid
 from typing import cast
 
@@ -20,7 +19,10 @@ class VerlEngine(RolloutEngine):
             raise ValueError(f"VerlEngine only supports vllm or sglang rollout, but got {config.actor_rollout_ref.rollout.name}")
 
         self.rollout_manager: AgentLoopManager = rollout_manager
-        self.server_manager = AsyncLLMServerManager(config, server_handles=rollout_manager.server_handles)
+        # reconstruct the servers list from the server_addresses and server_handles (Verl 0.7.0+)
+        servers = zip(rollout_manager.server_addresses, rollout_manager.server_handles, strict=True)
+        self.server_manager = AsyncLLMServerManager(config, servers=servers, load_balancer_handle=rollout_manager.global_load_balancer)
+
         self.tokenizer = tokenizer
         self.processor = processor
         self.chat_parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=config.get("rllm", {}).get("disable_thinking", False))
@@ -129,11 +131,3 @@ class VerlEngine(RolloutEngine):
             completion_length=len(completion_ids),
             finish_reason=finish_reason,
         )
-
-    async def wake_up(self):
-        """Wake up all rollout replica instances asynchronously."""
-        await asyncio.gather(*[replica.wake_up() for replica in self.rollout_manager.rollout_replicas])
-
-    async def sleep(self):
-        """Sleep all rollout replica instances asynchronously."""
-        await asyncio.gather(*[replica.sleep() for replica in self.rollout_manager.rollout_replicas])

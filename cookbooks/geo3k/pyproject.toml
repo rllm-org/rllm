@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geo3k-flow"
+version = "0.1.0"
+description = "Geo3K VLM geometry solver plugin for rLLM (AgentFlow protocol)"
+requires-python = ">=3.10"
+dependencies = ["rllm", "openai"]
+
+[tool.setuptools]
+py-modules = ["geo3k_flow", "evaluator"]
+
+# Plugin discovery: rllm CLI finds these by name
+[project.entry-points."rllm.agents"]
+geo3k = "geo3k_flow:geo3k_agent"
+
+[project.entry-points."rllm.evaluators"]
+geo3k_math = "evaluator:Geo3KEvaluator"

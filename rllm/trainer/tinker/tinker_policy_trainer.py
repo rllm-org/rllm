@@ -43,6 +43,7 @@ ADV_TO_LOSS_FN_AUTO_MAP = {
 }
 
 DEFAULT_LOSS_FN = "importance_sampling"
+TINKER_KNOWN_LOSSES = {"importance_sampling", "ppo", "cispo", "dro", "cross_entropy"}
 
 
 # helper decorator for any function requiring a training client to be initialized
@@ -141,11 +142,7 @@ class TinkerPolicyTrainer:
         if resume_info:
             # Resume from checkpoint
             logger.info(f"Resuming from checkpoint: {resume_info}")
-            try:
-                self.training_client = await self.service_client.create_training_client_from_state_async(resume_info["state_path"])
-            except Exception as e:
-                logger.error(f"Failed to resume from checkpoint: {e}")
-                raise
+            self.training_client = await self.service_client.create_training_client_from_state_async(resume_info["state_path"])
 
             if "sampler_path" in resume_info:
                 logger.info(f"Using sampler checkpoint: {resume_info['sampler_path']}")
@@ -198,7 +195,10 @@ class TinkerPolicyTrainer:
         if isinstance(training_datums, dict):
             for group_role, datums in training_datums.items():
                 estimator = estimator_map.get(group_role, self.algorithm_config.estimator)
-                loss_fn = algorithm_config.loss_fn or ADV_TO_LOSS_FN_AUTO_MAP.get(estimator, DEFAULT_LOSS_FN)
+                loss_fn = algorithm_config.loss_fn_map.get(group_role) or algorithm_config.loss_fn or ADV_TO_LOSS_FN_AUTO_MAP.get(estimator, DEFAULT_LOSS_FN)
+                if loss_fn not in TINKER_KNOWN_LOSSES:
+                    logger.warning(f"Unknown Tinker loss '{loss_fn}' for role '{group_role}', falling back to '{DEFAULT_LOSS_FN}'")
+                    loss_fn = DEFAULT_LOSS_FN
                 fwd_bwd_future = await self.training_client.forward_backward_async(
                     [self._remove_mask(datum) for datum in datums],
                     loss_fn=loss_fn,  # type: ignore[attr-defined]
@@ -388,6 +388,9 @@ class TinkerPolicyTrainer:
         Returns:
             Resume info dictionary or None if no checkpoint exists
         """
+        # TODO: default_local_dir is shared across all experiments (e.g. /tmp/rllm-tinker-checkpoints),
+        # so this can load checkpoints from a different model/experiment. Should scope by experiment
+        # name like tinker-cookbook does with its per-experiment log_path.
         return checkpoint_utils.get_last_checkpoint(self.config.training.default_local_dir)
 
     @require_training_client

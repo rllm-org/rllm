@@ -66,9 +66,9 @@ rollout_engine:
 data:
   train_files: null
   val_files: null
-  max_prompt_length: 2048
+  max_prompt_length: 30720
   max_response_length: 2048
-  train_batch_size: 64
+  train_batch_size: 32
   val_batch_size: 32
 
 # On-policy Self-Distillation (OPSD) Configuration

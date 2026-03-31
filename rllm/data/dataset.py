@@ -1,17 +1,18 @@
 import json
 import logging
 import os
+import shutil
 from typing import Any
-
-import pandas as pd
-import polars as pl
-import torch
 
 logger = logging.getLogger(__name__)
 
 
-class Dataset(torch.utils.data.Dataset):
-    """A class representing a dataset."""
+class Dataset:
+    """A class representing a dataset.
+
+    Implements the ``__len__``/``__getitem__`` protocol expected by
+    ``torch.utils.data.DataLoader`` without requiring torch at import time.
+    """
 
     def __init__(self, data: list[dict[str, Any]], name: str | None = None, split: str | None = None):
         """Initialize a Dataset.
@@ -21,7 +22,6 @@ class Dataset(torch.utils.data.Dataset):
             name: Optional name for the dataset
             split: Optional split name (e.g., 'train', 'test')
         """
-        super().__init__()
         self.data = data
         self.name = name
         self.split = split
@@ -103,10 +103,14 @@ class Dataset(torch.utils.data.Dataset):
             return None
 
         registry = DatasetRegistry._load_registry()
-        if self.name not in registry or self.split not in registry[self.name]:
+        datasets = registry.get("datasets", {})
+        if self.name not in datasets:
+            return None
+        splits = datasets[self.name].get("splits", {})
+        if self.split not in splits:
             return None
 
-        return registry[self.name][self.split]
+        return DatasetRegistry._resolve_path(splits[self.split]["path"])
 
     def get_verl_data_path(self) -> str | None:
         """Get the absolute path of the Verl-processed dataset file.
@@ -118,7 +122,11 @@ class Dataset(torch.utils.data.Dataset):
         if data_path is None:
             return None
 
-        verl_path = data_path.replace(".parquet", "_verl.parquet")
+        # .arrow files store the verl companion as _verl.parquet
+        if data_path.endswith(".arrow"):
+            verl_path = data_path[: -len(".arrow")] + "_verl.parquet"
+        else:
+            verl_path = data_path.replace(".parquet", "_verl.parquet")
         return verl_path if os.path.exists(verl_path) else None
 
     @classmethod
@@ -149,9 +157,15 @@ class Dataset(torch.utils.data.Dataset):
                 for line in f:
                     data.append(json.loads(line))
         elif file_ext == ".csv":
+            import pandas as pd
+
             data = pd.read_csv(path).to_dict("records")
         elif file_ext == ".parquet":
+            import pandas as pd
+
             data = pd.read_parquet(path).to_dict("records")
+        elif file_ext == ".arrow":
+            data = DatasetRegistry._load_arrow_ipc(path)
         else:
             raise ValueError(f"Unsupported file format: {file_ext}")
 
@@ -159,48 +173,228 @@ class Dataset(torch.utils.data.Dataset):
 
 
 class DatasetRegistry:
-    """A registry for datasets that manages storage and retrieval."""
+    """A registry for datasets that manages storage and retrieval.
 
-    # Path to the registry file mapping dataset names to their files
-    _REGISTRY_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "registry")
-    _REGISTRY_FILE = os.path.join(_REGISTRY_DIR, "dataset_registry.json")
-    _DATASET_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "datasets")
+    Uses ~/.rllm/datasets/ for storage with a v2 JSON registry format
+    that includes metadata alongside file paths.
+    """
+
+    _RLLM_HOME = os.path.expanduser(os.environ.get("RLLM_HOME", "~/.rllm"))
+    _REGISTRY_FILE = os.path.join(_RLLM_HOME, "datasets", "registry.json")
+    _DATASET_DIR = os.path.join(_RLLM_HOME, "datasets")
+
+    # Legacy paths for v1 migration
+    _LEGACY_REGISTRY_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "registry")
+    _LEGACY_REGISTRY_FILE = os.path.join(_LEGACY_REGISTRY_DIR, "dataset_registry.json")
+    _LEGACY_DATASET_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "datasets")
 
     @classmethod
     def _ensure_directories(cls) -> None:
         """Ensure the registry and dataset directories exist."""
-        os.makedirs(cls._REGISTRY_DIR, exist_ok=True)
         os.makedirs(cls._DATASET_DIR, exist_ok=True)
 
     @classmethod
-    def _load_registry(cls) -> dict[str, dict[str, str]]:
-        """Load the dataset registry from the registry file."""
-        cls._ensure_directories()
-        if not os.path.exists(cls._REGISTRY_FILE):
-            return {}
+    def _migrate_v1_to_v2(cls, v1_data: dict) -> dict:
+        """Migrate a v1 flat registry to v2 format.
 
-        try:
-            with open(cls._REGISTRY_FILE, encoding="utf-8") as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            logger.warning("Invalid JSON format in registry file. Creating a new registry.")
-            return {}
+        v1 format: { "name": { "split": "/abs/path.parquet" } }
+        v2 format: { "version": 2, "datasets": { "name": { "metadata": {...}, "splits": { "split": { "path": "rel/path.parquet", ... } } } } }
+        """
+        v2: dict[str, Any] = {"version": 2, "datasets": {}}
+        for name, splits in v1_data.items():
+            v2_entry: dict[str, Any] = {"metadata": {}, "splits": {}}
+            for split, abs_path in splits.items():
+                # Copy file to new location if it exists at old path
+                rel_path = os.path.join(name, f"{split}.parquet")
+                new_abs_path = os.path.join(cls._DATASET_DIR, rel_path)
+                if abs_path and os.path.exists(abs_path) and not os.path.exists(new_abs_path):
+                    os.makedirs(os.path.dirname(new_abs_path), exist_ok=True)
+                    try:
+                        os.symlink(os.path.abspath(abs_path), new_abs_path)
+                    except OSError:
+                        import shutil
+
+                        shutil.copy2(abs_path, new_abs_path)
+                    # Also handle verl files
+                    verl_old = abs_path.replace(".parquet", "_verl.parquet")
+                    verl_new = new_abs_path.replace(".parquet", "_verl.parquet")
+                    if os.path.exists(verl_old) and not os.path.exists(verl_new):
+                        try:
+                            os.symlink(os.path.abspath(verl_old), verl_new)
+                        except OSError:
+                            import shutil
+
+                            shutil.copy2(verl_old, verl_new)
+
+                split_info: dict[str, Any] = {"path": rel_path}
+                # Try to get num_examples
+                target = new_abs_path if os.path.exists(new_abs_path) else abs_path
+                if target and os.path.exists(target):
+                    try:
+                        import polars as pl
+
+                        num = len(pl.read_parquet(target))
+                        split_info["num_examples"] = num
+                        split_info["fields"] = list(pl.read_parquet(target).columns)
+                    except Exception:
+                        pass
+                v2_entry["splits"][split] = split_info
+            v2["datasets"][name] = v2_entry
+
+        logger.info("Migrated dataset registry from v1 to v2 format.")
+        return v2
 
     @classmethod
-    def _save_registry(cls, registry: dict[str, dict[str, str]]) -> None:
+    def _load_registry(cls) -> dict:
+        """Load the dataset registry, auto-migrating from v1 if needed.
+
+        Returns v2-format dict. For backward compat, callers that used the old
+        flat dict can still use the public methods unchanged.
+        """
+        cls._ensure_directories()
+
+        # Try loading from new location first
+        if os.path.exists(cls._REGISTRY_FILE):
+            try:
+                with open(cls._REGISTRY_FILE, encoding="utf-8") as f:
+                    data = json.load(f)
+                if data.get("version") == 2:
+                    return data
+                # Old format at new location — migrate in place
+                v2 = cls._migrate_v1_to_v2(data)
+                cls._save_registry(v2)
+                return v2
+            except json.JSONDecodeError:
+                logger.warning("Invalid JSON in registry file. Creating a new registry.")
+                return {"version": 2, "datasets": {}}
+
+        # Try migrating from legacy location
+        if os.path.exists(cls._LEGACY_REGISTRY_FILE):
+            try:
+                with open(cls._LEGACY_REGISTRY_FILE, encoding="utf-8") as f:
+                    v1_data = json.load(f)
+                v2 = cls._migrate_v1_to_v2(v1_data)
+                cls._save_registry(v2)
+                return v2
+            except (json.JSONDecodeError, Exception) as e:
+                logger.warning(f"Failed to migrate legacy registry: {e}")
+
+        return {"version": 2, "datasets": {}}
+
+    @classmethod
+    def _save_registry(cls, registry: dict) -> None:
         """Save the dataset registry to the registry file."""
         cls._ensure_directories()
         with open(cls._REGISTRY_FILE, "w", encoding="utf-8") as f:
             json.dump(registry, f, indent=2)
 
     @classmethod
-    def register_dataset(cls, name: str, data: list[dict[str, Any]] | Any, split: str = "default") -> Dataset:
+    def _resolve_path(cls, rel_path: str) -> str:
+        """Resolve a relative dataset path to an absolute path."""
+        if os.path.isabs(rel_path):
+            return rel_path
+        return os.path.join(cls._DATASET_DIR, rel_path)
+
+    @classmethod
+    def _has_binary_columns(cls, data_list: list[dict[str, Any]]) -> tuple[bool, list[str]]:
+        """Detect columns containing ``bytes`` or ``list[bytes]`` in the first row.
+
+        Returns:
+            Tuple of (has_binary, list_of_binary_column_names).
+        """
+        if not data_list:
+            return False, []
+
+        first = data_list[0]
+        bin_cols: list[str] = []
+        for col, val in first.items():
+            if isinstance(val, bytes):
+                bin_cols.append(col)
+            elif isinstance(val, list) and val and isinstance(val[0], bytes):
+                bin_cols.append(col)
+        return bool(bin_cols), bin_cols
+
+    @classmethod
+    def _save_arrow_ipc(cls, data_list: list[dict[str, Any]], path: str) -> None:
+        """Save data as an Arrow IPC (Feather v2) file.
+
+        PyArrow natively handles ``bytes`` and ``list<bytes>`` columns.
+
+        Args:
+            data_list: List of row dicts.
+            path: Absolute path to write the ``.arrow`` file.
+        """
+        import pyarrow as pa
+        import pyarrow.ipc as ipc
+
+        # Build column arrays from data_list
+        if not data_list:
+            table = pa.table({})
+        else:
+            columns: dict[str, list] = {k: [] for k in data_list[0]}
+            for row in data_list:
+                for k in columns:
+                    columns[k].append(row.get(k))
+            table = pa.table(columns)
+
+        with pa.OSFile(path, "wb") as f:
+            writer = ipc.new_file(f, table.schema)
+            writer.write_table(table)
+            writer.close()
+
+    @classmethod
+    def _load_arrow_ipc(cls, path: str) -> list[dict[str, Any]]:
+        """Load data from an Arrow IPC file.
+
+        Args:
+            path: Absolute path to the ``.arrow`` file.
+
+        Returns:
+            List of row dicts. Binary columns are returned as ``bytes``.
+        """
+        import pyarrow as pa
+        import pyarrow.ipc as ipc
+
+        with pa.OSFile(path, "rb") as f:
+            reader = ipc.open_file(f)
+            table = reader.read_all()
+
+        col_dict = {name: table.column(name).to_pylist() for name in table.column_names}
+        num_rows = table.num_rows
+        return [{col: col_dict[col][i] for col in col_dict} for i in range(num_rows)]
+
+    @classmethod
+    def _strip_binary_columns(cls, data_list: list[dict[str, Any]], bin_cols: list[str]) -> list[dict[str, Any]]:
+        """Return copies of rows with binary columns set to ``None``.
+
+        Used for verl postprocessing where image data isn't needed.
+        """
+        stripped = []
+        for row in data_list:
+            new_row = dict(row)
+            for col in bin_cols:
+                new_row[col] = None
+            stripped.append(new_row)
+        return stripped
+
+    @classmethod
+    def _verl_path_for(cls, dataset_path: str) -> str:
+        """Derive the verl companion parquet path from any dataset path."""
+        if dataset_path.endswith(".arrow"):
+            return dataset_path[: -len(".arrow")] + "_verl.parquet"
+        return dataset_path.replace(".parquet", "_verl.parquet")
+
+    @classmethod
+    def register_dataset(cls, name: str, data: list[dict[str, Any]] | Any, split: str = "default", source: str = "", description: str = "", category: str = "") -> Dataset:
         """Register a dataset by saving it to disk and updating the registry.
 
         Args:
             name: Name of the dataset
             data: List of dictionaries containing the dataset examples or a Hugging Face dataset
             split: Split name (e.g., 'train', 'test', 'default')
+            source: Optional source identifier (e.g., HuggingFace repo)
+            description: Optional description
+            category: Optional category (e.g., 'math', 'code')
 
         Returns:
             Dataset: The registered dataset
@@ -211,6 +405,8 @@ class DatasetRegistry:
         dataset_dir = os.path.join(cls._DATASET_DIR, name)
         os.makedirs(dataset_dir, exist_ok=True)
 
+        import pandas as pd
+
         # Convert HuggingFace dataset to list of dictionaries if needed
         if hasattr(data, "to_pandas") and callable(data.to_pandas):
             # This is likely a HuggingFace dataset
@@ -219,30 +415,60 @@ class DatasetRegistry:
         else:
             # Assume it's already a list of dictionaries
             data_list = data
+
+        # Detect binary columns (image bytes)
+        has_binary, bin_cols = cls._has_binary_columns(data_list)
+
+        if has_binary:
+            # Save as Arrow IPC (handles binary columns natively)
+            rel_path = os.path.join(name, f"{split}.arrow")
+            dataset_path = os.path.join(cls._DATASET_DIR, rel_path)
+            cls._save_arrow_ipc(data_list, dataset_path)
+
+            # Strip binary columns for verl postprocessing (images not needed)
+            stripped = cls._strip_binary_columns(data_list, bin_cols)
+            verl_data = cls.apply_verl_postprocessing(stripped)
+            verl_dataset_path = cls._verl_path_for(dataset_path)
+            verl_data_df = pd.DataFrame(verl_data)
+            verl_data_df.to_parquet(verl_dataset_path)
+
+            fields = list(data_list[0].keys()) if data_list else []
+        else:
+            # Text-only: use parquet (existing path)
             data_df = pd.DataFrame(data_list)
+            rel_path = os.path.join(name, f"{split}.parquet")
+            dataset_path = os.path.join(cls._DATASET_DIR, rel_path)
+            data_df.to_parquet(dataset_path)
 
-        # Save original data
-        dataset_path = os.path.join(dataset_dir, f"{split}.parquet")
-        data_df.to_parquet(dataset_path)
+            # Apply Verl postprocessing and save
+            verl_data = cls.apply_verl_postprocessing(data_list)
+            verl_dataset_path = cls._verl_path_for(dataset_path)
+            verl_data_df = pd.DataFrame(verl_data)
+            verl_data_df.to_parquet(verl_dataset_path)
 
-        # Apply Verl postprocessing and save
-        verl_data = cls.apply_verl_postprocessing(data_list)
-        verl_dataset_path = os.path.join(dataset_dir, f"{split}_verl.parquet")
-        verl_data_df = pd.DataFrame(verl_data)
-        verl_data_df.to_parquet(verl_dataset_path)
+            fields = list(data_df.columns)
 
-        # Update registry
+        # Update registry (v2 format)
         registry = cls._load_registry()
+        datasets = registry.setdefault("datasets", {})
 
-        # Initialize dataset entry if it doesn't exist
-        if name not in registry:
-            registry[name] = {}
+        if name not in datasets:
+            datasets[name] = {"metadata": {}, "splits": {}}
 
-        # Add the split to the dataset
-        registry[name][split] = dataset_path
+        # Update metadata if provided
+        entry = datasets[name]
+        if source:
+            entry["metadata"]["source"] = source
+        if description:
+            entry["metadata"]["description"] = description
+        if category:
+            entry["metadata"]["category"] = category
+
+        # Record field names and count
+        entry["splits"][split] = {"path": rel_path, "num_examples": len(data_list), "fields": fields}
         cls._save_registry(registry)
 
-        logger.info(f"Registered dataset '{name}' split '{split}' with {len(data_list)} examples. Verl-processed version saved at {verl_dataset_path}.")
+        logger.info(f"Registered dataset '{name}' split '{split}' with {len(data_list)} examples.")
 
         return Dataset(data=data_list, name=name, split=split)
 
@@ -258,23 +484,30 @@ class DatasetRegistry:
             Dataset: The loaded dataset or None if not found
         """
         registry = cls._load_registry()
-        if name not in registry:
+        datasets = registry.get("datasets", {})
+
+        if name not in datasets:
             logger.warning(f"Dataset '{name}' not found in registry.")
             return None
 
-        dataset_info = registry[name]
-
-        if split not in dataset_info:
+        splits = datasets[name].get("splits", {})
+        if split not in splits:
             logger.warning(f"Split '{split}' not found in dataset '{name}'.")
             return None
 
-        # Load data
-        dataset_path = dataset_info[split]
+        # Load data — resolve relative path
+        split_info = splits[split]
+        dataset_path = cls._resolve_path(split_info["path"])
         if not os.path.exists(dataset_path):
             logger.warning(f"Dataset file not found: {dataset_path}")
             return None
 
-        data = pl.read_parquet(dataset_path).to_dicts()
+        if dataset_path.endswith(".arrow"):
+            data = cls._load_arrow_ipc(dataset_path)
+        else:
+            import polars as pl
+
+            data = pl.read_parquet(dataset_path).to_dicts()
 
         logger.info(f"Loaded dataset '{name}' split '{split}' with {len(data)} examples.")
 
@@ -287,7 +520,8 @@ class DatasetRegistry:
         Returns:
             List[str]: List of dataset names
         """
-        return list(cls._load_registry().keys())
+        registry = cls._load_registry()
+        return list(registry.get("datasets", {}).keys())
 
     @classmethod
     def get_dataset_splits(cls, name: str) -> list[str]:
@@ -300,9 +534,10 @@ class DatasetRegistry:
             List[str]: List of available splits
         """
         registry = cls._load_registry()
-        if name not in registry:
+        datasets = registry.get("datasets", {})
+        if name not in datasets:
             return []
-        return list(registry[name].keys())
+        return list(datasets[name].get("splits", {}).keys())
 
     @classmethod
     def dataset_exists(cls, name: str, split: str | None = None) -> bool:
@@ -316,13 +551,26 @@ class DatasetRegistry:
             bool: True if the dataset exists, False otherwise
         """
         registry = cls._load_registry()
-        if name not in registry:
+        datasets = registry.get("datasets", {})
+        if name not in datasets:
             return False
-
         if split is not None:
-            return split in registry[name]
-
+            return split in datasets[name].get("splits", {})
         return True
+
+    @classmethod
+    def get_dataset_info(cls, name: str) -> dict | None:
+        """Get metadata and split info for a dataset.
+
+        Args:
+            name: Name of the dataset
+
+        Returns:
+            dict with 'metadata' and 'splits' keys, or None if not found
+        """
+        registry = cls._load_registry()
+        datasets = registry.get("datasets", {})
+        return datasets.get(name)
 
     @classmethod
     def remove_dataset_split(cls, name: str, split: str) -> bool:
@@ -336,33 +584,38 @@ class DatasetRegistry:
             bool: True if the split was removed, False otherwise
         """
         registry = cls._load_registry()
-        if name not in registry or split not in registry[name]:
+        datasets = registry.get("datasets", {})
+        if name not in datasets or split not in datasets[name].get("splits", {}):
             logger.warning(f"Dataset '{name}' split '{split}' not found in registry.")
             return False
 
         # Get dataset path
-        dataset_path = registry[name][split]
+        split_info = datasets[name]["splits"][split]
+        dataset_path = cls._resolve_path(split_info["path"])
 
         # Remove file if it exists
         if dataset_path and os.path.exists(dataset_path):
             os.remove(dataset_path)
 
         # Also remove the Verl-processed file if it exists
-        verl_path = dataset_path.replace(".parquet", "_verl.parquet")
+        verl_path = cls._verl_path_for(dataset_path)
         if os.path.exists(verl_path):
             os.remove(verl_path)
 
         # Remove split from registry
-        del registry[name][split]
+        del datasets[name]["splits"][split]
 
-        # If no splits left, remove the dataset directory
-        if not registry[name]:
-            del registry[name]
+        # If no splits left, remove the dataset entry and clean up
+        if not datasets[name]["splits"]:
+            del datasets[name]
             dataset_dir = os.path.join(cls._DATASET_DIR, name)
+            # Clean up legacy images directory
+            images_dir = os.path.join(dataset_dir, "images")
+            if os.path.isdir(images_dir):
+                shutil.rmtree(images_dir)
             if os.path.exists(dataset_dir) and not os.listdir(dataset_dir):
                 os.rmdir(dataset_dir)
 
-        # Update registry
         cls._save_registry(registry)
 
         logger.info(f"Removed dataset '{name}' split '{split}' from registry.")
@@ -379,30 +632,30 @@ class DatasetRegistry:
             bool: True if the dataset was removed, False otherwise
         """
         registry = cls._load_registry()
-        if name not in registry:
+        datasets = registry.get("datasets", {})
+        if name not in datasets:
             logger.warning(f"Dataset '{name}' not found in registry.")
             return False
 
-        # Get dataset paths
-        dataset_info = registry[name]
-
         # Remove files for all splits
-        for split, path in dataset_info.items():
+        for split, split_info in datasets[name].get("splits", {}).items():
+            path = cls._resolve_path(split_info["path"])
             if path and os.path.exists(path):
                 os.remove(path)
-
-            # Also check for and remove verl-processed file if it exists
-            verl_path = path.replace(".parquet", "_verl.parquet")
+            verl_path = cls._verl_path_for(path)
             if os.path.exists(verl_path):
                 os.remove(verl_path)
 
-        # Remove dataset directory if it's empty
+        # Clean up legacy images directory and dataset directory
         dataset_dir = os.path.join(cls._DATASET_DIR, name)
+        images_dir = os.path.join(dataset_dir, "images")
+        if os.path.isdir(images_dir):
+            shutil.rmtree(images_dir)
         if os.path.exists(dataset_dir) and not os.listdir(dataset_dir):
             os.rmdir(dataset_dir)
 
         # Update registry
-        del registry[name]
+        del datasets[name]
         cls._save_registry(registry)
 
         logger.info(f"Removed dataset '{name}' from registry.")

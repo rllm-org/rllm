@@ -14,7 +14,6 @@ PPO_RAY_RUNTIME_ENV = {
         # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
         "NCCL_CUMEM_ENABLE": "0",
     },
-    "worker_process_setup_hook": "rllm.patches.verl_patch_hook.setup",
 }
 
 FORWARD_PREFIXES = [
@@ -69,9 +68,6 @@ def _get_forwarded_env_vars():
 
 
 def get_ppo_ray_runtime_env():
-    env = PPO_RAY_RUNTIME_ENV["env_vars"].copy()
+    env = PPO_RAY_RUNTIME_ENV.get("env_vars", {}).copy()
     env.update(_get_forwarded_env_vars())
-    return {
-        "env_vars": env,
-        # "worker_process_setup_hook": PPO_RAY_RUNTIME_ENV["worker_process_setup_hook"],
-    }
+    return {"env_vars": env}

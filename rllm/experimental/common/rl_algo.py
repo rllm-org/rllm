@@ -21,7 +21,7 @@ def calculate_grpo_advantages_per_group(rewards: np.ndarray, norm_adv_by_std_in_
 def calculate_rloo_advantages_per_group(rewards: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     num_trajs = len(rewards)
     if num_trajs <= 1:
-        return rewards
+        return rewards, rewards
 
     advantages = num_trajs / (num_trajs - 1) * (rewards - rewards.mean())
     return advantages, advantages

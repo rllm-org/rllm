@@ -59,6 +59,30 @@ def _extract_logprobs(output_payload: dict) -> list[float]:
     return [float(entry.get("logprob")) for entry in logprobs if entry and entry.get("logprob") is not None]
 
 
+def _clean_message(raw_msg: dict) -> dict[str, str]:
+    """Normalize a raw LLM message dict for storage in Step.chat_completions.
+
+    Step.chat_completions is typed ``list[dict[str, str]]``, so we must:
+    - Drop keys whose values are None (e.g. ``tool_calls: null`` from LiteLLM)
+    - Promote ``provider_specific_fields.reasoning`` to top-level ``reasoning``
+    - Drop non-string values that cannot be meaningfully stored
+    """
+    cleaned: dict[str, str] = {}
+    for key, value in raw_msg.items():
+        if value is None:
+            continue
+        if key == "provider_specific_fields":
+            # Promote known sub-fields
+            if isinstance(value, dict):
+                reasoning = value.get("reasoning")
+                if reasoning and "reasoning" not in raw_msg:
+                    cleaned["reasoning"] = str(reasoning)
+            continue
+        if isinstance(value, str):
+            cleaned[key] = value
+    return cleaned
+
+
 def build_llm_output(payload: dict) -> LLMOutput:
     """Normalize raw OpenAI-style output payloads into LLMOutput."""
     if not isinstance(payload, dict):
@@ -72,8 +96,10 @@ def build_llm_output(payload: dict) -> LLMOutput:
     token_ids = _extract_completion_token_ids(payload)
     rollout_logprobs = _extract_logprobs(payload)
 
+    message = _clean_message(choice.get("message") or {})
+
     return LLMOutput(
-        message=choice.get("message") or {},
+        message=message,
         finish_reason=choice.get("finish_reason"),
         output_token_ids=token_ids,
         rollout_logprobs=rollout_logprobs,
@@ -125,9 +151,10 @@ def trace_to_step(trace: Trace) -> Step:
     assert response_message, "Response message is required in trace output"
 
     return Step(
+        id=trace.trace_id,
         chat_completions=messages + [response_message],
         model_output=trace_to_model_output(trace),
-        info=trace.metadata,
+        metadata=trace.metadata,
     )
 
 

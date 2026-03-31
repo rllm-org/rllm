@@ -80,7 +80,12 @@ class PipelineAgentPPOTrainer(AgentPPOTrainer):
         from omegaconf import OmegaConf
         from verl.utils.tracking import Tracking
 
-        logger = Tracking(project_name=self.config.trainer.project_name, experiment_name=self.config.trainer.experiment_name, default_backend=self.config.trainer.logger, config=OmegaConf.to_container(self.config, resolve=True))
+        logger = Tracking(
+            project_name=self.config.trainer.project_name,
+            experiment_name=self.config.trainer.experiment_name,
+            default_backend=self.config.trainer.logger,
+            config=OmegaConf.to_container(self.config, resolve=True),
+        )
 
         self.global_steps = 0
 
@@ -111,9 +116,6 @@ class PipelineAgentPPOTrainer(AgentPPOTrainer):
                     repeat_times=self.config.actor_rollout_ref.rollout.n,
                     interleave=True,
                 )
-
-                # must pop those keys for generation so they no longer exist
-                batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"])
 
                 metrics = {}
                 timing_raw = {}
@@ -290,7 +292,6 @@ class PipelineAgentPPOTrainer(AgentPPOTrainer):
 
             n_val_samples = self.config.actor_rollout_ref.rollout.val_kwargs.n
             test_batch = test_batch.repeat(repeat_times=n_val_samples, interleave=True)
-            test_batch.pop(["input_ids", "attention_mask", "position_ids"])  # these are not needed for environment based interaction
             test_batch.meta_info = {
                 "eos_token_id": self.tokenizer.eos_token_id,
                 "pad_token_id": self.tokenizer.pad_token_id,

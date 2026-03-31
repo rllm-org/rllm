@@ -299,7 +299,7 @@ critic:
     discrete: false
     all_ranks: false
     ranks: []
-  _target_: verl.trainer.config.FSDPCriticConfig
+  _target_: verl.workers.config.FSDPCriticConfig
   forward_micro_batch_size: ${oc.select:.ppo_micro_batch_size,null}
   forward_micro_batch_size_per_gpu: ${oc.select:.ppo_micro_batch_size_per_gpu,null}
   ulysses_sequence_parallel_size: 1
@@ -346,7 +346,7 @@ algorithm:
   _target_: verl.trainer.config.AlgoConfig
   gamma: 1.0
   lam: 1.0
-  adv_estimator: gae
+  adv_estimator: grpo
   norm_adv_by_std_in_grpo: true
   use_kl_in_reward: false
   kl_penalty: kl
@@ -357,10 +357,6 @@ algorithm:
     horizon: 10000
     target_kl: 0.1
   use_pf_ppo: false
-  pf_ppo:
-    _target_: verl.trainer.config.PFPPOConfig
-    reweight_method: pow
-    weight_pow: 2.0
 ray_init:
   num_cpus: null
   timeline_json_file: null

@@ -41,6 +41,7 @@ from rllm.experimental.metrics import MetricsAggregator
 from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.sync_coordinator import SyncCoordinator, SyncCoordinatorConfig
 from rllm.utils import EpisodeLogger, Tracking, extract_source_metadata
+from rllm.workflows.store import Store
 from rllm.workflows.workflow import TerminationReason, Workflow
 
 
@@ -102,7 +103,7 @@ class UnifiedTrainer:
         self,
         backend_cls: type[BackendProtocol],
         config: DictConfig,
-        workflow_class: type[Workflow],
+        workflow_class: type[Workflow] | None = None,
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
@@ -110,11 +111,21 @@ class UnifiedTrainer:
         *,
         traj_grouping_hook: Callable | None = None,
         traj_group_adv_estimator_map: dict | None = None,
+        store: Store | None = None,
         **kwargs,
     ):
-        """Initialize the UnifiedTrainer."""
+        """Initialize the UnifiedTrainer.
+
+        Provide exactly one of ``workflow_class`` or (``agent_flow`` AND ``evaluator``).
+        """
+        has_agent_flow = kwargs.get("agent_flow") is not None and kwargs.get("evaluator") is not None
+        remote_runtime_enabled = config.rllm.get("remote_runtime", {}).get("enabled", False)
+        if not has_agent_flow and not remote_runtime_enabled:
+            assert workflow_class is not None, "Either workflow_class, (agent_flow AND evaluator), or remote_runtime must be provided"
+
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
+        self.store = store
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
 
@@ -149,16 +160,81 @@ class UnifiedTrainer:
             rs_config=self.rs_config,
             algorithm_config=self.algorithm_config,
         )
-        self.agent_workflow_engine = UnifiedWorkflowEngine(
-            workflow_cls=self.workflow_class,
-            workflow_args=self.workflow_args,
-            rollout_engine=rollout_engine,
-            config=self.config,
-            n_parallel_tasks=self.rllm_config.workflow.n_parallel_tasks,
-            retry_limit=self.rllm_config.workflow.retry_limit,
-            raise_on_error=self.rllm_config.workflow.raise_on_error,
-            episode_logger=self.episode_logger,
-        )
+
+        # Determine which engine path to use:
+        # 1. agent_flow + evaluator → AgentFlowEngine (gateway-based, local)
+        # 2. remote_runtime → RemoteAgentFlowEngine (gateway-based, remote)
+        # 3. workflow_class → UnifiedWorkflowEngine (direct)
+        self._gateway = None
+        self._remote_runtime = None
+
+        agent_flow = kwargs.get("agent_flow")
+        evaluator = kwargs.get("evaluator")
+
+        remote_runtime_cfg = self.rllm_config.get("remote_runtime", {})
+
+        if agent_flow is not None and evaluator is not None:
+            from rllm.experimental.engine.agent_flow_engine import AgentFlowEngine
+            from rllm.experimental.engine.gateway_manager import GatewayManager
+
+            gateway_mode = "process" if kwargs.get("backend_name") == "verl" else "thread"
+            self._gateway = GatewayManager(self.config, mode=gateway_mode)
+            self._gateway.start(rollout_engine)
+
+            self.agent_workflow_engine = AgentFlowEngine(
+                agent_flow=agent_flow,
+                evaluator=evaluator,
+                gateway=self._gateway,
+                model=self.config.get("model", {}).get("name", "default"),
+                n_parallel_tasks=self.rllm_config.workflow.n_parallel_tasks,
+                retry_limit=self.rllm_config.workflow.retry_limit,
+                raise_on_error=self.rllm_config.workflow.get("raise_on_error", True),
+                episode_logger=self.episode_logger,
+            )
+        elif remote_runtime_cfg.get("enabled", False):
+            from rllm.experimental.engine.gateway_manager import GatewayManager
+            from rllm.experimental.engine.remote_agent_flow_engine import (
+                RemoteAgentFlowEngine,
+            )
+            from rllm.experimental.engine.remote_runtime import (
+                RemoteRuntimeConfig,
+                create_remote_runtime,
+            )
+
+            gateway_mode = "process" if kwargs.get("backend_name") == "verl" else "thread"
+            self._gateway = GatewayManager(self.config, mode=gateway_mode)
+            self._gateway.start(rollout_engine)
+
+            remote_runtime_config = RemoteRuntimeConfig(
+                enabled=True,
+                backend=remote_runtime_cfg.get("backend", "agentcore"),
+                backend_config=dict(remote_runtime_cfg.get("backend_config", {})),
+                session_timeout=remote_runtime_cfg.get("session_timeout", 900.0),
+            )
+            self._remote_runtime = create_remote_runtime(
+                remote_runtime_config,
+                exp_id=self.rllm_config.trainer.experiment_name,
+                model_id=self.config.get("model", {}).get("name", "default"),
+            )
+
+            self.agent_workflow_engine = RemoteAgentFlowEngine(
+                runtime=self._remote_runtime,
+                gateway=self._gateway,
+                session_timeout=remote_runtime_config.session_timeout,
+                episode_logger=self.episode_logger,
+            )
+        else:
+            self.agent_workflow_engine = UnifiedWorkflowEngine(
+                workflow_cls=self.workflow_class,
+                workflow_args=self.workflow_args,
+                rollout_engine=rollout_engine,
+                config=self.config,
+                n_parallel_tasks=self.rllm_config.workflow.n_parallel_tasks,
+                retry_limit=self.rllm_config.workflow.retry_limit,
+                raise_on_error=self.rllm_config.workflow.raise_on_error,
+                episode_logger=self.episode_logger,
+                store=self.store,
+            )
 
         self.tokenizer = None
         if hasattr(self.backend, "tokenizer"):
@@ -241,8 +317,14 @@ class UnifiedTrainer:
 
     async def fit_async(self) -> None:
         """Public async entry point for the full training process."""
+        # Initialize remote runtime (if enabled) before the workflow pool
+        if self._remote_runtime is not None:
+            self._remote_runtime.initialize()
+
         # initialize the UnifiedWorkflowEngine (init the workflow pool)
-        await self.agent_workflow_engine.initialize_pool()
+        # AgentFlowEngine and RemoteAgentFlowEngine don't need pool initialization
+        if hasattr(self.agent_workflow_engine, "initialize_pool"):
+            await self.agent_workflow_engine.initialize_pool()
 
         trainer_state = TrainerState()
 
@@ -294,7 +376,7 @@ class UnifiedTrainer:
                 trainer_state.reset_batch()
 
                 await self.backend.on_batch_start(trainer_state)
-                with simple_timer("total_step", trainer_state.timing_dict):
+                with simple_timer("step", trainer_state.timing_dict):
                     await self._train_batch_async(batch, trainer_state)
                 await self.backend.on_batch_end(trainer_state)
 
@@ -697,6 +779,12 @@ class UnifiedTrainer:
 
     def shutdown(self):
         """Shutdown the trainer and cleanup resources."""
+        if hasattr(self, "_remote_runtime") and self._remote_runtime is not None:
+            self._remote_runtime.shutdown()
+            self._remote_runtime = None
+        if hasattr(self, "_gateway") and self._gateway is not None:
+            self._gateway.stop()
+            self._gateway = None
         if hasattr(self, "agent_workflow_engine") and self.agent_workflow_engine is not None:
             self.agent_workflow_engine.shutdown()
         self.backend.shutdown()
@@ -732,23 +820,23 @@ class TrainerLauncher(ABC):
 
     It handles the necessary environment setup (e.g. ray init for `verl`) for different backends. This is an abstract
     class that each backend must implement.
-
-    TODO(listar2000): add support to non-workflow training (e.g. agent/env classes), `fireworks` backend, and SDK.
     """
 
     def __init__(
         self,
         config: DictConfig,
-        workflow_class: type[Workflow],
+        workflow_class: type[Workflow] | None = None,
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
+        store: Store | None = None,
         **kwargs,
     ):
         """Initialize the TrainerLauncher."""
         self.config = config
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
+        self.store = store
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
         self.kwargs = kwargs
@@ -764,42 +852,59 @@ class AgentTrainer:
     Adapted directly from `rllm.trainer.agent_trainer.AgentTrainer`.
 
     This trainer will simply delegate the task to the corresponding launcher class.
+
+    Provide exactly one of ``workflow_class`` or (``agent_flow`` AND ``evaluator``).
     """
 
     def __init__(
         self,
         config: DictConfig,
-        workflow_class: type[Workflow],
+        workflow_class: type[Workflow] | None = None,
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
-        backend: Literal["verl", "tinker", "fireworks"] = "verl",
+        backend: Literal["verl", "tinker"] = "verl",
+        agent_flow: Any = None,
+        evaluator: Any = None,
+        store: Store | None = None,
         **kwargs,
     ):
-        match backend:
-            case "verl":
-                from rllm.experimental.verl.verl_launcher import VerlTrainerLauncher
+        has_agent_flow = agent_flow is not None and evaluator is not None
+        remote_runtime_enabled = config.rllm.get("remote_runtime", {}).get("enabled", False)
+        if not has_agent_flow and not remote_runtime_enabled:
+            assert workflow_class is not None, "Either workflow_class, (agent_flow AND evaluator), or remote_runtime must be provided"
 
-                launcher_cls = VerlTrainerLauncher
-            case "tinker":
-                from rllm.trainer.tinker.tinker_launcher import TinkerTrainerLauncher
+        # Pass agent_flow and evaluator through kwargs for UnifiedTrainer
+        if agent_flow is not None:
+            kwargs["agent_flow"] = agent_flow
+        if evaluator is not None:
+            kwargs["evaluator"] = evaluator
+        kwargs["backend_name"] = backend
 
-                launcher_cls = TinkerTrainerLauncher
-            case "fireworks":
-                from rllm.trainer.fireworks.fireworks_launcher import FireworksTrainerLauncher
+        if backend == "verl":
+            from rllm.experimental.verl.verl_launcher import VerlTrainerLauncher
 
-                launcher_cls = FireworksTrainerLauncher
-            case _:
-                raise ValueError(f"Unsupported backend: {backend}, must be one of ['verl', 'tinker', 'fireworks']")
+            self.launcher = VerlTrainerLauncher(
+                config=config,
+                workflow_class=workflow_class,
+                train_dataset=train_dataset,
+                val_dataset=val_dataset,
+                workflow_args=workflow_args,
+                store=store,
+                **kwargs,
+            )
+        elif backend == "tinker":
+            from rllm.trainer.tinker.tinker_launcher import TinkerTrainerLauncher
 
-        self.launcher = launcher_cls(
-            config=config,
-            workflow_class=workflow_class,
-            train_dataset=train_dataset,
-            val_dataset=val_dataset,
-            workflow_args=workflow_args,
-            **kwargs,
-        )
+            self.launcher = TinkerTrainerLauncher(
+                config=config,
+                workflow_class=workflow_class,
+                train_dataset=train_dataset,
+                val_dataset=val_dataset,
+                workflow_args=workflow_args,
+                store=store,
+                **kwargs,
+            )
 
     def train(self):
         self.launcher.train()

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frozenlake-agent"
+version = "0.1.0"
+description = "FrozenLake grid navigation agent plugin for rLLM"
+requires-python = ">=3.10"
+dependencies = ["rllm", "numpy"]
+
+[tool.setuptools.packages.find]
+include = ["agent*", "eval*"]
+
+# Plugin discovery: rllm CLI finds these by name
+[project.entry-points."rllm.agents"]
+frozenlake = "agent.agent:frozenlake_agent"
+
+[project.entry-points."rllm.evaluators"]
+frozenlake_reward_fn = "eval.evaluator:FrozenLakeEvaluator"

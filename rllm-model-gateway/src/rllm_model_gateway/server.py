@@ -4,6 +4,7 @@ import argparse
 import logging
 import os
 import uuid
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -67,6 +68,7 @@ def _load_policy(dotted_path: str):
 def create_app(
     config: GatewayConfig | None = None,
     store: TraceStore | None = None,
+    local_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
 ) -> FastAPI:
     """Create and return a fully configured FastAPI application."""
     if config is None:
@@ -91,6 +93,7 @@ def create_app(
             WorkerInfo(
                 worker_id=wc.worker_id or str(i),
                 url=wc.url,
+                api_path=wc.api_path,
                 model_name=wc.model_name,
                 weight=wc.weight,
             )
@@ -101,6 +104,7 @@ def create_app(
         store=store,
         strip_vllm=config.strip_vllm_fields,
         sync_traces=config.sync_traces,
+        local_handler=local_handler,
     )
     sessions = SessionManager(store)
 
@@ -127,6 +131,7 @@ def create_app(
         SessionRoutingMiddleware,
         add_logprobs=config.add_logprobs,
         add_return_token_ids=config.add_return_token_ids,
+        sessions=sessions,
     )
 
     # -- Health endpoints --------------------------------------------------
@@ -152,6 +157,7 @@ def create_app(
         sid = sessions.create_session(
             session_id=body.get("session_id"),
             metadata=body.get("metadata"),
+            sampling_params=body.get("sampling_params"),
         )
         return {"session_id": sid, "url": f"/sessions/{sid}/v1"}
 
@@ -222,18 +228,21 @@ def create_app(
         if not url:
             return JSONResponse(status_code=400, content={"error": "url is required"})
         wid = body.get("worker_id", str(uuid.uuid4()))
-        router.add_worker(
-            WorkerInfo(
-                worker_id=wid,
-                url=url,
-                model_name=body.get("model_name"),
-                weight=body.get("weight", 1),
-            )
-        )
+        # Build kwargs — omit api_path if not provided so the validator auto-splits
+        worker_kwargs: dict[str, Any] = {
+            "worker_id": wid,
+            "url": url,
+            "model_name": body.get("model_name"),
+            "weight": body.get("weight", 1),
+        }
+        if "api_path" in body:
+            worker_kwargs["api_path"] = body["api_path"]
+        worker = WorkerInfo(**worker_kwargs)
+        router.add_worker(worker)
         # Start health checks if this is the first worker
         if len(router.workers) == 1:
             await router.start_health_checks()
-        return {"worker_id": wid, "url": url}
+        return {"worker_id": wid, "url": worker.url, "api_path": worker.api_path}
 
     @app.delete("/admin/workers/{worker_id}")
     async def remove_worker(worker_id: str):
@@ -265,7 +274,7 @@ def create_app(
 
     @app.api_route(
         "/v1/{path:path}",
-        methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+        methods=["GET", "POST"],
     )
     async def proxy_v1(request: Request, path: str):
         # Ensure session exists in manager (implicit creation)
@@ -347,10 +356,13 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
     if getattr(args, "store", None) is not None:
         data["store_worker"] = args.store
 
-    # Workers from CLI --worker flags
+    # Workers from CLI --worker flags (WorkerConfig validator auto-splits URLs)
     worker_urls = getattr(args, "worker", None) or []
     if worker_urls:
-        data["workers"] = [{"url": url, "worker_id": str(i)} for i, url in enumerate(worker_urls)]
+        data["workers"] = [
+            {"url": raw_url, "worker_id": str(i)}
+            for i, raw_url in enumerate(worker_urls)
+        ]
 
     return GatewayConfig(**data)
 
@@ -361,7 +373,9 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="rllm-model-gateway: lightweight LLM call proxy for RL training")
+    parser = argparse.ArgumentParser(
+        description="rllm-model-gateway: lightweight LLM call proxy for RL training"
+    )
     parser.add_argument("--host", type=str, default=None)
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--config", type=str, default=None, help="Path to YAML config")
@@ -384,7 +398,9 @@ def main() -> None:
 
     import uvicorn
 
-    uvicorn.run(app, host=config.host, port=config.port, log_level=config.log_level.lower())
+    uvicorn.run(
+        app, host=config.host, port=config.port, log_level=config.log_level.lower()
+    )
 
 
 if __name__ == "__main__":

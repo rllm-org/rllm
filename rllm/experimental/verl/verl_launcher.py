@@ -1,122 +1,85 @@
-import os
-import socket
-from pprint import pprint
-
 import ray
-from omegaconf import DictConfig, OmegaConf
-from verl.single_controller.ray import RayWorkerGroup
-from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
-from verl.trainer.ppo.reward import load_reward_manager
-from verl.utils import hf_processor, hf_tokenizer
-from verl.utils.fs import copy_to_local
+from omegaconf import DictConfig
 
 from rllm.data import Dataset
 from rllm.experimental.unified_trainer import TrainerLauncher, UnifiedTrainer
 from rllm.experimental.verl.verl_backend import VerlBackend
 from rllm.trainer.verl.ray_runtime_env import get_ppo_ray_runtime_env
+from rllm.trainer.verl.train_agent_ppo import TaskRunner
 from rllm.workflows.workflow import Workflow
 
 
+# TODO(listar2000): when later deprecating `train_agent_ppo`, need to migrate all the logic here to `WorkflowTaskRunner`
 @ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head
-class TaskRunner:
-    """Ray remote class for executing distributed PPO training tasks.
+class WorkflowTaskRunner(TaskRunner):
+    """Ray remote class for executing distributed PPO training with the unified trainer.
 
-    This class encapsulates the main training logic and runs as a Ray remote actor
-    to enable distributed execution across multiple nodes and GPUs.
-
-    Adapted directly from `rllm.trainer.verl.train_agent_ppo.TaskRunner`.
+    Inherits worker setup logic from `rllm.trainer.verl.train_agent_ppo.TaskRunner`
+    and overrides `run` to use the `UnifiedTrainer` with `VerlBackend`.
     """
 
-    def run(self, config, workflow_class, workflow_args, **kwargs):
-        """Execute the main PPO training workflow.
-
-        This method sets up the distributed training environment, initializes
-        workers, datasets, and reward functions, then starts the training process.
+    def run(self, config, workflow_class: type[Workflow], workflow_args: dict, **kwargs):  # type: ignore
+        """Execute the main PPO training workflow using the unified trainer.
 
         Args:
             config: Training configuration
             workflow_class: Workflow class
             workflow_args: Workflow arguments
         """
-        # Print the initial configuration. `resolve=True` will evaluate symbolic values.
-        print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
+        import os
+        import socket
+        from pprint import pprint
+
+        from omegaconf import OmegaConf
+        from verl.trainer.ppo.reward import load_reward_manager
+        from verl.trainer.ppo.utils import need_critic, need_reference_policy
+        from verl.utils import hf_processor, hf_tokenizer
+        from verl.utils.config import validate_config
+        from verl.utils.fs import copy_to_local
+
+        print(f"WorkflowTaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
+        pprint(OmegaConf.to_container(config))
         OmegaConf.register_new_resolver("mul", lambda x, y: int(x) * int(y))
         OmegaConf.resolve(config)
-        pprint(OmegaConf.to_container(config))
+
+        actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
+        self.add_critic_worker(config)
+        # Add a reference policy worker if KL loss or KL reward is used.
+        self.add_ref_policy_worker(config, actor_rollout_cls)
+
+        validate_config(
+            config=config,
+            use_reference_policy=need_reference_policy(config),
+            use_critic=need_critic(config),
+        )
 
         # Download the checkpoint from HDFS to the local machine.
-        # `use_shm` determines whether to use shared memory, which could lead to faster model loading if turned on
-        local_path = copy_to_local(config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False))
-
-        # Instantiate the tokenizer and processor.
+        local_path = copy_to_local(
+            config.actor_rollout_ref.model.path,
+            use_shm=config.actor_rollout_ref.model.get("use_shm", False),
+        )
 
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
-        # Used for multimodal LLM, could be None
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
-        # Starting from verl 0.6.1, this cls has been standardized for both fsdp and megatron backends.
-        ray_worker_group_cls = RayWorkerGroup
-        # Define worker classes based on the actor strategy.
-        if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
-            assert config.critic.strategy in {"fsdp", "fsdp2"}
-            from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker
-
-            use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
-            if use_legacy_worker_impl in ["auto", "enable"]:
-                # import warnings
-                # warnings.warn(f"Legacy worker impl is going to be deprecated, will be removed in the future. \
-                #   Please set trainer.use_legacy_worker_impl = false to switch to the new worker implementation.")
-                from verl.workers.fsdp_workers import CriticWorker
-            elif use_legacy_worker_impl == "disable":
-                from verl.workers.roles import CriticWorker
-
-                print("Using new worker implementation")
-            else:
-                raise ValueError(f"Invalid use_legacy_worker_impl: {use_legacy_worker_impl}")
-
-            actor_rollout_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
-
-        elif config.actor_rollout_ref.actor.strategy == "megatron":
-            assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-            from verl.workers.megatron_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker
-
-            actor_rollout_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
-        else:
-            raise NotImplementedError
-
-        # Map roles to their corresponding remote worker classes.
-        role_worker_mapping = {
-            Role.ActorRollout: ray.remote(actor_rollout_cls),
-            Role.Critic: ray.remote(CriticWorker),
-        }
-
-        # Define the resource pool specification.
-        # Map roles to the resource pool.
-        global_pool_id = "global_pool"
-        resource_pool_spec = {
-            global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
-        }
-        mapping = {
-            Role.ActorRollout: global_pool_id,
-            Role.Critic: global_pool_id,
-        }
-
-        # Add a reference policy worker if KL loss or KL reward is used.
-        if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
-            role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
-            mapping[Role.RefPolicy] = global_pool_id
-
-        # Load the reward manager for training and validation.
-        reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
-        val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {}))
-        resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
+        reward_fn = load_reward_manager(
+            config,
+            tokenizer,
+            **config.reward_model.get("reward_kwargs", {}),
+        )
+        val_reward_fn = load_reward_manager(
+            config,
+            tokenizer,
+            **config.reward_model.get("reward_kwargs", {}),
+        )
+        resource_pool_manager = self.init_resource_pool_mgr(config)
 
         # Assemble backend-specific arguments for initializing the verl backend.
         backend_args = {
             "tokenizer": tokenizer,
             "processor": processor,
-            "role_worker_mapping": role_worker_mapping,
+            "role_worker_mapping": self.role_worker_mapping,
             "resource_pool_manager": resource_pool_manager,
             "ray_worker_group_cls": ray_worker_group_cls,
             "reward_fn": reward_fn,
@@ -125,7 +88,16 @@ class TaskRunner:
 
         trainer = None
         try:
-            trainer = UnifiedTrainer(backend_cls=VerlBackend, config=config, workflow_class=workflow_class, train_dataset=None, val_dataset=None, workflow_args=workflow_args, backend_args=backend_args, **kwargs)
+            trainer = UnifiedTrainer(
+                backend_cls=VerlBackend,
+                config=config,
+                workflow_class=workflow_class,
+                train_dataset=None,
+                val_dataset=None,
+                workflow_args=workflow_args,
+                backend_args=backend_args,
+                **kwargs,
+            )
             trainer.fit()
         except Exception as e:
             print(f"Error training Verl: {e}")
@@ -143,7 +115,7 @@ class VerlTrainerLauncher(TrainerLauncher):
     def __init__(
         self,
         config: DictConfig,
-        workflow_class: type[Workflow],
+        workflow_class: type[Workflow] | None = None,
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
@@ -161,20 +133,19 @@ class VerlTrainerLauncher(TrainerLauncher):
 
     def train(self):
         if not ray.is_initialized():
-            # read off all the `ray_init` settings from the config
-            if self.config is not None and hasattr(self.config, "ray_init"):
-                ray_init_settings = {k: v for k, v in self.config.ray_init.items() if v is not None}
-            else:
-                ray_init_settings = {}
+            from rllm.trainer.ray_init_utils import get_ray_init_settings
+
+            ray_init_settings = get_ray_init_settings(self.config)
             ray.init(runtime_env=get_ppo_ray_runtime_env(), **ray_init_settings)
 
-        runner = TaskRunner.remote()  # type: ignore
+        runner = WorkflowTaskRunner.remote()  # type: ignore
 
         ray.get(
             runner.run.remote(
                 config=self.config,
                 workflow_class=self.workflow_class,
                 workflow_args=self.workflow_args,
+                store=self.store,
                 **self.kwargs,
             )
         )
