@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -53,8 +54,8 @@ class Step(_StepBase):
     def info(self, value: dict) -> None:
         self.metadata = value
 
-    # TODO: add deepcopy of chat_completions here — many agents don't deepcopy at step creation
     def model_post_init(self, __context: Any) -> None:
+        self.chat_completions = deepcopy(self.chat_completions)
         if self.model_output is None:
             return
         # backfill fields like prompt_ids, response_ids, logprobs, etc.
