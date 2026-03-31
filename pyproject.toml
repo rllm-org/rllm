@@ -178,7 +178,7 @@ where   = ["."]
 include = ["rllm", "rllm.*"]
 
 [tool.setuptools.package-data]
-rllm = ["trainer/config/*.yaml"]
+rllm = ["trainer/config/*.yaml", "experimental/config/**/*.yaml"]
 
 [tool.mypy]
 plugins = ["pydantic.mypy"]

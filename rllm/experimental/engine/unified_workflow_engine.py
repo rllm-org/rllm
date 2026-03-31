@@ -221,51 +221,6 @@ class UnifiedWorkflowEngine:
 
         return ordered_results
 
-    async def execute_tasks_streaming(
-        self,
-        tasks: list[dict],
-        task_ids: list[str] | None = None,
-        queue: asyncio.Queue | None = None,
-        is_validation: bool = False,
-        **kwargs,
-    ) -> None:
-        """Run async workflow execution, pushing each completed episode to queue immediately.
-
-        Concurrency is bounded by the existing workflow_queue (acts as semaphore).
-        No episode logging, no tqdm — designed for the fully-async training path.
-
-        Each completed episode is pushed as a tuple: (task_id, rollout_idx, result_idx, episode).
-
-        Args:
-            tasks: List of task dictionaries to process.
-            task_ids: Optional list of task identifiers. If None, UUIDs are generated.
-            queue: asyncio.Queue to push completed episodes into.
-            is_validation: Whether the generation is for validation.
-            **kwargs: Additional arguments passed to individual task processing.
-        """
-        assert queue is not None, "queue must be provided for streaming execution"
-        if self.workflow_queue is None:
-            await self.initialize_pool()
-
-        self.rollout_engine.is_validation = is_validation
-
-        if task_ids is None:
-            task_ids = [str(uuid.uuid4()) for _ in tasks]
-
-        task_id_counter = defaultdict(int)
-
-        async def _process_and_push(task, task_id, rollout_idx, result_idx):
-            result = await self.process_task_with_retry(task, task_id, rollout_idx, result_idx, **kwargs)
-            await queue.put(result)
-
-        tasks_to_run = []
-        for idx, (task, task_id) in enumerate(zip(tasks, task_ids, strict=True)):
-            rollout_idx = task_id_counter[task_id]
-            tasks_to_run.append(_process_and_push(task, task_id, rollout_idx, idx))
-            task_id_counter[task_id] += 1
-
-        await asyncio.gather(*tasks_to_run)
-
     # TODO(listar2000): eventually the agent_workflow_engine should be backend agnostic.
     async def execute_tasks_verl(self, batch: DataProto, is_validation: bool = False, **kwargs) -> list[Episode]:
         """Execute tasks from a Verl DataProto batch and return results.

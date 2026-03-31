@@ -319,6 +319,7 @@ class TrajectoryGroup:
     trajectories: list[Trajectory]
     group_id: str = ""
     metadata: list[dict] = field(default_factory=list)
+    weight_version: int = 0
 
     @cached_property
     def group_role(self) -> str:

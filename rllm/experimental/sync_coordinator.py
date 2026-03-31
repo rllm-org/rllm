@@ -8,8 +8,8 @@ from dataclasses import dataclass
 
 @dataclass
 class SyncCoordinatorConfig:
-    mini_batch_size: int  # episode groups per optimizer step
-    group_size: int  # episodes per group (rollout.n)
+    mini_batch_size: int     # episode groups per optimizer step
+    group_size: int          # episodes per group (rollout.n)
     staleness_threshold: float
     trigger_parameter_sync_step: int
 
@@ -26,7 +26,7 @@ class SyncCoordinator:
         self.config = config
 
         self._policy_version: int = 0
-        self._outstanding: int = 0  # groups dispatched but not yet consumed by training
+        self._outstanding: int = 0          # groups dispatched but not yet consumed by training
         self._steps_since_sync: int = 0
         self._total_syncs: int = 0
         self._total_groups_filtered: int = 0
@@ -38,8 +38,6 @@ class SyncCoordinator:
         # Generation pause — blocks generation during validation or weight sync
         self._generation_paused: asyncio.Event = asyncio.Event()
         self._generation_paused.set()
-
-        self.generation_done: bool = False
 
     @property
     def policy_version(self) -> int:
@@ -84,7 +82,7 @@ class SyncCoordinator:
         self._steps_since_sync = 0
         self._total_syncs += 1
 
-    # --- Generation pause (for validation / non-partial weight sync) ---
+    # --- Generation pause (for validation / weight sync if partial_rollout is False) ---
 
     def pause_generation(self) -> None:
         self._generation_paused.clear()

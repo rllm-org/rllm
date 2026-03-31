@@ -1,4 +1,5 @@
 import inspect
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -10,9 +11,21 @@ from rllm.tools.utils import function_to_dict
 class ToolCall:
     name: str
     arguments: dict[str, Any]
+    id: str | None = None
+    metadata: dict | None = None
 
     def to_dict(self):
         return {"name": self.name, "arguments": self.arguments}
+
+    def to_openai_format(self):
+        return {
+            "id": self.id or "unknown",
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "arguments": json.dumps(self.arguments),
+            },
+        }
 
 
 @dataclass
@@ -44,6 +57,24 @@ class ToolOutput:
             result_string = tool_output.to_string()
         """
         return str(self)
+
+    def to_dict(self) -> dict:
+        """Convert the tool output to a dictionary for JSON serialization."""
+        return {
+            "name": self.name,
+            "output": self.output,
+            "error": self.error,
+            "metadata": self.metadata,
+        }
+
+    def to_openai_format(self) -> dict:
+        """Convert the tool output to OpenAI tool message format."""
+        tool_call_id = (self.metadata.get("call_id") if self.metadata else None) or "unknown"
+        return {
+            "role": "tool",
+            "content": self.to_string(),
+            "tool_call_id": tool_call_id,
+        }
 
 
 class Tool:

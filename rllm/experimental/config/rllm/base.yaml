@@ -56,21 +56,15 @@ algorithm:
   # When true, always use pre-computed step.advantage from the workflow (e.g. distillation)
   # and skip advantage computation (GRPO/REINFORCE). Missing advantages default to 0.
   use_precomputed_advantage: false
-  # for tinker backend only (avaiable options: importance_sampling, ppo, cispo, dro, cross_entropy)
-  loss_fn: null
-
-  # Custom loss / rollout correction (used by Fireworks backend with cookbook losses)
-  kl_beta: 0.0           # KL penalty coefficient; >0 enables reference forward pass
+  loss_fn: null           # [null, importance_sampling, ppo, cispo, dro, cross_entropy]
+  loss_agg_mode: null     # [null, token-mean, seq-mean-token-sum, seq-mean-token-mean]
+  kl_beta: 0.0            # KL penalty coefficient
   eps_clip: 0.2           # PPO clip epsilon
   eps_clip_high: null     # Asymmetric upper clip bound (null = symmetric)
-
-  # Router Replay (R3): replay MoE expert routing from inference during training
-  router_replay: false
-
-  # Rollout correction: corrects FP8 (inference) vs FP32 (training) drift
+  router_replay: false    # Router Replay (R3): replay MoE expert routing from inference during training
   rollout_correction:
-    mode: null            # null = disabled, "token" or "sequence" = enable custom callable loss
     bypass_mode: true     # true = use rollout logprobs as pi_old (2-policy), false = proximal forward (3-policy)
+    tis_mode: null        # null = disabled, "token" or "sequence" = TIS importance sampling level
     tis_cap: 5.0          # Upper clamp on TIS importance weight
 
 # Stepwise advantage
@@ -124,12 +118,14 @@ sdk:
 
 # Async Training Configuration
 async_training:
-  enabled: false
+  enable: false
   mini_batch_size: 1
-  streaming_chunks: 1
+  fwd_bwd_group_size: null  # task batches per forward-backward pass (default: mini_batch_size)
   staleness_threshold: 0.0
   trigger_parameter_sync_step: 1
   partial_rollout: true
+  episode_offload_dir: null       # NVMe offload dir for pending episodes (null = disabled)
+  trajectory_group_offload_dir: null  # NVMe offload dir for queued task batches (null = disabled)
 
 # Episode Logging Configuration
 episode_logging:

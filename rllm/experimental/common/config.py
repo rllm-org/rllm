@@ -12,8 +12,8 @@ from rllm.workflows.workflow import TerminationReason
 class AsyncTrainingConfig:
     """Controls the async training behavior spectrum.
 
-    When `enabled` is False, the trainer uses the current synchronous pipeline.
-    When `enabled` is True, the trainer runs concurrent generation + training
+    When `enable` is False, the trainer uses the current synchronous pipeline.
+    When `enable` is True, the trainer runs concurrent generation + training
     with group-level streaming and dispatch-time throttle.
 
     Behavior spectrum:
@@ -23,17 +23,23 @@ class AsyncTrainingConfig:
         - staleness_threshold>0, partial_rollout=True: Async with partial rollout
     """
 
-    enabled: bool = False
+    enable: bool = False
     mini_batch_size: int = 1  # episode groups per optimizer step
-    streaming_chunks: int = 1  # forward-backward passes per optimizer step (must divide mini_batch_size)
+    fwd_bwd_group_size: int | None = None  # task batches per forward-backward pass (default: mini_batch_size)
     staleness_threshold: float = 0.0  # 0.0 = on-policy. Controls dispatch throttle quota.
     trigger_parameter_sync_step: int = 1  # optimizer steps between weight sync + version bump
     partial_rollout: bool = True  # enable turn-level gating during weight sync
+    episode_offload_dir: str | None = None  # NVMe offload dir for pending episodes (None = disabled)
+    trajectory_group_offload_dir: str | None = None  # NVMe offload dir for queued task batches (None = disabled)
 
     def __post_init__(self):
-        if self.enabled:
-            assert self.streaming_chunks >= 1
-            assert self.mini_batch_size % self.streaming_chunks == 0, f"mini_batch_size ({self.mini_batch_size}) must be divisible by streaming_chunks ({self.streaming_chunks})"
+        if self.fwd_bwd_group_size is None:
+            self.fwd_bwd_group_size = self.mini_batch_size
+        if self.enable:
+            assert self.fwd_bwd_group_size >= 1
+            assert self.mini_batch_size % self.fwd_bwd_group_size == 0, (
+                f"mini_batch_size ({self.mini_batch_size}) must be divisible by fwd_bwd_group_size ({self.fwd_bwd_group_size})"
+            )
 
 
 @dataclass
@@ -125,7 +131,7 @@ class RolloutCorrectionConfig:
     Backend-agnostic — each backend interprets these according to its infrastructure.
 
     Attributes:
-        mode: None = disabled (string loss names, current behavior).
+        tis_mode: None = disabled (string loss names, current behavior).
               "token" or "sequence" = enable custom callable loss with TIS at that level.
         bypass_mode: When True, use rollout (inference) logprobs as π_old — no
               proximal forward pass. When False, compute π_old via policy.forward()
@@ -133,7 +139,7 @@ class RolloutCorrectionConfig:
         tis_cap: Upper clamp on the TIS importance weight.
     """
 
-    mode: str | None = None
+    tis_mode: str | None = None
     bypass_mode: bool = True
     tis_cap: float = 5.0
 
@@ -179,6 +185,7 @@ class AlgorithmConfig:
     kl_beta: float = 0.0
     eps_clip: float = 0.2
     eps_clip_high: float | None = None
+    loss_agg_mode: Literal["token_mean", "seq_mean_token_sum", "seq_mean_token_mean", None] = None
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
     router_replay: bool = False
 
@@ -193,7 +200,7 @@ class AlgorithmConfig:
         """
         rc_section = config.rllm.algorithm.get("rollout_correction", {})
         rollout_correction = RolloutCorrectionConfig(
-            mode=rc_section.get("mode", None),
+            tis_mode=rc_section.get("tis_mode", None),
             bypass_mode=rc_section.get("bypass_mode", True),
             tis_cap=rc_section.get("tis_cap", 5.0),
         )
@@ -209,6 +216,7 @@ class AlgorithmConfig:
             kl_beta=config.rllm.algorithm.get("kl_beta", 0.0),
             eps_clip=config.rllm.algorithm.get("eps_clip", 0.2),
             eps_clip_high=config.rllm.algorithm.get("eps_clip_high", None),
+            loss_agg_mode=config.rllm.algorithm.get("loss_agg_mode", None),
             rollout_correction=rollout_correction,
             router_replay=config.rllm.algorithm.get("router_replay", False),
         )

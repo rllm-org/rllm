@@ -75,8 +75,9 @@ class VerlEngine(RolloutEngine):
         # these go to the parser
         tools = kwargs.pop("tools", [])
         accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
+        reasoning_effort = kwargs.pop("reasoning_effort", "medium")
 
-        prompt = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, tools=tools, accumulate_reasoning=accumulate_reasoning)
+        prompt = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, tools=tools, accumulate_reasoning=accumulate_reasoning, reasoning_effort=reasoning_effort)
         request_prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)  # list[int]
 
         if any(msg.get("images", None) is not None and msg["role"] == "user" for msg in messages) and self.processor is not None:

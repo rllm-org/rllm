@@ -179,7 +179,7 @@ class Workflow(ABC):
         """
         total_reward = 0
         for trajectory in episode.trajectories:
-            total_reward += trajectory.reward
+            total_reward += trajectory.reward or 0
         episode.is_correct = total_reward > 0
 
     def collect_metrics(self, episode: Episode) -> None:
@@ -192,7 +192,7 @@ class Workflow(ABC):
         metrics = defaultdict(list)
         for traj in episode.trajectories:
             name = traj.name
-            metrics[name].append(traj.reward)
+            metrics[name].append(traj.reward or 0.0)
         episode.metrics = {f"{k}_acc": float(np.mean(v)) for k, v in metrics.items()}
 
     def postprocess_episode(self, episode: Episode, termination_reason: TerminationReason = None, error: dict = None) -> Episode:
