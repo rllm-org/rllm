@@ -140,6 +140,20 @@ class GatewayClient:
         resp.raise_for_status()
         return resp.json()
 
+    # -- Gate (weight sync) ------------------------------------------------
+
+    def close_gate(self) -> None:
+        resp = self._http.post(f"{self.gateway_url}/admin/gate/close")
+        resp.raise_for_status()
+
+    def open_gate(self) -> None:
+        resp = self._http.post(f"{self.gateway_url}/admin/gate/open")
+        resp.raise_for_status()
+
+    def wait_for_drain(self, timeout: float | None = None) -> None:
+        resp = self._http.post(f"{self.gateway_url}/admin/gate/drain", timeout=timeout)
+        resp.raise_for_status()
+
 
 class AsyncGatewayClient:
     """Async variant of :class:`GatewayClient` using ``httpx.AsyncClient``."""
@@ -266,3 +280,17 @@ class AsyncGatewayClient:
         resp = await self._http.get(f"{self.gateway_url}/health")
         resp.raise_for_status()
         return resp.json()
+
+    # -- Gate (weight sync) ------------------------------------------------
+
+    async def close_gate(self) -> None:
+        resp = await self._http.post(f"{self.gateway_url}/admin/gate/close")
+        resp.raise_for_status()
+
+    async def open_gate(self) -> None:
+        resp = await self._http.post(f"{self.gateway_url}/admin/gate/open")
+        resp.raise_for_status()
+
+    async def wait_for_drain(self, timeout: float | None = None) -> None:
+        resp = await self._http.post(f"{self.gateway_url}/admin/gate/drain", timeout=timeout)
+        resp.raise_for_status()

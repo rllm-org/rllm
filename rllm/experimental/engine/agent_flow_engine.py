@@ -117,7 +117,7 @@ class AgentFlowEngine:
         for idx, (task, task_id) in enumerate(zip(tasks, task_ids, strict=True)):
             rollout_idx = task_id_counter[task_id]
             task_id_counter[task_id] += 1
-            futures.append(self._process_task_with_retry(task, task_id, rollout_idx, idx, is_validation=is_validation))
+            futures.append(self.process_task_with_retry(task, task_id, rollout_idx, idx, is_validation=is_validation))
 
         with tqdm(total=len(tasks), desc="Generating trajectories") as pbar:
             for future in asyncio.as_completed(futures):
@@ -141,7 +141,7 @@ class AgentFlowEngine:
 
         return ordered_results
 
-    async def _process_task_with_retry(
+    async def process_task_with_retry(
         self,
         task: dict,
         task_id: str,
@@ -202,12 +202,8 @@ class AgentFlowEngine:
         """Run a single AgentFlow task: execute, evaluate, enrich."""
         loop = asyncio.get_event_loop()
 
-        # 1. Create gateway session (run in executor to avoid blocking event loop)
-        await loop.run_in_executor(
-            self.executor,
-            self.gateway.create_session,
-            uid,
-        )
+        # 1. Create gateway session
+        await self.gateway.acreate_session(uid, is_validation=is_validation)
         session_url = self.gateway.get_session_url(uid)
 
         # 2. Build config
@@ -239,12 +235,8 @@ class AgentFlowEngine:
                 traj.reward = eval_output.reward
         episode.is_correct = eval_output.is_correct
 
-        # 5. Retrieve traces from gateway (run in executor to avoid blocking event loop)
-        traces = await loop.run_in_executor(
-            self.executor,
-            self.gateway.get_traces,
-            uid,
-        )
+        # 5. Retrieve traces from gateway
+        traces = await self.gateway.aget_traces(uid)
 
         # 6. Enrich episode with token data
         enriched = self._enrich_episode(episode, traces, uid, task)

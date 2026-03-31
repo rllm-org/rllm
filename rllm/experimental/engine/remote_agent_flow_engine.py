@@ -76,7 +76,7 @@ class RemoteAgentFlowEngine:
             uid = f"{task_id}:{rollout_idx}"
             session_id = str(uuid.uuid4())
 
-            self.gateway.create_session(session_id, is_validation=is_validation)
+            await self.gateway.acreate_session(session_id, is_validation=is_validation)
             session_url = self.gateway.get_session_url(session_id)
 
             submissions.append(
@@ -101,7 +101,7 @@ class RemoteAgentFlowEngine:
             if not result.finished:
                 logger.warning("[%s] Remote task failed (assigning reward=0): %s", uid, result.error)
                 result.reward = 0.0
-            traces = self.gateway.get_traces(result.session_id)
+            traces = await self.gateway.aget_traces(result.session_id)
             episode = _build_episode(traces, result, uid, task)
             if not result.finished:
                 episode.metadata["error"] = {"message": result.error or "Unknown error"}
@@ -122,6 +122,34 @@ class RemoteAgentFlowEngine:
                 logger.error("Failed to log episodes: %s", e)
 
         return episodes
+
+    async def process_task_with_retry(
+        self, task: dict, task_id: str, rollout_idx: int, result_idx: int, **kwargs,
+    ) -> tuple[str, int, int, Episode]:
+        """Process a single task: create session, submit to runtime, retrieve traces, build episode."""
+        uid = f"{task_id}:{rollout_idx}"
+        session_id = str(uuid.uuid4())
+        is_validation = kwargs.get("is_validation", False)
+
+        await self.gateway.acreate_session(session_id, is_validation=is_validation)
+        session_url = self.gateway.get_session_url(session_id)
+
+        submission = TaskSubmission(
+            task=task, session_id=session_id, task_id=task_id, inference_url=session_url,
+        )
+        results = await self.runtime.execute_tasks([submission], timeout=self.session_timeout)
+        result = results[0]
+
+        if not result.finished:
+            logger.warning("[%s] Remote task failed (assigning reward=0): %s", uid, result.error)
+            result.reward = 0.0
+
+        traces = await self.gateway.aget_traces(session_id)
+        episode = _build_episode(traces, result, uid, task)
+        if not result.finished:
+            episode.metadata["error"] = {"message": result.error or "Unknown error"}
+
+        return task_id, rollout_idx, result_idx, episode
 
     def shutdown(self) -> None:
         """No local resources to clean up (runtime shutdown is separate)."""

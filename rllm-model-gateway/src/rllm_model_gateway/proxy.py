@@ -89,6 +89,13 @@ class ReverseProxy:
         self._http: httpx.AsyncClient | None = None
         self._pending_traces: set[asyncio.Task[None]] = set()
 
+        # Gate for weight sync: when closed, new requests wait; in-flight requests finish.
+        self._gate = asyncio.Event()
+        self._gate.set()  # open by default
+        self._active_requests: int = 0
+        self._drained = asyncio.Event()
+        self._drained.set()
+
     async def start(self) -> None:
         self._http = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout=None),  # no timeout — LLM calls can be long
@@ -107,6 +114,35 @@ class ReverseProxy:
             self._http = None
 
     # ------------------------------------------------------------------
+    # Gate (weight sync)
+    # ------------------------------------------------------------------
+
+    def close_gate(self) -> None:
+        """Block new requests from proceeding. In-flight requests continue."""
+        self._gate.clear()
+
+    def open_gate(self) -> None:
+        """Allow new requests to proceed."""
+        self._gate.set()
+
+    async def wait_for_drain(self) -> None:
+        """Wait until all in-flight requests have completed."""
+        if self._active_requests == 0:
+            return
+        self._drained.clear()
+        await self._drained.wait()
+
+    def _on_request_start(self) -> None:
+        self._active_requests += 1
+        self._drained.clear()
+
+    def _on_request_end(self) -> None:
+        self._active_requests -= 1
+        if self._active_requests <= 0:
+            self._active_requests = 0
+            self._drained.set()
+
+    # ------------------------------------------------------------------
     # Main entrypoint
     # ------------------------------------------------------------------
 
@@ -116,6 +152,14 @@ class ReverseProxy:
 
     async def handle(self, request: Request) -> Response:
         """Proxy *request* to an inference worker, capture trace, return response."""
+        await self._gate.wait()
+        self._on_request_start()
+        try:
+            return await self._handle_inner(request)
+        finally:
+            self._on_request_end()
+
+    async def _handle_inner(self, request: Request) -> Response:
         await self._ensure_started()
         session_id: str | None = request.state.session_id
         originally_requested_logprobs: bool = getattr(request.state, "originally_requested_logprobs", False)

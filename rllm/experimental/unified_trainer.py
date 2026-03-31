@@ -240,6 +240,9 @@ class UnifiedTrainer:
         if hasattr(self.backend, "tokenizer"):
             self.tokenizer = self.backend.tokenizer
 
+        # Tracks in-flight async rollout tasks for drain/wait logic
+        self._in_flight_tasks: set[asyncio.Task] = set()
+
     def _validate_and_setup_configs(self):
         """Validate and setup common configs."""
         # validate common, backend-agnostic configs
@@ -473,7 +476,7 @@ class UnifiedTrainer:
         assert self.config.data.train_batch_size == 1, (
             f"Async training requires train_batch_size=1, got {self.config.data.train_batch_size}"
         )
-        assert not self.agent_workflow_engine.raise_on_error, (
+        assert not getattr(self.agent_workflow_engine, "raise_on_error", False), (
             "Async training requires raise_on_error=False so that process_task_with_retry always returns an episode"
         )
         coord_config = SyncCoordinatorConfig(
@@ -539,10 +542,11 @@ class UnifiedTrainer:
                                 task=t, task_id=tid, rollout_idx=ridx, result_idx=0
                             )
                             await buffer.add_episode(tid, episode)
-                        asyncio.create_task(_run_rollout())
+                        t = asyncio.create_task(_run_rollout())
+                        self._in_flight_tasks.add(t)
+                        t.add_done_callback(self._in_flight_tasks.discard)
 
-
-            await self._wait_for_all_workflows_idle()
+            await self._wait_for_drain()
         finally:
             buffer.mark_generation_complete()
 
@@ -558,7 +562,7 @@ class UnifiedTrainer:
         fwd_bwd_group_size = self.async_config.fwd_bwd_group_size
         num_fwd_bwd_passes = mini_batch_size // fwd_bwd_group_size
         use_total_batches = self.rllm_config.trainer.get("total_batches", -1) > 0
-        rollout_engine = self.agent_workflow_engine.rollout_engine
+        rollout_engine = getattr(self.agent_workflow_engine, "rollout_engine", None)
 
         while True:
             trainer_state.reset_batch()
@@ -669,44 +673,54 @@ class UnifiedTrainer:
             if use_total_batches and trainer_state.global_step >= self.rllm_config.trainer.total_batches:
                 break
 
-    async def _perform_weight_sync(self, trainer_state: TrainerState, coordinator: SyncCoordinator, rollout_engine: RolloutEngine) -> None:
+    async def _perform_weight_sync(self, trainer_state: TrainerState, coordinator: SyncCoordinator, rollout_engine: RolloutEngine | None) -> None:
         """Synchronize weights between training and rollout engines.
 
-        Two modes depending on partial_rollout:
-        - partial_rollout=True: Uses rollout engine gate (model-call level).
+        Gating behavior depends on backend.needs_weight_sync_gate:
+        - False (e.g. Tinker): skip gating, just update weights in-place.
+        - True + partial_rollout=True: gate at model-call level (rollout engine or gateway).
           Workflows block between turns, resume with new weights.
-        - partial_rollout=False: Uses coordinator generation pause (dispatch level).
+        - True + partial_rollout=False: pause at dispatch level (coordinator).
           Workflows finish naturally, gate stays open.
         """
+        gateway = getattr(self.agent_workflow_engine, "gateway", None)
+
         if self.async_config.partial_rollout:
-            # Block new model calls; in-flight calls finish, workflows pause between turns
-            rollout_engine.close_gate()
-            await rollout_engine.wait_for_drain()
+            if self.backend.needs_weight_sync_gate:
+                if rollout_engine is not None:
+                    rollout_engine.close_gate()
+                    await rollout_engine.wait_for_drain()
+                elif gateway is not None:
+                    gateway.close_gate()
+                    await gateway.wait_for_drain()
         else:
-            # Stop dispatching new prompts, let all workflows finish naturally
             coordinator.pause_generation()
-            await self._wait_for_all_workflows_idle()
+            await self._wait_for_drain()
 
         trainer_state.policy_version = coordinator.policy_version + 1
         await self.backend.on_policy_updated(trainer_state)
-        rollout_engine.weight_version = trainer_state.policy_version
+        if rollout_engine is not None:
+            rollout_engine.weight_version = trainer_state.policy_version
         coordinator.on_sync_complete()
 
         if self.async_config.partial_rollout:
-            rollout_engine.open_gate()
+            if self.backend.needs_weight_sync_gate:
+                if rollout_engine is not None:
+                    rollout_engine.open_gate()
+                elif gateway is not None:
+                    gateway.open_gate()
         else:
             coordinator.resume_generation()
 
-    async def _wait_for_all_workflows_idle(self) -> None:
-        """Wait for all n_parallel_tasks workflows to return to the pool."""
-        pool = self.agent_workflow_engine
-        while pool.workflow_queue.qsize() < pool.n_parallel_tasks:
+    async def _wait_for_drain(self) -> None:
+        """Wait for all in-flight rollout tasks to complete."""
+        while self._in_flight_tasks:
             await asyncio.sleep(0.1)
 
     async def _validate_async_with_pause(self, trainer_state: TrainerState, coordinator: SyncCoordinator) -> dict:
         """Validation with dispatch-level pause. Waits for workflows to drain, then runs validation."""
         coordinator.pause_generation()
-        await self._wait_for_all_workflows_idle()
+        await self._wait_for_drain()
         try:
             return await self._validate_async(trainer_state)
         finally:
