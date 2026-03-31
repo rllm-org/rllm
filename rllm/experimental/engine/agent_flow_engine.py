@@ -74,6 +74,7 @@ class AgentFlowEngine:
         self.raise_on_error = raise_on_error
         self.episode_logger = episode_logger
         self.executor = ThreadPoolExecutor(max_workers=n_parallel_tasks)
+        self._semaphore = asyncio.Semaphore(n_parallel_tasks)
 
         # Raise the file descriptor limit to avoid "Too many open files" when
         # running many parallel agent flows with individual HTTP clients.
@@ -150,53 +151,54 @@ class AgentFlowEngine:
         is_validation: bool = False,
     ) -> tuple[str, int, int, Episode]:
         """Process a single task with retry logic."""
-        for retry_attempt in range(1, self.retry_limit + 1):
-            uid = f"{task_id}:{rollout_idx}"
-            try:
-                episode = await self._run_single(task, uid, is_validation=is_validation)
-                episode.id = uid
-                episode.task = task
+        async with self._semaphore:
+            for retry_attempt in range(1, self.retry_limit + 1):
+                uid = f"{task_id}:{rollout_idx}"
+                try:
+                    episode = await self._run_single(task, uid, is_validation=is_validation)
+                    episode.id = uid
+                    episode.task = task
 
-                # Display rewards
-                reward_strs = []
-                for traj in episode.trajectories:
-                    reward = "N/A"
-                    if traj.reward is not None:
-                        reward = f"{traj.reward:.1f}"
-                    elif len(traj.steps) > 0:
-                        reward = f"{traj.steps[-1].reward:.1f}"
-                    reward_strs.append(f"{traj.name}: {reward}")
-                colorful_print(
-                    f"[{uid}] Rollout completed. Rewards: [{', '.join(reward_strs)}], Termination: {episode.termination_reason}",
-                    fg="green" if episode.is_correct else "yellow",
-                )
+                    # Display rewards
+                    reward_strs = []
+                    for traj in episode.trajectories:
+                        reward = "N/A"
+                        if traj.reward is not None:
+                            reward = f"{traj.reward:.1f}"
+                        elif len(traj.steps) > 0:
+                            reward = f"{traj.steps[-1].reward:.1f}"
+                        reward_strs.append(f"{traj.name}: {reward}")
+                    colorful_print(
+                        f"[{uid}] Rollout completed. Rewards: [{', '.join(reward_strs)}], Termination: {episode.termination_reason}",
+                        fg="green" if episode.is_correct else "yellow",
+                    )
 
-                return task_id, rollout_idx, result_idx, episode
+                    return task_id, rollout_idx, result_idx, episode
 
-            except Exception as e:
-                logger.error("[%s] Attempt %d/%d failed: %s", uid, retry_attempt, self.retry_limit, e)
-                if retry_attempt < self.retry_limit:
-                    continue
+                except Exception as e:
+                    logger.error("[%s] Attempt %d/%d failed: %s", uid, retry_attempt, self.retry_limit, e)
+                    if retry_attempt < self.retry_limit:
+                        continue
 
-                if self.raise_on_error:
-                    raise
+                    if self.raise_on_error:
+                        raise
 
-                # Return an error episode
-                return (
-                    task_id,
-                    rollout_idx,
-                    result_idx,
-                    Episode(
-                        id=uid,
-                        task=task,
-                        is_correct=False,
-                        termination_reason=TerminationReason.ERROR,
-                        metadata={"error": {"message": str(e)}},
-                    ),
-                )
+                    # Return an error episode
+                    return (
+                        task_id,
+                        rollout_idx,
+                        result_idx,
+                        Episode(
+                            id=uid,
+                            task=task,
+                            is_correct=False,
+                            termination_reason=TerminationReason.ERROR,
+                            metadata={"error": {"message": str(e)}},
+                        ),
+                    )
 
-        # Should not reach here, but satisfy type checker
-        raise RuntimeError(f"[{uid}] Exhausted all retries")
+            # Should not reach here, but satisfy type checker
+            raise RuntimeError(f"[{uid}] Exhausted all retries")
 
     async def _run_single(self, task: dict, uid: str, is_validation: bool = False) -> Episode:
         """Run a single AgentFlow task: execute, evaluate, enrich."""

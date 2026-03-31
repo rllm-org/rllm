@@ -221,6 +221,7 @@ class UnifiedTrainer:
                 runtime=self._remote_runtime,
                 gateway=self._gateway,
                 session_timeout=remote_runtime_config.session_timeout,
+                n_parallel_tasks=self.rllm_config.workflow.n_parallel_tasks,
                 episode_logger=self.episode_logger,
             )
         else:
