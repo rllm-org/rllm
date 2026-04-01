@@ -11,6 +11,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 _VERL_ACTOR_PATCHED = False
+_VERL_DYNAMIC_BATCH_PATCHED = False
 _VLLM_SDK_PATCHED = False
 
 
@@ -49,6 +50,56 @@ def patch_verl_actor_for_loss_override() -> None:
     DataParallelPPOActor.update_policy = _patched_update_policy
     _VERL_ACTOR_PATCHED = True
     logger.info("Patched DataParallelPPOActor.update_policy for per-call loss mode override")
+
+
+# ---------------------------------------------------------------------------
+# Verl dynamic batch: sync micro-batch counts across DP ranks
+# ---------------------------------------------------------------------------
+
+
+def patch_verl_dynamic_batch_sync() -> None:
+    """Patch ``prepare_dynamic_batch`` to sync micro-batch counts across DP ranks.
+
+    Fixes `verl#5750 <https://github.com/verl-project/verl/issues/5750>`_:
+    when ``use_dynamic_bsz=True``, each DP rank independently calculates
+    ``num_micro_batches`` based on its local sequence lengths.  Different
+    ranks can end up with different counts, causing NCCL collective
+    operations (AllGather/ReduceScatter in FSDP) to deadlock.
+
+    The fix defaults ``dp_group`` to ``torch.distributed.group.WORLD`` so
+    that ``prepare_dynamic_batch`` performs an ``all_reduce(MAX)`` across
+    ranks, forcing every rank to iterate through the same number of
+    micro-batches.  This is the same approach as verl PR #5591.
+    """
+    global _VERL_DYNAMIC_BATCH_PATCHED
+    if _VERL_DYNAMIC_BATCH_PATCHED:
+        return
+
+    import verl.utils.seqlen_balancing as sbl
+
+    _original_prepare = sbl.prepare_dynamic_batch
+
+    def _patched_prepare(data, max_token_len, dp_group=None, **kwargs):
+        if dp_group is None:
+            import torch.distributed
+
+            if torch.distributed.is_initialized():
+                dp_group = torch.distributed.group.WORLD
+        return _original_prepare(data, max_token_len, dp_group=dp_group, **kwargs)
+
+    sbl.prepare_dynamic_batch = _patched_prepare
+
+    # Also patch the already-imported reference in dp_actor so both
+    # compute_log_prob and update_policy use the patched version.
+    try:
+        from verl.workers.actor import dp_actor
+
+        dp_actor.prepare_dynamic_batch = _patched_prepare
+    except (ImportError, AttributeError):
+        pass  # dp_actor may not be importable outside GPU workers
+
+    _VERL_DYNAMIC_BATCH_PATCHED = True
+    logger.info("Patched prepare_dynamic_batch to sync micro-batch counts across DP ranks (verl#5750)")
 
 
 # ---------------------------------------------------------------------------

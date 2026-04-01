@@ -134,10 +134,11 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         Returns:
             VerlEngine: The initialized rollout engine.
         """
-        # Apply Verl actor patch for per-role loss mode support
-        from rllm.experimental.verl.patch import patch_verl_actor_for_loss_override
+        # Apply Verl patches
+        from rllm.experimental.verl.patch import patch_verl_actor_for_loss_override, patch_verl_dynamic_batch_sync
 
         patch_verl_actor_for_loss_override()
+        patch_verl_dynamic_batch_sync()
 
         # If SDK is enabled, instrument vLLM replicas before creating workers
         sdk_enabled = self.full_config.rllm.get("sdk", {}).get("enable", False)
