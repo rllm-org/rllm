@@ -168,6 +168,36 @@ class rLLMAdvantageEstimator(str, Enum):
         return cls.OTHER
 
 
+class TrainingObjective(str, Enum):
+    """Supported top-level training objectives in the experimental trainer."""
+
+    RL = "rl"
+    DPO = "dpo"
+
+
+class DPOPairingStrategy(str, Enum):
+    """Supported pairing strategies for DPO preference construction."""
+
+    BEST_WORST = "best_worst"
+
+
+@dataclass
+class DPOConfig:
+    """Configuration for strict, on-policy DPO pair construction."""
+
+    beta: float = 0.1
+    pairing_strategy: DPOPairingStrategy | str = DPOPairingStrategy.BEST_WORST
+    min_reward_gap: float = 0.0
+    drop_ties: bool = True
+
+    def __post_init__(self) -> None:
+        self.pairing_strategy = DPOPairingStrategy(self.pairing_strategy)
+        if self.beta <= 0:
+            raise ValueError(f"DPO beta must be positive, got {self.beta}")
+        if self.min_reward_gap < 0:
+            raise ValueError(f"DPO min_reward_gap must be non-negative, got {self.min_reward_gap}")
+
+
 @dataclass
 class AlgorithmConfig:
     """Configuration for algorithm parameters.
@@ -182,6 +212,7 @@ class AlgorithmConfig:
     ``estimator_map`` and the loss function goes into ``loss_fn_map``.
     """
 
+    objective: TrainingObjective | str = TrainingObjective.RL
     use_rllm: bool = False  # This is ignored (assumed True) for tinker backend.
     estimator: rLLMAdvantageEstimator = rLLMAdvantageEstimator.GRPO
     estimator_map: dict[str, rLLMAdvantageEstimator | str | tuple] = field(default_factory=dict)
@@ -194,6 +225,8 @@ class AlgorithmConfig:
     # advantage computation (GRPO/REINFORCE). Steps missing advantages default to 0.0.
     # When False (default), always compute advantages normally.
     use_precomputed_advantage: bool = False
+    # Configuration for preference-pair construction in DPO mode.
+    dpo: DPOConfig = field(default_factory=DPOConfig)
     # Global loss_fn override (for tinker backend; Verl uses loss_fn_map per role)
     loss_fn: Literal["importance_sampling", "ppo", "cispo", "dro", "cross_entropy"] | None = None
     lr_schedule: Literal["linear", "cosine", "constant"] = "constant"
@@ -216,30 +249,49 @@ class AlgorithmConfig:
         Returns:
             AlgorithmConfig: The AlgorithmConfig built from the configuration.
         """
-        rc_section = config.rllm.algorithm.get("rollout_correction", {})
+        algorithm_cfg = config.rllm.algorithm if hasattr(config, "rllm") else config.algorithm
+        stepwise_cfg = config.rllm.stepwise_advantage if hasattr(config, "rllm") else config.stepwise_advantage
+        dpo_cfg = algorithm_cfg.get("dpo", {})
+        if isinstance(dpo_cfg, DictConfig):
+            dpo_kwargs = OmegaConf.to_container(dpo_cfg, resolve=True)
+        elif dpo_cfg is None:
+            dpo_kwargs = {}
+        else:
+            dpo_kwargs = dict(dpo_cfg)
+        rc_section = algorithm_cfg.get("rollout_correction", {})
         rollout_correction = RolloutCorrectionConfig(
             tis_mode=rc_section.get("tis_mode", None),
             bypass_mode=rc_section.get("bypass_mode", True),
             tis_cap=rc_section.get("tis_cap", 5.0),
         )
         return cls(
-            estimator=rLLMAdvantageEstimator(config.algorithm.adv_estimator),
-            stepwise_advantage_mode=config.rllm.stepwise_advantage.mode,
-            norm_adv_by_std_in_grpo=config.rllm.algorithm.get("norm_adv_by_std_in_grpo", True),
-            use_rllm=config.rllm.stepwise_advantage.get("use_rllm", False),
-            use_precomputed_advantage=config.rllm.algorithm.get("use_precomputed_advantage", False),
-            loss_fn=config.rllm.algorithm.get("loss_fn", None),
-            lr_schedule=config.rllm.algorithm.get("lr_schedule", "constant"),
-            warmup_steps_ratio=config.rllm.algorithm.get("warmup_steps_ratio", 0.0),
-            kl_beta=config.rllm.algorithm.get("kl_beta", 0.0),
-            eps_clip=config.rllm.algorithm.get("eps_clip", 0.2),
-            eps_clip_high=config.rllm.algorithm.get("eps_clip_high", None),
-            loss_agg_mode=config.rllm.algorithm.get("loss_agg_mode", None),
+            objective=algorithm_cfg.get("objective", TrainingObjective.RL.value),
+            estimator=rLLMAdvantageEstimator(algorithm_cfg.adv_estimator),
+            stepwise_advantage_mode=stepwise_cfg.mode,
+            norm_adv_by_std_in_grpo=algorithm_cfg.get("norm_adv_by_std_in_grpo", True),
+            use_rllm=algorithm_cfg.get("use_rllm", False),
+            use_precomputed_advantage=algorithm_cfg.get("use_precomputed_advantage", False),
+            dpo=DPOConfig(**dpo_kwargs),
+            loss_fn=algorithm_cfg.get("loss_fn", None),
+            lr_schedule=algorithm_cfg.get("lr_schedule", "constant"),
+            warmup_steps_ratio=algorithm_cfg.get("warmup_steps_ratio", 0.0),
+            kl_beta=algorithm_cfg.get("kl_beta", 0.0),
+            eps_clip=algorithm_cfg.get("eps_clip", 0.2),
+            eps_clip_high=algorithm_cfg.get("eps_clip_high", None),
+            loss_agg_mode=algorithm_cfg.get("loss_agg_mode", None),
             rollout_correction=rollout_correction,
-            router_replay=config.rllm.algorithm.get("router_replay", False),
+            router_replay=algorithm_cfg.get("router_replay", False),
         )
 
     def __post_init__(self):
+        self.objective = TrainingObjective(self.objective)
+        if not isinstance(self.dpo, DPOConfig):
+            if isinstance(self.dpo, DictConfig):
+                dpo_kwargs = OmegaConf.to_container(self.dpo, resolve=True)
+            else:
+                dpo_kwargs = dict(self.dpo)
+            self.dpo = DPOConfig(**dpo_kwargs)
+
         # Normalize estimator_map: split (estimator, loss_fn) tuples.
         normalized_map: dict[str, rLLMAdvantageEstimator | str] = {}
         for role, value in self.estimator_map.items():
@@ -267,3 +319,6 @@ class AlgorithmConfig:
                 stacklevel=2,
             )
             self.stepwise_advantage_mode = "broadcast"
+
+        if self.objective == TrainingObjective.DPO and self.use_precomputed_advantage:
+            raise ValueError("DPO objective cannot be combined with use_precomputed_advantage=True")

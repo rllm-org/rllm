@@ -23,11 +23,15 @@ from rllm.experimental.common.advantage import (
 from rllm.experimental.common.config import (
     AsyncTrainingConfig,
     CompactFilteringConfig,
+    DPOConfig,
     RejectionSamplingConfig,
+    RolloutCorrectionConfig,
+    TrainingObjective,
     TransformConfig,
 )
 from rllm.experimental.common.metrics import reduce_metrics_lists
 from rllm.experimental.common.performance import simple_timer
+from rllm.experimental.common.preference import PreferencePair, build_preference_pairs
 from rllm.experimental.common.rejection_sampling import (
     RejectionSamplingState,
     apply_rejection_sampling_and_filtering,
@@ -66,6 +70,7 @@ class TrainerState:
     # For passing the context
     episodes: list[Episode] | None = None
     trajectory_groups: list[TrajectoryGroup] | None = None
+    preference_pairs: list[PreferencePair] | None = None
     backend_batch: Any | None = None
 
     def reset_batch(self) -> None:
@@ -73,6 +78,7 @@ class TrainerState:
         self.rs_state.reset()
         self.episodes = None
         self.trajectory_groups = None
+        self.preference_pairs = None
         self.backend_batch = None
 
         self.timing_dict = {}
@@ -90,6 +96,10 @@ class TrainerState:
     @property
     def has_backend_batch(self) -> bool:
         return self.backend_batch is not None
+
+    @property
+    def has_preference_pairs(self) -> bool:
+        return self.preference_pairs is not None and len(self.preference_pairs) > 0
 
 
 class UnifiedTrainer:
@@ -258,6 +268,15 @@ class UnifiedTrainer:
         if self.rllm_config.rejection_sample.multiplier != 1:
             assert self.rllm_config.rejection_sample.enable is True, "rejection sampling is disabled, but rejection_sample.multiplier is not 1"
 
+        objective = self.rllm_config.algorithm.get("objective", TrainingObjective.RL.value)
+        if objective == TrainingObjective.DPO.value:
+            if self.traj_group_adv_estimator_map:
+                raise ValueError("traj_group_adv_estimator_map is only supported for RL objectives, not DPO")
+            if self.rllm_config.algorithm.get("use_precomputed_advantage", False):
+                raise ValueError("DPO objective cannot be combined with use_precomputed_advantage=True")
+            if self.rllm_config.rollout.n < 2:
+                raise ValueError("DPO objective requires rllm.rollout.n >= 2")
+
         # validate backend-specific configs
         self.backend.validate_config()
 
@@ -278,16 +297,37 @@ class UnifiedTrainer:
         )
 
         # algorithm config (used for rLLM-native advantage computation)
+        dpo_cfg = self.rllm_config.algorithm.get("dpo", {})
+        if isinstance(dpo_cfg, DictConfig):
+            dpo_kwargs = OmegaConf.to_container(dpo_cfg, resolve=True)
+        elif dpo_cfg is None:
+            dpo_kwargs = {}
+        else:
+            dpo_kwargs = dict(dpo_cfg)
+        rc_section = self.rllm_config.algorithm.get("rollout_correction", {})
+        rollout_correction = RolloutCorrectionConfig(
+            tis_mode=rc_section.get("tis_mode", None),
+            bypass_mode=rc_section.get("bypass_mode", True),
+            tis_cap=rc_section.get("tis_cap", 5.0),
+        )
         self.algorithm_config = AlgorithmConfig(
+            objective=self.rllm_config.algorithm.get("objective", TrainingObjective.RL.value),
             estimator=self.rllm_config.algorithm.adv_estimator,
             estimator_map=self.traj_group_adv_estimator_map,  # TODO(listar2000): see if we can make this configurable in config as well
             stepwise_advantage_mode=self.rllm_config.stepwise_advantage.mode,
             norm_adv_by_std_in_grpo=self.rllm_config.algorithm.get("norm_adv_by_std_in_grpo", True),
             use_rllm=self.rllm_config.algorithm.get("use_rllm", False),
             use_precomputed_advantage=self.rllm_config.algorithm.get("use_precomputed_advantage", False),
+            dpo=DPOConfig(**dpo_kwargs),
             loss_fn=self.rllm_config.algorithm.get("loss_fn", None),
             lr_schedule=self.rllm_config.algorithm.get("lr_schedule", "constant"),
             warmup_steps_ratio=self.rllm_config.algorithm.get("warmup_steps_ratio", 0.0),
+            kl_beta=self.rllm_config.algorithm.get("kl_beta", 0.0),
+            eps_clip=self.rllm_config.algorithm.get("eps_clip", 0.2),
+            eps_clip_high=self.rllm_config.algorithm.get("eps_clip_high", None),
+            loss_agg_mode=self.rllm_config.algorithm.get("loss_agg_mode", None),
+            rollout_correction=rollout_correction,
+            router_replay=self.rllm_config.algorithm.get("router_replay", False),
         )
 
     def _setup_logging(self):
@@ -444,6 +484,13 @@ class UnifiedTrainer:
         if not trainer_state.has_trajectory_groups:
             return
 
+        if self.algorithm_config.objective == TrainingObjective.DPO:
+            preference_pairs, preference_metrics = build_preference_pairs(trainer_state.trajectory_groups, self.algorithm_config.dpo)
+            trainer_state.preference_pairs = preference_pairs
+            trainer_state.metrics.update(preference_metrics)
+            if not trainer_state.has_preference_pairs:
+                return
+
         # stage 4: transform rllm-native data structures to backend-specific format (sync)
         backend_batch = self.backend.transform_to_backend_batch(trainer_state)
         trainer_state.backend_batch = backend_batch
@@ -454,7 +501,8 @@ class UnifiedTrainer:
 
         # TODO(kylemontgomery1): compute advantages should be backend-agnostic
         # stage 6: compute advantages (async)
-        await self.backend.compute_advantages(trainer_state, self.algorithm_config)
+        if self.algorithm_config.objective != TrainingObjective.DPO:
+            await self.backend.compute_advantages(trainer_state, self.algorithm_config)
 
         # stage 7: update policy (async)
         await self.backend.update_policy(trainer_state)

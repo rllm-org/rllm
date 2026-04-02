@@ -35,6 +35,7 @@ from rllm.agents.agent import Episode
 from rllm.data import Dataset
 from rllm.experimental.common import (
     AlgorithmConfig,
+    TrainingObjective,
     collect_reward_and_advantage_from_trajectory_groups,
     simple_timer,
 )
@@ -211,6 +212,17 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         if self.config.rllm.stepwise_advantage.mode != "broadcast":
             # automatically set the stepwise_advantage_mode to "broadcast", the warning is already shown in AlgorithmConfig.from_config
             self.config.rllm.stepwise_advantage.mode = "broadcast"
+
+        if self.config.rllm.algorithm.get("objective", TrainingObjective.RL.value) == TrainingObjective.DPO.value:
+            if self.config.rllm.rollout.n < 2:
+                raise ValueError("DPO objective requires rllm.rollout.n >= 2 on VerlBackend")
+            if self.config.rllm.algorithm.get("use_precomputed_advantage", False):
+                raise ValueError("DPO objective cannot be combined with use_precomputed_advantage=True on VerlBackend")
+            if not self.use_reference_policy:
+                raise ValueError("DPO objective requires a reference policy on VerlBackend")
+            raise NotImplementedError(
+                "DPO objective trainer plumbing is available, but VerlBackend does not yet have a verified DPO actor-loss path in this build."
+            )
 
     def get_dataloader(self, dataset: Dataset | None, trainer_state: TrainerState) -> Iterable:
         """Get dataloader. Note that for Verl backend, the RayPPOTrainer init already creates the dataloaders."""
