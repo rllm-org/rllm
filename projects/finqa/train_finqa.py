@@ -4,6 +4,7 @@ from rllm.agents.agent import Episode
 from rllm.data.dataset import DatasetRegistry
 from rllm.engine.rollout.rollout_engine import ModelOutput
 from rllm.trainer.agent_trainer import AgentTrainer
+from rllm.workflows.early_finalize import attach_model_output_to_step, maybe_generate_with_early_finalize
 from rllm.workflows.multi_turn_workflow import MultiTurnWorkflow
 from rllm.workflows.workflow import TerminationEvent, TerminationReason
 
@@ -48,23 +49,26 @@ class FinQAWorkflow(MultiTurnWorkflow):
             if prompt_length > max_model_len - min_response_buffer:
                 raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
 
-            output: ModelOutput = await self.rollout_engine.get_model_response(
+            generation = await maybe_generate_with_early_finalize(
+                self,
                 self.agent.chat_completions,
                 application_id=uid,
+                task=task,
                 enforce_max_prompt_length=False,
                 **kwargs,
             )
+            output: ModelOutput = generation.output
             response = output.text
 
             action = self.agent.update_from_model(response)
-
-            # Store model_output on step for Tinker training (verl uses chat_completions)
-            if not hasattr(self.rollout_engine, "chat_parser") and self.agent.trajectory.steps:
-                self.agent.trajectory.steps[-1].model_output = output
+            current_step = self.agent.trajectory.steps[-1] if self.agent.trajectory.steps else None
+            attach_model_output_to_step(current_step, output, generation.response_mask)
 
             next_obs, reward, done, info = await self.run_in_executor(self.env.step, action.action)
 
             self.agent.update_from_env(next_obs, reward, done, info)
+            if current_step is not None and generation.metadata is not None:
+                current_step.info["early_finalize"] = generation.metadata
 
             if output.finish_reason == "length":
                 raise TerminationEvent(TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED)

@@ -6,13 +6,62 @@ _process_trajectory → AccumulatedData → _batch_tensors_and_build_data_proto 
 so that downstream importance sampling and bypass mode work.
 """
 
+import sys
+import types
 from unittest.mock import MagicMock
 
 import torch
 
 from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.experimental.rollout import ModelOutput
-from rllm.experimental.verl.transform import transform_episodes_to_dataproto
+
+
+def _install_minimal_verl_stubs() -> None:
+    if "verl.protocol" in sys.modules and "verl.utils.torch_functional" in sys.modules:
+        return
+
+    verl_module = sys.modules.setdefault("verl", types.ModuleType("verl"))
+    protocol_module = types.ModuleType("verl.protocol")
+    utils_module = types.ModuleType("verl.utils")
+    torch_functional_module = types.ModuleType("verl.utils.torch_functional")
+
+    class DataProto:
+        def __init__(self, *, tensors, non_tensors, meta_info):
+            self.batch = tensors
+            self.non_tensor_batch = non_tensors
+            self.meta_info = meta_info
+
+        @classmethod
+        def from_dict(cls, tensors, non_tensors, meta_info):
+            return cls(tensors=tensors, non_tensors=non_tensors, meta_info=meta_info)
+
+    def pad_sequence_to_length(batch: torch.Tensor, max_length: int, pad_token_id: int, left_pad: bool = True) -> torch.Tensor:
+        current_length = batch.shape[1]
+        if current_length >= max_length:
+            return batch[:, -max_length:] if left_pad else batch[:, :max_length]
+
+        pad_width = max_length - current_length
+        padding = torch.full((batch.shape[0], pad_width), pad_token_id, dtype=batch.dtype, device=batch.device)
+        return torch.cat([padding, batch], dim=1) if left_pad else torch.cat([batch, padding], dim=1)
+
+    protocol_module.DataProto = DataProto
+    torch_functional_module.pad_sequence_to_length = pad_sequence_to_length
+    utils_module.torch_functional = torch_functional_module
+    verl_module.protocol = protocol_module
+    verl_module.utils = utils_module
+
+    sys.modules["verl.protocol"] = protocol_module
+    sys.modules["verl.utils"] = utils_module
+    sys.modules["verl.utils.torch_functional"] = torch_functional_module
+
+
+try:
+    from rllm.experimental.verl.transform import transform_episodes_to_dataproto
+except ModuleNotFoundError as exc:
+    if exc.name != "verl":
+        raise
+    _install_minimal_verl_stubs()
+    from rllm.experimental.verl.transform import transform_episodes_to_dataproto
 
 
 def _make_mock_rollout_engine(pad_token_id: int = 0):
@@ -180,3 +229,27 @@ class TestRolloutLogProbsPropagation:
         # All standard fields should still be present
         for key in ["input_ids", "attention_mask", "position_ids", "prompts", "responses", "response_mask", "traj_rewards", "step_rewards"]:
             assert key in batch.batch, f"Standard field '{key}' should be present"
+
+    def test_step_response_mask_is_preserved(self):
+        """Explicit step-level response masks should flow into Verl response_mask."""
+        model_output = ModelOutput(
+            prompt_ids=[1, 2],
+            completion_ids=[3, 4, 5],
+            logprobs=[-0.1, -0.2, -0.3],
+        )
+        step = Step(
+            prompt_ids=[1, 2],
+            response_ids=[3, 4, 5],
+            response_mask=[1.0, 0.0, 1.0],
+            model_output=model_output,
+            reward=1.0,
+        )
+        trajectory = Trajectory(steps=[step], reward=1.0)
+        episode = Episode(id="task_0:0", trajectories=[trajectory], is_correct=True)
+
+        engine = _make_mock_rollout_engine()
+        batch = transform_episodes_to_dataproto([episode], engine, max_prompt_length=8, max_response_length=8)
+
+        response_mask = batch.batch["response_mask"]
+        assert torch.equal(response_mask[0, :3], torch.tensor([1.0, 0.0, 1.0]))
+        assert torch.equal(response_mask[0, 3:], torch.zeros(5))

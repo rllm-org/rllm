@@ -2,6 +2,7 @@ from typing import Any
 
 from rllm.agents.agent import Episode
 from rllm.engine.rollout.rollout_engine import ModelOutput
+from rllm.workflows.early_finalize import attach_model_output_to_step, maybe_generate_with_early_finalize
 from rllm.workflows.timing_mixin import TimingTrackingMixin
 from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflow
 
@@ -49,20 +50,27 @@ class CumulativeWorkflow(TimingTrackingMixin, Workflow):
             if max_tokens <= 0:
                 raise TerminationEvent(TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED)
 
-            output: ModelOutput = await self.timed_llm_call(
+            generation = await maybe_generate_with_early_finalize(
+                self,
                 self.agent.chat_completions,
                 application_id=uid,
+                task=task,
                 accumulate_reasoning=True,
                 enforce_max_prompt_length=False,
                 max_tokens=max_tokens,
                 **kwargs,
             )
+            output: ModelOutput = generation.output
             response = output.text
 
             action = self.agent.update_from_model(response)
+            current_step = self.agent.trajectory.steps[-1] if self.agent.trajectory.steps else None
+            attach_model_output_to_step(current_step, output, generation.response_mask)
 
             next_obs, reward, done, info = await self.timed_env_call(self.env.step, action)
             self.agent.update_from_env(next_obs, reward, done, info)
+            if current_step is not None and generation.metadata is not None:
+                current_step.info["early_finalize"] = generation.metadata
 
             if output.finish_reason == "length":
                 raise TerminationEvent(TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED)

@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import logging
 import uuid
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -7,9 +10,11 @@ from verl.protocol import DataProto
 from verl.utils.torch_functional import pad_sequence_to_length
 
 from rllm.agents.agent import Episode, Trajectory, TrajectoryGroup
-from rllm.experimental.rollout import VerlEngine
 from rllm.experimental.verl.dataclass import AccumulatedData, ProcessedStepData
 from rllm.workflows.workflow import TerminationReason
+
+if TYPE_CHECKING:
+    from rllm.experimental.rollout import VerlEngine
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +135,7 @@ def _handle_multimodal_position_ids(processor, input_ids: torch.Tensor, attentio
     return position_ids
 
 
-def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_id: int, max_prompt_length: int, max_response_length: int, processor=None) -> "DataProto":
+def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_id: int, max_prompt_length: int, max_response_length: int, processor=None) -> DataProto:
     """Batches the tensors from an AccumulatedData.
 
     Args:
@@ -242,7 +247,15 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
             continue
         prompt_ids = torch.tensor(step.model_output.prompt_ids, dtype=torch.long)
         response_ids = torch.tensor(step.model_output.completion_ids, dtype=torch.long)
-        mask = torch.ones_like(response_ids, dtype=torch.long)
+        if step.response_mask:
+            if len(step.response_mask) != len(response_ids):
+                raise ValueError(
+                    f"Step {step_idx} in trajectory {trajectory_id} has mismatched response_mask and completion_ids lengths: "
+                    f"{len(step.response_mask)} vs {len(response_ids)}"
+                )
+            mask = torch.tensor(step.response_mask, dtype=torch.float32)
+        else:
+            mask = torch.ones_like(response_ids, dtype=torch.float32)
         step_reward = step.reward
         multi_modal_inputs = step.model_output.multi_modal_inputs or {}
         step_id = f"{trajectory_id}_step{step_idx}"
