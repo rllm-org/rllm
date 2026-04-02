@@ -1,9 +1,9 @@
-"""ERL FrozenLake training example — **Verl backend**.
+"""ERL FrozenLake training example — **Tinker backend**.
 
 Reproduces the FrozenLake experiment from:
   Shi et al., "Experiential Reinforcement Learning", 2026.
 
-Launch via the companion shell script ``tmp/test_erl_frozenlake.sh``.
+Launch via the companion shell script ``tmp/test_erl_frozenlake_tinker.sh``.
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ def main(config: DictConfig):
         config=config,
         train_dataset=train_dataset,
         val_dataset=test_dataset,
-        backend="verl",
+        backend="tinker",
         traj_group_adv_estimator_map=DEFAULT_ERL_ADV_ESTIMATOR_MAP,
         store=store,
     )
