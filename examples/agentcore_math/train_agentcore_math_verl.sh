@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Requires megatron deps: bash scripts/install_megatron.sh <cu128|cu129|cu130|...>
 set -eux
 
 # Load environment variables (AGENTCORE_AGENT_ARN, AGENTCORE_S3_BUCKET)
@@ -65,6 +66,7 @@ python -m examples.agentcore_math.train_agentcore_math_verl \
     trainer.test_freq=10 \
     trainer.total_epochs=1 \
     trainer.default_hdfs_dir=null \
+    trainer.resume_mode=disable \
     rllm.remote_runtime.enabled=true \
     rllm.remote_runtime.backend=agentcore \
     rllm.remote_runtime.backend_config.agent_runtime_arn=$AGENTCORE_AGENT_ARN \
