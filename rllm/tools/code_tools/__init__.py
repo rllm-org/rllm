@@ -6,7 +6,6 @@ from rllm.tools.code_tools.together_tool import TogetherCodeTool
 __all__ = [
     "PythonInterpreter",  # New unified interpreter
     "E2BPythonInterpreter",  # Legacy interpreters for backward compatibility
-    "LocalPythonInterpreter",
     "LCBPythonInterpreter",
     "TogetherCodeTool",
 ]

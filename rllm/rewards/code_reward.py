@@ -19,7 +19,6 @@ from rllm.rewards.code_utils.kodcode import code_exec as kod_code_exec
 
 # from rllm.rewards.code_utils.code_contests import run_test as code_contests_run_test
 from rllm.rewards.code_utils.livecodebench import run_test as lcb_run_test
-from rllm.rewards.code_utils.taco import run_test as taco_run_test
 from rllm.rewards.reward_types import RewardConfig, RewardOutput, RewardType
 from rllm.tools.code_tools.code_tool import CodeTool
 from rllm.tools.code_tools.together_tool import TogetherCodeTool
@@ -175,6 +174,8 @@ def postprocess_lcb_sample(sample):
 
 # https://huggingface.co/datasets/PrimeIntellect/verifiable-coding-problems
 def primeintellect_check_correctness(tests, code, use_tci=False):
+    from rllm.rewards.code_utils.taco import run_test as taco_run_test
+
     if isinstance(tests, str):
         try:
             tests = ast.literal_eval(tests)
@@ -247,7 +248,17 @@ def lcb_check_correctness_v2(sample, generation, timeout=6, debug=False):
         # Create detailed test results
         in_outs = json.loads(sample["input_output"])
         detailed_results["total_tests"] = len(result[0])
-        detailed_results["test_results"] = [{"input": inp, "expected": out, "passed": res == True, "error": metadata_list[0].get("error", None), "error_message": metadata_list[0].get("error_message", None), "output": metadata_list[0].get("output", None)} for inp, out, res in zip(in_outs["inputs"], in_outs["outputs"], result[0], strict=False)]
+        detailed_results["test_results"] = [
+            {
+                "input": inp,
+                "expected": out,
+                "passed": res == True,
+                "error": metadata_list[0].get("error", None),
+                "error_message": metadata_list[0].get("error_message", None),
+                "output": metadata_list[0].get("output", None),
+            }
+            for inp, out, res in zip(in_outs["inputs"], in_outs["outputs"], result[0], strict=False)
+        ]
         detailed_results["passed_tests"] = sum(1 for r in result[0] if r == True)
         detailed_results["all_passed"] = all(r == True for r in result[0])
 
