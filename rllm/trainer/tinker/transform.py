@@ -166,12 +166,12 @@ def transform_trajectory_groups_to_datums(
         datums = []
 
     # step 2: iterate over all steps and build the Tinker Datum objects
-    datums_per_traj = []
+    seqs_per_traj = []
     seq_lengths = []
     for group in trajectory_groups:
         for trajectory in group.trajectories:
             traj_datums = trajectory_to_datums(trajectory, router_replay=algorithm_config.router_replay)
-            datums_per_traj.append(len(traj_datums))
+            seqs_per_traj.append(len(traj_datums))
             for d in traj_datums:
                 seq_lengths.append(d.model_input.length)
             if algorithm_config.estimator_map:
@@ -179,13 +179,13 @@ def transform_trajectory_groups_to_datums(
             else:
                 datums.extend(traj_datums)
 
-    if datums_per_traj:
+    if seqs_per_traj:
         import numpy as _np
-        adv_metrics["train/datums_per_traj/mean"] = _np.mean(datums_per_traj)
-        adv_metrics["train/datums_per_traj/min"] = _np.min(datums_per_traj)
-        adv_metrics["train/datums_per_traj/max"] = _np.max(datums_per_traj)
-        adv_metrics["train/seq_length/mean"] = _np.mean(seq_lengths)
-        adv_metrics["train/seq_length/min"] = _np.min(seq_lengths)
-        adv_metrics["train/seq_length/max"] = _np.max(seq_lengths)
+        adv_metrics["batch/seqs_per_traj/mean"] = _np.mean(seqs_per_traj)
+        adv_metrics["batch/seqs_per_traj/min"] = _np.min(seqs_per_traj)
+        adv_metrics["batch/seqs_per_traj/max"] = _np.max(seqs_per_traj)
+        adv_metrics["batch/seq_length/mean"] = _np.mean(seq_lengths)
+        adv_metrics["batch/seq_length/min"] = _np.min(seq_lengths)
+        adv_metrics["batch/seq_length/max"] = _np.max(seq_lengths)
 
     return (datums if not algorithm_config.estimator_map else datums_dict), adv_metrics

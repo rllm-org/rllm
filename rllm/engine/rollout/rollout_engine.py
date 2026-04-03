@@ -1,9 +1,12 @@
 import asyncio
+import logging
 from dataclasses import dataclass
 
 from rllm.engine.rollout.types import TokenInput, Tokenizer, TokenOutput
 from rllm.parser import ChatTemplateParser
 from rllm.tools.tool_base import ToolCall
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -22,6 +25,7 @@ class ModelOutput:
     completion_length: int = 0
     finish_reason: str | None = None
     weight_version: int | None = None  # policy version at time of generation
+    metrics: dict | None = None  # per-turn server metrics (e.g. ttft, queue durations)
 
     def to_dict(self):
         return {
@@ -38,6 +42,7 @@ class ModelOutput:
             "completion_length": self.completion_length,
             "finish_reason": self.finish_reason,
             "weight_version": self.weight_version,
+            "metrics": self.metrics,
         }
 
     @classmethod
@@ -56,6 +61,7 @@ class ModelOutput:
             completion_length=data.get("completion_length", 0),
             finish_reason=data.get("finish_reason"),
             weight_version=data.get("weight_version"),
+            metrics=data.get("metrics"),
         )
 
 
@@ -77,10 +83,12 @@ class RolloutEngine:
 
     def close_gate(self) -> None:
         """Close the gate. New model calls will block at wait_for_gate()."""
+        logger.info(f"[RolloutEngine] Closing gate. Active calls: {self._active_calls}")
         self._gate.clear()
 
     def open_gate(self) -> None:
         """Open the gate, releasing any blocked model calls."""
+        logger.info(f"[RolloutEngine] Opening gate. Active calls: {self._active_calls}")
         self._gate.set()
 
     def on_model_call_complete(self) -> None:
@@ -89,15 +97,23 @@ class RolloutEngine:
         if self._active_calls <= 0:
             self._active_calls = 0
             self._drained_event.set()
+            logger.debug("[RolloutEngine] All active calls drained.")
+        else:
+            logger.debug(f"[RolloutEngine] Model call complete. Active calls: {self._active_calls}")
 
     async def wait_for_gate(self) -> None:
         """Wait until gate is open, then register as active call. Engines will call this at the START of get_model_response()."""
+        if not self._gate.is_set():
+            logger.info(f"[RolloutEngine] Waiting for gate to open. Active calls: {self._active_calls}")
         await self._gate.wait()
         self._active_calls += 1
         self._drained_event.clear()
+        logger.debug(f"[RolloutEngine] Gate passed. Active calls: {self._active_calls}")
 
     async def wait_for_drain(self) -> None:
         """Wait until all active model calls complete. Used during weight sync."""
+        if not self._drained_event.is_set():
+            logger.info(f"[RolloutEngine] Waiting for drain. Active calls: {self._active_calls}")
         await self._drained_event.wait()
 
     # --- Model response ---
@@ -107,8 +123,9 @@ class RolloutEngine:
     async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         await self.wait_for_gate()
         try:
+            weight_version = self.weight_version
             result = await self._get_model_response(messages, **kwargs)
-            result.weight_version = self.weight_version
+            result.weight_version = weight_version
             return result
         finally:
             self.on_model_call_complete()

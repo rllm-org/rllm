@@ -150,7 +150,7 @@ on the transformation logic. At the same time, we also allow user-defined "hooks
 """
 
 
-def _get_transform_metrics(episodes: list[Episode], groups: list[TrajectoryGroup], prefix: str = "grouping") -> dict:
+def _get_transform_metrics(episodes: list[Episode], groups: list[TrajectoryGroup], prefix: str = "groups") -> dict:
     """
     Get metrics for the transformation pipeline.
     """
@@ -180,12 +180,11 @@ def _default_traj_grouping_hook(episodes: list[Episode], transform_config: Trans
     """
     trajectory_groups = _build_trajectory_groups(episodes, compact_filtering_config)  # part 1
     reward_warnings = _validate_and_propagate_rewards(trajectory_groups, transform_config)  # part 2
-
-    for warning in reward_warnings[:LOG_N_WARNINGS]:
-        logger.warning(warning)
-
-    if len(reward_warnings) > LOG_N_WARNINGS:
-        logger.warning(f"Skipping {len(reward_warnings) - LOG_N_WARNINGS} more similar warnings with reward validation")
+    if reward_warnings:
+        for warning in reward_warnings[:LOG_N_WARNINGS]:
+            logger.debug(warning)
+        if len(reward_warnings) > LOG_N_WARNINGS:
+            logger.debug(f"Skipping {len(reward_warnings) - LOG_N_WARNINGS} more similar reward validation warnings")
 
     return trajectory_groups
 
@@ -194,7 +193,7 @@ def transform_episodes_to_trajectory_groups(
     episodes: list[Episode],
     transform_config: TransformConfig,
     compact_filtering_config: CompactFilteringConfig | None = None,
-    metrics_prefix: str = "grouping",
+    metrics_prefix: str = "groups",
     traj_grouping_hook: Callable[[list[Episode], TransformConfig, CompactFilteringConfig | None], list[TrajectoryGroup]] = _default_traj_grouping_hook,
 ) -> tuple[list[TrajectoryGroup], dict]:
     """
@@ -232,12 +231,11 @@ def transform_episodes_to_trajectory_groups(
 
     # Step 1: Name imputation
     rename_warnings = _impute_trajectory_names(episodes, transform_config)
-
-    for warning in rename_warnings[:LOG_N_WARNINGS]:
-        logger.warning(warning)
-
-    if len(rename_warnings) > LOG_N_WARNINGS:
-        logger.warning(f"Skipping {len(rename_warnings) - LOG_N_WARNINGS} more similar warnings with trajectory names")
+    if rename_warnings:
+        for warning in rename_warnings[:LOG_N_WARNINGS]:
+            logger.debug(warning)
+        if len(rename_warnings) > LOG_N_WARNINGS:
+            logger.debug(f"Skipping {len(rename_warnings) - LOG_N_WARNINGS} more similar trajectory name warnings")
 
     # Step 2: Invoke the trajectory grouping hook
     groups = traj_grouping_hook(episodes, transform_config, compact_filtering_config)

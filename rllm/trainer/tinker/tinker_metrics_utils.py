@@ -5,59 +5,11 @@ import logging
 import tinker
 import torch
 
+from rllm.experimental.common.visualization import print_metrics_table  # noqa: F401 (re-export)
 from rllm.experimental.unified_trainer import TrainerState
 
 logger = logging.getLogger(__name__)
 
-
-def print_metrics_table(metrics: dict, step: int):
-    """
-    Print metrics as a formatted table (similar to tinker_cookbook).
-
-    Args:
-        metrics: Dictionary of metrics
-        step: Current step number
-    """
-    try:
-        from rich.console import Console
-        from rich.table import Table
-
-        console = Console()
-
-        # Create table
-        table = Table(title=f"Step {step}", show_header=True, header_style="bold magenta")
-        table.add_column("Metric", style="cyan", no_wrap=False)
-        table.add_column("Value", justify="right", style="green")
-
-        # Sort metrics by key for consistent ordering
-        sorted_metrics = sorted(metrics.items())
-
-        for key, value in sorted_metrics:
-            # Format value based on type
-            if isinstance(value, float):
-                value_str = f"{value:.6f}" if abs(value) < 1000 else f"{value:.2f}"
-            elif isinstance(value, int):
-                value_str = str(value)
-            else:
-                value_str = str(value)
-
-            table.add_row(key, value_str)
-
-        console.print(table)
-
-    except ImportError:
-        # Fallback to simple text table if rich is not available
-        print(f"\nStep {step}")
-        print("=" * 60)
-        for key, value in sorted(metrics.items()):
-            if isinstance(value, float):
-                value_str = f"{value:.6f}" if abs(value) < 1000 else f"{value:.2f}"
-            elif isinstance(value, int):
-                value_str = str(value)
-            else:
-                value_str = str(value)
-            print(f"{key:40s} {value_str:>15s}")
-        print("=" * 60)
 
 
 def compute_kl_and_entropy_metrics(training_datums: list[tinker.Datum], training_logprobs: list[torch.Tensor]) -> dict:
@@ -102,10 +54,10 @@ def compute_kl_and_entropy_metrics(training_datums: list[tinker.Datum], training
     perplexity = torch.exp(torch.tensor(entropy_sample)).item()
 
     return {
-        "optim/kl_sample_train_v1": kl_sample_train_v1,
-        "optim/kl_sample_train_v2": kl_sample_train_v2,
-        "optim/entropy": entropy_sample,
-        "optim/perplexity": perplexity,
+        "train/kl_sample_train_v1": kl_sample_train_v1,
+        "train/kl_sample_train_v2": kl_sample_train_v2,
+        "train/entropy": entropy_sample,
+        "train/perplexity": perplexity,
     }
 
 
@@ -125,7 +77,7 @@ def update_training_metrics(trainer_state: TrainerState, learning_rate: float, t
         {
             "progress/batch": trainer_state.global_step,
             "progress/epoch": trainer_state.epoch,
-            "optim/lr": learning_rate,
+            "progress/lr": learning_rate,
         }
     )
 

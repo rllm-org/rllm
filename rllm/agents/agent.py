@@ -92,6 +92,7 @@ class Step(_StepBase):
             "prompt_ids": self.prompt_ids,
             "response_ids": self.response_ids,
             "logprobs": self.logprobs,
+            "routing_matrices": self.routing_matrices,
             "chat_completions": _serialize_value(self.chat_completions),
             "observation": self.observation,
             "thought": self.thought,
@@ -114,6 +115,7 @@ class Step(_StepBase):
             prompt_ids=data["prompt_ids"],
             response_ids=data["response_ids"],
             logprobs=data["logprobs"],
+            routing_matrices=data.get("routing_matrices"),
             chat_completions=data["chat_completions"],
             observation=data["observation"],
             thought=data["thought"],
@@ -140,6 +142,7 @@ class Step(_StepBase):
             action=action,
             model_response=model_output.content or "",
             model_output=model_output,
+            weight_version=model_output.weight_version,
         )
 
 

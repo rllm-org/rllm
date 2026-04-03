@@ -255,12 +255,18 @@ class TinkerPolicyTrainer:
         # Wait for completion and extract logprobs
         fwd_bwd_results = await asyncio.gather(*fwd_bwd_futures)
 
-        # Extract training logprobs from loss_fn_outputs
+        # Extract training logprobs and server-side metrics from results
         training_logprobs = []
         for fwd_bwd_result in fwd_bwd_results:
             for output in fwd_bwd_result.loss_fn_outputs:
                 logprobs = output["logprobs"].to_torch()
                 training_logprobs.append(logprobs)
+            # Capture server-side metrics (e.g. loss) under train/ prefix
+            if fwd_bwd_result.metrics:
+                for k, v in fwd_bwd_result.metrics.items():
+                    if k.startswith("clock_cycle"):
+                        continue
+                    adv_metrics[f"train/{k.replace(':', '/')}"] = v
 
         return training_datums, training_logprobs, adv_metrics
 
@@ -335,6 +341,11 @@ class TinkerPolicyTrainer:
             for output in fwd_bwd_result.loss_fn_outputs:
                 logprobs = output["logprobs"].to_torch()
                 training_logprobs.append(logprobs)
+            if fwd_bwd_result.metrics:
+                for k, v in fwd_bwd_result.metrics.items():
+                    if k.startswith("clock_cycle"):
+                        continue
+                    adv_metrics[f"train/{k.replace(':', '/')}"] = v
 
         return training_datums, training_logprobs, adv_metrics, scheduled_learning_rate
 

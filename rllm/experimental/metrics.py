@@ -13,18 +13,18 @@ import numpy as np
 
 # Keys that should be summed rather than averaged.
 _SUM_KEYS: set[str] = {
-    "grouping/num_trajs_before_filter",
-    "grouping/num_trajs_after_filter",
-    "grouping/num_groups",
-    "buffer/filtered_min_trajs",
-    "buffer/filtered_zero_adv",
+    "groups/num_trajs_before_filter",
+    "groups/num_trajs_after_filter",
+    "groups/num_groups",
+    "groups/dropped_min_trajs",
+    "groups/dropped_zero_adv",
 }
 
 # Prefixes where "last value" is the correct reduction.
 _LAST_PREFIXES: tuple[str, ...] = (
     "time/",
+    "train/",
     "progress/",
-    "optim/",
     "async/",
 )
 

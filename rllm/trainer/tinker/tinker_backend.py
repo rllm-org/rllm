@@ -443,10 +443,6 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         learning_rate = trainer_state.extra_info.get("scheduled_learning_rate", self.learning_rate)
         update_training_metrics(trainer_state, learning_rate, trainer_state.total_steps)
 
-        # Print metrics table
-        if trainer_state.metrics:
-            print_metrics_table(trainer_state.metrics, trainer_state.global_step)
-
     async def on_epoch_start(self, trainer_state: TrainerState) -> None:
         """Called at the start of an epoch."""
         logger.info(f"Starting epoch {trainer_state.epoch}")
