@@ -1,0 +1,3 @@
+[submodule "cookbooks/swe/SWE-bench_Pro-os"]
+	path = cookbooks/swe/SWE-bench_Pro-os
+	url = git@github.com:scaleapi/SWE-bench_Pro-os.git

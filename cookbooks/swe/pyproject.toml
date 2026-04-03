@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swe-bench-flow"
+version = "0.1.0"
+description = "SWE-bench multi-turn coding agent plugin for rLLM (AgentFlow protocol)"
+requires-python = ">=3.12"
+dependencies = [
+    "openai",
+    "modal",
+    "mini-swe-agent[full]",
+    "swebench",
+    "swesmith",
+    "pyyaml",
+    "pandas",
+    "datasets",
+    "python-dotenv",
+]
+
+[tool.setuptools.packages.find]
+include = ["tasks*", "patches*"]
+
+[tool.setuptools]
+py-modules = ["swe_agent_flow", "evaluator", "openai_model", "environment", "data", "prepare_tinker_data"]
+
+[tool.setuptools.package-data]
+"*" = ["*.yaml"]
+
+# Plugin discovery
+[project.entry-points."rllm.agents"]
+swe = "swe_agent_flow:SWEAgentFlow"
+
+[project.entry-points."rllm.evaluators"]
+swe_bench_pro = "evaluator:SWEEvaluator"

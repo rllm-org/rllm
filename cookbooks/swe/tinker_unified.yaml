@@ -1,0 +1,99 @@
+defaults:  # these are loaded from the rLLM unified config folder
+  - rllm: base
+  - rllm/backend: tinker
+  - _self_
+
+# Whether to use UnifiedTrainer (if available)
+use_unified_trainer: true
+
+# Dataset Configuration (registered via prepare_tinker_data.py)
+train_dataset: swe_smith_py
+val_dataset: swe_bench_multilingual
+
+# SWE AgentFlow / Evaluator arguments
+swe:
+  cost_limit: 3.0
+  step_limit: 50
+  command_timeout: 60
+  sandbox_timeout: 1100
+  agent_timeout: 900
+  verbose: true
+
+# Model Configuration
+model:
+  name: "Qwen/Qwen3.5-35B-A3B"  # Default model - adjust based on your setup
+  lora_rank: 8
+  train_unembed: true  # Train LoRA on output embedding layer
+  train_attn: true     # Train LoRA on attention layers
+  train_mlp: true      # Train LoRA on MLP layers
+
+# Training Configuration
+training:
+  group_size: 8  # Number of rollouts per prompt
+  learning_rate: 1e-5
+  beta1: 0.9
+  beta2: 0.95
+  eps: 1e-8
+  max_length: 65536
+  num_minibatches: 1  # Must be 1 for workflow trainer
+  default_local_dir: './checkpoints/turing-swe-tinker'
+
+sampling:  # can be made smaller for validation -- Tinker has fixed the bug with logprobs
+  train:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+  val:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+
+# Rollout Engine Configuration
+rollout_engine:
+  reasoning_effort: "medium"
+  accumulate_reasoning: true
+  disable_thinking: false
+  bypass_render_with_parser: false
+  strip_thinking_from_history: false  # Preserve extension property for O(T) multi-turn training
+
+# Data Configuration
+data:
+  max_prompt_length: 30720
+  max_response_length: 2048
+  train_batch_size: 4
+  val_batch_size: 300
+
+# rLLM backend-agnostic settings
+rllm:
+  # Workflow Configuration (must be under rllm to override base.yaml defaults)
+  workflow:
+    n_parallel_tasks: 150 # Number of parallel Modal sandboxes
+    retry_limit: 1
+    raise_on_error: false  # Don't crash on individual rollout failures
+  compact_filtering:
+    enable: false
+  algorithm:
+    adv_estimator: grpo
+    gamma: 1.0
+    lam: 0.95
+    norm_adv_by_std_in_grpo: true
+    use_rllm: true
+  stepwise_advantage:
+    enable: true
+    mode: broadcast
+  trainer:
+    total_epochs: 1
+    logger: ['console', 'wandb']  # Use W&B for tracking
+    project_name: 'rllm-swe'
+    experiment_name: 'swe-smith-py-go-filtered-Qwen3.5-35B-3/12'
+    test_freq: 100     # Validate every N batches
+    save_freq: 15    # Save checkpoint every N batches
+    val_before_train: false  # Skip validation before training to go straight to 64 parallel
+    resume_from_tinker_id: null  # Tinker model ID path to resume from
+
+# Hydra configuration
+hydra:
+  searchpath:
+    - pkg://rllm.experimental.config
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
