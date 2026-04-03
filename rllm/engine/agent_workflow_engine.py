@@ -226,6 +226,20 @@ class AgentWorkflowEngine:
             self.current_mode = "train"
         tasks = batch.non_tensor_batch["extra_info"].tolist()
         task_ids = batch.non_tensor_batch["task_ids"].tolist()
+
+        # Preserve raw prompt content for workflow implementations that expect
+        # question/problem/messages/prompt fields inside each task dict.
+        if "raw_prompt" in batch.non_tensor_batch:
+            raw_prompts = batch.non_tensor_batch["raw_prompt"]
+            for i, task in enumerate(tasks):
+                prompt = raw_prompts[i]
+                if isinstance(prompt, np.ndarray):
+                    prompt = prompt.tolist()
+                if isinstance(prompt, list) and len(prompt) > 0 and isinstance(prompt[0], dict):
+                    task["messages"] = prompt
+                elif isinstance(prompt, str):
+                    task["prompt"] = prompt
+
         results = await self.execute_tasks(tasks, task_ids, **kwargs)  # list of Episodes
         self.rollout_engine.validate = False
 
