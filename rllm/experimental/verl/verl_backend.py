@@ -33,7 +33,7 @@ from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_pad
 
 from rllm.agents.agent import Episode
 from rllm.data import Dataset
-from rllm.engine.rollout import RolloutEngine, VerlEngine
+from rllm.experimental.rollout import RolloutEngine, VerlEngine
 from rllm.experimental.common import (
     AlgorithmConfig,
     collect_reward_and_advantage_from_trajectory_groups,

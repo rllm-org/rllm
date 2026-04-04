@@ -16,7 +16,7 @@ from omegaconf import DictConfig
 
 from rllm.agents.agent import Episode
 from rllm.data import Dataset
-from rllm.engine.rollout import RolloutEngine
+from rllm.experimental.rollout import RolloutEngine
 from rllm.experimental.common.advantage import AlgorithmConfig, collect_reward_and_advantage_from_trajectory_groups
 
 if TYPE_CHECKING:

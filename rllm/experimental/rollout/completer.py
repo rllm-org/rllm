@@ -14,8 +14,8 @@ from dataclasses import field
 from typing import TYPE_CHECKING, Any
 
 from rllm.agents.agent import Step
-from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine
-from rllm.engine.rollout.types import TokenInput, Tokenizer, TokenOutput
+from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
+from rllm.experimental.rollout.types import TokenInput, Tokenizer, TokenOutput
 from rllm.parser import ChatTemplateParser
 
 

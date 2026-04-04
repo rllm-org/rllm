@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 from rllm.agents.agent import Episode, TrajectoryGroup
 from rllm.data import Dataset
-from rllm.engine.rollout import RolloutEngine
+from rllm.experimental.rollout import RolloutEngine
 from rllm.experimental.common.advantage import (
     AlgorithmConfig,
     collect_reward_and_advantage_from_trajectory_groups,

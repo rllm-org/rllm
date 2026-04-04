@@ -11,8 +11,8 @@ from tinker.types.tensor_data import TensorData
 from tinker_cookbook.supervised.common import create_rightshifted_model_input_and_leftshifted_targets
 
 from rllm.agents.agent import Trajectory, TrajectoryGroup
-from rllm.engine.rollout.tinker_engine import _flat_token_input_length, _flat_token_input_to_model_input
-from rllm.engine.rollout.types import TinkerTokenInput
+from rllm.experimental.rollout.tinker_engine import _flat_token_input_length, _flat_token_input_to_model_input
+from rllm.experimental.rollout.types import TinkerTokenInput
 from rllm.experimental.common import AlgorithmConfig, collect_reward_and_advantage_from_trajectory_groups
 
 
