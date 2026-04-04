@@ -29,10 +29,6 @@ from rllm.workflows.workflow import TerminationReason
 logger = logging.getLogger(__name__)
 
 
-_EPISODE_STRIP_KEYS = {"prompt_ids", "response_ids", "logprobs", "model_output", "routing_matrices"}
-_EPISODE_STRIP_LIST_DEFAULTS = {"prompt_ids", "response_ids", "logprobs"}
-
-
 @dataclass
 class TaskBatch:
     """All trajectory groups produced from one task's episodes, plus stripped episodes for UI logging."""

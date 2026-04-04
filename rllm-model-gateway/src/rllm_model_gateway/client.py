@@ -141,7 +141,6 @@ class GatewayClient:
         return resp.json()
 
 
-
 class AsyncGatewayClient:
     """Async variant of :class:`GatewayClient` using ``httpx.AsyncClient``."""
 
@@ -267,4 +266,3 @@ class AsyncGatewayClient:
         resp = await self._http.get(f"{self.gateway_url}/health")
         resp.raise_for_status()
         return resp.json()
-

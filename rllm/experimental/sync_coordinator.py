@@ -44,6 +44,9 @@ class SyncCoordinator:
         self._generation_paused: asyncio.Event = asyncio.Event()
         self._generation_paused.set()
 
+        # Tracks in-flight async rollout tasks for drain/wait logic
+        self._in_flight_tasks: set[asyncio.Task] = set()
+
     @property
     def weight_version(self) -> int:
         return self._weight_version
@@ -101,6 +104,18 @@ class SyncCoordinator:
 
     async def wait_for_generation_allowed(self) -> None:
         await self._generation_paused.wait()
+
+    # --- In-flight task tracking ---
+
+    def track_task(self, task: asyncio.Task) -> None:
+        """Register an in-flight rollout task."""
+        self._in_flight_tasks.add(task)
+        task.add_done_callback(self._in_flight_tasks.discard)
+
+    async def wait_for_drain(self) -> None:
+        """Wait for all in-flight rollout tasks to complete."""
+        while self._in_flight_tasks:
+            await asyncio.sleep(0.1)
 
     def stats(self) -> dict:
         return {

@@ -205,6 +205,10 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
         """Hook method called at the end of an epoch."""
         pass
 
+    async def on_policy_updated(self, trainer_state: TrainerState) -> None:
+        """Hook called immediately after update_policy() for weight sync."""
+        pass
+
     async def on_validation_start(self, trainer_state: TrainerState) -> bool:
         """Hook method called at the start of validation.
 
@@ -213,15 +217,6 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
         """
         trainer_state.is_training = False
         return True
-
-    async def on_policy_updated(self, trainer_state: TrainerState) -> None:
-        """Hook called immediately after update_policy(). Backends sync weights here.
-
-        For Tinker-like remote/distributed backends: save checkpoint, create new sampling_client.
-        For Verl-like colocated backends: trigger NCCL sync to rollout workers.
-        Default: no-op (sync mode uses on_batch_end for this).
-        """
-        pass
 
     async def on_validation_end(self, trainer_state: TrainerState) -> None:
         """Hook method called at the end of validation."""

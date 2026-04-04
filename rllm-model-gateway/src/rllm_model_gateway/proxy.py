@@ -116,9 +116,6 @@ class ReverseProxy:
 
     async def handle(self, request: Request) -> Response:
         """Proxy *request* to an inference worker, capture trace, return response."""
-        return await self._handle_inner(request)
-
-    async def _handle_inner(self, request: Request) -> Response:
         await self._ensure_started()
         session_id: str | None = request.state.session_id
         originally_requested_logprobs: bool = getattr(request.state, "originally_requested_logprobs", False)

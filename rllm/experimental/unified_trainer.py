@@ -247,8 +247,6 @@ class UnifiedTrainer:
         if hasattr(self.backend, "tokenizer"):
             self.tokenizer = self.backend.tokenizer
 
-        # Tracks in-flight async rollout tasks for drain/wait logic
-        self._in_flight_tasks: set[asyncio.Task] = set()
 
     def _validate_and_setup_configs(self):
         """Validate and setup common configs."""
@@ -542,6 +540,7 @@ class UnifiedTrainer:
 
         try:
             for epoch in range(self.rllm_config.trainer.total_epochs):
+                await self.backend.on_epoch_start(trainer_state)
                 train_dataloader = self.backend.get_dataloader(self.train_dataset, trainer_state)
                 self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="train", epoch=epoch)
 
@@ -561,10 +560,11 @@ class UnifiedTrainer:
                             )
                             await buffer.add_episode(tid, episode)
                         t = asyncio.create_task(_run_rollout())
-                        self._in_flight_tasks.add(t)
-                        t.add_done_callback(self._in_flight_tasks.discard)
+                        coordinator.track_task(t)
 
-            await self._wait_for_drain()
+                await self.backend.on_epoch_end(trainer_state)
+
+            await coordinator.wait_for_drain()
         finally:
             buffer.mark_generation_complete()
 
@@ -711,7 +711,7 @@ class UnifiedTrainer:
         """Synchronize weights between training and rollout engines."""
         if not self.async_config.partial_rollout:
             coordinator.pause_generation()
-            await self._wait_for_drain()
+            await coordinator.wait_for_drain()
 
         trainer_state.weight_version = coordinator.weight_version + 1
         await self.backend.on_policy_updated(trainer_state)
@@ -722,15 +722,10 @@ class UnifiedTrainer:
         if not self.async_config.partial_rollout:
             coordinator.resume_generation()
 
-    async def _wait_for_drain(self) -> None:
-        """Wait for all in-flight rollout tasks to complete."""
-        while self._in_flight_tasks:
-            await asyncio.sleep(0.1)
-
     async def _validate_async_with_pause(self, trainer_state: TrainerState, coordinator: SyncCoordinator) -> dict:
         """Validation with dispatch-level pause. Waits for workflows to drain, then runs validation."""
         coordinator.pause_generation()
-        await self._wait_for_drain()
+        await coordinator.wait_for_drain()
         try:
             return await self._validate_async(trainer_state)
         finally:
