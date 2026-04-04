@@ -703,7 +703,7 @@ class HarmonyChatTemplateParser(ChatTemplateParser):
                 raise NotImplementedError(f"Unsupported message role: {message['role']}")
 
         conv = Conversation.from_messages(harmony_messages)
-        accumulate_thinking = kwargs.get("accumulate_reasoning", kwargs.get("accumulate_thinking", False))
+        accumulate_thinking = kwargs.get("accumulate_thinking", False)
         config = RenderConversationConfig(auto_drop_analysis=not accumulate_thinking)
         prompt_ids: list[int] = self.enc.render_conversation(conv, config)
 
