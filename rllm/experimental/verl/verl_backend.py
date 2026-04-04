@@ -277,9 +277,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
                 raise ValueError("DPO objective cannot be combined with use_precomputed_advantage=True on VerlBackend")
             if not self.use_reference_policy:
                 raise ValueError("DPO objective requires a reference policy on VerlBackend")
-            raise NotImplementedError(
-                "DPO objective trainer plumbing is available, but VerlBackend does not yet have a verified DPO actor-loss path in this build."
-            )
+            raise NotImplementedError("DPO objective trainer plumbing is available, but VerlBackend does not yet have a verified DPO actor-loss path in this build.")
 
     def get_dataloader(self, dataset: Dataset | None, trainer_state: TrainerState) -> Iterable:
         """Get dataloader. Note that for Verl backend, the RayPPOTrainer init already creates the dataloaders."""
