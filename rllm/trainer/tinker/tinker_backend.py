@@ -67,7 +67,6 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
     name: str = "tinker"
     requires_loop: bool = True  # Tinker uses async operations
-    needs_weight_sync_gate: bool = False  # Tinker swaps sampling_client in-place, no gating needed
 
     def __init__(
         self,

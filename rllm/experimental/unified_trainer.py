@@ -708,26 +708,8 @@ class UnifiedTrainer:
                 break
 
     async def _perform_weight_sync(self, trainer_state: TrainerState, coordinator: SyncCoordinator, rollout_engine: RolloutEngine | None) -> None:
-        """Synchronize weights between training and rollout engines.
-
-        Gating behavior depends on backend.needs_weight_sync_gate:
-        - False (e.g. Tinker): skip gating, just update weights in-place.
-        - True + partial_rollout=True: gate at model-call level (rollout engine or gateway).
-          Workflows block between turns, resume with new weights.
-        - True + partial_rollout=False: pause at dispatch level (coordinator).
-          Workflows finish naturally, gate stays open.
-        """
-        gateway = getattr(self.agent_workflow_engine, "gateway", None)
-
-        if self.async_config.partial_rollout:
-            if self.backend.needs_weight_sync_gate:
-                if rollout_engine is not None:
-                    rollout_engine.close_gate()
-                    await rollout_engine.wait_for_drain()
-                elif gateway is not None:
-                    gateway.close_gate()
-                    await gateway.wait_for_drain()
-        else:
+        """Synchronize weights between training and rollout engines."""
+        if not self.async_config.partial_rollout:
             coordinator.pause_generation()
             await self._wait_for_drain()
 
@@ -737,13 +719,7 @@ class UnifiedTrainer:
             rollout_engine.weight_version = trainer_state.weight_version
         coordinator.on_sync_complete()
 
-        if self.async_config.partial_rollout:
-            if self.backend.needs_weight_sync_gate:
-                if rollout_engine is not None:
-                    rollout_engine.open_gate()
-                elif gateway is not None:
-                    gateway.open_gate()
-        else:
+        if not self.async_config.partial_rollout:
             coordinator.resume_generation()
 
     async def _wait_for_drain(self) -> None:

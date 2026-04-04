@@ -167,20 +167,6 @@ class GatewayManager:
 
         self._local_handler = None
 
-    # -- Gate (weight sync) ---------------------------------------------------
-
-    def close_gate(self) -> None:
-        """Stop forwarding new inference requests through the gateway."""
-        self.client.close_gate()
-
-    async def wait_for_drain(self) -> None:
-        """Wait for all in-flight inference requests to complete."""
-        await self.async_client.wait_for_drain()
-
-    def open_gate(self) -> None:
-        """Resume forwarding inference requests through the gateway."""
-        self.client.open_gate()
-
     # -- Session / trace API -------------------------------------------------
 
     def create_session(self, session_id: str, is_validation: bool = False) -> str:

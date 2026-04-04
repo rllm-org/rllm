@@ -37,7 +37,6 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
 
     name: str = "base_backend"
     requires_loop: bool = False
-    needs_weight_sync_gate: bool = True
 
     def __init__(self, config: DictConfig, **kwargs):
         """Initialize the backend.

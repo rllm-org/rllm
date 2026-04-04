@@ -270,21 +270,6 @@ def create_app(
         # Placeholder for hot-reload
         return {"status": "ok"}
 
-    @app.post("/admin/gate/close")
-    async def gate_close():
-        proxy.close_gate()
-        return {"status": "closed"}
-
-    @app.post("/admin/gate/open")
-    async def gate_open():
-        proxy.open_gate()
-        return {"status": "open"}
-
-    @app.post("/admin/gate/drain")
-    async def gate_drain():
-        await proxy.wait_for_drain()
-        return {"status": "drained"}
-
     # -- Proxy catch-all (must be last) ------------------------------------
 
     @app.api_route(

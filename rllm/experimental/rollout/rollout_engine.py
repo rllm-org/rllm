@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -75,64 +74,16 @@ class RolloutEngine:
     is_validation: bool = False  # flag enabled/disabled by AgentWorkflowEngine.execute_tasks
 
     def __init__(self, *args, **kwargs):
-        # Gate mechanism for pausing model calls during weight sync
-        self._gate: asyncio.Event = asyncio.Event()
-        self._gate.set()  # open by default
-        self._active_calls: int = 0
-        self._drained_event: asyncio.Event = asyncio.Event()
-        self._drained_event.set()  # initially drained (no active calls)
         self.weight_version: int = 0
-
-    # --- Gate mechanism ---
-
-    def close_gate(self) -> None:
-        """Close the gate. New model calls will block at wait_for_gate()."""
-        logger.info(f"[RolloutEngine] Closing gate. Active calls: {self._active_calls}")
-        self._gate.clear()
-
-    def open_gate(self) -> None:
-        """Open the gate, releasing any blocked model calls."""
-        logger.info(f"[RolloutEngine] Opening gate. Active calls: {self._active_calls}")
-        self._gate.set()
-
-    def on_model_call_complete(self) -> None:
-        """Unregister active call. Engines will call this at the END of get_model_response()."""
-        self._active_calls -= 1
-        if self._active_calls <= 0:
-            self._active_calls = 0
-            self._drained_event.set()
-            logger.debug("[RolloutEngine] All active calls drained.")
-        else:
-            logger.debug(f"[RolloutEngine] Model call complete. Active calls: {self._active_calls}")
-
-    async def wait_for_gate(self) -> None:
-        """Wait until gate is open, then register as active call. Engines will call this at the START of get_model_response()."""
-        if not self._gate.is_set():
-            logger.info(f"[RolloutEngine] Waiting for gate to open. Active calls: {self._active_calls}")
-        await self._gate.wait()
-        self._active_calls += 1
-        self._drained_event.clear()
-        logger.debug(f"[RolloutEngine] Gate passed. Active calls: {self._active_calls}")
-
-    async def wait_for_drain(self) -> None:
-        """Wait until all active model calls complete. Used during weight sync."""
-        if not self._drained_event.is_set():
-            logger.info(f"[RolloutEngine] Waiting for drain. Active calls: {self._active_calls}")
-        await self._drained_event.wait()
 
     # --- Model response ---
     async def _get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         raise NotImplementedError(f"_get_model_response is not implemented for {self.__class__.__name__}")
 
     async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
-        await self.wait_for_gate()
-        try:
-            weight_version = self.weight_version
-            result = await self._get_model_response(messages, **kwargs)
-            result.weight_version = weight_version
-            return result
-        finally:
-            self.on_model_call_complete()
+        result = await self._get_model_response(messages, **kwargs)
+        result.weight_version = self.weight_version
+        return result
 
     def assemble_model_output(self, token_input: TokenInput, token_output: TokenOutput) -> ModelOutput:
         """
