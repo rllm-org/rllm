@@ -10,46 +10,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-_VERL_ACTOR_PATCHED = False
 _VERL_DYNAMIC_BATCH_PATCHED = False
 _VLLM_SDK_PATCHED = False
-
-
-# ---------------------------------------------------------------------------
-# Verl actor: per-call policy loss mode override
-# ---------------------------------------------------------------------------
-
-
-def patch_verl_actor_for_loss_override() -> None:
-    """Patch ``DataParallelPPOActor.update_policy`` to support per-call loss mode.
-
-    When ``data.meta_info`` contains ``"policy_loss_mode_override"``, the
-    actor temporarily uses that loss mode instead of the one baked into
-    ``self.config.policy_loss.loss_mode``.  The original config value is
-    restored after the call (even on exception).
-    """
-    global _VERL_ACTOR_PATCHED
-    if _VERL_ACTOR_PATCHED:
-        return
-
-    from verl.workers.actor.dp_actor import DataParallelPPOActor
-
-    _original_update_policy = DataParallelPPOActor.update_policy
-
-    def _patched_update_policy(self, data):
-        override = data.meta_info.get("policy_loss_mode_override")
-        if override is not None:
-            original = self.config.policy_loss.get("loss_mode", "vanilla")
-            self.config.policy_loss["loss_mode"] = override
-            try:
-                return _original_update_policy(self, data)
-            finally:
-                self.config.policy_loss["loss_mode"] = original
-        return _original_update_policy(self, data)
-
-    DataParallelPPOActor.update_policy = _patched_update_policy
-    _VERL_ACTOR_PATCHED = True
-    logger.info("Patched DataParallelPPOActor.update_policy for per-call loss mode override")
 
 
 # ---------------------------------------------------------------------------

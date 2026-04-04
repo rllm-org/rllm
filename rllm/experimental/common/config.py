@@ -227,7 +227,7 @@ class AlgorithmConfig:
         return cls(
             estimator=rLLMAdvantageEstimator(config.algorithm.adv_estimator),
             stepwise_advantage_mode=config.rllm.stepwise_advantage.mode,
-            norm_adv_by_std_in_grpo=config.rllm.stepwise_advantage.get("norm_adv_by_std_in_grpo", True),
+            norm_adv_by_std_in_grpo=config.rllm.algorithm.get("norm_adv_by_std_in_grpo", True),
             use_rllm=config.rllm.stepwise_advantage.get("use_rllm", False),
             use_precomputed_advantage=config.rllm.algorithm.get("use_precomputed_advantage", False),
             loss_fn=config.rllm.algorithm.get("loss_fn", None),

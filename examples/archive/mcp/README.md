@@ -7,7 +7,7 @@ This example demonstrates how to use external MCP servers as tool providers with
 ```bash
 # Install MCP CLI (if needed for other MCP servers)
 uv pip install mcp
-
+```
 
 ## Files
 
@@ -70,6 +70,33 @@ This will:
 - **`MCPToolAgent`** - ToolAgent that works with MCP tools
 - **`MCPEnvironment`** - Environment that manages MCP server connections and tool execution
 - **`MCPConnectionManager`** - Handles MCP server lifecycle and tool discovery
+
+### Multiple MCP Servers
+
+`MCPEnvironment` also supports routing tool calls across multiple named MCP servers:
+
+```python
+env = MCPEnvironment(
+    task={"question": "Find and summarize the latest updates."},
+    mcp_servers={
+        "search": {
+            "command": "npx",
+            "args": ["-y", "tavily-mcp@0.2.4"],
+            "env": {"TAVILY_API_KEY": "..."},
+        },
+        "filesystem": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+        },
+    },
+    tool_name_to_server_name={
+        "tavily_search": "search",
+        "read_file": "filesystem",
+    },
+)
+```
+
+Use `tool_name_to_server_name` when multiple servers expose the same public tool name, including underscore aliases for tools whose original MCP names contain hyphens.
 
 ### Integration with RLLM
 

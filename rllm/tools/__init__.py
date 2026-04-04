@@ -22,4 +22,4 @@ DEFAULT_TOOLS = {
 tool_registry = ToolRegistry()
 tool_registry.register_all(DEFAULT_TOOLS)
 
-__all__ = ["PythonInterpreter", "LocalRetrievalTool", "GoogleSearchTool", "FirecrawlTool", "TavilyExtractTool", "TavilySearchTool", "ToolRegistry", "tool_registry"]
+__all__ = ["PythonInterpreter", "GoogleSearchTool", "FirecrawlTool", "TavilyExtractTool", "TavilySearchTool", "ToolRegistry", "tool_registry"]

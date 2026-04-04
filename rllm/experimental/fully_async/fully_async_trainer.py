@@ -21,7 +21,7 @@ import ray
 from omegaconf import OmegaConf
 from tqdm import tqdm
 from verl import DataProto
-from verl.experimental.fully_async_policy.ray_trainer import FullyAsyncRayPPOTrainer
+from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import agg_loss
@@ -40,7 +40,7 @@ from rllm.experimental.fully_async.utils import (
 
 
 @ray.remote(num_cpus=10)
-class FullyAsyncTrainer(FullyAsyncRayPPOTrainer):
+class FullyAsyncTrainer(SeparateRayPPOTrainer):
     """
     A fully asynchronous PPO trainer that obtains samples from a MessageQueue for training.
     Based on an improved implementation of OneStepOffRayTrainer

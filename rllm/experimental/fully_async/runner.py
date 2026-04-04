@@ -22,7 +22,7 @@ from pprint import pprint
 
 import ray
 from omegaconf import OmegaConf
-from verl.experimental.fully_async_policy.fully_async_main import create_resource_pool_manager, create_role_worker_mapping
+from verl.experimental.separation.utils import create_resource_pool_manager, create_role_worker_mapping
 from verl.trainer.ppo.utils import Role
 from verl.utils.fs import copy_to_local
 

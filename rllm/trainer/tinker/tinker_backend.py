@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 import tinker
 import torch
 from omegaconf import DictConfig
-from transformers import AutoProcessor, AutoTokenizer
+from transformers import AutoTokenizer
 
 from rllm.agents.agent import Episode
 from rllm.data import Dataset
@@ -138,6 +138,8 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         model_name_lower = self.full_config.model.name.lower()
         if "vl" in model_name_lower or "vision" in model_name_lower:
             try:
+                from transformers import AutoProcessor
+
                 processor = AutoProcessor.from_pretrained(self.full_config.model.name, trust_remote_code=True)
                 if hasattr(processor, "image_processor") and processor.image_processor is not None:
                     image_processor = processor.image_processor
@@ -145,7 +147,18 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             except Exception as e:
                 logger.warning(f"Failed to load image_processor for VLM model: {e}")
 
-        self.rollout_engine = TinkerEngine(base_url=self.full_config.tinker_base_url, model_name=self.full_config.model.name, service_client=self.service_client, tokenizer=self.tokenizer, max_prompt_length=self.full_config.data.max_prompt_length, max_response_length=self.full_config.data.max_response_length, max_model_length=self.full_config.training.max_length, sampling_params=self.full_config.sampling, **self.full_config.rollout_engine, image_processor=image_processor)
+        self.rollout_engine = TinkerEngine(
+            base_url=self.full_config.tinker_base_url,
+            model_name=self.full_config.model.name,
+            service_client=self.service_client,
+            tokenizer=self.tokenizer,
+            max_prompt_length=self.full_config.data.max_prompt_length,
+            max_response_length=self.full_config.data.max_response_length,
+            max_model_length=self.full_config.training.max_length,
+            sampling_params=self.full_config.sampling,
+            **self.full_config.rollout_engine,
+            image_processor=image_processor,
+        )
         return self.rollout_engine
 
     def validate_config(self) -> None:
@@ -153,7 +166,10 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Check for recommended sampling parameters
         sampling_params = self.full_config.sampling
         if sampling_params.get("temperature", 1.0) != 1.0 or sampling_params.get("top_p", 1.0) != 1.0:
-            logger.warning("Temperature and top_p are set away from 1.0, this is not recommended by Tinker and can cause mysterious issues with logprobs. See https://github.com/thinking-machines-lab/tinker-cookbook/pull/86 for discussion.")
+            logger.warning(
+                "Temperature and top_p are set away from 1.0, this is not recommended by Tinker and can cause mysterious issues with logprobs."
+                "See https://github.com/thinking-machines-lab/tinker-cookbook/pull/86 for discussion."
+            )
 
         # Validate num_minibatches (currently only support 1)
         if self.full_config.training.get("num_minibatches", 1) != 1:
