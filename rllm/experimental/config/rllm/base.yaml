@@ -29,12 +29,6 @@ workflow:
   retry_limit: 3
   raise_on_error: true
 
-early_finalize:
-  enable: False
-  reserve_response_tokens: 2048
-  min_phase2_tokens: 128
-  suffix_mode: auto
-
 # Rollout Configuration (note: this is just for logging purpose, the actual rollout configs are backend-specific)
 rollout:
   n: 8

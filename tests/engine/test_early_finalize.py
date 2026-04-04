@@ -149,7 +149,7 @@ def test_early_finalize_skips_when_suffix_leaves_no_phase2_budget():
             [{"role": "user", "content": "question"}],
             application_id="task:0",
             task={"question": "question"},
-            max_tokens=20,
+            max_tokens=40,
         )
     )
 
@@ -210,3 +210,70 @@ def test_early_finalize_allows_custom_builder_to_return_empty_suffix():
     assert result.response_mask == ([1.0] * len(phase1.completion_ids) + [1.0] * len(phase2.completion_ids))
     assert result.metadata is not None
     assert result.metadata["suffix"] == ""
+
+
+def test_workflow_local_early_finalize_config_takes_priority_over_rollout_config():
+    tokenizer = FakeTokenizer()
+    phase1 = _make_output(tokenizer, "prompt", "<think>abc", finish_reason="length")
+    phase2 = _make_output(tokenizer, "unused", "42", finish_reason="stop")
+    workflow = FakeWorkflow(phase1, phase2, reserve_tokens=8)
+    workflow.early_finalize_config = SimpleNamespace(
+        enable=True,
+        reserve_response_tokens=30,
+        min_phase2_tokens=2,
+        suffix_mode="auto",
+    )
+
+    result = asyncio.run(
+        maybe_generate_with_early_finalize(
+            workflow,
+            [{"role": "user", "content": "question"}],
+            application_id="task:0",
+            task={"question": "question"},
+            max_tokens=40,
+        )
+    )
+
+    suffix_ids = tokenizer.encode("</think>\nThe answer is: ", add_special_tokens=False)
+    assert workflow.phase1_kwargs is not None
+    assert workflow.phase1_kwargs["max_tokens"] == 10
+    assert workflow.phase2_kwargs is not None
+    assert workflow.phase2_kwargs["max_tokens"] == 30 - len(suffix_ids)
+    assert result.metadata is not None
+
+
+def test_early_finalize_drops_merged_logprobs_when_segments_are_missing_them():
+    tokenizer = FakeTokenizer()
+    phase1 = ModelOutput(
+        text="<think>abc",
+        prompt_ids=tokenizer.encode("prompt", add_special_tokens=False),
+        completion_ids=tokenizer.encode("<think>abc", add_special_tokens=False),
+        logprobs=None,
+        prompt_length=6,
+        completion_length=10,
+        finish_reason="length",
+    )
+    phase2 = ModelOutput(
+        text="42",
+        prompt_ids=tokenizer.encode("unused", add_special_tokens=False),
+        completion_ids=tokenizer.encode("42", add_special_tokens=False),
+        logprobs=None,
+        prompt_length=6,
+        completion_length=2,
+        finish_reason="stop",
+    )
+    workflow = FakeWorkflow(phase1, phase2, reserve_tokens=30)
+
+    result = asyncio.run(
+        maybe_generate_with_early_finalize(
+            workflow,
+            [{"role": "user", "content": "question"}],
+            application_id="task:0",
+            task={"question": "question"},
+            max_tokens=40,
+        )
+    )
+
+    assert result.output.completion_ids is not None
+    assert result.output.logprobs is None
+    assert result.response_mask is not None

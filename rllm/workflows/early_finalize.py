@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from rllm.agents.agent import Step
@@ -34,19 +34,34 @@ def _config_get(config: Any, key: str, default: Any = None) -> Any:
     return getattr(config, key, default)
 
 
-def get_early_finalize_config(rollout_engine: Any) -> EarlyFinalizeConfig:
+def coerce_early_finalize_config(config: Any = None, *, default_enable: bool | None = None) -> EarlyFinalizeConfig:
+    if isinstance(config, EarlyFinalizeConfig):
+        result = replace(config)
+    else:
+        result = EarlyFinalizeConfig(
+            enable=bool(_config_get(config, "enable", False)),
+            reserve_response_tokens=int(_config_get(config, "reserve_response_tokens", 2048)),
+            min_phase2_tokens=int(_config_get(config, "min_phase2_tokens", 128)),
+            suffix_mode=str(_config_get(config, "suffix_mode", "auto")),
+        )
+
+    if default_enable is not None and _config_get(config, "enable", None) is None:
+        result.enable = default_enable
+    return result
+
+
+def get_early_finalize_config(target: Any) -> EarlyFinalizeConfig:
+    workflow_cfg = getattr(target, "early_finalize_config", None)
+    if workflow_cfg is not None:
+        return coerce_early_finalize_config(workflow_cfg)
+
+    rollout_engine = getattr(target, "rollout_engine", target)
     config = getattr(rollout_engine, "config", None)
     rllm_config = _config_get(config, "rllm", None)
     ef_cfg = _config_get(rllm_config, "early_finalize", None)
     if ef_cfg is None:
         return EarlyFinalizeConfig()
-
-    return EarlyFinalizeConfig(
-        enable=bool(_config_get(ef_cfg, "enable", False)),
-        reserve_response_tokens=int(_config_get(ef_cfg, "reserve_response_tokens", 2048)),
-        min_phase2_tokens=int(_config_get(ef_cfg, "min_phase2_tokens", 128)),
-        suffix_mode=str(_config_get(ef_cfg, "suffix_mode", "auto")),
-    )
+    return coerce_early_finalize_config(ef_cfg)
 
 
 def _supports_early_finalize(workflow: Any, messages: list[dict[str, Any]], config: EarlyFinalizeConfig) -> bool:
@@ -104,6 +119,18 @@ def _make_metadata(
     }
 
 
+def _aligned_logprobs(logprobs: list[float] | None, expected_length: int) -> list[float] | None:
+    if expected_length == 0:
+        return []
+    if logprobs is None:
+        return None
+
+    values = list(logprobs)
+    if len(values) != expected_length:
+        return None
+    return values
+
+
 def attach_model_output_to_step(
     step: Step | None,
     output: ModelOutput,
@@ -133,7 +160,7 @@ async def maybe_generate_with_early_finalize(
     task: dict | None = None,
     **kwargs,
 ) -> EarlyFinalizeResult:
-    config = get_early_finalize_config(workflow.rollout_engine)
+    config = get_early_finalize_config(workflow)
     if not _supports_early_finalize(workflow, messages, config):
         output = await workflow.timed_llm_call(messages, application_id=application_id, **kwargs)
         return EarlyFinalizeResult(output=output)
@@ -179,9 +206,11 @@ async def maybe_generate_with_early_finalize(
     phase2_ids = list(phase2_output.completion_ids or [])
     merged_completion_ids = phase1_ids + list(suffix_ids) + phase2_ids
 
-    phase1_logprobs = list(phase1_output.logprobs or [])
-    phase2_logprobs = list(phase2_output.logprobs or [])
-    merged_logprobs = phase1_logprobs + ([0.0] * len(suffix_ids)) + phase2_logprobs
+    phase1_logprobs = _aligned_logprobs(phase1_output.logprobs, len(phase1_ids))
+    phase2_logprobs = _aligned_logprobs(phase2_output.logprobs, len(phase2_ids))
+    merged_logprobs = None
+    if phase1_logprobs is not None and phase2_logprobs is not None:
+        merged_logprobs = phase1_logprobs + ([0.0] * len(suffix_ids)) + phase2_logprobs
 
     parsed_output = workflow.rollout_engine.chat_parser.parse_completion(merged_completion_ids)
     completion_text = workflow.rollout_engine.tokenizer.decode(merged_completion_ids, skip_special_tokens=True)

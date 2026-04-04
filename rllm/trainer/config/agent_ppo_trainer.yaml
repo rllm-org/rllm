@@ -42,11 +42,6 @@ rllm:
       reward_bonus_coeff: 0.0 # no reward shaping
     n_parallel_tasks: 256
     retry_limit: 3
-  early_finalize:
-    enable: False
-    reserve_response_tokens: 2048
-    min_phase2_tokens: 128
-    suffix_mode: auto
   disable_thinking: False
   accumulate_reasoning: False
   mask_truncated_samples: False
