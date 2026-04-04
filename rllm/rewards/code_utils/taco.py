@@ -66,7 +66,10 @@ def timeout_handler(signum, frame):
     raise TimeoutException
 
 
-signal.signal(signal.SIGALRM, timeout_handler)
+try:
+    signal.signal(signal.SIGALRM, timeout_handler)
+except ValueError:
+    pass  # signal only works in main thread; skip in Ray workers
 TIMEOUT = 90  # seconds
 
 EXECUTION_RESULTS = {1: "passed", 0: "false", -1: "timeout", -2: "runtime_error", -3: "returncode:{code}", -4: "compile_error"}
