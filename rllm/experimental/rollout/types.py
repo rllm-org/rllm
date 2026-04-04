@@ -17,8 +17,7 @@ else:
     Processor: TypeAlias = Any
     ImageProcessor: TypeAlias = Any
 
-# Tinker types.
-# See https://github.com/thinking-machines-lab/tinker-cookbook/blob/main/tinker_cookbook/rl/data_processing.py
+# Tinker types. See https://github.com/thinking-machines-lab/tinker-cookbook/blob/main/tinker_cookbook/rl/data_processing.py
 # for the rationale behind "FlatObElem" and "FlatOb" types.
 try:
     from tinker.types import ModelInputChunk, SampledSequence

@@ -26,6 +26,7 @@ def main(config: DictConfig):
         tokenizer=teacher_tokenizer,
         service_client=teacher_service_client,
         sampling_client=teacher_sampling_client,
+        bypass_render_with_parser=True,
     )
 
     trainer = AgentTrainer(

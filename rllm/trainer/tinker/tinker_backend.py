@@ -23,9 +23,9 @@ from transformers import AutoTokenizer
 
 from rllm.agents.agent import Episode
 from rllm.data import Dataset
-from rllm.experimental.rollout import RolloutEngine, TinkerEngine
 from rllm.experimental.common import AlgorithmConfig, simple_timer
 from rllm.experimental.protocol import BackendProtocol
+from rllm.experimental.rollout import RolloutEngine, TinkerEngine
 from rllm.trainer.tinker.tinker_metrics_utils import (
     print_metrics_table,
     update_training_metrics,
@@ -117,8 +117,6 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
         Args:
             **kwargs: Additional arguments, including the various configurations
-                - strip_thinking_from_history: Whether to strip thinking from history (default = true)
-                - renderer_name: Name of the renderer to use (default = auto-detect from model)
 
         Returns:
             TinkerEngine: The initialized rollout engine.

@@ -59,7 +59,10 @@ agent:
 
 # Tinker Engine Configuration
 rollout_engine:
-  strip_thinking_from_history: true
+  reasoning_effort: "medium"
+  accumulate_reasoning: false
+  disable_thinking: false
+  bypass_render_with_parser: false
   renderer_name: null
 
 # Data Configuration

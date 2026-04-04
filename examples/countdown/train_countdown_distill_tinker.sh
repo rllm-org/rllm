@@ -24,3 +24,4 @@ python -m examples.countdown.train_countdown_tinker \
     trainer.test_freq=10 \
     trainer.save_freq=1000 \
     trainer.default_local_dir='./outputs/countdown-distill-tinker-8b' \
+    rollout_engine.bypass_render_with_parser=True

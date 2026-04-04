@@ -25,5 +25,6 @@ python -m examples.math_distill.train_deepmath_distill_tinker \
     training.default_local_dir='./outputs/deepmath-distill-8b-32b-unified' \
     rllm.algorithm.use_precomputed_advantage=true \
     rllm.algorithm.loss_fn=importance_sampling \
+    rollout_engine.bypass_render_with_parser=False \
     rollout_engine.renderer_name=qwen3 \
     rllm.workflow.n_parallel_tasks=512
