@@ -64,7 +64,10 @@ class CustomPPOLoss:
     """
 
     def __init__(self, config):
-        self.config = config
+        # Convert OmegaConf DictConfig → ActorConfig dataclass
+        from verl.utils.config import omega_conf_to_dataclass
+
+        self.config = omega_conf_to_dataclass(config)
 
     def __call__(self, model_output, data, dp_group=None):
         from verl.utils import tensordict_utils as _tu
