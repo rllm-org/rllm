@@ -210,9 +210,12 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         assert self.use_rm is False, "Reward models are not supported. Rewards should be assigned using a reward function in the workflow or environment."
         # Enforce new EngineWorker path (TensorDict + no-padding)
         legacy_mode = self.config.trainer.get("use_legacy_worker_impl", "auto")
-        assert legacy_mode == "disable", (
-            f"VerlBackend requires use_legacy_worker_impl='disable' (new EngineWorker path), got '{legacy_mode}'. Set trainer.use_legacy_worker_impl=disable in your config."
-        )
+        if legacy_mode != "disable":  # force to disable legacy worker impl
+            logger.warning(
+                "VerlBackend forces use_legacy_worker_impl='disable' (new EngineWorker path), got '{legacy_mode}'."
+                "If you insist on using the legacy worker implementation, consider using the older agent workflow trainer."
+            )
+            self.config.trainer.use_legacy_worker_impl = "disable"
         if self.config.rllm.stepwise_advantage.mode != "broadcast":
             # automatically set the stepwise_advantage_mode to "broadcast", the warning is already shown in AlgorithmConfig.from_config
             self.config.rllm.stepwise_advantage.mode = "broadcast"
