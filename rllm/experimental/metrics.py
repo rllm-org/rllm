@@ -10,7 +10,6 @@ from collections import defaultdict
 
 import numpy as np
 
-
 # Keys that should be summed rather than averaged.
 _SUM_KEYS: set[str] = {
     "groups/num_trajs_before_filter",
@@ -29,9 +28,7 @@ _LAST_PREFIXES: tuple[str, ...] = (
 )
 
 # Prefixes where "mean" is the correct reduction.
-_MEAN_PREFIXES: tuple[str, ...] = (
-    "episode/",
-)
+_MEAN_PREFIXES: tuple[str, ...] = ("episode/",)
 
 
 def _infer_rule(key: str) -> str:
@@ -107,7 +104,7 @@ class MetricsAggregator:
     def record_dict(self, metrics: dict) -> None:
         """Record all numeric values from a dict, coercing types."""
         for k, v in metrics.items():
-            if isinstance(v, (int, float)):
+            if isinstance(v, int | float):
                 self._values[k].append(float(v))
             elif isinstance(v, np.number):
                 self._values[k].append(float(v))

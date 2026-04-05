@@ -37,9 +37,7 @@ class AsyncTrainingConfig:
             self.fwd_bwd_group_size = self.mini_batch_size
         if self.enable:
             assert self.fwd_bwd_group_size >= 1
-            assert self.mini_batch_size % self.fwd_bwd_group_size == 0, (
-                f"mini_batch_size ({self.mini_batch_size}) must be divisible by fwd_bwd_group_size ({self.fwd_bwd_group_size})"
-            )
+            assert self.mini_batch_size % self.fwd_bwd_group_size == 0, f"mini_batch_size ({self.mini_batch_size}) must be divisible by fwd_bwd_group_size ({self.fwd_bwd_group_size})"
 
 
 @dataclass

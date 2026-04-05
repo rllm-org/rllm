@@ -9,15 +9,13 @@ from dataclasses import dataclass, field
 from pprint import pprint
 from typing import Any, Literal
 
-logger = logging.getLogger(__name__)
-
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
 from rllm.agents.agent import Episode, TrajectoryGroup
 from rllm.data import Dataset
-from rllm.experimental.rollout import RolloutEngine
+from rllm.experimental.buffer import TrajectoryGroupBuffer
 from rllm.experimental.common.advantage import (
     AlgorithmConfig,
     collect_reward_and_advantage_from_trajectory_groups,
@@ -40,13 +38,15 @@ from rllm.experimental.common.transform import (
 )
 from rllm.experimental.common.visualization import print_metrics_table, visualize_trajectory_last_steps
 from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
-from rllm.experimental.buffer import TrajectoryGroupBuffer
 from rllm.experimental.metrics import MetricsAggregator
 from rllm.experimental.protocol import BackendProtocol
+from rllm.experimental.rollout import RolloutEngine
 from rllm.experimental.sync_coordinator import SyncCoordinator, SyncCoordinatorConfig
 from rllm.utils import EpisodeLogger, Tracking, extract_source_metadata
 from rllm.workflows.store import Store
 from rllm.workflows.workflow import TerminationReason, Workflow
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -246,7 +246,6 @@ class UnifiedTrainer:
         self.tokenizer = None
         if hasattr(self.backend, "tokenizer"):
             self.tokenizer = self.backend.tokenizer
-
 
     def _validate_and_setup_configs(self):
         """Validate and setup common configs."""
@@ -482,12 +481,8 @@ class UnifiedTrainer:
 
     async def _fit_fully_async(self, trainer_state: TrainerState) -> None:
         """Fully-async generation + training with group-level streaming."""
-        assert self.config.data.train_batch_size == 1, (
-            f"Async training requires train_batch_size=1, got {self.config.data.train_batch_size}"
-        )
-        assert not getattr(self.agent_workflow_engine, "raise_on_error", False), (
-            "Async training requires raise_on_error=False so that process_task_with_retry always returns an episode"
-        )
+        assert self.config.data.train_batch_size == 1, f"Async training requires train_batch_size=1, got {self.config.data.train_batch_size}"
+        assert not getattr(self.agent_workflow_engine, "raise_on_error", False), "Async training requires raise_on_error=False so that process_task_with_retry always returns an episode"
         coord_config = SyncCoordinatorConfig(
             mini_batch_size=self.async_config.mini_batch_size,
             group_size=self.rllm_config.rollout.n,
@@ -533,7 +528,10 @@ class UnifiedTrainer:
             pbar.close()
 
     async def _generation_loop(
-        self, trainer_state: TrainerState, buffer: TrajectoryGroupBuffer, coordinator: SyncCoordinator,
+        self,
+        trainer_state: TrainerState,
+        buffer: TrajectoryGroupBuffer,
+        coordinator: SyncCoordinator,
     ) -> None:
         """Generate episodes and stream to TrajectoryGroupBuffer."""
         group_size = self.rllm_config.rollout.n
@@ -554,11 +552,11 @@ class UnifiedTrainer:
 
                     task_id = str(uuid.uuid4())
                     for rollout_idx in range(group_size):
+
                         async def _run_rollout(t=task, tid=task_id, ridx=rollout_idx):
-                            _, _, _, episode = await self.agent_workflow_engine.process_task_with_retry(
-                                task=t, task_id=tid, rollout_idx=ridx, result_idx=0
-                            )
+                            _, _, _, episode = await self.agent_workflow_engine.process_task_with_retry(task=t, task_id=tid, rollout_idx=ridx, result_idx=0)
                             await buffer.add_episode(tid, episode)
+
                         t = asyncio.create_task(_run_rollout())
                         coordinator.track_task(t)
 
@@ -593,7 +591,9 @@ class UnifiedTrainer:
             done = False
 
             buffered = buffer._queue.qsize()
-            logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: waiting for {mini_batch_size} task batches ({num_fwd_bwd_passes} fwd-bwd passes x {fwd_bwd_group_size} groups), {buffered} buffered")
+            logger.info(
+                f"[TrainingLoop] Step {trainer_state.global_step}: waiting for {mini_batch_size} task batches ({num_fwd_bwd_passes} fwd-bwd passes x {fwd_bwd_group_size} groups), {buffered} buffered"
+            )
 
             # 1. Pull mini_batch_size task batches total, split into
             #    num_fwd_bwd_passes forward-backward passes of fwd_bwd_group_size each.

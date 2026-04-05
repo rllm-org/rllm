@@ -27,7 +27,6 @@ from rllm.experimental.common import AlgorithmConfig, simple_timer
 from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.rollout import RolloutEngine, TinkerEngine
 from rllm.trainer.tinker.tinker_metrics_utils import (
-    print_metrics_table,
     update_training_metrics,
 )
 from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer

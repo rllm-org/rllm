@@ -8,8 +8,8 @@ from dataclasses import dataclass
 
 @dataclass
 class SyncCoordinatorConfig:
-    mini_batch_size: int     # episode groups per optimizer step
-    group_size: int          # episodes per group (rollout.n)
+    mini_batch_size: int  # episode groups per optimizer step
+    group_size: int  # episodes per group (rollout.n)
     staleness_threshold: float
     trigger_parameter_sync_step: int
 
@@ -32,7 +32,7 @@ class SyncCoordinator:
 
         self._weight_version: int = 0
         self._quota_used: int = 0  # groups counting toward current sync window quota (includes carryover)
-        self._in_flight: int = 0              # groups dispatched but not yet consumed/filtered
+        self._in_flight: int = 0  # groups dispatched but not yet consumed/filtered
         self._steps_since_sync: int = 0
         self._total_syncs: int = 0
 
