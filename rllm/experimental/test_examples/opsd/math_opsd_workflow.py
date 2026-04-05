@@ -26,7 +26,13 @@ class MathOPSDWorkflow(Workflow):
         self.reset(task, uid)
 
         student_prompt = f"Problem: {task['question']}"
-        teacher_prompt = student_prompt + "\n\n" + f"Here is a reference solution:\n\n{task['ground_truth']}" + "\n\n" + "After understanding the reference solution, please try to solve this problem using your own approach below:"
+        teacher_prompt = (
+            student_prompt
+            + "\n\n"
+            + f"Here is a reference solution:\n\n{task['ground_truth']}"
+            + "\n\n"
+            + "After understanding the reference solution, please try to solve this problem using your own approach below:"
+        )
 
         student_messages = [{"role": "user", "content": student_prompt}]
         teacher_messages = [{"role": "user", "content": teacher_prompt}]

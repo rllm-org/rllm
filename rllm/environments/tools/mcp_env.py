@@ -403,9 +403,7 @@ class MCPEnvironment(BaseEnv):
                     existing_spec = MCPEnvironment._server_specs.get(server_name)
                     if existing_spec is not None:
                         if existing_spec != server_spec:
-                            raise ValueError(
-                                f"MCP server '{server_name}' is already initialized with a different configuration"
-                            )
+                            raise ValueError(f"MCP server '{server_name}' is already initialized with a different configuration")
                         continue
 
                     manager = MCPConnectionManager(
@@ -460,27 +458,18 @@ class MCPEnvironment(BaseEnv):
             explicit_server_name = self.tool_name_to_server_name.get(public_tool_name)
             if explicit_server_name is not None:
                 if explicit_server_name not in candidate_servers:
-                    raise ValueError(
-                        f"Tool '{public_tool_name}' is not provided by mapped MCP server '{explicit_server_name}'"
-                    )
+                    raise ValueError(f"Tool '{public_tool_name}' is not provided by mapped MCP server '{explicit_server_name}'")
                 resolved[public_tool_name] = explicit_server_name
             elif len(candidate_servers) == 1:
                 resolved[public_tool_name] = next(iter(candidate_servers))
             else:
-                raise ValueError(
-                    f"Tool '{public_tool_name}' is provided by multiple MCP servers {sorted(candidate_servers)}. "
-                    "Supply 'tool_name_to_server_name' to disambiguate."
-                )
+                raise ValueError(f"Tool '{public_tool_name}' is provided by multiple MCP servers {sorted(candidate_servers)}. Supply 'tool_name_to_server_name' to disambiguate.")
 
         for public_tool_name, mapped_server_name in self.tool_name_to_server_name.items():
             if mapped_server_name not in self.mcp_servers:
-                raise ValueError(
-                    f"Tool mapping for '{public_tool_name}' references unknown MCP server '{mapped_server_name}'"
-                )
+                raise ValueError(f"Tool mapping for '{public_tool_name}' references unknown MCP server '{mapped_server_name}'")
             if public_tool_name not in discovered_tool_servers:
-                raise ValueError(
-                    f"Tool mapping for '{public_tool_name}' does not match any discovered tool on the configured MCP servers"
-                )
+                raise ValueError(f"Tool mapping for '{public_tool_name}' does not match any discovered tool on the configured MCP servers")
 
         return resolved
 

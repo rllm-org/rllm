@@ -60,9 +60,7 @@ class GatewayClient:
         resp.raise_for_status()
         return resp.json()
 
-    def list_sessions(
-        self, since: float | None = None, limit: int | None = None
-    ) -> list[dict[str, Any]]:
+    def list_sessions(self, since: float | None = None, limit: int | None = None) -> list[dict[str, Any]]:
         params: dict[str, Any] = {}
         if since is not None:
             params["since"] = since
@@ -90,9 +88,7 @@ class GatewayClient:
             params["since"] = since
         if limit is not None:
             params["limit"] = limit
-        resp = self._http.get(
-            f"{self.gateway_url}/sessions/{session_id}/traces", params=params
-        )
+        resp = self._http.get(f"{self.gateway_url}/sessions/{session_id}/traces", params=params)
         resp.raise_for_status()
         data = resp.json()
         return [TraceRecord(**t) for t in data]
@@ -188,9 +184,7 @@ class AsyncGatewayClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def list_sessions(
-        self, since: float | None = None, limit: int | None = None
-    ) -> list[dict[str, Any]]:
+    async def list_sessions(self, since: float | None = None, limit: int | None = None) -> list[dict[str, Any]]:
         params: dict[str, Any] = {}
         if since is not None:
             params["since"] = since
@@ -218,9 +212,7 @@ class AsyncGatewayClient:
             params["since"] = since
         if limit is not None:
             params["limit"] = limit
-        resp = await self._http.get(
-            f"{self.gateway_url}/sessions/{session_id}/traces", params=params
-        )
+        resp = await self._http.get(f"{self.gateway_url}/sessions/{session_id}/traces", params=params)
         resp.raise_for_status()
         data = resp.json()
         return [TraceRecord(**t) for t in data]

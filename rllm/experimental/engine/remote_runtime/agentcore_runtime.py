@@ -112,9 +112,7 @@ class AgentCoreRuntime(RemoteAgentRuntime):
             raw_result=result,
         )
 
-    async def execute_tasks(
-        self, submissions: list[TaskSubmission], timeout: float | None = None
-    ) -> list[RemoteTaskResult]:
+    async def execute_tasks(self, submissions: list[TaskSubmission], timeout: float | None = None) -> list[RemoteTaskResult]:
         """Submit all tasks concurrently via asyncio.gather.
 
         Each task invokes then polls in sequence; all tasks run in parallel.
