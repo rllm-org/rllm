@@ -29,10 +29,23 @@ workflow:
   retry_limit: 3
   raise_on_error: true
 
-# Rollout Configuration (note: this is just for logging purpose, the actual rollout configs are backend-specific)
+# Rollout Configuration
 rollout:
-  n: 8
+  n: 8 # group size
   n_val: 1  # number of validation samples per prompt
+  sampling:
+    train:
+      temperature: 1.0
+      top_p: 1.0
+      top_k: -1
+    val:
+      temperature: ${..train.temperature}
+      top_p: ${..train.top_p}
+      top_k: ${..train.top_k}
+  chat_template_kwargs:
+    disable_thinking: ${..disable_thinking} # Disable thinking
+    accumulate_reasoning: ${..accumulate_reasoning} # Accumulate reasoning
+    reasoning_effort: medium # low, medium, high
 
 # Trainer Configuration
 trainer:
@@ -48,22 +61,22 @@ trainer:
 
 # Algorithm Configuration
 algorithm:
-  adv_estimator: grpo # [grpo, reinforce, reinforce_plus_plus_baseline, rloo, gae]
-  gamma: 1.0
-  lam: 0.95
+  adv_estimator: grpo # [grpo, reinforce, reinforce_plus_plus_baseline, rloo]
   norm_adv_by_std_in_grpo: true
-  use_rllm: false
-  # When true, always use pre-computed step.advantage from the workflow (e.g. distillation)
-  # and skip advantage computation (GRPO/REINFORCE). Missing advantages default to 0.
-  use_precomputed_advantage: false
-  loss_fn: null           # [null, importance_sampling, ppo, cispo, dro, cross_entropy]
-  loss_agg_mode: null     # [null, token-mean, seq-mean-token-sum, seq-mean-token-mean]
+  use_precomputed_advantage: false # When true, use step.advantage from the workflow (e.g. distillation) instead of computing it from rewards
+  # Loss function
+  # verl: vanilla, dppo_tv, dppo_kl, gspo, sapo, gpg, clip_cov, kl_cov, geo_mean, cispo
+  # tinker: importance_sampling, ppo, cispo, dro
+  # null defauls to backend's default
+  loss_fn: null
+  loss_agg_mode: null     # [null, token-mean, seq-mean-token-sum, seq-mean-token-mean, seq-mean-token-mean-norm]
   kl_beta: 0.0            # KL penalty coefficient
   eps_clip: 0.2           # PPO clip epsilon
   eps_clip_high: null     # Asymmetric upper clip bound (null = symmetric)
   router_replay: false    # Router Replay (R3): replay MoE expert routing from inference during training
+  mask_truncated_samples: ${..mask_truncated_samples}  # Mask truncated samples
   rollout_correction:
-    bypass_mode: true     # true = use rollout logprobs as pi_old (2-policy), false = proximal forward (3-policy)
+    bypass_mode: False    # true = pi_old = pi_rollout, false = pi_old is computed from the model
     tis_mode: null        # null = disabled, "token" or "sequence" = TIS importance sampling level
     tis_cap: 5.0          # Upper clamp on TIS importance weight
 
@@ -74,15 +87,10 @@ stepwise_advantage:
   mode: broadcast # support `broadcast` only now
   normalize_by_steps: False
 
-# Disable thinking
-disable_thinking: False
-
-# Accumulate reasoning
-accumulate_reasoning: False
-
-# Mask truncated samples
-mask_truncated_samples: False
-filter_token_mismatch: True
+# Deprecated
+disable_thinking: False # (moved to rollout.chat_template_kwargs)
+accumulate_reasoning: False # (moved to rollout.chat_template_kwargs)
+mask_truncated_samples: False # (moved to algorithm.mask_truncated_samples)
 
 # Compact filtering
 compact_filtering:
@@ -165,11 +173,11 @@ gateway:
 # Async Training Configuration
 async_training:
   enable: false
-  mini_batch_size: 1
+  mini_batch_size: 64
   fwd_bwd_group_size: null  # task batches per forward-backward pass (default: mini_batch_size)
   staleness_threshold: 0.0
   trigger_parameter_sync_step: 1
-  partial_rollout: true
+  partial_rollout: false
   episode_offload_dir: null       # NVMe offload dir for pending episodes (null = disabled)
   trajectory_group_offload_dir: null  # NVMe offload dir for queued task batches (null = disabled)
 

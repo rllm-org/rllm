@@ -5,85 +5,85 @@ from rllm.data import Dataset
 from rllm.experimental.unified_trainer import TrainerLauncher, UnifiedTrainer
 from rllm.experimental.verl.verl_backend import VerlBackend
 from rllm.trainer.verl.ray_runtime_env import get_ppo_ray_runtime_env
-from rllm.trainer.verl.train_agent_ppo import TaskRunner
+from rllm.trainer.verl.train_agent_ppo import TaskRunner as _BaseTaskRunner
 from rllm.workflows.workflow import Workflow
 
 
-# TODO(listar2000): when later deprecating `train_agent_ppo`, need to migrate all the logic here to `WorkflowTaskRunner`
 @ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head
-class WorkflowTaskRunner(TaskRunner):
-    """Ray remote class for executing distributed PPO training with the unified trainer.
-
-    Inherits worker setup logic from `rllm.trainer.verl.train_agent_ppo.TaskRunner`
-    and overrides `run` to use the `UnifiedTrainer` with `VerlBackend`.
-    """
+class VerlTaskRunner(_BaseTaskRunner):
+    """Ray remote class for executing training with the unified trainer."""
 
     def run(self, config, workflow_class: type[Workflow], workflow_args: dict, **kwargs):  # type: ignore
-        """Execute the main PPO training workflow using the unified trainer.
-
-        Args:
-            config: Training configuration
-            workflow_class: Workflow class
-            workflow_args: Workflow arguments
-        """
         import os
         import socket
         from pprint import pprint
 
         from omegaconf import OmegaConf
-        from verl.trainer.ppo.reward import load_reward_manager
-        from verl.trainer.ppo.utils import need_critic, need_reference_policy
+        from verl.trainer.ppo.utils import need_reference_policy
         from verl.utils import hf_processor, hf_tokenizer
         from verl.utils.config import validate_config
         from verl.utils.fs import copy_to_local
 
-        print(f"WorkflowTaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
+        print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
         pprint(OmegaConf.to_container(config))
         OmegaConf.register_new_resolver("mul", lambda x, y: int(x) * int(y))
         OmegaConf.resolve(config)
 
-        actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
-        self.add_critic_worker(config)
-        # Add a reference policy worker if KL loss or KL reward is used.
-        self.add_ref_policy_worker(config, actor_rollout_cls)
+        is_separated = config.rllm.get("async_training", {}).get("enable", False)
 
+        # Propagate rllm algorithm config to verl actor config.
+        # Must happen before worker mapping creation since verl's
+        # need_reference_policy() reads from the verl config.
+        from rllm.experimental.verl.utils import propagate_rllm_to_verl_config
+        propagate_rllm_to_verl_config(config)
+
+        # --- Worker mapping and resource pools ---
+        # Follows verl's TaskRunner.run() for colocated,
+        # verl's FullyAsyncTaskRunner._initialize_components() for separated.
+        if is_separated:
+            from verl.experimental.separation.utils import create_resource_pool_manager, create_role_worker_mapping
+            from verl.trainer.ppo.utils import Role
+
+            # Propagate rollout GPU config into actor_rollout_ref (verl convention)
+            config.actor_rollout_ref.rollout.nnodes = config.rollout.nnodes
+            config.actor_rollout_ref.rollout.n_gpus_per_node = config.rollout.n_gpus_per_node
+
+            role_worker_mapping, ray_worker_group_cls = create_role_worker_mapping(config)
+
+            # Trainer resource pool: all roles except Rollout
+            # (Rollout servers are launched by AgentLoopManager in standalone mode)
+            trainer_roles = {r: cls for r, cls in role_worker_mapping.items() if r != Role.Rollout}
+            resource_pool_manager = create_resource_pool_manager(config, roles=list(trainer_roles.keys()))
+        else:
+            actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
+            self.add_ref_policy_worker(config, actor_rollout_cls)
+
+            trainer_roles = self.role_worker_mapping
+            resource_pool_manager = self.init_resource_pool_mgr(config)
+
+        # --- Config validation ---
         validate_config(
             config=config,
             use_reference_policy=need_reference_policy(config),
-            use_critic=need_critic(config),
+            use_critic=False,
         )
 
-        # Download the checkpoint from HDFS to the local machine.
+        # --- Model, tokenizer, processor ---
         local_path = copy_to_local(
             config.actor_rollout_ref.model.path,
             use_shm=config.actor_rollout_ref.model.get("use_shm", False),
         )
-
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
-        reward_fn = load_reward_manager(
-            config,
-            tokenizer,
-            **config.reward_model.get("reward_kwargs", {}),
-        )
-        val_reward_fn = load_reward_manager(
-            config,
-            tokenizer,
-            **config.reward_model.get("reward_kwargs", {}),
-        )
-        resource_pool_manager = self.init_resource_pool_mgr(config)
-
-        # Assemble backend-specific arguments for initializing the verl backend.
+        # --- Build backend args ---
         backend_args = {
             "tokenizer": tokenizer,
             "processor": processor,
-            "role_worker_mapping": self.role_worker_mapping,
+            "role_worker_mapping": trainer_roles if is_separated else self.role_worker_mapping,
             "resource_pool_manager": resource_pool_manager,
             "ray_worker_group_cls": ray_worker_group_cls,
-            "reward_fn": reward_fn,
-            "val_reward_fn": val_reward_fn,
         }
 
         trainer = None
@@ -108,9 +108,7 @@ class WorkflowTaskRunner(TaskRunner):
 
 
 class VerlTrainerLauncher(TrainerLauncher):
-    """
-    Verl trainer launcher that handles the necessary setup for the verl backend.
-    """
+    """Verl trainer launcher."""
 
     def __init__(
         self,
@@ -121,11 +119,8 @@ class VerlTrainerLauncher(TrainerLauncher):
         workflow_args: dict | None = None,
         **kwargs,
     ):
-        """Initialize the VerlTrainerLauncher. The heavy lifting is done in the `run` method of the `TaskRunner` class."""
         super().__init__(config, workflow_class, train_dataset, val_dataset, workflow_args, **kwargs)
 
-        # For Verl specifically, the datasets are not passed directly to the backend, which instead relies on the data paths
-        # being set in the config. TODO(listar2000): check whether this can be deprecated in favor of a more standard approach.
         if train_dataset is not None and self.config is not None and hasattr(self.config, "data"):
             self.config.data.train_files = train_dataset.get_verl_data_path()
         if val_dataset is not None and self.config is not None and hasattr(self.config, "data"):
@@ -138,8 +133,7 @@ class VerlTrainerLauncher(TrainerLauncher):
             ray_init_settings = get_ray_init_settings(self.config)
             ray.init(runtime_env=get_ppo_ray_runtime_env(), **ray_init_settings)
 
-        runner = WorkflowTaskRunner.remote()  # type: ignore
-
+        runner = VerlTaskRunner.remote()
         ray.get(
             runner.run.remote(
                 config=self.config,

@@ -1,8 +1,12 @@
 """
 Verl backend implementation for the UnifiedTrainer.
 
-This backend inherits from both BackendProtocol and RayPPOTrainer to provide
-verl-specific implementations while reusing verl's worker group infrastructure.
+Uses verl's lower-level worker infrastructure (RayWorkerGroup, AgentLoopManager,
+CheckpointEngineManager) directly, without inheriting from verl's RayPPOTrainer.
+
+Automatically selects colocated vs separated mode based on config:
+  - async_training.enable=False (default): Colocated hybrid engine mode.
+  - async_training.enable=True: Separated resources, fully async training.
 """
 
 from __future__ import annotations
@@ -18,16 +22,18 @@ import numpy as np
 import torch
 from omegaconf import DictConfig
 from verl import DataProto
-from verl.single_controller.ray import RayWorkerGroup
+from verl.checkpoint_engine import CheckpointEngineManager
+from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
+from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
 )
-from verl.trainer.ppo.ray_trainer import RayPPOTrainer, ResourcePoolManager
-from verl.trainer.ppo.utils import Role, WorkerType
+from verl.trainer.ppo.utils import Role, WorkerType, need_reference_policy
 from verl.utils import tensordict_utils as tu
+from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.metric import reduce_metrics
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
@@ -40,7 +46,16 @@ from rllm.experimental.common import (
     simple_timer,
 )
 from rllm.experimental.protocol import BackendProtocol
-from rllm.experimental.verl import compute_advantage_verl, transform_episodes_to_dataproto, update_dataproto_with_advantages
+from rllm.experimental.verl import transform_episodes_to_dataproto, update_dataproto_with_advantages
+from rllm.experimental.verl.utils import (
+    balance_batch,
+    build_wg_kwargs,
+    create_dataloaders,
+    load_checkpoint,
+    save_checkpoint,
+    start_profiling,
+    stop_profiling,
+)
 
 if TYPE_CHECKING:
     from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
@@ -51,57 +66,16 @@ import logging
 logger = logging.getLogger(__name__)
 
 _DEFAULT_VERL_LOSS = "vanilla"
-_VERL_KNOWN_LOSSES: set[str] | None = None
 
 
-class CustomPPOLoss:
-    """Wraps Verl's ``ppo_loss`` to support per-call loss mode override.
-
-    When the data TensorDict contains ``policy_loss_mode_override``,
-    the loss mode is temporarily overridden for that call.  Instances
-    are serialised via cloudpickle and sent to remote workers through
-    Verl's ``set_loss_fn`` RPC.
-    """
-
-    def __init__(self, config):
-        # Convert OmegaConf DictConfig → ActorConfig dataclass
-        from verl.utils.config import omega_conf_to_dataclass
-
-        self.config = omega_conf_to_dataclass(config)
-
-    def __call__(self, model_output, data, dp_group=None):
-        from verl.utils import tensordict_utils as _tu
-        from verl.workers.utils.losses import ppo_loss
-
-        override = _tu.get(data, "policy_loss_mode_override", default=None)
-        if override is not None:
-            original = self.config.policy_loss.get("loss_mode", "vanilla")
-            self.config.policy_loss["loss_mode"] = override
-            try:
-                return ppo_loss(self.config, model_output, data, dp_group)
-            finally:
-                self.config.policy_loss["loss_mode"] = original
-        return ppo_loss(self.config, model_output, data, dp_group)
+def _get_verl_loss_fn(name: str):
+    """Look up a loss function from verl's POLICY_LOSS_REGISTRY by name."""
+    from verl.trainer.ppo.core_algos import get_policy_loss
+    return get_policy_loss(name)
 
 
-def _get_verl_known_losses() -> set[str]:
-    """Lazily load the set of registered Verl policy loss function names."""
-    global _VERL_KNOWN_LOSSES
-    if _VERL_KNOWN_LOSSES is None:
-        from verl.trainer.ppo.core_algos import POLICY_LOSS_REGISTRY
-
-        _VERL_KNOWN_LOSSES = set(POLICY_LOSS_REGISTRY.keys())
-    return _VERL_KNOWN_LOSSES
-
-
-class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
-    """
-    Verl backend for the unified trainer.
-
-    Inherits from both BackendProtocol and RayPPOTrainer to:
-        - Provide the BackendProtocol interface for UnifiedTrainer
-        - Reuse RayPPOTrainer's worker group infrastructure and utilities (e.g. work group creation, checkpointing)
-    """
+class VerlBackend(BackendProtocol[Iterable, DataProto]):
+    """Verl backend for the unified trainer."""
 
     name: str = "verl"
 
@@ -113,166 +87,271 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         resource_pool_manager: ResourcePoolManager,
         ray_worker_group_cls: type[RayWorkerGroup] = RayWorkerGroup,
         processor=None,
-        reward_fn=None,
-        val_reward_fn=None,
         **kwargs,
     ):
-        """Initialize the VerlBackend.
-
-        Args:
-            config: The full configuration object.
-            tokenizer: The tokenizer for encoding/decoding.
-            role_worker_mapping: Mapping from roles to worker types.
-            resource_pool_manager: Manager for GPU resource pools.
-            ray_worker_group_cls: Class for creating Ray worker groups.
-            processor: Optional multimodal processor.
-            reward_fn: Optional reward function for training.
-            val_reward_fn: Optional reward function for validation.
-            **kwargs: Additional arguments.
-        """
-        # Initialize RayPPOTrainer first - this sets up all worker groups
-        RayPPOTrainer.__init__(
-            self,
-            config=config,
-            tokenizer=tokenizer,
-            processor=processor,
-            role_worker_mapping=role_worker_mapping,
-            resource_pool_manager=resource_pool_manager,
-            ray_worker_group_cls=ray_worker_group_cls,
-        )
-
-        # Initialize BackendProtocol
         BackendProtocol.__init__(self, config, **kwargs)
 
-        # RayPPOTrainer no longer accepts them, so we need to store manualll
-        self.reward_fn = reward_fn
-        self.val_reward_fn = val_reward_fn
-
-        # Store full config reference (RayPPOTrainer uses self.config)
+        self.tokenizer = tokenizer
+        self.processor = processor
         self.full_config = config
-        self.algorithm_config: AlgorithmConfig | None = None  # to be set in init_rollout_engine
 
-        # Rollout engine - will be created in init_rollout_engine
+        # Detect mode from config
+        self.is_separated = config.rllm.get("async_training", {}).get("enable", False)
+
+        # Derive boolean flags from config
+        self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
+        self.use_reference_policy = need_reference_policy(config)
+        self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
+        self.use_prefix_grouper = config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
+        self.device_name = config.trainer.get("device", "cuda")
+
+        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
+        if lora_rank <= 0:
+            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
+        self.ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+
+        # Store worker setup params
+        self._role_worker_mapping = role_worker_mapping
+        self._resource_pool_manager = resource_pool_manager
+        self._ray_worker_group_cls = ray_worker_group_cls
+
+        # Worker groups (populated in init_rollout_engine)
+        self.actor_rollout_wg = None
+        self.ref_policy_wg = None
+
+        # Infrastructure (populated in init_rollout_engine)
+        self.async_rollout_manager = None
+        self.checkpoint_manager: CheckpointEngineManager | None = None
         self.rollout_engine: VerlEngine | None = None
+        self.algorithm_config: AlgorithmConfig | None = None
+
+        # Dataloaders
+        self.train_dataloader, self.val_dataloader, self.total_training_steps = create_dataloaders(
+            config, tokenizer, processor,
+        )
+
+    # =========================================================================
+    # Worker initialization
+    # =========================================================================
+
+    def _init_colocated_workers(self) -> None:
+        """Create worker groups for colocated (hybrid engine) mode."""
+        config = self.config
+        self._resource_pool_manager.create_resource_pool()
+        resource_pool_to_cls = {pool: {} for pool in self._resource_pool_manager.resource_pool_dict.values()}
+
+        # Actor/rollout
+        actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self._role_worker_mapping else Role.ActorRollout
+        actor_rollout_resource_pool = self._resource_pool_manager.get_resource_pool(actor_role)
+        resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = RayClassWithInitArgs(
+            cls=self._role_worker_mapping[actor_role], config=config.actor_rollout_ref, role=str(actor_role),
+        )
+
+        # Reference policy
+        if self.use_reference_policy and Role.RefPolicy in self._role_worker_mapping:
+            resource_pool = self._resource_pool_manager.get_resource_pool(Role.RefPolicy)
+            resource_pool_to_cls[resource_pool][str(Role.RefPolicy)] = RayClassWithInitArgs(
+                self._role_worker_mapping[Role.RefPolicy], config=config.actor_rollout_ref, role=str(Role.RefPolicy),
+            )
+
+        # Spawn worker groups
+        wg_kwargs = build_wg_kwargs(config, self.device_name)
+        all_wg = {}
+        for resource_pool, class_dict in resource_pool_to_cls.items():
+            if not class_dict:
+                continue
+            worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
+            wg_dict = self._ray_worker_group_cls(resource_pool=resource_pool, ray_cls_with_init=worker_dict_cls, **wg_kwargs)
+            all_wg.update(wg_dict.spawn(prefix_set=class_dict.keys()))
+
+        # Initialize models
+        if self.use_reference_policy and not self.ref_in_actor:
+            if str(Role.RefPolicy) in all_wg:
+                self.ref_policy_wg = all_wg[str(Role.RefPolicy)]
+                self.ref_policy_wg.init_model()
+            else:
+                assert str(Role.ActorRolloutRef) in all_wg, f"{all_wg.keys()=}"
+                self.ref_policy_wg = all_wg[str(Role.ActorRolloutRef)]
+
+        # Actor/rollout initialized last for better KV cache memory estimation
+        self.actor_rollout_wg = all_wg[str(actor_role)]
+        self.actor_rollout_wg.init_model()
+
+        if self.ref_in_actor:
+            self.ref_policy_wg = self.actor_rollout_wg
+
+        # AgentLoopManager (async rollout)
+        from verl.experimental.agent_loop import AgentLoopManager
+        self.async_rollout_manager = AgentLoopManager.create(
+            config=config, worker_group=self.actor_rollout_wg,
+            rollout_resource_pool=actor_rollout_resource_pool,
+        )
+
+        # CheckpointEngineManager
+        ckpt_cfg = omega_conf_to_dataclass(config.actor_rollout_ref.rollout.checkpoint_engine)
+        self.checkpoint_manager = CheckpointEngineManager(
+            config=ckpt_cfg, trainer=self.actor_rollout_wg,
+            replicas=self.async_rollout_manager.rollout_replicas,
+        )
+        self.checkpoint_manager.sleep_replicas()
+
+    def _init_separated_workers(self) -> None:
+        """Create training-side workers and standalone rollout servers for separated (async) mode.
+
+        Training workers are created via RayWorkerGroup on trainer GPUs.
+        Rollout servers are launched by AgentLoopManager in standalone mode
+        (worker_group=None), using config.actor_rollout_ref.rollout.nnodes/n_gpus_per_node.
+        """
+        config = self.config
+        wg_kwargs = build_wg_kwargs(config, self.device_name)
+
+        # --- Training-side workers ---
+        self._resource_pool_manager.create_resource_pool()
+        resource_pool_to_cls = {pool: {} for pool in self._resource_pool_manager.resource_pool_dict.values()}
+
+        actor_role = Role.Actor
+        if Role.ActorRollout in self._role_worker_mapping:
+            actor_role = Role.ActorRollout
+        elif Role.Actor not in self._role_worker_mapping:
+            raise ValueError(f"Separated mode requires Role.Actor or Role.ActorRollout, got {self._role_worker_mapping.keys()}")
+
+        resource_pool = self._resource_pool_manager.get_resource_pool(actor_role)
+        resource_pool_to_cls[resource_pool][str(actor_role)] = RayClassWithInitArgs(
+            cls=self._role_worker_mapping[actor_role], config=config.actor_rollout_ref, role=str(actor_role),
+        )
+
+        if self.use_reference_policy and Role.RefPolicy in self._role_worker_mapping:
+            ref_pool = self._resource_pool_manager.get_resource_pool(Role.RefPolicy)
+            resource_pool_to_cls[ref_pool][str(Role.RefPolicy)] = RayClassWithInitArgs(
+                self._role_worker_mapping[Role.RefPolicy], config=config.actor_rollout_ref, role=str(Role.RefPolicy),
+            )
+
+        all_wg = {}
+        for rp, class_dict in resource_pool_to_cls.items():
+            if not class_dict:
+                continue
+            worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
+            wg_dict = self._ray_worker_group_cls(resource_pool=rp, ray_cls_with_init=worker_dict_cls, **wg_kwargs)
+            all_wg.update(wg_dict.spawn(prefix_set=class_dict.keys()))
+
+        if self.use_reference_policy and not self.ref_in_actor:
+            if str(Role.RefPolicy) in all_wg:
+                self.ref_policy_wg = all_wg[str(Role.RefPolicy)]
+                self.ref_policy_wg.init_model()
+
+        self.actor_rollout_wg = all_wg[str(actor_role)]
+        self.actor_rollout_wg.init_model()
+
+        if self.ref_in_actor:
+            self.ref_policy_wg = self.actor_rollout_wg
+
+        # --- Rollout servers (standalone, launched by AgentLoopManager) ---
+        from verl.experimental.fully_async_policy.agent_loop import FullyAsyncAgentLoopManager
+        self.async_rollout_manager = FullyAsyncAgentLoopManager.create(
+            config=config, worker_group=None,
+        )
+
+        # CheckpointEngineManager: trainer=actor_wg, replicas from standalone rollout servers
+        ckpt_cfg = omega_conf_to_dataclass(config.actor_rollout_ref.rollout.checkpoint_engine)
+        self.checkpoint_manager = CheckpointEngineManager(
+            config=ckpt_cfg, trainer=self.actor_rollout_wg,
+            replicas=self.async_rollout_manager.rollout_replicas,
+        )
 
     # =========================================================================
     # BackendProtocol interface methods
     # =========================================================================
+
     def init_rollout_engine(self, **kwargs) -> RolloutEngine:
-        """Initialize the VerlEngine rollout engine.
-
-        Note: This should be called after init_workers() to ensure
-        async_rollout_manager is available.
-
-        Returns:
-            VerlEngine: The initialized rollout engine.
-        """
-        # Apply Verl patches
         from rllm.experimental.verl.patch import patch_verl_dynamic_batch_sync
-
         patch_verl_dynamic_batch_sync()
 
-        # If SDK is enabled, instrument vLLM replicas before creating workers
         sdk_enabled = self.full_config.rllm.get("sdk", {}).get("enable", False)
         if sdk_enabled:
-            self._instrument_vllm_for_sdk()
+            from rllm.experimental.verl.patch import patch_vllm_for_sdk
+            patch_vllm_for_sdk()
 
-        # Step 1: call RayPPOTrainer's `init_workers()` function to obtain the async_rollout_manager
-        RayPPOTrainer.init_workers(self)
+        if self.is_separated:
+            self._init_separated_workers()
+        else:
+            self._init_colocated_workers()
 
-        assert self.async_rollout_manager is not None, "async_rollout_manager is not available. Issues with RayPPOTrainer's `init_workers()` function."
+        assert self.async_rollout_manager is not None
 
-        # Step 2: replace loss function on remote workers to support per-role loss override
-        self.actor_rollout_wg.set_loss_fn(CustomPPOLoss(self.config.actor_rollout_ref.actor))
+        # Set default loss function from config (or rllm algorithm config)
+        default_loss = self.config.actor_rollout_ref.actor.get("policy_loss", {}).get("loss_mode", _DEFAULT_VERL_LOSS)
+        self.actor_rollout_wg.set_loss_fn(_get_verl_loss_fn(default_loss))
+        self._default_loss_name = default_loss
 
-        # Step 3: initialize the rollout engine
+        # Create server manager
+        servers = zip(self.async_rollout_manager.server_addresses, self.async_rollout_manager.server_handles, strict=True)
+        if self.is_separated:
+            from verl.experimental.fully_async_policy.agent_loop.agent_loop import FullyAsyncLLMServerManager
+            server_manager = FullyAsyncLLMServerManager(self.config, servers=servers, load_balancer_handle=self.async_rollout_manager.global_load_balancer)
+        else:
+            from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
+            server_manager = AsyncLLMServerManager(self.config, servers=servers, load_balancer_handle=self.async_rollout_manager.global_load_balancer)
+
+        # Create VerlEngine
         self.rollout_engine = VerlEngine(
-            config=self.config,
-            rollout_manager=self.async_rollout_manager,
-            tokenizer=self.tokenizer,
-            processor=self.processor,
+            config=self.config, server_manager=server_manager,
+            tokenizer=self.tokenizer, processor=self.processor,
         )
 
-        # Step 4: store the algorithm config
         self.algorithm_config = kwargs.get("algorithm_config")
-
         return self.rollout_engine
 
-    def _instrument_vllm_for_sdk(self) -> None:
-        """Monkey-patch vLLM replicas to add logprob/token-id instrumentation for SDK trace collection."""
-        from rllm.experimental.verl.patch import patch_vllm_for_sdk
-
-        patch_vllm_for_sdk()
-
     def validate_config(self) -> None:
-        """Validate verl-specific configuration settings."""
-        assert self.config.actor_rollout_ref.rollout.mode == "async", "Only async rollout mode is supported for VerlBackend"
-        assert self.use_rm is False, "Reward models are not supported. Rewards should be assigned using a reward function in the workflow or environment."
-        # Enforce new EngineWorker path (TensorDict + no-padding)
-        legacy_mode = self.config.trainer.get("use_legacy_worker_impl", "auto")
-        if legacy_mode != "disable":  # force to disable legacy worker impl
-            logger.warning(
-                "VerlBackend forces use_legacy_worker_impl='disable' (new EngineWorker path), got '{legacy_mode}'."
-                "If you insist on using the legacy worker implementation, consider using the older agent workflow trainer."
-            )
+        if not self.is_separated:
+            assert self.config.actor_rollout_ref.rollout.mode == "async", "Only async rollout mode is supported"
+        if self.use_legacy_worker_impl != "disable":
+            logger.warning(f"VerlBackend forces use_legacy_worker_impl='disable', got '{self.use_legacy_worker_impl}'.")
             self.config.trainer.use_legacy_worker_impl = "disable"
         if self.config.rllm.stepwise_advantage.mode != "broadcast":
-            # automatically set the stepwise_advantage_mode to "broadcast", the warning is already shown in AlgorithmConfig.from_config
             self.config.rllm.stepwise_advantage.mode = "broadcast"
+        # Validate rollout correction config
+        rc = self.config.rllm.algorithm.get("rollout_correction", {})
+        if rc.get("bypass_mode", False) and rc.get("tis_mode") is not None:
+            raise ValueError("bypass_mode=True and tis_mode!=None is invalid: IS correction is meaningless when π_old = π_rollout")
+
+        # Validate router replay
+        if self.config.rllm.algorithm.get("router_replay", False):
+            strategy = self.config.actor_rollout_ref.actor.strategy
+            if strategy != "megatron":
+                raise ValueError(f"router_replay (R3) requires megatron strategy, got '{strategy}'")
+        if self.config.actor_rollout_ref.actor.get("router_replay", {}).get("mode", "disabled") == "R2":
+            raise ValueError("R2 router replay is not supported. Use rllm.algorithm.router_replay=True for R3.")
 
     def get_dataloader(self, dataset: Dataset | None, trainer_state: TrainerState) -> Iterable:
-        """Get dataloader. Note that for Verl backend, the RayPPOTrainer init already creates the dataloaders."""
         if trainer_state.is_training:
             return self.train_dataloader
         elif self.val_dataloader is not None:
             return self.val_dataloader
         else:
-            raise ValueError("No validation dataloader available. Please check the configuration.")
+            raise ValueError("No validation dataloader available.")
 
     async def generate_episodes(self, batch: Any, agent_workflow_engine: UnifiedWorkflowEngine, is_validation: bool = False, **kwargs) -> list[Episode]:
-        """Generate episodes using the workflow engine.
-
-        For Verl backend, this function handles the following procedures:
-
-        1. Build an "interleaved" batch, where each task is repeated `rollout.n` times.
-        2. Extract the tasks and task IDs from the batch.
-        3. Execute the tasks using the agent workflow engine.
-        4. Return the episodes.
-
-        Args:
-            batch: Input batch (dict format from dataloader).
-            agent_workflow_engine: The workflow engine to use.
-            **kwargs: Additional arguments.
-
-        Returns:
-            List of generated episodes.
-        """
-        # Step 1: build interleaved batch
         if isinstance(batch, dict):
             batch = DataProto.from_single_dict(batch)
 
         batch.non_tensor_batch["task_ids"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
-        if is_validation:
-            repeat_times = self.full_config.rllm.rollout.n_val
-        else:
-            repeat_times = self.full_config.rllm.rollout.n
+        repeat_times = self.full_config.rllm.rollout.n_val if is_validation else self.full_config.rllm.rollout.n
         batch = batch.repeat(repeat_times=repeat_times)
-        # Step 2: execute tasks using the agent workflow engine (async)
+
         episodes = await self._execute_tasks_async(batch, agent_workflow_engine, **kwargs)
-        # Step 3: sleep the replicas to free kv_cache before weight sync (if free_cache_engine is enabled)
-        # Only sleep during training — validation doesn't update weights, so there's no wake_up call after it.
-        # Sleeping after validation would leave replicas asleep, causing CUDA illegal memory access on the next generation.
-        if not is_validation:
+
+        # In colocated mode, sleep replicas to free KV cache / rollout weights
+        # before the training forward pass (process_backend_batch).
+        if not is_validation and not self.is_separated and self.checkpoint_manager is not None:
             await self.checkpoint_manager.sleep_replicas()
+
         return episodes
 
     async def _execute_tasks_async(self, batch: DataProto, agent_workflow_engine: UnifiedWorkflowEngine, **kwargs) -> list[Episode]:
-        """A Verl-specific helper function to execute tasks asynchronously."""
-        assert self.rollout_engine is not None, "rollout_engine is not initialized."
+        assert self.rollout_engine is not None
         tasks = batch.non_tensor_batch["extra_info"].tolist()
         task_ids = batch.non_tensor_batch["task_ids"].tolist()
         episodes = await agent_workflow_engine.execute_tasks(tasks, task_ids, **kwargs)
-        # handle data sources in the input dataproto
         if "data_source" in batch.non_tensor_batch:
             data_sources = batch.non_tensor_batch["data_source"].tolist()
             for episode, data_source in zip(episodes, data_sources, strict=True):
@@ -280,37 +359,23 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         return episodes
 
     def transform_to_backend_batch(self, trainer_state: TrainerState, **kwargs) -> DataProto:
-        """Transform rllm-native data structures to verl DataProto format."""
-        assert trainer_state.episodes is not None, "Episodes are not set"
-        episodes: list[Episode] = trainer_state.episodes
-        assert self.rollout_engine is not None, "rollout_engine is not initialized."
-        return transform_episodes_to_dataproto(episodes, self.rollout_engine, self.config.data.max_prompt_length, self.config.data.max_response_length)
+        assert trainer_state.episodes is not None
+        assert self.rollout_engine is not None
+        return transform_episodes_to_dataproto(
+            trainer_state.episodes, self.rollout_engine,
+            self.config.data.max_prompt_length, self.config.data.max_response_length,
+        )
 
     def _remove_padding(self, batch: DataProto) -> DataProto:
-        """Removes padded steps from the batch"""
         is_pad_step = batch.non_tensor_batch["is_pad_step"]
-        non_pad_step_indices = np.where(is_pad_step == False)[0]
-        batch = batch.select_idxs(non_pad_step_indices)  # This batch only has non_pad steps
-        return batch
+        return batch.select_idxs(np.where(is_pad_step == False)[0])  # noqa: E712
 
     def _get_dp_world_size(self) -> int | None:
-        """Compute the LCM of all worker group world sizes for DP splitting."""
-
         world_sizes = []
-        if self.use_critic and self.critic_wg.world_size != 0:
-            world_sizes.append(self.critic_wg.world_size)
-        if self.use_reference_policy and self.ref_policy_wg.world_size != 0:
+        if self.use_reference_policy and self.ref_policy_wg is not None and self.ref_policy_wg.world_size != 0:
             world_sizes.append(self.ref_policy_wg.world_size)
-        if self.use_rm and self.rm_wg.world_size != 0:
-            world_sizes.append(self.rm_wg.world_size)
-        if self.hybrid_engine:
-            if self.actor_rollout_wg.world_size != 0:
-                world_sizes.append(self.actor_rollout_wg.world_size)
-        else:
-            if hasattr(self, "actor_wg") and self.actor_wg.world_size != 0:
-                world_sizes.append(self.actor_wg.world_size)
-            if hasattr(self, "rollout_wg") and self.rollout_wg.world_size != 0:
-                world_sizes.append(self.rollout_wg.world_size)
+        if self.actor_rollout_wg is not None and self.actor_rollout_wg.world_size != 0:
+            world_sizes.append(self.actor_rollout_wg.world_size)
         if not world_sizes:
             return None
         return reduce(math.lcm, world_sizes)
@@ -322,11 +387,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         if world_size is None:
             return batch
 
-        batch = self._remove_padding(batch)  # Remove any padded steps from the batch (just in case)
+        batch = self._remove_padding(batch)
         original_batch_size = batch.batch["prompts"].shape[0]
         batch, pad_size = pad_dataproto_to_divisor(batch, world_size)
 
-        # for the padded dataproto, make the traj mask to 0. is_last_step also False
         pad_start, pad_end = original_batch_size, original_batch_size + pad_size
         batch.non_tensor_batch["is_last_step"][pad_start:pad_end] = False
         batch.non_tensor_batch["is_pad_step"][pad_start:pad_end] = True
@@ -334,82 +398,85 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         return batch
 
     async def process_backend_batch(self, trainer_state: TrainerState, **kwargs) -> None:
-        """Compute step-level values: old_log_probs, ref_log_probs, critic values.
-
-        Uses the new EngineWorker path: converts DataProto to TensorDict in
-        no-padding format, calls workers, converts results back to padded
-        DataProto.  The no-padding TensorDict (batch_td) is created once and
-        reused across all inference worker calls.
-        """
+        """Compute old_log_probs and ref_log_probs."""
         metrics = trainer_state.metrics
         timing_dict = trainer_state.timing_dict
-        batch: DataProto = trainer_state.backend_batch  # type: ignore[assignment]
+        batch: DataProto = trainer_state.backend_batch
 
-        # Balance the number of valid tokens across DP ranks.
-        # NOTE: This usually changes the order of data in the `batch`,
-        # which won't affect the advantage calculation (since it's based on uid),
-        # but might affect the loss calculation (due to the change of mini-batching).
         if self.config.trainer.balance_batch:
-            # pad batch size to world size for batch balancing
             batch = self._pad_dataproto_to_world_size(batch=batch)
-            self._balance_batch(batch, metrics=metrics)
+            balance_batch(batch, self.actor_rollout_wg, self.config, metrics, use_prefix_grouper=self.use_prefix_grouper)
 
-        # Set meta_info needed by workers
         batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
         batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
         if "multi_modal_inputs" in batch.non_tensor_batch:
             images_seqlens_all = []
-            for multi_modal_input in batch.non_tensor_batch["multi_modal_inputs"]:
-                if "image_grid_thw" not in multi_modal_input:
+            for mmi in batch.non_tensor_batch["multi_modal_inputs"]:
+                if "image_grid_thw" not in mmi:
                     continue
-                images_seqlens_all.extend(multi_modal_input["images_seqlens"].tolist())
+                images_seqlens_all.extend(mmi["images_seqlens"].tolist())
             batch.meta_info["images_seqlens"] = images_seqlens_all
 
-        # Convert to TensorDict + no-padding ONCE — reused for all inference calls.
-        # to_tensordict() does NOT mutate the original DataProto.
-        # left_right_2_no_padding mutates batch_td in-place.
         batch_td = batch.to_tensordict()
         batch_td = left_right_2_no_padding(batch_td)
 
-        # --- Compute old_log_probs ---
-        with simple_timer("old_log_probs", timing_dict):
-            tu.assign_non_tensor(batch_td, calculate_entropy=True, compute_loss=False)
-            output = self.actor_rollout_wg.compute_log_prob(batch_td)
-            log_probs = no_padding_2_padding(tu.get(output, "log_probs"), batch_td)
-            entropy = no_padding_2_padding(tu.get(output, "entropy"), batch_td)
+        # old_log_probs + rollout correction
+        rc = self.algorithm_config.rollout_correction if self.algorithm_config is not None else None
+        bypass_mode = rc is not None and rc.bypass_mode
 
-            # Entropy metric (for logging only)
-            response_masks = batch.batch["response_mask"]
-            loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
-            entropy_agg = agg_loss(loss_mat=entropy, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
-            metrics["actor/entropy"] = entropy_agg.detach().item()
+        if bypass_mode:
+            # bypass_mode=True: use rollout logprobs as π_old (no forward pass)
+            assert "rollout_log_probs" in batch.batch, "bypass_mode requires rollout_log_probs in batch"
+            with simple_timer("old_log_probs", timing_dict):
+                batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
+        else:
+            # bypass_mode=False: compute π_old via forward pass
+            with simple_timer("old_log_probs", timing_dict):
+                tu.assign_non_tensor(batch_td, calculate_entropy=True, compute_loss=False)
+                output = self.actor_rollout_wg.compute_log_prob(batch_td)
+                log_probs = no_padding_2_padding(tu.get(output, "log_probs"), batch_td)
+                entropy = no_padding_2_padding(tu.get(output, "entropy"), batch_td)
 
-            # Merge old_log_probs back into the padded DataProto
-            old_log_prob = DataProto.from_tensordict(tu.get_tensordict({"old_log_probs": log_probs.float()}))
-            batch = batch.union(old_log_prob)
+                response_masks = batch.batch["response_mask"]
+                loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
+                entropy_agg = agg_loss(loss_mat=entropy, loss_mask=response_masks, loss_agg_mode=loss_agg_mode, loss_scale_factor=self.config.actor_rollout_ref.actor.loss_scale_factor)
+                metrics["actor/entropy"] = entropy_agg.detach().item()
 
-            # Compute rollout log prob diff if available
+                batch = batch.union(DataProto.from_tensordict(tu.get_tensordict({"old_log_probs": log_probs.float()})))
+
+            # Compute rollout IS weights if tis_mode is set (3-policy correction)
+            tis_mode = rc.tis_mode if rc is not None else None
+            if tis_mode is not None and "rollout_log_probs" in batch.batch:
+                with simple_timer("rollout_correction", timing_dict):
+                    from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_weights
+
+                    log_ratio = batch.batch["old_log_probs"] - batch.batch["rollout_log_probs"]
+                    response_length = batch.batch["responses"].size(1)
+                    response_mask = batch.batch["attention_mask"][:, -response_length:]
+
+                    rollout_is_weights, is_metrics = compute_rollout_correction_weights(
+                        log_ratio=log_ratio,
+                        response_mask=response_mask,
+                        rollout_is=tis_mode,
+                        rollout_is_threshold=rc.tis_cap,
+                    )
+                    batch.batch["rollout_is_weights"] = rollout_is_weights
+                    metrics.update({f"rollout_correction/{k}": v for k, v in is_metrics.items()})
+
+            # Off-policy diagnostics (KL, PPL, chi-squared, etc.)
             if "rollout_log_probs" in batch.batch:
-                rollout_old_log_probs = batch.batch["rollout_log_probs"]
-                actor_old_log_probs = batch.batch["old_log_probs"]
-                attention_mask = batch.batch["attention_mask"]
-                responses = batch.batch["responses"]
-                response_length = responses.size(1)
-                response_mask = attention_mask[:, -response_length:]
+                from verl.trainer.ppo.rollout_corr_helper import compute_offpolicy_metrics
 
-                rollout_probs = torch.exp(rollout_old_log_probs)
-                actor_probs = torch.exp(actor_old_log_probs)
-                rollout_probs_diff = torch.abs(rollout_probs - actor_probs)
-                rollout_probs_diff = torch.masked_select(rollout_probs_diff, response_mask.bool())
+                response_length = batch.batch["responses"].size(1)
+                response_mask = batch.batch["attention_mask"][:, -response_length:]
+                offpolicy_metrics = compute_offpolicy_metrics(
+                    old_log_prob=batch.batch["old_log_probs"],
+                    rollout_log_prob=batch.batch["rollout_log_probs"],
+                    response_mask=response_mask,
+                )
+                metrics.update({f"offpolicy/{k}": v for k, v in offpolicy_metrics.items()})
 
-                rollout_probs_diff_metrics = {
-                    "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).detach().item(),
-                    "training/rollout_probs_diff_mean": torch.mean(rollout_probs_diff).detach().item(),
-                    "training/rollout_probs_diff_std": torch.std(rollout_probs_diff).detach().item(),
-                }
-                metrics.update(rollout_probs_diff_metrics)
-
-        # --- Compute reference log_probs (reuse batch_td) ---
+        # ref_log_probs
         if self.use_reference_policy:
             with simple_timer("ref", timing_dict):
                 tu.assign_non_tensor(batch_td, calculate_entropy=False, compute_loss=False)
@@ -419,213 +486,163 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
                     tu.assign_non_tensor(batch_td, no_lora_adapter=True)
                     ref_output = self.actor_rollout_wg.compute_log_prob(batch_td)
                 ref_lp = no_padding_2_padding(tu.get(ref_output, "log_probs"), batch_td)
-                ref_log_prob = DataProto.from_tensordict(tu.get_tensordict({"ref_log_prob": ref_lp.float()}))
-                batch = batch.union(ref_log_prob)
+                batch = batch.union(DataProto.from_tensordict(tu.get_tensordict({"ref_log_prob": ref_lp.float()})))
 
-        # --- Compute critic values ---
-        if self.use_critic:
-            with simple_timer("values", timing_dict):
-                tu.assign_non_tensor(batch_td, compute_loss=False)
-                values_output = self.critic_wg.infer_batch(batch_td)
-                values_output = values_output.get()  # blocking await on future
-                values_tensor = no_padding_2_padding(tu.get(values_output, "values"), batch_td)
-                values = DataProto.from_tensordict(tu.get_tensordict({"values": values_tensor.float()}))
-                batch = batch.union(values)
-
-        # Mask truncated samples if configured
-        if self.config.rllm.get("mask_truncated_samples", False):
+        if self.config.rllm.algorithm.get("mask_truncated_samples", False):
             mask = batch.batch["attention_mask"][:, -1] == 1
             batch = batch[~mask]
 
         trainer_state.backend_batch = batch
 
     async def compute_advantages(self, trainer_state: TrainerState, algorithm_config: AlgorithmConfig, **kwargs) -> None:
-        """Compute advantages from trajectory groups.
-
-        Note: This is async for protocol compatibility but operations are sync.
-        """
-        assert trainer_state.episodes is not None, "Episodes are not set"
-        assert trainer_state.trajectory_groups is not None, "Trajectory groups are not set"
-        episodes, trajectory_groups = trainer_state.episodes, trainer_state.trajectory_groups
-        batch: DataProto = trainer_state.backend_batch  # type: ignore[assignment]
+        assert trainer_state.trajectory_groups is not None
+        batch: DataProto = trainer_state.backend_batch
 
         with simple_timer("adv", trainer_state.timing_dict):
-            if algorithm_config.use_rllm:
-                adv_metrics = collect_reward_and_advantage_from_trajectory_groups(trajectory_groups, algorithm_config)
-                updated_batch = update_dataproto_with_advantages(batch, episodes, mode=algorithm_config.stepwise_advantage_mode)
-            else:
-                updated_batch, adv_metrics = compute_advantage_verl(batch, self.config)
+            adv_metrics = collect_reward_and_advantage_from_trajectory_groups(trainer_state.trajectory_groups, algorithm_config)
+            updated_batch = update_dataproto_with_advantages(batch, trainer_state.episodes, mode=algorithm_config.stepwise_advantage_mode)
 
         trainer_state.metrics.update(adv_metrics)
         trainer_state.backend_batch = updated_batch
 
     async def update_policy(self, trainer_state: TrainerState, **kwargs) -> None:
-        """Update actor and critic policies.
-
-        Uses the new EngineWorker path: converts DataProto to TensorDict in
-        no-padding format with training metadata, then calls workers.  The new
-        workers handle micro-batching internally, so no manual re-padding is
-        needed before the update.
-        """
-        global_steps = trainer_state.global_step
-        batch: DataProto = trainer_state.backend_batch  # type: ignore[assignment]
-
-        # Update critic
-        if self.use_critic:
-            with simple_timer("update_critic", trainer_state.timing_dict):
-                critic_td = batch.to_tensordict()
-                critic_td = left_right_2_no_padding(critic_td)
-                ppo_mbs_critic = self.config.critic.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
-                tu.assign_non_tensor(
-                    critic_td,
-                    global_batch_size=ppo_mbs_critic,
-                    mini_batch_size=ppo_mbs_critic,
-                    epochs=self.config.critic.ppo_epochs,
-                    seed=self.config.critic.data_loader_seed,
-                    dataloader_kwargs={"shuffle": self.config.critic.shuffle},
-                )
-                critic_output = self.critic_wg.train_mini_batch(critic_td)
-                critic_output = critic_output.get()
-                critic_output_metrics = tu.get(critic_output, "metrics")
-                trainer_state.metrics.update(reduce_metrics(critic_output_metrics))
-
-        # Update actor (after critic warmup)
-        if self.config.trainer.get("critic_warmup", 0) <= global_steps:
-            with simple_timer("update_actor", trainer_state.timing_dict):
-                self._update_actor_with_loss_routing(batch, trainer_state)
+        batch: DataProto = trainer_state.backend_batch
+        with simple_timer("update_actor", trainer_state.timing_dict):
+            self._update_actor_with_loss_routing(batch, trainer_state)
 
     def _update_actor_with_loss_routing(self, batch: DataProto, trainer_state: TrainerState) -> None:
-        """Update actor with per-loss-group splitting when ``loss_fn_map`` is set.
-
-        Roles that share the same policy loss function are grouped together
-        into a single ``update_actor`` call, minimising the number of
-        optimiser steps.  Each (sub-)batch is converted to TensorDict +
-        no-padding format with training metadata before being sent to the
-        worker.
-        """
         loss_fn_map = self.algorithm_config.loss_fn_map if self.algorithm_config is not None else {}
         group_roles = batch.non_tensor_batch.get("group_roles") if hasattr(batch, "non_tensor_batch") and batch.non_tensor_batch is not None else None
 
-        # Common training metadata
         rollout_n = self.config.actor_rollout_ref.rollout.n
         actor_cfg = self.config.actor_rollout_ref.actor
         ppo_mbs = actor_cfg.ppo_mini_batch_size * rollout_n
 
-        def _send_actor_update(sub_batch: DataProto, loss_override: str | None = None) -> None:
-            """Convert DataProto to TensorDict, inject metadata, send to worker."""
+        def _send_actor_update(sub_batch: DataProto) -> None:
             batch_td = sub_batch.to_tensordict()
             batch_td = left_right_2_no_padding(batch_td)
-            metadata: dict[str, Any] = dict(
+            tu.assign_non_tensor(batch_td,
                 calculate_entropy=(actor_cfg.entropy_coeff != 0.0),
-                global_batch_size=ppo_mbs,
-                mini_batch_size=ppo_mbs,
-                epochs=actor_cfg.ppo_epochs,
-                seed=actor_cfg.data_loader_seed,
+                global_batch_size=ppo_mbs, mini_batch_size=ppo_mbs,
+                epochs=actor_cfg.ppo_epochs, seed=actor_cfg.data_loader_seed,
                 dataloader_kwargs={"shuffle": actor_cfg.shuffle},
             )
-            if loss_override is not None:
-                metadata["policy_loss_mode_override"] = loss_override
-            tu.assign_non_tensor(batch_td, **metadata)
             actor_output = self.actor_rollout_wg.update_actor(batch_td)
-            actor_metrics = tu.get(actor_output, "metrics")
-            trainer_state.metrics.update(reduce_metrics(actor_metrics))
+            trainer_state.metrics.update(reduce_metrics(tu.get(actor_output, "metrics")))
 
-        # Fast path: no per-role loss overrides or no role annotations.
+        # No per-role loss routing — just use the default loss
         if not loss_fn_map or group_roles is None:
             _send_actor_update(batch)
             return
 
-        # Resolve each role to a Verl loss name with validation + fallback.
-        known = _get_verl_known_losses()
+        # Group roles by loss function
         role_to_loss: dict[str, str] = {}
         for role in set(group_roles.tolist()):
-            loss_name = loss_fn_map.get(role, _DEFAULT_VERL_LOSS)
-            if loss_name not in known:
-                logger.warning(f"Unknown Verl loss '{loss_name}' for role '{role}', falling back to '{_DEFAULT_VERL_LOSS}'")
-                loss_name = _DEFAULT_VERL_LOSS
-            role_to_loss[role] = loss_name
+            role_to_loss[role] = loss_fn_map.get(role, self._default_loss_name)
 
-        # Regroup: collect roles by their loss function.
         loss_to_roles: dict[str, list[str]] = defaultdict(list)
         for role, loss in role_to_loss.items():
             loss_to_roles[loss].append(role)
 
+        # Single loss for all roles — no need to split
         if len(loss_to_roles) <= 1:
-            # All roles share the same loss — single update.
-            _send_actor_update(batch, next(iter(loss_to_roles)))
+            loss_name = next(iter(loss_to_roles))
+            if loss_name != self._default_loss_name:
+                self.actor_rollout_wg.set_loss_fn(_get_verl_loss_fn(loss_name))
+            _send_actor_update(batch)
+            if loss_name != self._default_loss_name:
+                self.actor_rollout_wg.set_loss_fn(_get_verl_loss_fn(self._default_loss_name))
             return
 
-        # Multiple distinct losses: split batch by loss group, update each.
+        # Multiple losses — split batch by loss, swap loss_fn for each
         for loss_name, roles in loss_to_roles.items():
+            self.actor_rollout_wg.set_loss_fn(_get_verl_loss_fn(loss_name))
             role_set = set(roles)
             mask = np.array([r in role_set for r in group_roles])
-            indices = np.where(mask)[0]
-            sub_batch = batch[indices]
-            _send_actor_update(sub_batch, loss_name)
+            _send_actor_update(batch[np.where(mask)[0]])
+
+        # Restore default
+        self.actor_rollout_wg.set_loss_fn(_get_verl_loss_fn(self._default_loss_name))
 
     def shutdown(self) -> None:
-        """Placeholder, just use the BackendProtocol's default shutdown method."""
         pass
 
     # =========================================================================
-    # Async hook methods - leverage RayPPOTrainer utilities where possible
+    # Lifecycle hooks
     # =========================================================================
 
     async def on_train_start(self, trainer_state: TrainerState) -> None:
-        """Called at the start of training."""
-        self.global_steps = trainer_state.global_step
-        self._load_checkpoint()
-        await self.checkpoint_manager.update_weights(self.global_steps)
-        # we need to set trainer's global_steps to sync with the loaded checkpoint
-        trainer_state.global_step = self.global_steps
-        trainer_state.epoch = self.global_steps // len(self.train_dataloader)
+        resumed_step = load_checkpoint(
+            self.config, self.actor_rollout_wg,
+            train_dataloader=self.train_dataloader,
+        )
+        if resumed_step > 0:
+            trainer_state.global_step = resumed_step
+            trainer_state.epoch = resumed_step // len(self.train_dataloader)
+
+        await self.checkpoint_manager.update_weights(trainer_state.global_step)
+
+
+    async def on_train_end(self, trainer_state: TrainerState) -> None:
+        if self.config.trainer.save_freq <= 0 or trainer_state.global_step % self.config.trainer.save_freq != 0:
+            save_checkpoint(self.config, trainer_state.global_step, self.actor_rollout_wg,
+                train_dataloader=self.train_dataloader)
 
     async def on_batch_start(self, trainer_state: TrainerState) -> None:
-        """Called at the start of each batch."""
-        self.global_steps = trainer_state.global_step
-        # Start profiling if configured
-        do_profile = trainer_state.is_training and trainer_state.global_step in self.config.trainer.profile_steps if self.config.trainer.get("profile_steps") is not None else False
+        do_profile = (
+            trainer_state.is_training
+            and self.config.trainer.get("profile_steps") is not None
+            and trainer_state.global_step in self.config.trainer.profile_steps
+        )
         if do_profile:
             with simple_timer("start_profile", trainer_state.timing_dict):
-                self._start_profiling(do_profile)
+                start_profiling(trainer_state.global_step, self.actor_rollout_wg,
+                    ref_policy_wg=self.ref_policy_wg,
+                    use_reference_policy=self.use_reference_policy)
 
     async def on_batch_end(self, trainer_state: TrainerState) -> None:
-        """Called at the end of each batch."""
-        # Stop profiling
-        do_profile = trainer_state.is_training and trainer_state.global_step in self.config.trainer.profile_steps if self.config.trainer.get("profile_steps") is not None else False
+        do_profile = (
+            trainer_state.is_training
+            and self.config.trainer.get("profile_steps") is not None
+            and trainer_state.global_step in self.config.trainer.profile_steps
+        )
         if do_profile:
             with simple_timer("stop_profile", trainer_state.timing_dict):
-                self._stop_profiling(do_profile)
+                stop_profiling(self.actor_rollout_wg,
+                    ref_policy_wg=self.ref_policy_wg,
+                    use_reference_policy=self.use_reference_policy)
 
-        # Save checkpoint if configured
         if self.config.trainer.save_freq > 0 and trainer_state.global_step % self.config.trainer.save_freq == 0:
             with simple_timer("save_checkpoint", trainer_state.timing_dict):
-                self._save_checkpoint()
+                save_checkpoint(self.config, trainer_state.global_step, self.actor_rollout_wg,
+                    train_dataloader=self.train_dataloader)
 
-        # Weight synchronization
-        with simple_timer("update_weights", trainer_state.timing_dict):
-            await self.checkpoint_manager.update_weights(trainer_state.global_step)
+        # Weight synchronization (colocated only — separated syncs in on_policy_updated)
+        if not self.is_separated:
+            with simple_timer("update_weights", trainer_state.timing_dict):
+                await self.checkpoint_manager.update_weights(trainer_state.global_step)
 
-        # Update metrics
-        batch: DataProto = trainer_state.backend_batch  # type: ignore[attr-defined]
+        batch: DataProto = trainer_state.backend_batch
         metrics = trainer_state.metrics
         metrics.update({"training/global_step": trainer_state.global_step, "training/epoch": trainer_state.epoch})
-        metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+        metrics.update(compute_data_metrics(batch=batch, use_critic=False))
         metrics.update(compute_timing_metrics(batch=batch, timing_raw=trainer_state.timing_dict))
-
-        n_gpus = self.resource_pool_manager.get_n_gpus()
+        n_gpus = self._resource_pool_manager.get_n_gpus()
         metrics.update(compute_throughout_metrics(batch=batch, timing_raw=trainer_state.timing_dict, n_gpus=n_gpus))
 
+    async def on_policy_updated(self, trainer_state: TrainerState) -> None:
+        """Weight sync hook for async mode (called by _perform_weight_sync)."""
+        if self.is_separated and self.checkpoint_manager is not None:
+            with simple_timer("weight_sync", trainer_state.timing_dict):
+                await self.checkpoint_manager.update_weights(trainer_state.weight_version)
+
     async def on_validation_start(self, trainer_state: TrainerState) -> bool:
-        """Called at the start of validation."""
-        if self.val_reward_fn is None:
-            return False
-        else:
-            trainer_state.is_training = False
+        trainer_state.is_training = False
+        if self.rollout_engine is not None:
             self.rollout_engine.is_validation = True
-            return True
+        return True
 
     async def on_validation_end(self, trainer_state: TrainerState) -> None:
-        """Called at the end of validation."""
         trainer_state.is_training = True
-        self.rollout_engine.is_validation = False
+        if self.rollout_engine is not None:
+            self.rollout_engine.is_validation = False

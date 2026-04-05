@@ -419,8 +419,8 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         """Called at the end of training."""
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
-        # Save final checkpoint if we didn't just save it in the last batch
-        if trainer_state.global_step % self.full_config.rllm.trainer.save_freq != 0:
+        save_freq = self.full_config.rllm.trainer.save_freq
+        if save_freq <= 0 or trainer_state.global_step % save_freq != 0:
             logger.info(f"Saving final checkpoint at step {trainer_state.global_step}")
             await self.policy_trainer.save_checkpoint_and_get_sampling_client(trainer_state.global_step, kind="both", do_save=True)
 

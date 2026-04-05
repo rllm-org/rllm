@@ -205,6 +205,29 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
         rollout_logprobs_batch = _pad_sequence_batch(accumulated.rollout_logprobs, 0, max_response_length, left_pad=False)
         tensors["rollout_log_probs"] = rollout_logprobs_batch
 
+    # Include routed_experts if available (for Router Replay / R3)
+    # Format: first entry is JSON shape header, rest are per-token base64-encoded int32
+    if accumulated.routing_matrices and len(accumulated.routing_matrices) == len(accumulated.responses):
+        import base64
+        import json as _json
+
+        response_tensors = []
+        for step_rm in accumulated.routing_matrices:
+            shape = _json.loads(step_rm[0])["shape"]  # [num_layers, topk]
+            num_layers, topk = shape
+            token_arrays = [
+                np.frombuffer(base64.b64decode(s), dtype=np.int32).reshape(num_layers, topk)
+                for s in step_rm[1:]
+            ]
+            response_tensors.append(torch.from_numpy(np.stack(token_arrays)))  # (completion_len, num_layers, topk)
+
+        # Pad response routing to max_response_length
+        response_routing = _pad_sequence_batch(response_tensors, 0, max_response_length, left_pad=False)
+        # Prepend zeros for prompt positions
+        bs = response_routing.shape[0]
+        prompt_zeros = torch.zeros(bs, max_prompt_length, num_layers, topk, dtype=response_routing.dtype)
+        tensors["routed_experts"] = torch.cat([prompt_zeros, response_routing], dim=1)
+
     return DataProto.from_dict(
         tensors=tensors,
         non_tensors=non_tensors,
@@ -256,6 +279,7 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
             multi_modal_inputs=multi_modal_inputs,
             advantage=step.advantage,
             logprobs=step.model_output.logprobs,
+            routing_matrices=step.routing_matrices,
         )
 
         accumulated.add_step(

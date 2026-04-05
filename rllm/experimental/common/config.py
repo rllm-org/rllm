@@ -148,7 +148,7 @@ class RolloutCorrectionConfig:
     """
 
     tis_mode: str | None = None
-    bypass_mode: bool = True
+    bypass_mode: bool = False
     tis_cap: float = 5.0
 
 
@@ -184,7 +184,6 @@ class AlgorithmConfig:
     ``estimator_map`` and the loss function goes into ``loss_fn_map``.
     """
 
-    use_rllm: bool = False  # This is ignored (assumed True) for tinker backend.
     estimator: rLLMAdvantageEstimator = rLLMAdvantageEstimator.GRPO
     estimator_map: dict[str, rLLMAdvantageEstimator | str | tuple] = field(default_factory=dict)
     # Per-role policy loss overrides (populated from tuples in estimator_map during __post_init__)
@@ -221,14 +220,13 @@ class AlgorithmConfig:
         rc_section = config.rllm.algorithm.get("rollout_correction", {})
         rollout_correction = RolloutCorrectionConfig(
             tis_mode=rc_section.get("tis_mode", None),
-            bypass_mode=rc_section.get("bypass_mode", True),
+            bypass_mode=rc_section.get("bypass_mode", False),
             tis_cap=rc_section.get("tis_cap", 5.0),
         )
         return cls(
-            estimator=rLLMAdvantageEstimator(config.algorithm.adv_estimator),
+            estimator=rLLMAdvantageEstimator(config.rllm.algorithm.adv_estimator),
             stepwise_advantage_mode=config.rllm.stepwise_advantage.mode,
             norm_adv_by_std_in_grpo=config.rllm.algorithm.get("norm_adv_by_std_in_grpo", True),
-            use_rllm=config.rllm.stepwise_advantage.get("use_rllm", False),
             use_precomputed_advantage=config.rllm.algorithm.get("use_precomputed_advantage", False),
             loss_fn=config.rllm.algorithm.get("loss_fn", None),
             lr_schedule=config.rllm.algorithm.get("lr_schedule", "constant"),

@@ -3,7 +3,6 @@ from typing import cast
 
 from omegaconf import DictConfig
 from typing_extensions import override
-from verl.experimental.agent_loop.agent_loop import AgentLoopManager, AsyncLLMServerManager
 
 from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
 from rllm.experimental.rollout.types import TokenInput, Tokenizer, TokenOutput, VerlTokenOutput
@@ -12,38 +11,36 @@ from rllm.workflows import TerminationEvent, TerminationReason
 
 
 class VerlEngine(RolloutEngine):
-    def __init__(self, config: DictConfig, rollout_manager: AgentLoopManager, tokenizer: Tokenizer, processor=None, **kwargs):
+    def __init__(self, config: DictConfig, server_manager, tokenizer: Tokenizer, processor=None, **kwargs):
         self.config = config
 
         if config.actor_rollout_ref.rollout.name not in ["vllm", "sglang"]:
             raise ValueError(f"VerlEngine only supports vllm or sglang rollout, but got {config.actor_rollout_ref.rollout.name}")
 
-        assert rollout_manager.global_load_balancer is not None, "global_load_balancer is not available. Issues with RayPPOTrainer's `init_workers()` function."
-
-        self.rollout_manager: AgentLoopManager = rollout_manager
-        # reconstruct the servers list from the server_addresses and server_handles (Verl 0.7.0+)
-        servers = zip(rollout_manager.server_addresses, rollout_manager.server_handles, strict=True)
-        self.server_manager = AsyncLLMServerManager(config, servers=servers, load_balancer_handle=rollout_manager.global_load_balancer)
+        self.server_manager = server_manager
 
         self.tokenizer = tokenizer
         self.processor = processor
-        self.chat_parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=config.get("rllm", {}).get("disable_thinking", False))
+        chat_template_kwargs = config.rllm.rollout.get("chat_template_kwargs", {})
+        self.chat_parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=chat_template_kwargs.get("disable_thinking", False))
 
         self.max_prompt_length = config.data.max_prompt_length
         self.max_response_length = config.data.max_response_length
-        self.accumulate_reasoning = config.get("rllm", {}).get("accumulate_reasoning", False)
+        self.accumulate_reasoning = chat_template_kwargs.get("accumulate_reasoning", False)
+        self.reasoning_effort = chat_template_kwargs.get("reasoning_effort", "medium")
 
+        rllm_sampling = config.rllm.rollout.sampling
         self.train_sampling_params = dict(
-            temperature=0.0 if config.actor_rollout_ref.rollout.do_sample is False else config.actor_rollout_ref.rollout.temperature,
-            top_k=config.actor_rollout_ref.rollout.top_k,
-            top_p=config.actor_rollout_ref.rollout.top_p,
+            temperature=rllm_sampling.train.temperature,
+            top_k=rllm_sampling.train.top_k,
+            top_p=rllm_sampling.train.top_p,
             logprobs=1,
         )
 
         self.val_sampling_params = dict(
-            temperature=0.0 if config.actor_rollout_ref.rollout.val_kwargs.do_sample is False else config.actor_rollout_ref.rollout.val_kwargs.temperature,
-            top_k=config.actor_rollout_ref.rollout.val_kwargs.top_k,
-            top_p=config.actor_rollout_ref.rollout.val_kwargs.top_p,
+            temperature=rllm_sampling.val.temperature,
+            top_k=rllm_sampling.val.top_k,
+            top_p=rllm_sampling.val.top_p,
             logprobs=1,
         )
 
@@ -79,7 +76,7 @@ class VerlEngine(RolloutEngine):
         # these go to the parser
         tools = kwargs.pop("tools", [])
         accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
-        reasoning_effort = kwargs.pop("reasoning_effort", "medium")
+        reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
 
         prompt = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, tools=tools, accumulate_reasoning=accumulate_reasoning, reasoning_effort=reasoning_effort)
         request_prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)  # list[int]
@@ -120,6 +117,20 @@ class VerlEngine(RolloutEngine):
         # TODO: implement parse_completion for the standard parser
         parsed_output = self.chat_parser.parse_completion(completion_ids)
 
+        # Encode routed_experts to per-token base64 with shape header.
+        # Input: np.ndarray (completion_len, num_layers, topk) int32
+        # Output: list[str] where first entry is JSON shape header, rest are base64 per token
+        routing_matrices = None
+        if token_output.routed_experts is not None:
+            import base64
+            import json as _json
+            arr = token_output.routed_experts  # (completion_len, num_layers, topk)
+            shape_header = _json.dumps({"shape": list(arr.shape[1:])})
+            routing_matrices = [shape_header] + [
+                base64.b64encode(arr[i].tobytes()).decode("ascii")
+                for i in range(len(arr))
+            ]
+
         return ModelOutput(
             text=completion_text,
             content=parsed_output["content"],
@@ -132,4 +143,6 @@ class VerlEngine(RolloutEngine):
             prompt_length=prompt_length,
             completion_length=len(completion_ids),
             finish_reason=finish_reason,
+            routing_matrices=routing_matrices,
+            metrics={"num_preempted": token_output.num_preempted} if token_output.num_preempted else None,
         )
