@@ -209,7 +209,12 @@ class FrozenLakeEnv(GymFrozenLakeEnv, BaseEnv):
 
     def reset(self, task=None):
         task = task or {}
-        self.__init__(size=task.get("size", self.map_kwargs["size"]), p=task.get("p", self.map_kwargs["p"]), seed=task.get("seed", self.env_kwargs["seed"]), is_slippery=task.get("is_slippery", self.env_kwargs["is_slippery"]))
+        self.__init__(
+            size=task.get("size", self.map_kwargs["size"]),
+            p=task.get("p", self.map_kwargs["p"]),
+            seed=task.get("seed", self.env_kwargs["seed"]),
+            is_slippery=task.get("is_slippery", self.env_kwargs["is_slippery"]),
+        )
         GymFrozenLakeEnv.reset(self, seed=self.seed)
         return self.render(mode="tiny_rgb_array"), {}
 

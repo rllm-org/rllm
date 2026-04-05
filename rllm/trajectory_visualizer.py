@@ -119,7 +119,12 @@ def main(trajectory_file: str = "./trajectories/sample_trajectories/search_traje
         # Updated logic for new API pattern
         uses_thinking_format = has_thinking and step.thought.strip()
 
-        return {"has_thinking": has_thinking, "has_direct_response": has_direct_response, "uses_thinking_format": uses_thinking_format, "response_field": "thought" if uses_thinking_format else "model_response"}
+        return {
+            "has_thinking": has_thinking,
+            "has_direct_response": has_direct_response,
+            "uses_thinking_format": uses_thinking_format,
+            "response_field": "thought" if uses_thinking_format else "model_response",
+        }
 
     def get_task_type(metadata):
         """Detect task type from metadata"""
@@ -476,13 +481,25 @@ def main(trajectory_file: str = "./trajectories/sample_trajectories/search_traje
 
         with gr.Row():
             with gr.Column(scale=1):
-                filter_dropdown = gr.Dropdown(choices=["All Trajectories", "Zero Reward (Failed)", "Nonzero Reward (Partial/Full Success)", "Perfect Score (Reward = 1)"], value="All Trajectories", label="🎯 Filter by Reward", interactive=True)
+                filter_dropdown = gr.Dropdown(
+                    choices=[
+                        "All Trajectories",
+                        "Zero Reward (Failed)",
+                        "Nonzero Reward (Partial/Full Success)",
+                        "Perfect Score (Reward = 1)",
+                    ],
+                    value="All Trajectories",
+                    label="🎯 Filter by Reward",
+                    interactive=True,
+                )
             with gr.Column(scale=1):
                 zero_count = len([t for t in all_trajs if float(t.reward) == 0.0])
                 nonzero_count = len([t for t in all_trajs if float(t.reward) > 0.0])
                 perfect_count = len([t for t in all_trajs if float(t.reward) == 1.0])
 
-                _ = gr.Markdown(f"**Dataset Stats:**\n- Total: {len(all_trajs)} trajectories\n- Failed (0): {zero_count}\n- Partial/Full Success (>0): {nonzero_count}\n- Perfect Score (=1): {perfect_count}")
+                _ = gr.Markdown(
+                    f"**Dataset Stats:**\n- Total: {len(all_trajs)} trajectories\n- Failed (0): {zero_count}\n- Partial/Full Success (>0): {nonzero_count}\n- Perfect Score (=1): {perfect_count}"
+                )
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -524,15 +541,42 @@ def main(trajectory_file: str = "./trajectories/sample_trajectories/search_traje
                 with gr.Accordion("📋 Tool Results", open=True):
                     outputs_output = gr.Markdown(elem_classes=["outputs-box"])
 
-        all_outputs = [current_pos_display, metadata_output, performance_output, question_output, thinking_output, response_output, step_perf_output, actions_output, outputs_output, final_answer_output]
+        all_outputs = [
+            current_pos_display,
+            metadata_output,
+            performance_output,
+            question_output,
+            thinking_output,
+            response_output,
+            step_perf_output,
+            actions_output,
+            outputs_output,
+            final_answer_output,
+        ]
 
         def reset_to_first_trajectory():
             return 0, 0
 
-        prev_traj_button.click(fn=lambda t, s, f: advance_step_or_trajectory(t, s, "prev", "trajectory", filter_trajectories_by_reward(f)), inputs=[current_traj_idx_state, current_step_idx_state, filter_dropdown], outputs=[current_traj_idx_state, current_step_idx_state])
-        next_traj_button.click(fn=lambda t, s, f: advance_step_or_trajectory(t, s, "next", "trajectory", filter_trajectories_by_reward(f)), inputs=[current_traj_idx_state, current_step_idx_state, filter_dropdown], outputs=[current_traj_idx_state, current_step_idx_state])
-        prev_step_button.click(fn=lambda t, s, f: advance_step_or_trajectory(t, s, "prev", "step", filter_trajectories_by_reward(f)), inputs=[current_traj_idx_state, current_step_idx_state, filter_dropdown], outputs=[current_traj_idx_state, current_step_idx_state])
-        next_step_button.click(fn=lambda t, s, f: advance_step_or_trajectory(t, s, "next", "step", filter_trajectories_by_reward(f)), inputs=[current_traj_idx_state, current_step_idx_state, filter_dropdown], outputs=[current_traj_idx_state, current_step_idx_state])
+        prev_traj_button.click(
+            fn=lambda t, s, f: advance_step_or_trajectory(t, s, "prev", "trajectory", filter_trajectories_by_reward(f)),
+            inputs=[current_traj_idx_state, current_step_idx_state, filter_dropdown],
+            outputs=[current_traj_idx_state, current_step_idx_state],
+        )
+        next_traj_button.click(
+            fn=lambda t, s, f: advance_step_or_trajectory(t, s, "next", "trajectory", filter_trajectories_by_reward(f)),
+            inputs=[current_traj_idx_state, current_step_idx_state, filter_dropdown],
+            outputs=[current_traj_idx_state, current_step_idx_state],
+        )
+        prev_step_button.click(
+            fn=lambda t, s, f: advance_step_or_trajectory(t, s, "prev", "step", filter_trajectories_by_reward(f)),
+            inputs=[current_traj_idx_state, current_step_idx_state, filter_dropdown],
+            outputs=[current_traj_idx_state, current_step_idx_state],
+        )
+        next_step_button.click(
+            fn=lambda t, s, f: advance_step_or_trajectory(t, s, "next", "step", filter_trajectories_by_reward(f)),
+            inputs=[current_traj_idx_state, current_step_idx_state, filter_dropdown],
+            outputs=[current_traj_idx_state, current_step_idx_state],
+        )
 
         filter_dropdown.change(fn=reset_to_first_trajectory, outputs=[current_traj_idx_state, current_step_idx_state])
 

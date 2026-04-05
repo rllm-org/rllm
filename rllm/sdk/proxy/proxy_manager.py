@@ -366,7 +366,12 @@ class VerlProxyManager(ProxyManager):
             print(f"[PROXY_MANAGER] Detailed instrumentation status: {status}")
 
             if support == "none":
-                logger.warning("vLLM < 0.10.2 detected, but VERL servers are already running. Token IDs will NOT be available! To enable token IDs, call instrument_vllm() BEFORE creating AgentLoopManager. See docs/howto/instrument_verl_vllm_for_token_ids.md for details.")
+                logger.warning(
+                    "vLLM < 0.10.2 detected, but VERL servers are already running. "
+                    "Token IDs will NOT be available! To enable token IDs, call "
+                    "instrument_vllm() BEFORE creating AgentLoopManager. "
+                    "See docs/howto/instrument_verl_vllm_for_token_ids.md for details."
+                )
             elif support == "native":
                 logger.info("vLLM >= 0.10.2 detected, token IDs available via native support")
             elif support == "instrumented":

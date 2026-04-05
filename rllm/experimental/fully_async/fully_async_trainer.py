@@ -274,7 +274,15 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
 
         if self.use_critic:
             critic_local_path = os.path.join(local_global_step_folder, str(Role.Critic))
-            critic_remote_path = None if self.config.trainer.default_hdfs_dir is None else os.path.join(self.config.trainer.default_hdfs_dir, f"global_step_{self.current_param_version}", str(Role.Critic))
+            critic_remote_path = (
+                None
+                if self.config.trainer.default_hdfs_dir is None
+                else os.path.join(
+                    self.config.trainer.default_hdfs_dir,
+                    f"global_step_{self.current_param_version}",
+                    str(Role.Critic),
+                )
+            )
             self.critic_wg.save_checkpoint(
                 critic_local_path,
                 critic_remote_path,

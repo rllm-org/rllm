@@ -43,7 +43,19 @@ def make_map_fn(split: str):
         tests = json.dumps(tests)
         if isinstance(question, dict):
             question = json.dumps(question)
-        data = {"data_source": dataset_name, "prompt": [{"role": "user", "content": question}], "ability": "code", "reward_model": {"style": "rule", "ground_truth": tests}, "extra_info": {"split": split, "index": idx, "task": {"question": question}}, "task": {"question": question}, "uid": idx}
+        data = {
+            "data_source": dataset_name,
+            "prompt": [{"role": "user", "content": question}],
+            "ability": "code",
+            "reward_model": {"style": "rule", "ground_truth": tests},
+            "extra_info": {
+                "split": split,
+                "index": idx,
+                "task": {"question": question},
+            },
+            "task": {"question": question},
+            "uid": idx,
+        }
         return data
 
     return process_fn

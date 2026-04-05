@@ -191,7 +191,9 @@ def main(config: Config):
                 target_tokens = tokens[1:]
                 all_logprobs = [0.0] * ob_len + logprob
                 all_advantages = [0.0] * ob_len + [advantage] * (len(input_tokens) - ob_len)
-                assert len(input_tokens) == len(target_tokens) == len(all_logprobs) == len(all_advantages), f"len(input_tokens): {len(input_tokens)}, len(target_tokens): {len(target_tokens)}, len(all_logprobs): {len(all_logprobs)}, len(all_advantages): {len(all_advantages)}"
+                assert len(input_tokens) == len(target_tokens) == len(all_logprobs) == len(all_advantages), (
+                    f"len(input_tokens): {len(input_tokens)}, len(target_tokens): {len(target_tokens)}, len(all_logprobs): {len(all_logprobs)}, len(all_advantages): {len(all_advantages)}"
+                )
                 datum = types.Datum(
                     model_input=types.ModelInput.from_ints(tokens=input_tokens),
                     loss_fn_inputs={
