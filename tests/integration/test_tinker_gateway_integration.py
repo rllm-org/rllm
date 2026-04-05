@@ -34,7 +34,6 @@ def create_tinker_engine():
         max_response_length=128,
         max_model_length=2048,
         sampling_params={"train": {"temperature": 0.0}, "val": {"temperature": 0.0}},
-        bypass_render_with_parser=True,
         disable_thinking=True,
     )
     engine.set_sampling_client(sampling_client)
