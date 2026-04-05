@@ -1,16 +1,13 @@
-import json
-from typing import Any, cast
+from typing import cast
 
 import tinker
 from tinker.types import ModelInput
 from tinker_cookbook import model_info, renderers
-from tinker_cookbook.renderers import Message
 from typing_extensions import override  # need to use typing_extensions for python < 3.12
 
 from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine
 from rllm.engine.rollout.types import ImageProcessor, Processor, TinkerTokenInput, TinkerTokenOutput, TokenInput, Tokenizer, TokenOutput
 from rllm.parser.tinker_parser import TinkerChatTemplateParser
-from rllm.tools.tool_base import ToolCall
 from rllm.workflows import TerminationEvent, TerminationReason
 
 """
@@ -52,94 +49,6 @@ def _flat_token_input_length(token_input: TokenInput) -> int:
         else:
             length += elem.length
     return length
-
-
-def _convert_openai_messages(messages: list[dict[str, Any]]) -> list[Message]:
-    """Convert OpenAI message dicts to tinker-cookbook Messages.
-
-    Follows the same pattern as tinker_cookbook.third_party.litellm.provider._convert_openai_messages.
-    TODO: once these helpers are refactored out of the litellm provider into a shared module
-    (e.g. tinker_cookbook.renderers.openai_compat), import directly instead of duplicating.
-    """
-    from tinker_cookbook.renderers.base import ToolCall as TinkerToolCall
-
-    out: list[Message] = []
-    for msg in messages:
-        tinker_msg: Message = {
-            "role": msg["role"],
-            "content": msg.get("content") or "",
-        }
-        if "name" in msg:
-            tinker_msg["name"] = msg["name"]
-        if "tool_call_id" in msg:
-            tinker_msg["tool_call_id"] = msg["tool_call_id"]
-        if "tool_calls" in msg:
-            tinker_msg["tool_calls"] = [TinkerToolCall.model_validate(tc) for tc in msg["tool_calls"]]
-        out.append(tinker_msg)
-    return out
-
-
-def _prepare_messages_with_tools(
-    renderer: renderers.Renderer,
-    messages: list[Message],
-    tools: list[dict[str, Any]],
-) -> list[Message]:
-    """Inject tool declarations into the message list via the renderer.
-
-    Follows the same pattern as tinker_cookbook.third_party.litellm.provider._prepare_messages_with_tools.
-    TODO: once these helpers are refactored out of the litellm provider into a shared module
-    (e.g. tinker_cookbook.renderers.openai_compat), import directly instead of duplicating.
-    """
-    from tinker_cookbook.renderers.base import ToolSpec
-
-    tool_specs: list[ToolSpec] = []
-    for tool in tools:
-        if tool.get("type") != "function":
-            continue
-        func = tool["function"]
-        tool_specs.append(ToolSpec(name=func["name"], description=func.get("description", ""), parameters=func.get("parameters", {})))
-
-    system_prompt = ""
-    if messages and messages[0]["role"] == "system":
-        content = messages[0].get("content") or ""
-        system_prompt = content if isinstance(content, str) else ""
-        remaining = list(messages[1:])
-    else:
-        remaining = list(messages)
-
-    prefix = renderer.create_conversation_prefix_with_tools(tool_specs, system_prompt)
-    return prefix + remaining
-
-
-def _parse_tinker_message(message: Message) -> tuple[str, str, list[Any]]:
-    tinker_content = message["content"]
-    if isinstance(tinker_content, list):
-        text_parts, think_parts = [], []
-        for part in tinker_content:
-            if part["type"] == "text":
-                text_parts.append(part)
-            elif part["type"] == "thinking":
-                think_parts.append(part)
-        content = "\n".join([text["text"] for text in text_parts])
-        reasoning = "\n".join([think["thinking"] for think in think_parts])
-    else:  # no reasoning parsed
-        content = tinker_content
-        reasoning = ""
-    # Convert tinker-cookbook ToolCall (function.name/function.arguments) to rllm ToolCall (name/arguments)
-    raw_tool_calls = message.get("tool_calls", [])
-    tool_calls = []
-    for tc in raw_tool_calls:
-        if hasattr(tc, "function"):
-            # tinker-cookbook ToolCall: ToolCall(function=FunctionBody(name, arguments), id)
-            args = tc.function.arguments
-            tool_calls.append(ToolCall(name=tc.function.name, arguments=json.loads(args) if isinstance(args, str) else args))
-        elif isinstance(tc, ToolCall):
-            tool_calls.append(tc)
-        elif isinstance(tc, dict):
-            tool_calls.append(ToolCall(name=tc.get("name", ""), arguments=tc.get("arguments", {})))
-        else:
-            raise TypeError(f"Unrecognized tool_call type: {type(tc)}")
-    return content, reasoning, tool_calls
 
 
 class TinkerEngine(RolloutEngine):
