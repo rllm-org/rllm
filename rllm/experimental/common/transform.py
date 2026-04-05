@@ -87,7 +87,9 @@ def _validate_and_propagate_rewards(
     for group in groups:
         if config.broadcast:
             num_missing_rewards = sum(traj.reward is None for traj in group.trajectories)
-            assert num_missing_rewards == 0 or num_missing_rewards == len(group.trajectories), "Trajectories in a group must either ALL NOT have a trajectory-level reward or ALL have a trajectory-level reward"
+            assert num_missing_rewards == 0 or num_missing_rewards == len(group.trajectories), (
+                "Trajectories in a group must either ALL NOT have a trajectory-level reward or ALL have a trajectory-level reward"
+            )
             if num_missing_rewards > 0:
                 for traj in group.trajectories:
                     assert len(traj.steps) > 0, "Trajectory within a group must have at least one step"

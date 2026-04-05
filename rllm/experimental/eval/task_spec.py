@@ -61,7 +61,12 @@ class TaskSpec:
 
 BENCHMARK_INSTRUCTIONS: dict[str, str] = {
     "math_reward_fn": ("Solve the math problem step by step, showing your reasoning clearly. Put your final answer in \\boxed{} notation.\nExample: The answer is \\boxed{42}."),
-    "countdown_reward_fn": ("You are given a target number and a set of numbers. Use each number exactly once with basic arithmetic (+, -, *, /) to reach the target. Show your reasoning, then provide your equation inside <answer>...</answer> tags.\nExample: <answer>(25 + 3) * 2</answer>"),
+    "countdown_reward_fn": (
+        "You are given a target number and a set of numbers. Use each number exactly once"
+        " with basic arithmetic (+, -, *, /) to reach the target. Show your reasoning,"
+        " then provide your equation inside <answer>...</answer> tags.\n"
+        "Example: <answer>(25 + 3) * 2</answer>"
+    ),
     "mcq_reward_fn": ("Choose the correct answer from the given options. Think through the problem carefully, then respond with ONLY the letter of the correct answer (A, B, C, D, etc.)."),
     "code_reward_fn": ("Write a Python function that solves the problem. Your code will be tested against hidden test cases. Put your complete solution in a ```python code block."),
     "f1_reward_fn": ("Answer the question directly and concisely. Provide only the answer, no additional explanation."),

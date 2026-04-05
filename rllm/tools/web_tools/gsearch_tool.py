@@ -41,7 +41,23 @@ class GoogleSearchTool(Tool):
 
     @property
     def json(self):
-        return {"type": "function", "function": {"name": self.name, "description": self.description, "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Query to be submitted to Google search engine."}}, "required": ["query"]}}}
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Query to be submitted to Google search engine.",
+                        }
+                    },
+                    "required": ["query"],
+                },
+            },
+        }
 
     def _search_with_google(self, query: str):
         """

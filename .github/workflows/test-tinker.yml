@@ -32,7 +32,7 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install dependencies
-        run: uv sync --extra tinker
+        run: uv sync --extra tinker --extra dev
 
       - name: Run Tinker engine tests
         run: uv run pytest tests/engine/test_tinker_engine.py -v

@@ -18,7 +18,14 @@ class PythonInterpreter(CodeTool):
     and LiveCodeBench environment.
     """
 
-    def __init__(self, backend: BackendType = "local", n_sandboxes: int = 1, api_key: str | None = None, name: str = "python", description: str = "Execute Python code in a sandboxed environment. Returns results and standard output/error."):
+    def __init__(
+        self,
+        backend: BackendType = "local",
+        n_sandboxes: int = 1,
+        api_key: str | None = None,
+        name: str = "python",
+        description: str = "Execute Python code in a sandboxed environment. Returns results and standard output/error.",
+    ):
         """
         Initialize the unified Python interpreter with the specified backend.
 

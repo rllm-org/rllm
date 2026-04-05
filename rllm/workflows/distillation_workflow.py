@@ -21,7 +21,16 @@ class DistillationWorkflow(Workflow):
         **kwargs: Additional arguments passed to Workflow.
     """
 
-    def __init__(self, rollout_engine: RolloutEngine, reward_function: RewardFunction | None = None, teacher_engine: RolloutEngine | None = None, shared_tokenizer: bool = False, clip_min: float | None = None, clip_max: float | None = None, **kwargs):
+    def __init__(
+        self,
+        rollout_engine: RolloutEngine,
+        reward_function: RewardFunction | None = None,
+        teacher_engine: RolloutEngine | None = None,
+        shared_tokenizer: bool = False,
+        clip_min: float | None = None,
+        clip_max: float | None = None,
+        **kwargs,
+    ):
         super().__init__(rollout_engine, **kwargs)
         self.reward_function = reward_function
         self.teacher_engine = teacher_engine

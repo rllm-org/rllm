@@ -54,7 +54,21 @@ from swebench.harness.utils import (
     run_threadpool,
 )
 
-from rllm.globals import CACHE_LEVEL, CLEAN, FORCE_REBUILD, INSTANCE_IMAGE_TAG, MAX_WORKERS, MODEL_NAME_OR_PATH, NAMESPACE, OPEN_FILE_LIMIT, REPORT_DIR, REWRITE_REPORTS, SPLIT, SWEBENCH_DATASET_NAME, TIMEOUT
+from rllm.globals import (
+    CACHE_LEVEL,
+    CLEAN,
+    FORCE_REBUILD,
+    INSTANCE_IMAGE_TAG,
+    MAX_WORKERS,
+    MODEL_NAME_OR_PATH,
+    NAMESPACE,
+    OPEN_FILE_LIMIT,
+    REPORT_DIR,
+    REWRITE_REPORTS,
+    SPLIT,
+    SWEBENCH_DATASET_NAME,
+    TIMEOUT,
+)
 
 GIT_APPLY_CMDS = [
     "git apply --verbose",
@@ -627,7 +641,23 @@ def swebench_check_correctness(
     run_id = uuid.uuid4().hex
     instance_ids = [instance_id]
 
-    eval_report_path = run_evaluation(SWEBENCH_DATASET_NAME, instance_ids, actions, MAX_WORKERS, FORCE_REBUILD, CACHE_LEVEL, CLEAN, OPEN_FILE_LIMIT, run_id, TIMEOUT, NAMESPACE, REWRITE_REPORTS, SPLIT, INSTANCE_IMAGE_TAG, REPORT_DIR)
+    eval_report_path = run_evaluation(
+        SWEBENCH_DATASET_NAME,
+        instance_ids,
+        actions,
+        MAX_WORKERS,
+        FORCE_REBUILD,
+        CACHE_LEVEL,
+        CLEAN,
+        OPEN_FILE_LIMIT,
+        run_id,
+        TIMEOUT,
+        NAMESPACE,
+        REWRITE_REPORTS,
+        SPLIT,
+        INSTANCE_IMAGE_TAG,
+        REPORT_DIR,
+    )
 
     # read from eval report and get the correct/incorrect stats for reward calculation
     with open(eval_report_path) as f:

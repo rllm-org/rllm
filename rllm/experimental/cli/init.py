@@ -173,7 +173,9 @@ def init_cmd(project_name: str | None, template: str | None, evaluator: bool, ou
     console.print()
     console.print(
         Panel(
-            f"[bold green]Project created:[/bold green] {project_dir}\n\n[bold]Template:[/bold] {tpl_info['label']}\n[bold]Agent:[/bold] {module_name}.agent:{agent_instance}\n" + (f"[bold]Evaluator:[/bold] {module_name}.evaluator:{evaluator_class}\n" if evaluator else ""),
+            f"[bold green]Project created:[/bold green] {project_dir}\n\n"
+            f"[bold]Template:[/bold] {tpl_info['label']}\n"
+            f"[bold]Agent:[/bold] {module_name}.agent:{agent_instance}\n" + (f"[bold]Evaluator:[/bold] {module_name}.evaluator:{evaluator_class}\n" if evaluator else ""),
             title="[bold cyan]rllm init[/bold cyan]",
             border_style="cyan",
         )

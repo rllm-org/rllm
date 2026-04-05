@@ -358,7 +358,9 @@ Here is my response
 class Solution:\n    def minOperations(self, nums: List[int], k: int) -> int:\n        is_added = [False] * k\n        count = 0\n        n = len(nums)\n        for i in range(n - 1, -1, -1):\n            if nums[i] > k or is_added[nums[i] - 1]:\n                continue\n            is_added[nums[i] - 1] = True\n            count += 1\n            if count == k:\n                return n - i\n
 ```
 """
-        tests = {"functional": "def check(candidate):\n    assert candidate(nums = [3,1,5,4,2], k = 2) == 4\n    assert candidate(nums = [3,1,5,4,2], k = 5) == 5\n    assert candidate(nums = [3,2,5,3,1], k = 3) == 4\n\n\ncheck(Solution().minOperations)"}
+        tests = {
+            "functional": "def check(candidate):\n    assert candidate(nums = [3,1,5,4,2], k = 2) == 4\n    assert candidate(nums = [3,1,5,4,2], k = 5) == 5\n    assert candidate(nums = [3,2,5,3,1], k = 3) == 4\n\n\ncheck(Solution().minOperations)"
+        }
         reward = RewardCodeFn(RewardConfig())
         task_info = {"problem": "", "problem_type": RewardType.CODE, "data_source": "leetcode", "ground_truth": tests}
         output = reward(task_info, model_response)
@@ -373,7 +375,9 @@ class Solution:\n    def minOperations(self, nums: List[int], k: int) -> int:\n 
 Here is my bad response, it is not in markdown oops
 class Solution:\n    def minOperations(self, nums: List[int], k: int) -> int:\n        is_added = [False] * k\n        count = 0\n        n = len(nums)\n        for i in range(n - 1, -1, -1):\n            if nums[i] > k or is_added[nums[i] - 1]:\n                continue\n            is_added[nums[i] - 1] = True\n            count += 1\n            if count == k:\n                return n - i\n
 """
-        tests = {"functional": "def check(candidate):\n    assert candidate(nums = [3,1,5,4,2], k = 2) == 4\n    assert candidate(nums = [3,1,5,4,2], k = 5) == 5\n    assert candidate(nums = [3,2,5,3,1], k = 3) == 4\n\n\ncheck(Solution().minOperations)"}
+        tests = {
+            "functional": "def check(candidate):\n    assert candidate(nums = [3,1,5,4,2], k = 2) == 4\n    assert candidate(nums = [3,1,5,4,2], k = 5) == 5\n    assert candidate(nums = [3,2,5,3,1], k = 3) == 4\n\n\ncheck(Solution().minOperations)"
+        }
         reward = RewardCodeFn(RewardConfig())
         task_info = {"problem": "", "problem_type": RewardType.CODE, "data_source": "leetcode", "ground_truth": tests}
         output = reward(task_info, model_response)

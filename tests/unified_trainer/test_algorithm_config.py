@@ -8,7 +8,6 @@ See: https://github.com/rllm-org/rllm/issues/447
 import importlib.util
 import os
 
-import pytest
 from omegaconf import OmegaConf
 
 # Import config module directly to avoid heavy transitive deps (codetiming, verl, etc.)

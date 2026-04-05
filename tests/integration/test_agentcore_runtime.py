@@ -47,7 +47,9 @@ class TestSingleTask:
         """Submit a GSM8K problem, verify success=True, reward is not None."""
         runtime = _make_runtime()
         sub = _make_submission(
-            prompt=("Toula went to the bakery and bought various types of pastries. She bought 3 dozen donuts which cost $68 per dozen, 2 dozen mini cupcakes which cost $80 per dozen, and 6 dozen mini cheesecakes for $55 per dozen. How much was the total cost?"),
+            prompt=(
+                "Toula went to the bakery and bought various types of pastries. She bought 3 dozen donuts which cost $68 per dozen, 2 dozen mini cupcakes which cost $80 per dozen, and 6 dozen mini cheesecakes for $55 per dozen. How much was the total cost?"
+            ),
             answer="694",
         )
 

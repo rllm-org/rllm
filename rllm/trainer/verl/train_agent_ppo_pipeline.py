@@ -83,7 +83,17 @@ def main_task(config, compute_score=None):
     agent_class = AGENT_CLASS_MAPPING[config.rllm.agent.name]
     setup_environment(config)
 
-    trainer = PipelineAgentPPOTrainer(config=config, tokenizer=tokenizer, role_worker_mapping=role_worker_mapping, resource_pool_manager=resource_pool_manager, ray_worker_group_cls=RayWorkerGroup, reward_fn=reward_fn, val_reward_fn=val_reward_fn, env_class=env_class, agent_class=agent_class)
+    trainer = PipelineAgentPPOTrainer(
+        config=config,
+        tokenizer=tokenizer,
+        role_worker_mapping=role_worker_mapping,
+        resource_pool_manager=resource_pool_manager,
+        ray_worker_group_cls=RayWorkerGroup,
+        reward_fn=reward_fn,
+        val_reward_fn=val_reward_fn,
+        env_class=env_class,
+        agent_class=agent_class,
+    )
 
     trainer.init_workers()
     trainer.fit_agent()

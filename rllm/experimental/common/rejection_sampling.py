@@ -157,7 +157,12 @@ def filter_episodes(
     return filtered_episodes
 
 
-def apply_rejection_sampling_and_filtering(episodes: list[Episode], groups: list[TrajectoryGroup], config: RejectionSamplingConfig, state: RejectionSamplingState) -> tuple[list[TrajectoryGroup], list[Episode], dict]:
+def apply_rejection_sampling_and_filtering(
+    episodes: list[Episode],
+    groups: list[TrajectoryGroup],
+    config: RejectionSamplingConfig,
+    state: RejectionSamplingState,
+) -> tuple[list[TrajectoryGroup], list[Episode], dict]:
     """
     Apply rejection sampling to trajectory groups and episodes.
 

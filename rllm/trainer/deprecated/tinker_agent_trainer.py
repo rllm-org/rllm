@@ -445,7 +445,12 @@ class TinkerAgentTrainer:
                         elif produce_completed.is_set() and episode_queue.empty():
                             break
                         else:
-                            raise TimeoutError(f"Episode generation stuck: no episodes received for {max_timeouts * 0.1:.1f} seconds. Producer completed: {produce_completed.is_set()}, Queue size: {episode_queue.qsize()}") from None
+                            raise TimeoutError(
+                                f"Episode generation stuck: no episodes received for "
+                                f"{max_timeouts * 0.1:.1f} seconds. Producer completed: "
+                                f"{produce_completed.is_set()}, Queue size: "
+                                f"{episode_queue.qsize()}"
+                            ) from None
 
                     if produce_completed.is_set():
                         break

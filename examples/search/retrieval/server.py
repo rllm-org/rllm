@@ -149,7 +149,20 @@ class Encoder:
 class Config:
     """Configuration class for retrieval server."""
 
-    def __init__(self, retrieval_method: str = "e5", retrieval_topk: int = 10, index_path: str = "./index/e5_Flat.index", corpus_path: str = "./data/corpus.jsonl", faiss_gpu: bool = True, gpu_id: int = 0, retrieval_model_path: str = "intfloat/e5-base-v2", retrieval_pooling_method: str = "mean", retrieval_query_max_length: int = 256, retrieval_use_fp16: bool = True, retrieval_batch_size: int = 512):
+    def __init__(
+        self,
+        retrieval_method: str = "e5",
+        retrieval_topk: int = 10,
+        index_path: str = "./index/e5_Flat.index",
+        corpus_path: str = "./data/corpus.jsonl",
+        faiss_gpu: bool = True,
+        gpu_id: int = 0,
+        retrieval_model_path: str = "intfloat/e5-base-v2",
+        retrieval_pooling_method: str = "mean",
+        retrieval_query_max_length: int = 256,
+        retrieval_use_fp16: bool = True,
+        retrieval_batch_size: int = 512,
+    ):
         self.retrieval_method = retrieval_method
         self.retrieval_topk = retrieval_topk
         self.index_path = index_path
@@ -274,7 +287,14 @@ class DenseRetriever(BaseRetriever):
         logger.info(f"Loaded corpus with {len(self.corpus)} documents")
 
         # Initialize encoder
-        self.encoder = Encoder(model_name=self.retrieval_method, model_path=config.retrieval_model_path, pooling_method=config.retrieval_pooling_method, max_length=config.retrieval_query_max_length, use_fp16=config.retrieval_use_fp16, gpu_id=config.gpu_id)
+        self.encoder = Encoder(
+            model_name=self.retrieval_method,
+            model_path=config.retrieval_model_path,
+            pooling_method=config.retrieval_pooling_method,
+            max_length=config.retrieval_query_max_length,
+            use_fp16=config.retrieval_use_fp16,
+            gpu_id=config.gpu_id,
+        )
         self.topk = config.retrieval_topk
         self.batch_size = config.retrieval_batch_size
 
@@ -371,7 +391,18 @@ config = None
 @app.get("/health")
 def health_check():
     """Health check endpoint."""
-    return {"status": "healthy", "corpus_size": len(retriever.corpus), "index_type": "dense" if not config.retrieval_method == "bm25" else "bm25", "index_loaded": retriever.index is not None if hasattr(retriever, "index") else True, "retrieval_method": config.retrieval_method, "faiss_gpu": config.faiss_gpu, "batch_size": config.retrieval_batch_size, "topk": config.retrieval_topk, "model_path": config.retrieval_model_path, "use_fp16": config.retrieval_use_fp16}
+    return {
+        "status": "healthy",
+        "corpus_size": len(retriever.corpus),
+        "index_type": "dense" if not config.retrieval_method == "bm25" else "bm25",
+        "index_loaded": (retriever.index is not None if hasattr(retriever, "index") else True),
+        "retrieval_method": config.retrieval_method,
+        "faiss_gpu": config.faiss_gpu,
+        "batch_size": config.retrieval_batch_size,
+        "topk": config.retrieval_topk,
+        "model_path": config.retrieval_model_path,
+        "use_fp16": config.retrieval_use_fp16,
+    }
 
 
 @app.post("/retrieve")

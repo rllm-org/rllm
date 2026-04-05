@@ -79,7 +79,13 @@ class TogetherCodeTool(CodeTool):
                     output += str(output_item.data) + "\n"
 
             # Return formatted output
-            return CodeToolOutput(name=self.name or "together_python", output=output.strip() if output else None, stdout=stdout.strip() if stdout else None, stderr=stderr.strip() if stderr else None, error=error)
+            return CodeToolOutput(
+                name=self.name or "together_python",
+                output=output.strip() if output else None,
+                stdout=stdout.strip() if stdout else None,
+                stderr=stderr.strip() if stderr else None,
+                error=error,
+            )
 
         except Exception as e:
             return CodeToolOutput(name=self.name or "together_python", error=f"{type(e).__name__} - {str(e)}", stderr=str(e))
