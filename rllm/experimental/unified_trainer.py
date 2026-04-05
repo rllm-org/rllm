@@ -15,6 +15,7 @@ from tqdm import tqdm
 
 from rllm.agents.agent import Episode, TrajectoryGroup
 from rllm.data import Dataset
+from rllm.engine.rollout import RolloutEngine
 from rllm.experimental.buffer import TrajectoryGroupBuffer
 from rllm.experimental.common.advantage import (
     AlgorithmConfig,
@@ -40,7 +41,6 @@ from rllm.experimental.common.visualization import print_metrics_table, visualiz
 from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
 from rllm.experimental.metrics import MetricsAggregator
 from rllm.experimental.protocol import BackendProtocol
-from rllm.experimental.rollout import RolloutEngine
 from rllm.experimental.sync_coordinator import SyncCoordinator, SyncCoordinatorConfig
 from rllm.utils import EpisodeLogger, Tracking, extract_source_metadata
 from rllm.workflows.store import Store

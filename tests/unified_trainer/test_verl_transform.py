@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 import torch
 
 from rllm.agents.agent import Episode, Step, Trajectory
-from rllm.experimental.rollout import ModelOutput
+from rllm.engine.rollout import ModelOutput
 from rllm.experimental.verl.transform import transform_episodes_to_dataproto
 
 

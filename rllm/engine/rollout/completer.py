@@ -14,8 +14,8 @@ from dataclasses import field
 from typing import TYPE_CHECKING, Any
 
 from rllm.agents.agent import Step
-from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
-from rllm.experimental.rollout.types import TokenInput, Tokenizer, TokenOutput
+from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine
+from rllm.engine.rollout.types import TokenInput, Tokenizer, TokenOutput
 
 if TYPE_CHECKING:
     from rllm.parser import ChatTemplateParser
@@ -74,7 +74,7 @@ class TITOCompleter(Completer):
 
     chat_parser: ChatTemplateParser
     tokenizer: Tokenizer
-    # stateful data taht this completer tracks over `complete` calls
+    # stateful data that this completer tracks over `complete` calls
     _prev_messages_str: str = ""  # the messages after applying chat template
     _prev_token_input: TokenInput = field(default_factory=list)
     _n_completions: int = 0
