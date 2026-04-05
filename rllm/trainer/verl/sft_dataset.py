@@ -49,15 +49,18 @@ class RLLMSFTDataset(MultiTurnSFTDataset):
         message's tokens, then applies loss mask only on assistant tokens.
         """
         full_text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=False,
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
         )
-        full_ids = self.tokenizer.encode(full_text, add_special_tokens=False)
 
         # Build prefix lengths to find boundaries
         prefix_lengths = [0]  # char offset where each message starts
         for i in range(len(messages)):
             prefix_text = self.tokenizer.apply_chat_template(
-                messages[: i + 1], tokenize=False, add_generation_prompt=False,
+                messages[: i + 1],
+                tokenize=False,
+                add_generation_prompt=False,
             )
             prefix_lengths.append(len(prefix_text))
 
