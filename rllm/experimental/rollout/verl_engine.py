@@ -13,6 +13,7 @@ from rllm.workflows import TerminationEvent, TerminationReason
 
 class VerlEngine(RolloutEngine):
     def __init__(self, config: DictConfig, rollout_manager: AgentLoopManager, tokenizer: Tokenizer, processor=None, **kwargs):
+        super().__init__()
         self.config = config
 
         if config.actor_rollout_ref.rollout.name not in ["vllm", "sglang"]:
