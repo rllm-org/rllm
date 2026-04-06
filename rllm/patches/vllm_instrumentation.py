@@ -189,7 +189,10 @@ def instrument_vllm(force: bool = False, add_response_logprobs: bool = False) ->
                         response_logprobs_lists = []
                         for output in res.outputs:
                             if output.logprobs:  # list[LogprobsOnePosition]: list of dict[int, Logprob]
-                                curr_log_probs = [output.logprobs[i][token_id].logprob if i < len(output.logprobs) and token_id in output.logprobs[i] else float("-inf") for i, token_id in enumerate(output.token_ids)]
+                                curr_log_probs = [
+                                    output.logprobs[i][token_id].logprob if i < len(output.logprobs) and token_id in output.logprobs[i] else float("-inf")
+                                    for i, token_id in enumerate(output.token_ids)
+                                ]
                                 response_logprobs_lists.append(curr_log_probs)
                             else:
                                 response_logprobs_lists.append([])

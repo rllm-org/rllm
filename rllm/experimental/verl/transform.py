@@ -200,6 +200,11 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
         "step_rewards": step_rewards_batch,
     }
 
+    # Include rollout log probs if available (enables importance sampling & bypass mode)
+    if accumulated.rollout_logprobs and len(accumulated.rollout_logprobs) == len(accumulated.responses):
+        rollout_logprobs_batch = _pad_sequence_batch(accumulated.rollout_logprobs, 0, max_response_length, left_pad=False)
+        tensors["rollout_log_probs"] = rollout_logprobs_batch
+
     return DataProto.from_dict(
         tensors=tensors,
         non_tensors=non_tensors,
@@ -239,9 +244,7 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
         response_ids = torch.tensor(step.model_output.completion_ids, dtype=torch.long)
         mask = torch.ones_like(response_ids, dtype=torch.long)
         step_reward = step.reward
-        # Extract multimodal inputs if available
         multi_modal_inputs = step.model_output.multi_modal_inputs or {}
-        # Construct step_id from trajectory_id and step index
         step_id = f"{trajectory_id}_step{step_idx}"
 
         step_data = ProcessedStepData(
@@ -252,6 +255,7 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
             step_id=step_id,
             multi_modal_inputs=multi_modal_inputs,
             advantage=step.advantage,
+            logprobs=step.model_output.logprobs,
         )
 
         accumulated.add_step(

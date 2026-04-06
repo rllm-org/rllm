@@ -70,7 +70,9 @@ class RequestStats:
             # Log periodically
             if (self.total_completed + self.total_failed) % 50 == 0:
                 avg_latency = self.total_latency / max(1, self.total_completed)
-                logger.info(f"[STATS] In-flight: {self.in_flight}, Completed: {self.total_completed}, Failed: {self.total_failed}, Latency(avg/min/max): {avg_latency:.2f}s/{self.min_latency:.2f}s/{self.max_latency:.2f}s")
+                logger.info(
+                    f"[STATS] In-flight: {self.in_flight}, Completed: {self.total_completed}, Failed: {self.total_failed}, Latency(avg/min/max): {avg_latency:.2f}s/{self.min_latency:.2f}s/{self.max_latency:.2f}s"
+                )
 
     async def get_stats(self) -> dict:
         async with self._lock:

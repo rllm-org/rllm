@@ -18,7 +18,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
-from rllm_model_gateway.client import GatewayClient
+from rllm_model_gateway.client import AsyncGatewayClient, GatewayClient
 from rllm_model_gateway.models import TraceRecord
 
 if TYPE_CHECKING:
@@ -89,6 +89,7 @@ class GatewayManager:
         self._server: Any = None  # uvicorn.Server when using thread mode
         self._local_handler: Any = None  # in-process handler for tinker
         self._client: GatewayClient | None = None
+        self._async_client: AsyncGatewayClient | None = None
 
         # Per-mode sampling params (extracted from rollout engine in start())
         self._train_sampling_params: dict[str, Any] = {}
@@ -100,9 +101,17 @@ class GatewayManager:
 
     @property
     def client(self) -> GatewayClient:
+        """Sync client for lifecycle operations (start, stop, health polling)."""
         if self._client is None:
             self._client = GatewayClient(self.gateway_url)
         return self._client
+
+    @property
+    def async_client(self) -> AsyncGatewayClient:
+        """Async client for runtime operations (sessions, traces)."""
+        if self._async_client is None:
+            self._async_client = AsyncGatewayClient(self.gateway_url)
+        return self._async_client
 
     # -- Lifecycle -----------------------------------------------------------
 
@@ -171,6 +180,16 @@ class GatewayManager:
         self.client.flush()
         return self.client.get_session_traces(session_id)
 
+    # -- Async session / trace API -------------------------------------------
+
+    async def acreate_session(self, session_id: str, is_validation: bool = False) -> str:
+        sp = self._val_sampling_params if is_validation else self._train_sampling_params
+        return await self.async_client.create_session(session_id=session_id, sampling_params=sp or None)
+
+    async def aget_traces(self, session_id: str) -> list[TraceRecord]:
+        await self.async_client.flush()
+        return await self.async_client.get_session_traces(session_id)
+
     # -- Worker setup --------------------------------------------------------
 
     def _ensure_workers(self, rollout_engine: RolloutEngine) -> list[str]:
@@ -201,7 +220,11 @@ class GatewayManager:
             cmd.extend(["--db-path", self.db_path])
 
         logger.info("Starting gateway subprocess: %s", " ".join(cmd))
-        self._process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Inherit parent's stdout/stderr so gateway logs are visible for debugging.
+        # subprocess.PIPE causes problems as without an active reader, the OS pipe
+        # buffer (~64KB on Linux) fills up under high-throughput logging, causing the
+        # gateway process to block on write and eventually hang.
+        self._process = subprocess.Popen(cmd)
 
         # Poll health endpoint
         deadline = time.monotonic() + _HEALTH_POLL_TIMEOUT
@@ -212,8 +235,7 @@ class GatewayManager:
                 return
             except Exception as e:
                 if self._process.poll() is not None:
-                    stderr = self._process.stderr.read().decode() if self._process.stderr else ""
-                    raise RuntimeError(f"Gateway process exited unexpectedly: {stderr}") from e
+                    raise RuntimeError(f"Gateway process exited unexpectedly (rc={self._process.returncode})") from e
                 time.sleep(_HEALTH_POLL_INTERVAL)
 
         self._process.terminate()

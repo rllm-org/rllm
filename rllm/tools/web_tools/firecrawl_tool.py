@@ -66,7 +66,23 @@ class FirecrawlTool(Tool):
     @property
     def json(self):
         """Return the tool's information in a standardized format for tool registration."""
-        return {"type": "function", "function": {"name": self.name, "description": self.description, "parameters": {"type": "object", "properties": {"url": {"type": "string", "description": "Web URL to scrape content from."}}, "required": ["url"]}}}
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "Web URL to scrape content from.",
+                        }
+                    },
+                    "required": ["url"],
+                },
+            },
+        }
 
     def forward(self, url: str) -> ToolOutput:
         """

@@ -10,45 +10,58 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-_VERL_ACTOR_PATCHED = False
+_VERL_DYNAMIC_BATCH_PATCHED = False
 _VLLM_SDK_PATCHED = False
 
 
 # ---------------------------------------------------------------------------
-# Verl actor: per-call policy loss mode override
+# Verl dynamic batch: sync micro-batch counts across DP ranks
 # ---------------------------------------------------------------------------
 
 
-def patch_verl_actor_for_loss_override() -> None:
-    """Patch ``DataParallelPPOActor.update_policy`` to support per-call loss mode.
+def patch_verl_dynamic_batch_sync() -> None:
+    """Patch ``prepare_dynamic_batch`` to sync micro-batch counts across DP ranks.
 
-    When ``data.meta_info`` contains ``"policy_loss_mode_override"``, the
-    actor temporarily uses that loss mode instead of the one baked into
-    ``self.config.policy_loss.loss_mode``.  The original config value is
-    restored after the call (even on exception).
+    Fixes `verl#5750 <https://github.com/verl-project/verl/issues/5750>`_:
+    when ``use_dynamic_bsz=True``, each DP rank independently calculates
+    ``num_micro_batches`` based on its local sequence lengths.  Different
+    ranks can end up with different counts, causing NCCL collective
+    operations (AllGather/ReduceScatter in FSDP) to deadlock.
+
+    The fix defaults ``dp_group`` to ``torch.distributed.group.WORLD`` so
+    that ``prepare_dynamic_batch`` performs an ``all_reduce(MAX)`` across
+    ranks, forcing every rank to iterate through the same number of
+    micro-batches.  This is the same approach as verl PR #5591.
     """
-    global _VERL_ACTOR_PATCHED
-    if _VERL_ACTOR_PATCHED:
+    global _VERL_DYNAMIC_BATCH_PATCHED
+    if _VERL_DYNAMIC_BATCH_PATCHED:
         return
 
-    from verl.workers.actor.dp_actor import DataParallelPPOActor
+    import verl.utils.seqlen_balancing as sbl
 
-    _original_update_policy = DataParallelPPOActor.update_policy
+    _original_prepare = sbl.prepare_dynamic_batch
 
-    def _patched_update_policy(self, data):
-        override = data.meta_info.get("policy_loss_mode_override")
-        if override is not None:
-            original = self.config.policy_loss.get("loss_mode", "vanilla")
-            self.config.policy_loss["loss_mode"] = override
-            try:
-                return _original_update_policy(self, data)
-            finally:
-                self.config.policy_loss["loss_mode"] = original
-        return _original_update_policy(self, data)
+    def _patched_prepare(data, max_token_len, dp_group=None, **kwargs):
+        if dp_group is None:
+            import torch.distributed
 
-    DataParallelPPOActor.update_policy = _patched_update_policy
-    _VERL_ACTOR_PATCHED = True
-    logger.info("Patched DataParallelPPOActor.update_policy for per-call loss mode override")
+            if torch.distributed.is_initialized():
+                dp_group = torch.distributed.group.WORLD
+        return _original_prepare(data, max_token_len, dp_group=dp_group, **kwargs)
+
+    sbl.prepare_dynamic_batch = _patched_prepare
+
+    # Also patch the already-imported reference in dp_actor so both
+    # compute_log_prob and update_policy use the patched version.
+    try:
+        from verl.workers.actor import dp_actor
+
+        dp_actor.prepare_dynamic_batch = _patched_prepare
+    except (ImportError, AttributeError):
+        pass  # dp_actor may not be importable outside GPU workers
+
+    _VERL_DYNAMIC_BATCH_PATCHED = True
+    logger.info("Patched prepare_dynamic_batch to sync micro-batch counts across DP ranks (verl#5750)")
 
 
 # ---------------------------------------------------------------------------

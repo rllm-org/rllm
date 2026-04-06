@@ -9,6 +9,38 @@ from rllm.workflows.workflow import TerminationReason
 
 
 @dataclass
+class AsyncTrainingConfig:
+    """Controls the async training behavior spectrum.
+
+    When `enable` is False, the trainer uses the current synchronous pipeline.
+    When `enable` is True, the trainer runs concurrent generation + training
+    with group-level streaming and dispatch-time throttle.
+
+    Behavior spectrum:
+        - staleness_threshold=0, trigger_parameter_sync_step=1: On-policy
+        - staleness_threshold=0, trigger_parameter_sync_step=K: Stream off-policy
+        - staleness_threshold>0, partial_rollout=False: Async with staleness
+        - staleness_threshold>0, partial_rollout=True: Async with partial rollout
+    """
+
+    enable: bool = False
+    mini_batch_size: int = 1  # episode groups per optimizer step
+    fwd_bwd_group_size: int | None = None  # task batches per forward-backward pass (default: mini_batch_size)
+    staleness_threshold: float = 0.0  # 0.0 = on-policy. Controls dispatch throttle quota.
+    trigger_parameter_sync_step: int = 1  # optimizer steps between weight sync + version bump
+    partial_rollout: bool = True  # enable turn-level gating during weight sync
+    episode_offload_dir: str | None = None  # NVMe offload dir for pending episodes (None = disabled)
+    trajectory_group_offload_dir: str | None = None  # NVMe offload dir for queued task batches (None = disabled)
+
+    def __post_init__(self):
+        if self.fwd_bwd_group_size is None:
+            self.fwd_bwd_group_size = self.mini_batch_size
+        if self.enable:
+            assert self.fwd_bwd_group_size >= 1
+            assert self.mini_batch_size % self.fwd_bwd_group_size == 0, f"mini_batch_size ({self.mini_batch_size}) must be divisible by fwd_bwd_group_size ({self.fwd_bwd_group_size})"
+
+
+@dataclass
 class CompactFilteringConfig:
     """Configuration for compact filtering of episodes based on termination reasons.
 
@@ -93,6 +125,30 @@ class RejectionSamplingConfig:
     # For "episode" mode (verl compatibility): minimum number of tasks with partial solves before proceeding
     min_partial_solve_tasks: int = 1
 
+    # Filter out episode groups where all rollouts have the same is_correct (no gradient signal).
+    # Applied at the accumulator level in async training, before groups enter the buffer.
+    filter_uniform_groups: bool = False
+
+
+@dataclass
+class RolloutCorrectionConfig:
+    """Configuration for rollout correction (TIS, proximal forward passes).
+
+    Backend-agnostic — each backend interprets these according to its infrastructure.
+
+    Attributes:
+        tis_mode: None = disabled (string loss names, current behavior).
+              "token" or "sequence" = enable custom callable loss with TIS at that level.
+        bypass_mode: When True, use rollout (inference) logprobs as π_old — no
+              proximal forward pass. When False, compute π_old via policy.forward()
+              (3-policy / decoupled PPO).
+        tis_cap: Upper clamp on the TIS importance weight.
+    """
+
+    tis_mode: str | None = None
+    bypass_mode: bool = True
+    tis_cap: float = 5.0
+
 
 class rLLMAdvantageEstimator(str, Enum):
     """
@@ -143,6 +199,14 @@ class AlgorithmConfig:
     lr_schedule: Literal["linear", "cosine", "constant"] = "constant"
     warmup_steps_ratio: float = 0.0
 
+    # Custom loss / rollout correction fields (used by Fireworks backend with cookbook losses)
+    kl_beta: float = 0.0
+    eps_clip: float = 0.2
+    eps_clip_high: float | None = None
+    loss_agg_mode: Literal["token_mean", "seq_mean_token_sum", "seq_mean_token_mean", None] = None
+    rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
+    router_replay: bool = False
+
     @classmethod
     def from_config(cls, config: DictConfig) -> "AlgorithmConfig":
         """Create an AlgorithmConfig from a dictionary configuration.
@@ -152,15 +216,27 @@ class AlgorithmConfig:
         Returns:
             AlgorithmConfig: The AlgorithmConfig built from the configuration.
         """
+        rc_section = config.rllm.algorithm.get("rollout_correction", {})
+        rollout_correction = RolloutCorrectionConfig(
+            tis_mode=rc_section.get("tis_mode", None),
+            bypass_mode=rc_section.get("bypass_mode", True),
+            tis_cap=rc_section.get("tis_cap", 5.0),
+        )
         return cls(
             estimator=rLLMAdvantageEstimator(config.algorithm.adv_estimator),
             stepwise_advantage_mode=config.rllm.stepwise_advantage.mode,
-            norm_adv_by_std_in_grpo=config.rllm.stepwise_advantage.get("norm_adv_by_std_in_grpo", True),
+            norm_adv_by_std_in_grpo=config.rllm.algorithm.get("norm_adv_by_std_in_grpo", True),
             use_rllm=config.rllm.stepwise_advantage.get("use_rllm", False),
             use_precomputed_advantage=config.rllm.algorithm.get("use_precomputed_advantage", False),
             loss_fn=config.rllm.algorithm.get("loss_fn", None),
             lr_schedule=config.rllm.algorithm.get("lr_schedule", "constant"),
             warmup_steps_ratio=config.rllm.algorithm.get("warmup_steps_ratio", 0.0),
+            kl_beta=config.rllm.algorithm.get("kl_beta", 0.0),
+            eps_clip=config.rllm.algorithm.get("eps_clip", 0.2),
+            eps_clip_high=config.rllm.algorithm.get("eps_clip_high", None),
+            loss_agg_mode=config.rllm.algorithm.get("loss_agg_mode", None),
+            rollout_correction=rollout_correction,
+            router_replay=config.rllm.algorithm.get("router_replay", False),
         )
 
     def __post_init__(self):

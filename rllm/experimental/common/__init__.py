@@ -7,8 +7,10 @@ This module provides shared functionality across different trainer backends (ver
 from rllm.experimental.common.advantage import collect_reward_and_advantage_from_trajectory_groups
 from rllm.experimental.common.config import (
     AlgorithmConfig,
+    AsyncTrainingConfig,
     CompactFilteringConfig,
     RejectionSamplingConfig,
+    RolloutCorrectionConfig,
     TransformConfig,
     rLLMAdvantageEstimator,
 )
@@ -24,8 +26,10 @@ from rllm.experimental.common.visualization import VisualizationConfig, colorful
 
 __all__ = [
     # Config
+    "AsyncTrainingConfig",
     "CompactFilteringConfig",
     "RejectionSamplingConfig",
+    "RolloutCorrectionConfig",
     "TransformConfig",
     "AlgorithmConfig",
     # Transform pipeline

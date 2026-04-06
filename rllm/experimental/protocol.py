@@ -205,6 +205,10 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
         """Hook method called at the end of an epoch."""
         pass
 
+    async def on_policy_updated(self, trainer_state: TrainerState) -> None:
+        """Hook called immediately after update_policy() for weight sync."""
+        pass
+
     async def on_validation_start(self, trainer_state: TrainerState) -> bool:
         """Hook method called at the start of validation.
 

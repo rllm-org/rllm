@@ -31,11 +31,8 @@ def compute_advantage_verl(batch: DataProto, config: DictConfig) -> tuple[DataPr
     is_last_step = batch.non_tensor_batch["is_last_step"]
     last_step_indices = np.where(is_last_step)[0]
     not_last_step_indices = np.where(~is_last_step)[0]
-    non_last_step_batch = batch.select_idxs(not_last_step_indices)
-    batch = batch.select_idxs(last_step_indices)
 
-    batch = compute_advantage(
-        batch,
+    adv_kwargs = dict(
         adv_estimator=config.algorithm.adv_estimator,
         gamma=config.algorithm.gamma,
         lam=config.algorithm.lam,
@@ -43,6 +40,17 @@ def compute_advantage_verl(batch: DataProto, config: DictConfig) -> tuple[DataPr
         norm_adv_by_std_in_grpo=config.algorithm.norm_adv_by_std_in_grpo,
         config=config.algorithm,
     )
+
+    if len(not_last_step_indices) == 0:
+        # All steps are last steps (e.g. single-step trajectories) — compute directly, no broadcast needed
+        batch = compute_advantage(batch, **adv_kwargs)
+        return batch, metrics
+
+    # Multi-step: split by last step, compute advantages on last steps, broadcast to earlier steps
+    non_last_step_batch = batch.select_idxs(not_last_step_indices)
+    batch = batch.select_idxs(last_step_indices)
+
+    batch = compute_advantage(batch, **adv_kwargs)
 
     _stepwise_advantage_broadcast(batch, non_last_step_batch, config)
     batch = DataProto.concat([batch, non_last_step_batch])
@@ -73,7 +81,9 @@ def _stepwise_advantage_broadcast(last_step_batch: DataProto, non_last_step_batc
 
         traj_ep_to_scalar_adv[(traj_id, eps_id)] = scalar
 
-    scalar_rows = torch.stack([torch.full_like(tgt_mask[i], fill_value=traj_ep_to_scalar_adv[(traj_id, eps_id)], dtype=torch.float32) for i, (traj_id, eps_id) in enumerate(zip(tgt_traj_ids, tgt_eps_ids, strict=False))])
+    scalar_rows = torch.stack(
+        [torch.full_like(tgt_mask[i], fill_value=traj_ep_to_scalar_adv[(traj_id, eps_id)], dtype=torch.float32) for i, (traj_id, eps_id) in enumerate(zip(tgt_traj_ids, tgt_eps_ids, strict=False))]
+    )
 
     final_advantage = scalar_rows * tgt_mask
     non_last_step_batch.batch["advantages"] = final_advantage

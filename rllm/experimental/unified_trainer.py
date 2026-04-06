@@ -1,5 +1,7 @@
 import asyncio
+import logging
 import time
+import uuid
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
@@ -9,14 +11,17 @@ from typing import Any, Literal
 
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
+from tqdm import tqdm
 
 from rllm.agents.agent import Episode, TrajectoryGroup
 from rllm.data import Dataset
+from rllm.experimental.buffer import TrajectoryGroupBuffer
 from rllm.experimental.common.advantage import (
     AlgorithmConfig,
     collect_reward_and_advantage_from_trajectory_groups,
 )
 from rllm.experimental.common.config import (
+    AsyncTrainingConfig,
     CompactFilteringConfig,
     RejectionSamplingConfig,
     TransformConfig,
@@ -27,14 +32,21 @@ from rllm.experimental.common.rejection_sampling import (
     RejectionSamplingState,
     apply_rejection_sampling_and_filtering,
 )
-from rllm.experimental.common.transform import _default_traj_grouping_hook, transform_episodes_to_trajectory_groups
-from rllm.experimental.common.visualization import visualize_trajectory_last_steps
+from rllm.experimental.common.transform import (
+    _default_traj_grouping_hook,
+    transform_episodes_to_trajectory_groups,
+)
+from rllm.experimental.common.visualization import print_metrics_table, visualize_trajectory_last_steps
 from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
+from rllm.experimental.metrics import MetricsAggregator
 from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.rollout import RolloutEngine
+from rllm.experimental.sync_coordinator import SyncCoordinator, SyncCoordinatorConfig
 from rllm.utils import EpisodeLogger, Tracking, extract_source_metadata
 from rllm.workflows.store import Store
 from rllm.workflows.workflow import TerminationReason, Workflow
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -46,6 +58,7 @@ class TrainerState:
     epoch: int = 0
     total_steps: int = 0
     is_training: bool = True
+    weight_version: int = 0
     # For timing and metrics
     timing_dict: dict = field(default_factory=dict)
     metrics: dict = field(default_factory=dict)
@@ -129,10 +142,23 @@ class UnifiedTrainer:
         # Extract the TrajectoryGroup-specific estimator from kwargs
         self.traj_group_adv_estimator_map = traj_group_adv_estimator_map or {}
 
+        # TODO(kylemontgomery1): disaggregate UnitifiedTrainer.__init__ from engine/infra setup
+
         self.backend = backend_cls(config=config, **(backend_args or {}))
 
         self._validate_and_setup_configs()
         self._setup_logging()
+
+        # Async training config
+        async_cfg = self.rllm_config.get("async_training", {})
+        self.async_config = AsyncTrainingConfig(
+            enable=async_cfg.get("enable", False),
+            mini_batch_size=async_cfg.get("mini_batch_size", 1),
+            fwd_bwd_group_size=async_cfg.get("fwd_bwd_group_size", 1),
+            staleness_threshold=async_cfg.get("staleness_threshold", 0.0),
+            trigger_parameter_sync_step=async_cfg.get("trigger_parameter_sync_step", 1),
+            partial_rollout=async_cfg.get("partial_rollout", True),
+        )
 
         rollout_engine: RolloutEngine = self.backend.init_rollout_engine(
             cf_config=self.cf_config,
@@ -201,6 +227,7 @@ class UnifiedTrainer:
                 runtime=self._remote_runtime,
                 gateway=self._gateway,
                 session_timeout=remote_runtime_config.session_timeout,
+                n_parallel_tasks=self.rllm_config.workflow.n_parallel_tasks,
                 episode_logger=self.episode_logger,
             )
         else:
@@ -247,6 +274,7 @@ class UnifiedTrainer:
             mode=rs_mode,
             min_partial_solve_tasks=self.rllm_config.rejection_sample.min_partial_solve_tasks,
             min_trajs_per_group=self.rllm_config.rejection_sample.min_trajs_per_group,
+            filter_uniform_groups=self.rllm_config.rejection_sample.get("filter_uniform_groups", False),
         )
 
         # algorithm config (used for rLLM-native advantage computation)
@@ -254,7 +282,7 @@ class UnifiedTrainer:
             estimator=self.rllm_config.algorithm.adv_estimator,
             estimator_map=self.traj_group_adv_estimator_map,  # TODO(listar2000): see if we can make this configurable in config as well
             stepwise_advantage_mode=self.rllm_config.stepwise_advantage.mode,
-            norm_adv_by_std_in_grpo=self.rllm_config.stepwise_advantage.get("norm_adv_by_std_in_grpo", True),
+            norm_adv_by_std_in_grpo=self.rllm_config.algorithm.get("norm_adv_by_std_in_grpo", True),
             use_rllm=self.rllm_config.algorithm.get("use_rllm", False),
             use_precomputed_advantage=self.rllm_config.algorithm.get("use_precomputed_advantage", False),
             loss_fn=self.rllm_config.algorithm.get("loss_fn", None),
@@ -290,6 +318,8 @@ class UnifiedTrainer:
     # Main training loop methods
     # =========================================================================
 
+    # TODO(kylemontgomery1): better seperation of on policy vs fully async training code
+
     def fit(self):
         """Main training loop (sync entry point)."""
         asyncio.run(self.fit_async())
@@ -310,8 +340,7 @@ class UnifiedTrainer:
         await self.backend.on_train_start(trainer_state)
 
         if self.rllm_config.trainer.get("val_before_train", True):
-            val_metrics = await self._validate_async(trainer_state)
-            pprint(f"Initial validation metrics: {val_metrics}")
+            await self._validate_async(trainer_state)
             if self.rllm_config.trainer.get("val_only", False):
                 return
 
@@ -324,7 +353,16 @@ class UnifiedTrainer:
         await self.backend.on_train_end(trainer_state)
 
     async def _fit_async(self, trainer_state: TrainerState) -> None:
-        """Internal async main training loop."""
+        """Dispatch to sync or concurrent training based on config."""
+        # TODO(listar2000): after some benchmarking, maybe we just keep the fully-async and treat on-policy as a special case.
+        if self.async_config.enable:
+            await self._fit_fully_async(trainer_state)
+        else:
+            await self._fit_on_policy(trainer_state)
+
+    async def _fit_on_policy(self, trainer_state: TrainerState) -> None:
+        """Synchronous training loop (the most vanilla, standalone case that does not support minibatching or off-policy training)."""
+        # TODO(kylemontgomery1): dataloader should be backend-agnostic
         train_dataloader: Iterable = self.backend.get_dataloader(self.train_dataset, trainer_state)
         break_via_total_batches = False  # used to break the training loop via the `total_batches` parameter
         use_total_batches = self.rllm_config.trainer.get("total_batches") is not None and self.rllm_config.trainer.total_batches > 0
@@ -351,6 +389,7 @@ class UnifiedTrainer:
                     await self._train_batch_async(batch, trainer_state)
                 await self.backend.on_batch_end(trainer_state)
 
+                print_metrics_table(trainer_state.metrics, trainer_state.global_step)
                 self.logger.log(
                     data=trainer_state.metrics,
                     step=trainer_state.global_step,
@@ -373,13 +412,13 @@ class UnifiedTrainer:
 
         # final validation after training
         if self.rllm_config.trainer.test_freq > 0:
-            val_metrics = await self._validate_async(trainer_state)
-            pprint(f"Final validation metrics: {val_metrics}")
+            await self._validate_async(trainer_state)
 
     async def _train_batch_async(self, batch: Any, trainer_state: TrainerState) -> None:
         """Train a batch (async implementation)."""
         self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="train", epoch=trainer_state.epoch)
 
+        # TODO(kylemontgomery1): episode generation should be backend-agnostic
         # stage 1: generate episodes (async) and collect metrics (sync)
         trainer_state.episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, is_validation=False)
         if not trainer_state.has_episodes:
@@ -413,6 +452,7 @@ class UnifiedTrainer:
         await self.backend.process_backend_batch(trainer_state)
         assert trainer_state.has_backend_batch, "Backend batch is not transformed or processed successfully"
 
+        # TODO(kylemontgomery1): compute advantages should be backend-agnostic
         # stage 6: compute advantages (async)
         await self.backend.compute_advantages(trainer_state, self.algorithm_config)
 
@@ -435,6 +475,262 @@ class UnifiedTrainer:
         for r in TerminationReason:
             trainer_state.metrics[f"batch/termination_reason/{r.value}"] = termination_counts[r.value] / total_counts
 
+    # =========================================================================
+    # Fully-asynchronous training pipeline
+    # =========================================================================
+
+    async def _fit_fully_async(self, trainer_state: TrainerState) -> None:
+        """Fully-async generation + training with group-level streaming."""
+        assert self.config.data.train_batch_size == 1, f"Async training requires train_batch_size=1, got {self.config.data.train_batch_size}"
+        assert not getattr(self.agent_workflow_engine, "raise_on_error", False), "Async training requires raise_on_error=False so that process_task_with_retry always returns an episode"
+        coord_config = SyncCoordinatorConfig(
+            mini_batch_size=self.async_config.mini_batch_size,
+            group_size=self.rllm_config.rollout.n,
+            staleness_threshold=self.async_config.staleness_threshold,
+            trigger_parameter_sync_step=self.async_config.trigger_parameter_sync_step,
+        )
+        coordinator = SyncCoordinator(coord_config)
+        aggregator = MetricsAggregator()
+        buffer = TrajectoryGroupBuffer(
+            group_size=self.rllm_config.rollout.n,
+            coordinator=coordinator,
+            aggregator=aggregator,
+            algorithm_config=self.algorithm_config,
+            transform_config=self.transform_config,
+            cf_config=self.cf_config,
+            rs_config=self.rs_config,
+            episode_offload_dir=self.async_config.episode_offload_dir,
+            trajectory_group_offload_dir=self.async_config.trajectory_group_offload_dir,
+        )
+
+        # Compute total_steps for LR scheduling
+        train_dataloader = self.backend.get_dataloader(self.train_dataset, trainer_state)
+        use_total_batches = self.rllm_config.trainer.get("total_batches", -1) > 0
+        if use_total_batches:
+            trainer_state.total_steps = self.rllm_config.trainer.total_batches
+        else:
+            trainer_state.total_steps = len(train_dataloader) * self.rllm_config.trainer.total_epochs
+
+        total_tasks = len(train_dataloader) * self.rllm_config.trainer.total_epochs
+        pbar = tqdm(total=total_tasks, desc="Tasks", unit="task")
+        buffer._pbar = pbar
+
+        try:
+            gen_task = asyncio.create_task(self._generation_loop(trainer_state, buffer, coordinator))
+            await self._training_loop(trainer_state, buffer, coordinator, aggregator)
+            if not gen_task.done():
+                gen_task.cancel()
+                try:
+                    await gen_task
+                except asyncio.CancelledError:
+                    pass
+        finally:
+            pbar.close()
+
+    async def _generation_loop(
+        self,
+        trainer_state: TrainerState,
+        buffer: TrajectoryGroupBuffer,
+        coordinator: SyncCoordinator,
+    ) -> None:
+        """Generate episodes and stream to TrajectoryGroupBuffer."""
+        group_size = self.rllm_config.rollout.n
+
+        try:
+            for epoch in range(self.rllm_config.trainer.total_epochs):
+                await self.backend.on_epoch_start(trainer_state)
+                train_dataloader = self.backend.get_dataloader(self.train_dataset, trainer_state)
+                self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="train", epoch=epoch)
+
+                for batch in train_dataloader:
+                    task = batch[0]
+
+                    await coordinator.wait_for_generation_allowed()
+                    if not coordinator.has_quota():
+                        await coordinator.wait_for_throttle()
+                    coordinator.on_group_dispatched()
+
+                    task_id = str(uuid.uuid4())
+                    for rollout_idx in range(group_size):
+
+                        async def _run_rollout(t=task, tid=task_id, ridx=rollout_idx):
+                            _, _, _, episode = await self.agent_workflow_engine.process_task_with_retry(task=t, task_id=tid, rollout_idx=ridx, result_idx=0)
+                            await buffer.add_episode(tid, episode)
+
+                        t = asyncio.create_task(_run_rollout())
+                        coordinator.track_task(t)
+
+                await self.backend.on_epoch_end(trainer_state)
+
+            await coordinator.wait_for_drain()
+        finally:
+            buffer.mark_generation_complete()
+
+    async def _training_loop(
+        self,
+        trainer_state: TrainerState,
+        buffer: TrajectoryGroupBuffer,
+        coordinator: SyncCoordinator,
+        aggregator: MetricsAggregator,
+    ) -> None:
+        """Consume task batches from buffer, run forward-backward + optimizer step."""
+        mini_batch_size = self.async_config.mini_batch_size
+        fwd_bwd_group_size = self.async_config.fwd_bwd_group_size
+        num_fwd_bwd_passes = mini_batch_size // fwd_bwd_group_size
+        use_total_batches = self.rllm_config.trainer.get("total_batches", -1) > 0
+        rollout_engine = getattr(self.agent_workflow_engine, "rollout_engine", None)
+
+        while True:
+            trainer_state.reset_batch()
+            step_start = time.perf_counter()
+            weight_versions = []
+            all_trajectory_groups: list[TrajectoryGroup] = []
+            all_episodes: list[Episode] = []
+            groups_consumed = 0
+            buffer_wait_time = 0.0
+            done = False
+
+            buffered = buffer._queue.qsize()
+            logger.info(
+                f"[TrainingLoop] Step {trainer_state.global_step}: waiting for {mini_batch_size} task batches ({num_fwd_bwd_passes} fwd-bwd passes x {fwd_bwd_group_size} groups), {buffered} buffered"
+            )
+
+            # 1. Pull mini_batch_size task batches total, split into
+            #    num_fwd_bwd_passes forward-backward passes of fwd_bwd_group_size each.
+            for pass_idx in range(num_fwd_bwd_passes):
+                chunk_groups: list[TrajectoryGroup] = []
+
+                for _ in range(fwd_bwd_group_size):
+                    t_wait = time.perf_counter()
+                    task_batch = await buffer.get()
+                    buffer_wait_time += time.perf_counter() - t_wait
+                    if task_batch is None:
+                        done = True
+                        break
+
+                    coordinator.on_group_consumed()
+                    groups_consumed += 1
+
+                    for group in task_batch.groups:
+                        weight_versions.append(group.weight_version)
+                    chunk_groups.extend(task_batch.groups)
+                    all_trajectory_groups.extend(task_batch.groups)
+                    all_episodes.extend(task_batch.episodes)
+
+                if not chunk_groups or done:
+                    break
+
+                # Forward-backward on this chunk
+                trainer_state.trajectory_groups = chunk_groups
+
+                if trainer_state.has_trajectory_groups:
+                    logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: fwd-bwd pass {pass_idx + 1}/{num_fwd_bwd_passes} ({len(chunk_groups)} groups)")
+                    await self.backend.on_batch_start(trainer_state)
+                    trainer_state.backend_batch = self.backend.transform_to_backend_batch(trainer_state)
+                    await self.backend.process_backend_batch(trainer_state)
+
+                    # Drain per-chunk backend metrics into aggregator
+                    aggregator.record_dict(trainer_state.metrics)
+                    trainer_state.metrics = {}
+
+            # Only run optimizer step on a full batch
+            if groups_consumed < mini_batch_size:
+                logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: incomplete batch ({groups_consumed}/{mini_batch_size}), stopping")
+                break
+
+            # 2. Optimizer step
+            logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: optimizer step")
+            await self.backend.update_policy(trainer_state)
+
+            # 3. Capture pre-sync metrics (before weight sync resets coordinator state)
+            staleness_values = [coordinator.weight_version - v for v in weight_versions]
+            aggregator.record("async/staleness_mean", float(np.mean(staleness_values)))
+            aggregator.record("async/staleness_min", float(np.min(staleness_values)))
+            aggregator.record("async/staleness_max", float(np.max(staleness_values)))
+            aggregator.record("async/groups_consumed", groups_consumed)
+            aggregator.record("time/buffer_wait", buffer_wait_time)
+            pre_sync_coordinator_stats = coordinator.stats()
+            pre_sync_buffer_stats = buffer.stats()
+
+            # 4. Weight sync
+            coordinator.on_training_step_complete()
+            sync_time = 0.0
+            if coordinator.should_sync():
+                logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: triggering weight sync")
+                t0 = time.perf_counter()
+                await self._perform_weight_sync(trainer_state, coordinator, rollout_engine)
+                sync_time = time.perf_counter() - t0
+                logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: weight sync complete ({sync_time:.2f}s)")
+            if sync_time > 0:
+                aggregator.record("time/weight_sync", sync_time)
+            aggregator.record("time/step", time.perf_counter() - step_start)
+
+            # Set all trajectory groups and stripped episodes for visualization/logging
+            trainer_state.trajectory_groups = all_trajectory_groups
+            trainer_state.episodes = all_episodes
+
+            if self.tokenizer is not None and trainer_state.has_trajectory_groups:
+                visualize_trajectory_last_steps(
+                    trainer_state.trajectory_groups,
+                    tokenizer=self.tokenizer,
+                    max_steps_to_visualize=2,
+                    show_workflow_metadata=True,
+                )
+
+            # 5. Flush aggregator and merge pre-sync snapshots into trainer_state.metrics
+            trainer_state.metrics.update(aggregator.flush())
+            trainer_state.metrics.update(pre_sync_buffer_stats)
+            trainer_state.metrics.update(pre_sync_coordinator_stats)
+
+            # 6. Compute derived metrics
+            step_time = trainer_state.metrics.get("time/step", 1.0)
+            trainer_state.metrics["async/trainer_idle_ratio"] = buffer_wait_time / max(step_time, 1e-9)
+
+            # 7. on_batch_end writes backend metrics (progress, optim, timing)
+            await self.backend.on_batch_end(trainer_state)
+
+            # 7. Print and log
+            print_metrics_table(trainer_state.metrics, trainer_state.global_step)
+            self.logger.log(
+                data=trainer_state.metrics,
+                step=trainer_state.global_step,
+                episodes=trainer_state.episodes,
+                trajectory_groups=trainer_state.trajectory_groups,
+            )
+
+            # Periodic validation
+            if self.rllm_config.trainer.test_freq > 0 and trainer_state.global_step % self.rllm_config.trainer.test_freq == 0:
+                await self._validate_async_with_pause(trainer_state, coordinator)
+
+            trainer_state.global_step += 1
+
+            if use_total_batches and trainer_state.global_step >= self.rllm_config.trainer.total_batches:
+                break
+
+    async def _perform_weight_sync(self, trainer_state: TrainerState, coordinator: SyncCoordinator, rollout_engine: RolloutEngine | None) -> None:
+        """Synchronize weights between training and rollout engines."""
+        if not self.async_config.partial_rollout:
+            coordinator.pause_generation()
+            await coordinator.wait_for_drain()
+
+        trainer_state.weight_version = coordinator.weight_version + 1
+        await self.backend.on_policy_updated(trainer_state)
+        if rollout_engine is not None:
+            rollout_engine.weight_version = trainer_state.weight_version
+        coordinator.on_sync_complete()
+
+        if not self.async_config.partial_rollout:
+            coordinator.resume_generation()
+
+    async def _validate_async_with_pause(self, trainer_state: TrainerState, coordinator: SyncCoordinator) -> dict:
+        """Validation with dispatch-level pause. Waits for workflows to drain, then runs validation."""
+        coordinator.pause_generation()
+        await coordinator.wait_for_drain()
+        try:
+            return await self._validate_async(trainer_state)
+        finally:
+            coordinator.resume_generation()
+
     async def _validate_async(self, trainer_state: TrainerState) -> dict:
         """Validate the model (async implementation)."""
         n_val_samples = self.rllm_config.rollout.n_val
@@ -453,7 +749,7 @@ class UnifiedTrainer:
         for batch in val_dataloader:
             # Generate episodes and transform to trajectory groups
             val_episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, is_validation=True)
-            val_trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(val_episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook)
+            val_trajectory_groups, _ = transform_episodes_to_trajectory_groups(val_episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook)
             reward_metrics = collect_reward_and_advantage_from_trajectory_groups(val_trajectory_groups, self.algorithm_config, collect_advantage=False)
 
             is_correct_lst.extend([episode.is_correct for episode in val_episodes])
@@ -466,7 +762,7 @@ class UnifiedTrainer:
                 for key, value in episode.metrics.items():
                     workflow_metrics_by_source[data_source][key].append(float(value))
 
-            for key, value in (transform_metrics | reward_metrics).items():
+            for key, value in reward_metrics.items():
                 val_metrics[f"val/{key}"].append(value)
 
         test_end = time.perf_counter()
@@ -496,6 +792,7 @@ class UnifiedTrainer:
 
         # post-process the val metrics to reduce any "list values" into scalars
         reduce_metrics_lists(val_metrics)
+        print_metrics_table(val_metrics, trainer_state.global_step, title="Validation")
         self.logger.log(data=val_metrics, step=trainer_state.global_step)
         await self.backend.on_validation_end(trainer_state)
         return val_metrics

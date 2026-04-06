@@ -24,6 +24,7 @@ class VerlEngine(RolloutEngine):
         # reconstruct the servers list from the server_addresses and server_handles (Verl 0.7.0+)
         servers = zip(rollout_manager.server_addresses, rollout_manager.server_handles, strict=True)
         self.server_manager = AsyncLLMServerManager(config, servers=servers, load_balancer_handle=rollout_manager.global_load_balancer)
+
         self.tokenizer = tokenizer
         self.processor = processor
         self.chat_parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=config.get("rllm", {}).get("disable_thinking", False))
@@ -74,12 +75,13 @@ class VerlEngine(RolloutEngine):
         return token_output
 
     @override
-    async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
+    async def _get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         # these go to the parser
         tools = kwargs.pop("tools", [])
         accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
+        reasoning_effort = kwargs.pop("reasoning_effort", "medium")
 
-        prompt = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, tools=tools, accumulate_reasoning=accumulate_reasoning)
+        prompt = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, tools=tools, accumulate_reasoning=accumulate_reasoning, reasoning_effort=reasoning_effort)
         request_prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)  # list[int]
 
         if any(msg.get("images", None) is not None and msg["role"] == "user" for msg in messages) and self.processor is not None:

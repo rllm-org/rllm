@@ -186,6 +186,7 @@ class TinkerEngine(RolloutEngine):
             reasoning_effort: The effort level for reasoning (used when bypass_render_with_parser=True)
             renderer_name: The name of the renderer to use (used when bypass_render_with_parser=True)
         """
+        super().__init__()
         self.base_url = base_url
         self.model_name = model_name
         self.max_prompt_length = max_prompt_length
@@ -365,7 +366,7 @@ class TinkerEngine(RolloutEngine):
         )
 
     @override
-    async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
+    async def _get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         """
         Generate model response for a given set of messages.
 

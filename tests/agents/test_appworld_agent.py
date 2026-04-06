@@ -53,7 +53,11 @@ class TestAppWorldReactAgent:
         """Test updating environment with initial task observation"""
         agent = AppWorldReactAgent()
 
-        observation = {"instruction": "How many playlists do I have in Spotify?", "user_info": {"first_name": "Test", "last_name": "User", "email": "test@example.com", "phone_number": "+1234567890"}, "app_descriptions": "spotify: Music streaming app\nsupervisor: User management"}
+        observation = {
+            "instruction": "How many playlists do I have in Spotify?",
+            "user_info": {"first_name": "Test", "last_name": "User", "email": "test@example.com", "phone_number": "+1234567890"},
+            "app_descriptions": "spotify: Music streaming app\nsupervisor: User management",
+        }
 
         agent.update_from_env(observation, 0.0, False, {})
 
@@ -247,7 +251,11 @@ test
         agent = AppWorldReactAgent()
 
         # Step 1: Receive initial task
-        task_observation = {"instruction": "How many playlists do I have in Spotify?", "user_info": {"first_name": "Test", "last_name": "User", "email": "test@example.com", "phone_number": "+1234567890"}, "app_descriptions": "spotify: Music streaming app"}
+        task_observation = {
+            "instruction": "How many playlists do I have in Spotify?",
+            "user_info": {"first_name": "Test", "last_name": "User", "email": "test@example.com", "phone_number": "+1234567890"},
+            "app_descriptions": "spotify: Music streaming app",
+        }
         agent.update_from_env(task_observation, 0.0, False, {})
 
         assert agent.initialized is True

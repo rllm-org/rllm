@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 import tinker
 import torch
-from transformers import AutoProcessor, AutoTokenizer
+from transformers import AutoTokenizer
 
 from rllm.agents.agent import Episode
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
@@ -91,6 +91,8 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
         model_name_lower = self.config.model.name.lower()
         if "vl" in model_name_lower or "vision" in model_name_lower:
             try:
+                from transformers import AutoProcessor
+
                 processor = AutoProcessor.from_pretrained(self.config.model.name, trust_remote_code=True)
                 if hasattr(processor, "image_processor") and processor.image_processor is not None:
                     image_processor = processor.image_processor

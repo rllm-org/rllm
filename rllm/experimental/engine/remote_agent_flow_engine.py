@@ -5,6 +5,7 @@ Reuses GatewayManager for session/trace management and trace_record_to_step for
 converting gateway traces to training Steps.
 """
 
+import asyncio
 import logging
 import uuid
 from collections import defaultdict
@@ -31,12 +32,15 @@ class RemoteAgentFlowEngine:
         runtime: RemoteAgentRuntime,
         gateway: GatewayManager,
         session_timeout: float = 900.0,
+        n_parallel_tasks: int = 128,
         episode_logger: EpisodeLogger | None = None,
     ) -> None:
         self.runtime = runtime
         self.gateway = gateway
         self.session_timeout = session_timeout
+        self.n_parallel_tasks = n_parallel_tasks
         self.episode_logger = episode_logger
+        self._semaphore = asyncio.Semaphore(n_parallel_tasks)
 
         # Training step tracking (set by set_training_step)
         self.current_step = 0
@@ -55,59 +59,24 @@ class RemoteAgentFlowEngine:
         is_validation: bool = False,
         **kwargs,
     ) -> list[Episode]:
-        """Submit tasks to remote runtime, gather results, build Episodes from gateway traces.
-
-        1. Prepare submissions (create gateway sessions)
-        2. Submit all and gather results concurrently via runtime
-        3. Retrieve traces from gateway + build Episodes
-        """
+        """Submit tasks to remote runtime, gather results, build Episodes from gateway traces."""
         if task_ids is None:
             task_ids = [str(uuid.uuid4()) for _ in tasks]
 
-        # Phase 1: Prepare submissions
         task_id_counter: dict[str, int] = defaultdict(int)
-        submissions: list[TaskSubmission] = []
-        # Map session_id -> (idx, uid, task) for result correlation
-        session_metadata: dict[str, tuple[int, str, dict]] = {}
+        results: list[Episode | None] = [None] * len(tasks)
 
+        futures = []
         for idx, (task, task_id) in enumerate(zip(tasks, task_ids, strict=True)):
             rollout_idx = task_id_counter[task_id]
             task_id_counter[task_id] += 1
-            uid = f"{task_id}:{rollout_idx}"
-            session_id = str(uuid.uuid4())
+            futures.append(self.process_task_with_retry(task, task_id, rollout_idx, idx, is_validation=is_validation))
 
-            self.gateway.create_session(session_id, is_validation=is_validation)
-            session_url = self.gateway.get_session_url(session_id)
+        for future in asyncio.as_completed(futures):
+            task_id, rollout_idx, idx, episode = await future
+            results[idx] = episode
 
-            submissions.append(
-                TaskSubmission(
-                    task=task,
-                    session_id=session_id,
-                    task_id=task_id,
-                    inference_url=session_url,
-                )
-            )
-            session_metadata[session_id] = (idx, uid, task)
-
-        # Phase 2: Submit all and gather results concurrently
-        logger.info("Submitting %d tasks to remote runtime (timeout=%.0fs)", len(submissions), self.session_timeout)
-        remote_results = await self.runtime.execute_tasks(submissions, timeout=self.session_timeout)
-
-        # Phase 3: Retrieve traces from gateway + build Episodes (match by session_id)
-        episode_map: dict[int, Episode] = {}
-
-        for result in remote_results:
-            idx, uid, task = session_metadata[result.session_id]
-            if not result.finished:
-                logger.warning("[%s] Remote task failed (assigning reward=0): %s", uid, result.error)
-                result.reward = 0.0
-            traces = self.gateway.get_traces(result.session_id)
-            episode = _build_episode(traces, result, uid, task)
-            if not result.finished:
-                episode.metadata["error"] = {"message": result.error or "Unknown error"}
-            episode_map[idx] = episode
-
-        episodes = [episode_map[i] for i in range(len(tasks))]
+        episodes: list[Episode] = results  # type: ignore[assignment]
 
         # Log episodes if logger is provided
         if self.episode_logger is not None:
@@ -122,6 +91,43 @@ class RemoteAgentFlowEngine:
                 logger.error("Failed to log episodes: %s", e)
 
         return episodes
+
+    async def process_task_with_retry(
+        self,
+        task: dict,
+        task_id: str,
+        rollout_idx: int,
+        result_idx: int,
+        **kwargs,
+    ) -> tuple[str, int, int, Episode]:
+        """Process a single task with concurrency control."""
+        async with self._semaphore:
+            uid = f"{task_id}:{rollout_idx}"
+            session_id = str(uuid.uuid4())
+            is_validation = kwargs.get("is_validation", False)
+
+            await self.gateway.acreate_session(session_id, is_validation=is_validation)
+            session_url = self.gateway.get_session_url(session_id)
+
+            submission = TaskSubmission(
+                task=task,
+                session_id=session_id,
+                task_id=task_id,
+                inference_url=session_url,
+            )
+            results = await self.runtime.execute_tasks([submission], timeout=self.session_timeout)
+            result = results[0]
+
+            if not result.finished:
+                logger.warning("[%s] Remote task failed (assigning reward=0): %s", uid, result.error)
+                result.reward = 0.0
+
+            traces = await self.gateway.aget_traces(session_id)
+            episode = _build_episode(traces, result, uid, task)
+            if not result.finished:
+                episode.metadata["error"] = {"message": result.error or "Unknown error"}
+
+            return task_id, rollout_idx, result_idx, episode
 
     def shutdown(self) -> None:
         """No local resources to clean up (runtime shutdown is separate)."""

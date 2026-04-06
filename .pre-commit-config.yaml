@@ -6,4 +6,4 @@ repos:
         args: ["--fix", "--show-fixes", "--output-format=full"]
         exclude: ^.*\.(ipynb)$|^verl/.*$
       - id: ruff-format
-        exclude: ^verl/.*$
+        exclude: ^.*\.(ipynb)$|^verl/.*$

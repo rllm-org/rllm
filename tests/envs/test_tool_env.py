@@ -235,7 +235,10 @@ class TestToolEnvironment:
         mock_tool_output = ToolOutput(name="mock_tool", output="Mock result")
         env.tools.forward = Mock(return_value=mock_tool_output)
 
-        tool_calls = [{"id": "call_1", "function": {"name": "mock_tool", "arguments": json.dumps({"query": "test1"})}}, {"id": "call_2", "function": {"name": "mock_tool", "arguments": json.dumps({"query": "test2"})}}]
+        tool_calls = [
+            {"id": "call_1", "function": {"name": "mock_tool", "arguments": json.dumps({"query": "test1"})}},
+            {"id": "call_2", "function": {"name": "mock_tool", "arguments": json.dumps({"query": "test2"})}},
+        ]
 
         result = env._execute_tool_calls(tool_calls)
 
@@ -259,7 +262,10 @@ class TestToolEnvironment:
 
         env.tools.forward = mock_forward
 
-        tool_calls = [{"id": "call_1", "function": {"name": "mock_tool", "arguments": json.dumps({"query": "test1"})}}, {"id": "call_2", "function": {"name": "mock_tool", "arguments": json.dumps({"query": "test2"})}}]
+        tool_calls = [
+            {"id": "call_1", "function": {"name": "mock_tool", "arguments": json.dumps({"query": "test1"})}},
+            {"id": "call_2", "function": {"name": "mock_tool", "arguments": json.dumps({"query": "test2"})}},
+        ]
 
         result = env._execute_tool_calls(tool_calls)
 
@@ -394,7 +400,10 @@ class TestToolEnvironment:
 
         env.tools.forward = slow_forward
 
-        tool_calls = [{"id": "call_1", "function": {"name": "slow_tool", "arguments": json.dumps({"query": "test1"})}}, {"id": "call_2", "function": {"name": "slow_tool", "arguments": json.dumps({"query": "test2"})}}]
+        tool_calls = [
+            {"id": "call_1", "function": {"name": "slow_tool", "arguments": json.dumps({"query": "test1"})}},
+            {"id": "call_2", "function": {"name": "slow_tool", "arguments": json.dumps({"query": "test2"})}},
+        ]
 
         start_time = time.time()
         result = env._execute_tool_calls(tool_calls)

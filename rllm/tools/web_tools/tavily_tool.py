@@ -17,7 +17,24 @@ class TavilyExtractTool(Tool):
 
     @property
     def json(self):
-        return {"type": "function", "function": {"name": self.name, "description": self.description, "parameters": {"type": "object", "properties": {"urls": {"type": "array", "items": {"type": "string"}, "description": "Array of URLs to extract content from"}}, "required": ["urls"]}}}
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "urls": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Array of URLs to extract content from",
+                        }
+                    },
+                    "required": ["urls"],
+                },
+            },
+        }
 
     def _init_client(self):
         self.client: httpx.Client | None = httpx.Client()

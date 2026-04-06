@@ -19,6 +19,7 @@ class ProcessedStepData:
     step_id: str
     multi_modal_inputs: dict = field(default_factory=dict)  # Optional multimodal inputs (e.g., image_grid_thw for Qwen-VL)
     advantage: float | list[float] | None = None
+    logprobs: list[float] | None = None  # Per-token rollout log probs for importance sampling
 
 
 @dataclass
@@ -61,6 +62,9 @@ class AccumulatedData:
     # Per-row trajectory role name (for per-role loss routing in VerlBackend)
     group_roles: list[str] = field(default_factory=list)
 
+    # Rollout log probs (parallel to tensor lists, only populated when available)
+    rollout_logprobs: list[torch.Tensor] = field(default_factory=list)
+
     def add_step(
         self,
         step_data: ProcessedStepData,
@@ -89,6 +93,9 @@ class AccumulatedData:
         self.is_last_step.append(is_last)
         self.multi_modal_inputs.append(step_data.multi_modal_inputs)
         self.group_roles.append(group_role)
+
+        if step_data.logprobs is not None and len(step_data.logprobs) > 0:
+            self.rollout_logprobs.append(torch.tensor(step_data.logprobs, dtype=torch.float32))
 
     def __len__(self) -> int:
         """Return the total number of batch rows accumulated."""

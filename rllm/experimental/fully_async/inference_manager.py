@@ -15,15 +15,15 @@
 import subprocess
 
 import ray
-from verl.experimental.fully_async_policy.ray_trainer import FullyAsyncRayPPOTrainer
+from verl.experimental.separation.ray_trainer import SeparateRayPPOTrainer
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 from verl.trainer.ppo.utils import Role, WorkerType
-from verl.workers.rollout.utils import get_free_port
+from verl.utils.net_utils import get_free_port
 
 
 @ray.remote(num_cpus=10, max_concurrency=100)
-class InferenceManager(FullyAsyncRayPPOTrainer):
+class InferenceManager(SeparateRayPPOTrainer):
     """
     Manages SGLang inference servers for async training.
     Responsible for:
@@ -120,10 +120,10 @@ class InferenceManager(FullyAsyncRayPPOTrainer):
     async def _init_async_rollout_manager(self):
         # create async rollout manager and request scheduler
         assert self.config.actor_rollout_ref.rollout.mode == "async"
-        from verl.experimental.fully_async_policy.agent_loop import FullyAsyncAgentLoopManager
+        from verl.experimental.agent_loop import AgentLoopManager
 
         self.async_rollout_mode = True
-        self.async_rollout_manager = await FullyAsyncAgentLoopManager.create(
+        self.async_rollout_manager = await AgentLoopManager.create(
             config=self.config,
             worker_group=self.rollout_wg,
         )

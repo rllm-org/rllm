@@ -1,30 +1,51 @@
 from rllm.agents.agent import Action, BaseAgent, Episode, Step, Trajectory
-from rllm.agents.math_agent import MathAgent
 
-__all__ = ["BaseAgent", "Action", "Step", "Trajectory", "Episode", "MathAgent", "ToolAgent"]
+# Concrete agent implementations load on first access (see __getattr__) so optional /
+# heavy dependencies are not pulled in by `import rllm.agents`.
 
-
-def safe_import(module_path, class_name):
-    try:
-        module = __import__(module_path, fromlist=[class_name])
-        return getattr(module, class_name)
-    except ImportError:
-        return None
-
-
-# Define all agent imports (lazy, since they may have heavy/optional dependencies)
-AGENT_IMPORTS = [
-    ("rllm.agents.tool_agent", "ToolAgent"),
-    ("rllm.agents.miniwob_agent", "MiniWobAgent"),
-    ("rllm.agents.frozenlake_agent", "FrozenLakeAgent"),
-    ("rllm.agents.swe_agent", "SWEAgent"),
-    ("rllm.agents.code_agent", "CompetitionCodingAgent"),
-    ("rllm.agents.webarena_agent", "WebArenaAgent"),
+__all__ = [
+    "BaseAgent",
+    "Action",
+    "Step",
+    "Trajectory",
+    "Episode",
+    "MathAgent",
+    "ToolAgent",
+    "MiniWobAgent",
+    "FrozenLakeAgent",
+    "SWEAgent",
+    "CompetitionCodingAgent",
+    "WebArenaAgent",
 ]
 
-for module_path, class_name in AGENT_IMPORTS:
-    imported_class = safe_import(module_path, class_name)
-    if imported_class is not None:
-        globals()[class_name] = imported_class
-        if class_name not in __all__:
-            __all__.append(class_name)
+# name -> (module_path, attribute, optional)
+# If optional is True, ImportError is turned into AttributeError (missing optional deps).
+_LAZY_IMPORTS: dict[str, tuple[str, str, bool]] = {
+    "MathAgent": ("rllm.agents.math_agent", "MathAgent", False),
+    "ToolAgent": ("rllm.agents.tool_agent", "ToolAgent", True),
+    "MiniWobAgent": ("rllm.agents.miniwob_agent", "MiniWobAgent", True),
+    "FrozenLakeAgent": ("rllm.agents.frozenlake_agent", "FrozenLakeAgent", True),
+    "SWEAgent": ("rllm.agents.swe_agent", "SWEAgent", True),
+    "CompetitionCodingAgent": ("rllm.agents.code_agent", "CompetitionCodingAgent", True),
+    "WebArenaAgent": ("rllm.agents.webarena_agent", "WebArenaAgent", True),
+}
+
+
+def __getattr__(name: str):
+    try:
+        module_path, attr_name, optional = _LAZY_IMPORTS[name]
+    except KeyError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+    try:
+        module = __import__(module_path, fromlist=[attr_name])
+        value = getattr(module, attr_name)
+    except ImportError:
+        if optional:
+            raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+        raise
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(__all__) | set(_LAZY_IMPORTS))

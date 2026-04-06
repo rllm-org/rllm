@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,6 +24,7 @@ class Step(_StepBase):
     prompt_ids: list[int] | list[Any] = Field(default_factory=list)
     response_ids: list[int] = Field(default_factory=list)
     logprobs: list[float] = Field(default_factory=list)
+    routing_matrices: list[str] | None = None  # per-token routing matrices (R3, transient)
 
     chat_completions: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -38,6 +40,9 @@ class Step(_StepBase):
     # Per-token or scalar advantages
     advantage: list[float] | float | None = None
 
+    # weight version at time of generation (for async training staleness tracking)
+    weight_version: int | None = None
+
     @property
     def info(self) -> dict:
         """Alias for metadata. Auto-initializes to {} if None so mutation works."""
@@ -50,6 +55,7 @@ class Step(_StepBase):
         self.metadata = value
 
     def model_post_init(self, __context: Any) -> None:
+        self.chat_completions = deepcopy(self.chat_completions)
         if self.model_output is None:
             return
         # backfill fields like prompt_ids, response_ids, logprobs, etc.
@@ -59,17 +65,35 @@ class Step(_StepBase):
             self.response_ids = self.model_output.completion_ids
         if len(self.logprobs) == 0 and self.model_output.logprobs is not None:
             self.logprobs = self.model_output.logprobs
+        if self.routing_matrices is None and getattr(self.model_output, "routing_matrices", None) is not None:
+            self.routing_matrices = self.model_output.routing_matrices
+        if self.weight_version is None and hasattr(self.model_output, "weight_version"):
+            self.weight_version = self.model_output.weight_version
 
         # check that the lengths would match up
         if len(self.logprobs) > 0:
             assert len(self.response_ids) == len(self.logprobs), f"length mismatch between response_ids and logprobs, got {len(self.response_ids)}, {len(self.logprobs)}"
 
     def to_dict(self) -> dict:
+        from rllm.tools.tool_base import ToolCall, ToolOutput
+
+        # Helper function to recursively convert ToolCall and ToolOutput objects to dicts
+        def _serialize_value(value):
+            if isinstance(value, ToolCall | ToolOutput):
+                return value.to_dict()
+            elif isinstance(value, list):
+                return [_serialize_value(item) for item in value]
+            elif isinstance(value, dict):
+                return {k: _serialize_value(v) for k, v in value.items()}
+            else:
+                return value
+
         return {
             "prompt_ids": self.prompt_ids,
             "response_ids": self.response_ids,
             "logprobs": self.logprobs,
-            "chat_completions": self.chat_completions,
+            "routing_matrices": self.routing_matrices,
+            "chat_completions": _serialize_value(self.chat_completions),
             "observation": self.observation,
             "thought": self.thought,
             "action": self.action.action if isinstance(self.action, Action) else self.action,
@@ -80,6 +104,7 @@ class Step(_StepBase):
             "done": self.done,
             "mc_return": self.mc_return,
             "advantage": self.advantage,
+            "weight_version": self.weight_version,
         }
 
     @classmethod
@@ -90,6 +115,7 @@ class Step(_StepBase):
             prompt_ids=data["prompt_ids"],
             response_ids=data["response_ids"],
             logprobs=data["logprobs"],
+            routing_matrices=data.get("routing_matrices"),
             chat_completions=data["chat_completions"],
             observation=data["observation"],
             thought=data["thought"],
@@ -100,7 +126,8 @@ class Step(_StepBase):
             reward=data["reward"],
             done=data["done"],
             mc_return=data["mc_return"],
-            advantage=data["advantage"],
+            advantage=data.get("advantage", 0.0),
+            weight_version=data.get("weight_version"),
         )
 
     @classmethod
@@ -109,11 +136,13 @@ class Step(_StepBase):
             prompt_ids=model_output.prompt_ids or [],
             response_ids=model_output.completion_ids or [],
             logprobs=model_output.logprobs or [],
+            routing_matrices=getattr(model_output, "routing_matrices", None),
             chat_completions=(messages or []) + [{"role": "assistant", "content": model_output.content, "reasoning": model_output.reasoning}],
             thought=model_output.reasoning or "",
             action=action,
             model_response=model_output.content or "",
             model_output=model_output,
+            weight_version=model_output.weight_version,
         )
 
 
@@ -259,6 +288,7 @@ class TrajectoryGroup(BaseModel):
     trajectories: list[Trajectory]
     group_id: str = ""
     metadata: list[dict] = Field(default_factory=list)
+    weight_version: int = 0
 
     @property
     def group_role(self) -> str:

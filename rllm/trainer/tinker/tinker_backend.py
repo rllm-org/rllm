@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 import tinker
 import torch
 from omegaconf import DictConfig
-from transformers import AutoProcessor, AutoTokenizer
+from transformers import AutoTokenizer
 
 from rllm.agents.agent import Episode
 from rllm.data import Dataset
@@ -27,7 +27,6 @@ from rllm.experimental.common import AlgorithmConfig, simple_timer
 from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.rollout import RolloutEngine, TinkerEngine
 from rllm.trainer.tinker.tinker_metrics_utils import (
-    print_metrics_table,
     update_training_metrics,
 )
 from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer
@@ -98,6 +97,9 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Store algorithm config for use in process_backend_batch
         self._algorithm_config: AlgorithmConfig | None = None
 
+        # Track whether on_policy_updated was called this step (for backward compat)
+        self._policy_updated_this_step: bool = False
+
         # Specific optimizer parameters for Tinker
         self.learning_rate = self.full_config.training.get("learning_rate", 1e-6)
         self.beta1 = self.full_config.training.get("beta1", 0.9)
@@ -132,6 +134,8 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         model_name_lower = self.full_config.model.name.lower()
         if "vl" in model_name_lower or "vision" in model_name_lower:
             try:
+                from transformers import AutoProcessor
+
                 processor = AutoProcessor.from_pretrained(self.full_config.model.name, trust_remote_code=True)
                 if hasattr(processor, "image_processor") and processor.image_processor is not None:
                     image_processor = processor.image_processor
@@ -139,7 +143,18 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             except Exception as e:
                 logger.warning(f"Failed to load image_processor for VLM model: {e}")
 
-        self.rollout_engine = TinkerEngine(base_url=self.full_config.tinker_base_url, model_name=self.full_config.model.name, service_client=self.service_client, tokenizer=self.tokenizer, max_prompt_length=self.full_config.data.max_prompt_length, max_response_length=self.full_config.data.max_response_length, max_model_length=self.full_config.training.max_length, sampling_params=self.full_config.sampling, **self.full_config.rollout_engine, image_processor=image_processor)
+        self.rollout_engine = TinkerEngine(
+            base_url=self.full_config.tinker_base_url,
+            model_name=self.full_config.model.name,
+            service_client=self.service_client,
+            tokenizer=self.tokenizer,
+            max_prompt_length=self.full_config.data.max_prompt_length,
+            max_response_length=self.full_config.data.max_response_length,
+            max_model_length=self.full_config.training.max_length,
+            sampling_params=self.full_config.sampling,
+            **self.full_config.rollout_engine,
+            image_processor=image_processor,
+        )
         return self.rollout_engine
 
     def validate_config(self) -> None:
@@ -147,7 +162,10 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Check for recommended sampling parameters
         sampling_params = self.full_config.sampling
         if sampling_params.get("temperature", 1.0) != 1.0 or sampling_params.get("top_p", 1.0) != 1.0:
-            logger.warning("Temperature and top_p are set away from 1.0, this is not recommended by Tinker and can cause mysterious issues with logprobs. See https://github.com/thinking-machines-lab/tinker-cookbook/pull/86 for discussion.")
+            logger.warning(
+                "Temperature and top_p are set away from 1.0, this is not recommended by Tinker and can cause mysterious issues with logprobs."
+                "See https://github.com/thinking-machines-lab/tinker-cookbook/pull/86 for discussion."
+            )
 
         # Validate num_minibatches (currently only support 1)
         if self.full_config.training.get("num_minibatches", 1) != 1:
@@ -173,6 +191,8 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             shuffle = True
         else:
             batch_size = self.full_config.data.get("val_batch_size", self.full_config.data.train_batch_size)
+            if batch_size == -1:
+                batch_size = len(dataset)
             shuffle = False
 
         return torch.utils.data.DataLoader(
@@ -388,6 +408,9 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         resume = bool(self.full_config.training.resume_from_tinker_id)
         start_batch, self.sampling_client = await self.policy_trainer.initialize_async(resume_from_checkpoint=resume)
 
+        # Propagate sampling_client to rollout engine so it can make inference calls
+        self.rollout_engine.set_sampling_client(self.sampling_client)
+
         # Update trainer state with the start batch from checkpoint
         trainer_state.global_step = start_batch
 
@@ -400,28 +423,37 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             logger.info(f"Saving final checkpoint at step {trainer_state.global_step}")
             await self.policy_trainer.save_checkpoint_and_get_sampling_client(trainer_state.global_step, kind="both", do_save=True)
 
+    async def on_policy_updated(self, trainer_state: TrainerState) -> None:
+        """Save checkpoint and update sampling_client after policy update."""
+        assert self.policy_trainer is not None, "policy_trainer is not initialized"
+        self._policy_updated_this_step = True
+
+        global_step = trainer_state.global_step
+        save_freq = self.full_config.rllm.trainer.save_freq
+        do_save = save_freq > 0 and global_step % save_freq == 0
+        self.sampling_client = await self.policy_trainer.save_checkpoint_and_get_sampling_client(global_step, kind="both", do_save=do_save)
+
+        # Propagate updated sampling_client to rollout engine for async weight sync
+        self.rollout_engine.set_sampling_client(self.sampling_client)
+
     async def on_batch_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of each batch.
 
-        Saves checkpoint, updates sampling client, and prints metrics.
+        In sync mode, on_policy_updated() is not called separately, so we
+        do the checkpoint/sampling_client update here for backward compat.
         """
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
-        global_step = trainer_state.global_step
-        # Save sampler checkpoint after each batch
-        with simple_timer("save_checkpoint", trainer_state.timing_dict):
-            logger.info(f"Saving state checkpoint and sampler at step {global_step}")
-            save_freq = self.full_config.rllm.trainer.save_freq
-            do_save = save_freq > 0 and global_step % save_freq == 0
-            self.sampling_client = await self.policy_trainer.save_checkpoint_and_get_sampling_client(global_step, kind="both", do_save=do_save)
+        # If on_policy_updated() wasn't called (sync mode), do checkpoint here
+        if not self._policy_updated_this_step:
+            with simple_timer("save_checkpoint", trainer_state.timing_dict):
+                logger.info(f"Saving state checkpoint and sampler at step {trainer_state.global_step}")
+                await self.on_policy_updated(trainer_state)
+        self._policy_updated_this_step = False
 
         # Update metrics
         learning_rate = trainer_state.extra_info.get("scheduled_learning_rate", self.learning_rate)
         update_training_metrics(trainer_state, learning_rate, trainer_state.total_steps)
-
-        # Print metrics table
-        if trainer_state.metrics:
-            print_metrics_table(trainer_state.metrics, global_step)
 
     async def on_epoch_start(self, trainer_state: TrainerState) -> None:
         """Called at the start of an epoch."""

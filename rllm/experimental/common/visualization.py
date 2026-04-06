@@ -24,6 +24,40 @@ class VisualizationConfig:
     failure_style: dict[str, Any] = field(default_factory=lambda: {"fg": "red", "bold": True})
 
 
+def print_metrics_table(metrics: dict, step: int, title: str | None = None) -> None:
+    """Print metrics as a formatted Rich table with fallback to plain text."""
+    try:
+        from rich.console import Console
+        from rich.table import Table
+
+        table = Table(title=title or f"Step {step}", show_header=True, header_style="bold magenta")
+        table.add_column("Metric", style="cyan", no_wrap=False)
+        table.add_column("Value", justify="right", style="green")
+
+        for key, value in sorted(metrics.items()):
+            if isinstance(value, float):
+                value_str = f"{value:.6f}" if abs(value) < 1000 else f"{value:.2f}"
+            elif isinstance(value, int):
+                value_str = str(value)
+            else:
+                value_str = str(value)
+            table.add_row(key, value_str)
+
+        Console().print(table)
+    except ImportError:
+        print(f"\n{title or f'Step {step}'}")
+        print("=" * 60)
+        for key, value in sorted(metrics.items()):
+            if isinstance(value, float):
+                value_str = f"{value:.6f}" if abs(value) < 1000 else f"{value:.2f}"
+            elif isinstance(value, int):
+                value_str = str(value)
+            else:
+                value_str = str(value)
+            print(f"{key:40s} {value_str:>15s}")
+        print("=" * 60)
+
+
 def colorful_print(string: str, *args, **kwargs) -> None:
     end = kwargs.pop("end", "\n")
     print(click.style(string, *args, **kwargs), end=end, flush=True)

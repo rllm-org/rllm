@@ -7,8 +7,11 @@ verl-specific implementations while reusing verl's worker group infrastructure.
 
 from __future__ import annotations
 
+import math
 import uuid
+from collections import defaultdict
 from collections.abc import Iterable
+from functools import reduce
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -24,7 +27,9 @@ from verl.trainer.ppo.metric_utils import (
 )
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer, ResourcePoolManager
 from verl.trainer.ppo.utils import Role, WorkerType
+from verl.utils import tensordict_utils as tu
 from verl.utils.metric import reduce_metrics
+from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 from rllm.agents.agent import Episode
 from rllm.data import Dataset
@@ -47,6 +52,36 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_VERL_LOSS = "vanilla"
 _VERL_KNOWN_LOSSES: set[str] | None = None
+
+
+class CustomPPOLoss:
+    """Wraps Verl's ``ppo_loss`` to support per-call loss mode override.
+
+    When the data TensorDict contains ``policy_loss_mode_override``,
+    the loss mode is temporarily overridden for that call.  Instances
+    are serialised via cloudpickle and sent to remote workers through
+    Verl's ``set_loss_fn`` RPC.
+    """
+
+    def __init__(self, config):
+        # Convert OmegaConf DictConfig → ActorConfig dataclass
+        from verl.utils.config import omega_conf_to_dataclass
+
+        self.config = omega_conf_to_dataclass(config)
+
+    def __call__(self, model_output, data, dp_group=None):
+        from verl.utils import tensordict_utils as _tu
+        from verl.workers.utils.losses import ppo_loss
+
+        override = _tu.get(data, "policy_loss_mode_override", default=None)
+        if override is not None:
+            original = self.config.policy_loss.get("loss_mode", "vanilla")
+            self.config.policy_loss["loss_mode"] = override
+            try:
+                return ppo_loss(self.config, model_output, data, dp_group)
+            finally:
+                self.config.policy_loss["loss_mode"] = original
+        return ppo_loss(self.config, model_output, data, dp_group)
 
 
 def _get_verl_known_losses() -> set[str]:
@@ -132,10 +167,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         Returns:
             VerlEngine: The initialized rollout engine.
         """
-        # Apply Verl actor patch for per-role loss mode support
-        from rllm.experimental.verl.patch import patch_verl_actor_for_loss_override
+        # Apply Verl patches
+        from rllm.experimental.verl.patch import patch_verl_dynamic_batch_sync
 
-        patch_verl_actor_for_loss_override()
+        patch_verl_dynamic_batch_sync()
 
         # If SDK is enabled, instrument vLLM replicas before creating workers
         sdk_enabled = self.full_config.rllm.get("sdk", {}).get("enable", False)
@@ -147,7 +182,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
 
         assert self.async_rollout_manager is not None, "async_rollout_manager is not available. Issues with RayPPOTrainer's `init_workers()` function."
 
-        # Step 2: initialize the rollout engine
+        # Step 2: replace loss function on remote workers to support per-role loss override
+        self.actor_rollout_wg.set_loss_fn(CustomPPOLoss(self.config.actor_rollout_ref.actor))
+
+        # Step 3: initialize the rollout engine
         self.rollout_engine = VerlEngine(
             config=self.config,
             rollout_manager=self.async_rollout_manager,
@@ -155,7 +193,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             processor=self.processor,
         )
 
-        # Step 3: store the algorithm config
+        # Step 4: store the algorithm config
         self.algorithm_config = kwargs.get("algorithm_config")
 
         return self.rollout_engine
@@ -170,6 +208,14 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         """Validate verl-specific configuration settings."""
         assert self.config.actor_rollout_ref.rollout.mode == "async", "Only async rollout mode is supported for VerlBackend"
         assert self.use_rm is False, "Reward models are not supported. Rewards should be assigned using a reward function in the workflow or environment."
+        # Enforce new EngineWorker path (TensorDict + no-padding)
+        legacy_mode = self.config.trainer.get("use_legacy_worker_impl", "auto")
+        if legacy_mode != "disable":  # force to disable legacy worker impl
+            logger.warning(
+                "VerlBackend forces use_legacy_worker_impl='disable' (new EngineWorker path), got '{legacy_mode}'."
+                "If you insist on using the legacy worker implementation, consider using the older agent workflow trainer."
+            )
+            self.config.trainer.use_legacy_worker_impl = "disable"
         if self.config.rllm.stepwise_advantage.mode != "broadcast":
             # automatically set the stepwise_advantage_mode to "broadcast", the warning is already shown in AlgorithmConfig.from_config
             self.config.rllm.stepwise_advantage.mode = "broadcast"
@@ -247,11 +293,8 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         batch = batch.select_idxs(non_pad_step_indices)  # This batch only has non_pad steps
         return batch
 
-    def _pad_dataproto_to_world_size(self, batch: DataProto) -> DataProto:
-        import math
-        from functools import reduce
-
-        from verl.protocol import pad_dataproto_to_divisor
+    def _get_dp_world_size(self) -> int | None:
+        """Compute the LCM of all worker group world sizes for DP splitting."""
 
         world_sizes = []
         if self.use_critic and self.critic_wg.world_size != 0:
@@ -269,9 +312,15 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             if hasattr(self, "rollout_wg") and self.rollout_wg.world_size != 0:
                 world_sizes.append(self.rollout_wg.world_size)
         if not world_sizes:
-            return batch
+            return None
+        return reduce(math.lcm, world_sizes)
 
-        world_size = reduce(math.lcm, world_sizes)
+    def _pad_dataproto_to_world_size(self, batch: DataProto) -> DataProto:
+        from verl.protocol import pad_dataproto_to_divisor
+
+        world_size = self._get_dp_world_size()
+        if world_size is None:
+            return batch
 
         batch = self._remove_padding(batch)  # Remove any padded steps from the batch (just in case)
         original_batch_size = batch.batch["prompts"].shape[0]
@@ -287,8 +336,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
     async def process_backend_batch(self, trainer_state: TrainerState, **kwargs) -> None:
         """Compute step-level values: old_log_probs, ref_log_probs, critic values.
 
-        Reuses logic from AgentWorkflowPPOTrainer._compute_step_level_values.
-        Note: This is async for protocol compatibility but operations are sync (blocking)
+        Uses the new EngineWorker path: converts DataProto to TensorDict in
+        no-padding format, calls workers, converts results back to padded
+        DataProto.  The no-padding TensorDict (batch_td) is created once and
+        reused across all inference worker calls.
         """
         metrics = trainer_state.metrics
         timing_dict = trainer_state.timing_dict
@@ -303,29 +354,42 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             batch = self._pad_dataproto_to_world_size(batch=batch)
             self._balance_batch(batch, metrics=metrics)
 
+        # Set meta_info needed by workers
         batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
-        # get images_seqlens
-        if "multi_modal_inputs" in batch.non_tensor_batch.keys():
+        batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+        if "multi_modal_inputs" in batch.non_tensor_batch:
             images_seqlens_all = []
             for multi_modal_input in batch.non_tensor_batch["multi_modal_inputs"]:
-                if "image_grid_thw" not in multi_modal_input.keys():
+                if "image_grid_thw" not in multi_modal_input:
                     continue
                 images_seqlens_all.extend(multi_modal_input["images_seqlens"].tolist())
             batch.meta_info["images_seqlens"] = images_seqlens_all
 
+        # Convert to TensorDict + no-padding ONCE — reused for all inference calls.
+        # to_tensordict() does NOT mutate the original DataProto.
+        # left_right_2_no_padding mutates batch_td in-place.
+        batch_td = batch.to_tensordict()
+        batch_td = left_right_2_no_padding(batch_td)
+
+        # --- Compute old_log_probs ---
         with simple_timer("old_log_probs", timing_dict):
-            # Compute old_log_probs from actor
-            old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-            entropys = old_log_prob.batch["entropys"]
+            tu.assign_non_tensor(batch_td, calculate_entropy=True, compute_loss=False)
+            output = self.actor_rollout_wg.compute_log_prob(batch_td)
+            log_probs = no_padding_2_padding(tu.get(output, "log_probs"), batch_td)
+            entropy = no_padding_2_padding(tu.get(output, "entropy"), batch_td)
+
+            # Entropy metric (for logging only)
             response_masks = batch.batch["response_mask"]
             loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
-            entropy_agg = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
+            entropy_agg = agg_loss(loss_mat=entropy, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
             metrics["actor/entropy"] = entropy_agg.detach().item()
-            old_log_prob.batch.pop("entropys")
+
+            # Merge old_log_probs back into the padded DataProto
+            old_log_prob = DataProto.from_tensordict(tu.get_tensordict({"old_log_probs": log_probs.float()}))
             batch = batch.union(old_log_prob)
 
             # Compute rollout log prob diff if available
-            if "rollout_log_probs" in batch.batch.keys():
+            if "rollout_log_probs" in batch.batch:
                 rollout_old_log_probs = batch.batch["rollout_log_probs"]
                 actor_old_log_probs = batch.batch["old_log_probs"]
                 attention_mask = batch.batch["attention_mask"]
@@ -345,19 +409,27 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
                 }
                 metrics.update(rollout_probs_diff_metrics)
 
-        # Compute reference log_probs if using reference policy
+        # --- Compute reference log_probs (reuse batch_td) ---
         if self.use_reference_policy:
             with simple_timer("ref", timing_dict):
+                tu.assign_non_tensor(batch_td, calculate_entropy=False, compute_loss=False)
                 if not self.ref_in_actor:
-                    ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                    ref_output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
                 else:
-                    ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
+                    tu.assign_non_tensor(batch_td, no_lora_adapter=True)
+                    ref_output = self.actor_rollout_wg.compute_log_prob(batch_td)
+                ref_lp = no_padding_2_padding(tu.get(ref_output, "log_probs"), batch_td)
+                ref_log_prob = DataProto.from_tensordict(tu.get_tensordict({"ref_log_prob": ref_lp.float()}))
                 batch = batch.union(ref_log_prob)
 
-        # Compute critic values if using critic
+        # --- Compute critic values ---
         if self.use_critic:
             with simple_timer("values", timing_dict):
-                values = self.critic_wg.compute_values(batch)
+                tu.assign_non_tensor(batch_td, compute_loss=False)
+                values_output = self.critic_wg.infer_batch(batch_td)
+                values_output = values_output.get()  # blocking await on future
+                values_tensor = no_padding_2_padding(tu.get(values_output, "values"), batch_td)
+                values = DataProto.from_tensordict(tu.get_tensordict({"values": values_tensor.float()}))
                 batch = batch.union(values)
 
         # Mask truncated samples if configured
@@ -390,47 +462,77 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
     async def update_policy(self, trainer_state: TrainerState, **kwargs) -> None:
         """Update actor and critic policies.
 
-        Note: This is async for protocol compatibility but operations are sync (blocking)
+        Uses the new EngineWorker path: converts DataProto to TensorDict in
+        no-padding format with training metadata, then calls workers.  The new
+        workers handle micro-batching internally, so no manual re-padding is
+        needed before the update.
         """
         global_steps = trainer_state.global_step
-        batch = trainer_state.backend_batch
-
-        # Re-pad batch to world size before gradient updates.
-        # Filtering (e.g. mask_truncated_samples) in process_backend_batch may have
-        # shrunk the batch to a size that is no longer divisible by dp_size.
-        batch = self._pad_dataproto_to_world_size(batch)
-        trainer_state.backend_batch = batch
+        batch: DataProto = trainer_state.backend_batch  # type: ignore[assignment]
 
         # Update critic
         if self.use_critic:
             with simple_timer("update_critic", trainer_state.timing_dict):
-                critic_output = self.critic_wg.update_critic(batch)
-            critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
-            trainer_state.metrics.update(critic_output_metrics)
+                critic_td = batch.to_tensordict()
+                critic_td = left_right_2_no_padding(critic_td)
+                ppo_mbs_critic = self.config.critic.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+                tu.assign_non_tensor(
+                    critic_td,
+                    global_batch_size=ppo_mbs_critic,
+                    mini_batch_size=ppo_mbs_critic,
+                    epochs=self.config.critic.ppo_epochs,
+                    seed=self.config.critic.data_loader_seed,
+                    dataloader_kwargs={"shuffle": self.config.critic.shuffle},
+                )
+                critic_output = self.critic_wg.train_mini_batch(critic_td)
+                critic_output = critic_output.get()
+                critic_output_metrics = tu.get(critic_output, "metrics")
+                trainer_state.metrics.update(reduce_metrics(critic_output_metrics))
 
         # Update actor (after critic warmup)
         if self.config.trainer.get("critic_warmup", 0) <= global_steps:
             with simple_timer("update_actor", trainer_state.timing_dict):
                 self._update_actor_with_loss_routing(batch, trainer_state)
 
-    def _update_actor_with_loss_routing(self, batch, trainer_state: TrainerState) -> None:
+    def _update_actor_with_loss_routing(self, batch: DataProto, trainer_state: TrainerState) -> None:
         """Update actor with per-loss-group splitting when ``loss_fn_map`` is set.
 
         Roles that share the same policy loss function are grouped together
         into a single ``update_actor`` call, minimising the number of
-        optimiser steps.
+        optimiser steps.  Each (sub-)batch is converted to TensorDict +
+        no-padding format with training metadata before being sent to the
+        worker.
         """
-        from collections import defaultdict
-
-        import numpy as np
-
         loss_fn_map = self.algorithm_config.loss_fn_map if self.algorithm_config is not None else {}
         group_roles = batch.non_tensor_batch.get("group_roles") if hasattr(batch, "non_tensor_batch") and batch.non_tensor_batch is not None else None
 
+        # Common training metadata
+        rollout_n = self.config.actor_rollout_ref.rollout.n
+        actor_cfg = self.config.actor_rollout_ref.actor
+        ppo_mbs = actor_cfg.ppo_mini_batch_size * rollout_n
+
+        def _send_actor_update(sub_batch: DataProto, loss_override: str | None = None) -> None:
+            """Convert DataProto to TensorDict, inject metadata, send to worker."""
+            batch_td = sub_batch.to_tensordict()
+            batch_td = left_right_2_no_padding(batch_td)
+            metadata: dict[str, Any] = dict(
+                calculate_entropy=(actor_cfg.entropy_coeff != 0.0),
+                global_batch_size=ppo_mbs,
+                mini_batch_size=ppo_mbs,
+                epochs=actor_cfg.ppo_epochs,
+                seed=actor_cfg.data_loader_seed,
+                dataloader_kwargs={"shuffle": actor_cfg.shuffle},
+            )
+            if loss_override is not None:
+                metadata["policy_loss_mode_override"] = loss_override
+            tu.assign_non_tensor(batch_td, **metadata)
+            actor_output = self.actor_rollout_wg.update_actor(batch_td)
+            actor_metrics = tu.get(actor_output, "metrics")
+            trainer_state.metrics.update(reduce_metrics(actor_metrics))
+
         # Fast path: no per-role loss overrides or no role annotations.
         if not loss_fn_map or group_roles is None:
-            actor_output = self.actor_rollout_wg.update_actor(batch)
-            trainer_state.metrics.update(reduce_metrics(actor_output.meta_info["metrics"]))
+            _send_actor_update(batch)
             return
 
         # Resolve each role to a Verl loss name with validation + fallback.
@@ -450,10 +552,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
 
         if len(loss_to_roles) <= 1:
             # All roles share the same loss — single update.
-            loss_name = next(iter(loss_to_roles))
-            batch.meta_info["policy_loss_mode_override"] = loss_name
-            actor_output = self.actor_rollout_wg.update_actor(batch)
-            trainer_state.metrics.update(reduce_metrics(actor_output.meta_info["metrics"]))
+            _send_actor_update(batch, next(iter(loss_to_roles)))
             return
 
         # Multiple distinct losses: split batch by loss group, update each.
@@ -462,9 +561,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             mask = np.array([r in role_set for r in group_roles])
             indices = np.where(mask)[0]
             sub_batch = batch[indices]
-            sub_batch.meta_info["policy_loss_mode_override"] = loss_name
-            actor_output = self.actor_rollout_wg.update_actor(sub_batch)
-            trainer_state.metrics.update(reduce_metrics(actor_output.meta_info["metrics"]))
+            _send_actor_update(sub_batch, loss_name)
 
     def shutdown(self) -> None:
         """Placeholder, just use the BackendProtocol's default shutdown method."""
@@ -525,10 +622,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             return False
         else:
             trainer_state.is_training = False
-            self.rollout_engine.validate = True  # type: ignore[attr-defined]
+            self.rollout_engine.is_validation = True
             return True
 
     async def on_validation_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of validation."""
         trainer_state.is_training = True
-        self.rollout_engine.validate = False  # type: ignore[attr-defined]
+        self.rollout_engine.is_validation = False

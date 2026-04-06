@@ -1,8 +1,11 @@
+import logging
 import random
 import re
 
 from rllm import Action
 from rllm.rewards.reward_types import RewardOutput
+
+logger = logging.getLogger(__name__)
 
 
 def extract_solution(solution_str):
@@ -72,20 +75,17 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.1,
     do_print = random.randint(1, 64) == 1
 
     if do_print:
-        print("--------------------------------")
-        print(f"Target: {target} | Numbers: {numbers}")
-        print(f"Extracted equation: {equation}")
-        print(f"Solution string: {solution_str}")
+        logger.debug(f"Target: {target} | Numbers: {numbers} | Equation: {equation} | Solution: {solution_str}")
 
     if equation is None:
         if do_print:
-            print("No equation found")
+            logger.debug("No equation found")
         return 0
 
     # Validate equation uses correct numbers
     if not validate_equation(equation, numbers):
         if do_print:
-            print("Invalid equation")
+            logger.debug("Invalid equation")
         return format_score
 
     # Evaluate equation
@@ -93,20 +93,20 @@ def compute_score(solution_str, ground_truth, method="strict", format_score=0.1,
         result = evaluate_equation(equation)
         if result is None:
             if do_print:
-                print("Could not evaluate equation")
+                logger.debug("Could not evaluate equation")
             return format_score
 
         if abs(result - target) < 1e-5:  # Account for floating point precision
             if do_print:
-                print(f"Correct equation: {equation} = {result}")
+                logger.debug(f"Correct equation: {equation} = {result}")
             return score
         else:
             if do_print:
-                print(f"Wrong result: equation = {result}, target = {target}")
+                logger.debug(f"Wrong result: equation = {result}, target = {target}")
             return format_score
     except Exception:
         if do_print:
-            print("Error evaluating equation")
+            logger.debug("Error evaluating equation")
         return format_score
 
 

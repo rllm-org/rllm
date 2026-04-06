@@ -67,17 +67,13 @@ class SessionRoutingMiddleware:
 
         # Inject sampling parameters into POST request bodies (chat completions, etc.)
         method = scope.get("method", "").upper()
-        needs_injection = (
-            self.add_logprobs or self.add_return_token_ids or self.sessions is not None
-        )
+        needs_injection = self.add_logprobs or self.add_return_token_ids or self.sessions is not None
         if method == "POST" and needs_injection:
             await self._inject_params(scope, receive, send, session_id)
         else:
             await self.app(scope, receive, send)
 
-    async def _inject_params(
-        self, scope: Scope, receive: Receive, send: Send, session_id: str | None = None
-    ) -> None:
+    async def _inject_params(self, scope: Scope, receive: Receive, send: Send, session_id: str | None = None) -> None:
         """Read body, inject sampling params, then forward with mutated body."""
         body_parts: list[bytes] = []
         more = True
@@ -94,9 +90,7 @@ class SessionRoutingMiddleware:
                     # Record whether the client originally requested logprobs
                     # so the proxy can strip them from the response if not.
                     state = scope["state"]
-                    state["originally_requested_logprobs"] = (
-                        "logprobs" in payload and payload["logprobs"]
-                    )
+                    state["originally_requested_logprobs"] = "logprobs" in payload and payload["logprobs"]
                     self._mutate(payload, session_id)
                     raw = json.dumps(payload).encode("utf-8")
             except (json.JSONDecodeError, UnicodeDecodeError):

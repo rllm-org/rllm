@@ -9,11 +9,10 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ModelOutput",
-    # Rollout engines
     "RolloutEngine",
     "TinkerEngine",
     "VerlEngine",
-    # Token input/output types
+    # Token types
     "TokenInput",
     "TokenOutput",
     "TinkerTokenInput",
@@ -30,7 +29,10 @@ def __getattr__(name):
 
         return _TinkerEngine
     if name == "VerlEngine":
-        from .verl_engine import VerlEngine as _VerlEngine
+        try:
+            from .verl_engine import VerlEngine as _VerlEngine
 
-        return _VerlEngine
+            return _VerlEngine
+        except Exception:
+            raise AttributeError(name) from None
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
