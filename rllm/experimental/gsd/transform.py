@@ -48,16 +48,18 @@ def gsd_transform_trajectory_groups_to_datums(
         A ``(datums_dict, adv_metrics)`` tuple.  ``datums_dict`` is keyed
         by ``group_role`` (e.g. ``"gsd_distill_onpolicy"``).
     """
-    # --- Step 1: Compute advantages for non-CE groups ---
+    # --- Step 1: Compute advantages for non-CE groups that need them ---
+    # Groups with pre-computed advantages (e.g. gsd_distill_onpolicy) are
+    # skipped; groups without (e.g. gsd_student / GRPO fallback) get
+    # advantages computed by the standard pipeline.
     non_ce_groups = [g for g in trajectory_groups if g.group_role not in CROSS_ENTROPY_ROLES]
+    needs_adv = [g for g in non_ce_groups if not any(step.advantage is not None for traj in g.trajectories for step in traj.steps)]
     adv_metrics: dict = {}
-    if non_ce_groups:
-        has_adv = any(step.advantage is not None for g in non_ce_groups for traj in g.trajectories for step in traj.steps)
-        if not has_adv:
-            adv_metrics = collect_reward_and_advantage_from_trajectory_groups(
-                non_ce_groups,
-                algorithm_config,
-            )
+    if needs_adv:
+        adv_metrics = collect_reward_and_advantage_from_trajectory_groups(
+            needs_adv,
+            algorithm_config,
+        )
 
     # --- Step 2: Build datums per role ---
     datums_dict: dict[str, list] = defaultdict(list)
