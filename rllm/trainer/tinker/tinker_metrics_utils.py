@@ -26,6 +26,12 @@ def compute_kl_and_entropy_metrics(training_datums: list[tinker.Datum], training
     all_sampling_logprobs = []
 
     for datum, training_logprobs_tensor in zip(training_datums, training_logprobs, strict=False):
+        # Skip datums that don't have standard IS fields (e.g. cross_entropy
+        # datums from GSD supervised distillation which use target_tokens/weights
+        # instead of logprobs/advantages).
+        if "logprobs" not in datum.loss_fn_inputs or "mask" not in datum.loss_fn_inputs:
+            continue
+
         # Get logprobs from sampling
         sampling_logprobs = datum.loss_fn_inputs["logprobs"].to_torch()
         action_mask = datum.loss_fn_inputs["mask"].to_torch() > 0
