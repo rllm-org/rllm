@@ -13,6 +13,7 @@ from __future__ import annotations
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
+from rllm.experimental.gsd.experience_store import EmbeddingExperienceStore
 from rllm.experimental.gsd.losses import build_gsd_estimator_map
 from rllm.experimental.gsd.transform import gsd_transform_trajectory_groups_to_datums
 from rllm.experimental.gsd.workflow import GsdConfig, GsdWorkflow
@@ -42,13 +43,17 @@ def main(config: DictConfig):
         kl_coeff=1.0,
         kl_clip_min=-5.0,
         kl_clip_max=5.0,
+        retrieval_k=3,
     )
+
+    experience_store = EmbeddingExperienceStore(max_size=500)
 
     trainer = AgentTrainer(
         workflow_class=GsdWorkflow,
         workflow_args={
             "reward_fn": gsd_math_reward,
             "gsd_config": gsd_config,
+            "experience_store": experience_store,
         },
         config=config,
         train_dataset=train_dataset,

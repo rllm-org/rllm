@@ -19,6 +19,7 @@ Quick start::
     )
 """
 
+from rllm.experimental.gsd.experience_store import EmbeddingExperienceStore
 from rllm.experimental.gsd.losses import (
     DEFAULT_GSD_ADV_ESTIMATOR_MAP,
     build_gsd_estimator_map,
@@ -32,6 +33,7 @@ from rllm.experimental.gsd.workflow import GsdConfig, GsdWorkflow
 
 __all__ = [
     "DEFAULT_GSD_ADV_ESTIMATOR_MAP",
+    "EmbeddingExperienceStore",
     "GsdConfig",
     "GsdWorkflow",
     "build_gsd_estimator_map",

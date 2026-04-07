@@ -51,7 +51,7 @@ RewardFn = Callable[[dict, str], float]
 
 @dataclass
 class GsdConfig:
-    """Configuration for the GSD workflow (Phase 1 — no meta-RL, no buffer)."""
+    """Configuration for the GSD workflow."""
 
     N: int = 4
     N_val: int = 2
@@ -65,6 +65,9 @@ class GsdConfig:
     kl_clip_max: float = 5.0
     success_reward_threshold: float = 0.5
     max_context_length: int = 32768
+
+    # Experience buffer retrieval
+    retrieval_k: int = 3
 
 
 class GsdWorkflow(Workflow):
@@ -89,11 +92,13 @@ class GsdWorkflow(Workflow):
         *,
         reward_fn: RewardFn,
         gsd_config: GsdConfig | None = None,
+        experience_store: Any | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(rollout_engine=rollout_engine, executor=executor, **kwargs)
         self.cfg = gsd_config or GsdConfig()
         self.reward_fn = reward_fn
+        self.experience_store = experience_store  # Optional EmbeddingExperienceStore
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -168,13 +173,19 @@ class GsdWorkflow(Workflow):
         N = self.cfg.N
 
         # ---- Phase 1: Self-hinting --------------------------------
-        hint_messages = build_hint_prompt(question)
+        # Retrieve similar past experiences from the buffer (if available)
+        experiences = None
+        if self.experience_store is not None:
+            experiences = await self.experience_store.query(question, top_k=self.cfg.retrieval_k)
+            if experiences:
+                logger.info(f"[{uid}] retrieved {len(experiences)} experiences from buffer (size={self.experience_store.size})")
+
+        hint_messages = build_hint_prompt(question, experiences=experiences)
         hint_output = await self.rollout_engine.get_model_response(
             hint_messages,
             **self.cfg.hint_sampling_params,
         )
         hint_text = extract_hint(hint_output.text or hint_output.content or "")
-        # print the first 500 characters of the hint
         logger.info(f"[{uid}] hint generated ({len(hint_text)} chars): {hint_text[:500]}")
 
         # ---- Phase 2: Dual rollouts (concurrent with progress) ----
@@ -222,6 +233,17 @@ class GsdWorkflow(Workflow):
         else:
             logger.info(f"[{uid}] Case 2 (GRPO fallback): R_S={R_S_avg:.2f} R_T={R_T_avg:.2f} student_correct={n_correct_student}/{N} teacher_correct={n_correct_teacher}/{N}")
             self._case2_grpo_fallback(student_results, trajectories)
+
+        # ---- Phase 5: Update experience buffer ----------------------
+        if teacher_valid and self.experience_store is not None:
+            await self.experience_store.add(
+                text=question,
+                metadata={
+                    "hint": hint_text,
+                    "summary": (f"Teacher outperformed student ({R_T_avg:.2f} vs {R_S_avg:.2f}). {n_correct_teacher}/{N} teacher rollouts correct."),
+                    "improvement": R_T_avg - R_S_avg,
+                },
+            )
 
         is_correct = max(student_rewards + teacher_rewards) >= self.cfg.success_reward_threshold
         return self._build_episode(uid, task, trajectories, metrics, is_correct)
