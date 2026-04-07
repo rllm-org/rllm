@@ -24,8 +24,10 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -59,6 +61,8 @@ class EmbeddingExperienceStore:
         model_name: str = "all-MiniLM-L6-v2",
         device: str | None = None,
         max_size: int = 500,
+        save_path: str | Path | None = None,
+        autosave_every: int = 10,
     ) -> None:
         self._model_name = model_name
         if device is None:
@@ -67,10 +71,13 @@ class EmbeddingExperienceStore:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self._device = device
         self.max_size = max_size
+        self._save_path = Path(save_path) if save_path is not None else None
+        self._autosave_every = autosave_every
         self._entries: list[ExperienceEntry] = []
         self._lock = asyncio.Lock()
         self._encoder = None  # lazy-loaded
         self._step = 0
+        self._adds_since_save = 0
 
     def _get_encoder(self):
         """Lazy-load the sentence-transformers model on first use."""
@@ -118,6 +125,11 @@ class EmbeddingExperienceStore:
                     created_at=self._step,
                 )
             )
+            self._adds_since_save += 1
+
+        # Autosave periodically
+        if self._save_path is not None and self._adds_since_save >= self._autosave_every:
+            await self.save()
 
     async def query(self, text: str, top_k: int = 3) -> list[dict[str, Any]]:
         """Retrieve the top-K most similar experiences.
@@ -147,6 +159,72 @@ class EmbeddingExperienceStore:
             result = {"text": entry.text, **entry.metadata}
             results.append(result)
         return results
+
+    async def save(self, path: str | Path | None = None) -> None:
+        """Save all entries to a JSON file (embeddings stored as lists).
+
+        Args:
+            path: File path. Defaults to ``self._save_path`` from the constructor.
+        """
+        save_path = Path(path) if path is not None else self._save_path
+        if save_path is None:
+            return
+
+        async with self._lock:
+            data = [
+                {
+                    "text": e.text,
+                    "embedding": e.embedding.tolist(),
+                    "metadata": e.metadata,
+                    "created_at": e.created_at,
+                }
+                for e in self._entries
+            ]
+            self._adds_since_save = 0
+
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(self._write_json, save_path, data)
+        logger.info(f"Experience store saved: {len(data)} entries → {save_path}")
+
+    async def load(self, path: str | Path | None = None) -> int:
+        """Load entries from a JSON file, replacing the current buffer.
+
+        Args:
+            path: File path. Defaults to ``self._save_path`` from the constructor.
+
+        Returns:
+            Number of entries loaded.
+        """
+        load_path = Path(path) if path is not None else self._save_path
+        if load_path is None or not load_path.exists():
+            return 0
+
+        data = await asyncio.to_thread(self._read_json, load_path)
+
+        async with self._lock:
+            self._entries = [
+                ExperienceEntry(
+                    text=d["text"],
+                    embedding=np.array(d["embedding"], dtype=np.float32),
+                    metadata=d["metadata"],
+                    created_at=d.get("created_at", 0),
+                )
+                for d in data
+            ]
+            self._adds_since_save = 0
+
+        logger.info(f"Experience store loaded: {len(self._entries)} entries ← {load_path}")
+        return len(self._entries)
+
+    @staticmethod
+    def _write_json(path: Path, data: list[dict]) -> None:
+        with open(path, "w") as f:
+            json.dump(data, f)
+
+    @staticmethod
+    def _read_json(path: Path) -> list[dict]:
+        with open(path) as f:
+            return json.load(f)
 
     async def clear(self) -> None:
         """Remove all entries."""

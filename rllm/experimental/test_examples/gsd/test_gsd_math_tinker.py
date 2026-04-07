@@ -46,7 +46,12 @@ def main(config: DictConfig):
         retrieval_k=3,
     )
 
-    experience_store = EmbeddingExperienceStore(max_size=500)
+    save_dir = config.training.get("default_local_dir", "/tmp/rllm-gsd-checkpoints")
+    experience_store = EmbeddingExperienceStore(
+        max_size=500,
+        save_path=f"{save_dir}/experience_store.json",
+        autosave_every=10,
+    )
 
     trainer = AgentTrainer(
         workflow_class=GsdWorkflow,
