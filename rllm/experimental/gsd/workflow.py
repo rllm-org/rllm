@@ -21,9 +21,11 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
+
+from tqdm import tqdm
 
 from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.experimental.gsd.losses import compute_sampled_rkl_advantages, score_teacher_for_response
@@ -40,6 +42,8 @@ if TYPE_CHECKING:
     from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 # Type alias for the reward function: (task_dict, response_text) → float
 RewardFn = Callable[[dict, str], float]
@@ -107,21 +111,7 @@ class GsdWorkflow(Workflow):
     # ------------------------------------------------------------------
 
     async def _do_validation(self, task: dict, uid: str) -> Episode:
-        """Run validation rollouts and compute pass@N metrics for both roles.
-
-        Generates ``N_val`` student and ``N_val`` teacher rollouts, then
-        reports:
-
-        * ``val/student_pass@1`` — fraction of student rollouts that are correct
-        * ``val/teacher_pass@1`` — fraction of teacher rollouts that are correct
-        * ``val/hint_improvement`` — teacher pass rate minus student pass rate
-        * ``val/student_any_correct`` — 1.0 if any student rollout is correct
-        * ``val/teacher_any_correct`` — 1.0 if any teacher rollout is correct
-
-        No training trajectories are produced — only a single representative
-        student trajectory is returned so the trainer pipeline can track basic
-        metrics.
-        """
+        """Run validation rollouts and compute pass@N metrics for both roles."""
         question = task["question"]
         N = self.cfg.N_val
 
@@ -133,13 +123,13 @@ class GsdWorkflow(Workflow):
         )
         hint_text = extract_hint(hint_output.text or hint_output.content or "")
 
-        # Dual rollouts
+        # Dual rollouts with progress
         student_messages = build_student_prompt(question)
         teacher_messages = build_teacher_prompt(question, hint_text)
 
         coros = [self._do_rollout(task, student_messages) for _ in range(N)]
         coros += [self._do_rollout(task, teacher_messages) for _ in range(N)]
-        results = await asyncio.gather(*coros)
+        results = await _gather_with_progress(coros, desc=f"[val:{uid}] rollouts")
 
         student_results = results[:N]
         teacher_results = results[N:]
@@ -173,6 +163,7 @@ class GsdWorkflow(Workflow):
 
     async def _do_training(self, task: dict, uid: str) -> Episode:
         question = task["question"]
+        N = self.cfg.N
 
         # ---- Phase 1: Self-hinting --------------------------------
         hint_messages = build_hint_prompt(question)
@@ -182,16 +173,17 @@ class GsdWorkflow(Workflow):
         )
         hint_text = extract_hint(hint_output.text or hint_output.content or "")
 
-        # ---- Phase 2: Dual rollouts (concurrent) ------------------
+        # ---- Phase 2: Dual rollouts (concurrent with progress) ----
         student_messages = build_student_prompt(question)
         teacher_messages = build_teacher_prompt(question, hint_text)
 
-        coros = [self._do_rollout(task, student_messages) for _ in range(self.cfg.N)]
-        coros += [self._do_rollout(task, teacher_messages) for _ in range(self.cfg.N)]
-        results = await asyncio.gather(*coros)
+        coros: list[Awaitable[tuple[Step, float]]] = []
+        coros += [self._do_rollout(task, student_messages) for _ in range(N)]
+        coros += [self._do_rollout(task, teacher_messages) for _ in range(N)]
+        results = await _gather_with_progress(coros, desc=f"[train:{uid}] rollouts")
 
-        student_results = results[: self.cfg.N]
-        teacher_results = results[self.cfg.N :]
+        student_results = results[:N]
+        teacher_results = results[N:]
 
         # ---- Phase 3: Gating --------------------------------------
         student_rewards = [r for _, r in student_results]
@@ -211,6 +203,7 @@ class GsdWorkflow(Workflow):
         # ---- Phase 4: Loss routing --------------------------------
         if teacher_valid:
             await self._case1_distillation(
+                uid,
                 question,
                 hint_text,
                 student_results,
@@ -243,6 +236,7 @@ class GsdWorkflow(Workflow):
 
     async def _case1_distillation(
         self,
+        uid: str,
         question: str,
         hint_text: str,
         student_results: list[tuple[Step, float]],
@@ -258,20 +252,45 @@ class GsdWorkflow(Workflow):
         student_prompt_ids = self._tokenize_messages(build_student_prompt(question))
 
         # (a) On-policy distillation: score student seqs under teacher
-        scoring_coros = []
-        for step, _ in student_results:
-            scoring_coros.append(
-                score_teacher_for_response(
-                    client,
-                    teacher_prompt_ids,
-                    step.response_ids,
-                    topk=cfg.distill_topk,
-                    max_context_length=cfg.max_context_length,
-                )
+        scoring_coros = [
+            score_teacher_for_response(
+                client,
+                teacher_prompt_ids,
+                step.response_ids,
+                topk=cfg.distill_topk,
+                max_context_length=cfg.max_context_length,
             )
-        scorings = await asyncio.gather(*scoring_coros)
+            for step, _ in student_results
+        ]
 
-        for (step, reward), scoring in zip(student_results, scorings, strict=True):
+        # (b) Supervised distillation: score teacher's correct seqs
+        correct_teacher = [(s, r) for s, r in teacher_results if r >= cfg.success_reward_threshold]
+        sup_scoring_coros = [
+            score_teacher_for_response(
+                client,
+                teacher_prompt_ids,
+                step.response_ids,
+                topk=cfg.distill_topk,
+                max_context_length=cfg.max_context_length,
+            )
+            for step, _ in correct_teacher
+        ]
+
+        # Run all scoring passes concurrently with progress
+        all_scoring_coros = scoring_coros + sup_scoring_coros
+        if all_scoring_coros:
+            all_scorings = await _gather_with_progress(
+                all_scoring_coros,
+                desc=f"[train:{uid}] teacher scoring",
+            )
+        else:
+            all_scorings = []
+
+        on_policy_scorings = all_scorings[: len(scoring_coros)]
+        sup_scorings = all_scorings[len(scoring_coros) :]
+
+        # Process on-policy results
+        for (step, reward), scoring in zip(student_results, on_policy_scorings, strict=True):
             if scoring["response_len"] == 0:
                 continue
             advantages = compute_sampled_rkl_advantages(
@@ -285,40 +304,24 @@ class GsdWorkflow(Workflow):
             traj = Trajectory(name="gsd_distill_onpolicy", steps=[step], reward=reward)
             trajectories.append(traj)
 
-        # (b) Supervised distillation: teacher's correct seqs with Top-K targets
-        correct_teacher = [(s, r) for s, r in teacher_results if r >= cfg.success_reward_threshold]
-
-        if correct_teacher:
-            sup_scoring_coros = []
-            for step, _ in correct_teacher:
-                sup_scoring_coros.append(
-                    score_teacher_for_response(
-                        client,
-                        teacher_prompt_ids,
-                        step.response_ids,
-                        topk=cfg.distill_topk,
-                        max_context_length=cfg.max_context_length,
-                    )
-                )
-            sup_scorings = await asyncio.gather(*sup_scoring_coros)
-
-            for (step, reward), scoring in zip(correct_teacher, sup_scorings, strict=True):
-                if scoring["response_len"] == 0:
-                    continue
-                # Deep-copy and swap prompt to student view (hint removed)
-                sup_step = copy.deepcopy(step)
-                sup_step.prompt_ids = student_prompt_ids
-                sup_step.chat_completions = build_student_prompt(question)
-                sup_step.model_output = None  # recompute student logprobs during training
-                sup_step.advantage = None
-                sup_step.metadata = {
-                    "teacher_topk": {
-                        "topk_ids": scoring["topk_ids"],
-                        "topk_logprobs": scoring["topk_logprobs"],
-                    },
-                }
-                traj = Trajectory(name="gsd_distill_supervised", steps=[sup_step], reward=reward)
-                trajectories.append(traj)
+        # Process supervised results
+        for (step, reward), scoring in zip(correct_teacher, sup_scorings, strict=True):
+            if scoring["response_len"] == 0:
+                continue
+            # Deep-copy and swap prompt to student view (hint removed)
+            sup_step = copy.deepcopy(step)
+            sup_step.prompt_ids = student_prompt_ids
+            sup_step.chat_completions = build_student_prompt(question)
+            sup_step.model_output = None  # recompute student logprobs during training
+            sup_step.advantage = None
+            sup_step.metadata = {
+                "teacher_topk": {
+                    "topk_ids": scoring["topk_ids"],
+                    "topk_logprobs": scoring["topk_logprobs"],
+                },
+            }
+            traj = Trajectory(name="gsd_distill_supervised", steps=[sup_step], reward=reward)
+            trajectories.append(traj)
 
     # ------------------------------------------------------------------
     # Case 2: Teacher invalid → GRPO fallback
@@ -361,3 +364,30 @@ class GsdWorkflow(Workflow):
             trajectories=trajectories,
             metrics=metrics,
         )
+
+
+# ---------------------------------------------------------------------------
+# Async gather with tqdm progress bar
+# ---------------------------------------------------------------------------
+
+
+async def _gather_with_progress(
+    coros: list[Awaitable[T]],
+    desc: str = "GSD",
+) -> list[T]:
+    """Run coroutines concurrently, showing a tqdm progress bar as each completes."""
+    results: list[T | None] = [None] * len(coros)
+
+    # Wrap each coroutine to track its original index
+    async def _indexed(idx: int, coro: Awaitable[T]) -> tuple[int, T]:
+        return idx, await coro
+
+    tasks = [_indexed(i, c) for i, c in enumerate(coros)]
+
+    with tqdm(total=len(tasks), desc=desc, leave=False) as pbar:
+        for future in asyncio.as_completed(tasks):
+            idx, result = await future
+            results[idx] = result
+            pbar.update(1)
+
+    return results  # type: ignore[return-value]
