@@ -125,6 +125,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             cf_config=kwargs.get("cf_config"),
             transform_config=kwargs.get("transform_config"),
             algorithm_config=kwargs.get("algorithm_config"),
+            transform_fn=kwargs.get("transform_fn"),
         )
         # we need to get it from `AutoTokenizer` since the `policy_trainer` has not been initialized yet
         self.tokenizer = AutoTokenizer.from_pretrained(self.full_config.model.name)

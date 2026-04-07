@@ -116,6 +116,7 @@ class UnifiedTrainer:
         traj_grouping_hook: Callable | None = None,
         traj_group_adv_estimator_map: dict | None = None,
         store: Store | None = None,
+        transform_fn: Callable | None = None,
         **kwargs,
     ):
         """Initialize the UnifiedTrainer.
@@ -141,6 +142,7 @@ class UnifiedTrainer:
         self.traj_grouping_hook = traj_grouping_hook or _default_traj_grouping_hook
         # Extract the TrajectoryGroup-specific estimator from kwargs
         self.traj_group_adv_estimator_map = traj_group_adv_estimator_map or {}
+        self._transform_fn = transform_fn
 
         # TODO(kylemontgomery1): disaggregate UnitifiedTrainer.__init__ from engine/infra setup
 
@@ -165,6 +167,7 @@ class UnifiedTrainer:
             transform_config=self.transform_config,
             rs_config=self.rs_config,
             algorithm_config=self.algorithm_config,
+            transform_fn=self._transform_fn,
         )
 
         # Determine which engine path to use:

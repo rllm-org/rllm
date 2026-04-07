@@ -9,8 +9,8 @@ from functools import partial
 import numpy as np
 
 from rllm.agents.agent import BaseAgent, Episode, Trajectory
-from rllm.engine.rollout.rollout_engine import RolloutEngine
 from rllm.environments.base.base_env import BaseEnv
+from rllm.experimental.rollout.rollout_engine import RolloutEngine
 from rllm.workflows.store import Store
 
 

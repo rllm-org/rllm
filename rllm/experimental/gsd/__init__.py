@@ -8,6 +8,7 @@ Quick start::
 
     from rllm.experimental.gsd import (
         DEFAULT_GSD_ADV_ESTIMATOR_MAP,
+        GsdConfig,
         GsdWorkflow,
     )
 
@@ -27,9 +28,12 @@ from rllm.experimental.gsd.losses import (
     compute_topk_rkl_at_position,
     score_teacher_for_response,
 )
+from rllm.experimental.gsd.workflow import GsdConfig, GsdWorkflow
 
 __all__ = [
     "DEFAULT_GSD_ADV_ESTIMATOR_MAP",
+    "GsdConfig",
+    "GsdWorkflow",
     "build_gsd_estimator_map",
     "build_topk_fkl_datum",
     "compute_sampled_rkl_advantages",
