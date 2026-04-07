@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+from collections.abc import Callable
 from functools import wraps
 from typing import TYPE_CHECKING, Literal
 
@@ -94,6 +95,7 @@ class TinkerPolicyTrainer:
         cf_config: CompactFilteringConfig | None = None,
         transform_config: TransformConfig | None = None,
         algorithm_config: AlgorithmConfig | None = None,
+        transform_fn: Callable | None = None,
     ):
         """
         Initialize the policy trainer.
@@ -101,6 +103,9 @@ class TinkerPolicyTrainer:
         Args:
             config: Training configuration (OmegaConf)
             service_client: Tinker service client
+            transform_fn: Optional custom transform function replacing the
+                default :func:`transform_trajectory_groups_to_datums`.
+                Signature: ``(trajectory_groups, algorithm_config) -> (datums, metrics)``.
         """
         self.config = config
         self.service_client = service_client
@@ -109,6 +114,7 @@ class TinkerPolicyTrainer:
         self.cf_config = cf_config or CompactFilteringConfig.from_config(self.config.rllm.compact_filtering)
         self.transform_config = transform_config or TransformConfig()
         self.algorithm_config = algorithm_config or AlgorithmConfig.from_config(self.config)
+        self._transform_fn = transform_fn or transform_trajectory_groups_to_datums
 
     async def initialize_async(self, resume_from_checkpoint: bool = True):
         """
@@ -240,7 +246,7 @@ class TinkerPolicyTrainer:
             algorithm_config = self.algorithm_config
 
         # Transform trajectory groups to datums (includes advantage computation)
-        training_datums, adv_metrics = transform_trajectory_groups_to_datums(
+        training_datums, adv_metrics = self._transform_fn(
             trajectory_groups,
             algorithm_config=algorithm_config,
         )
@@ -312,7 +318,7 @@ class TinkerPolicyTrainer:
         This follows from the best-practice with Tinker: https://tinker-docs.thinkingmachines.ai/async#performance-tips-overlap-requests
         """
         # Transform trajectory groups to datums (includes advantage computation)
-        training_datums, adv_metrics = transform_trajectory_groups_to_datums(
+        training_datums, adv_metrics = self._transform_fn(
             trajectory_groups,
             algorithm_config=self.algorithm_config,
         )
