@@ -16,8 +16,6 @@ from rllm.experimental.test_examples.erl.frozen_lake_utils import (
     ERL_FROZENLAKE_SYMBOLS,
     ERL_FROZENLAKE_SYSTEM_PROMPT,
     FROZENLAKE_UPDATER_PROMPT,
-    MAX_AGENT_STEPS,
-    MAX_ENV_STEPS,
     frozenlake_feedback_fn,
     frozenlake_state_builder_fn,
     make_solver_fn,
@@ -40,9 +38,9 @@ def main(config: DictConfig):
         updater_system_prompt=FROZENLAKE_UPDATER_PROMPT,
         updater_sampling_params={"temperature": 0.7, "top_p": 0.9},
         train_first_attempt=True,
-        train_second_attempt=True,
-        train_distilled=True,
-        train_updater=True,
+        train_second_attempt=False,
+        train_distilled=False,
+        train_updater=False,
         success_reward_threshold=1.0,
     )
 
@@ -52,8 +50,8 @@ def main(config: DictConfig):
         workflow_class=ErlWorkflow,
         workflow_args={
             "solver_fn": make_solver_fn(
-                max_steps=MAX_AGENT_STEPS,
-                env_max_steps=MAX_ENV_STEPS,
+                max_steps=4,
+                env_max_steps=4,
                 symbol_map=ERL_FROZENLAKE_SYMBOLS,
             ),
             "feedback_fn": frozenlake_feedback_fn,
