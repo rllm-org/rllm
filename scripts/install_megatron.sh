@@ -15,7 +15,7 @@ echo "=== Megatron dependency installer for rLLM ==="
 echo "TORCH_BACKEND=${TORCH_BACKEND}"
 
 echo "[1/5] Installing nvidia-modelopt..."
-uv pip install 'nvidia-modelopt[torch]>=0.37.0'
+uv pip install 'nvidia-modelopt>=0.37.0'
 
 echo "[2/5] Installing transformer-engine (this may take a while)..."
 MAX_JOBS=128 uv pip install --no-cache --no-build-isolation "transformer_engine[pytorch]==2.10" --torch-backend="${TORCH_BACKEND}"
