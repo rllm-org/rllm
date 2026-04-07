@@ -1,15 +1,10 @@
 set -x
 
-unset ROCR_VISIBLE_DEVICES
+export TRITON_CACHE_DIR=/tmp/triton_cache
 
-export VLLM_ATTENTION_BACKEND=FLASH_ATTN
-export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:False"
-export VLLM_USE_V1=1
-export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
-export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 python3 -m examples.countdown.train_countdown \
-    data.train_batch_size=64 \
+    data.train_batch_size=32 \
+    data.val_batch_size=1024 \
     data.max_prompt_length=2048 \
     data.max_response_length=1024 \
     actor_rollout_ref.model.path=Qwen/Qwen3-0.6B \
@@ -18,7 +13,7 @@ python3 -m examples.countdown.train_countdown \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=32768 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=64 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
@@ -34,13 +29,15 @@ python3 -m examples.countdown.train_countdown \
     actor_rollout_ref.rollout.mode="async" \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.temperature=1.0 \
+    actor_rollout_ref.rollout.top_p=1.0 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
-    actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
-    actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
+    actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
+    actor_rollout_ref.rollout.val_kwargs.top_p=1.0 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.adv_estimator=grpo \
+    algorithm.norm_adv_by_std_in_grpo=true \
     rllm.compact_filtering.enable=False \
     rllm.compact_filtering.mask_max_prompt_length_exceeded=True \
     rllm.compact_filtering.mask_max_response_length_exceeded=True \
@@ -50,17 +47,19 @@ python3 -m examples.countdown.train_countdown \
     rllm.rejection_sample.multiplier=1.0 \
     rllm.stepwise_advantage.enable=False \
     rllm.stepwise_advantage.mode=per_step \
+    trainer.use_legacy_worker_impl=disable \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
-    trainer.project_name='rllm-agent' \
-    trainer.experiment_name='countdown' \
+    trainer.project_name='rllm-countdown' \
+    trainer.experiment_name='countdown-verl-legacy' \
     trainer.val_before_train=True \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.save_freq=1000 \
+    trainer.save_freq=-1 \
     trainer.test_freq=10 \
     trainer.default_hdfs_dir=null \
-    trainer.total_epochs=100 \
-    rllm.workflow.use_workflow=True
-
-pkill -9 -f 'ray::WorkerDict' 
+    trainer.total_epochs=1 \
+    trainer.total_training_steps=100 \
+    rllm.workflow.use_workflow=True \
+    rllm.workflow.n_parallel_tasks=256 \
+    rllm.workflow.retry_limit=1

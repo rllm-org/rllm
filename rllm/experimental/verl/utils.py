@@ -15,51 +15,63 @@ logger = logging.getLogger(__name__)
 
 
 def propagate_rllm_to_verl_config(config: DictConfig) -> None:
-    """Propagate rllm algorithm config to verl's actor config.
+    """Propagate all rllm base config values to verl-native config keys.
 
-    This must be called before verl's worker mapping creation, since
-    functions like need_reference_policy() read from the verl config.
+    This is the single source of truth for rllm → verl config overrides.
+    rllm values always win; verl defaults only apply for keys with no rllm equivalent.
+
+    Must be called after OmegaConf.resolve() and before verl's worker mapping
+    creation, since functions like need_reference_policy() read from the verl config.
     """
     rllm_algo = config.rllm.algorithm
+    rllm_rollout = config.rllm.rollout
+    rllm_trainer = config.rllm.trainer
     actor = config.actor_rollout_ref.actor
+    rollout = config.actor_rollout_ref.rollout
 
-    # KL in loss
+    # ── Algorithm → algorithm.* ──
+    config.algorithm.adv_estimator = rllm_algo.adv_estimator
+    config.algorithm.norm_adv_by_std_in_grpo = rllm_algo.norm_adv_by_std_in_grpo
+
+    # ── Algorithm → actor_rollout_ref.actor.* ──
     kl_beta = rllm_algo.get("kl_beta", 0.0)
     if kl_beta > 0:
         actor.use_kl_loss = True
         actor.kl_loss_coef = kl_beta
 
-    # Loss function
     loss_fn = rllm_algo.get("loss_fn", None)
     if loss_fn is not None:
         actor.policy_loss.loss_mode = loss_fn
 
-    # Loss aggregation mode
     loss_agg_mode = rllm_algo.get("loss_agg_mode", None)
     if loss_agg_mode is not None:
         actor.loss_agg_mode = loss_agg_mode
 
-    # PPO clip range
     eps_clip = rllm_algo.get("eps_clip", None)
     if eps_clip is not None:
-        actor.policy_loss.cliprange = eps_clip
+        actor.clip_ratio = eps_clip
+        actor.clip_ratio_low = eps_clip
+
     eps_clip_high = rllm_algo.get("eps_clip_high", None)
     if eps_clip_high is not None:
-        actor.policy_loss.cliprange_high = eps_clip_high
+        actor.clip_ratio_high = eps_clip_high
 
-    # Router Replay (R3)
     if rllm_algo.get("router_replay", False):
         actor.router_replay.mode = "R3"
-        config.actor_rollout_ref.rollout.enable_rollout_routing_replay = True
+        rollout.enable_rollout_routing_replay = True
 
-    # Async training: separated mode requires hybrid_engine=False
+    # ── Async training ──
     is_separated = config.rllm.get("async_training", {}).get("enable", False)
     if is_separated:
         config.actor_rollout_ref.hybrid_engine = False
 
-    # Sampling params
-    rollout = config.actor_rollout_ref.rollout
-    rllm_sampling = config.rllm.rollout.get("sampling", {})
+    # ── Rollout → actor_rollout_ref.rollout.* ──
+    if rllm_rollout.get("n") is not None:
+        rollout.n = rllm_rollout.n
+    if rllm_rollout.get("n_val") is not None:
+        rollout.val_kwargs.n = rllm_rollout.n_val
+
+    rllm_sampling = rllm_rollout.get("sampling", {})
     train_sampling = rllm_sampling.get("train", {})
     if train_sampling.get("temperature") is not None:
         rollout.temperature = train_sampling.temperature
@@ -68,11 +80,6 @@ def propagate_rllm_to_verl_config(config: DictConfig) -> None:
     if train_sampling.get("top_k") is not None:
         rollout.top_k = train_sampling.top_k
 
-    # n (group size)
-    rllm_rollout = config.rllm.get("rollout", {})
-    if rllm_rollout.get("n") is not None:
-        rollout.n = rllm_rollout.n
-
     val_sampling = rllm_sampling.get("val", {})
     if val_sampling.get("temperature") is not None:
         rollout.val_kwargs.temperature = val_sampling.temperature
@@ -80,6 +87,17 @@ def propagate_rllm_to_verl_config(config: DictConfig) -> None:
         rollout.val_kwargs.top_p = val_sampling.top_p
     if val_sampling.get("top_k") is not None:
         rollout.val_kwargs.top_k = val_sampling.top_k
+
+    # ── Trainer → trainer.* ──
+    config.trainer.total_epochs = rllm_trainer.total_epochs
+    config.trainer.total_training_steps = rllm_trainer.total_batches
+    config.trainer.logger = rllm_trainer.logger
+    config.trainer.project_name = rllm_trainer.project_name
+    config.trainer.experiment_name = rllm_trainer.experiment_name
+    config.trainer.test_freq = rllm_trainer.test_freq
+    config.trainer.save_freq = rllm_trainer.save_freq
+    config.trainer.val_before_train = rllm_trainer.val_before_train
+    config.trainer.val_only = rllm_trainer.val_only
 
 
 def save_checkpoint(

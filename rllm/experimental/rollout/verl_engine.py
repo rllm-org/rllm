@@ -12,6 +12,7 @@ from rllm.workflows import TerminationEvent, TerminationReason
 
 class VerlEngine(RolloutEngine):
     def __init__(self, config: DictConfig, server_manager, tokenizer: Tokenizer, processor=None, **kwargs):
+        super().__init__()
         self.config = config
 
         if config.actor_rollout_ref.rollout.name not in ["vllm", "sglang"]:
@@ -22,25 +23,25 @@ class VerlEngine(RolloutEngine):
         self.tokenizer = tokenizer
         self.processor = processor
         chat_template_kwargs = config.rllm.rollout.get("chat_template_kwargs", {})
-        self.chat_parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=chat_template_kwargs.get("disable_thinking", False))
+        self.chat_parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=chat_template_kwargs.get("disable_thinking", config.rllm.disable_thinking))
 
         self.max_prompt_length = config.data.max_prompt_length
         self.max_response_length = config.data.max_response_length
-        self.accumulate_reasoning = chat_template_kwargs.get("accumulate_reasoning", False)
+        self.accumulate_reasoning = chat_template_kwargs.get("accumulate_reasoning", config.rllm.accumulate_reasoning)
         self.reasoning_effort = chat_template_kwargs.get("reasoning_effort", "medium")
 
-        rllm_sampling = config.rllm.rollout.sampling
+        verl_rollout = config.actor_rollout_ref.rollout
         self.train_sampling_params = dict(
-            temperature=rllm_sampling.train.temperature,
-            top_k=rllm_sampling.train.top_k,
-            top_p=rllm_sampling.train.top_p,
+            temperature=verl_rollout.temperature,
+            top_k=verl_rollout.top_k,
+            top_p=verl_rollout.top_p,
             logprobs=1,
         )
 
         self.val_sampling_params = dict(
-            temperature=rllm_sampling.val.temperature,
-            top_k=rllm_sampling.val.top_k,
-            top_p=rllm_sampling.val.top_p,
+            temperature=verl_rollout.val_kwargs.temperature,
+            top_k=verl_rollout.val_kwargs.top_k,
+            top_p=verl_rollout.val_kwargs.top_p,
             logprobs=1,
         )
 
@@ -69,6 +70,11 @@ class VerlEngine(RolloutEngine):
         sampling_params["max_tokens"] = max_tokens
 
         token_output = await self.server_manager.generate(request_id=application_id, prompt_ids=token_input, sampling_params=sampling_params)
+
+        if token_output.stop_reason in ("aborted", "abort"):
+            raise RuntimeError("Rollout aborted")
+        token_output.stop_reason = "length" if len(token_output.token_ids) >= max_tokens else "stop"
+
         return token_output
 
     @override
@@ -105,13 +111,7 @@ class VerlEngine(RolloutEngine):
         token_output = cast(VerlTokenOutput, token_output)
         completion_ids = token_output.token_ids
         logprobs = token_output.log_probs
-
-        # convert the stop reason from verl back to the standard finish reason TODO(listar2000): check backward-compatibility
-        reason_mapping = {"aborted": "abort", "completed": "stop"}
-        if token_output.stop_reason is not None:
-            finish_reason = reason_mapping.get(token_output.stop_reason, token_output.stop_reason)
-        else:
-            finish_reason = "stop"
+        finish_reason = token_output.stop_reason
 
         completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
         # TODO: implement parse_completion for the standard parser

@@ -11,11 +11,12 @@ Automatically selects colocated vs separated mode based on config:
 
 from __future__ import annotations
 
+import copy
 import math
 import uuid
 from collections import defaultdict
 from collections.abc import Iterable
-from functools import reduce
+from functools import partial, reduce
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -26,6 +27,9 @@ from verl.checkpoint_engine import CheckpointEngineManager
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.core_algos import agg_loss
+from verl.utils.config import omega_conf_to_dataclass
+from verl.workers.config import ActorConfig
+from verl.workers.utils.losses import ppo_loss
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
@@ -33,7 +37,6 @@ from verl.trainer.ppo.metric_utils import (
 )
 from verl.trainer.ppo.utils import Role, WorkerType, need_reference_policy
 from verl.utils import tensordict_utils as tu
-from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.metric import reduce_metrics
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
@@ -66,12 +69,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 _DEFAULT_VERL_LOSS = "vanilla"
-
-
-def _get_verl_loss_fn(name: str):
-    """Look up a loss function from verl's POLICY_LOSS_REGISTRY by name."""
-    from verl.trainer.ppo.core_algos import get_policy_loss
-    return get_policy_loss(name)
 
 
 class VerlBackend(BackendProtocol[Iterable, DataProto]):
@@ -194,6 +191,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             replicas=self.async_rollout_manager.rollout_replicas,
         )
         self.checkpoint_manager.sleep_replicas()
+        print("[rllm] _init_colocated: done", flush=True)
 
     def _init_separated_workers(self) -> None:
         """Create training-side workers and standalone rollout servers for separated (async) mode.
@@ -278,10 +276,9 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
         assert self.async_rollout_manager is not None
 
-        # Set default loss function from config (or rllm algorithm config)
-        default_loss = self.config.actor_rollout_ref.actor.get("policy_loss", {}).get("loss_mode", _DEFAULT_VERL_LOSS)
-        self.actor_rollout_wg.set_loss_fn(_get_verl_loss_fn(default_loss))
-        self._default_loss_name = default_loss
+        # Set default loss function (matches verl's engine_workers setup).
+        self._default_loss_name = self.config.actor_rollout_ref.actor.get("policy_loss", {}).get("loss_mode", _DEFAULT_VERL_LOSS)
+        self.actor_rollout_wg.set_loss_fn(self._make_loss_fn(self._default_loss_name))
 
         # Create server manager
         servers = zip(self.async_rollout_manager.server_addresses, self.async_rollout_manager.server_handles, strict=True)
@@ -510,6 +507,17 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         with simple_timer("update_actor", trainer_state.timing_dict):
             self._update_actor_with_loss_routing(batch, trainer_state)
 
+    def _make_loss_fn(self, loss_name: str):
+        """Create a ppo_loss partial with the given loss mode, matching verl's engine_workers setup.
+
+        Builds a fresh ActorConfig each call — modifying policy_loss.loss_mode on the
+        DictConfig (still mutable) before conversion, since the resulting dataclass is frozen.
+        """
+        actor_cfg_oc = copy.deepcopy(self.config.actor_rollout_ref.actor)
+        actor_cfg_oc.policy_loss.loss_mode = loss_name
+        actor_config: ActorConfig = omega_conf_to_dataclass(actor_cfg_oc)
+        return partial(ppo_loss, config=actor_config)
+
     def _update_actor_with_loss_routing(self, batch: DataProto, trainer_state: TrainerState) -> None:
         loss_fn_map = self.algorithm_config.loss_fn_map if self.algorithm_config is not None else {}
         group_roles = batch.non_tensor_batch.get("group_roles") if hasattr(batch, "non_tensor_batch") and batch.non_tensor_batch is not None else None
@@ -548,21 +556,21 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         if len(loss_to_roles) <= 1:
             loss_name = next(iter(loss_to_roles))
             if loss_name != self._default_loss_name:
-                self.actor_rollout_wg.set_loss_fn(_get_verl_loss_fn(loss_name))
+                self.actor_rollout_wg.set_loss_fn(self._make_loss_fn(loss_name))
             _send_actor_update(batch)
             if loss_name != self._default_loss_name:
-                self.actor_rollout_wg.set_loss_fn(_get_verl_loss_fn(self._default_loss_name))
+                self.actor_rollout_wg.set_loss_fn(self._make_loss_fn(self._default_loss_name))
             return
 
         # Multiple losses — split batch by loss, swap loss_fn for each
         for loss_name, roles in loss_to_roles.items():
-            self.actor_rollout_wg.set_loss_fn(_get_verl_loss_fn(loss_name))
+            self.actor_rollout_wg.set_loss_fn(self._make_loss_fn(loss_name))
             role_set = set(roles)
             mask = np.array([r in role_set for r in group_roles])
             _send_actor_update(batch[np.where(mask)[0]])
 
         # Restore default
-        self.actor_rollout_wg.set_loss_fn(_get_verl_loss_fn(self._default_loss_name))
+        self.actor_rollout_wg.set_loss_fn(self._make_loss_fn(self._default_loss_name))
 
     def shutdown(self) -> None:
         pass

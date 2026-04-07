@@ -43,8 +43,8 @@ rollout:
       top_p: ${..train.top_p}
       top_k: ${..train.top_k}
   chat_template_kwargs:
-    disable_thinking: ${..disable_thinking} # Disable thinking
-    accumulate_reasoning: ${..accumulate_reasoning} # Accumulate reasoning
+    disable_thinking: ${...disable_thinking} # Disable thinking
+    accumulate_reasoning: ${...accumulate_reasoning} # Accumulate reasoning
     reasoning_effort: medium # low, medium, high
 
 # Trainer Configuration

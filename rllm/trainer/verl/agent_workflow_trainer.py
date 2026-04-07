@@ -462,29 +462,29 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
-                        # verl 0.7.1 new worker path: update_actor needs training metadata
-                        ppo_mini_batch_size = (
-                            self.config.actor_rollout_ref.actor.ppo_mini_batch_size
-                            * self.config.actor_rollout_ref.rollout.n
-                        )
-                        batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
-                        batch.meta_info["mini_batch_size"] = ppo_mini_batch_size
-                        batch.meta_info["epochs"] = self.config.actor_rollout_ref.actor.ppo_epochs
-                        batch.meta_info["seed"] = self.config.actor_rollout_ref.actor.data_loader_seed
-                        batch.meta_info["dataloader_kwargs"] = {
-                            "shuffle": self.config.actor_rollout_ref.actor.shuffle,
-                        }
-                        batch.meta_info["compute_loss"] = True
+                        # verl 0.7.1 new worker path: update_actor takes a TensorDict in
+                        # no-padding format with training metadata as non-tensor fields
+                        # (mirrors VerlBackend._update_actor_with_loss_routing).
+                        # temperature and global_token_num already live in batch.meta_info
+                        # from earlier in this loop and carry through to_tensordict().
+                        actor_cfg = self.config.actor_rollout_ref.actor
+                        ppo_mini_batch_size = actor_cfg.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+
+                        update_batch_td = batch.to_tensordict()
+                        update_batch_td = left_right_2_no_padding(update_batch_td)
                         tu.assign_non_tensor(
-                            batch.batch,
-                            temperature=self.config.actor_rollout_ref.rollout.temperature,
+                            update_batch_td,
+                            mini_batch_size=ppo_mini_batch_size,
                             global_batch_size=ppo_mini_batch_size,
-                            calculate_entropy=(self.config.actor_rollout_ref.actor.entropy_coeff != 0.0),
+                            epochs=actor_cfg.ppo_epochs,
+                            seed=actor_cfg.data_loader_seed,
+                            dataloader_kwargs={"shuffle": actor_cfg.shuffle},
+                            calculate_entropy=(actor_cfg.entropy_coeff != 0.0),
                         )
 
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
-                            actor_output = self.actor_rollout_wg.update_actor(batch)
+                            actor_output = self.actor_rollout_wg.update_actor(update_batch_td)
 
                         # save checkpoint
                         if self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq == 0:

@@ -85,7 +85,10 @@ class VerlEngine(RolloutEngine):
         completion_ids: list[int] = token_output.token_ids
         logprobs: list[float] = token_output.log_probs
 
-        finish_reason = token_output.stop_reason
+        if token_output.stop_reason in ("aborted", "abort"):
+            raise RuntimeError("Rollout aborted")
+
+        finish_reason = "length" if len(completion_ids) >= max_tokens else "stop"
         completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
         # TODO: implement parse_completion for the standard parser
         parsed_output = self.chat_parser.parse_completion(completion_ids)

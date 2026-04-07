@@ -37,6 +37,9 @@ class VerlTaskRunner(_BaseTaskRunner):
         from rllm.experimental.verl.utils import propagate_rllm_to_verl_config
         propagate_rllm_to_verl_config(config)
 
+        # Force new model engine (required by VerlBackend)
+        config.trainer.use_legacy_worker_impl = "disable"
+
         # --- Worker mapping and resource pools ---
         # Follows verl's TaskRunner.run() for colocated,
         # verl's FullyAsyncTaskRunner._initialize_components() for separated.
