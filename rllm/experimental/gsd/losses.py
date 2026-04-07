@@ -118,7 +118,7 @@ async def score_teacher_for_response(
     """
     prompt_len = len(teacher_prompt_ids)
     available = max_context_length - prompt_len
-    if available <= 0:
+    if available <= 0:  # even the prompt is longer than the max context length.
         return {
             "topk_ids": [],
             "topk_logprobs": [],
@@ -138,39 +138,51 @@ async def score_teacher_for_response(
     )
 
     T = len(truncated_response)
-    topk_all = result.topk_prompt_logprobs
-    scalar_all = result.prompt_logprobs
+    topk_all = result.topk_prompt_logprobs  # list[Optional[list[tuple[int,float]]]]
+    scalar_all = result.prompt_logprobs  # list[Optional[float]]
 
-    topk_ids: list[list[int]] = []
-    topk_logprobs: list[list[float]] = []
-    sampled_logprobs: list[float] = []
+    # --- Extract scalar logprobs for the IS term (response slice) ---
+    # The API returns a ragged, nullable list; we slice to the response
+    # portion and replace None with 0.0 in one pass.
+    if scalar_all is not None:
+        raw_slice = scalar_all[prompt_len : prompt_len + T]
+        sampled_logprobs = [v if v is not None else 0.0 for v in raw_slice]
+        # Pad if the returned list is shorter than T (shouldn't happen, but guard)
+        sampled_logprobs += [0.0] * (T - len(sampled_logprobs))
+    else:
+        sampled_logprobs = [0.0] * T
 
-    for t in range(T):
-        teacher_pos = prompt_len + t
+    # --- Extract Top-K entries for the CE term (response slice) ---
+    # Each position is Optional[list[tuple[int, float]]]; we unzip + pad to K.
+    # This per-position loop matches SDPO's pattern — the ragged nullable
+    # structure from the Tinker API prevents batch conversion.
+    pad_ids = [0] * topk
+    pad_lps = [float("-inf")] * topk
 
-        # --- Scalar logprob of the actual token (for IS) ---
-        lp_val = 0.0
-        if scalar_all is not None and teacher_pos < len(scalar_all):
-            v = scalar_all[teacher_pos]
-            if v is not None:
-                lp_val = v
-        sampled_logprobs.append(lp_val)
-
-        # --- Top-K entries (for CE) ---
-        pos_ids: list[int] = []
-        pos_lps: list[float] = []
-        if topk_all is not None and teacher_pos < len(topk_all):
-            entries = topk_all[teacher_pos]
-            if entries is not None:
-                for tok_id, lp in entries[:topk]:
-                    pos_ids.append(tok_id)
-                    pos_lps.append(lp)
-        # Pad to K if fewer returned
-        while len(pos_ids) < topk:
-            pos_ids.append(0)
-            pos_lps.append(float("-inf"))
-        topk_ids.append(pos_ids)
-        topk_logprobs.append(pos_lps)
+    if topk_all is not None:
+        raw_topk_slice = topk_all[prompt_len : prompt_len + T]
+        topk_ids: list[list[int]] = []
+        topk_logprobs: list[list[float]] = []
+        for entries in raw_topk_slice:
+            if entries:
+                ids = [tok_id for tok_id, _ in entries[:topk]]
+                lps = [lp for _, lp in entries[:topk]]
+                # Pad if fewer than K returned
+                if len(ids) < topk:
+                    ids += [0] * (topk - len(ids))
+                    lps += [float("-inf")] * (topk - len(lps))
+                topk_ids.append(ids)
+                topk_logprobs.append(lps)
+            else:
+                topk_ids.append(pad_ids)
+                topk_logprobs.append(pad_lps)
+        # Pad if slice is shorter than T
+        while len(topk_ids) < T:
+            topk_ids.append(pad_ids)
+            topk_logprobs.append(pad_lps)
+    else:
+        topk_ids = [pad_ids] * T
+        topk_logprobs = [pad_lps] * T
 
     return {
         "topk_ids": topk_ids,
