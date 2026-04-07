@@ -34,8 +34,8 @@ def main(config: DictConfig):
     train_dataset, test_dataset = prepare_deepscaler_datasets()
 
     gsd_config = GsdConfig(
-        N=4,
-        N_val=4,
+        N=5,
+        N_val=2,
         distill_topk=20,
         train_hint=False,
         success_reward_threshold=0.5,

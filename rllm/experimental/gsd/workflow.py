@@ -174,7 +174,8 @@ class GsdWorkflow(Workflow):
             **self.cfg.hint_sampling_params,
         )
         hint_text = extract_hint(hint_output.text or hint_output.content or "")
-        logger.info(f"[{uid}] hint generated ({len(hint_text)} chars)")
+        # print the first 500 characters of the hint
+        logger.info(f"[{uid}] hint generated ({len(hint_text)} chars): {hint_text[:500]}")
 
         # ---- Phase 2: Dual rollouts (concurrent with progress) ----
         student_messages = build_student_prompt(question)
@@ -193,7 +194,8 @@ class GsdWorkflow(Workflow):
         teacher_rewards = [r for _, r in teacher_results]
         R_S_avg = sum(student_rewards) / len(student_rewards)
         R_T_avg = sum(teacher_rewards) / len(teacher_rewards)
-        teacher_valid = R_T_avg >= R_S_avg
+        # strictly greater is needed
+        teacher_valid = R_T_avg > R_S_avg
 
         trajectories: list[Trajectory] = []
         metrics: dict[str, Any] = {
