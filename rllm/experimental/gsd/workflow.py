@@ -68,6 +68,9 @@ class GsdConfig:
 
     # Experience buffer retrieval
     retrieval_k: int = 3
+    # Threshold for collecting "hard solves" — tasks with student pass rate
+    # below this that still have at least one correct solution.
+    hard_solve_threshold: float = 0.5
 
 
 class GsdWorkflow(Workflow):
@@ -129,8 +132,8 @@ class GsdWorkflow(Workflow):
         hint_text = extract_hint(hint_output.text or hint_output.content or "")
 
         # Dual rollouts with progress
-        student_messages = build_student_prompt(question)
-        teacher_messages = build_teacher_prompt(question, hint_text)
+        student_messages = self._make_student_prompt(question)
+        teacher_messages = self._make_teacher_prompt(question, hint_text)
 
         coros = [self._do_rollout(task, student_messages) for _ in range(N)]
         coros += [self._do_rollout(task, teacher_messages) for _ in range(N)]
@@ -189,8 +192,8 @@ class GsdWorkflow(Workflow):
         logger.info(f"[{uid}] hint generated ({len(hint_text)} chars): {hint_text[:500]}")
 
         # ---- Phase 2: Dual rollouts (concurrent with progress) ----
-        student_messages = build_student_prompt(question)
-        teacher_messages = build_teacher_prompt(question, hint_text)
+        student_messages = self._make_student_prompt(question)
+        teacher_messages = self._make_teacher_prompt(question, hint_text)
 
         coros: list[Awaitable[tuple[Step, float]]] = []
         coros += [self._do_rollout(task, student_messages) for _ in range(N)]
@@ -279,9 +282,9 @@ class GsdWorkflow(Workflow):
         client = engine.sampling_client
         cfg = self.cfg
 
-        # Tokenize prompts for scoring
-        teacher_prompt_ids = self._tokenize_messages(build_teacher_prompt(question, hint_text))
-        student_prompt_ids = self._tokenize_messages(build_student_prompt(question))
+        # Tokenize prompts for scoring (use overridable prompt builders)
+        teacher_prompt_ids = self._tokenize_messages(self._make_teacher_prompt(question, hint_text))
+        student_prompt_ids = self._tokenize_messages(self._make_student_prompt(question))
 
         # (a) On-policy distillation: score student seqs under teacher
         scoring_coros = [
@@ -343,7 +346,7 @@ class GsdWorkflow(Workflow):
             # Deep-copy and swap prompt to student view (hint removed)
             sup_step = copy.deepcopy(step)
             sup_step.prompt_ids = student_prompt_ids
-            sup_step.chat_completions = build_student_prompt(question)
+            sup_step.chat_completions = self._make_student_prompt(question)
             sup_step.model_output = None  # recompute student logprobs during training
             sup_step.advantage = None
             sup_step.metadata = {
@@ -375,6 +378,14 @@ class GsdWorkflow(Workflow):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _make_student_prompt(self, question: str) -> list[dict]:
+        """Build the student prompt.  Override in subclasses for task-specific prompts."""
+        return build_student_prompt(question)
+
+    def _make_teacher_prompt(self, question: str, hint: str) -> list[dict]:
+        """Build the teacher prompt.  Override in subclasses for task-specific prompts."""
+        return build_teacher_prompt(question, hint)
 
     def _tokenize_messages(self, messages: list[dict]) -> list[int]:
         """Convert OpenAI-style messages to token IDs via the engine's chat parser.
