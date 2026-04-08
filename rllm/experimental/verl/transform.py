@@ -237,7 +237,7 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
 
     added_steps = 0
     for step_idx, step in enumerate(trajectory.steps):
-        if step.model_output is None or step.model_output.prompt_ids is None:
+        if step.model_output is None or step.model_output.prompt_ids is None or len(step.model_output.prompt_ids) == 0:
             logger.warning(f"Step {step_idx} in trajectory {trajectory_id} has no valid model_output, skipping")
             continue
         prompt_ids = torch.tensor(step.model_output.prompt_ids, dtype=torch.long)
