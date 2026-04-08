@@ -204,12 +204,11 @@ class SWEAgentFlow:
             messages = agent.messages if agent else []
 
         # --- Build Episode ---
-        steps = [
-            Step(output=msg.get("content", ""))
-            for msg in messages
-            if msg.get("role") == "assistant"
-        ]
-        trajectory = Trajectory(name="solver", steps=steps)
+        # Return steps=[] so that _enrich_episode assigns all gateway traces
+        # to this trajectory (the canonical rllm cookbook pattern).  The gateway
+        # already captured every chat.completions.create() call with full
+        # prompt_ids, completion_ids, and logprobs.
+        trajectory = Trajectory(name="solver", steps=[])
 
         # Keep env alive for graders that reuse the sandbox
         return_env = None
