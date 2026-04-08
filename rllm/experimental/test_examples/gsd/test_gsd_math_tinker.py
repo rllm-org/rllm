@@ -48,6 +48,7 @@ def main(config: DictConfig):
 
     save_dir = config.training.get("default_local_dir", "/tmp/rllm-gsd-checkpoints")
     experience_store = EmbeddingExperienceStore(
+        device="cpu",
         max_size=500,
         save_path=f"{save_dir}/experience_store.json",
         autosave_every=10,
