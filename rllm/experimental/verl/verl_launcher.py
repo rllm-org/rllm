@@ -42,6 +42,10 @@ class WorkflowTaskRunner(TaskRunner):
         OmegaConf.register_new_resolver("mul", lambda x, y: int(x) * int(y))
         OmegaConf.resolve(config)
 
+        # VerlBackend requires the new EngineWorker path (TensorDict + no-padding).
+        # Must be set here, before add_actor_rollout_worker selects the worker class.
+        config.trainer.use_legacy_worker_impl = "disable"
+
         actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
         self.add_critic_worker(config)
         # Add a reference policy worker if KL loss or KL reward is used.

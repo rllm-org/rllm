@@ -130,6 +130,11 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             val_reward_fn: Optional reward function for validation.
             **kwargs: Additional arguments.
         """
+        # VerlBackend requires the new EngineWorker path; ensure the flag is set
+        # before RayPPOTrainer.__init__ caches it as self.use_legacy_worker_impl.
+        if config.trainer.get("use_legacy_worker_impl", "auto") != "disable":
+            config.trainer.use_legacy_worker_impl = "disable"
+
         # Initialize RayPPOTrainer first - this sets up all worker groups
         RayPPOTrainer.__init__(
             self,
@@ -216,6 +221,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
                 "If you insist on using the legacy worker implementation, consider using the older agent workflow trainer."
             )
             self.config.trainer.use_legacy_worker_impl = "disable"
+            self.use_legacy_worker_impl = "disable"
         if self.config.rllm.stepwise_advantage.mode != "broadcast":
             # automatically set the stepwise_advantage_mode to "broadcast", the warning is already shown in AlgorithmConfig.from_config
             self.config.rllm.stepwise_advantage.mode = "broadcast"
@@ -331,6 +337,36 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         batch.non_tensor_batch["is_last_step"][pad_start:pad_end] = False
         batch.non_tensor_batch["is_pad_step"][pad_start:pad_end] = True
         batch.non_tensor_batch["is_valid"][pad_start:pad_end] = False
+        return batch
+
+    def _pad_dataproto_for_megatron_training(self, batch: DataProto) -> DataProto:
+        """Pad batch for megatron actor update using uniform random sampling.
+
+        Megatron's make_minibatch_iterator requires per-GPU batch to be divisible
+        by ppo_mini_batch_size. Padded samples are randomly sampled real data that
+        participate in training as redundant samples from the same distribution.
+        """
+
+        world_size = self._get_dp_world_size()
+        if world_size is None:
+            return batch
+
+        ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+        rollout_n = self.config.actor_rollout_ref.rollout.n
+        divisor = math.lcm(world_size, ppo_mini_batch_size * rollout_n)
+
+        batch = self._remove_padding(batch)
+        original_batch_size = batch.batch["prompts"].shape[0]
+
+        pad_size = (-original_batch_size) % divisor
+        if pad_size > 0:
+            pad_indices = np.random.choice(original_batch_size, size=pad_size, replace=True)
+            pad_batch = batch.select_idxs(pad_indices)
+            batch = DataProto.concat([batch, pad_batch])
+            # Deliberately skip setting is_pad_step/is_last_step/is_valid on padded rows.
+            # This method is only called in update_policy (the last pipeline stage before
+            # actor update), so _remove_padding is never called on this output. The padded
+            # rows are real duplicates that participate in training with real advantages.
         return batch
 
     async def process_backend_batch(self, trainer_state: TrainerState, **kwargs) -> None:
@@ -463,12 +499,21 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         """Update actor and critic policies.
 
         Uses the new EngineWorker path: converts DataProto to TensorDict in
-        no-padding format with training metadata, then calls workers.  The new
-        workers handle micro-batching internally, so no manual re-padding is
-        needed before the update.
+        no-padding format with training metadata, then calls workers.
         """
         global_steps = trainer_state.global_step
         batch: DataProto = trainer_state.backend_batch  # type: ignore[assignment]
+
+        # Re-pad batch before gradient updates. Multi-turn agents produce a
+        # variable number of steps per episode, so the batch size is not
+        # deterministic from config. For megatron, use the larger divisor
+        # (world_size * ppo_mini_batch_size) with uniform random sampling.
+        actor_strategy = self.config.actor_rollout_ref.actor.get("strategy", None)
+        if actor_strategy == "megatron":
+            batch = self._pad_dataproto_for_megatron_training(batch)
+        else:
+            batch = self._pad_dataproto_to_world_size(batch)
+        trainer_state.backend_batch = batch
 
         # Update critic
         if self.use_critic:
@@ -509,16 +554,22 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         # Common training metadata
         rollout_n = self.config.actor_rollout_ref.rollout.n
         actor_cfg = self.config.actor_rollout_ref.actor
-        ppo_mbs = actor_cfg.ppo_mini_batch_size * rollout_n
+        _ppo_mbs = actor_cfg.ppo_mini_batch_size * rollout_n
 
         def _send_actor_update(sub_batch: DataProto, loss_override: str | None = None) -> None:
             """Convert DataProto to TensorDict, inject metadata, send to worker."""
             batch_td = sub_batch.to_tensordict()
             batch_td = left_right_2_no_padding(batch_td)
+            # Use actual (padded) batch size so there is exactly 1 mini-batch
+            # per epoch, preserving the original number of optimizer steps.
+            # Multi-turn episodes + megatron padding make the batch size larger
+            # than the config-based ppo_mbs, which would otherwise cause extra
+            # optimizer steps and effectively multiply the learning rate.
+            actual_bs = sub_batch.batch["prompts"].shape[0]
             metadata: dict[str, Any] = dict(
                 calculate_entropy=(actor_cfg.entropy_coeff != 0.0),
-                global_batch_size=ppo_mbs,
-                mini_batch_size=ppo_mbs,
+                global_batch_size=actual_bs,
+                mini_batch_size=actual_bs,
                 epochs=actor_cfg.ppo_epochs,
                 seed=actor_cfg.data_loader_seed,
                 dataloader_kwargs={"shuffle": actor_cfg.shuffle},
