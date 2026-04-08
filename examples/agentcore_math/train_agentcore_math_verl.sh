@@ -5,8 +5,10 @@ set -eux
 # Load environment variables (AGENTCORE_AGENT_ARN, AGENTCORE_S3_BUCKET)
 set -a && source .env && set +a
 
-export CUDA_DEVICE_MAX_CONNECTIONS=1
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0
+
+# Clean up stale ZMQ sockets from previous crashed runs
+rm -f /tmp/rl-colocate-zmq-*.sock
 
 MODEL_PATH=Qwen/Qwen3-4B-Instruct-2507
 
