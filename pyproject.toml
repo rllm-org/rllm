@@ -86,7 +86,7 @@ dev = [
 verl = [
     "transformers>=4.55.0,<5.0.0",
     "numpy",
-    "verl==0.7.1",
+    "verl @ git+https://github.com/volcengine/verl.git@63e8a0d1617b209284011e0fcf1796574f372ffd",
     "ray",
     "torch>=2.10.0",
     "torchvision>=0.23.0",
