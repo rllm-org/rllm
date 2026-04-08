@@ -227,12 +227,12 @@ class TestEstimatorMap:
         _, loss = DEFAULT_GSD_ADV_ESTIMATOR_MAP["gsd_distill_supervised"]
         assert loss == "cross_entropy"
 
-    def test_student_uses_reinforce(self):
+    def test_student_uses_reinforce_pp(self):
         from rllm.experimental.common.config import rLLMAdvantageEstimator
 
         estimator, loss = DEFAULT_GSD_ADV_ESTIMATOR_MAP["gsd_student"]
-        assert estimator == rLLMAdvantageEstimator.REINFORCE
-        assert loss == "importance_sampling"
+        assert estimator == rLLMAdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE
+        assert loss == "ppo"
 
     def test_build_without_hint(self):
         m = build_gsd_estimator_map(train_hint=False)

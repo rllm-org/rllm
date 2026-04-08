@@ -108,6 +108,11 @@ class HintPool:
         """Select a hint using UCB1: score + c * sqrt(ln(total) / n_uses).
 
         Hints with 0 uses are prioritized (infinite UCB bonus).
+
+        **Eagerly increments** ``n_uses`` and ``_total_uses`` at selection
+        time so that concurrent tasks within the same batch see updated
+        counts and spread across hints instead of all picking the same one.
+        The score is updated later by :meth:`update`.
         """
         if not self._hints:
             raise RuntimeError("HintPool is empty — provide seed_hints or call evolve() first.")
@@ -115,7 +120,10 @@ class HintPool:
         # Prioritize unused hints
         unused = [h for h in self._hints if h.n_uses == 0]
         if unused:
-            return unused[0]
+            chosen = unused[0]
+            chosen.n_uses += 1
+            self._total_uses += 1
+            return chosen
 
         # UCB1
         ln_total = math.log(max(self._total_uses, 1))
@@ -126,17 +134,23 @@ class HintPool:
             if ucb > best_ucb:
                 best_ucb = ucb
                 best_hint = h
-        return best_hint  # type: ignore[return-value]
+
+        assert best_hint is not None
+        best_hint.n_uses += 1
+        self._total_uses += 1
+        return best_hint
 
     # ------------------------------------------------------------------
     # Score update
     # ------------------------------------------------------------------
 
     def update(self, hint: ScoredHint, improvement: float) -> None:
-        """Update EMA score for a hint after observing teacher improvement."""
-        hint.n_uses += 1
-        self._total_uses += 1
-        if hint.n_uses == 1:
+        """Update EMA score for a hint after observing teacher improvement.
+
+        Note: ``n_uses`` was already incremented by :meth:`select`, so this
+        method only updates the score.
+        """
+        if hint.n_uses <= 1:
             hint.score = improvement
         else:
             hint.score = (1 - self.ema_alpha) * hint.score + self.ema_alpha * improvement
