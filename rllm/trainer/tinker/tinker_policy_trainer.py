@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # Mapping from rLLMAdvantageEstimator to their default Tinker loss function (overriding is allowed through config)
 ADV_TO_LOSS_FN_AUTO_MAP = {
     rLLMAdvantageEstimator.REINFORCE: "importance_sampling",
-    rLLMAdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE: "importance_sampling",
+    rLLMAdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE: "ppo",
     rLLMAdvantageEstimator.GRPO: "ppo",
     rLLMAdvantageEstimator.RLOO: "importance_sampling",
     rLLMAdvantageEstimator.OTHER: "importance_sampling",

@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 # via cross_entropy with (T, K) teacher soft targets.
 DEFAULT_GSD_ADV_ESTIMATOR_MAP: dict[str, Any] = {
     # Case 2 fallback: standard GRPO
-    "gsd_student": (rLLMAdvantageEstimator.REINFORCE, "importance_sampling"),
+    "gsd_student": (rLLMAdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE, "ppo"),
     # Case 1 on-policy distillation: reverse KL → importance_sampling
     "gsd_distill_onpolicy": ("precomputed", "importance_sampling"),
     # Case 1 supervised distillation: forward KL → cross_entropy

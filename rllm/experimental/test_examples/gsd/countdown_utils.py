@@ -45,10 +45,7 @@ def countdown_reward(task: dict, response_text: str) -> float:
 
 COUNTDOWN_SOLVER_PROMPT = """
 You are a number puzzle solver. You are given several numbers and a target. \
-Find an arithmetic expression using the given numbers that equals the target. \
-Use each number exactly once. You may use +, -, *, / and parentheses. \
-Show your reasoning, then output your final answer in <answer>...</answer> tags, \
-for example <answer> (1 + 2) / 3 </answer>.
+Find an arithmetic expression using the given numbers that equals the target.
 """.strip()
 
 

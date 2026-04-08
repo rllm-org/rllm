@@ -39,7 +39,7 @@ def main(config: DictConfig):
     train_dataset, test_dataset = prepare_countdown_datasets()
 
     gsd_config = GsdConfig(
-        N=5,
+        N=8,
         N_val=2,
         distill_topk=20,
         train_hint=False,
@@ -54,10 +54,10 @@ def main(config: DictConfig):
         max_size=5,
         ema_alpha=0.3,
         ucb_c=1.0,
-        evolve_every=10,
+        evolve_every=16,
         seed_hints=COUNTDOWN_SEED_HINTS,
         save_path=f"{save_dir}/hint_pool.json",
-        autosave_every=10,
+        autosave_every=32,
     )
 
     trainer = AgentTrainer(
