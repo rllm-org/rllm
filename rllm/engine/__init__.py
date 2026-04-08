@@ -14,6 +14,7 @@ __all__ = [
     "RolloutEngine",
     "ModelOutput",
     "OpenAIEngine",
+    "TinkerEngine",
     "VerlEngine",
 ]
 
@@ -31,6 +32,13 @@ def __getattr__(name):
         from .rollout.openai_engine import OpenAIEngine as _OpenAIEngine
 
         return _OpenAIEngine
+    if name == "TinkerEngine":
+        try:
+            from .rollout.tinker_engine import TinkerEngine as _TinkerEngine
+
+            return _TinkerEngine
+        except Exception:
+            raise AttributeError(name) from None
     if name == "VerlEngine":
         try:
             from .rollout.verl_engine import VerlEngine as _VerlEngine

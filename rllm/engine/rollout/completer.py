@@ -14,8 +14,8 @@ from dataclasses import field
 from typing import TYPE_CHECKING, Any
 
 from rllm.agents.agent import Step
-from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
-from rllm.experimental.rollout.types import TokenInput, Tokenizer, TokenOutput
+from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine
+from rllm.engine.rollout.types import TokenInput, Tokenizer, TokenOutput
 
 if TYPE_CHECKING:
     from rllm.parser import ChatTemplateParser
@@ -74,7 +74,7 @@ class TITOCompleter(Completer):
 
     chat_parser: ChatTemplateParser
     tokenizer: Tokenizer
-    # stateful data taht this completer tracks over `complete` calls
+    # stateful data that this completer tracks over `complete` calls
     _prev_messages_str: str = ""  # the messages after applying chat template
     _prev_token_input: TokenInput = field(default_factory=list)
     _n_completions: int = 0
@@ -88,7 +88,7 @@ class TITOCompleter(Completer):
             raise ValueError(f"The rollout engine {cls_name} does not support token-in-token-out")
         # we also require the rollout engine has a chat parser and a tokenizer
         if rollout_engine.chat_parser is None or rollout_engine.tokenizer is None:
-            raise ValueError("The rollout engine must have a chat parser and a tokenizer. For Tinker engine, make sure you have set bypass_render_with_parser=True.")
+            raise ValueError("The rollout engine must have a chat parser and a tokenizer.")
         self.tokenizer = rollout_engine.tokenizer
         self.chat_parser = rollout_engine.chat_parser
 

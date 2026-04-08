@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 from tqdm import tqdm
 
 from rllm.agents.agent import Episode
-from rllm.experimental.rollout import RolloutEngine
+from rllm.engine.rollout import RolloutEngine
 from rllm.workflows.store import Store
 from rllm.workflows.workflow import TerminationReason, Workflow
 

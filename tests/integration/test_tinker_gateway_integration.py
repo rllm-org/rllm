@@ -19,7 +19,7 @@ def create_tinker_engine():
     import tinker
     from tinker_cookbook.tokenizer_utils import get_tokenizer
 
-    from rllm.experimental.rollout.tinker_engine import TinkerEngine
+    from rllm.engine.rollout.tinker_engine import TinkerEngine
 
     tokenizer = get_tokenizer(TINKER_MODEL_NAME)
     service_client = tinker.ServiceClient()
@@ -34,7 +34,6 @@ def create_tinker_engine():
         max_response_length=128,
         max_model_length=2048,
         sampling_params={"train": {"temperature": 0.0}, "val": {"temperature": 0.0}},
-        bypass_render_with_parser=True,
         disable_thinking=True,
     )
     engine.set_sampling_client(sampling_client)

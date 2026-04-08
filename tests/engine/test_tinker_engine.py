@@ -1,203 +1,202 @@
-"""Tests for tinker_engine OpenAI-to-renderer conversion helpers."""
+"""Tests for tinker_engine utility functions and TinkerEngine static helpers."""
 
-import json
+from unittest.mock import MagicMock
 
-import pytest
-from tinker_cookbook.renderers import get_renderer
-from tinker_cookbook.renderers.base import ToolCall as TinkerToolCall
-from tinker_cookbook.tokenizer_utils import get_tokenizer
+import tinker
+from tinker.types import ImageChunk
 
-from rllm.experimental.rollout.tinker_engine import (
-    _convert_openai_messages,
-    _parse_tinker_message,
-    _prepare_messages_with_tools,
+from rllm.engine.rollout.tinker_engine import (
+    _flat_token_input_length,
+    _flat_token_input_to_model_input,
 )
-from rllm.tools.tool_base import ToolCall as RllmToolCall
 
 # ------------------------------------------------------------------
-# Fixtures
-# ------------------------------------------------------------------
-
-CALCULATOR_TOOL_OPENAI = {
-    "type": "function",
-    "function": {
-        "name": "calculator",
-        "description": "Compute math expressions",
-        "parameters": {
-            "type": "object",
-            "properties": {"expression": {"type": "string"}},
-            "required": ["expression"],
-        },
-    },
-}
-
-TOOL_CALL_OPENAI = {
-    "id": "call_0",
-    "type": "function",
-    "function": {"name": "calculator", "arguments": '{"expression": "2+2"}'},
-}
-
-
-def _make_tinker_tool_call(name: str = "calculator", arguments: str = '{"expression": "2+2"}', id: str = "call_0"):
-    return TinkerToolCall(
-        function=TinkerToolCall.FunctionBody(name=name, arguments=arguments),
-        id=id,
-    )
-
-
-# ------------------------------------------------------------------
-# _convert_openai_messages
+# Helpers
 # ------------------------------------------------------------------
 
 
-class TestConvertOpenaiMessages:
-    def test_tool_calls_become_pydantic_objects(self):
-        """OpenAI tool_calls dicts should be converted to TinkerToolCall objects."""
-        messages = [
-            {"role": "assistant", "content": "Let me calculate.", "tool_calls": [TOOL_CALL_OPENAI]},
+def _make_image_chunk(length: int = 16):
+    """Create a real tinker ImageChunk with the given token length."""
+    return ImageChunk(data=b"\x89PNG", format="png", expected_tokens=length)
+
+
+# ------------------------------------------------------------------
+# _flat_token_input_to_model_input
+# ------------------------------------------------------------------
+
+
+class TestFlatTokenInputToModelInput:
+    def test_empty_input(self):
+        result = _flat_token_input_to_model_input([])
+        assert result.chunks == []
+
+    def test_pure_ints(self):
+        result = _flat_token_input_to_model_input([1, 2, 3])
+        assert len(result.chunks) == 1
+        assert isinstance(result.chunks[0], tinker.EncodedTextChunk)
+        assert result.chunks[0].tokens == [1, 2, 3]
+
+    def test_image_chunk_splits_text(self):
+        """An image chunk in the middle should produce text-image-text."""
+        img = _make_image_chunk(16)
+        result = _flat_token_input_to_model_input([1, 2, img, 3, 4])
+        assert len(result.chunks) == 3
+        assert isinstance(result.chunks[0], tinker.EncodedTextChunk)
+        assert result.chunks[0].tokens == [1, 2]
+        assert result.chunks[1] is img
+        assert isinstance(result.chunks[2], tinker.EncodedTextChunk)
+        assert result.chunks[2].tokens == [3, 4]
+
+    def test_leading_image_chunk(self):
+        """Image at the start should not produce an empty text chunk."""
+        img = _make_image_chunk(8)
+        result = _flat_token_input_to_model_input([img, 1, 2])
+        assert len(result.chunks) == 2
+        assert result.chunks[0] is img
+        assert isinstance(result.chunks[1], tinker.EncodedTextChunk)
+        assert result.chunks[1].tokens == [1, 2]
+
+    def test_trailing_image_chunk(self):
+        img = _make_image_chunk(8)
+        result = _flat_token_input_to_model_input([1, 2, img])
+        assert len(result.chunks) == 2
+        assert isinstance(result.chunks[0], tinker.EncodedTextChunk)
+        assert result.chunks[0].tokens == [1, 2]
+        assert result.chunks[1] is img
+
+    def test_consecutive_image_chunks(self):
+        img1 = _make_image_chunk(8)
+        img2 = _make_image_chunk(16)
+        result = _flat_token_input_to_model_input([img1, img2])
+        assert len(result.chunks) == 2
+        assert result.chunks[0] is img1
+        assert result.chunks[1] is img2
+
+
+# ------------------------------------------------------------------
+# _flat_token_input_length
+# ------------------------------------------------------------------
+
+
+class TestFlatTokenInputLength:
+    def test_empty(self):
+        assert _flat_token_input_length([]) == 0
+
+    def test_pure_ints(self):
+        assert _flat_token_input_length([1, 2, 3, 4]) == 4
+
+    def test_mixed(self):
+        img = _make_image_chunk(16)
+        assert _flat_token_input_length([1, 2, img, 3]) == 3 + 16
+
+    def test_only_image_chunks(self):
+        img1 = _make_image_chunk(8)
+        img2 = _make_image_chunk(12)
+        assert _flat_token_input_length([img1, img2]) == 20
+
+
+# ------------------------------------------------------------------
+# TinkerEngine._convert_images_to_content_list (static method)
+# ------------------------------------------------------------------
+
+
+class TestConvertImagesToContentList:
+    @staticmethod
+    def _call(messages):
+        from rllm.engine.rollout.tinker_engine import TinkerEngine
+
+        return TinkerEngine._convert_images_to_content_list(messages)
+
+    def test_no_images_passthrough(self):
+        msgs = [{"role": "user", "content": "hello"}]
+        result = self._call(msgs)
+        assert result == msgs
+
+    def test_empty_images_passthrough(self):
+        msgs = [{"role": "user", "content": "hello", "images": []}]
+        result = self._call(msgs)
+        assert result == msgs
+
+    def test_images_converted_to_content_list(self):
+        fake_img = MagicMock()  # simulates a PIL Image
+        msgs = [{"role": "user", "content": "describe this", "images": [fake_img]}]
+        result = self._call(msgs)
+
+        assert len(result) == 1
+        content = result[0]["content"]
+        assert isinstance(content, list)
+        # First element should be the image part
+        assert content[0] == {"type": "image", "image": fake_img}
+        # Second element should be the text part
+        assert content[1] == {"type": "text", "text": "describe this"}
+        # images key should be removed
+        assert "images" not in result[0]
+
+    def test_multiple_images(self):
+        img1 = MagicMock()
+        img2 = MagicMock()
+        msgs = [{"role": "user", "content": "compare", "images": [img1, img2]}]
+        result = self._call(msgs)
+
+        content = result[0]["content"]
+        assert len(content) == 3  # 2 images + 1 text
+        assert content[0]["type"] == "image"
+        assert content[1]["type"] == "image"
+        assert content[2]["type"] == "text"
+
+    def test_mixed_messages(self):
+        """Only messages with images are converted; others pass through."""
+        fake_img = MagicMock()
+        msgs = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "look at this", "images": [fake_img]},
+            {"role": "assistant", "content": "I see it."},
         ]
-        result = _convert_openai_messages(messages)
-        tc = result[0]["tool_calls"][0]
-        assert isinstance(tc, TinkerToolCall)
-        assert tc.function.name == "calculator"
-        assert json.loads(tc.function.arguments) == {"expression": "2+2"}
+        result = self._call(msgs)
 
-    def test_tool_response_preserves_fields(self):
-        """Tool response messages should preserve tool_call_id and name."""
-        messages = [
-            {"role": "tool", "content": "4", "tool_call_id": "call_0", "name": "calculator"},
-        ]
-        result = _convert_openai_messages(messages)
-        assert result[0]["tool_call_id"] == "call_0"
-        assert result[0]["name"] == "calculator"
-
-    def test_array_content_passed_through(self):
-        """Strands sends content as [{"type": "text", "text": "..."}] — list is truthy so it passes through."""
-        messages = [
-            {"role": "user", "content": [{"type": "text", "text": "What is 2+2?"}]},
-        ]
-        result = _convert_openai_messages(messages)
-        assert result[0]["content"] == [{"type": "text", "text": "What is 2+2?"}]
-
-    def test_none_content_becomes_empty_string(self):
-        messages = [{"role": "assistant", "content": None}]
-        result = _convert_openai_messages(messages)
-        assert result[0]["content"] == ""
+        assert result[0] == msgs[0]  # system unchanged
+        assert isinstance(result[1]["content"], list)  # user converted
+        assert result[2] == msgs[2]  # assistant unchanged
 
 
 # ------------------------------------------------------------------
-# _prepare_messages_with_tools
+# TinkerEngine._prepare_max_tokens
 # ------------------------------------------------------------------
 
 
-class TestPrepareMessagesWithTools:
-    @pytest.fixture()
-    def qwen3_renderer(self):
-        tok = get_tokenizer("Qwen/Qwen3-8B")
-        return get_renderer("qwen3", tok, model_name="Qwen/Qwen3-8B")
+class TestPrepareMaxTokens:
+    @staticmethod
+    def _make_engine(max_model_length=1000, max_response_length=256):
+        """Create a minimal mock TinkerEngine with the fields _prepare_max_tokens needs."""
+        from rllm.engine.rollout.tinker_engine import TinkerEngine
 
-    def test_tools_injected_into_system_message(self, qwen3_renderer):
-        """Tool definitions should appear in the system message content."""
-        messages = _convert_openai_messages(
-            [
-                {"role": "system", "content": "Solve math problems."},
-                {"role": "user", "content": "What is 2+2?"},
-            ]
-        )
-        result = _prepare_messages_with_tools(qwen3_renderer, messages, [CALCULATOR_TOOL_OPENAI])
+        engine = object.__new__(TinkerEngine)
+        # _prepare_max_tokens only reads max_model_length (already decremented by 1 in __init__)
+        engine.max_model_length = max_model_length - 1
+        engine.max_response_length = max_response_length
+        return engine
 
-        system_content = result[0]["content"]
-        assert "calculator" in system_content
-        assert "<tools>" in system_content
-        assert "Solve math problems." in system_content
+    def test_within_budget(self):
+        engine = self._make_engine(max_model_length=1000)
+        # Plenty of room: 999 - 100 = 899 remaining > 256
+        assert engine._prepare_max_tokens(256, prompt_length=100) == 256
 
-    def test_system_prompt_not_duplicated(self, qwen3_renderer):
-        """Original system message should be replaced, not duplicated."""
-        messages = _convert_openai_messages(
-            [
-                {"role": "system", "content": "Be helpful."},
-                {"role": "user", "content": "Hi"},
-            ]
-        )
-        result = _prepare_messages_with_tools(qwen3_renderer, messages, [CALCULATOR_TOOL_OPENAI])
+    def test_capped_by_model_length(self):
+        engine = self._make_engine(max_model_length=500)
+        # 499 - 400 = 99 remaining < 256
+        assert engine._prepare_max_tokens(256, prompt_length=400) == 99
 
-        system_messages = [m for m in result if m["role"] == "system"]
-        assert len(system_messages) == 1
+    def test_exact_boundary(self):
+        engine = self._make_engine(max_model_length=500)
+        # 499 - 243 = 256 remaining == 256
+        assert engine._prepare_max_tokens(256, prompt_length=243) == 256
 
-    def test_no_system_message_creates_one(self, qwen3_renderer):
-        """If no system message exists, one should be created with tool definitions."""
-        messages = _convert_openai_messages(
-            [
-                {"role": "user", "content": "What is 2+2?"},
-            ]
-        )
-        result = _prepare_messages_with_tools(qwen3_renderer, messages, [CALCULATOR_TOOL_OPENAI])
+    def test_no_model_length_constraint(self):
+        """When max_model_length is 0 (falsy), no capping occurs."""
+        engine = object.__new__(type("E", (), {}))
+        from rllm.engine.rollout.tinker_engine import TinkerEngine
 
-        assert result[0]["role"] == "system"
-        assert "calculator" in result[0]["content"]
-        assert result[-1]["role"] == "user"
-
-    def test_non_function_tools_ignored(self, qwen3_renderer):
-        """Tools without type='function' should be silently skipped."""
-        messages = _convert_openai_messages(
-            [
-                {"role": "system", "content": "Hi"},
-                {"role": "user", "content": "Hello"},
-            ]
-        )
-        bad_tool = {"type": "retrieval", "name": "search"}
-        result = _prepare_messages_with_tools(qwen3_renderer, messages, [bad_tool])
-
-        # No tools injected, but system message still present
-        assert "<tools>" not in result[0]["content"]
-
-
-# ------------------------------------------------------------------
-# _parse_tinker_message
-# ------------------------------------------------------------------
-
-
-class TestParseTinkerMessage:
-    def test_tinker_tool_calls_converted_to_rllm(self):
-        """Tinker ToolCall(function=FunctionBody(...)) should become rllm ToolCall(name, arguments)."""
-        tc = _make_tinker_tool_call()
-        message = {"role": "assistant", "content": "result", "tool_calls": [tc]}
-
-        content, reasoning, tool_calls = _parse_tinker_message(message)
-        assert len(tool_calls) == 1
-        assert isinstance(tool_calls[0], RllmToolCall)
-        assert tool_calls[0].name == "calculator"
-        assert tool_calls[0].arguments == {"expression": "2+2"}
-
-    def test_structured_content_with_thinking(self):
-        """List content with thinking and text parts should be separated."""
-        message = {
-            "role": "assistant",
-            "content": [
-                {"type": "thinking", "thinking": "Let me reason..."},
-                {"type": "text", "text": "The answer is 4."},
-            ],
-        }
-        content, reasoning, tool_calls = _parse_tinker_message(message)
-        assert "answer is 4" in content
-        assert "reason" in reasoning
-        assert tool_calls == []
-
-    def test_string_content_no_reasoning(self):
-        """Plain string content should have empty reasoning."""
-        message = {"role": "assistant", "content": "Hello world"}
-        content, reasoning, tool_calls = _parse_tinker_message(message)
-        assert content == "Hello world"
-        assert reasoning == ""
-
-    def test_multiple_tool_calls(self):
-        """Multiple tool calls should all be converted."""
-        tcs = [
-            _make_tinker_tool_call("calculator", '{"expression": "2+2"}', "call_0"),
-            _make_tinker_tool_call("calculator", '{"expression": "3*3"}', "call_1"),
-        ]
-        message = {"role": "assistant", "content": "Computing...", "tool_calls": tcs}
-        _, _, tool_calls = _parse_tinker_message(message)
-        assert len(tool_calls) == 2
-        assert tool_calls[0].arguments == {"expression": "2+2"}
-        assert tool_calls[1].arguments == {"expression": "3*3"}
+        engine = object.__new__(TinkerEngine)
+        engine.max_model_length = 0  # falsy → skip capping
+        engine.max_response_length = 256
+        assert engine._prepare_max_tokens(512, prompt_length=100) == 512

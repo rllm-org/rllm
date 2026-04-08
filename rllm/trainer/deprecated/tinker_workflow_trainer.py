@@ -145,7 +145,7 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
         all_episode_metrics = {}  # episode_id -> episode.metrics dict
         val_group_size = self.config.training.get("val_group_size", 1)
         self.agent_execution_engine.rollout_engine.set_sampling_client(sampling_client)
-        self.agent_execution_engine.rollout_engine.validate = True
+        self.agent_execution_engine.rollout_engine.is_validation = True
 
         try:
             for batch in dataloader:
@@ -155,7 +155,7 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
                     all_episodes.extend(episodes)
                     all_episode_metrics.update(episode_metrics)
         finally:
-            self.agent_execution_engine.rollout_engine.validate = False
+            self.agent_execution_engine.rollout_engine.is_validation = False
 
         # Collect workflow metrics per episode
         workflow_metrics = defaultdict(list)

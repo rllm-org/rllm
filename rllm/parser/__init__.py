@@ -5,6 +5,7 @@ __all__ = [
     "DeepseekQwenChatTemplateParser",
     "QwenChatTemplateParser",
     "LlamaChatTemplateParser",
+    "TinkerChatTemplateParser",
     "ToolParser",
     "R1ToolParser",
     "QwenToolParser",
@@ -23,6 +24,10 @@ def __getattr__(name):
 
         mod = importlib.import_module("rllm.parser.chat_template_parser")
         return getattr(mod, name)
+    if name == "TinkerChatTemplateParser":
+        from rllm.parser.tinker_parser import TinkerChatTemplateParser
+
+        return TinkerChatTemplateParser
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

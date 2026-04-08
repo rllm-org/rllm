@@ -1,13 +1,54 @@
-import json
+from typing import cast
 
 import tinker
 from tinker.types import ModelInput
 from tinker_cookbook import model_info, renderers
+from typing_extensions import override  # need to use typing_extensions for python < 3.12
 
 from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine
-from rllm.parser import ChatTemplateParser
-from rllm.tools.tool_base import ToolCall
+from rllm.engine.rollout.types import ImageProcessor, Processor, TinkerTokenInput, TinkerTokenOutput, TokenInput, Tokenizer, TokenOutput
+from rllm.parser.tinker_parser import TinkerChatTemplateParser
 from rllm.workflows import TerminationEvent, TerminationReason
+
+"""
+Utility functions for Tinker engine. Partly borrowed from
+https://github.com/thinking-machines-lab/tinker-cookbook/blob/main/tinker_cookbook/rl/data_processing.py
+"""
+
+
+def _flat_token_input_to_model_input(token_input: TinkerTokenInput) -> ModelInput:
+    """Convert a flat token input to a ModelInput."""
+    if not token_input:  # empty list
+        return ModelInput(chunks=[])
+
+    out: list[tinker.ModelInputChunk] = []
+    current_text_chunk: list[int] = []
+
+    def flush_text_chunk():
+        if current_text_chunk:
+            out.append(tinker.EncodedTextChunk(tokens=current_text_chunk))
+            current_text_chunk.clear()
+
+    for elem in token_input:
+        if isinstance(elem, int):
+            current_text_chunk.append(elem)
+        else:
+            flush_text_chunk()
+            out.append(elem)
+
+    flush_text_chunk()  # final clear up
+    return tinker.ModelInput(chunks=out)
+
+
+def _flat_token_input_length(token_input: TokenInput) -> int:
+    """Get the length of a flat token input. This nicely handles both text and image inputs"""
+    length = 0
+    for elem in token_input:
+        if isinstance(elem, int):
+            length += 1
+        else:
+            length += elem.length
+    return length
 
 
 class TinkerEngine(RolloutEngine):
@@ -17,19 +58,16 @@ class TinkerEngine(RolloutEngine):
 
     def __init__(
         self,
+        base_url: str,
         model_name: str,
-        tokenizer,
+        tokenizer: Tokenizer,
         service_client: tinker.ServiceClient,
-        sampling_client: tinker.SamplingClient = None,
         max_prompt_length: int = 4096,
         max_response_length: int = 4096,
         max_model_length: int = 32768,
         sampling_params: dict | None = None,
-        val_sampling_params: dict | None = None,
-        bypass_render_with_parser: bool = False,
-        processor=None,
-        image_processor=None,
-        disable_thinking: bool = False,
+        processor: Processor | None = None,
+        image_processor: ImageProcessor | None = None,
         accumulate_reasoning: bool = False,
         reasoning_effort: str = "medium",
         renderer_name: str | None = None,
@@ -39,56 +77,43 @@ class TinkerEngine(RolloutEngine):
         Initialize TinkerEngine.
 
         Args:
+            base_url: Tinker service base URL
             model_name: Name of the model to use
             tokenizer: Tokenizer for encoding/decoding
             service_client: Tinker ServiceClient instance
-            sampling_client: Tinker SamplingClient instance
             max_prompt_length: Maximum prompt length in tokens
             max_response_length: Maximum response length in tokens
             max_model_length: Maximum total length (prompt + response) in tokens
-            sampling_params: Default sampling parameters for training (temperature, top_p, etc.)
-            val_sampling_params: Sampling parameters for validation (defaults to sampling_params if not provided)
-            bypass_render_with_parser: If True, use ChatTemplateParser instead of Tinker's renderer
-            processor: Optional processor for multimodal models (used when bypass_render_with_parser=True)
+            sampling_params: Default sampling parameters (temperature, top_p, etc.)
+            processor: Optional processor for multimodal models
             image_processor: Optional image processor for vision-language models (used with renderer)
-            disable_thinking: Whether to disable thinking in generation prompt (used when bypass_render_with_parser=True)
-            accumulate_reasoning: Whether to accumulate reasoning (used when bypass_render_with_parser=True)
-            renderer_name: Override renderer name (None = auto-detect from model)
+            accumulate_reasoning: Whether to accumulate reasoning
+            reasoning_effort: The effort level for reasoning
+            renderer_name: The name of the renderer to use (auto-detected from model_name if None)
         """
+        super().__init__()
+        self.base_url = base_url
         self.model_name = model_name
         self.max_prompt_length = max_prompt_length
         self.max_response_length = max_response_length
-        self.max_model_length = max_model_length - 1  # Reserve 1 token for logprob computation
+        self.max_model_length = max_model_length - 1
         self.tokenizer = tokenizer
-        self.sampling_params = sampling_params or {}
-        self.val_sampling_params = val_sampling_params or self.sampling_params
-        self.validate = False
-        self.bypass_render_with_parser = bypass_render_with_parser
         self.accumulate_reasoning = accumulate_reasoning
         self.reasoning_effort = reasoning_effort
 
+        self.train_sampling_params = dict(sampling_params.get("train", {})) if sampling_params else {}
+        self.val_sampling_params = dict(sampling_params.get("val", {})) if sampling_params else {}
         # Initialize Tinker service client
         self.service_client = service_client
 
-        if bypass_render_with_parser:
-            self.chat_parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=disable_thinking)
-            self.renderer = None
-            if hasattr(self.chat_parser, "stop_sequences") and self.chat_parser.stop_sequences:
-                self.stop_sequences = self.chat_parser.stop_sequences
-            elif hasattr(tokenizer, "eos_token") and tokenizer.eos_token:
-                self.stop_sequences = [tokenizer.eos_token]
-            else:
-                raise ValueError("No stop sequences found for tokenizer or chat parser")
-        else:
-            # Use explicit renderer_name if provided, otherwise auto-detect
-            renderer_name = renderer_name or model_info.get_recommended_renderer_name(self.model_name)
-            # Pass image_processor for VLM support with Tinker renderer
-            self.renderer = renderers.get_renderer(renderer_name, self.tokenizer, image_processor=image_processor)
-            self.chat_parser = None
-            self.stop_sequences = self.renderer.get_stop_sequences()
+        # Initialize the renderer and create TinkerChatTemplateParser
+        renderer_name = renderer_name or model_info.get_recommended_renderer_name(self.model_name)
+        self.renderer = renderers.get_renderer(renderer_name, self.tokenizer, image_processor=image_processor)
+        self.chat_parser = TinkerChatTemplateParser(self.renderer)
+        self.stop_sequences = self.chat_parser.stop_sequences
 
-        # Sampling client can be set later via set_sampling_client()
-        self.sampling_client = sampling_client
+        # Sampling client will be set via set_sampling_client()
+        self.sampling_client = None
 
     def set_sampling_client(self, sampling_client):
         """
@@ -99,29 +124,20 @@ class TinkerEngine(RolloutEngine):
         """
         self.sampling_client = sampling_client
 
-    def _convert_images_to_content_list(self, messages: list[dict]) -> list[dict]:
-        """
-        Convert messages from standard format to Tinker renderer format.
+    @staticmethod
+    def _convert_images_to_content_list(messages: list[dict]) -> list[dict]:
+        """Convert rllm image format to renderer content list format.
 
-        Standard format: {"role": "user", "content": "text", "images": [PIL.Image]}
-        Tinker format:   {"role": "user", "content": [{"type": "image", "image": img}, {"type": "text", "text": "..."}]}
-
-        Args:
-            messages: List of messages in standard format
-
-        Returns:
-            List of messages in Tinker renderer format
+        {"content": "text", "images": [PIL.Image]} -> {"content": [ImagePart, TextPart]}
         """
         converted = []
         for msg in messages:
             if "images" in msg and msg["images"]:
-                # Convert to content list format
                 content_list = []
                 for img in msg["images"]:
                     content_list.append({"type": "image", "image": img})
                 content_list.append({"type": "text", "text": msg.get("content", "")})
                 converted.append({**msg, "content": content_list})
-                # Remove the images key since it's now in content
                 del converted[-1]["images"]
             else:
                 converted.append(msg)
@@ -149,157 +165,79 @@ class TinkerEngine(RolloutEngine):
 
         return max_tokens
 
-    async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
-        """
-        Generate model response for a given set of messages.
+    @property
+    def supports_token_in_token_out(self) -> bool:
+        """Tinker sampling client does support returning prompt_ids, so this is true."""
+        return True
 
-        Args:
-            messages: List of message dictionaries (OpenAI format)
-            **kwargs: Additional parameters including:
-                - application_id: Session/application ID for tracing
-                - validate: Whether this is validation (for greedy decoding)
-                - enforce_max_prompt_length: Whether to enforce max prompt length
-                - tools: List of tools (used when bypass_render_with_parser=True)
-                - accumulate_reasoning: Whether to accumulate reasoning (used when bypass_render_with_parser=True)
-
-        Returns:
-            ModelOutput with generated text and metadata
+    @override
+    async def get_token_output_from_token_input(self, token_input: TokenInput, **kwargs) -> TinkerTokenOutput:
         """
+        Generate a sampled sequence from a given token input.
+        """
+        token_input = cast(TinkerTokenInput, token_input)
         if self.sampling_client is None:
             raise RuntimeError("Sampling client not set. Call set_sampling_client() first.")
 
-        # Extract kwargs
-        kwargs.pop("application_id", None)
-        validate = kwargs.pop("validate", False) or self.validate
+        input_length = _flat_token_input_length(token_input)
+
         enforce_max_prompt_length = kwargs.pop("enforce_max_prompt_length", True)
-        sampling_params = self.val_sampling_params if validate else self.sampling_params
+        if enforce_max_prompt_length and input_length > min(self.max_prompt_length, self.max_model_length):
+            raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
 
-        # Extract parser-specific kwargs
-        tools = kwargs.pop("tools", [])
-        accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
-        reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
+        # prepare sampling params
+        sampling_params = self.val_sampling_params.copy() if self.is_validation else self.train_sampling_params.copy()
 
-        if self.bypass_render_with_parser:
-            # Use ChatTemplateParser
-            prompt = self.chat_parser.parse(
-                messages,
-                add_generation_prompt=True,
-                is_first_msg=True,
-                tools=tools,
-                reasoning_effort=reasoning_effort,
-                accumulate_reasoning=accumulate_reasoning,
-            )
-            prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
-            prompt_length = len(prompt_ids)
+        requested_max_tokens = kwargs.pop("max_tokens", kwargs.pop("max_new_tokens", self.max_response_length))
+        requested_max_tokens = sampling_params.pop("max_tokens", requested_max_tokens)
+        max_tokens = self._prepare_max_tokens(requested_max_tokens, input_length)
 
-            # Check prompt length
-            if enforce_max_prompt_length and (prompt_length > self.max_prompt_length or prompt_length > self.max_model_length):
-                raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
+        if "temperature" in kwargs:
+            sampling_params["temperature"] = kwargs["temperature"]
+        if "top_p" in kwargs:
+            sampling_params["top_p"] = kwargs["top_p"]
+        if "top_k" in kwargs:
+            sampling_params["top_k"] = kwargs["top_k"]
 
-            # Dynamically adjust max_tokens based on prompt length
-            default_max_tokens = sampling_params.get("max_tokens", self.max_response_length)
-            requested_max_tokens = kwargs.get("max_tokens", kwargs.get("max_new_tokens", default_max_tokens))
-            max_tokens = self._prepare_max_tokens(requested_max_tokens, prompt_length)
+        tinker_sampling_params = tinker.types.SamplingParams(
+            max_tokens=max_tokens,
+            stop=self.stop_sequences,  # type: ignore
+            **sampling_params,
+        )
+        # call sampling client
+        model_input = _flat_token_input_to_model_input(token_input)
+        sample_response: tinker.SampleResponse = await self.sampling_client.sample_async(
+            prompt=model_input,
+            num_samples=1,
+            sampling_params=tinker_sampling_params,
+        )
 
-            # Prepare sampling params (override defaults with kwargs)
-            sampling_params = tinker.types.SamplingParams(
-                max_tokens=max_tokens,
-                stop=self.stop_sequences,
-                temperature=kwargs.get("temperature", sampling_params.get("temperature", 1.0)),
-                top_p=kwargs.get("top_p", sampling_params.get("top_p", 1.0)),
-            )
+        # return sampled sequence from sample response
+        return sample_response.sequences[0]
 
-            # Convert prompt to Tinker prompt format
-            tinker_prompt = ModelInput.from_ints(prompt_ids)
+    @override
+    def assemble_model_output(self, token_input: TokenInput, token_output: TokenOutput) -> ModelOutput:
+        """
+        Assemble model output from a sampled sequence.
+        """
+        sampled_sequence = cast(TinkerTokenOutput, token_output)
+        response_tokens, logprobs = sampled_sequence.tokens, sampled_sequence.logprobs
 
-            # Call Tinker sampling API
-            sample_response = await self.sampling_client.sample_async(
-                prompt=tinker_prompt,
-                num_samples=1,
-                sampling_params=sampling_params,
-            )
+        parsed_output = self.chat_parser.parse_completion(response_tokens)
+        content = parsed_output.get("content", "")
+        reasoning = parsed_output.get("reasoning", "")
+        tool_calls = parsed_output.get("tool_calls", [])
 
-            # Extract response tokens and logprobs
-            response_tokens = sample_response.sequences[0].tokens
-            logprobs = sample_response.sequences[0].logprobs
-
-            # Parse response using parser
-            parsed_output = self.chat_parser.parse_completion(response_tokens)
-
-            content = parsed_output.get("content", "")
-            reasoning = parsed_output.get("reasoning", "")
-            tool_calls = parsed_output.get("tool_calls", [])
-
-            # Decode full text
-            completion_text = self.tokenizer.decode(response_tokens, skip_special_tokens=True)
-        else:
-            # Use Tinker renderer (original behavior)
-            # Convert standard image format to Tinker renderer format
-            converted_messages = self._convert_images_to_content_list(messages)
-            # Build prompt using renderer (converts messages to Tinker prompt)
-            tinker_prompt = self.renderer.build_generation_prompt(converted_messages)
-
-            # For VLM prompts with ImageChunks, to_ints() may not be supported
-            try:
-                prompt_ids = tinker_prompt.to_ints()
-                prompt_length = len(prompt_ids)
-            except ValueError:
-                # Prompt contains ImageChunks - skip length enforcement for VLM
-                prompt_ids = []
-                prompt_length = 0
-
-            # Check prompt length (only for text-only prompts)
-            if prompt_length > 0 and enforce_max_prompt_length and (prompt_length > self.max_prompt_length or prompt_length > self.max_model_length):
-                raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
-
-            # Dynamically adjust max_tokens based on prompt length
-            default_max_tokens = sampling_params.get("max_tokens", self.max_response_length)
-            requested_max_tokens = kwargs.get("max_tokens", kwargs.get("max_new_tokens", default_max_tokens))
-            max_tokens = self._prepare_max_tokens(requested_max_tokens, prompt_length) if prompt_length > 0 else requested_max_tokens
-
-            # Prepare sampling params (override defaults with kwargs)
-            sampling_params = tinker.types.SamplingParams(
-                max_tokens=max_tokens,
-                stop=self.stop_sequences,
-                temperature=kwargs.get("temperature", sampling_params.get("temperature", 1.0)),
-                top_p=kwargs.get("top_p", sampling_params.get("top_p", 1.0)),
-            )
-
-            # Call Tinker sampling API
-            sample_response = await self.sampling_client.sample_async(
-                prompt=tinker_prompt,
-                num_samples=1,
-                sampling_params=sampling_params,
-            )
-
-            # Extract response tokens and logprobs
-            response_tokens = sample_response.sequences[0].tokens
-            logprobs = sample_response.sequences[0].logprobs
-
-            # Parse response using renderer
-            parsed_msg, _ = self.renderer.parse_response(response_tokens)
-            raw_content = parsed_msg["content"]
-            tool_calls = []
-            for tc in parsed_msg.get("tool_calls", []):
-                try:
-                    tool_calls.append(ToolCall(name=tc.function.name, arguments=json.loads(tc.function.arguments)))
-                except (json.JSONDecodeError, AttributeError):
-                    continue
-
-            if isinstance(raw_content, list):
-                reasoning = next((p["thinking"] for p in raw_content if p["type"] == "thinking"), "")
-                content = next((p["text"] for p in raw_content if p["type"] == "text"), "")
+        # decode full text
+        completion_text = self.tokenizer.decode(response_tokens, skip_special_tokens=True)  # type: ignore
+        finish_reason = sampled_sequence.stop_reason
+        # special handling for prompt ids, we will break any EncodedTextChunk into ints
+        prompt_ids = []
+        for elem in token_input:
+            if isinstance(elem, tinker.EncodedTextChunk):
+                prompt_ids.extend(elem.tokens)
             else:
-                content = raw_content
-                reasoning = ""
-
-            # Decode full text
-            completion_text = self.tokenizer.decode(response_tokens, skip_special_tokens=True)
-
-        # Determine finish reason
-        finish_reason = "stop"
-        if len(response_tokens) >= sampling_params.max_tokens:
-            finish_reason = "length"
+                prompt_ids.append(elem)
 
         return ModelOutput(
             text=completion_text,
@@ -309,10 +247,48 @@ class TinkerEngine(RolloutEngine):
             prompt_ids=prompt_ids,
             completion_ids=response_tokens,
             logprobs=logprobs,
-            prompt_length=prompt_length,
+            prompt_length=_flat_token_input_length(token_input),
             completion_length=len(response_tokens),
             finish_reason=finish_reason,
         )
+
+    @override
+    async def _get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
+        """
+        Generate model response for a given set of messages.
+
+        Args:
+            messages: List of message dictionaries (OpenAI format)
+            **kwargs: Additional parameters including:
+                - application_id: Session/application ID for tracing
+                - enforce_max_prompt_length: Whether to enforce max prompt length
+                - tools: List of tools
+                - accumulate_reasoning: Whether to accumulate reasoning
+
+        Returns:
+            ModelOutput with generated text and metadata
+        """
+        # Extract unused kwargs
+        kwargs.pop("application_id", None)
+
+        # Extract parser-specific kwargs
+        tools = kwargs.pop("tools", [])
+        accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
+        reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
+
+        # Use TinkerChatTemplateParser to build prompt
+        prompt = self.chat_parser.parse(
+            messages,
+            add_generation_prompt=True,
+            is_first_msg=True,
+            tools=tools,
+            reasoning_effort=reasoning_effort,
+            accumulate_reasoning=accumulate_reasoning,
+        )
+        token_input = self.tokenizer.encode(prompt, add_special_tokens=False)  # type: ignore
+
+        sampled_sequence = await self.get_token_output_from_token_input(token_input=token_input, **kwargs)
+        return self.assemble_model_output(token_input=token_input, token_output=sampled_sequence)
 
     async def compute_logprobs(self, ids: list[int]) -> list[float]:
         ids = ids[: self.max_model_length]

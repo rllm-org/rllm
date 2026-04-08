@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from rllm.experimental.rollout.tinker_engine import TinkerEngine
+from rllm.engine.rollout.tinker_engine import TinkerEngine
 
 logger = logging.getLogger(__name__)
 

@@ -24,7 +24,7 @@ from rllm_model_gateway.models import TraceRecord
 if TYPE_CHECKING:
     from omegaconf import DictConfig
 
-    from rllm.experimental.rollout import RolloutEngine
+    from rllm.engine.rollout import RolloutEngine
 
 logger = logging.getLogger(__name__)
 
