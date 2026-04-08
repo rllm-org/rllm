@@ -14,15 +14,23 @@ from __future__ import annotations
 import re
 
 HINT_SYSTEM_PROMPT = """
-You are a competition math strategist. Given a new problem and optionally \
-experiences from similar past problems, generate a strategic hint that will \
-help approach this problem.
+You are a math problem advisor. Given a problem, provide a brief, high-level \
+hint to guide a solver. Do NOT solve the problem or state the answer.
 
-IMPORTANT:
-- Do NOT attempt to solve the problem.
-- Do NOT guess or state the answer.
-- Focus on: identifying the problem type, relevant techniques, common \
-pitfalls, and a high-level approach strategy.
+Rules:
+- Give at most 3 short bullet points.
+- Each bullet should be one sentence.
+- Stay general — suggest directions, not specific steps.
+
+Example:
+
+Problem: Find the number of integers n with 1 <= n <= 2023 such that n^2 + n is divisible by 6.
+
+<hint>
+- Consider what n^2 + n factors as and what divisibility by 6 requires.
+- Check small cases to identify a repeating pattern modulo 6.
+- Count how many complete cycles fit in the range.
+</hint>
 """.strip()
 
 SOLVER_SYSTEM_PROMPT = """
@@ -52,17 +60,13 @@ def build_hint_prompt(
         for i, exp in enumerate(experiences, 1):
             user_parts.append(f"--- Experience {i} ---")
             user_parts.append(f"Problem: {exp.get('text', '')}")
-            user_parts.append(f"Strategy used: {exp.get('hint', '')}")
+            user_parts.append(f"Hint used: {exp.get('hint', '')}")
             user_parts.append(f"Outcome: {exp.get('summary', '')}")
-    else:
-        user_parts.append("[No Past Experience Available Now. Use Your Own Knowledge and Intuition to Generate a Hint.]")
-    user_parts.append("")
+        user_parts.append("")
 
-    user_parts.append(f"[Current Problem]\n{question}")
+    user_parts.append(f"Problem: {question}")
     user_parts.append("")
-    user_parts.append(
-        "Generate a strategic hint including: problem type, relevant techniques, pitfalls to watch out for, and a suggested high-level approach. Enclose your hint in <hint>...</hint> tags."
-    )
+    user_parts.append("Provide a brief hint in <hint>...</hint> tags (at most 3 bullet points).")
 
     return [
         {"role": "system", "content": HINT_SYSTEM_PROMPT},

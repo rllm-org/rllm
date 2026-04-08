@@ -149,9 +149,13 @@ class EmbeddingExperienceStore:
         all_embs = np.stack([e.embedding for e in entries_snapshot])
         similarities = all_embs @ query_emb
         k = min(top_k, len(entries_snapshot))
-        top_indices = np.argpartition(-similarities, k)[:k]
-        # Sort the top-K by similarity (descending)
-        top_indices = top_indices[np.argsort(-similarities[top_indices])]
+
+        if k >= len(entries_snapshot):
+            # Fewer entries than requested — just sort all of them
+            top_indices = np.argsort(-similarities)
+        else:
+            top_indices = np.argpartition(-similarities, k)[:k]
+            top_indices = top_indices[np.argsort(-similarities[top_indices])]
 
         results = []
         for idx in top_indices:
