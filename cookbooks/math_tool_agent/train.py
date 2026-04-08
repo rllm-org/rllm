@@ -25,7 +25,7 @@ def main(config: DictConfig):
         raise RuntimeError("gsm8k train split not found. Run: rllm dataset pull gsm8k")
 
     trainer = AgentTrainer(
-        backend="tinker",
+        backend=config.rllm.get("backend", "tinker"),
         agent_flow=math_tool_agent,
         evaluator=math_tool_evaluator,
         config=config,

@@ -183,7 +183,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         assert self.async_rollout_manager is not None, "async_rollout_manager is not available. Issues with RayPPOTrainer's `init_workers()` function."
 
         # Step 2: replace loss function on remote workers to support per-role loss override
-        self.actor_rollout_wg.set_loss_fn(CustomPPOLoss(self.config.actor_rollout_ref.actor))
+        if hasattr(self.actor_rollout_wg, "set_loss_fn"):
+            self.actor_rollout_wg.set_loss_fn(CustomPPOLoss(self.config.actor_rollout_ref.actor))
+        else:
+            logger.warning("RayWorkerGroup.set_loss_fn not available — skipping custom loss injection")
 
         # Step 3: initialize the rollout engine
         self.rollout_engine = VerlEngine(
