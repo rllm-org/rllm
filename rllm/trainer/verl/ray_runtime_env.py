@@ -7,9 +7,6 @@ PPO_RAY_RUNTIME_ENV = {
         "VLLM_LOGGING_LEVEL": "WARN",
         "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true",
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-        # TODO: disable compile cache due to cache corruption issue
-        # https://github.com/vllm-project/vllm/issues/31199
-        "VLLM_DISABLE_COMPILE_CACHE": "1",
         # To prevent hanging or crash during synchronization of weights between actor and rollout
         # in disaggregated mode. See:
         # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
