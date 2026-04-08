@@ -7,7 +7,7 @@ from tinker_cookbook.renderers import get_renderer
 from tinker_cookbook.renderers.base import ToolCall as TinkerToolCall
 from tinker_cookbook.tokenizer_utils import get_tokenizer
 
-from rllm.experimental.rollout.tinker_engine import (
+from rllm.engine.rollout.tinker_engine import (
     _convert_openai_messages,
     _parse_tinker_message,
     _prepare_messages_with_tools,

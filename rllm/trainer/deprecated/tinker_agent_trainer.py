@@ -350,7 +350,7 @@ class TinkerAgentTrainer:
         episodes_ls = []
         val_group_size = self.config.training.get("val_group_size", 1)
         self.agent_execution_engine.rollout_engine.set_sampling_client(sampling_client)
-        self.agent_execution_engine.rollout_engine.validate = True
+        self.agent_execution_engine.rollout_engine.is_validation = True
         try:
             for batch in dataloader:
                 batch = self.build_interleave_batch(batch, val_group_size)
@@ -358,7 +358,7 @@ class TinkerAgentTrainer:
                 async for episode_batch in self.generate_agent_episodes(group_size=val_group_size, minibatch_size=1):
                     episodes_ls.extend(episode_batch)
         finally:
-            self.agent_execution_engine.rollout_engine.validate = False
+            self.agent_execution_engine.rollout_engine.is_validation = False
 
         all_trajectories = []
         for episode in episodes_ls:

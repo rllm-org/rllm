@@ -14,6 +14,7 @@ __all__ = [
     "RolloutEngine",
     "ModelOutput",
     "OpenAIEngine",
+    "TinkerEngine",
     "VerlEngine",
 ]
 
@@ -28,14 +29,15 @@ def __getattr__(name):
 
         return _AgentWorkflowEngine
     if name == "OpenAIEngine":
-        from .rollout.openai_engine import OpenAIEngine as _OpenAIEngine
+        from .rollout.openai_engine import OpenAIEngine
 
-        return _OpenAIEngine
+        return OpenAIEngine
+    if name == "TinkerEngine":
+        from .rollout.tinker_engine import TinkerEngine
+
+        return TinkerEngine
     if name == "VerlEngine":
-        try:
-            from .rollout.verl_engine import VerlEngine as _VerlEngine
+        from .rollout.verl_engine import VerlEngine
 
-            return _VerlEngine
-        except Exception:
-            raise AttributeError(name) from None
+        return VerlEngine
     raise AttributeError(name)
