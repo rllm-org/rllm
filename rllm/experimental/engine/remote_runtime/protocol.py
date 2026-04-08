@@ -14,7 +14,8 @@ class RemoteRuntimeConfig:
 
     enabled: bool = False
     backend: str = "agentcore"
-    backend_config: dict[str, Any] = field(default_factory=dict)
+    agentcore: dict[str, Any] = field(default_factory=dict)
+    harbor: dict[str, Any] = field(default_factory=dict)
     session_timeout: float = 900.0
 
 
@@ -69,3 +70,25 @@ class AgentCoreRuntimeConfig:
     agent_runtime_arn: str = ""
     s3_bucket: str = ""
     tps_limit: int = 25
+
+
+# ---------------------------------------------------------------------------
+# Harbor-specific config
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class HarborRuntimeConfig:
+    """Config specific to harbor-backed trials."""
+
+    agent: str = "mini-swe-agent"
+    # Harbor environment backend: "docker" | "daytona" | "modal" | "e2b" | "runloop" | "gke" | "apple-container".
+    # None → use the task's declared default.
+    environment_type: str | None = None
+    # Pass-through to harbor AgentConfig.kwargs (scaffold-specific flags).
+    agent_kwargs: dict[str, Any] = field(default_factory=dict)
+    # Per-stage timeout multipliers — None means use the task's default (multiplier 1.0).
+    agent_timeout_multiplier: float | None = None
+    verifier_timeout_multiplier: float | None = None
+    agent_setup_timeout_multiplier: float | None = None
+    environment_build_timeout_multiplier: float | None = None

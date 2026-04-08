@@ -57,6 +57,7 @@ class RemoteAgentFlowEngine:
         tasks: list[dict],
         task_ids: list[str] | None = None,
         is_validation: bool = False,
+        show_progress: bool = False,
         **kwargs,
     ) -> list[Episode]:
         """Submit tasks to remote runtime, gather results, build Episodes from gateway traces."""
@@ -72,7 +73,13 @@ class RemoteAgentFlowEngine:
             task_id_counter[task_id] += 1
             futures.append(self.process_task_with_retry(task, task_id, rollout_idx, idx, is_validation=is_validation))
 
-        for future in asyncio.as_completed(futures):
+        completion_iter = asyncio.as_completed(futures)
+        if show_progress:
+            from tqdm.asyncio import tqdm
+
+            completion_iter = tqdm(completion_iter, total=len(futures), desc="rollouts")
+
+        for future in completion_iter:
             task_id, rollout_idx, idx, episode = await future
             results[idx] = episode
 

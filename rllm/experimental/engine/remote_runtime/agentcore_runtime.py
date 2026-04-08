@@ -30,7 +30,7 @@ class AgentCoreRuntime(RemoteAgentRuntime):
         model_id: str = "",
     ) -> None:
         self._config = config
-        self._acr_config = AgentCoreRuntimeConfig(**config.backend_config)
+        self._acr_config = AgentCoreRuntimeConfig(**config.agentcore)
         self._exp_id = exp_id
         self._model_id = model_id
         self._client: Any = None

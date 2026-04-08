@@ -214,7 +214,8 @@ class UnifiedTrainer:
             remote_runtime_config = RemoteRuntimeConfig(
                 enabled=True,
                 backend=remote_runtime_cfg.get("backend", "agentcore"),
-                backend_config=dict(remote_runtime_cfg.get("backend_config", {})),
+                agentcore=dict(remote_runtime_cfg.get("agentcore", {})),
+                harbor=dict(remote_runtime_cfg.get("harbor", {})),
                 session_timeout=remote_runtime_cfg.get("session_timeout", 900.0),
             )
             self._remote_runtime = create_remote_runtime(

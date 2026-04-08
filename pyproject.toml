@@ -35,7 +35,7 @@ dependencies = [
     "pandas",
     "polars",
     "pyarrow",
-    "litellm[proxy]>=1.80.0,<1.82.7",
+    "litellm[proxy]>=1.83.0",
     "aiosqlite",
     "hydra-core",
     "codetiming",
@@ -150,12 +150,18 @@ code-tools = [
     "together>=1.4",
 ]
 
+harbor = [
+    "harbor==0.3.0",
+]
+
 [tool.uv.sources]
 rllm-model-gateway = { path = "./rllm-model-gateway", editable = true }
 
 [tool.uv]
 override-dependencies = [
-    "litellm[proxy]>=1.80.0,<1.82.7",
+    "litellm[proxy]>=1.83.0",
+    "rich>=14.1.0",
+    "python-dotenv>=1.1.1",
 ]
 
 [tool.uv.extra-build-dependencies]
