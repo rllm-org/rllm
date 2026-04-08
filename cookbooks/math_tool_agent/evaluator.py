@@ -18,9 +18,7 @@ def math_tool_evaluator(task: dict, episode: Episode) -> EvalOutput:
     answer_text = _extract_agent_answer(episode)
     ground_truth = str(task.get("ground_truth", ""))
 
-    is_correct = grade_answer_mathd(answer_text, ground_truth) or grade_answer_sympy(
-        answer_text, ground_truth
-    )
+    is_correct = grade_answer_mathd(answer_text, ground_truth) or grade_answer_sympy(answer_text, ground_truth)
 
     reward = 1.0 if is_correct else 0.0
     return EvalOutput(

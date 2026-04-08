@@ -5,7 +5,6 @@ from math_tool_agent import _extract_answer, _safe_eval
 
 from rllm.types import Episode, Step, Trajectory
 
-
 # -- Calculator tests ----------------------------------------------------------
 
 

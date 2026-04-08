@@ -22,13 +22,9 @@ def main(config: DictConfig):
     test_dataset = DatasetRegistry.load_dataset("math500", "test")
 
     if train_dataset is None:
-        raise RuntimeError(
-            "hendrycks_math train split not found. Run: rllm dataset pull hendrycks_math"
-        )
+        raise RuntimeError("hendrycks_math train split not found. Run: rllm dataset pull hendrycks_math")
     if test_dataset is None:
-        raise RuntimeError(
-            "math500 test split not found. Run: rllm dataset pull math500"
-        )
+        raise RuntimeError("math500 test split not found. Run: rllm dataset pull math500")
 
     trainer = AgentTrainer(
         backend=config.rllm.get("backend", "tinker"),

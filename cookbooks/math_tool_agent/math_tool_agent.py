@@ -184,9 +184,7 @@ def math_tool_agent(task: Task, config: AgentConfig) -> Episode:
                 expr = args.get("expression", "")
                 result = _safe_eval(expr)
                 logger.info("Task %s turn %d: tool(%s) = %s", question[:40], turn, expr, result)
-                messages.append(
-                    {"role": "tool", "tool_call_id": tc.id, "content": result}
-                )
+                messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
         else:
             # No tool calls — model produced a text response; extract answer and stop.
             final_answer = _extract_answer(content) if used_tool else ""
