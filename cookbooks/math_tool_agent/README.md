@@ -4,9 +4,9 @@ A multi-turn agent flow for rLLM that trains a math agent to solve arithmetic pr
 
 ## Overview
 
-The agent solves math word problems from [GSM8K](https://huggingface.co/datasets/openai/gsm8k) by calling a calculator tool for each arithmetic step. This cookbook serves two purposes:
+The agent solves competition math problems from [MATH](https://huggingface.co/datasets/EleutherAI/hendrycks_math) (train) and [MATH-500](https://huggingface.co/datasets/HuggingFaceH4/MATH-500) (test) by calling a calculator tool for each arithmetic step. These problems are harder than GSM8K and require multi-turn reasoning, making them a better test for multi-turn RL training. This cookbook serves two purposes:
 
-1. **End-to-end system test** — a minimal multi-turn tool-use example that trains and converges quickly
+1. **End-to-end system test** — a multi-turn tool-use example that exercises the full training loop
 2. **Onboarding** — shows new users how to build a tool-calling agent with rLLM
 
 ## Architecture
@@ -42,10 +42,11 @@ rllm agent list    # should show "math_tool_agent" as a plugin
 
 ## Dataset
 
-Pull the GSM8K dataset (one-time):
+Pull the datasets (one-time):
 
 ```bash
-rllm dataset pull gsm8k
+rllm dataset pull hendrycks_math   # ~12.5K train problems across 7 subjects
+rllm dataset pull math500           # 500-problem test benchmark
 ```
 
 ## Training

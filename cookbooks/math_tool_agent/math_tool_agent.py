@@ -1,8 +1,8 @@
 """Multi-turn math agent with calculator tool.
 
-A multi-turn agent that solves arithmetic problems step by step using a
-calculator tool.  Uses text-based tool calling with a plain OpenAI client —
-works identically for eval and training (the gateway handles trace capture).
+A multi-turn agent that solves math problems step by step using a calculator
+tool via native OpenAI function-calling.  Works identically for eval and
+training (the gateway handles trace capture).
 """
 
 from __future__ import annotations
@@ -19,22 +19,39 @@ from rllm.types import Episode, Step, Trajectory
 
 logger = logging.getLogger(__name__)
 
-MAX_TURNS = 5
+MAX_TURNS = 8
 
 SYSTEM_PROMPT = """\
-You are a math assistant that solves arithmetic problems step by step.
-You have access to a calculator tool.
+You are a math assistant that solves competition math problems step by step.
+You have access to a calculator tool and you MUST use it.
 
-To use the calculator, output a tool call in this exact format:
-<tool_call>{"name": "calculate", "arguments": {"expression": "EXPR"}}</tool_call>
-
-where EXPR is an arithmetic expression using +, -, *, / and parentheses.
-
-Rules:
-1. Use the calculator for each arithmetic step — do not compute in your head.
-2. Wait for the tool result before continuing.
-3. When you have the final answer, write it as: <answer>NUMBER</answer>
+IMPORTANT rules you must follow:
+1. You MUST call the calculator tool at least once before giving your final answer. \
+Answers given without any prior tool call will be marked wrong.
+2. Do NOT perform arithmetic in your head — every computation must go through the calculator.
+3. Break the problem into small steps. Make one tool call per step, then reason about the result.
+4. When you have the final answer, put it in \\boxed{ANSWER} in your response.
 """
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate",
+            "description": "Evaluate an arithmetic expression. Supports +, -, *, /, ** (power), % (modulo), and parentheses.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "expression": {
+                        "type": "string",
+                        "description": "The arithmetic expression to evaluate, e.g. '(3 + 4) * 2'",
+                    }
+                },
+                "required": ["expression"],
+            },
+        },
+    }
+]
 
 
 def _safe_eval(expression: str) -> str:
@@ -44,7 +61,7 @@ def _safe_eval(expression: str) -> str:
     """
     if len(expression) > 100:
         return "Error: expression too long"
-    allowed = set("0123456789+-*/().  ")
+    allowed = set("0123456789+-*/().  %")
     if not all(c in allowed for c in expression):
         return "Error: invalid characters in expression"
     try:
@@ -56,35 +73,24 @@ def _safe_eval(expression: str) -> str:
         return f"Error: {e}"
 
 
-def _parse_tool_call(text: str) -> dict | None:
-    """Extract a tool call from <tool_call>...</tool_call> tags."""
-    match = re.search(r"<tool_call>(.*?)</tool_call>", text, re.DOTALL)
-    if not match:
-        return None
-    try:
-        return json.loads(match.group(1).strip())
-    except json.JSONDecodeError:
-        return None
-
-
 def _extract_answer(text: str) -> str:
-    """Try multiple patterns to extract the final numeric answer.
+    """Try multiple patterns to extract the final answer.
 
-    Order: <answer> tags → #### (GSM8K) → \\boxed{} → last number in text.
+    Order: \\boxed{} → <answer> tags → #### → "answer is X" → last number.
     """
 
-    # 1. <answer>NUMBER</answer>
+    # 1. \boxed{ANSWER}
+    m = re.search(r"\\boxed\{([^}]+)\}", text)
+    if m:
+        return m.group(1).strip()
+
+    # 2. <answer>ANSWER</answer>
     m = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL)
     if m:
         return m.group(1).strip()
 
-    # 2. #### NUMBER  (GSM8K convention)
+    # 3. #### ANSWER
     m = re.search(r"####\s*(.+?)(?:\n|$)", text)
-    if m:
-        return m.group(1).strip()
-
-    # 3. \boxed{NUMBER}
-    m = re.search(r"\\boxed\{([^}]+)\}", text)
     if m:
         return m.group(1).strip()
 
@@ -101,19 +107,41 @@ def _extract_answer(text: str) -> str:
     return ""
 
 
+def _msg_to_dict(msg) -> dict:
+    """Convert an OpenAI message object to a plain dict for serialization."""
+    if isinstance(msg, dict):
+        return msg
+    d: dict = {"role": msg.role}
+    if msg.content:
+        d["content"] = msg.content
+    if getattr(msg, "tool_calls", None):
+        d["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": tc.type,
+                "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+            }
+            for tc in msg.tool_calls
+        ]
+    if getattr(msg, "tool_call_id", None):
+        d["tool_call_id"] = msg.tool_call_id
+    return d
+
+
 @rllm.rollout(name="math-tool-agent")
 def math_tool_agent(task: Task, config: AgentConfig) -> Episode:
     """Multi-turn agent that solves math problems using a calculator tool."""
     client = OpenAI(base_url=config.base_url, api_key="EMPTY")
     question = task.data["question"]
 
-    messages = [
+    messages: list[dict] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": question},
     ]
 
     steps = []
     final_answer = ""
+    used_tool = False
 
     for turn in range(MAX_TURNS):
         logger.info("Task %s turn %d: calling LLM (%d messages)", question[:40], turn, len(messages))
@@ -121,6 +149,7 @@ def math_tool_agent(task: Task, config: AgentConfig) -> Episode:
             response = client.chat.completions.create(
                 model=config.model,
                 messages=messages,
+                tools=TOOLS,
                 temperature=1.0,
                 max_tokens=2048,
                 timeout=120,
@@ -129,38 +158,42 @@ def math_tool_agent(task: Task, config: AgentConfig) -> Episode:
             logger.warning("Task %s turn %d: LLM call failed: %s", question[:40], turn, e)
             break
 
-        content = response.choices[0].message.content or ""
-        messages.append({"role": "assistant", "content": content})
-        logger.info("Task %s turn %d: got %d chars", question[:40], turn, len(content))
+        msg = response.choices[0].message
+        content = msg.content or ""
+        tool_calls = msg.tool_calls or []
+
+        # Append the assistant message (may include tool_calls)
+        assistant_msg = _msg_to_dict(msg)
+        messages.append(assistant_msg)
+        logger.info("Task %s turn %d: got %d chars, %d tool calls", question[:40], turn, len(content), len(tool_calls))
 
         # Record this LLM call as a step
         steps.append(
             Step(
-                chat_completions=list(messages),
+                chat_completions=[_msg_to_dict(m) if not isinstance(m, dict) else m for m in messages],
                 model_response=content,
                 action=content,
             )
         )
 
-        # Check for final answer (strict: <answer> tag)
-        m = re.search(r"<answer>(.*?)</answer>", content, re.DOTALL)
-        if m:
-            final_answer = m.group(1).strip()
-            break
-
-        # Check for tool call
-        tool_call = _parse_tool_call(content)
-        if tool_call:
-            expr = tool_call.get("arguments", {}).get("expression", "")
-            result = _safe_eval(expr)
-            logger.info("Task %s turn %d: tool(%s) = %s", question[:40], turn, expr, result)
-            messages.append({"role": "user", "content": f"[Tool Result]\n{result}"})
+        # Execute any tool calls
+        if tool_calls:
+            used_tool = True
+            for tc in tool_calls:
+                args = json.loads(tc.function.arguments)
+                expr = args.get("expression", "")
+                result = _safe_eval(expr)
+                logger.info("Task %s turn %d: tool(%s) = %s", question[:40], turn, expr, result)
+                messages.append(
+                    {"role": "tool", "tool_call_id": tc.id, "content": result}
+                )
         else:
-            # Model didn't call a tool or give a tagged answer — stop
+            # No tool calls — model produced a text response; extract answer and stop.
+            final_answer = _extract_answer(content) if used_tool else ""
             break
 
-    # Fallback: extract answer from last response using flexible patterns
-    if not final_answer and steps:
+    # If loop ended without extracting (e.g. hit MAX_TURNS), try last content
+    if not final_answer and used_tool and steps:
         last_content = steps[-1].action or ""
         final_answer = _extract_answer(str(last_content))
 

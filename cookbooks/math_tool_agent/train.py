@@ -18,11 +18,17 @@ from rllm.experimental.unified_trainer import AgentTrainer
 
 @hydra.main(config_path="pkg://rllm.experimental.config", config_name="unified", version_base=None)
 def main(config: DictConfig):
-    train_dataset = DatasetRegistry.load_dataset("gsm8k", "train")
-    test_dataset = DatasetRegistry.load_dataset("gsm8k", "test")
+    train_dataset = DatasetRegistry.load_dataset("hendrycks_math", "train")
+    test_dataset = DatasetRegistry.load_dataset("math500", "test")
 
     if train_dataset is None:
-        raise RuntimeError("gsm8k train split not found. Run: rllm dataset pull gsm8k")
+        raise RuntimeError(
+            "hendrycks_math train split not found. Run: rllm dataset pull hendrycks_math"
+        )
+    if test_dataset is None:
+        raise RuntimeError(
+            "math500 test split not found. Run: rllm dataset pull math500"
+        )
 
     trainer = AgentTrainer(
         backend=config.rllm.get("backend", "tinker"),

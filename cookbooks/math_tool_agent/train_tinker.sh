@@ -4,7 +4,7 @@
 # Prerequisites:
 #   1. Install rllm with tinker extras:  uv pip install -e ".[tinker]"
 #   2. Install this cookbook:             uv pip install --no-deps -e cookbooks/math_tool_agent
-#   3. Pull the dataset:                 rllm dataset pull gsm8k
+#   3. Pull the datasets:                rllm dataset pull hendrycks_math && rllm dataset pull math500
 #
 # To enable UI logging, append: rllm.trainer.logger=[console,ui]
 
