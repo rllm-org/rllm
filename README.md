@@ -29,7 +29,7 @@ Read more on our [documentation site](https://docs.rllm-project.com/).
 
 ## Installation
 
-rLLM requires `Python >= 3.10` (`3.11` is needed if using `tinker`). You can install it either directly via pip or build from source.
+rLLM requires `Python >= 3.11`. You can install it either directly via pip or build from source.
 
 ```bash
 uv pip install "rllm @ git+https://github.com/rllm-org/rllm.git"
