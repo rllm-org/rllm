@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Literal
@@ -185,8 +186,10 @@ class AlgorithmConfig:
     use_rllm: bool = False  # This is ignored (assumed True) for tinker backend.
     estimator: rLLMAdvantageEstimator = rLLMAdvantageEstimator.GRPO
     estimator_map: dict[str, rLLMAdvantageEstimator | str | tuple] = field(default_factory=dict)
-    # Per-role policy loss overrides (populated from tuples in estimator_map during __post_init__)
-    loss_fn_map: dict[str, str] = field(default_factory=dict)
+    # Per-role policy loss overrides (populated from tuples in estimator_map during __post_init__).
+    # Values can be strings (standard Tinker losses) or callables (custom losses
+    # for forward_backward_custom_async).
+    loss_fn_map: dict[str, str | Callable] = field(default_factory=dict)
     # TODO(listar2000): eventually we will remove the `per_step` mode all-together. Now we keep it for backward compatibility.
     stepwise_advantage_mode: Literal["broadcast", "per_step"] = "broadcast"
     norm_adv_by_std_in_grpo: bool = True
@@ -194,8 +197,9 @@ class AlgorithmConfig:
     # advantage computation (GRPO/REINFORCE). Steps missing advantages default to 0.0.
     # When False (default), always compute advantages normally.
     use_precomputed_advantage: bool = False
-    # Global loss_fn override (for tinker backend; Verl uses loss_fn_map per role)
-    loss_fn: Literal["importance_sampling", "ppo", "cispo", "dro", "cross_entropy"] | None = None
+    # Global loss_fn override (for tinker backend; Verl uses loss_fn_map per role).
+    # Can be a string (standard Tinker loss) or a callable (custom loss).
+    loss_fn: Literal["importance_sampling", "ppo", "cispo", "dro", "cross_entropy"] | Callable | None = None
     lr_schedule: Literal["linear", "cosine", "constant"] = "constant"
     warmup_steps_ratio: float = 0.0
 
@@ -248,7 +252,7 @@ class AlgorithmConfig:
                     raise ValueError(f"estimator_map tuple for role '{role}' must have exactly 2 elements (estimator, loss_fn), got {len(value)}")
                 estimator, loss_fn = value
                 normalized_map[role] = estimator
-                self.loss_fn_map[role] = str(loss_fn)
+                self.loss_fn_map[role] = loss_fn if callable(loss_fn) else str(loss_fn)
             else:
                 normalized_map[role] = value
         self.estimator_map = normalized_map

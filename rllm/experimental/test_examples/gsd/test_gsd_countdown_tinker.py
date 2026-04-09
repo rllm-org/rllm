@@ -41,7 +41,7 @@ def main(config: DictConfig):
     gsd_config = GsdConfig(
         N=8,
         N_val=2,
-        distill_topk=20,
+        distill_topk=19,
         train_hint=False,
         success_reward_threshold=1.0,
         kl_coeff=1.0,

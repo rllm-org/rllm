@@ -217,31 +217,37 @@ class TestEstimatorMap:
             "gsd_hint",
         }
 
-    def test_on_policy_uses_importance_sampling(self):
-        """On-policy distillation routes to importance_sampling (reverse KL)."""
-        _, loss = DEFAULT_GSD_ADV_ESTIMATOR_MAP["gsd_distill_onpolicy"]
-        assert loss == "importance_sampling"
+    def test_build_has_combined_distill(self):
+        """build_gsd_estimator_map uses a single 'gsd_distill' role with callable loss."""
+        m = build_gsd_estimator_map(train_hint=False)
+        assert "gsd_distill" in m
+        estimator, loss_fn = m["gsd_distill"]
+        assert estimator == "precomputed"
+        assert callable(loss_fn)
 
-    def test_supervised_uses_cross_entropy(self):
-        """Supervised distillation routes to cross_entropy (forward KL)."""
-        _, loss = DEFAULT_GSD_ADV_ESTIMATOR_MAP["gsd_distill_supervised"]
-        assert loss == "cross_entropy"
-
-    def test_student_uses_reinforce_pp(self):
+    def test_build_student_role(self):
         from rllm.experimental.common.config import rLLMAdvantageEstimator
 
-        estimator, loss = DEFAULT_GSD_ADV_ESTIMATOR_MAP["gsd_student"]
+        m = build_gsd_estimator_map(train_hint=False)
+        estimator, loss = m["gsd_student"]
         assert estimator == rLLMAdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE
         assert loss == "ppo"
 
     def test_build_without_hint(self):
         m = build_gsd_estimator_map(train_hint=False)
         assert "gsd_hint" not in m
-        assert "gsd_distill_onpolicy" in m
 
     def test_build_with_hint(self):
         m = build_gsd_estimator_map(train_hint=True)
         assert "gsd_hint" in m
+
+    def test_callable_flows_through_algorithm_config(self):
+        """Callable loss function survives AlgorithmConfig.__post_init__ tuple splitting."""
+        from rllm.experimental.common.config import AlgorithmConfig
+
+        m = build_gsd_estimator_map(train_hint=False)
+        config = AlgorithmConfig(estimator_map=m)
+        assert callable(config.loss_fn_map["gsd_distill"])
 
 
 # ---------------------------------------------------------------------------
@@ -311,3 +317,111 @@ class TestBuildTopkFklDatum:
         )
         weights_t = datum.loss_fn_inputs["weights"].to_torch()
         assert weights_t.max().item() <= 0.5 + 1e-8
+
+
+# ---------------------------------------------------------------------------
+# build_combined_gsd_datum — (N, K+1) shape
+# ---------------------------------------------------------------------------
+
+
+class TestBuildCombinedGsdDatum:
+    @pytest.fixture(autouse=True)
+    def _skip_without_tinker(self):
+        pytest.importorskip("tinker")
+
+    def test_shape_with_teacher_topk(self):
+        """Combined datum has (N, K+1) targets and weights."""
+        from rllm.experimental.gsd.losses import build_combined_gsd_datum
+
+        prompt_ids = [1, 2]
+        response_ids = [3, 4]
+        K = 3
+        teacher_topk = {
+            "topk_ids": [[10, 20, 30], [40, 50, 60]],
+            "topk_logprobs": [[-0.5, -1.0, -2.0], [-0.3, -0.8, -1.5]],
+        }
+        datum = build_combined_gsd_datum(
+            prompt_ids,
+            response_ids,
+            teacher_topk=teacher_topk,
+            is_advantages=[0.1, 0.2],
+            is_old_logprobs=[-1.0, -2.0],
+            K=K,
+        )
+
+        target_t = datum.loss_fn_inputs["target_tokens"].to_torch()
+        meta = datum._gsd_metadata
+        weights_t = meta["teacher_weights"]
+        adv_t = meta["is_advantages"]
+        mask_t = meta["mask"]
+
+        N = len(prompt_ids) + len(response_ids) - 1  # 3 after right-shift
+        assert target_t.shape == (N, K + 1)
+        assert weights_t.shape == (N, K + 1)
+        assert adv_t.shape == (N,)
+        assert mask_t.shape == (N,)
+
+        # Column K has the sampled (next) token
+        assert target_t[-1, K].item() != 0  # last response pos has a real token
+
+        # CE weights sum to ~1 for response positions (columns 0..K-1)
+        prompt_len = N - len(response_ids)
+        resp_weights = weights_t[prompt_len, :K]
+        np.testing.assert_allclose(resp_weights.sum().item(), 1.0, atol=1e-5)
+
+        # IS column (K) weight is always 0
+        assert weights_t[:, K].sum().item() == 0.0
+
+    def test_onpolicy_only_no_teacher(self):
+        """On-policy datum with no teacher_topk: CE weights are all zero."""
+        from rllm.experimental.gsd.losses import build_combined_gsd_datum
+
+        datum = build_combined_gsd_datum(
+            prompt_ids=[1],
+            response_ids=[2, 3],
+            teacher_topk=None,
+            is_advantages=[0.5, -0.3],
+            is_old_logprobs=[-1.0, -2.0],
+            K=5,
+        )
+        meta = datum._gsd_metadata
+        assert meta["teacher_weights"].sum().item() == 0.0  # no CE contribution
+        assert meta["is_advantages"].sum().item() != 0.0  # IS is populated
+
+
+# ---------------------------------------------------------------------------
+# make_gsd_combined_loss
+# ---------------------------------------------------------------------------
+
+
+class TestGsdCombinedLoss:
+    def test_loss_runs_and_returns_metrics(self):
+        """The custom loss function computes a scalar loss and returns metrics."""
+        import torch
+
+        from rllm.experimental.gsd.losses import make_gsd_combined_loss
+
+        loss_fn = make_gsd_combined_loss(ce_weight=0.5, is_weight=0.5)
+
+        # Mock a datum with _gsd_metadata sidecar (matching real datum structure)
+        class MockDatum:
+            def __init__(self, N, K):
+                self.loss_fn_inputs = {"target_tokens": None}  # placeholder
+                self._gsd_metadata = {
+                    "teacher_weights": torch.zeros(N, K + 1),
+                    "is_advantages": torch.tensor([0.5] + [0.0] * (N - 1)),
+                    "is_old_logprobs": torch.tensor([-1.0] + [0.0] * (N - 1)),
+                    "mask": torch.tensor([1.0] + [0.0] * (N - 1)),
+                }
+
+        N, K = 4, 3
+        datum = MockDatum(N, K)
+        logprobs = torch.randn(N, K + 1, requires_grad=True)
+
+        loss, metrics = loss_fn([datum], [logprobs])
+
+        assert loss.shape == ()  # scalar
+        assert loss.requires_grad
+        assert "gsd/combined_loss" in metrics
+        assert "gsd/ce_loss" in metrics
+        assert "gsd/is_loss" in metrics

@@ -55,7 +55,7 @@ class GsdConfig:
 
     N: int = 4
     N_val: int = 2
-    distill_topk: int = 20
+    distill_topk: int = 19  # Max 19: combined datum uses K+1 columns, server limit is 20
     train_hint: bool = False
     hint_sampling_params: dict[str, Any] = field(
         default_factory=lambda: {"temperature": 0.6, "top_p": 0.9, "max_tokens": 256},
@@ -71,6 +71,11 @@ class GsdConfig:
     # Threshold for collecting "hard solves" — tasks with student pass rate
     # below this that still have at least one correct solution.
     hard_solve_threshold: float = 0.5
+
+    # When True, Case 2 (teacher invalid) produces NO training trajectories.
+    # All gradients come exclusively from the combined IS + CE distillation loss.
+    # When False (default), Case 2 falls back to standard RL on student rollouts.
+    distill_only: bool = False
 
 
 class GsdWorkflow(Workflow):
@@ -208,8 +213,9 @@ class GsdWorkflow(Workflow):
         teacher_rewards = [r for _, r in teacher_results]
         R_S_avg = sum(student_rewards) / len(student_rewards)
         R_T_avg = sum(teacher_rewards) / len(teacher_rewards)
-        # strictly greater is needed
-        teacher_valid = R_T_avg > R_S_avg
+
+        # Teacher is valid when R_T_avg is greater than R_S_avg, or when they are equal but the R_T_avg is >= success_reward_threshold
+        teacher_valid = R_T_avg > R_S_avg or (R_T_avg == R_S_avg and R_T_avg >= self.cfg.success_reward_threshold)
 
         trajectories: list[Trajectory] = []
         metrics: dict[str, Any] = {
@@ -234,8 +240,11 @@ class GsdWorkflow(Workflow):
                 trajectories,
             )
         else:
-            logger.info(f"[{uid}] Case 2 (GRPO fallback): R_S={R_S_avg:.2f} R_T={R_T_avg:.2f} student_correct={n_correct_student}/{N} teacher_correct={n_correct_teacher}/{N}")
-            self._case2_grpo_fallback(student_results, trajectories)
+            if self.cfg.distill_only:
+                logger.info(f"[{uid}] Case 2 (skipped, distill_only=True): R_S={R_S_avg:.2f} R_T={R_T_avg:.2f}")
+            else:
+                logger.info(f"[{uid}] Case 2 (GRPO fallback): R_S={R_S_avg:.2f} R_T={R_T_avg:.2f} student_correct={n_correct_student}/{N} teacher_correct={n_correct_teacher}/{N}")
+                self._case2_grpo_fallback(student_results, trajectories)
 
         # ---- Phase 5: Update experience buffer ----------------------
         if teacher_valid and self.experience_store is not None:
@@ -336,31 +345,35 @@ class GsdWorkflow(Workflow):
                 clip_max=cfg.kl_clip_max,
             )
             step.advantage = advantages
-            traj = Trajectory(name="gsd_distill_onpolicy", steps=[step], reward=reward)
+            # Store teacher Top-K so the combined datum has CE data too
+            step.metadata = step.metadata or {}
+            step.metadata["teacher_topk"] = {
+                "topk_ids": scoring["topk_ids"],
+                "topk_logprobs": scoring["topk_logprobs"],
+            }
+            traj = Trajectory(name="gsd_distill", steps=[step], reward=reward)
             trajectories.append(traj)
 
-        # Process supervised results
+        # Process supervised results → combined datums with CE fields only
         for (step, reward), scoring in zip(correct_teacher, sup_scorings, strict=True):
             if scoring["response_len"] == 0:
                 continue
-            # Deep-copy and swap prompt to student view (hint removed)
             sup_step = copy.deepcopy(step)
             sup_step.prompt_ids = student_prompt_ids
             sup_step.chat_completions = self._make_student_prompt(question)
-            sup_step.model_output = None  # recompute student logprobs during training
-            sup_step.advantage = None
+            sup_step.model_output = None
+            sup_step.advantage = None  # no IS for supervised datums
             sup_step.metadata = {
                 "teacher_topk": {
                     "topk_ids": scoring["topk_ids"],
                     "topk_logprobs": scoring["topk_logprobs"],
                 },
             }
-            traj = Trajectory(name="gsd_distill_supervised", steps=[sup_step], reward=reward)
+            traj = Trajectory(name="gsd_distill", steps=[sup_step], reward=reward)
             trajectories.append(traj)
 
-        n_onpolicy = sum(1 for t in trajectories if t.name == "gsd_distill_onpolicy")
-        n_supervised = sum(1 for t in trajectories if t.name == "gsd_distill_supervised")
-        logger.info(f"[{uid}] distillation: {n_onpolicy} on-policy (IS) + {n_supervised} supervised (CE) trajectories")
+        n_distill = sum(1 for t in trajectories if t.name == "gsd_distill")
+        logger.info(f"[{uid}] distillation: {n_distill} combined datums ({len(on_policy_scorings)} on-policy + {len(correct_teacher)} supervised)")
 
     # ------------------------------------------------------------------
     # Case 2: Teacher invalid → GRPO fallback

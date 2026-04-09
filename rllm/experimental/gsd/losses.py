@@ -30,6 +30,7 @@ CE + IS decomposition.  Key conventions inherited from SDPO:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import tinker
@@ -65,15 +66,28 @@ DEFAULT_GSD_ADV_ESTIMATOR_MAP: dict[str, Any] = {
 def build_gsd_estimator_map(
     *,
     train_hint: bool = False,
+    ce_weight: float | None = None,
+    is_weight: float | None = None,
 ) -> dict[str, Any]:
-    """Build the estimator map for GSD.
+    """Build the estimator map for GSD with combined custom loss.
+
+    The ``gsd_distill`` role uses a combined CE + IS loss via
+    ``forward_backward_custom_async``.
 
     Args:
         train_hint: Whether to include the hint trajectory for meta-RL training.
+        ce_weight: Weight for the forward-KL (CE) term.  ``None`` (default)
+            = auto-proportional to the number of CE datums in the batch.
+        is_weight: Weight for the reverse-KL (IS) term.  ``None`` (default)
+            = auto-proportional to the number of IS datums in the batch.
     """
-    m = dict(DEFAULT_GSD_ADV_ESTIMATOR_MAP)
-    if not train_hint:
-        m.pop("gsd_hint", None)
+    custom_loss = make_gsd_combined_loss(ce_weight=ce_weight, is_weight=is_weight)
+    m: dict[str, Any] = {
+        "gsd_student": (rLLMAdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE, "ppo"),
+        "gsd_distill": ("precomputed", custom_loss),
+    }
+    if train_hint:
+        m["gsd_hint"] = (rLLMAdvantageEstimator.REINFORCE, "importance_sampling")
     return m
 
 
@@ -423,3 +437,232 @@ async def compute_student_logprobs_for_teacher_topk(
         result_logprobs.append(lps.tolist())
 
     return {"logprobs": result_logprobs}
+
+
+# ---------------------------------------------------------------------------
+# Combined CE + IS datum builder (for forward_backward_custom_async)
+# ---------------------------------------------------------------------------
+
+
+def build_combined_gsd_datum(
+    prompt_ids: TinkerTokenInput,
+    response_ids: list[int],
+    teacher_topk: dict[str, list[list[int]] | list[list[float]]] | None = None,
+    is_advantages: list[float] | None = None,
+    is_old_logprobs: list[float] | None = None,
+    K: int = 20,
+):
+    """Build a combined ``(N, K+1)`` datum for ``forward_backward_custom_async``.
+
+    Following SDPO's design, the ``target_tokens`` has shape ``(N, K+1)``:
+
+    * Columns 0..K-1: teacher's Top-K token IDs (for CE term).
+    * Column K: the next response token (for IS term).
+
+    The custom loss function :func:`make_gsd_combined_loss` uses both sets of
+    logprobs in a single forward pass.
+
+    For **on-policy datums** (student sequences):
+      ``is_advantages`` and ``is_old_logprobs`` are populated; ``teacher_topk``
+      may be None (CE contributes nothing).
+
+    For **supervised datums** (teacher correct sequences):
+      ``teacher_topk`` is populated; ``is_advantages`` is None (IS contributes
+      nothing).
+
+    Args:
+        prompt_ids: Tokenized student prompt (``TinkerTokenInput``).
+        response_ids: Response token IDs.
+        teacher_topk: ``{"topk_ids": (T, K), "topk_logprobs": (T, K)}``.
+        is_advantages: Per-token IS advantages (len T).  None → zeros.
+        is_old_logprobs: Student logprobs at rollout time (len T).  None → zeros.
+        K: Number of Top-K tokens (must match teacher_topk width if provided).
+
+    Returns:
+        A ``tinker.Datum`` for use with :func:`make_gsd_combined_loss`.
+    """
+    import tinker
+    from tinker_cookbook.supervised.common import (
+        create_rightshifted_model_input_and_leftshifted_targets,
+    )
+
+    from rllm.experimental.rollout.tinker_engine import _flat_token_input_to_model_input
+
+    T = len(response_ids)
+    K1 = K + 1
+    if K1 > 20:
+        raise ValueError(f"distill_topk={K} produces K+1={K1} columns in target_tokens, but the Tinker server limits the second dimension to 20. Use distill_topk <= 19.")
+
+    # Build full token sequence and right-shift
+    all_tokens = list(prompt_ids) + list(response_ids)
+    all_model_input = _flat_token_input_to_model_input(all_tokens)
+    input_tokens, left_shifted_targets = create_rightshifted_model_input_and_leftshifted_targets(
+        list(all_model_input.chunks),
+    )
+    N = input_tokens.length  # len(all_tokens) - 1
+    prompt_len = N - T
+
+    # --- Build (N, K+1) target_tokens ---
+    target_NK1 = torch.zeros(N, K1, dtype=torch.long)
+
+    # Column K: the autoregressive next-token (for IS)
+    # left_shifted_targets is a list[int] of length N (the standard 1D targets)
+    target_NK1[:, K] = torch.tensor(left_shifted_targets, dtype=torch.long)
+
+    # Columns 0..K-1: teacher's Top-K (for CE), response portion only
+    if teacher_topk is not None:
+        topk_ids = teacher_topk["topk_ids"]
+        assert len(topk_ids) == T, f"teacher_topk length {len(topk_ids)} != response length {T}"
+        topk_K = len(topk_ids[0])
+        topk_ids_t = torch.tensor(topk_ids, dtype=torch.long)  # (T, topk_K)
+        k_fill = min(topk_K, K)
+        target_NK1[prompt_len:, :k_fill] = topk_ids_t[:, :k_fill]
+
+    # --- Build (N, K+1) teacher_weights ---
+    weights_NK1 = torch.zeros(N, K1, dtype=torch.float32)
+
+    if teacher_topk is not None:
+        topk_lps = torch.tensor(teacher_topk["topk_logprobs"], dtype=torch.float64)  # (T, topk_K)
+        # Renormalize via logsumexp
+        topk_lps -= torch.logsumexp(topk_lps, dim=1, keepdim=True)
+        probs = torch.nan_to_num(topk_lps.exp().float(), nan=0.0)  # (T, topk_K)
+        k_fill = min(probs.shape[1], K)
+        weights_NK1[prompt_len:, :k_fill] = probs[:, :k_fill]
+    # Column K stays 0 (not used by CE term)
+
+    # --- Build (N,) mask, advantages, old_logprobs ---
+    mask_N = torch.zeros(N, dtype=torch.float32)
+    mask_N[prompt_len:] = 1.0
+
+    adv_N = torch.zeros(N, dtype=torch.float32)
+    if is_advantages is not None:
+        adv_t = torch.tensor(is_advantages, dtype=torch.float32)
+        adv_N[prompt_len : prompt_len + len(adv_t)] = adv_t
+
+    old_lp_N = torch.zeros(N, dtype=torch.float32)
+    if is_old_logprobs is not None:
+        old_lp_t = torch.tensor(is_old_logprobs, dtype=torch.float32)
+        old_lp_N[prompt_len : prompt_len + len(old_lp_t)] = old_lp_t
+
+    # Only target_tokens goes into loss_fn_inputs (sent to Tinker server
+    # for the CE forward pass).  The other fields are stored as a Python-
+    # side sidecar dict on the Datum object — accessible by the custom loss
+    # function but not serialized to the server.
+    datum = tinker.Datum(
+        model_input=input_tokens,
+        loss_fn_inputs={
+            "target_tokens": tinker.TensorData.from_torch(target_NK1),
+        },
+    )
+    datum._gsd_metadata = {  # type: ignore[attr-defined]
+        "teacher_weights": weights_NK1,
+        "is_advantages": adv_N,
+        "is_old_logprobs": old_lp_N,
+        "mask": mask_N,
+    }
+    return datum
+
+
+# ---------------------------------------------------------------------------
+# Combined CE + IS custom loss function
+# ---------------------------------------------------------------------------
+
+
+def make_gsd_combined_loss(
+    ce_weight: float | None = None,
+    is_weight: float | None = None,
+) -> Callable:
+    """Create a combined CE + IS loss for ``forward_backward_custom_async``.
+
+    Returns a closure matching Tinker's ``CustomLossFnV1`` signature::
+
+        (data: list[Datum], logprobs: list[Tensor]) -> (loss, metrics)
+
+    The ``logprobs`` tensors have shape ``(N, K+1)`` — matching the
+    ``target_tokens`` field in combined datums from
+    :func:`build_combined_gsd_datum`.
+
+    Args:
+        ce_weight: Weight for the forward-KL (cross-entropy) term.  If
+            ``None`` (default), the weight is set proportionally to the
+            number of datums that contribute CE signal in the batch.
+        is_weight: Weight for the reverse-KL (importance sampling) term.
+            Same auto-proportional behavior when ``None``.
+
+    Example: A batch with 4 on-policy datums (IS only) and 2 supervised
+    datums (CE only) → effective ``ce_weight=2/6≈0.33``, ``is_weight=4/6≈0.67``.
+    """
+
+    def gsd_combined_loss(
+        data: list,
+        logprobs_list: list[torch.Tensor],
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        # --- Determine weights: auto-proportional or fixed ---
+        if ce_weight is None or is_weight is None:
+            # Count by primary role: a datum with non-zero IS advantages is
+            # an on-policy (IS) datum; one with zero advantages is supervised
+            # (CE-only).  On-policy datums may also have CE data, but their
+            # primary signal is IS — they shouldn't inflate the CE count.
+            n_is = 0
+            n_ce_only = 0
+            for datum in data:
+                meta = datum._gsd_metadata  # type: ignore[attr-defined]
+                if meta["is_advantages"].any():
+                    n_is += 1
+                else:
+                    n_ce_only += 1
+            total = max(n_is + n_ce_only, 1)
+            eff_ce = ce_weight if ce_weight is not None else n_ce_only / total
+            eff_is = is_weight if is_weight is not None else n_is / total
+        else:
+            eff_ce = ce_weight
+            eff_is = is_weight
+
+        total_loss = torch.tensor(0.0)
+        total_ce = 0.0
+        total_is = 0.0
+        total_tokens = 0
+
+        for datum, lp in zip(data, logprobs_list, strict=True):
+            # Metadata is stored as a Python-side sidecar (not in loss_fn_inputs)
+            # to avoid Tinker server serialization errors with unknown fields.
+            meta = datum._gsd_metadata  # type: ignore[attr-defined]
+            teacher_w = meta["teacher_weights"]  # (N, K+1) torch.Tensor
+            mask = meta["mask"]  # (N,) torch.Tensor
+            adv = meta["is_advantages"]  # (N,) torch.Tensor
+            old_lp = meta["is_old_logprobs"]  # (N,) torch.Tensor
+
+            n_tokens = mask.sum()
+            if n_tokens == 0:
+                continue
+
+            K = teacher_w.shape[1] - 1
+
+            # CE term: -sum_k teacher_w[:, :K] * student_lp[:, :K]
+            ce_per_pos = -(teacher_w[:, :K] * lp[:, :K]).sum(dim=1)  # (N,)
+
+            # IS term: -(ratio * advantage)
+            new_lp_sampled = lp[:, K]  # (N,) — current logprob of sampled token
+            ratio = torch.exp(new_lp_sampled - old_lp)
+            is_per_pos = -(ratio * adv)  # (N,)
+
+            # Combined, masked, token-normalized
+            loss_per_pos = eff_ce * ce_per_pos + eff_is * is_per_pos
+            datum_loss = (loss_per_pos * mask).sum() / n_tokens
+            total_loss = total_loss + datum_loss
+
+            total_ce += (ce_per_pos * mask).sum().item() / n_tokens.item()
+            total_is += (is_per_pos * mask).sum().item() / n_tokens.item()
+            total_tokens += int(n_tokens.item())
+
+        n = max(len(data), 1)
+        return total_loss, {
+            "gsd/ce_loss": total_ce / n,
+            "gsd/is_loss": total_is / n,
+            "gsd/combined_loss": total_loss.item() / n,
+            "gsd/total_tokens": float(total_tokens),
+            "gsd/ce_weight": eff_ce,
+            "gsd/is_weight": eff_is,
+        }
+
+    return gsd_combined_loss

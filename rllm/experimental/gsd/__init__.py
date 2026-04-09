@@ -22,11 +22,13 @@ Quick start::
 from rllm.experimental.gsd.experience_store import EmbeddingExperienceStore
 from rllm.experimental.gsd.losses import (
     DEFAULT_GSD_ADV_ESTIMATOR_MAP,
+    build_combined_gsd_datum,
     build_gsd_estimator_map,
     build_topk_fkl_datum,
     compute_sampled_rkl_advantages,
     compute_student_logprobs_for_teacher_topk,
     compute_topk_rkl_at_position,
+    make_gsd_combined_loss,
     score_teacher_for_response,
 )
 from rllm.experimental.gsd.workflow import GsdConfig, GsdWorkflow
@@ -36,10 +38,12 @@ __all__ = [
     "EmbeddingExperienceStore",
     "GsdConfig",
     "GsdWorkflow",
+    "build_combined_gsd_datum",
     "build_gsd_estimator_map",
     "build_topk_fkl_datum",
     "compute_sampled_rkl_advantages",
     "compute_student_logprobs_for_teacher_topk",
     "compute_topk_rkl_at_position",
+    "make_gsd_combined_loss",
     "score_teacher_for_response",
 ]
