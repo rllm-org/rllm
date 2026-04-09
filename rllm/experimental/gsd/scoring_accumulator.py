@@ -119,7 +119,7 @@ class ScoringAccumulator:
         results = await asyncio.gather(*coros, return_exceptions=True)
 
         elapsed = time.monotonic() - t0
-        logger.debug(f"[ScoringAccumulator] flushed batch #{self.total_batches}: {batch_size} coros in {elapsed:.2f}s")
+        logger.info(f"[ScoringAccumulator] flushed batch #{self.total_batches}: {batch_size} coros in {elapsed:.2f}s")
 
         for (future, _), result in zip(batch, results, strict=False):
             if future.done():

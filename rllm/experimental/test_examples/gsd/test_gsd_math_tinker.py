@@ -42,8 +42,8 @@ def main(config: DictConfig):
         train_hint=False,
         success_reward_threshold=0.5,
         kl_coeff=1.0,
-        kl_clip_min=-2.0,
-        kl_clip_max=2.0,
+        kl_clip_min=-5.0,
+        kl_clip_max=5.0,
         retrieval_k=3,
         distill_only=True,
     )
@@ -53,10 +53,10 @@ def main(config: DictConfig):
         device="cpu",
         max_size=500,
         save_path=f"{save_dir}/experience_store.json",
-        autosave_every=10,
+        autosave_every=20,
     )
 
-    scoring_accumulator = ScoringAccumulator(batch_interval=0.05, batch_threshold=64)
+    scoring_accumulator = ScoringAccumulator(batch_interval=0.05, batch_threshold=32)
 
     trainer = AgentTrainer(
         workflow_class=GsdWorkflow,
