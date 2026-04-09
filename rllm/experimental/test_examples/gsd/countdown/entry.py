@@ -10,21 +10,41 @@ Launch via ``tmp/gsd/test_gsd_countdown_tinker.sh``.
 
 from __future__ import annotations
 
+import random
+
 import hydra
+import numpy as np
+import torch
 from omegaconf import DictConfig, OmegaConf
 
-from rllm.experimental.gsd.hint_pool import HintPool
-from rllm.experimental.gsd.losses import build_gsd_estimator_map
-from rllm.experimental.gsd.scoring_accumulator import ScoringAccumulator
-from rllm.experimental.gsd.transform import gsd_transform_trajectory_groups_to_datums
-from rllm.experimental.gsd.workflow import GsdConfig
-from rllm.experimental.test_examples.gsd.countdown_utils import (
+from rllm.experimental.gsd import (
+    FrozenTeacherRef,
+    GsdConfig,
+    HintPool,
+    ScoringAccumulator,
+    build_gsd_estimator_map,
+    gsd_transform_trajectory_groups_to_datums,
+    make_gsd_grouping_hook,
+)
+from rllm.experimental.test_examples.gsd.countdown.utils import (
     COUNTDOWN_SEED_HINTS,
     countdown_reward,
     prepare_countdown_datasets,
 )
-from rllm.experimental.test_examples.gsd.countdown_workflow import GsdCountdownWorkflow
+from rllm.experimental.test_examples.gsd.countdown.workflow import GsdCountdownWorkflow
 from rllm.experimental.unified_trainer import AgentTrainer
+
+# Fixed seed for reproducibility.  This seeds the torch / numpy / random
+# RNGs used by:
+#
+# * ``torch.utils.data.DataLoader(shuffle=True)`` in ``TinkerBackend.get_dataloader``
+#   — determines the per-epoch training-task ordering.
+# * GSD helpers that use ``random`` / ``np.random`` (e.g. HintPool UCB1
+#   tie-breaking, experience store sampling).
+#
+# Change this to vary the run; set it from ``config.training.seed`` if
+# you want Hydra-driven sweeps.
+SEED = 42
 
 
 @hydra.main(
@@ -33,6 +53,10 @@ from rllm.experimental.unified_trainer import AgentTrainer
     version_base=None,
 )
 def main(config: DictConfig):
+    torch.manual_seed(SEED)
+    np.random.seed(SEED)
+    random.seed(SEED)
+
     # GSD manages its own N rollouts per task
     OmegaConf.update(config, "training.group_size", 1, force_add=True)
     OmegaConf.update(config, "validation.group_size", 1, force_add=True)
@@ -42,7 +66,9 @@ def main(config: DictConfig):
     gsd_config = GsdConfig(
         N=5,
         N_val=2,
-        distill_topk=19,
+        # Countdown uses pool-selected hints (not model-sampled), so hint
+        # GRPO does not apply.  The workflow subclass forces this to False
+        # regardless, but we set it explicitly here for clarity.
         train_hint=False,
         success_reward_threshold=0.5,
         kl_coeff=1.0,
@@ -65,6 +91,7 @@ def main(config: DictConfig):
         hard_solve_window=5,  # only feed the 5 most recent into evolution
     )
 
+    teacher_ref = FrozenTeacherRef()
     scoring_accumulator = ScoringAccumulator(batch_interval=0.05, batch_threshold=64)
 
     trainer = AgentTrainer(
@@ -72,6 +99,7 @@ def main(config: DictConfig):
         workflow_args={
             "reward_fn": countdown_reward,
             "gsd_config": gsd_config,
+            "teacher_ref": teacher_ref,
             "hint_pool": hint_pool,
             "scoring_accumulator": scoring_accumulator,
         },
@@ -81,6 +109,9 @@ def main(config: DictConfig):
         backend="tinker",
         traj_group_adv_estimator_map=build_gsd_estimator_map(train_hint=False),
         transform_fn=gsd_transform_trajectory_groups_to_datums,
+        # Not strictly required since countdown has no hint trajectories,
+        # but cheap and future-proof if we ever turn hint GRPO back on.
+        traj_grouping_hook=make_gsd_grouping_hook(),
     )
     trainer.train()
 

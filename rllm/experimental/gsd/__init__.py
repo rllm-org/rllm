@@ -1,51 +1,66 @@
 """Generalized Self-Distillation (GSD) module.
 
-Provides building blocks for the GSD training paradigm, which combines
-on-policy reverse-KL distillation with supervised forward-KL distillation
-from a hint-conditioned pseudo-teacher.
+The active pipeline uses:
 
-Quick start::
+* **SFT-style CE loss** — student is trained on the frozen teacher's correct
+  responses via Tinker's built-in ``cross_entropy`` loss (no Top-K).
+* **IS loss** — student is trained on its own responses with per-token
+  reverse-KL advantages computed against a *frozen reference* teacher
+  (``teacher_lp - student_lp``) via ``importance_sampling``.
+* **GRPO hint optimization** — hint-generation trajectories are grouped
+  across tasks via a custom :mod:`rllm.experimental.gsd.grouping` hook and
+  trained with REINFORCE / GRPO using ``R_T_avg - R_S_avg`` as the reward.
+* **Case 2 fallback** — when the teacher doesn't help, student rollouts go
+  through standard GRPO (``ppo`` loss with REINFORCE++ baseline).
 
-    from rllm.experimental.gsd import (
-        DEFAULT_GSD_ADV_ESTIMATOR_MAP,
-        GsdConfig,
-        GsdWorkflow,
-    )
-
-    trainer = AgentTrainer(
-        ...,
-        workflow_class=GsdWorkflow,
-        traj_group_adv_estimator_map=DEFAULT_GSD_ADV_ESTIMATOR_MAP,
-    )
+See :mod:`rllm.experimental.gsd.legacy` for the original Top-K CE + custom
+combined loss implementation.
 """
 
-from rllm.experimental.gsd.experience_store import EmbeddingExperienceStore
+from rllm.experimental.gsd.grouping import make_gsd_grouping_hook
 from rllm.experimental.gsd.losses import (
-    DEFAULT_GSD_ADV_ESTIMATOR_MAP,
-    build_combined_gsd_datum,
+    CE_ROLE,
+    GRPO_ROLE,
+    GSD_ROLES,
+    HINT_ROLE,
+    IS_ROLE,
     build_gsd_estimator_map,
-    build_topk_fkl_datum,
-    compute_sampled_rkl_advantages,
-    compute_student_logprobs_for_teacher_topk,
-    compute_topk_rkl_at_position,
-    make_gsd_combined_loss,
-    score_teacher_for_response,
+    build_is_datum,
+    build_sft_style_ce_datum,
+    compute_teacher_logprobs_for_response,
+    kl_advantages_from_logprobs,
 )
-from rllm.experimental.gsd.scoring_accumulator import ScoringAccumulator
+from rllm.experimental.gsd.teacher_ref import FrozenTeacherRef
+from rllm.experimental.gsd.transform import gsd_transform_trajectory_groups_to_datums
+from rllm.experimental.gsd.utils import (
+    EmbeddingExperienceStore,
+    HintPool,
+    ScoringAccumulator,
+)
 from rllm.experimental.gsd.workflow import GsdConfig, GsdWorkflow
 
 __all__ = [
-    "DEFAULT_GSD_ADV_ESTIMATOR_MAP",
-    "EmbeddingExperienceStore",
-    "GsdConfig",
+    # Roles
+    "CE_ROLE",
+    "IS_ROLE",
+    "GRPO_ROLE",
+    "HINT_ROLE",
+    "GSD_ROLES",
+    # Workflow + config
     "GsdWorkflow",
-    "ScoringAccumulator",
-    "build_combined_gsd_datum",
+    "GsdConfig",
+    # Infrastructure
+    "FrozenTeacherRef",
+    "make_gsd_grouping_hook",
+    "gsd_transform_trajectory_groups_to_datums",
     "build_gsd_estimator_map",
-    "build_topk_fkl_datum",
-    "compute_sampled_rkl_advantages",
-    "compute_student_logprobs_for_teacher_topk",
-    "compute_topk_rkl_at_position",
-    "make_gsd_combined_loss",
-    "score_teacher_for_response",
+    # Datum builders / helpers
+    "build_sft_style_ce_datum",
+    "build_is_datum",
+    "compute_teacher_logprobs_for_response",
+    "kl_advantages_from_logprobs",
+    # Optional utilities (re-exported from gsd.utils)
+    "EmbeddingExperienceStore",
+    "HintPool",
+    "ScoringAccumulator",
 ]

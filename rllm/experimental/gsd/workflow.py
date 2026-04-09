@@ -1,40 +1,69 @@
 """GsdWorkflow — Generalized Self-Distillation workflow.
 
-Implements the GSD training loop for a single task:
+This is the active GSD implementation (see :mod:`rllm.experimental.gsd.legacy`
+for the archived Top-K variant).  Key design choices:
 
-1. **Self-hinting** — generate a solution-independent strategic hint.
-2. **Dual rollouts** — N student (no hint) + N teacher (with hint) rollouts.
-3. **Gating** — compare average rewards; decide distillation vs GRPO fallback.
-4. **Loss routing** —
+1. **Direct sampling client access.** The workflow builds ``ModelInput``
+   objects via the renderer's ``build_prompt`` method and calls
+   ``sampling_client.sample_async`` directly, bypassing
+   ``rollout_engine.get_model_response``.  This avoids the
+   ``ModelOutput → Step.from_model_output`` round-trip and lets us use
+   ``num_samples=N`` for single-call batched rollouts.
 
-   * **Case 1 (teacher valid):**
-     * On-policy distillation (reverse KL via ``importance_sampling``):
-       student sequences scored under teacher → per-token advantages.
-     * Supervised distillation (forward KL via ``cross_entropy``):
-       teacher's correct sequences with Top-K soft targets.
-   * **Case 2 (fallback):**
-     * Student trajectories → GRPO via ``importance_sampling``.
+2. **Frozen reference teacher.** Teacher rollouts and teacher logprob
+   evaluations go through a :class:`FrozenTeacherRef` that pins the
+   initial sampling client at the start of training so its logprobs
+   stay stable across ``optim_step`` calls.  Student rollouts and hint
+   generation use the *live* (updating) sampling client.
+
+3. **SFT-style CE.** The CE loss is classic cross-entropy on
+   ``(student_prompt, teacher_response)`` pairs via Tinker's built-in
+   ``cross_entropy`` loss.  No Top-K, no extra ``sample_async`` call.
+
+4. **Sampled-token IS.** The IS loss uses per-token reverse-KL advantages
+   ``teacher_lp - student_lp`` computed against the frozen teacher via
+   a single ``compute_logprobs_async`` call per student response.
+
+5. **Hint GRPO.** When ``train_hint=True``, the hint generation step
+   becomes a trajectory with reward ``R_T_avg - R_S_avg``.  The custom
+   grouping hook (see :mod:`rllm.experimental.gsd.grouping`) merges
+   hint trajectories across tasks into a single group so REINFORCE has
+   a meaningful baseline.
+
+Trajectory roles produced:
+
+* :data:`rllm.experimental.gsd.losses.CE_ROLE` (``"gsd_ce"``)
+* :data:`rllm.experimental.gsd.losses.IS_ROLE` (``"gsd_is"``)
+* :data:`rllm.experimental.gsd.losses.GRPO_ROLE` (``"gsd_grpo"``) — Case 2
+* :data:`rllm.experimental.gsd.losses.HINT_ROLE` (``"gsd_hint"``) — when train_hint=True
 """
 
 from __future__ import annotations
 
 import asyncio
-import copy
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from tqdm import tqdm
+import tinker
 
 from rllm.agents.agent import Episode, Step, Trajectory
-from rllm.experimental.gsd.losses import compute_sampled_rkl_advantages, score_teacher_for_response
+from rllm.experimental.gsd.losses import (
+    CE_ROLE,
+    GRPO_ROLE,
+    HINT_ROLE,
+    IS_ROLE,
+    compute_teacher_logprobs_for_response,
+    kl_advantages_from_logprobs,
+)
 from rllm.experimental.gsd.prompts import (
     build_hint_prompt,
     build_student_prompt,
     build_teacher_prompt,
     extract_hint,
 )
+from rllm.experimental.gsd.teacher_ref import FrozenTeacherRef
 from rllm.experimental.rollout.rollout_engine import RolloutEngine
 from rllm.workflows.workflow import Workflow
 
@@ -53,44 +82,59 @@ RewardFn = Callable[[dict, str], float]
 class GsdConfig:
     """Configuration for the GSD workflow."""
 
+    # Core rollout sizes
     N: int = 4
     N_val: int = 2
-    distill_topk: int = 19  # Max 19: combined datum uses K+1 columns, server limit is 20
-    train_hint: bool = False
+
+    # Sampling parameters for the rollouts themselves (temperature, top_p,
+    # max_tokens, etc.).  If empty, the engine's train_sampling_params are
+    # used.
+    rollout_sampling_params: dict[str, Any] = field(default_factory=dict)
+
+    # Hint generation sampling params (typically lower temperature).
     hint_sampling_params: dict[str, Any] = field(
-        default_factory=lambda: {"temperature": 0.6, "top_p": 0.9, "max_tokens": 256},
+        default_factory=lambda: {"temperature": 1.0, "top_p": 0.95, "max_tokens": 512},
     )
+
+    # Hint meta-RL: when True, the hint generation trajectory is added as
+    # a ``gsd_hint`` trajectory optimized via REINFORCE / GRPO.  Requires
+    # the custom grouping hook (``make_gsd_grouping_hook``) in the trainer.
+    train_hint: bool = True
+
+    # IS / reverse-KL advantage computation
     kl_coeff: float = 1.0
     kl_clip_min: float = -5.0
     kl_clip_max: float = 5.0
     success_reward_threshold: float = 0.5
     max_context_length: int = 32768
 
-    # Experience buffer retrieval
+    # Experience buffer retrieval (for the math workflow's LLM hint generation)
     retrieval_k: int = 3
     # Threshold for collecting "hard solves" — tasks with student pass rate
     # below this that still have at least one correct solution.
     hard_solve_threshold: float = 0.5
 
-    # When True, Case 2 (teacher invalid) produces NO training trajectories.
-    # All gradients come exclusively from the combined IS + CE distillation loss.
-    # When False (default), Case 2 falls back to standard RL on student rollouts.
+    # When True, Case 2 (teacher invalid) produces NO training trajectories
+    # on the student side.  Hint trajectories are still emitted when
+    # ``train_hint=True`` (hints can get signal even when the hint itself
+    # didn't help, via the negative reward).
     distill_only: bool = False
 
 
 class GsdWorkflow(Workflow):
-    """Generalized Self-Distillation workflow for single-turn math tasks.
+    """Generalized Self-Distillation workflow for single-turn tasks.
 
     Each :meth:`run` call processes one problem through the full GSD loop
-    and returns an :class:`Episode` with named trajectories that the
-    per-role loss router dispatches to the correct loss function.
+    and returns an :class:`Episode` whose trajectories are dispatched to
+    the correct loss by the per-role estimator map + custom transform.
 
     .. important::
 
-       GSD manages its own rollout parallelism (``N`` student + ``N`` teacher).
-       The Tinker ``training.group_size`` and ``validation.group_size`` should
-       both be set to **1** in the config so the engine dispatches one task at
-       a time to this workflow.
+       GSD manages its own rollout parallelism (``N`` student + ``N``
+       teacher via ``sample_async(num_samples=N)``).  The Tinker
+       ``training.group_size`` and ``validation.group_size`` should both be
+       set to **1** in the config so the engine dispatches one task at a
+       time to this workflow.
     """
 
     def __init__(
@@ -100,6 +144,7 @@ class GsdWorkflow(Workflow):
         *,
         reward_fn: RewardFn,
         gsd_config: GsdConfig | None = None,
+        teacher_ref: FrozenTeacherRef | None = None,
         experience_store: Any | None = None,
         scoring_accumulator: Any | None = None,
         **kwargs: Any,
@@ -107,6 +152,9 @@ class GsdWorkflow(Workflow):
         super().__init__(rollout_engine=rollout_engine, executor=executor, **kwargs)
         self.cfg = gsd_config or GsdConfig()
         self.reward_fn = reward_fn
+        # Shared across all workflow instances: pins the initial sampling
+        # client as the frozen reference teacher on first access.
+        self.teacher_ref = teacher_ref or FrozenTeacherRef()
         self.experience_store = experience_store  # Optional EmbeddingExperienceStore
         self.scoring_accumulator = scoring_accumulator  # Optional ScoringAccumulator
 
@@ -116,28 +164,209 @@ class GsdWorkflow(Workflow):
 
     async def run(self, task: dict, uid: str, **kwargs: Any) -> Episode:
         is_validation = self.rollout_engine.is_validation
-
         if is_validation:
             return await self._do_validation(task, uid)
         return await self._do_training(task, uid)
 
-    async def _get_hint_text(self, question: str, uid: str) -> str:
-        experiences = None
-        if self.experience_store is not None:
-            experiences = await self.experience_store.query(question, top_k=self.cfg.retrieval_k)
-            if experiences:
-                logger.info(f"[{uid}] retrieved {len(experiences)} experiences from buffer (size={self.experience_store.size})")
-        hint_messages = build_hint_prompt(question, experiences=experiences)
-        hint_output = await self.rollout_engine.get_model_response(
-            hint_messages,
-            **self.cfg.hint_sampling_params,
+    # ------------------------------------------------------------------
+    # Training: hint → dual rollouts → gate → distill / fallback
+    # ------------------------------------------------------------------
+
+    async def _do_training(self, task: dict, uid: str) -> Episode:
+        question = task["question"]
+        N = self.cfg.N
+
+        # Capture the frozen teacher on first use.  No-op after first capture.
+        teacher_client = self.teacher_ref.capture(self.rollout_engine)
+        live_client: tinker.SamplingClient = self.rollout_engine.sampling_client
+
+        # ---- Phase 1: Acquire a hint ------------------------------
+        # ``_get_hint`` returns the hint text and optionally a ``Step``
+        # representing the hint-generation trajectory (populated only when
+        # the hint was sampled from the live model, so that it can receive
+        # gradient signal via hint GRPO).  Subclasses that use a pool /
+        # cached hint should return ``(hint_text, None)``.
+        hint_text, hint_step = await self._get_hint(question, uid, live_client)
+
+        # ---- Phase 2: Dual rollouts -------------------------------
+        # Student uses the LIVE client, teacher uses the FROZEN client.
+        # ``num_samples=N`` gives us N rollouts per call.
+        student_messages = self._make_student_prompt(question)
+        teacher_messages = self._make_teacher_prompt(question, hint_text)
+
+        student_mi = self._build_model_input(student_messages)
+        teacher_mi = self._build_model_input(teacher_messages)
+
+        student_sp = self._make_sampling_params(self.cfg.rollout_sampling_params, prompt_len=student_mi.length)
+        teacher_sp = self._make_sampling_params(self.cfg.rollout_sampling_params, prompt_len=teacher_mi.length)
+
+        student_resp, teacher_resp = await asyncio.gather(
+            live_client.sample_async(prompt=student_mi, num_samples=N, sampling_params=student_sp),
+            teacher_client.sample_async(prompt=teacher_mi, num_samples=N, sampling_params=teacher_sp),
         )
-        hint_text = extract_hint(hint_output.text or hint_output.content or "")
-        logger.info(f"[{uid}] hint generated ({len(hint_text)} chars): {hint_text[:500]}")
-        return hint_text
+
+        student_prompt_ids = student_mi.to_ints()
+        teacher_prompt_ids = teacher_mi.to_ints()
+
+        student_steps = [self._seq_to_step(student_prompt_ids, seq, task, student_messages) for seq in student_resp.sequences]
+        teacher_steps = [self._seq_to_step(teacher_prompt_ids, seq, task, teacher_messages) for seq in teacher_resp.sequences]
+
+        # ---- Phase 3: Gating --------------------------------------
+        student_rewards = [s.reward for s in student_steps]
+        teacher_rewards = [s.reward for s in teacher_steps]
+        R_S_avg = sum(student_rewards) / max(len(student_rewards), 1)
+        R_T_avg = sum(teacher_rewards) / max(len(teacher_rewards), 1)
+        threshold = self.cfg.success_reward_threshold
+        teacher_valid = R_T_avg > R_S_avg or (R_T_avg == R_S_avg and R_T_avg >= threshold)
+
+        n_correct_student = sum(1 for r in student_rewards if r >= threshold)
+        n_correct_teacher = sum(1 for r in teacher_rewards if r >= threshold)
+
+        trajectories: list[Trajectory] = []
+        metrics: dict[str, Any] = {
+            "R_S_avg": R_S_avg,
+            "R_T_avg": R_T_avg,
+            "teacher_valid": float(teacher_valid),
+            "hint_improvement": R_T_avg - R_S_avg,
+            "n_correct_student": float(n_correct_student),
+            "n_correct_teacher": float(n_correct_teacher),
+        }
+
+        # ---- Phase 4a: Hint trajectory ------------------------------
+        # Only emitted when the hint was actually sampled from the live
+        # model AND meta-RL on the hint generator is enabled.  Subclasses
+        # that select hints from a pool (no sampling) return
+        # ``hint_step is None`` from ``_get_hint``.
+        if self.cfg.train_hint and hint_step is not None:
+            hint_reward = R_T_avg - R_S_avg
+            hint_step.reward = hint_reward
+            trajectories.append(Trajectory(name=HINT_ROLE, steps=[hint_step], reward=hint_reward))
+
+        # ---- Phase 4b: Case 1 (teacher valid) → CE + IS ------------
+        if teacher_valid:
+            logger.info(f"[{uid}] Case 1 (distill): R_S={R_S_avg:.2f} R_T={R_T_avg:.2f} student={n_correct_student}/{N} teacher={n_correct_teacher}/{N}")
+            await self._case1_distillation(
+                uid=uid,
+                teacher_client=teacher_client,
+                student_prompt_ids=student_prompt_ids,
+                teacher_prompt_ids=teacher_prompt_ids,
+                student_messages=student_messages,
+                student_steps=student_steps,
+                teacher_steps=teacher_steps,
+                trajectories=trajectories,
+            )
+        # ---- Phase 4c: Case 2 (teacher invalid) → GRPO fallback ----
+        else:
+            if self.cfg.distill_only:
+                logger.info(f"[{uid}] Case 2 (skipped, distill_only=True): R_S={R_S_avg:.2f} R_T={R_T_avg:.2f}")
+            else:
+                logger.info(f"[{uid}] Case 2 (GRPO fallback): R_S={R_S_avg:.2f} R_T={R_T_avg:.2f} student={n_correct_student}/{N} teacher={n_correct_teacher}/{N}")
+                for s in student_steps:
+                    trajectories.append(Trajectory(name=GRPO_ROLE, steps=[s], reward=s.reward))
+
+        # ---- Phase 5: Post-training hooks (experience buffer, etc.) ---
+        await self._post_training_hook(
+            task=task,
+            uid=uid,
+            question=question,
+            hint_text=hint_text,
+            student_steps=student_steps,
+            teacher_steps=teacher_steps,
+            R_S_avg=R_S_avg,
+            R_T_avg=R_T_avg,
+            teacher_valid=teacher_valid,
+            metrics=metrics,
+        )
+
+        is_correct = max(student_rewards + teacher_rewards, default=0.0) >= threshold
+        return self._build_episode(uid, task, trajectories, metrics, is_correct)
 
     # ------------------------------------------------------------------
-    # Validation: N_val student + N_val teacher, report pass@N metrics
+    # Case 1: build CE and IS trajectories
+    # ------------------------------------------------------------------
+
+    async def _case1_distillation(
+        self,
+        *,
+        uid: str,
+        teacher_client: tinker.SamplingClient,
+        student_prompt_ids: list[int],
+        teacher_prompt_ids: list[int],
+        student_messages: list[dict],
+        student_steps: list[Step],
+        teacher_steps: list[Step],
+        trajectories: list[Trajectory],
+    ) -> None:
+        cfg = self.cfg
+
+        # ---- (a) IS: teacher_lp on student responses (single call per student) ---
+        # The frozen teacher evaluates its own logprobs on the student's
+        # response tokens, conditioned on the teacher prompt (with hint).
+        coros = [
+            compute_teacher_logprobs_for_response(
+                teacher_client,
+                teacher_prompt_ids,
+                s.response_ids,
+                max_context_length=cfg.max_context_length,
+            )
+            for s in student_steps
+        ]
+        if not coros:
+            teacher_lps_D = []
+        elif self.scoring_accumulator is not None:
+            teacher_lps_D = await asyncio.gather(*[self.scoring_accumulator.submit(c) for c in coros])
+        else:
+            teacher_lps_D = await asyncio.gather(*coros)
+
+        is_count = 0
+        for s, (teacher_lps, T) in zip(student_steps, teacher_lps_D, strict=True):
+            if T == 0:
+                continue
+            student_lps = list(s.logprobs[:T])
+            advantages = kl_advantages_from_logprobs(
+                teacher_logprobs=teacher_lps,
+                student_logprobs=student_lps,
+                kl_coeff=cfg.kl_coeff,
+                clip_min=cfg.kl_clip_min,
+                clip_max=cfg.kl_clip_max,
+            )
+            # Truncate the response to T so advantage/response/logprobs stay aligned.
+            is_step = Step(
+                prompt_ids=list(student_prompt_ids),
+                response_ids=list(s.response_ids[:T]),
+                logprobs=student_lps,
+                chat_completions=student_messages,
+                model_response=s.model_response,
+                reward=s.reward,
+                advantage=advantages,
+                done=True,
+            )
+            trajectories.append(Trajectory(name=IS_ROLE, steps=[is_step], reward=s.reward))
+            is_count += 1
+
+        # ---- (b) CE: teacher's correct responses prepended to the student prompt ---
+        ce_count = 0
+        for t in teacher_steps:
+            if t.reward < cfg.success_reward_threshold:
+                continue
+            if not t.response_ids:
+                continue
+            ce_step = Step(
+                prompt_ids=list(student_prompt_ids),
+                response_ids=list(t.response_ids),
+                logprobs=[],  # not used by cross_entropy
+                chat_completions=student_messages,
+                model_response=t.model_response,
+                reward=t.reward,
+                done=True,
+            )
+            trajectories.append(Trajectory(name=CE_ROLE, steps=[ce_step], reward=t.reward))
+            ce_count += 1
+
+        logger.info(f"[{uid}] distillation: {is_count} IS + {ce_count} CE trajectories")
+
+    # ------------------------------------------------------------------
+    # Validation
     # ------------------------------------------------------------------
 
     async def _do_validation(self, task: dict, uid: str) -> Episode:
@@ -145,24 +374,36 @@ class GsdWorkflow(Workflow):
         question = task["question"]
         N = self.cfg.N_val
 
-        # Generate hint
-        hint_text = await self._get_hint_text(question, uid)
+        teacher_client = self.teacher_ref.capture(self.rollout_engine)
+        live_client = self.rollout_engine.sampling_client
 
-        # Dual rollouts with progress
+        # Use the same ``_get_hint`` extension point as training so
+        # subclasses get a single place to override.  We discard the
+        # optional hint step — validation never produces training data.
+        hint_text, _ = await self._get_hint(question, uid, live_client)
+
         student_messages = self._make_student_prompt(question)
         teacher_messages = self._make_teacher_prompt(question, hint_text)
+        student_mi = self._build_model_input(student_messages)
+        teacher_mi = self._build_model_input(teacher_messages)
 
-        coros = [self._do_rollout(task, student_messages) for _ in range(N)]
-        coros += [self._do_rollout(task, teacher_messages) for _ in range(N)]
-        results = await _gather_with_progress(coros, desc=f"[val:{uid}] rollouts")
+        student_sp = self._make_sampling_params(self.cfg.rollout_sampling_params, prompt_len=student_mi.length)
+        teacher_sp = self._make_sampling_params(self.cfg.rollout_sampling_params, prompt_len=teacher_mi.length)
 
-        student_results = results[:N]
-        teacher_results = results[N:]
+        student_resp, teacher_resp = await asyncio.gather(
+            live_client.sample_async(prompt=student_mi, num_samples=N, sampling_params=student_sp),
+            teacher_client.sample_async(prompt=teacher_mi, num_samples=N, sampling_params=teacher_sp),
+        )
 
-        student_rewards = [r for _, r in student_results]
-        teacher_rewards = [r for _, r in teacher_results]
+        student_prompt_ids = student_mi.to_ints()
+        teacher_prompt_ids = teacher_mi.to_ints()
+
+        student_steps = [self._seq_to_step(student_prompt_ids, seq, task, student_messages) for seq in student_resp.sequences]
+        teacher_steps = [self._seq_to_step(teacher_prompt_ids, seq, task, teacher_messages) for seq in teacher_resp.sequences]
+
         threshold = self.cfg.success_reward_threshold
-
+        student_rewards = [s.reward for s in student_steps]
+        teacher_rewards = [s.reward for s in teacher_steps]
         student_correct = [r >= threshold for r in student_rewards]
         teacher_correct = [r >= threshold for r in teacher_rewards]
 
@@ -178,239 +419,185 @@ class GsdWorkflow(Workflow):
 
         logger.info(f"[{uid}] val: student_pass@1={sum(student_correct)}/{N} teacher_pass@1={sum(teacher_correct)}/{N} hint_improvement={sum(teacher_correct) / N - sum(student_correct) / N:+.2f}")
 
-        # Return a single student trajectory for the trainer pipeline
-        step, reward = student_results[0]
-        traj = Trajectory(name="gsd_student", steps=[step], reward=reward)
-        is_correct = any(student_correct)
-        return self._build_episode(uid, task, [traj], metrics, is_correct)
+        # Return a single student trajectory for the trainer pipeline.
+        traj = Trajectory(name=GRPO_ROLE, steps=[student_steps[0]], reward=student_rewards[0])
+        return self._build_episode(uid, task, [traj], metrics, any(student_correct))
 
     # ------------------------------------------------------------------
-    # Training: hint → dual rollouts → gate → score → route
+    # Subclass extension points
     # ------------------------------------------------------------------
 
-    async def _do_training(self, task: dict, uid: str) -> Episode:
-        question = task["question"]
-        N = self.cfg.N
+    def _make_student_prompt(self, question: str) -> list[dict]:
+        """Build the student prompt (no hint).  Override in subclasses."""
+        return build_student_prompt(question)
 
-        # ---- Phase 1: Self-hinting --------------------------------
-        hint_text = await self._get_hint_text(question, uid)
+    def _make_teacher_prompt(self, question: str, hint: str) -> list[dict]:
+        """Build the teacher prompt (with hint).  Override in subclasses."""
+        return build_teacher_prompt(question, hint)
 
-        # ---- Phase 2: Dual rollouts (concurrent with progress) ----
-        student_messages = self._make_student_prompt(question)
-        teacher_messages = self._make_teacher_prompt(question, hint_text)
+    async def _build_hint_prompt_messages(self, question: str, uid: str) -> list[dict]:
+        """Build the messages used to sample a hint.  Override in subclasses.
 
-        coros: list[Awaitable[tuple[Step, float]]] = []
-        coros += [self._do_rollout(task, student_messages) for _ in range(N)]
-        coros += [self._do_rollout(task, teacher_messages) for _ in range(N)]
-        results = await _gather_with_progress(coros, desc=f"[train:{uid}] rollouts")
+        The default implementation calls :func:`build_hint_prompt`, optionally
+        augmented with similar past experiences retrieved from the workflow's
+        experience store.
+        """
+        experiences = None
+        if self.experience_store is not None:
+            experiences = await self.experience_store.query(question, top_k=self.cfg.retrieval_k)
+            if experiences:
+                logger.info(f"[{uid}] retrieved {len(experiences)} experiences (store size={self.experience_store.size})")
+        return build_hint_prompt(question, experiences=experiences)
 
-        student_results = results[:N]
-        teacher_results = results[N:]
+    async def _get_hint(
+        self,
+        question: str,
+        uid: str,
+        live_client: tinker.SamplingClient,
+    ) -> tuple[str, Step | None]:
+        """Return ``(hint_text, hint_step)`` for the current task.
 
-        # ---- Phase 3: Gating --------------------------------------
-        student_rewards = [r for _, r in student_results]
-        teacher_rewards = [r for _, r in teacher_results]
-        R_S_avg = sum(student_rewards) / len(student_rewards)
-        R_T_avg = sum(teacher_rewards) / len(teacher_rewards)
+        The default implementation samples a hint from the live model via
+        ``sample_async`` and returns the fully populated ``Step`` so it can
+        later become a ``gsd_hint`` trajectory for GRPO.
 
-        # Teacher is valid when R_T_avg is greater than R_S_avg, or when they are equal but the R_T_avg is >= success_reward_threshold
-        teacher_valid = R_T_avg > R_S_avg or (R_T_avg == R_S_avg and R_T_avg >= self.cfg.success_reward_threshold)
+        Subclasses that use a different hint source (e.g. a shared
+        :class:`HintPool`) should override this to return
+        ``(hint_text, None)`` — a ``None`` step means no gradient flows
+        to the hint generator for this task.
+        """
+        messages = await self._build_hint_prompt_messages(question, uid)
+        hint_mi = self._build_model_input(messages)
+        sp = self._make_sampling_params(self.cfg.hint_sampling_params, prompt_len=hint_mi.length)
+        resp = await live_client.sample_async(
+            prompt=hint_mi,
+            num_samples=1,
+            sampling_params=sp,
+        )
+        seq = resp.sequences[0]
+        raw_text = self._decode(list(seq.tokens))
+        hint_text = extract_hint(raw_text)
+        logger.info(f"[{uid}] hint generated ({len(hint_text)} chars): {hint_text[:200]}")
 
-        trajectories: list[Trajectory] = []
-        metrics: dict[str, Any] = {
-            "R_S_avg": R_S_avg,
-            "R_T_avg": R_T_avg,
-            "teacher_valid": float(teacher_valid),
-            "hint_improvement": R_T_avg - R_S_avg,
-        }
+        hint_step = Step(
+            prompt_ids=list(hint_mi.to_ints()),
+            response_ids=list(seq.tokens),
+            logprobs=list(seq.logprobs),
+            chat_completions=messages,
+            model_response=raw_text,
+            reward=0.0,  # overwritten later with R_T - R_S
+            done=True,
+        )
+        return hint_text, hint_step
 
-        # ---- Phase 4: Loss routing --------------------------------
-        n_correct_teacher = sum(1 for r in teacher_rewards if r >= self.cfg.success_reward_threshold)
-        n_correct_student = sum(1 for r in student_rewards if r >= self.cfg.success_reward_threshold)
+    async def _post_training_hook(
+        self,
+        *,
+        task: dict,
+        uid: str,
+        question: str,
+        hint_text: str,
+        student_steps: list[Step],
+        teacher_steps: list[Step],
+        R_S_avg: float,
+        R_T_avg: float,
+        teacher_valid: bool,
+        metrics: dict[str, Any],
+    ) -> None:
+        """Post-training hook — default implementation updates the experience buffer.
 
-        if teacher_valid:
-            logger.info(f"[{uid}] Case 1 (distill): R_S={R_S_avg:.2f} R_T={R_T_avg:.2f} student_correct={n_correct_student}/{N} teacher_correct={n_correct_teacher}/{N}")
-            await self._case1_distillation(
-                uid,
-                question,
-                hint_text,
-                student_results,
-                teacher_results,
-                trajectories,
-            )
-        else:
-            if self.cfg.distill_only:
-                logger.info(f"[{uid}] Case 2 (skipped, distill_only=True): R_S={R_S_avg:.2f} R_T={R_T_avg:.2f}")
-            else:
-                logger.info(f"[{uid}] Case 2 (GRPO fallback): R_S={R_S_avg:.2f} R_T={R_T_avg:.2f} student_correct={n_correct_student}/{N} teacher_correct={n_correct_teacher}/{N}")
-                self._case2_grpo_fallback(student_results, trajectories)
-
-        # ---- Phase 5: Update experience buffer ----------------------
+        Subclasses (e.g. ``GsdCountdownWorkflow``) override this to update
+        a shared ``HintPool`` instead.
+        """
         if teacher_valid and self.experience_store is not None:
+            n_correct_teacher = sum(1 for s in teacher_steps if s.reward >= self.cfg.success_reward_threshold)
             await self.experience_store.add(
                 text=question,
                 metadata={
                     "hint": hint_text,
-                    "summary": (f"Teacher outperformed student ({R_T_avg:.2f} vs {R_S_avg:.2f}). {n_correct_teacher}/{N} teacher rollouts correct."),
+                    "summary": (f"Teacher outperformed student ({R_T_avg:.2f} vs {R_S_avg:.2f}). {n_correct_teacher}/{len(teacher_steps)} teacher rollouts correct."),
                     "improvement": R_T_avg - R_S_avg,
                 },
             )
 
-        is_correct = max(student_rewards + teacher_rewards) >= self.cfg.success_reward_threshold
-        return self._build_episode(uid, task, trajectories, metrics, is_correct)
-
     # ------------------------------------------------------------------
-    # Shared rollout helper
+    # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _do_rollout(self, task: dict, messages: list[dict]) -> tuple[Step, float]:
-        """Generate a single rollout and score it."""
-        output = await self.rollout_engine.get_model_response(messages)
-        response_text = output.text or output.content or ""
-        reward = self.reward_fn(task, response_text)
-        step = Step.from_model_output(output, messages=messages)
-        step.reward = reward
-        step.done = True
-        return step, reward
+    def _build_model_input(self, messages: list[dict]) -> tinker.ModelInput:
+        """Build a :class:`tinker.ModelInput` from OpenAI-style messages.
 
-    # ------------------------------------------------------------------
-    # Case 1: Teacher valid → distillation
-    # ------------------------------------------------------------------
-
-    async def _case1_distillation(
-        self,
-        uid: str,
-        question: str,
-        hint_text: str,
-        student_results: list[tuple[Step, float]],
-        teacher_results: list[tuple[Step, float]],
-        trajectories: list[Trajectory],
-    ) -> None:
-        engine = self.rollout_engine
-        client = engine.sampling_client
-        cfg = self.cfg
-
-        # Tokenize prompts for scoring (use overridable prompt builders)
-        teacher_prompt_ids = self._tokenize_messages(self._make_teacher_prompt(question, hint_text))
-        student_prompt_ids = self._tokenize_messages(self._make_student_prompt(question))
-
-        # (a) On-policy distillation: score student seqs under teacher
-        scoring_coros = [
-            score_teacher_for_response(
-                client,
-                teacher_prompt_ids,
-                step.response_ids,
-                topk=cfg.distill_topk,
-                max_context_length=cfg.max_context_length,
-            )
-            for step, _ in student_results
-        ]
-
-        # (b) Supervised distillation: score teacher's correct seqs
-        correct_teacher = [(s, r) for s, r in teacher_results if r >= cfg.success_reward_threshold]
-        sup_scoring_coros = [
-            score_teacher_for_response(
-                client,
-                teacher_prompt_ids,
-                step.response_ids,
-                topk=cfg.distill_topk,
-                max_context_length=cfg.max_context_length,
-            )
-            for step, _ in correct_teacher
-        ]
-
-        # Run all scoring passes concurrently.
-        # When a ScoringAccumulator is available, submit coroutines there so
-        # they get batched with scoring requests from other concurrent workflows.
-        all_scoring_coros = scoring_coros + sup_scoring_coros
-        if not all_scoring_coros:
-            all_scorings = []
-        elif self.scoring_accumulator is not None:
-            all_scorings = await asyncio.gather(*[self.scoring_accumulator.submit(c) for c in all_scoring_coros])
-        else:
-            all_scorings = await _gather_with_progress(
-                all_scoring_coros,
-                desc=f"[train:{uid}] teacher scoring",
-            )
-
-        on_policy_scorings = all_scorings[: len(scoring_coros)]
-        sup_scorings = all_scorings[len(scoring_coros) :]
-
-        # Process on-policy results
-        for (step, reward), scoring in zip(student_results, on_policy_scorings, strict=True):
-            if scoring["response_len"] == 0:
-                continue
-            advantages = compute_sampled_rkl_advantages(
-                teacher_logprobs=scoring["sampled_logprobs"],
-                student_logprobs=step.logprobs[: scoring["response_len"]],
-                kl_coeff=cfg.kl_coeff,
-                clip_min=cfg.kl_clip_min,
-                clip_max=cfg.kl_clip_max,
-            )
-            step.advantage = advantages
-            # Store teacher Top-K so the combined datum has CE data too
-            step.metadata = step.metadata or {}
-            step.metadata["teacher_topk"] = {
-                "topk_ids": scoring["topk_ids"],
-                "topk_logprobs": scoring["topk_logprobs"],
-            }
-            traj = Trajectory(name="gsd_distill", steps=[step], reward=reward)
-            trajectories.append(traj)
-
-        # Process supervised results → combined datums with CE fields only
-        for (step, reward), scoring in zip(correct_teacher, sup_scorings, strict=True):
-            if scoring["response_len"] == 0:
-                continue
-            sup_step = copy.deepcopy(step)
-            sup_step.prompt_ids = student_prompt_ids
-            sup_step.chat_completions = self._make_student_prompt(question)
-            sup_step.model_output = None
-            sup_step.advantage = None  # no IS for supervised datums
-            sup_step.metadata = {
-                "teacher_topk": {
-                    "topk_ids": scoring["topk_ids"],
-                    "topk_logprobs": scoring["topk_logprobs"],
-                },
-            }
-            traj = Trajectory(name="gsd_distill", steps=[sup_step], reward=reward)
-            trajectories.append(traj)
-
-        n_distill = sum(1 for t in trajectories if t.name == "gsd_distill")
-        logger.info(f"[{uid}] distillation: {n_distill} combined datums ({len(on_policy_scorings)} on-policy + {len(correct_teacher)} supervised)")
-
-    # ------------------------------------------------------------------
-    # Case 2: Teacher invalid → GRPO fallback
-    # ------------------------------------------------------------------
-
-    def _case2_grpo_fallback(
-        self,
-        student_results: list[tuple[Step, float]],
-        trajectories: list[Trajectory],
-    ) -> None:
-        for step, reward in student_results:
-            traj = Trajectory(name="gsd_student", steps=[step], reward=reward)
-            trajectories.append(traj)
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def _make_student_prompt(self, question: str) -> list[dict]:
-        """Build the student prompt.  Override in subclasses for task-specific prompts."""
-        return build_student_prompt(question)
-
-    def _make_teacher_prompt(self, question: str, hint: str) -> list[dict]:
-        """Build the teacher prompt.  Override in subclasses for task-specific prompts."""
-        return build_teacher_prompt(question, hint)
-
-    def _tokenize_messages(self, messages: list[dict]) -> list[int]:
-        """Convert OpenAI-style messages to token IDs via the engine's chat parser.
-
-        Uses ``build_prompt()`` which goes through the Tinker renderer natively,
-        avoiding the token→string→token round-trip of ``parse()`` + ``encode()``.
+        Uses the renderer's ``build_prompt`` path so there is no
+        ``parse → string → encode`` round-trip and ImageChunks are preserved.
         """
-        model_input = self.rollout_engine.chat_parser.build_prompt(messages)
-        return model_input.to_ints()
+        return self.rollout_engine.chat_parser.build_prompt(messages)
+
+    def _decode(self, token_ids: list[int]) -> str:
+        """Decode a token sequence to text for reward scoring and logging."""
+        return self.rollout_engine.tokenizer.decode(token_ids, skip_special_tokens=True)
+
+    def _make_sampling_params(self, overrides: dict[str, Any], prompt_len: int) -> tinker.SamplingParams:
+        """Build a :class:`tinker.SamplingParams` from the engine defaults.
+
+        Starts from the engine's train/val sampling params, applies the
+        caller's overrides, and clamps ``max_tokens`` so that
+        ``prompt_len + max_tokens`` stays within ``max_model_length``.
+        """
+        engine = self.rollout_engine
+        base = engine.val_sampling_params.copy() if engine.is_validation else engine.train_sampling_params.copy()
+        base.update(overrides or {})
+
+        # Resolve max_tokens with the same precedence the engine uses in
+        # ``_prepare_max_tokens``.
+        max_tokens = base.pop("max_tokens", None)
+        if max_tokens is None:
+            max_tokens = getattr(engine, "max_response_length", 4096)
+        max_model_length = getattr(engine, "max_model_length", None)
+        if max_model_length:
+            remaining = max_model_length - prompt_len
+            if remaining <= 0:
+                max_tokens = 1  # degenerate case — let the server truncate
+            elif remaining < max_tokens:
+                max_tokens = remaining
+
+        # Stop sequences from the chat parser.
+        stop = list(getattr(engine, "stop_sequences", []) or [])
+
+        return tinker.SamplingParams(
+            max_tokens=int(max_tokens),
+            stop=stop,
+            **base,
+        )
+
+    def _seq_to_step(
+        self,
+        prompt_ids: list[int],
+        seq: Any,  # tinker.SampledSequence
+        task: dict,
+        messages: list[dict],
+    ) -> Step:
+        """Convert a ``SampledSequence`` into a :class:`Step` with its reward.
+
+        We build the Step by hand so we can skip the
+        ``ModelOutput → Step.from_model_output`` round-trip.  The fields we
+        populate are the only ones the downstream transform / datum builders
+        actually read: ``prompt_ids``, ``response_ids``, ``logprobs``,
+        ``reward``, ``done``, ``chat_completions`` (for logging), and
+        ``model_response`` (decoded text).
+        """
+        response_ids = list(seq.tokens)
+        logprobs = list(seq.logprobs)
+        response_text = self._decode(response_ids)
+        reward = float(self.reward_fn(task, response_text))
+        return Step(
+            prompt_ids=list(prompt_ids),
+            response_ids=response_ids,
+            logprobs=logprobs,
+            chat_completions=messages,
+            model_response=response_text,
+            reward=reward,
+            done=True,
+        )
 
     def _build_episode(
         self,
@@ -427,30 +614,3 @@ class GsdWorkflow(Workflow):
             trajectories=trajectories,
             metrics=metrics,
         )
-
-
-# ---------------------------------------------------------------------------
-# Async gather with tqdm progress bar
-# ---------------------------------------------------------------------------
-
-
-async def _gather_with_progress(
-    coros: list[Awaitable[T]],
-    desc: str = "GSD",
-) -> list[T]:
-    """Run coroutines concurrently, showing a tqdm progress bar as each completes."""
-    results: list[T | None] = [None] * len(coros)
-
-    # Wrap each coroutine to track its original index
-    async def _indexed(idx: int, coro: Awaitable[T]) -> tuple[int, T]:
-        return idx, await coro
-
-    tasks = [_indexed(i, c) for i, c in enumerate(coros)]
-
-    with tqdm(total=len(tasks), desc=desc, leave=False) as pbar:
-        for future in asyncio.as_completed(tasks):
-            idx, result = await future
-            results[idx] = result
-            pbar.update(1)
-
-    return results  # type: ignore[return-value]

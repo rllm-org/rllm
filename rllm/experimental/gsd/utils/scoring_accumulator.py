@@ -1,13 +1,14 @@
-"""Shared scoring accumulator for batching teacher-scoring calls across workflows.
+"""Shared asyncio batch accumulator for expensive per-task operations.
 
-When multiple :class:`GsdWorkflow` instances run concurrently, each
-independently calls :func:`score_teacher_for_response` for its own
-trajectories.  The ``ScoringAccumulator`` collects these coroutines and
-fires them in larger batches, improving Tinker server utilisation.
+When multiple :class:`GsdWorkflow` instances run concurrently, each may
+want to submit many small coroutines (e.g. teacher logprob evaluations)
+to the Tinker server.  The ``ScoringAccumulator`` collects submissions
+from all workflows and fires them in larger batches via a single
+``asyncio.gather``, improving server utilisation.
 
 Usage::
 
-    from rllm.experimental.gsd.scoring_accumulator import ScoringAccumulator
+    from rllm.experimental.gsd.utils import ScoringAccumulator
 
     accumulator = ScoringAccumulator(batch_interval=0.05, batch_threshold=64)
     # pass via workflow_args so every GsdWorkflow instance shares it

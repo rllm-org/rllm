@@ -1,12 +1,20 @@
 """GSD-specific trajectory-to-datum transform.
 
-Dispatches to different datum builders per trajectory role:
+Routes trajectories to datums based on their role:
 
-* ``gsd_distill`` (and legacy ``gsd_distill_onpolicy`` / ``gsd_distill_supervised``)
-  → :func:`build_combined_gsd_datum` producing ``(N, K+1)`` datums for the
-  combined CE + IS custom loss via ``forward_backward_custom_async``.
-* Everything else (``gsd_student``, ``gsd_hint``) → standard
-  :func:`trajectory_to_datums` for ``importance_sampling`` / ``ppo``.
+* :data:`CE_ROLE` (``"gsd_ce"``) → :func:`build_sft_style_ce_datum`,
+  consumed by Tinker's built-in ``cross_entropy`` loss.
+* :data:`IS_ROLE` (``"gsd_is"``) → :func:`build_is_datum`, consumed by
+  Tinker's built-in ``importance_sampling`` loss.  Advantages are already
+  populated on ``step.advantage`` by the workflow (using the frozen
+  reference teacher's logprobs).
+* :data:`GRPO_ROLE` (``"gsd_grpo"``) → default ``trajectory_to_datums``
+  path with group-centered GRPO advantages computed from the trajectory
+  rewards.
+* :data:`HINT_ROLE` (``"gsd_hint"``) → default path; the cross-task
+  grouping hook (see :mod:`rllm.experimental.gsd.grouping`) collapses
+  hints from all tasks into one group so REINFORCE's baseline has
+  something to average against.
 """
 
 from __future__ import annotations
@@ -15,8 +23,18 @@ import logging
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
-from rllm.experimental.common import AlgorithmConfig, collect_reward_and_advantage_from_trajectory_groups
-from rllm.experimental.gsd.losses import build_combined_gsd_datum
+from rllm.experimental.common import (
+    AlgorithmConfig,
+    collect_reward_and_advantage_from_trajectory_groups,
+)
+from rllm.experimental.gsd.losses import (
+    CE_ROLE,
+    GRPO_ROLE,
+    HINT_ROLE,
+    IS_ROLE,
+    build_is_datum,
+    build_sft_style_ce_datum,
+)
 from rllm.trainer.tinker.transform import trajectory_to_datums
 
 if TYPE_CHECKING:
@@ -26,86 +44,102 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Roles whose datums are built via the combined (K+1) custom-loss path.
-COMBINED_DISTILL_ROLES = frozenset({"gsd_distill", "gsd_distill_onpolicy", "gsd_distill_supervised"})
+# Roles whose datums are constructed by GSD's own helpers, bypassing the
+# default ``trajectory_to_datums`` pipeline.
+_GSD_CUSTOM_DATUM_ROLES = frozenset({CE_ROLE, IS_ROLE})
 
 
 def gsd_transform_trajectory_groups_to_datums(
     trajectory_groups: list[TrajectoryGroup],
     algorithm_config: AlgorithmConfig,
 ) -> tuple[dict[str, list[tinker.Datum]], dict]:
-    """GSD-specific transform: combined CE+IS datums for distillation roles.
+    """Transform trajectory groups into per-role datum dicts for GSD.
 
-    For ``COMBINED_DISTILL_ROLES``, each trajectory's step is converted into
-    a ``(N, K+1)`` shaped combined datum via :func:`build_combined_gsd_datum`.
-    The transform infers what to populate from the step's fields:
-
-    * ``step.advantage is not None`` → IS fields populated (on-policy).
-    * ``step.info.get("teacher_topk") is not None`` → CE fields populated
-      (supervised).
-    * Both can be True simultaneously.
-
-    All combined datums land under the ``"gsd_distill"`` key, regardless of
-    their original trajectory name.
-
-    For all other roles, the standard advantage pipeline runs and
-    :func:`trajectory_to_datums` produces importance-sampling datums.
-
-    Returns:
-        A ``(datums_dict, adv_metrics)`` tuple.
+    Returns a ``(datums_dict, metrics)`` tuple where ``datums_dict`` is keyed
+    by role.  The Tinker policy trainer then fires one
+    ``forward_backward_async`` call per role, each with its own built-in
+    loss function (see :func:`build_gsd_estimator_map`).
     """
-    # --- Step 1: Compute advantages for non-distill groups that need them ---
-    non_distill_groups = [g for g in trajectory_groups if g.group_role not in COMBINED_DISTILL_ROLES]
-    needs_adv = [g for g in non_distill_groups if not any(step.advantage is not None for traj in g.trajectories for step in traj.steps)]
     adv_metrics: dict = {}
-    if needs_adv:
+
+    # 1. Compute advantages for the GRPO / hint roles that need group-centered
+    #    rewards.  Skip CE/IS groups — their steps either have no advantage
+    #    (CE) or already have per-token advantages pre-populated by the
+    #    workflow (IS).
+    groups_needing_adv = [g for g in trajectory_groups if g.group_role not in _GSD_CUSTOM_DATUM_ROLES and not any(step.advantage is not None for traj in g.trajectories for step in traj.steps)]
+    if groups_needing_adv:
         adv_metrics = collect_reward_and_advantage_from_trajectory_groups(
-            needs_adv,
+            groups_needing_adv,
             algorithm_config,
         )
 
-    # Collect reward metrics for distill groups (advantages are pre-computed
-    # or handled by the custom loss, but reward summaries should still be logged).
-    distill_groups = [g for g in trajectory_groups if g.group_role in COMBINED_DISTILL_ROLES]
-    if distill_groups:
+    # 2. Lightweight reward summaries for CE / IS groups so the metrics
+    #    dashboard still has visibility into distillation reward.
+    distill_rewards = [traj.reward for g in trajectory_groups if g.group_role in _GSD_CUSTOM_DATUM_ROLES for traj in g.trajectories if traj.reward is not None]
+    if distill_rewards:
         import numpy as _np
 
-        all_rewards = [traj.reward for g in distill_groups for traj in g.trajectories if traj.reward is not None]
-        if all_rewards:
-            adv_metrics["train/gsd_distill_reward/mean"] = _np.mean(all_rewards)
-            adv_metrics["train/gsd_distill_reward/min"] = _np.min(all_rewards)
-            adv_metrics["train/gsd_distill_reward/max"] = _np.max(all_rewards)
-            adv_metrics["train/gsd_distill_reward/std"] = _np.std(all_rewards)
-            adv_metrics["train/gsd_distill_count"] = len(all_rewards)
+        adv_metrics["train/gsd_distill_reward/mean"] = float(_np.mean(distill_rewards))
+        adv_metrics["train/gsd_distill_reward/min"] = float(_np.min(distill_rewards))
+        adv_metrics["train/gsd_distill_reward/max"] = float(_np.max(distill_rewards))
+        adv_metrics["train/gsd_distill_reward/std"] = float(_np.std(distill_rewards))
+        adv_metrics["train/gsd_distill_count"] = float(len(distill_rewards))
 
-    # --- Step 2: Build datums per role ---
+    # 3. Build datums per role.
     datums_dict: dict[str, list] = defaultdict(list)
 
     for group in trajectory_groups:
         role = group.group_role
-        if role in COMBINED_DISTILL_ROLES:
+
+        if role == CE_ROLE:
             for traj in group.trajectories:
                 for step in traj.steps:
-                    teacher_topk = (step.info or {}).get("teacher_topk")
-
-                    # Infer K from teacher_topk or fall back to 20
-                    K = len(teacher_topk["topk_ids"][0]) if teacher_topk else 20
-
-                    datum = build_combined_gsd_datum(
-                        prompt_ids=step.prompt_ids,
-                        response_ids=step.response_ids,
-                        teacher_topk=teacher_topk,
-                        is_advantages=step.advantage if isinstance(step.advantage, list) else None,
-                        is_old_logprobs=step.logprobs if step.advantage is not None else None,
-                        K=K,
+                    if not step.response_ids:
+                        continue
+                    datums_dict[CE_ROLE].append(
+                        build_sft_style_ce_datum(
+                            prompt_ids=step.prompt_ids,
+                            response_ids=step.response_ids,
+                        )
                     )
-                    datums_dict["gsd_distill"].append(datum)
-        else:
-            for traj in group.trajectories:
-                traj_datums = trajectory_to_datums(
-                    traj,
-                    router_replay=algorithm_config.router_replay,
-                )
-                datums_dict[role].extend(traj_datums)
 
-    return datums_dict, adv_metrics
+        elif role == IS_ROLE:
+            for traj in group.trajectories:
+                for step in traj.steps:
+                    if not step.response_ids:
+                        continue
+                    # Advantage was populated by the workflow from the frozen
+                    # teacher's logprobs.  Default to 0.0 if somehow missing
+                    # (e.g. sequence was entirely truncated during scoring).
+                    adv = step.advantage
+                    if adv is None:
+                        adv = [0.0] * len(step.response_ids)
+                    datums_dict[IS_ROLE].append(
+                        build_is_datum(
+                            prompt_ids=step.prompt_ids,
+                            response_ids=step.response_ids,
+                            logprobs=step.logprobs,
+                            advantages=adv,
+                        )
+                    )
+
+        else:
+            # Default path for gsd_grpo, gsd_hint, and any other role.
+            # collect_reward_and_advantage_from_trajectory_groups above has
+            # already populated step.advantage with group-centered values.
+            for traj in group.trajectories:
+                datums_dict[role].extend(
+                    trajectory_to_datums(
+                        traj,
+                        router_replay=algorithm_config.router_replay,
+                    )
+                )
+
+    # Bookkeeping metrics
+    for role in (CE_ROLE, IS_ROLE, GRPO_ROLE, HINT_ROLE):
+        adv_metrics[f"train/gsd_role_count/{role}"] = float(len(datums_dict.get(role, [])))
+
+    return dict(datums_dict), adv_metrics
+
+
+__all__ = ["gsd_transform_trajectory_groups_to_datums"]
