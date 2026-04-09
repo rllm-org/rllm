@@ -101,12 +101,14 @@ class GsdWorkflow(Workflow):
         reward_fn: RewardFn,
         gsd_config: GsdConfig | None = None,
         experience_store: Any | None = None,
+        scoring_accumulator: Any | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(rollout_engine=rollout_engine, executor=executor, **kwargs)
         self.cfg = gsd_config or GsdConfig()
         self.reward_fn = reward_fn
         self.experience_store = experience_store  # Optional EmbeddingExperienceStore
+        self.scoring_accumulator = scoring_accumulator  # Optional ScoringAccumulator
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -119,6 +121,21 @@ class GsdWorkflow(Workflow):
             return await self._do_validation(task, uid)
         return await self._do_training(task, uid)
 
+    async def _get_hint_text(self, question: str, uid: str) -> str:
+        experiences = None
+        if self.experience_store is not None:
+            experiences = await self.experience_store.query(question, top_k=self.cfg.retrieval_k)
+            if experiences:
+                logger.info(f"[{uid}] retrieved {len(experiences)} experiences from buffer (size={self.experience_store.size})")
+        hint_messages = build_hint_prompt(question, experiences=experiences)
+        hint_output = await self.rollout_engine.get_model_response(
+            hint_messages,
+            **self.cfg.hint_sampling_params,
+        )
+        hint_text = extract_hint(hint_output.text or hint_output.content or "")
+        logger.info(f"[{uid}] hint generated ({len(hint_text)} chars): {hint_text[:500]}")
+        return hint_text
+
     # ------------------------------------------------------------------
     # Validation: N_val student + N_val teacher, report pass@N metrics
     # ------------------------------------------------------------------
@@ -129,12 +146,7 @@ class GsdWorkflow(Workflow):
         N = self.cfg.N_val
 
         # Generate hint
-        hint_messages = build_hint_prompt(question)
-        hint_output = await self.rollout_engine.get_model_response(
-            hint_messages,
-            **self.cfg.hint_sampling_params,
-        )
-        hint_text = extract_hint(hint_output.text or hint_output.content or "")
+        hint_text = await self._get_hint_text(question, uid)
 
         # Dual rollouts with progress
         student_messages = self._make_student_prompt(question)
@@ -181,20 +193,7 @@ class GsdWorkflow(Workflow):
         N = self.cfg.N
 
         # ---- Phase 1: Self-hinting --------------------------------
-        # Retrieve similar past experiences from the buffer (if available)
-        experiences = None
-        if self.experience_store is not None:
-            experiences = await self.experience_store.query(question, top_k=self.cfg.retrieval_k)
-            if experiences:
-                logger.info(f"[{uid}] retrieved {len(experiences)} experiences from buffer (size={self.experience_store.size})")
-
-        hint_messages = build_hint_prompt(question, experiences=experiences)
-        hint_output = await self.rollout_engine.get_model_response(
-            hint_messages,
-            **self.cfg.hint_sampling_params,
-        )
-        hint_text = extract_hint(hint_output.text or hint_output.content or "")
-        logger.info(f"[{uid}] hint generated ({len(hint_text)} chars): {hint_text[:500]}")
+        hint_text = await self._get_hint_text(question, uid)
 
         # ---- Phase 2: Dual rollouts (concurrent with progress) ----
         student_messages = self._make_student_prompt(question)
@@ -320,15 +319,19 @@ class GsdWorkflow(Workflow):
             for step, _ in correct_teacher
         ]
 
-        # Run all scoring passes concurrently with progress
+        # Run all scoring passes concurrently.
+        # When a ScoringAccumulator is available, submit coroutines there so
+        # they get batched with scoring requests from other concurrent workflows.
         all_scoring_coros = scoring_coros + sup_scoring_coros
-        if all_scoring_coros:
+        if not all_scoring_coros:
+            all_scorings = []
+        elif self.scoring_accumulator is not None:
+            all_scorings = await asyncio.gather(*[self.scoring_accumulator.submit(c) for c in all_scoring_coros])
+        else:
             all_scorings = await _gather_with_progress(
                 all_scoring_coros,
                 desc=f"[train:{uid}] teacher scoring",
             )
-        else:
-            all_scorings = []
 
         on_policy_scorings = all_scorings[: len(scoring_coros)]
         sup_scorings = all_scorings[len(scoring_coros) :]

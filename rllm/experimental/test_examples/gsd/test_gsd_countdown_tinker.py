@@ -15,6 +15,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from rllm.experimental.gsd.hint_pool import HintPool
 from rllm.experimental.gsd.losses import build_gsd_estimator_map
+from rllm.experimental.gsd.scoring_accumulator import ScoringAccumulator
 from rllm.experimental.gsd.transform import gsd_transform_trajectory_groups_to_datums
 from rllm.experimental.gsd.workflow import GsdConfig
 from rllm.experimental.test_examples.gsd.countdown_utils import (
@@ -60,12 +61,15 @@ def main(config: DictConfig):
         autosave_every=32,
     )
 
+    scoring_accumulator = ScoringAccumulator(batch_interval=0.05, batch_threshold=64)
+
     trainer = AgentTrainer(
         workflow_class=GsdCountdownWorkflow,
         workflow_args={
             "reward_fn": countdown_reward,
             "gsd_config": gsd_config,
             "hint_pool": hint_pool,
+            "scoring_accumulator": scoring_accumulator,
         },
         config=config,
         train_dataset=train_dataset,

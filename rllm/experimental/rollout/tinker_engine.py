@@ -273,19 +273,14 @@ class TinkerEngine(RolloutEngine):
 
         # Extract parser-specific kwargs
         tools = kwargs.pop("tools", [])
-        accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
-        reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
+        kwargs.pop("accumulate_reasoning", None)
+        kwargs.pop("reasoning_effort", None)
 
-        # Use TinkerChatTemplateParser to build prompt
-        prompt = self.chat_parser.parse(
-            messages,
-            add_generation_prompt=True,
-            is_first_msg=True,
-            tools=tools,
-            reasoning_effort=reasoning_effort,
-            accumulate_reasoning=accumulate_reasoning,
-        )
-        token_input = self.tokenizer.encode(prompt, add_special_tokens=False)  # type: ignore
+        # Build ModelInput directly via the renderer, avoiding the lossy
+        # parse()→string→encode() round-trip.  build_prompt() adds BOS
+        # tokens and the generation suffix automatically.
+        model_input = self.chat_parser.build_prompt(messages, tools=tools)
+        token_input = list(model_input.chunks)  # TinkerTokenInput — preserves ImageChunks
 
         sampled_sequence = await self.get_token_output_from_token_input(token_input=token_input, **kwargs)
         return self.assemble_model_output(token_input=token_input, token_output=sampled_sequence)

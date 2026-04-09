@@ -31,6 +31,7 @@ from rllm.experimental.gsd.losses import (
     make_gsd_combined_loss,
     score_teacher_for_response,
 )
+from rllm.experimental.gsd.scoring_accumulator import ScoringAccumulator
 from rllm.experimental.gsd.workflow import GsdConfig, GsdWorkflow
 
 __all__ = [
@@ -38,6 +39,7 @@ __all__ = [
     "EmbeddingExperienceStore",
     "GsdConfig",
     "GsdWorkflow",
+    "ScoringAccumulator",
     "build_combined_gsd_datum",
     "build_gsd_estimator_map",
     "build_topk_fkl_datum",
