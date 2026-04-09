@@ -8,6 +8,9 @@ an ``EvalOutput`` with the reward.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
+
 from rllm.experimental.eval.types import EvalOutput, Signal
 from rllm.types import Episode
 
@@ -30,6 +33,7 @@ class SWEEvaluator:
         dockerhub_username: str = "jefzda",
         command_timeout: int = 120,
         sandbox_timeout: int = 3600,
+        max_grading_workers: int = 256,
         verbose: bool = False,
     ):
         self.scripts_dir = scripts_dir or default_scripts_dir()
@@ -37,6 +41,10 @@ class SWEEvaluator:
         self.command_timeout = command_timeout
         self.sandbox_timeout = sandbox_timeout
         self.verbose = verbose
+        # Grading runs in a thread pool because EvalRunner calls evaluate()
+        # directly in the async event loop, but env.execute() internally uses
+        # asyncio.run() which cannot be called from a running loop.
+        self._grading_pool = ThreadPoolExecutor(max_workers=max_grading_workers)
 
     def evaluate(self, task: dict, episode: Episode) -> EvalOutput:
         """Score an Episode by grading its patch against the task's test suite.
@@ -44,27 +52,19 @@ class SWEEvaluator:
         ``EvalOutput.metadata`` must only contain numeric values —
         ``AgentFlowEngine`` copies them into ``episode.metrics``.
         """
-        log = make_log(self.verbose)
         patch = episode.artifacts["patch"]
         exit_status = episode.artifacts["exit_status"]
-        eval_type = task["eval_type"]
         env = episode.artifacts["env"]
 
         if exit_status != "Submitted" or not patch.strip():
             return EvalOutput(reward=0.0, is_correct=False)
 
         try:
-            if eval_type == "swebench_pro":
-                result = grade_swebench_pro(
-                    task, patch, self.dockerhub_username, self.scripts_dir, self.verbose,
-                )
-            elif eval_type == "swesmith":
-                result = grade_swesmith(task, patch, self._create_env, self.verbose)
-            elif eval_type == "swebench":
-                result = grade_swebench_multilingual(task, env, patch, self.verbose)
-            else:
-                raise ValueError(f"Unsupported eval_type: {eval_type}")
+            result = self._grading_pool.submit(
+                self._grade, task, env, patch,
+            ).result()
         except Exception as e:
+            log = make_log(self.verbose)
             log(f"Grading error: {type(e).__name__}: {e}")
             return EvalOutput(reward=0.0, is_correct=False)
 
@@ -84,6 +84,18 @@ class SWEEvaluator:
             is_correct=reward > 0,
             signals=signals,
         )
+
+    def _grade(self, task: dict, env: Any, patch: str) -> dict | float:
+        """Run the dataset-specific grader. Executed in a thread pool."""
+        eval_type = task["eval_type"]
+        if eval_type == "swebench_pro":
+            return grade_swebench_pro(task, patch, self.dockerhub_username, self.scripts_dir, self.verbose)
+        elif eval_type == "swesmith":
+            return grade_swesmith(task, patch, self._create_env, self.verbose)
+        elif eval_type == "swebench":
+            return grade_swebench_multilingual(task, env, patch, self.verbose)
+        else:
+            raise ValueError(f"Unsupported eval_type: {eval_type}")
 
     def _create_env(self, task: dict):
         """Factory for fresh grading sandboxes (used by SWE-smith grader)."""
