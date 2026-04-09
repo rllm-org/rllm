@@ -40,14 +40,14 @@ def main(config: DictConfig):
     train_dataset, test_dataset = prepare_countdown_datasets()
 
     gsd_config = GsdConfig(
-        N=8,
+        N=5,
         N_val=2,
         distill_topk=19,
         train_hint=False,
-        success_reward_threshold=1.0,
+        success_reward_threshold=0.5,
         kl_coeff=1.0,
-        kl_clip_min=-5.0,
-        kl_clip_max=5.0,
+        kl_clip_min=-2.0,
+        kl_clip_max=2.0,
     )
 
     save_dir = config.training.get("default_local_dir", "/tmp/rllm-gsd-checkpoints")
