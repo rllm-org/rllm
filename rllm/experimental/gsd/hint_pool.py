@@ -25,6 +25,7 @@ import json
 import logging
 import math
 import re
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,26 +57,37 @@ class HintPool:
 
     Args:
         max_size: Maximum number of hints in the pool.
-        ema_alpha: Smoothing factor for EMA score updates (higher = more reactive).
-        ucb_c: Exploration coefficient for UCB1 selection.
+        ema_alpha: Smoothing factor for EMA score updates (higher = more
+            reactive).  Defaults to 0.2 for smoother scores.
+        ucb_c: Exploration coefficient for UCB1 selection.  Defaults to 0.2,
+            which is much lower than the textbook value of ~1.0 because
+            improvement scores in GSD are typically in [-1, 1] and a large
+            coefficient causes exploration to dominate exploitation — so the
+            best hints rarely get picked.  Lower values (0.1-0.3) make the
+            pool exploitation-biased.
         evolve_every: Evolve the pool every N training steps (0 = never).
         evolve_model: LiteLLM model identifier for hint evolution
             (default: ``openrouter/google/gemini-2.5-flash-preview``).
         seed_hints: Initial hint texts to populate the pool.
         save_path: Path for JSON persistence (None = no saving).
         autosave_every: Save after every N updates (0 = never).
+        max_hard_solves: Capacity of the recent-hard-solves FIFO buffer.
+        hard_solve_window: Number of most-recent hard solves to feed into
+            the evolution prompt.
     """
 
     def __init__(
         self,
         max_size: int = 5,
-        ema_alpha: float = 0.3,
-        ucb_c: float = 1.0,
+        ema_alpha: float = 0.2,
+        ucb_c: float = 0.2,
         evolve_every: int = 20,
         evolve_model: str = DEFAULT_EVOLVE_MODEL,
         seed_hints: list[str] | None = None,
         save_path: str | Path | None = None,
         autosave_every: int = 10,
+        max_hard_solves: int = 20,
+        hard_solve_window: int = 5,
     ) -> None:
         self.max_size = max_size
         self.ema_alpha = ema_alpha
@@ -88,8 +100,10 @@ class HintPool:
         self._total_uses = 0
         self._updates_since_save = 0
         self._last_evolve_step = 0
-        self._hard_solves: list[dict] = []  # shared across all workflow instances
-        self._max_hard_solves = 20
+        # FIFO buffer of recent hard solves — oldest entries are evicted
+        # automatically by the deque's maxlen.
+        self.hard_solve_window = hard_solve_window
+        self._hard_solves: deque[dict] = deque(maxlen=max_hard_solves)
         self._evolving = False  # guard against concurrent evolve calls
 
         if seed_hints:
@@ -166,16 +180,19 @@ class HintPool:
     def record_hard_solve(self, hard_solve: dict) -> None:
         """Record a rare correct solution on a hard problem.
 
-        Thread-safe via the GIL (simple list append).  Called by workflow
-        instances after each task.
+        Thread-safe via the GIL (single ``deque.append``).  Called by
+        workflow instances after each task.  The underlying deque has a
+        ``maxlen``, so oldest entries are evicted automatically.
 
         Args:
             hard_solve: Dict with keys ``"target"``, ``"nums"``,
                 ``"response"`` (the correct solution), ``"student_pass_rate"``.
         """
         self._hard_solves.append(hard_solve)
-        if len(self._hard_solves) > self._max_hard_solves:
-            self._hard_solves = self._hard_solves[-self._max_hard_solves // 2 :]
+
+    @property
+    def num_hard_solves(self) -> int:
+        return len(self._hard_solves)
 
     # ------------------------------------------------------------------
     # Evolution via LiteLLM
@@ -216,10 +233,13 @@ class HintPool:
 
         self._last_evolve_step = self._total_uses
         if hard_solves is None:
-            hard_solves = self._hard_solves[-5:]
+            # Take the most recent `hard_solve_window` entries from the FIFO.
+            recent = list(self._hard_solves)[-self.hard_solve_window :]
+        else:
+            recent = hard_solves
 
         best = self.get_best(n=2)
-        messages = _build_evolve_prompt(best, hard_solves)
+        messages = _build_evolve_prompt(best, recent)
 
         try:
             response = await litellm.acompletion(
@@ -227,7 +247,7 @@ class HintPool:
                 messages=messages,
                 temperature=0.8,
                 top_p=0.95,
-                max_tokens=256,
+                max_tokens=1024,
             )
             text = response.choices[0].message.content or ""
             match = re.search(r"<hint>(.*?)</hint>", text, re.DOTALL | re.IGNORECASE)
@@ -332,11 +352,11 @@ def _build_evolve_prompt(
             parts.append("")
 
     if hard_solves:
-        parts.append("[Hard Problems With Rare Correct Solutions]")
+        parts.append("[Recent Hard Problems With Rare Correct Solutions]")
         parts.append("These are problems the solver usually gets wrong, but occasionally solves correctly.")
         parts.append("Study the successful solutions to identify patterns that could become general strategies.")
         parts.append("")
-        for ex in hard_solves[:5]:
+        for ex in hard_solves:
             nums = ex.get("nums", [])
             target = ex.get("target", "?")
             rate = ex.get("student_pass_rate", 0.0)

@@ -158,7 +158,7 @@ class GsdCountdownWorkflow(GsdWorkflow):
 
         # Periodic evolution (uses _total_uses as the global step counter)
         if self.hint_pool.should_evolve():
-            logger.info(f"[{uid}] Evolving hint pool (total_uses={self.hint_pool._total_uses}, hard_solves={len(self.hint_pool._hard_solves)})")
+            logger.info(f"[{uid}] Evolving hint pool (total_uses={self.hint_pool._total_uses}, hard_solves={self.hint_pool.num_hard_solves})")
             await self.hint_pool.evolve()
 
         is_correct = max(student_rewards + teacher_rewards) >= self.cfg.success_reward_threshold

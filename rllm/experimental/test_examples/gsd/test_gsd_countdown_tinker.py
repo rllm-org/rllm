@@ -53,12 +53,16 @@ def main(config: DictConfig):
     save_dir = config.training.get("default_local_dir", "/tmp/rllm-gsd-checkpoints")
     hint_pool = HintPool(
         max_size=5,
-        ema_alpha=0.3,
-        ucb_c=1.0,
+        ema_alpha=0.2,  # smoother score updates, less noise-driven
+        ucb_c=0.2,  # exploitation-biased: improvement scores live in [-1,1],
+        # so a large c lets the exploration bonus drown out real
+        # score differences and the best hints rarely win
         evolve_every=16,
         seed_hints=COUNTDOWN_SEED_HINTS,
         save_path=f"{save_dir}/hint_pool.json",
         autosave_every=32,
+        max_hard_solves=20,  # FIFO buffer capacity
+        hard_solve_window=5,  # only feed the 5 most recent into evolution
     )
 
     scoring_accumulator = ScoringAccumulator(batch_interval=0.05, batch_threshold=64)
