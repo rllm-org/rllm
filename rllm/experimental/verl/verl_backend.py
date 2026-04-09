@@ -261,7 +261,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             repeat_times = self.full_config.rllm.rollout.n
         batch = batch.repeat(repeat_times=repeat_times)
         # Step 2: execute tasks using the agent workflow engine (async)
-        episodes = await self._execute_tasks_async(batch, agent_workflow_engine, **kwargs)
+        episodes = await self._execute_tasks_async(batch, agent_workflow_engine, is_validation=is_validation, **kwargs)
         # Step 3: sleep the replicas to free kv_cache before weight sync (if free_cache_engine is enabled)
         # Only sleep during training — validation doesn't update weights, so there's no wake_up call after it.
         # Sleeping after validation would leave replicas asleep, causing CUDA illegal memory access on the next generation.
