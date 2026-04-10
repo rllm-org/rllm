@@ -79,11 +79,11 @@ def gsd_transform_trajectory_groups_to_datums(
     if distill_rewards:
         import numpy as _np
 
-        adv_metrics["train/gsd_distill_reward/mean"] = float(_np.mean(distill_rewards))
-        adv_metrics["train/gsd_distill_reward/min"] = float(_np.min(distill_rewards))
-        adv_metrics["train/gsd_distill_reward/max"] = float(_np.max(distill_rewards))
-        adv_metrics["train/gsd_distill_reward/std"] = float(_np.std(distill_rewards))
-        adv_metrics["train/gsd_distill_count"] = float(len(distill_rewards))
+        adv_metrics["reward/gsd_distill/mean"] = float(_np.mean(distill_rewards))
+        adv_metrics["reward/gsd_distill/min"] = float(_np.min(distill_rewards))
+        adv_metrics["reward/gsd_distill/max"] = float(_np.max(distill_rewards))
+        adv_metrics["reward/gsd_distill/std"] = float(_np.std(distill_rewards))
+        adv_metrics["reward/gsd_distill/count"] = float(len(distill_rewards))
 
     # 3. Build datums per role.
     datums_dict: dict[str, list] = defaultdict(list)

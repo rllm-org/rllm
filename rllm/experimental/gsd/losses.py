@@ -76,10 +76,10 @@ def build_gsd_estimator_map(*, train_hint: bool = True) -> dict[str, Any]:
     m: dict[str, Any] = {
         CE_ROLE: ("precomputed", "cross_entropy"),
         IS_ROLE: ("precomputed", "importance_sampling"),
-        GRPO_ROLE: (rLLMAdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE, "ppo"),
+        GRPO_ROLE: (rLLMAdvantageEstimator.GRPO, "ppo"),
     }
     if train_hint:
-        m[HINT_ROLE] = (rLLMAdvantageEstimator.REINFORCE, "importance_sampling")
+        m[HINT_ROLE] = (rLLMAdvantageEstimator.GRPO, "ppo")
     return m
 
 
