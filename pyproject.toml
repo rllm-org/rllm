@@ -158,8 +158,9 @@ rllm-model-gateway = { path = "./rllm-model-gateway", editable = true }
 
 [tool.uv]
 override-dependencies = [
-    "litellm[proxy]>=1.80.0,<1.82.7",
+    "litellm[proxy]>=1.83.0",
     "numpy>=1.26.0",
+    "rich>=14.1.0",
 ]
 
 [tool.uv.extra-build-dependencies]
