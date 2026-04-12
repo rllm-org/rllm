@@ -131,6 +131,8 @@ class RemoteAgentFlowEngine:
 
             traces = await self.gateway.aget_traces(session_id)
             episode = _build_episode(traces, result, uid, task)
+            if result.metadata:
+                episode.metadata.update(result.metadata)
             if not result.finished:
                 episode.metadata["error"] = {"message": result.error or "Unknown error"}
 
@@ -192,5 +194,5 @@ def _build_episode(
         is_correct=is_correct,
         trajectories=trajectories,
         metrics=metrics,
-        termination_reason=TerminationReason.ENV_DONE if training_steps else TerminationReason.ERROR,
+        termination_reason=result.termination_reason or TerminationReason.UNKNOWN,
     )

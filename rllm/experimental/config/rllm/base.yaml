@@ -169,6 +169,7 @@ remote_runtime:
 gateway:
   port: 9090
   host: null          # Auto-detects routable IP; set explicitly to override
+  public_url: null    # Public URL for remote agents (e.g. http://<tunnel-host>:9090); defaults to http://<host>:<port>
   db_path: null       # Defaults to temp file
   sampling_params_priority: session   # "session" | "client" — who wins when both set the same key
 

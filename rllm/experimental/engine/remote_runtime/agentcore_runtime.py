@@ -16,6 +16,7 @@ from rllm.experimental.engine.remote_runtime.protocol import (
     RemoteTaskResult,
     TaskSubmission,
 )
+from rllm.workflows.workflow import TerminationReason
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,7 @@ class AgentCoreRuntime(RemoteAgentRuntime):
                 session_id=sub.session_id,
                 task_id=sub.task_id,
                 error=str(e),
+                termination_reason=TerminationReason.ERROR,
             )
 
         # Check for application-level errors from @rollout_entrypoint in ART
@@ -95,6 +97,7 @@ class AgentCoreRuntime(RemoteAgentRuntime):
                 session_id=sub.session_id,
                 task_id=sub.task_id,
                 error=error_msg,
+                termination_reason=TerminationReason.ERROR,
                 elapsed=future.elapsed(),
                 raw_result=result,
             )
@@ -108,6 +111,7 @@ class AgentCoreRuntime(RemoteAgentRuntime):
             session_id=sub.session_id,
             task_id=sub.task_id,
             reward=reward,
+            termination_reason=TerminationReason.ENV_DONE,
             elapsed=future.elapsed(),
             raw_result=result,
         )

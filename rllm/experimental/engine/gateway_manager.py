@@ -82,6 +82,7 @@ class GatewayManager:
         self.host: str = configured_host if configured_host else _get_routable_ip()
         self.port: int = gw_cfg.get("port", 9090)
         self.db_path: str | None = gw_cfg.get("db_path", None)
+        self.public_url: str | None = gw_cfg.get("public_url", None)
         self.sampling_params_priority: str = gw_cfg.get("sampling_params_priority", "client")
         # The gateway always pins ``body.model`` to whatever the trainer is serving
         self.model: str | None = config.get("model", {}).get("name", None)
@@ -177,6 +178,9 @@ class GatewayManager:
         return self.client.create_session(session_id=session_id, sampling_params=sp or None)
 
     def get_session_url(self, session_id: str) -> str:
+        if self.public_url:
+            base = self.public_url.rstrip("/")
+            return f"{base}/sessions/{session_id}/v1"
         return self.client.get_session_url(session_id)
 
     def get_traces(self, session_id: str) -> list[TraceRecord]:

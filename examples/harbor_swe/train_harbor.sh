@@ -1,0 +1,42 @@
+set -x
+
+python -m examples.harbor_swe.train_harbor \
+    rllm/backend=tinker \
+    model.name=Qwen/Qwen3-30B-A3B-Instruct-2507 \
+    model.lora_rank=32 \
+    training.group_size=8 \
+    training.learning_rate=2e-5 \
+    training.max_length=32768 \
+    sampling.train.temperature=1.0 \
+    sampling.train.top_p=1.0 \
+    sampling.val.temperature=0.7 \
+    sampling.val.top_p=0.8 \
+    data.max_prompt_length=32768 \
+    data.max_response_length=8192 \
+    data.train_batch_size=1 \
+    data.val_batch_size=-1 \
+    rllm.compact_filtering.enable=true \
+    rllm.algorithm.adv_estimator=grpo \
+    rllm.algorithm.norm_adv_by_std_in_grpo=true \
+    rllm.async_training.enable=true \
+    rllm.async_training.mini_batch_size=16 \
+    rllm.async_training.fwd_bwd_group_size=1 \
+    rllm.async_training.staleness_threshold=0.5 \
+    rllm.async_training.trigger_parameter_sync_step=1 \
+    rllm.async_training.partial_rollout=true \
+    rllm.workflow.n_parallel_tasks=128 \
+    rllm.remote_runtime.enabled=true \
+    rllm.remote_runtime.backend=harbor \
+    rllm.remote_runtime.harbor.agent=mini-swe-agent \
+    rllm.remote_runtime.harbor.environment_type=daytona \
+    rllm.remote_runtime.session_timeout=1800.0 \
+    rllm.gateway.port=9090 \
+    rllm.gateway.public_url=null \
+    rllm.gateway.sampling_params_priority=session \
+    rllm.trainer.total_epochs=1 \
+    rllm.trainer.logger='[wandb]' \
+    rllm.trainer.project_name='harbor-swe' \
+    rllm.trainer.experiment_name='swesmith-mini-swe-agent-qwen3-30b' \
+    rllm.trainer.val_before_train=false \
+    rllm.trainer.test_freq=10 \
+    rllm.trainer.save_freq=-1

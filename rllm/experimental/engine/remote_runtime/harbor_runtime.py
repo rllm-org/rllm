@@ -19,8 +19,32 @@ from rllm.experimental.engine.remote_runtime.protocol import (
     RemoteTaskResult,
     TaskSubmission,
 )
+from rllm.workflows.workflow import TerminationReason
 
 logger = logging.getLogger(__name__)
+
+# Map harbor exception_type strings to rllm TerminationReason.
+_EXCEPTION_TYPE_MAP: dict[str, TerminationReason] = {
+    "AgentTimeoutError": TerminationReason.TIMEOUT,
+    "ContextLengthExceededError": TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED,
+    "OutputLengthExceededError": TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED,
+}
+
+
+def _map_termination_reason(
+    finished: bool,
+    exception_type: str | None,
+    timed_out: bool = False,
+) -> TerminationReason:
+    """Derive TerminationReason from harbor trial outcome."""
+    if finished:
+        return TerminationReason.ENV_DONE
+    if timed_out:
+        return TerminationReason.TIMEOUT
+    if exception_type:
+        return _EXCEPTION_TYPE_MAP.get(exception_type, TerminationReason.ERROR)
+    return TerminationReason.ERROR
+
 
 # Provider API key env vars that harbor's installed agent scaffolds pre-flight
 # check on the host process before the trial runs. When routing through a
@@ -150,6 +174,7 @@ class HarborRuntime(RemoteAgentRuntime):
                 session_id=sub.session_id,
                 task_id=sub.task_id,
                 error=f"harbor trial timed out after {timeout:.1f}s",
+                termination_reason=TerminationReason.TIMEOUT,
                 elapsed=elapsed,
             )
         except Exception as e:
@@ -160,6 +185,7 @@ class HarborRuntime(RemoteAgentRuntime):
                 session_id=sub.session_id,
                 task_id=sub.task_id,
                 error=f"{type(e).__name__}: {e}",
+                termination_reason=_map_termination_reason(False, type(e).__name__),
                 elapsed=elapsed,
             )
 
@@ -168,6 +194,8 @@ class HarborRuntime(RemoteAgentRuntime):
         vr = result.verifier_result
         exc = result.exception_info
         exc_msg = f"{exc.exception_type}: {exc.exception_message}" if exc else None
+        exc_type = exc.exception_type if exc else None
+        meta = {"trial_uri": result.trial_uri}
 
         if vr is not None and vr.rewards:
             reward_val = vr.rewards.get("reward")
@@ -181,8 +209,10 @@ class HarborRuntime(RemoteAgentRuntime):
                     task_id=sub.task_id,
                     reward=float(reward_val),
                     error=exc_msg,
+                    termination_reason=_map_termination_reason(True, exc_type),
                     elapsed=elapsed,
                     raw_result=raw,
+                    metadata=meta,
                 )
 
         # No reward signal at all → finished=False.
@@ -192,8 +222,10 @@ class HarborRuntime(RemoteAgentRuntime):
             task_id=sub.task_id,
             reward=None,
             error=exc_msg or "harbor trial produced no verifier reward",
+            termination_reason=_map_termination_reason(False, exc_type),
             elapsed=elapsed,
             raw_result=raw,
+            metadata=meta,
         )
 
     async def execute_tasks(

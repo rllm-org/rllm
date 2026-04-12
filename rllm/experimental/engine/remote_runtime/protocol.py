@@ -3,6 +3,8 @@
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from rllm.workflows.workflow import TerminationReason
+
 # ---------------------------------------------------------------------------
 # Common protocol (backend-agnostic)
 # ---------------------------------------------------------------------------
@@ -38,8 +40,10 @@ class RemoteTaskResult:
     task_id: str = ""  # GRPO grouping key (from TaskSubmission)
     reward: float | None = None
     error: str | None = None
+    termination_reason: TerminationReason | None = None
     elapsed: float = 0.0
     raw_result: dict[str, Any] | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class RemoteAgentRuntime(Protocol):
