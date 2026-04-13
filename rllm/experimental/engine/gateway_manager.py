@@ -190,6 +190,14 @@ class GatewayManager:
         await self.async_client.flush()
         return await self.async_client.get_session_traces(session_id)
 
+    async def adelete_session(self, session_id: str) -> int:
+        """Delete a session and its traces from the gateway DB."""
+        return await self.async_client.delete_session(session_id)
+
+    def delete_session(self, session_id: str) -> int:
+        """Delete a session and its traces from the gateway DB (sync)."""
+        return self.client.delete_session(session_id)
+
     # -- Worker setup --------------------------------------------------------
 
     def _ensure_workers(self, rollout_engine: RolloutEngine) -> list[str]:
