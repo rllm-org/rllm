@@ -111,7 +111,7 @@ async def main() -> int:
         tasks = [{"task_path": r["task_path"], "id": r["id"]} for r in rows]
         task_ids = [r["id"] for r in rows]
 
-        episodes = await engine.execute_tasks(tasks=tasks, task_ids=task_ids, is_validation=True, show_progress=True)
+        episodes = await engine.execute_tasks(tasks=tasks, task_ids=task_ids, is_validation=True)
     finally:
         runtime.shutdown()
         gateway.stop()

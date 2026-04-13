@@ -185,7 +185,6 @@ class UnifiedTrainer:
 
             gateway_mode = "process" if kwargs.get("backend_name") == "verl" else "thread"
             self._gateway = GatewayManager(self.config, mode=gateway_mode)
-            self._gateway.start(rollout_engine)
 
             self.agent_workflow_engine = AgentFlowEngine(
                 agent_flow=agent_flow,
@@ -209,7 +208,6 @@ class UnifiedTrainer:
 
             gateway_mode = "process" if kwargs.get("backend_name") == "verl" else "thread"
             self._gateway = GatewayManager(self.config, mode=gateway_mode)
-            self._gateway.start(rollout_engine)
 
             remote_runtime_config = RemoteRuntimeConfig(
                 enabled=True,
@@ -339,6 +337,9 @@ class UnifiedTrainer:
         trainer_state = TrainerState()
 
         await self.backend.on_train_start(trainer_state)
+
+        if hasattr(self, "_gateway"):
+            self._gateway.start(self.backend.rollout_engine)
 
         if self.rllm_config.trainer.get("val_before_train", True):
             await self._validate_async(trainer_state)

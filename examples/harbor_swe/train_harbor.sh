@@ -24,7 +24,7 @@ python -m examples.harbor_swe.train_harbor \
     rllm.async_training.staleness_threshold=0.5 \
     rllm.async_training.trigger_parameter_sync_step=1 \
     rllm.async_training.partial_rollout=true \
-    rllm.workflow.n_parallel_tasks=128 \
+    rllm.workflow.n_parallel_tasks=64 \
     rllm.remote_runtime.enabled=true \
     rllm.remote_runtime.backend=harbor \
     rllm.remote_runtime.harbor.agent=mini-swe-agent \
@@ -37,6 +37,6 @@ python -m examples.harbor_swe.train_harbor \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='harbor-swe' \
     rllm.trainer.experiment_name='swesmith-mini-swe-agent-qwen3-30b' \
-    rllm.trainer.val_before_train=false \
+    rllm.trainer.val_before_train=true \
     rllm.trainer.test_freq=10 \
     rllm.trainer.save_freq=-1
