@@ -214,15 +214,35 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
     )
 
 
+def _is_prefix(prefix_prompt: torch.Tensor, prefix_response: torch.Tensor, step_prompt: torch.Tensor) -> bool:
+    """Check if prefix's prompt_ids + response_ids is a prefix of step's prompt_ids"""
+    prefix_prompt_len = len(prefix_prompt)
+    prefix_response_len = len(prefix_response)
+    prefix_len = prefix_prompt_len + prefix_response_len
+
+    if prefix_len > len(step_prompt):
+        return False
+
+    return (
+        torch.equal(prefix_prompt, step_prompt[:prefix_prompt_len]) and
+        torch.equal(prefix_response, step_prompt[prefix_prompt_len:prefix_len])
+    )
+
 def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: AccumulatedData) -> int:
-    """Processes a trajectory and returns an AccumulatedData.
+    """Processes a trajectory with prefix-based collapse.
+
+    Steps whose prompt is a cumulative extension of the previous step's
+    (prompt + response) are merged into a single training row. The merged row
+    keeps the earliest prompt and concatenates all response tokens with a mask
+    that is 1 on assistant completion tokens and 0 on gap (observation/template)
+    tokens between turns.
 
     Args:
         trajectory: Trajectory to process.
         task_id: Task identifier corresponding to the episode.
         accumulated: AccumulatedData to process the trajectory into.
     Returns:
-        n_steps: The number of steps in the trajectory.
+        added_steps: The number of rows added to accumulated (after collapse).
     """
     name = trajectory.name
     trajectory_id = f"{task_id}_{name}"
@@ -231,42 +251,91 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
         return 0
 
     n_steps = len(trajectory.steps)
-
-    # This corresponds to case when we have `per_step` mode for stepwise advantage computation
     traj_reward = 0.0 if trajectory.reward is None else trajectory.reward
 
-    added_steps = 0
+    processed_steps: list[dict] = []
+    last_modified_idx: int = -1  # index of the processed_step that received the last chronological step
     for step_idx, step in enumerate(trajectory.steps):
         if step.model_output is None or step.model_output.prompt_ids is None:
             logger.warning(f"Step {step_idx} in trajectory {trajectory_id} has no valid model_output, skipping")
             continue
         prompt_ids = torch.tensor(step.model_output.prompt_ids, dtype=torch.long)
         response_ids = torch.tensor(step.model_output.completion_ids, dtype=torch.long)
-        mask = torch.ones_like(response_ids, dtype=torch.long)
         step_reward = step.reward
         multi_modal_inputs = step.model_output.multi_modal_inputs or {}
         step_id = f"{trajectory_id}_step{step_idx}"
 
-        step_data = ProcessedStepData(
-            prompt=prompt_ids,
-            response=response_ids,
-            mask=mask,
-            step_reward=step_reward,
-            step_id=step_id,
-            multi_modal_inputs=multi_modal_inputs,
-            advantage=step.advantage,
-            logprobs=step.model_output.logprobs,
-        )
+        # Try to merge with an existing processed step via prefix matching
+        merged = False
+        for i, prefix_entry in enumerate(processed_steps):
+            prefix_data = prefix_entry["step_data"]
+            if _is_prefix(prefix_data.prompt, prefix_data.response, prompt_ids):
+                # Gap = tokens in current prompt after the prefix (observation/template tokens)
+                prefix_len = len(prefix_data.prompt) + len(prefix_data.response)
+                gap_tokens = prompt_ids[prefix_len:]
 
+                new_response = torch.cat([prefix_data.response, gap_tokens, response_ids])
+                new_mask = torch.cat([
+                    prefix_data.mask,
+                    torch.zeros(len(gap_tokens), dtype=torch.long),
+                    torch.ones(len(response_ids), dtype=torch.long),
+                ])
+
+                processed_steps[i]["step_data"] = ProcessedStepData(
+                    prompt=prefix_data.prompt,
+                    response=new_response,
+                    mask=new_mask,
+                    step_reward=step_reward,
+                    step_id=prefix_data.step_id,
+                    multi_modal_inputs=multi_modal_inputs,  # use current step's (cumulative from full prompt)
+                    advantage=step.advantage,
+                    logprobs=None,  # logprobs not valid after merge (gap tokens have none)
+                )
+                last_modified_idx = i
+                merged = True
+                break
+
+        if not merged:
+            # No prefix match — start a new training sequence
+            step_data = ProcessedStepData(
+                prompt=prompt_ids,
+                response=response_ids,
+                mask=torch.ones(len(response_ids), dtype=torch.long),
+                step_reward=step_reward,
+                step_id=step_id,
+                multi_modal_inputs=multi_modal_inputs,
+                advantage=step.advantage,
+                logprobs=step.model_output.logprobs,
+            )
+            processed_steps.append({
+                "step_data": step_data,
+                "trajectory_id": trajectory_id,
+                "traj_reward": traj_reward,
+                "step_num": n_steps,
+                "is_last_step": False,
+                "group_role": name,
+            })
+            last_modified_idx = len(processed_steps) - 1
+
+    # Mark the entry containing the chronologically last step as is_last
+    if processed_steps and last_modified_idx >= 0:
+        processed_steps[last_modified_idx]["is_last_step"] = True
+
+    # Flush all processed steps to accumulated
+    added_steps = 0
+    for entry in processed_steps:
         accumulated.add_step(
-            step_data=step_data,
-            trajectory_id=trajectory_id,
-            traj_reward=traj_reward,
-            step_num=n_steps,
-            is_last=step_idx == n_steps - 1,
-            group_role=name,
+            step_data=entry["step_data"],
+            trajectory_id=entry["trajectory_id"],
+            traj_reward=entry["traj_reward"],
+            step_num=entry["step_num"],
+            is_last=entry["is_last_step"],
+            group_role=entry["group_role"],
         )
         added_steps += 1
+
+    if added_steps < n_steps:
+        logger.info(f"[collapse] {trajectory_id}: {n_steps} steps -> {added_steps} rows")
 
     return added_steps
 

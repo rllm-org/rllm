@@ -84,14 +84,8 @@ dev = [
 ]
 
 verl = [
-    "transformers>=4.55.0,<5.0.0",
-    "numpy",
-    "verl==0.7.1",
-    "ray",
     "torch>=2.10.0",
-    "torchvision>=0.23.0",
-    "vllm==0.17.0",
-    "flash-attn==2.8.1",
+    "ray",
     "qwen-vl-utils",
 ]
 
