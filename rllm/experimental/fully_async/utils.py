@@ -456,9 +456,23 @@ def apply_rejection_sampling(
     unfiltered_mean = stats.get("rejection_sample/unfiltered_reward_mean", 0)
     filtered_mean = stats.get("rejection_sample/filtered_reward_mean", 0)
     if enable:
-        print(f"[RejectionSampling] Applied rejection sampling: solve_none={stats['rejection_sample/solve_none']}, solve_all={stats['rejection_sample/solve_all']}, solve_partial={stats['rejection_sample/solve_partial']}, kept {len(filtered_groups)}/{len(trajectory_group_ls)} groups, unfiltered_reward={unfiltered_mean:.4f}, filtered_reward={filtered_mean:.4f}")
+        print(
+            f"[RejectionSampling] Applied rejection sampling:"
+            f" solve_none={stats['rejection_sample/solve_none']},"
+            f" solve_all={stats['rejection_sample/solve_all']},"
+            f" solve_partial={stats['rejection_sample/solve_partial']},"
+            f" kept {len(filtered_groups)}/{len(trajectory_group_ls)} groups,"
+            f" unfiltered_reward={unfiltered_mean:.4f},"
+            f" filtered_reward={filtered_mean:.4f}"
+        )
     else:
-        print(f"[RejectionSampling] Stats (filtering disabled): solve_none={stats['rejection_sample/solve_none']}, solve_all={stats['rejection_sample/solve_all']}, solve_partial={stats['rejection_sample/solve_partial']}, reward_mean={unfiltered_mean:.4f}")
+        print(
+            f"[RejectionSampling] Stats (filtering disabled):"
+            f" solve_none={stats['rejection_sample/solve_none']},"
+            f" solve_all={stats['rejection_sample/solve_all']},"
+            f" solve_partial={stats['rejection_sample/solve_partial']},"
+            f" reward_mean={unfiltered_mean:.4f}"
+        )
 
     return filtered_groups, stats
 

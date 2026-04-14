@@ -376,7 +376,9 @@ class BigQueryExporter(BaseExporter):
         try:
             await loop.run_in_executor(None, self._client.get_dataset, dataset_ref)
         except Exception as exc:
-            raise BigQueryValidationError(f"BigQuery dataset '{self._config.bq_dataset}' not found in project '{self._config.bq_project}'. Set bq_auto_create=True to create it automatically: {exc}") from exc
+            raise BigQueryValidationError(
+                f"BigQuery dataset '{self._config.bq_dataset}' not found in project '{self._config.bq_project}'. Set bq_auto_create=True to create it automatically: {exc}"
+            ) from exc
 
         try:
             await loop.run_in_executor(None, self._client.get_table, self._table_ref)

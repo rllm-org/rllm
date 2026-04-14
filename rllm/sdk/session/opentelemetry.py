@@ -105,7 +105,9 @@ def get_active_otel_session_uids() -> list[str]:
 
 def get_current_otel_session() -> OpenTelemetrySession:
     """Not implemented - use get_current_otel_metadata() or get_current_otel_session_name() instead."""
-    raise NotImplementedError("get_current_otel_session() is not supported with baggage-based sessions. Use get_current_otel_metadata(), get_current_otel_session_name(), or get_active_otel_session_uids() instead.")
+    raise NotImplementedError(
+        "get_current_otel_session() is not supported with baggage-based sessions. Use get_current_otel_metadata(), get_current_otel_session_name(), or get_active_otel_session_uids() instead."
+    )
 
 
 def otel_session(**kwargs: Any) -> OpenTelemetrySession:

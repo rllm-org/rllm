@@ -118,10 +118,22 @@ asyncio.run(main())
 
 # Test queries for search tools
 search_test_cases = {
-    "google_search": [{"name": "Basic Search", "query": "What is Python programming?", "expected_fields": ["title", "snippet", "link"]}, {"name": "Technical Search", "query": "Python async await syntax example", "expected_fields": ["title", "snippet", "link"]}],
-    # "tavily_search": [{"name": "News Search", "query": "Latest developments in AI", "expected_fields": ["title", "snippet", "url"]}, {"name": "Technical Search", "query": "Python type hints tutorial", "expected_fields": ["title", "snippet", "url"]}],
-    # "tavily_extract": [{"name": "Python.org", "url": "https://www.python.org/about/", "expected_fields": ["title", "text"]}, {"name": "Python Docs", "url": "https://docs.python.org/3/tutorial/", "expected_fields": ["title", "text"]}],
-    # "firecrawl": [{"name": "Python.org", "url": "https://www.python.org", "expected_fields": ["title", "text", "links"]}, {"name": "Python Docs", "url": "https://docs.python.org/3/", "expected_fields": ["title", "text", "links"]}],
+    "google_search": [
+        {"name": "Basic Search", "query": "What is Python programming?", "expected_fields": ["title", "snippet", "link"]},
+        {"name": "Technical Search", "query": "Python async await syntax example", "expected_fields": ["title", "snippet", "link"]},
+    ],
+    # "tavily_search": [
+    #     {"name": "News Search", "query": "Latest developments in AI", "expected_fields": ["title", "snippet", "url"]},
+    #     {"name": "Technical Search", "query": "Python type hints tutorial", "expected_fields": ["title", "snippet", "url"]},
+    # ],
+    # "tavily_extract": [
+    #     {"name": "Python.org", "url": "https://www.python.org/about/", "expected_fields": ["title", "text"]},
+    #     {"name": "Python Docs", "url": "https://docs.python.org/3/tutorial/", "expected_fields": ["title", "text"]},
+    # ],
+    # "firecrawl": [
+    #     {"name": "Python.org", "url": "https://www.python.org", "expected_fields": ["title", "text", "links"]},
+    #     {"name": "Python Docs", "url": "https://docs.python.org/3/", "expected_fields": ["title", "text", "links"]},
+    # ],
 }
 
 

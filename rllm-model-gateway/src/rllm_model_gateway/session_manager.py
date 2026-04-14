@@ -23,9 +23,7 @@ class SessionManager:
         self._created_at: dict[str, float] = {}
         self._sampling_params: dict[str, dict[str, Any]] = {}
 
-    def ensure_session(
-        self, session_id: str, metadata: dict[str, Any] | None = None
-    ) -> str:
+    def ensure_session(self, session_id: str, metadata: dict[str, Any] | None = None) -> str:
         """Ensure a session exists (create if needed).  Returns session_id."""
         if session_id not in self._created_at:
             self._created_at[session_id] = time.time()

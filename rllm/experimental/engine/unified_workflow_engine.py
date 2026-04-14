@@ -12,7 +12,6 @@ from tqdm import tqdm
 
 from rllm.agents.agent import Episode
 from rllm.experimental.rollout import RolloutEngine
-from rllm.utils import colorful_print
 from rllm.workflows.store import Store
 from rllm.workflows.workflow import TerminationReason, Workflow
 
@@ -157,9 +156,7 @@ class UnifiedWorkflowEngine:
                     elif len(traj.steps) > 0:
                         reward = f"{traj.steps[-1].reward:.1f}"
                     reward_strs.append(f"{traj.name}: {reward}")
-                logger.debug(
-                    f"[{uid}] Rollout completed. Rewards: [{', '.join(reward_strs)}], Termination: {episode.termination_reason}"
-                )
+                logger.debug(f"[{uid}] Rollout completed. Rewards: [{', '.join(reward_strs)}], Termination: {episode.termination_reason}")
 
                 if episode.termination_reason != TerminationReason.ERROR:
                     return task_id, rollout_idx, result_idx, episode

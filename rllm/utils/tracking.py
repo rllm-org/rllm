@@ -683,7 +683,9 @@ class ClearMLLogger:
                     iteration=step,
                 )
             else:
-                logger.warning(f'Trainer is attempting to log a value of "{v}" of type {type(v)} for key "{k}". This invocation of ClearML logger\'s function is incorrect so this attribute was dropped. ')
+                logger.warning(
+                    f'Trainer is attempting to log a value of "{v}" of type {type(v)} for key "{k}". This invocation of ClearML logger\'s function is incorrect so this attribute was dropped.'
+                )
 
     def finish(self):
         self._task.close()

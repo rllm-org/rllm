@@ -12,6 +12,10 @@ import os
 import pickle
 import tempfile
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from tqdm import tqdm
 
 from rllm.agents.agent import Episode, TrajectoryGroup
 from rllm.experimental.common import (
@@ -32,6 +36,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TaskBatch:
     """All trajectory groups produced from one task's episodes, plus stripped episodes for UI logging."""
+
     groups: list[TrajectoryGroup]
     episodes: list[Episode] = field(default_factory=list)
 
@@ -66,7 +71,7 @@ class TrajectoryGroupBuffer:
         rs_config: RejectionSamplingConfig,
         episode_offload_dir: str | None = None,
         trajectory_group_offload_dir: str | None = None,
-        pbar: "tqdm | None" = None,
+        pbar: tqdm | None = None,
     ):
         self._group_size = group_size
         self._coordinator = coordinator
@@ -161,7 +166,9 @@ class TrajectoryGroupBuffer:
 
         # 2. Transform episodes -> trajectory groups
         traj_groups, transform_metrics = transform_episodes_to_trajectory_groups(
-            episodes, self._transform_config, self._cf_config,
+            episodes,
+            self._transform_config,
+            self._cf_config,
         )
         self._aggregator.record_dict(transform_metrics)
 
@@ -176,7 +183,8 @@ class TrajectoryGroupBuffer:
 
         # 4. Compute advantages
         adv_metrics = collect_reward_and_advantage_from_trajectory_groups(
-            traj_groups, self._algorithm_config,
+            traj_groups,
+            self._algorithm_config,
         )
         self._aggregator.record_dict(adv_metrics)
 
@@ -184,15 +192,7 @@ class TrajectoryGroupBuffer:
         filtered_zero_adv = 0
         if self._rs_config.filter_uniform_groups:
             before_adv = len(traj_groups)
-            traj_groups = [
-                g for g in traj_groups
-                if any(
-                    abs(step.advantage) > 1e-8
-                    for traj in g.trajectories
-                    for step in traj.steps
-                    if step.advantage is not None
-                )
-            ]
+            traj_groups = [g for g in traj_groups if any(abs(step.advantage) > 1e-8 for traj in g.trajectories for step in traj.steps if step.advantage is not None)]
             filtered_zero_adv = before_adv - len(traj_groups)
         self._aggregator.record("groups/dropped_zero_adv", filtered_zero_adv)
 
@@ -264,10 +264,10 @@ class TrajectoryGroupBuffer:
 
     @staticmethod
     def _min_weight_version(episodes: list[Episode]) -> int:
-        min_v = float('inf')
+        min_v = float("inf")
         for ep in episodes:
             for traj in ep.trajectories:
                 for step in traj.steps:
                     if step.weight_version is not None:
                         min_v = min(min_v, step.weight_version)
-        return int(min_v) if min_v != float('inf') else 0
+        return int(min_v) if min_v != float("inf") else 0

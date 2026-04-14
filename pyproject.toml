@@ -84,14 +84,14 @@ dev = [
 ]
 
 verl = [
-    "torch",
     "transformers>=4.55.0,<5.0.0",
     "numpy",
     "verl==0.7.1",
     "ray",
-    "torchvision",
-    "vllm>=0.10.2,<=0.17.0",
-    "flash-attn>=2.8.1",
+    "torch>=2.10.0",
+    "torchvision>=0.23.0",
+    "vllm==0.17.0",
+    "flash-attn==2.8.1",
     "qwen-vl-utils",
 ]
 
@@ -155,7 +155,7 @@ rllm-model-gateway = { path = "./rllm-model-gateway", editable = true }
 [tool.uv]
 override-dependencies = [
     "litellm[proxy]>=1.80.0,<1.82.7",
-    "numpy>=2.0.0",
+    "numpy>=1.26.0",
 ]
 
 [tool.uv.extra-build-dependencies]
@@ -199,6 +199,38 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "rllm/rewards/code_utils/**" = ["ALL"]
+# Prompt / string-heavy files where long lines are intentional
+"rllm/agents/system_prompts.py" = ["E501"]
+"rllm/system_prompts.py" = ["E501"]
+"rllm/agents/appworld_react_agents.py" = ["E501"]
+"rllm/agents/code_agent.py" = ["E501"]
+"rllm/agents/frozenlake_agent.py" = ["E501"]
+"rllm/agents/miniwob_agent.py" = ["E501"]
+"rllm/agents/webarena_agent.py" = ["E501"]
+"agenthub/frozenlake_agent/agent/agent.py" = ["E501"]
+"examples/archive/deepresearch/deepresearch_agent.py" = ["E501"]
+"examples/fully_async/deepresearch/refine_agent.py" = ["E501"]
+"examples/fully_async/deepresearch/search_agent.py" = ["E501"]
+"examples/archive/sft/run_sft_model.py" = ["E501"]
+"examples/archive/vimgolf/prepare_vimgolf_data.py" = ["E501"]
+"examples/countdown/prepare_countdown_data.py" = ["E501"]
+"examples/eval_protocol/prepare_frozen_lake_data.py" = ["E501"]
+"examples/solver_judge/prepare_countdown_data.py" = ["E501"]
+"cookbooks/solver_judge_flow/solver_judge_flow.py" = ["E501"]
+"examples/sdk/solver_judge/solver_judge_flow_decorator.py" = ["E501"]
+"examples/sdk/solver_judge/solver_judge_flow_session.py" = ["E501"]
+"examples/solver_judge/solver_judge_flow.py" = ["E501"]
+"rllm/experimental/cli/main.py" = ["E501"]
+"rllm/experimental/rllm_telemetry/examples/experiment_comparison.py" = ["E501"]
+"rllm/experimental/test_examples/opsd/math_opsd_workflow.py" = ["E501"]
+"rllm/experimental/agents/tools/file_editor_tool.py" = ["E501"]
+"rllm/rewards/math_reward.py" = ["E501"]
+"projects/finqa/fin_qa_tools.py" = ["E501"]
+"projects/finqa/scripts/data_generation/cleanup_tables.py" = ["E501"]
+"tests/agents/test_appworld_agent.py" = ["E501"]
+"tests/integration/test_agentcore_runtime.py" = ["E501"]
+"tests/integration/test_remote_engine.py" = ["E501"]
+"tests/rewards/test_code_reward.py" = ["E501"]
 
 [tool.setuptools.packages.find]
 where   = ["."]

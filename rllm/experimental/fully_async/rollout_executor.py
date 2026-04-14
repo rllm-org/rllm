@@ -71,7 +71,13 @@ class RolloutExecutor:
         self.total_train_steps = int(self.total_rollout_steps / (required_samples * trigger_parameter_sync_step))
         self.max_queue_size = self.max_required_samples
 
-        print(f"[RolloutExecutor] required_samples={required_samples} max_required_samples={self.max_required_samples} max_queue_size={self.max_queue_size} total_train_steps={self.total_train_steps} total_rollout_steps={self.total_rollout_steps}")
+        print(
+            f"[RolloutExecutor] required_samples={required_samples}"
+            f" max_required_samples={self.max_required_samples}"
+            f" max_queue_size={self.max_queue_size}"
+            f" total_train_steps={self.total_train_steps}"
+            f" total_rollout_steps={self.total_rollout_steps}"
+        )
 
         # Lock for dataloader access (async safety)
         self.dataloader_lock = asyncio.Lock()
@@ -355,7 +361,12 @@ class RolloutExecutor:
                     datum = batch[0]  # batch_size=1, extract single item
                     datum_count += 1
                     if datum_count % 128 == 1:
-                        print(f"[RolloutExecutor] Processing datum {datum_count}, global_steps={self.global_steps}/{self.total_rollout_steps}, active={self.active_sample}, enqueued={self.enqueued_sample}", flush=True)
+                        print(
+                            f"[RolloutExecutor] Processing datum {datum_count},"
+                            f" global_steps={self.global_steps}/{self.total_rollout_steps},"
+                            f" active={self.active_sample}, enqueued={self.enqueued_sample}",
+                            flush=True,
+                        )
 
                     if self.active_sample + self.enqueued_sample >= self.max_staleness_samples:
                         self.continue_event.clear()
@@ -403,7 +414,15 @@ class RolloutExecutor:
         mq_total_consumed = mq_stats.get("total_consumed", "N/A")
         mq_total_produced = mq_stats.get("total_produced", "N/A")
 
-        print(f"[RolloutExecutor] update_staleness_tracking CALLED, current enqueued_sample={self.enqueued_sample}, active_sample={self.active_sample}, mq_queue_size={mq_queue_size}, mq_total_consumed={mq_total_consumed}, mq_total_produced={mq_total_produced}", flush=True)
+        print(
+            f"[RolloutExecutor] update_staleness_tracking CALLED,"
+            f" current enqueued_sample={self.enqueued_sample},"
+            f" active_sample={self.active_sample},"
+            f" mq_queue_size={mq_queue_size},"
+            f" mq_total_consumed={mq_total_consumed},"
+            f" mq_total_produced={mq_total_produced}",
+            flush=True,
+        )
         self.enqueued_sample = mq_queue_size
         print(f"[RolloutExecutor] update_staleness_tracking DONE, new enqueued_sample={self.enqueued_sample}", flush=True)
 

@@ -269,7 +269,9 @@ FETCH_MC_PROMPT = """You are provided a problem and a solution in the user promp
 - IF THE PROBLEM DOESNT HAVE MULTIPLE CHOICE, OUTPUT 'NO MULTIPLE CHOICE'."""
 
 
-LCB_SYSTEM_MESSAGE_GENERIC = "You are an expert Python programmer. You will be given a question (problem specification) and will generate a correct Python program that matches the specification and passes all tests."
+LCB_SYSTEM_MESSAGE_GENERIC = (
+    "You are an expert Python programmer. You will be given a question (problem specification) and will generate a correct Python program that matches the specification and passes all tests."
+)
 
 LCB_FORMATTING_MESSAGE_WITH_STARTER_CODE = "You will use the following starter code to write the solution to the problem and enclose your code within delimiters."
 

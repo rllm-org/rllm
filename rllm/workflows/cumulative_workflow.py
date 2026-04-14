@@ -49,7 +49,14 @@ class CumulativeWorkflow(TimingTrackingMixin, Workflow):
             if max_tokens <= 0:
                 raise TerminationEvent(TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED)
 
-            output: ModelOutput = await self.timed_llm_call(self.agent.chat_completions, application_id=uid, accumulate_reasoning=True, enforce_max_prompt_length=False, max_tokens=max_tokens, **kwargs)
+            output: ModelOutput = await self.timed_llm_call(
+                self.agent.chat_completions,
+                application_id=uid,
+                accumulate_reasoning=True,
+                enforce_max_prompt_length=False,
+                max_tokens=max_tokens,
+                **kwargs,
+            )
             response = output.text
 
             action = self.agent.update_from_model(response)

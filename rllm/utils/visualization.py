@@ -118,7 +118,14 @@ def visualize_trajectories(
             _visualize_metadata(batch, idx, config)
 
         # 2. Print Legend (simplified)
-        legend = " ".join([_format_token("masked", config.masked_token_style), _format_token("unmasked", config.unmasked_token_style), _format_token("reward > 0", config.reward_pos_style), _format_token("reward <= 0", config.reward_neg_style)])
+        legend = " ".join(
+            [
+                _format_token("masked", config.masked_token_style),
+                _format_token("unmasked", config.unmasked_token_style),
+                _format_token("reward > 0", config.reward_pos_style),
+                _format_token("reward <= 0", config.reward_neg_style),
+            ]
+        )
         print(f"[{legend}]")
 
         # 3. Render Prompt

@@ -48,9 +48,7 @@ class RemoteAgentRuntime(Protocol):
         """Client setup from config."""
         ...
 
-    async def execute_tasks(
-        self, submissions: list[TaskSubmission], timeout: float | None = None
-    ) -> list[RemoteTaskResult]:
+    async def execute_tasks(self, submissions: list[TaskSubmission], timeout: float | None = None) -> list[RemoteTaskResult]:
         """Submit tasks concurrently and gather results. Returns one result per submission."""
         ...
 

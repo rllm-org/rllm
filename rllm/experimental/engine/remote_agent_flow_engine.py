@@ -93,7 +93,12 @@ class RemoteAgentFlowEngine:
         return episodes
 
     async def process_task_with_retry(
-        self, task: dict, task_id: str, rollout_idx: int, result_idx: int, **kwargs,
+        self,
+        task: dict,
+        task_id: str,
+        rollout_idx: int,
+        result_idx: int,
+        **kwargs,
     ) -> tuple[str, int, int, Episode]:
         """Process a single task with concurrency control."""
         async with self._semaphore:
@@ -105,7 +110,10 @@ class RemoteAgentFlowEngine:
             session_url = self.gateway.get_session_url(session_id)
 
             submission = TaskSubmission(
-                task=task, session_id=session_id, task_id=task_id, inference_url=session_url,
+                task=task,
+                session_id=session_id,
+                task_id=task_id,
+                inference_url=session_url,
             )
             results = await self.runtime.execute_tasks([submission], timeout=self.session_timeout)
             result = results[0]

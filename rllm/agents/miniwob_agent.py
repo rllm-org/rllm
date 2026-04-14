@@ -38,7 +38,17 @@ def image_to_jpg_base64_url(image: np.ndarray | Image.Image) -> str:
 
 
 class MiniWobAgent(BaseAgent):
-    def __init__(self, chat_mode: bool = False, use_html: bool = True, use_axtree: bool = True, use_screenshot: bool = False, use_accumulate_thinking: bool = True, cot_prompt: bool = False, use_full_conversation: bool = True, use_reward_shaping: bool = False):
+    def __init__(
+        self,
+        chat_mode: bool = False,
+        use_html: bool = True,
+        use_axtree: bool = True,
+        use_screenshot: bool = False,
+        use_accumulate_thinking: bool = True,
+        cot_prompt: bool = False,
+        use_full_conversation: bool = True,
+        use_reward_shaping: bool = False,
+    ):
         self.chat_mode: bool = chat_mode
         self.use_html: bool = use_html
         self.use_axtree: bool = use_axtree
@@ -217,7 +227,12 @@ Last Action:
         user_msgs.append({"type": "text", "text": self._get_action_space_description()})
 
         # Add next action prompt
-        user_msgs.append({"type": "text", "text": "# Next action\nThe task has not been completed yet. You will now think step by step and produce your next best action. Reflect on your past actions, any resulting error message, and the current state of the page before deciding on your next action. The content must be in the same format as shown before in the Action Space. You can plan ahead but only 1 immediate action is needed."})
+        user_msgs.append(
+            {
+                "type": "text",
+                "text": "# Next action\nThe task has not been completed yet. You will now think step by step and produce your next best action. Reflect on your past actions, any resulting error message, and the current state of the page before deciding on your next action. The content must be in the same format as shown before in the Action Space. You can plan ahead but only 1 immediate action is needed.",
+            }
+        )
 
         return user_msgs
 

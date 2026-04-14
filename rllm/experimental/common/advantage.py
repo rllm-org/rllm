@@ -49,7 +49,10 @@ def get_rllm_adv_estimator(name: str | rLLMAdvantageEstimator) -> Callable:
 
 @register_rllm_adv_estimator(rLLMAdvantageEstimator.GRPO)
 def calculate_grpo_advantages(rewards: list[np.ndarray], norm_adv_by_std_in_grpo=True, episilon=1e-6, **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    advantages_by_group, returns_by_group = zip(*[calculate_grpo_advantages_per_group(group_rewards, norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo, episilon=episilon) for group_rewards in rewards], strict=True)
+    advantages_by_group, returns_by_group = zip(
+        *[calculate_grpo_advantages_per_group(group_rewards, norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo, episilon=episilon) for group_rewards in rewards],
+        strict=True,
+    )
 
     return advantages_by_group, returns_by_group
 

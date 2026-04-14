@@ -225,7 +225,9 @@ class TinkerDatumBuilder:
         all_mask = [0.0] * ob_len + [1.0] * (len(input_tokens) - ob_len)
 
         # Ensure all lists have the same length
-        assert len(input_tokens) == len(target_tokens) == len(all_logprobs) == len(all_advantages) == len(all_mask), f"Length mismatch: input={len(input_tokens)}, target={len(target_tokens)}, logprobs={len(all_logprobs)}, advantages={len(all_advantages)}, mask={len(all_mask)}"
+        assert len(input_tokens) == len(target_tokens) == len(all_logprobs) == len(all_advantages) == len(all_mask), (
+            f"Length mismatch: input={len(input_tokens)}, target={len(target_tokens)}, logprobs={len(all_logprobs)}, advantages={len(all_advantages)}, mask={len(all_mask)}"
+        )
 
         # Create Datum
         datum = tinker.types.Datum(
@@ -268,7 +270,9 @@ class TinkerDatumBuilder:
         all_mask = [0.0] * ob_len + [1.0] * (len(input_tokens) - ob_len)
 
         # Ensure all lists have the same length
-        assert len(input_tokens) == len(target_tokens) == len(all_logprobs) == len(all_advantages) == len(all_mask), f"Length mismatch: input={len(input_tokens)}, target={len(target_tokens)}, logprobs={len(all_logprobs)}, advantages={len(all_advantages)}, mask={len(all_mask)}"
+        assert len(input_tokens) == len(target_tokens) == len(all_logprobs) == len(all_advantages) == len(all_mask), (
+            f"Length mismatch: input={len(input_tokens)}, target={len(target_tokens)}, logprobs={len(all_logprobs)}, advantages={len(all_advantages)}, mask={len(all_mask)}"
+        )
 
         # Create Datum
         datum = tinker.types.Datum(

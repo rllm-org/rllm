@@ -7,8 +7,19 @@ from rllm.data.utils import fetch_live_code_bench_system_prompt
 
 
 def prepare_deepcoder_data(train_size: int = None, test_size: int = None):
-    train_dataset = concatenate_datasets([load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="primeintellect", split="train"), load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="taco", split="train"), load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="lcbv5", split="train")])
-    test_dataset = concatenate_datasets([load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="codeforces", split="test"), load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="lcbv5", split="test")])
+    train_dataset = concatenate_datasets(
+        [
+            load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="primeintellect", split="train"),
+            load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="taco", split="train"),
+            load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="lcbv5", split="train"),
+        ]
+    )
+    test_dataset = concatenate_datasets(
+        [
+            load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="codeforces", split="test"),
+            load_dataset("agentica-org/DeepCoder-Preview-Dataset", name="lcbv5", split="test"),
+        ]
+    )
 
     def preprocess_fn(example, idx):
         starter_code = example.get("starter_code", "")
@@ -39,7 +50,15 @@ def prepare_deepcoder_data(train_size: int = None, test_size: int = None):
             else:
                 test["metadata"] = {"func_name": None}
 
-        return {"question": question, "ground_truth": json.dumps(tests), "data_source": "livecodebench", "uid": f"deepcoder_{idx}", "index": idx, "starter_code": starter_code, "metadata": json.dumps(metadata)}
+        return {
+            "question": question,
+            "ground_truth": json.dumps(tests),
+            "data_source": "livecodebench",
+            "uid": f"deepcoder_{idx}",
+            "index": idx,
+            "starter_code": starter_code,
+            "metadata": json.dumps(metadata),
+        }
 
     if train_size:
         train_dataset = train_dataset.select(range(min(train_size, len(train_dataset))))

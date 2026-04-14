@@ -30,7 +30,19 @@ def _suggest_benchmarks(name: str, catalog_names: list[str], max_suggestions: in
     return get_close_matches(name, catalog_names, n=max_suggestions, cutoff=0.5)
 
 
-def _run_eval(benchmark: str, agent_name: str, evaluator_name: str | None, base_url: str, model: str, split: str, concurrency: int, max_examples: int | None, output_path: str | None, agent_metadata: dict | None = None, enable_ui: bool = False):
+def _run_eval(
+    benchmark: str,
+    agent_name: str,
+    evaluator_name: str | None,
+    base_url: str,
+    model: str,
+    split: str,
+    concurrency: int,
+    max_examples: int | None,
+    output_path: str | None,
+    agent_metadata: dict | None = None,
+    enable_ui: bool = False,
+):
     """Core eval logic, extracted for clean proxy lifecycle management."""
     from rllm.data import DatasetRegistry
     from rllm.experimental.eval.agent_loader import load_agent
@@ -238,11 +250,37 @@ def _run_eval(benchmark: str, agent_name: str, evaluator_name: str | None, base_
 @click.option("--concurrency", default=64, type=int, help="Number of parallel requests.")
 @click.option("--max-examples", default=None, type=int, help="Limit number of examples (for dev/testing).")
 @click.option("--output", "output_path", default=None, help="Output file path for results JSON.")
-@click.option("--search-backend", "search_backend", default=None, type=click.Choice(["serper", "brave"], case_sensitive=False), help="Search backend for the search agent (auto-detected from API keys if omitted).")
-@click.option("--sandbox-backend", "sandbox_backend", default=None, type=click.Choice(["docker", "local", "modal"], case_sensitive=False), help="Sandbox backend for sandboxed agents (auto-detected from agent if omitted).")
+@click.option(
+    "--search-backend",
+    "search_backend",
+    default=None,
+    type=click.Choice(["serper", "brave"], case_sensitive=False),
+    help="Search backend for the search agent (auto-detected from API keys if omitted).",
+)
+@click.option(
+    "--sandbox-backend",
+    "sandbox_backend",
+    default=None,
+    type=click.Choice(["docker", "local", "modal"], case_sensitive=False),
+    help="Sandbox backend for sandboxed agents (auto-detected from agent if omitted).",
+)
 @click.option("--sandbox-concurrency", "sandbox_concurrency", default=None, type=int, help="Override max concurrent sandboxes (default: agent's max_concurrent).")
 @click.option("--ui/--no-ui", "enable_ui", default=None, help="Enable/disable live UI logging. Default: auto-enabled when logged in (see 'rllm login').")
-def eval_cmd(benchmark: str, agent_name: str | None, evaluator_name: str | None, base_url: str | None, model: str | None, split: str | None, concurrency: int, max_examples: int | None, output_path: str | None, search_backend: str | None, sandbox_backend: str | None, sandbox_concurrency: int | None, enable_ui: bool | None):
+def eval_cmd(
+    benchmark: str,
+    agent_name: str | None,
+    evaluator_name: str | None,
+    base_url: str | None,
+    model: str | None,
+    split: str | None,
+    concurrency: int,
+    max_examples: int | None,
+    output_path: str | None,
+    search_backend: str | None,
+    sandbox_backend: str | None,
+    sandbox_concurrency: int | None,
+    enable_ui: bool | None,
+):
     """Evaluate a model on a benchmark dataset."""
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
     _ui_explicit = enable_ui is not None

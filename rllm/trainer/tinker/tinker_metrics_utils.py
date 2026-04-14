@@ -11,7 +11,6 @@ from rllm.experimental.unified_trainer import TrainerState
 logger = logging.getLogger(__name__)
 
 
-
 def compute_kl_and_entropy_metrics(training_datums: list[tinker.Datum], training_logprobs: list[torch.Tensor]) -> dict:
     """
     Compute KL divergence and entropy metrics from training.
