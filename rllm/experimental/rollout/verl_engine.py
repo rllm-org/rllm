@@ -5,9 +5,9 @@ from omegaconf import DictConfig
 from typing_extensions import override
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager, AsyncLLMServerManager
 
+from rllm.experimental.parser import get_chat_parser
 from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
 from rllm.experimental.rollout.types import TokenInput, Tokenizer, TokenOutput, VerlTokenOutput
-from rllm.parser import ChatTemplateParser
 from rllm.workflows import TerminationEvent, TerminationReason
 
 
@@ -28,7 +28,18 @@ class VerlEngine(RolloutEngine):
 
         self.tokenizer = tokenizer
         self.processor = processor
-        self.chat_parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=config.get("rllm", {}).get("disable_thinking", False))
+
+        rllm_cfg = config.get("rllm", {})
+        parser_cfg = rllm_cfg.get("parser", {})
+        self.chat_parser = get_chat_parser(
+            tokenizer,
+            processor=processor,
+            parser_backend=parser_cfg.get("parser_backend", "rllm"),
+            reasoning_parser_name=parser_cfg.get("reasoning_parser_name"),
+            tool_parser_name=parser_cfg.get("tool_parser_name"),
+            renderer_name=parser_cfg.get("renderer_name"),
+            disable_thinking=rllm_cfg.get("disable_thinking", False),
+        )
 
         self.max_prompt_length = config.data.max_prompt_length
         self.max_response_length = config.data.max_response_length

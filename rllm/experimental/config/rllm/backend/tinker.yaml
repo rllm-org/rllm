@@ -62,8 +62,6 @@ rollout_engine:
   reasoning_effort: "medium"
   accumulate_reasoning: false
   disable_thinking: false
-  bypass_render_with_parser: false
-  renderer_name: null
 
 # Data Configuration
 data:
@@ -85,6 +83,8 @@ opsd:
 # Only override if the algorithm values are not None, otherwise still use the rLLM-common config
 rllm:
   backend: tinker
+  parser:
+    parser_backend: tinker
   rollout:
     n: ${oc.select:training.group_size, 8}
     n_val: ${oc.select:validation.group_size, 1}

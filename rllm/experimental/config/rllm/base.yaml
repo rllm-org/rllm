@@ -80,6 +80,13 @@ disable_thinking: False
 # Accumulate reasoning
 accumulate_reasoning: False
 
+# Parser configuration — which backend's native parsers to use for rendering/parsing
+parser:
+  parser_backend: rllm         # rllm | vllm | sglang | tinker
+  reasoning_parser_name: null  # vllm/sglang only: e.g. "deepseek_r1", "qwen3"
+  tool_parser_name: null       # vllm/sglang only: e.g. "deepseek_v3", "qwen3_coder"
+  renderer_name: null          # tinker only; auto-detected from model name if null
+
 # Mask truncated samples
 mask_truncated_samples: False
 filter_token_mismatch: True

@@ -10,9 +10,16 @@ from rllm.tools.utils import function_to_dict
 class ToolCall:
     name: str
     arguments: dict[str, Any]
+    # Preserves the original arguments string emitted by the model, unparsed.
+    # Matches the OpenAI chat completions spec, where function.arguments is a
+    # string that may be invalid JSON. Populated by adapters that receive a
+    # raw string from the upstream library (vLLM, SGLang). When parsing
+    # succeeds, both `arguments` and `arguments_raw` are set; when it fails,
+    # `arguments` is {} and `arguments_raw` holds the malformed string.
+    arguments_raw: str | None = None
 
     def to_dict(self):
-        return {"name": self.name, "arguments": self.arguments}
+        return {"name": self.name, "arguments": self.arguments, "arguments_raw": self.arguments_raw}
 
 
 @dataclass
