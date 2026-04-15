@@ -335,7 +335,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         repeat_times = self.full_config.rllm.rollout.n_val if is_validation else self.full_config.rllm.rollout.n
         batch = batch.repeat(repeat_times=repeat_times)
 
-        episodes = await self._execute_tasks_async(batch, agent_workflow_engine, **kwargs)
+        episodes = await self._execute_tasks_async(batch, agent_workflow_engine, is_validation=is_validation, **kwargs)
 
         # In colocated mode, sleep replicas to free KV cache / rollout weights
         # before the training forward pass (process_backend_batch).

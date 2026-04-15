@@ -308,7 +308,7 @@ def create_dataloaders(config: DictConfig, tokenizer, processor=None):
     )
 
     val_batch_size = config.data.val_batch_size
-    if val_batch_size is None:
+    if val_batch_size is None or val_batch_size == -1:
         val_batch_size = len(val_dataset)
 
     val_dataloader = StatefulDataLoader(

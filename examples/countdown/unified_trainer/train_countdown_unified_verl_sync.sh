@@ -11,7 +11,7 @@ python -m examples.countdown.unified_trainer.train_countdown_unified_verl \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=32768 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=64 \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.rollout.name=vllm \
@@ -24,15 +24,15 @@ python -m examples.countdown.unified_trainer.train_countdown_unified_verl \
     rllm.rollout.n_val=1 \
     rllm.rollout.sampling.train.temperature=1.0 \
     rllm.rollout.sampling.train.top_p=1.0 \
-    rllm.rollout.sampling.val.temperature=1.0 \
-    rllm.rollout.sampling.val.top_p=1.0 \
+    rllm.rollout.sampling.val.temperature=0.6 \
+    rllm.rollout.sampling.val.top_p=0.95 \
     rllm.workflow.n_parallel_tasks=256 \
     rllm.workflow.retry_limit=1 \
     rllm.workflow.raise_on_error=false \
     data.max_prompt_length=2048 \
     data.max_response_length=1024 \
-    data.train_batch_size=32 \
-    data.val_batch_size=1024 \
+    data.train_batch_size=64 \
+    data.val_batch_size=-1 \
     rllm.algorithm.adv_estimator=grpo \
     rllm.algorithm.norm_adv_by_std_in_grpo=true \
     rllm.algorithm.loss_agg_mode=seq-mean-token-mean \
@@ -40,7 +40,6 @@ python -m examples.countdown.unified_trainer.train_countdown_unified_verl \
     rllm.algorithm.kl_beta=0.0 \
     rllm.async_training.enable=false \
     rllm.trainer.total_epochs=1 \
-    rllm.trainer.total_batches=100 \
     rllm.trainer.logger='[console,wandb]' \
     rllm.trainer.project_name='rllm-countdown' \
     rllm.trainer.experiment_name='countdown-verl-sync' \
