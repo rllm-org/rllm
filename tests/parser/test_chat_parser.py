@@ -9,6 +9,24 @@ from rllm.parser import (
 from rllm.parser.utils import PARSER_TEST_MESSAGES
 
 
+class _ProbeSensitiveTokenizer:
+    def apply_chat_template(self, messages, add_generation_prompt=False, tokenize=False):
+        if messages == [{"role": "assistant", "content": ""}]:
+            raise ValueError("assistant-only probe is invalid for this tokenizer")
+
+        rendered = "|".join(f"{msg['role']}:{msg['content']}" for msg in messages)
+        if add_generation_prompt:
+            rendered += "<GEN>"
+        return rendered
+
+
+def test_default_chat_template_parser_generation_prompt_probe():
+    tokenizer = _ProbeSensitiveTokenizer()
+    parser = ChatTemplateParser(tokenizer)
+
+    assert parser.generation_prompt == "<GEN>"
+
+
 def test_qwen_chat_template_parser():
     # Test with Qwen tokenizer
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
