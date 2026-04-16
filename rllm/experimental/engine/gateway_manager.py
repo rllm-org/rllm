@@ -82,6 +82,10 @@ class GatewayManager:
         self.host: str = configured_host if configured_host else _get_routable_ip()
         self.port: int = gw_cfg.get("port", 9090)
         self.db_path: str | None = gw_cfg.get("db_path", None)
+        self.public_url: str | None = gw_cfg.get("public_url", None)
+        self.sampling_params_priority: str = gw_cfg.get("sampling_params_priority", "client")
+        # The gateway always pins ``body.model`` to whatever the trainer is serving
+        self.model: str | None = config.get("model", {}).get("name", None)
         self.mode = mode
 
         self._process: subprocess.Popen | None = None
@@ -174,6 +178,9 @@ class GatewayManager:
         return self.client.create_session(session_id=session_id, sampling_params=sp or None)
 
     def get_session_url(self, session_id: str) -> str:
+        if self.public_url:
+            base = self.public_url.rstrip("/")
+            return f"{base}/sessions/{session_id}/v1"
         return self.client.get_session_url(session_id)
 
     def get_traces(self, session_id: str) -> list[TraceRecord]:
@@ -218,6 +225,10 @@ class GatewayManager:
         ]
         if self.db_path:
             cmd.extend(["--db-path", self.db_path])
+        if self.sampling_params_priority != "client":
+            cmd.extend(["--sampling-params-priority", self.sampling_params_priority])
+        if self.model:
+            cmd.extend(["--model", self.model])
 
         logger.info("Starting gateway subprocess: %s", " ".join(cmd))
         # Inherit parent's stdout/stderr so gateway logs are visible for debugging.
@@ -252,6 +263,8 @@ class GatewayManager:
             port=self.port,
             db_path=self.db_path,
             store_worker="sqlite" if self.db_path else "memory",
+            sampling_params_priority=self.sampling_params_priority,
+            model=self.model,
         )
         app = create_app(config=gw_config, local_handler=local_handler)
 

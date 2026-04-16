@@ -119,3 +119,5 @@ class GatewayConfig(BaseModel):
     health_check_interval: float = 10.0
     log_level: str = "INFO"
     sync_traces: bool = False
+    sampling_params_priority: str = "client"
+    model: str | None = None  # When set, overrides ``body.model``
