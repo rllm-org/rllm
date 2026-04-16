@@ -1,3 +1,5 @@
+import logging
+
 import ray
 from omegaconf import DictConfig
 
@@ -7,6 +9,8 @@ from rllm.experimental.verl.verl_backend import VerlBackend
 from rllm.trainer.verl.ray_runtime_env import get_ppo_ray_runtime_env
 from rllm.trainer.verl.train_agent_ppo import TaskRunner
 from rllm.workflows.workflow import Workflow
+
+logger = logging.getLogger(__name__)
 
 
 # TODO(listar2000): when later deprecating `train_agent_ppo`, need to migrate all the logic here to `WorkflowTaskRunner`
@@ -41,6 +45,14 @@ class WorkflowTaskRunner(TaskRunner):
         pprint(OmegaConf.to_container(config))
         OmegaConf.register_new_resolver("mul", lambda x, y: int(x) * int(y))
         OmegaConf.resolve(config)
+
+        # Force the new EngineWorker path before worker classes are selected.
+        # VerlBackend (UnifiedTrainer) requires use_legacy_worker_impl='disable';
+        # this must happen before add_actor_rollout_worker() reads the value.
+        legacy_mode = config.trainer.get("use_legacy_worker_impl", "auto")
+        if legacy_mode != "disable":
+            logger.warning(f"VerlBackend requires use_legacy_worker_impl='disable' (new EngineWorker path), got '{legacy_mode}'. Overriding to 'disable'.")
+            config.trainer.use_legacy_worker_impl = "disable"
 
         actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
         self.add_critic_worker(config)
