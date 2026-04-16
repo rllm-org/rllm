@@ -181,6 +181,42 @@ def math500_transform(row: dict) -> dict:
     }
 
 
+def hendrycks_math_transform(row: dict) -> dict:
+    """Transform EleutherAI/hendrycks_math row to standard math format.
+
+    The answer is extracted from ``\\boxed{...}`` in the solution field,
+    handling nested braces.
+    """
+    import re
+
+    solution = row.get("solution", "")
+    ground_truth = solution
+    # Extract the last \boxed{...} occurrence (handles nested braces)
+    idx = solution.rfind("\\boxed{")
+    if idx != -1:
+        start = idx + len("\\boxed{")
+        depth = 1
+        end = start
+        while end < len(solution) and depth > 0:
+            if solution[end] == "{":
+                depth += 1
+            elif solution[end] == "}":
+                depth -= 1
+            end += 1
+        ground_truth = solution[start : end - 1]
+    else:
+        # Fallback: try #### pattern
+        m = re.search(r"####\s*(.+?)(?:\n|$)", solution)
+        if m:
+            ground_truth = m.group(1).strip()
+
+    return {
+        "question": row.get("problem", ""),
+        "ground_truth": ground_truth,
+        "data_source": "hendrycks_math",
+    }
+
+
 def countdown_transform(row: dict) -> dict:
     """Transform Countdown row to standard format.
 
