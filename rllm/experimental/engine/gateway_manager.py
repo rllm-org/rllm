@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 _HEALTH_POLL_INTERVAL = 0.5
 _HEALTH_POLL_TIMEOUT = 30.0
+_TRACE_API_TIMEOUT = 600.0
 
 
 def _get_routable_ip() -> str:
@@ -110,7 +111,7 @@ class GatewayManager:
     def async_client(self) -> AsyncGatewayClient:
         """Async client for runtime operations (sessions, traces)."""
         if self._async_client is None:
-            self._async_client = AsyncGatewayClient(self.gateway_url)
+            self._async_client = AsyncGatewayClient(self.gateway_url, timeout=_TRACE_API_TIMEOUT)
         return self._async_client
 
     # -- Lifecycle -----------------------------------------------------------
@@ -187,8 +188,16 @@ class GatewayManager:
         return await self.async_client.create_session(session_id=session_id, sampling_params=sp or None)
 
     async def aget_traces(self, session_id: str) -> list[TraceRecord]:
-        await self.async_client.flush()
+        await self.async_client.flush(timeout=_TRACE_API_TIMEOUT)
         return await self.async_client.get_session_traces(session_id)
+
+    async def adelete_session(self, session_id: str) -> int:
+        """Delete a session and its traces from the gateway DB."""
+        return await self.async_client.delete_session(session_id)
+
+    def delete_session(self, session_id: str) -> int:
+        """Delete a session and its traces from the gateway DB (sync)."""
+        return self.client.delete_session(session_id)
 
     # -- Worker setup --------------------------------------------------------
 
