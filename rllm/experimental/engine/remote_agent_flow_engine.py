@@ -127,6 +127,9 @@ class RemoteAgentFlowEngine:
             if not result.finished:
                 episode.metadata["error"] = {"message": result.error or "Unknown error"}
 
+            # Delete traces from gateway DB to prevent unbounded growth
+            await self.gateway.adelete_session(session_id)
+
             return task_id, rollout_idx, result_idx, episode
 
     def shutdown(self) -> None:

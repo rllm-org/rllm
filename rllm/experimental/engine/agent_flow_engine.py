@@ -243,6 +243,9 @@ class AgentFlowEngine:
         # 6. Enrich episode with token data
         enriched = self._enrich_episode(episode, traces, uid, task)
 
+        # 7. Delete traces from gateway DB to prevent unbounded growth
+        await self.gateway.adelete_session(uid)
+
         # Attach eval metrics
         enriched.metrics.update(eval_output.metadata)
         for signal in eval_output.signals:
