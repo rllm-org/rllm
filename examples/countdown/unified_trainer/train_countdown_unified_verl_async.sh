@@ -1,10 +1,22 @@
 set -x
 
+export TRITON_CACHE_DIR=/tmp/triton_cache
+
 python -m examples.countdown.unified_trainer.train_countdown_unified_verl \
     rllm/backend=verl \
-    actor_rollout_ref.model.path=Qwen/Qwen3-8B \
+    actor_rollout_ref.model.path=Qwen/Qwen3-0.6B \
+    actor_rollout_ref.model.use_remove_padding=True \
+    actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.strategy=fsdp \
+    actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.actor.use_dynamic_bsz=True \
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=32768 \
+    actor_rollout_ref.actor.fsdp_config.param_offload=True \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.enforce_eager=False \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     rollout.n_gpus_per_node=4 \
@@ -13,27 +25,32 @@ python -m examples.countdown.unified_trainer.train_countdown_unified_verl \
     rllm.rollout.n_val=1 \
     rllm.rollout.sampling.train.temperature=1.0 \
     rllm.rollout.sampling.train.top_p=1.0 \
-    rllm.rollout.sampling.val.temperature=1.0 \
-    rllm.rollout.sampling.val.top_p=1.0 \
-    rllm.workflow.n_parallel_tasks=256 \
+    rllm.rollout.sampling.val.temperature=0.6 \
+    rllm.rollout.sampling.val.top_p=0.95 \
+    rllm.workflow.n_parallel_tasks=512 \
     rllm.workflow.retry_limit=1 \
     rllm.workflow.raise_on_error=false \
     data.max_prompt_length=2048 \
-    data.max_response_length=2048 \
+    data.max_response_length=1024 \
     data.train_batch_size=1 \
-    data.val_batch_size=1024 \
+    data.val_batch_size=-1 \
     rllm.algorithm.adv_estimator=grpo \
     rllm.algorithm.norm_adv_by_std_in_grpo=true \
+    rllm.algorithm.loss_agg_mode=seq-mean-token-mean \
+    rllm.algorithm.eps_clip_high=0.28 \
+    rllm.algorithm.kl_beta=0.0 \
+    rllm.algorithm.rollout_correction.bypass_mode=false \
+    rllm.algorithm.rollout_correction.tis_mode=token \
+    rllm.algorithm.rollout_correction.tis_cap=2.0 \
     rllm.async_training.enable=true \
-    rllm.async_training.mini_batch_size=32 \
-    rllm.async_training.fwd_bwd_group_size=8 \
-    rllm.async_training.staleness_threshold=0.5 \
+    rllm.async_training.mini_batch_size=64 \
+    rllm.async_training.staleness_threshold=2.0 \
     rllm.async_training.trigger_parameter_sync_step=1 \
     rllm.async_training.partial_rollout=true \
     rllm.trainer.total_epochs=1 \
-    rllm.trainer.logger='[wandb]' \
+    rllm.trainer.logger='[console,wandb]' \
     rllm.trainer.project_name='rllm-countdown' \
-    rllm.trainer.experiment_name='countdown-verl-async-staleness-0.5' \
+    rllm.trainer.experiment_name='countdown-verl-async-staleness-2.0-tis' \
     rllm.trainer.val_before_train=true \
     rllm.trainer.test_freq=10 \
     rllm.trainer.save_freq=-1

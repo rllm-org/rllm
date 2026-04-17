@@ -333,16 +333,15 @@ def _process_trajectory_group(trajectory_group: TrajectoryGroup, task_id: str, a
     total_steps = 0
     for trajectory in trajectory_group.trajectories:
         n_steps = _process_trajectory(trajectory, task_id, accumulated)
+        # trajectory.uid is rollout-unique; group_id is shared across rollouts, so using
+        # only group_id would collide advantages across rollouts of the same task.
+        rollout_id = f"{trajectory_group.group_id}:{trajectory.uid}"
+        accumulated.episode_ids.extend([rollout_id] * n_steps)
         total_steps += n_steps
 
-    # Extend episode-level data for all steps in this trajectory group
-    # TrajectoryGroup doesn't have episode-level metadata, so we use reasonable defaults
-    # TODO(listar2000): check whether and how we should supplement these info from trajectory groups.
-    group_id = trajectory_group.group_id if trajectory_group.group_id else task_id
-    accumulated.episode_ids.extend([group_id] * total_steps)
-    accumulated.is_correct.extend([False] * total_steps)  # default to False for trajectory groups
+    accumulated.is_correct.extend([False] * total_steps)
     accumulated.termination_reasons.extend([TerminationReason.UNKNOWN] * total_steps)
-    accumulated.metrics.extend([{}] * total_steps)  # empty metrics for trajectory groups
+    accumulated.metrics.extend([{}] * total_steps)
 
     return total_steps
 
@@ -408,22 +407,28 @@ def update_dataproto_with_advantages(batch: DataProto, container: list[Episode] 
     Updates a DataProto with advantages. Useful when we use rLLM-native advantage computation,
     after which we need to update the DataProto with the advantages.
     """
-    # Build a step_id → advantage mapping from episodes/trajectory groups.
-    # step_id format must match _process_trajectory: f"{task_id}_{trajectory.name}_step{step_idx}"
-    adv_by_step_id: dict[str, float] = {}
+    # Key by (episode_id, step_id): step_id alone collides across rollouts of the same task
+    # (same task_id + trajectory.name + step_idx), so we include the per-rollout-unique
+    # episode_id, which matches batch.non_tensor_batch["episode_ids"].
+    adv_by_key: dict[tuple[str, str], float] = {}
     for item in container:
         for trajectory in item.trajectories:
+            if isinstance(item, Episode):
+                episode_id = item.id
+            else:
+                # Match _process_trajectory_group: rollout-unique id keyed by trajectory.uid
+                episode_id = f"{item.group_id}:{trajectory.uid}"
             trajectory_id = f"{item.task_id}_{trajectory.name}"
             for step_idx, step in enumerate(trajectory.steps):
                 step_id = f"{trajectory_id}_step{step_idx}"
-                adv_by_step_id[step_id] = step.advantage if step.advantage is not None else 0.0
+                adv_by_key[(str(episode_id), step_id)] = step.advantage if step.advantage is not None else 0.0
 
-    # Match advantages to batch entries by step_id (robust to batch reordering and padding)
     n_total = len(batch.non_tensor_batch["trajectory_ids"])
+    episode_ids = batch.non_tensor_batch["episode_ids"]
     step_ids = batch.non_tensor_batch["step_ids"]
     is_pad = batch.non_tensor_batch.get("is_pad_step", np.zeros(n_total, dtype=bool))
 
-    advantages = [0.0 if is_pad[i] else adv_by_step_id.get(str(step_ids[i]), 0.0) for i in range(n_total)]
+    advantages = [0.0 if is_pad[i] else adv_by_key.get((str(episode_ids[i]), str(step_ids[i])), 0.0) for i in range(n_total)]
 
     advantage_tensor = _build_per_step_advantages(batch.batch["response_mask"], advantages)
     batch.batch["advantages"] = advantage_tensor

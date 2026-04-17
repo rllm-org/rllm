@@ -78,7 +78,7 @@ algorithm:
   rollout_correction:
     bypass_mode: False    # true = pi_old = pi_rollout, false = pi_old is computed from the model
     tis_mode: null        # null = disabled, "token" or "sequence" = TIS importance sampling level
-    tis_cap: 5.0          # Upper clamp on TIS importance weight
+    tis_cap: 2.0          # Upper clamp on TIS importance weight
 
 # Stepwise advantage
 # TODO(listar2000): deprecate the `per_step` mode and refactor this config.

@@ -49,7 +49,11 @@ from rllm.experimental.common import (
     simple_timer,
 )
 from rllm.experimental.protocol import BackendProtocol
-from rllm.experimental.verl import transform_episodes_to_dataproto, update_dataproto_with_advantages
+from rllm.experimental.verl import (
+    transform_episodes_to_dataproto,
+    transform_trajectory_groups_to_dataproto,
+    update_dataproto_with_advantages,
+)
 from rllm.experimental.verl.utils import (
     balance_batch,
     build_wg_kwargs,
@@ -244,7 +248,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             self.ref_policy_wg = self.actor_rollout_wg
 
         # --- Rollout servers (standalone, launched by AgentLoopManager) ---
-        from verl.experimental.fully_async_policy.agent_loop import FullyAsyncAgentLoopManager
+        from rllm.experimental.verl.async_agent_loop import FullyAsyncAgentLoopManager
         self.async_rollout_manager = FullyAsyncAgentLoopManager.create(
             config=config, worker_group=None,
         )
@@ -283,7 +287,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         # Create server manager
         servers = zip(self.async_rollout_manager.server_addresses, self.async_rollout_manager.server_handles, strict=True)
         if self.is_separated:
-            from verl.experimental.fully_async_policy.agent_loop.agent_loop import FullyAsyncLLMServerManager
+            from rllm.experimental.verl.async_agent_loop import FullyAsyncLLMServerManager
             server_manager = FullyAsyncLLMServerManager(self.config, servers=servers, load_balancer_handle=self.async_rollout_manager.global_load_balancer)
         else:
             from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
@@ -299,8 +303,14 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         return self.rollout_engine
 
     def validate_config(self) -> None:
-        if not self.is_separated:
-            assert self.config.actor_rollout_ref.rollout.mode == "async", "Only async rollout mode is supported"
+        assert self.config.actor_rollout_ref.rollout.mode == "async", "Only async rollout mode is supported"
+        if self.is_separated:
+            async_cfg = self.config.rllm.async_training
+            fwd_bwd = async_cfg.fwd_bwd_group_size if async_cfg.fwd_bwd_group_size is not None else async_cfg.mini_batch_size
+            assert fwd_bwd == async_cfg.mini_batch_size, (
+                f"VerlBackend requires async_training.fwd_bwd_group_size == mini_batch_size "
+                f"(got {async_cfg.fwd_bwd_group_size} vs {async_cfg.mini_batch_size})"
+            )
         if self.use_legacy_worker_impl != "disable":
             logger.warning(f"VerlBackend forces use_legacy_worker_impl='disable', got '{self.use_legacy_worker_impl}'.")
             self.config.trainer.use_legacy_worker_impl = "disable"
@@ -356,11 +366,20 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         return episodes
 
     def transform_to_backend_batch(self, trainer_state: TrainerState, **kwargs) -> DataProto:
-        assert trainer_state.episodes is not None
         assert self.rollout_engine is not None
-        return transform_episodes_to_dataproto(
-            trainer_state.episodes, self.rollout_engine,
+        if trainer_state.episodes is not None:
+            return transform_episodes_to_dataproto(
+                trainer_state.episodes, self.rollout_engine,
+                self.config.data.max_prompt_length, self.config.data.max_response_length,
+            )
+        assert trainer_state.trajectory_groups is not None
+        batch = transform_trajectory_groups_to_dataproto(
+            trainer_state.trajectory_groups, self.rollout_engine,
             self.config.data.max_prompt_length, self.config.data.max_response_length,
+        )
+        return update_dataproto_with_advantages(
+            batch, trainer_state.trajectory_groups,
+            mode=self.algorithm_config.stepwise_advantage_mode,
         )
 
     def _remove_padding(self, batch: DataProto) -> DataProto:

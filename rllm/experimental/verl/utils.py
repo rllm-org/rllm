@@ -35,8 +35,8 @@ def propagate_rllm_to_verl_config(config: DictConfig) -> None:
 
     # ── Algorithm → actor_rollout_ref.actor.* ──
     kl_beta = rllm_algo.get("kl_beta", 0.0)
+    actor.use_kl_loss = kl_beta > 0
     if kl_beta > 0:
-        actor.use_kl_loss = True
         actor.kl_loss_coef = kl_beta
 
     loss_fn = rllm_algo.get("loss_fn", None)
@@ -60,10 +60,23 @@ def propagate_rllm_to_verl_config(config: DictConfig) -> None:
         actor.router_replay.mode = "R3"
         rollout.enable_rollout_routing_replay = True
 
-    # ── Async training ──
+    rollout.calculate_log_probs = True
+    actor.use_rollout_log_probs = True
+    config.algorithm.rollout_correction.bypass_mode = rllm_algo.rollout_correction.bypass_mode
+
     is_separated = config.rllm.get("async_training", {}).get("enable", False)
     if is_separated:
         config.actor_rollout_ref.hybrid_engine = False
+        if rollout.checkpoint_engine.backend == "naive":
+            logger.info("Async training enabled; overriding checkpoint_engine.backend 'naive' → 'nccl' (naive is colocated-only).")
+            rollout.checkpoint_engine.backend = "nccl"
+        actor.ppo_mini_batch_size = config.rllm.async_training.mini_batch_size
+        config.async_training.partial_rollout = config.rllm.async_training.partial_rollout
+    else:
+        config.actor_rollout_ref.hybrid_engine = True
+        if rollout.checkpoint_engine.backend != "naive":
+            logger.info(f"Sync training; overriding checkpoint_engine.backend '{rollout.checkpoint_engine.backend}' → 'naive' (hybrid engine requires naive).")
+            rollout.checkpoint_engine.backend = "naive"
 
     # ── Rollout → actor_rollout_ref.rollout.* ──
     if rllm_rollout.get("n") is not None:

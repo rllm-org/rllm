@@ -26,7 +26,7 @@ python -m examples.countdown.unified_trainer.train_countdown_unified_verl \
     rllm.rollout.sampling.train.top_p=1.0 \
     rllm.rollout.sampling.val.temperature=0.6 \
     rllm.rollout.sampling.val.top_p=0.95 \
-    rllm.workflow.n_parallel_tasks=256 \
+    rllm.workflow.n_parallel_tasks=512 \
     rllm.workflow.retry_limit=1 \
     rllm.workflow.raise_on_error=false \
     data.max_prompt_length=2048 \
