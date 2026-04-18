@@ -1,12 +1,13 @@
 # rllm-model-gateway
 
-## Overview
+Lightweight FastAPI gateway sitting between an agent and a single LLM endpoint. Two modes, picked at startup, mutually exclusive:
 
-A lightweight, standalone Python gateway that sits between RL agents and inference servers (vLLM). It transparently captures every LLM call's token IDs, logprobs, and messages — without requiring any modification to agent code. Agents use standard `OpenAI(base_url=gateway_url)`.
+- **Passthrough**: forward bytes to a configured `upstream_url`. Agent's auth header is stripped; `upstream_api_key` (if set) is injected as the upstream's auth.
+- **Adapter**: convert wire request → `NormalizedRequest` → in-process `async def adapter(req) -> NormalizedResponse` → wire response.
 
-## Development Setup
+Captures every call as a `TraceRecord` in SQLite. Adapter mode optionally captures token-level extras into a separate blob row. Two-tier API key auth: admin key for management endpoints, agent key for proxy endpoints.
 
-This package uses `uv` for dependency management and `hatchling` as the build backend. Do not use setuptools or pip.
+## Development setup
 
 ```bash
 cd rllm/rllm-model-gateway
@@ -14,119 +15,166 @@ uv venv --python 3.11
 source .venv/bin/activate
 uv pip install -e ".[dev]"
 
-# Set up pre-commit hooks (one-time, from the rllm repo root)
 cd .. && pre-commit install && cd rllm-model-gateway
+
+python -m pytest tests/ -q
 ```
 
-To run tests:
-
-```bash
-# Unit tests (no external dependencies)
-python -m pytest tests/unit/ -x -q
-
-# Integration tests against a real vLLM server (auto-skipped if unreachable)
-python -m pytest tests/integration/ -x -v
-```
-
-## Package Layout
+## Package layout
 
 ```
 src/rllm_model_gateway/
-├── __init__.py           # Public API exports
-├── __main__.py           # python -m rllm_model_gateway
-├── _version.py           # Package version
-├── server.py             # FastAPI app factory + CLI entrypoint
-├── proxy.py              # httpx reverse proxy (non-streaming + SSE streaming)
-├── middleware.py          # ASGI middleware: session extraction + param injection
-├── session_router.py     # Pluggable session-sticky worker routing
-├── session_manager.py    # Session CRUD lifecycle
-├── data_process.py       # Token/logprob extraction, response sanitization
-├── models.py             # Pydantic models (TraceRecord, GatewayConfig, etc.)
-├── client.py             # GatewayClient + AsyncGatewayClient
+├── __init__.py
+├── __main__.py            # python -m rllm_model_gateway
+├── _version.py
+├── server.py              # FastAPI app factory + CLI; request handler
+├── middleware.py          # SessionRoutingMiddleware (extracts sid, rewrites path)
+├── auth.py                # AuthMiddleware (two-tier bearer)
+├── config.py              # GatewayConfig
+├── normalized.py          # NormalizedRequest / NormalizedResponse / Message / ToolCall / ToolSpec / AdapterError
+├── extras.py              # pinned key constants for NormalizedResponse.extras
+├── trace.py               # TraceRecord + serialize_extras / deserialize_extras
+├── client.py              # GatewayClient + AsyncGatewayClient
+├── endpoints/
+│   ├── __init__.py        # SHAPERS = {"chat_completions": <module>, …}
+│   ├── chat_completions.py
+│   ├── completions.py
+│   ├── responses.py
+│   └── anthropic_messages.py
 └── store/
-    ├── base.py           # TraceStore protocol (6 async methods)
-    ├── sqlite_store.py   # SQLite with junction table (default)
-    └── memory_store.py   # In-memory (testing)
+    ├── base.py            # TraceStore protocol
+    ├── sqlite_store.py    # WAL-mode SQLite, three tables (sessions / traces / trace_extras)
+    └── memory_store.py    # in-memory test fixture (importable; not exposed via config)
 ```
 
-## Key Design Decisions
+## Endpoint shapers
 
-1. **No LiteLLM** — Direct httpx reverse proxy. Session-sticky routing requires custom logic that LiteLLM can't provide, and httpx handles HTTP forwarding + SSE natively. This keeps deps to 6 packages.
+Each shaper module exposes:
 
-2. **Zero retokenization** — Token IDs come from vLLM's `return_token_ids=True` response field, not from a local tokenizer. The middleware injects this parameter automatically.
+```python
+NAME: str                                # e.g. "chat_completions"
+PATH: str                                # FastAPI route, e.g. "/v1/chat/completions"
+UPSTREAM_PATH: str                       # appended to upstream_url in passthrough
 
-3. **Implicit sessions** — First request to `/sessions/{sid}/v1/chat/completions` auto-creates the session. No explicit creation required.
-
-4. **ASGI middleware** — `SessionRoutingMiddleware` operates at the ASGI level (not FastAPI middleware) so it can intercept and rewrite the request body before FastAPI route matching.
-
-5. **Pluggable routing** — `RoutingPolicy` protocol allows swapping the worker selection strategy. Default is `StickyLeastLoadedPolicy` (LRU cache + least-loaded fallback, mirroring verl's pattern).
-
-6. **Pluggable storage** — `TraceStore` protocol (duck-typed, not ABC). SQLite for single-node, MemoryStore for testing, extensible to DynamoDB/PostgreSQL.
-
-## Request Flow
-
-```
-Agent → /sessions/{sid}/v1/chat/completions
-  → SessionRoutingMiddleware:
-      1. Extract session_id from URL, rewrite path to /v1/chat/completions
-      2. Inject logprobs=True, return_token_ids=True into body
-  → FastAPI route handler (/v1/{path:path}):
-      1. SessionManager.ensure_session(sid)
-      2. ReverseProxy.handle(request):
-          a. SessionRouter.route(session_id) → pick worker
-          b. httpx forward to worker
-          c. Extract token_ids + logprobs from response
-          d. Build TraceRecord, persist to store
-          e. Strip vLLM fields from response
-          f. Return clean response to agent
+def to_normalized_request(body: dict) -> NormalizedRequest
+def parse_upstream_response(body: dict) -> NormalizedResponse        # passthrough
+def parse_upstream_stream(chunks: list[dict]) -> NormalizedResponse  # passthrough
+def from_normalized_response_nonstream(resp, model: str) -> dict     # adapter
+async def from_normalized_response_stream(resp, model: str) -> AsyncIterator[str]  # adapter
 ```
 
-## Streaming
+`PATH` and `UPSTREAM_PATH` differ because the gateway's internal routing path includes `/v1` (so it matches what SDKs send), while the upstream-relative path follows the upstream's SDK convention:
 
-For SSE streaming requests (`stream=True`):
-- Chunks forwarded to agent in real-time via `StreamingResponse`
-- Chunks buffered internally for trace assembly
-- `prompt_token_ids` extracted from first chunk only
-- Delta `token_ids` and logprobs accumulated across chunks
-- After `[DONE]`, `build_trace_record_from_chunks()` assembles the trace
+| Endpoint | PATH (gateway-internal) | UPSTREAM_PATH (forwarded) |
+|---|---|---|
+| chat_completions | `/v1/chat/completions` | `/chat/completions` |
+| completions | `/v1/completions` | `/completions` |
+| responses | `/v1/responses` | `/responses` |
+| anthropic_messages | `/v1/messages` | `/v1/messages` |
 
-## vLLM Response Fields
+So users set `upstream_url` per the upstream's own SDK convention: `https://api.openai.com/v1` (path appended is `/chat/completions` → resolves to `https://api.openai.com/v1/chat/completions`); `https://api.anthropic.com` (path appended is `/v1/messages` → `https://api.anthropic.com/v1/messages`).
 
-The gateway strips these vLLM-specific fields before returning to the agent (verified against vLLM 0.11):
+Streaming in adapter mode is fake-streamed: the adapter returns a complete `NormalizedResponse`, the gateway emits SSE events post-hoc in the wire format the agent asked for.
 
-| Level | Field | Purpose |
-|-------|-------|---------|
-| Root | `prompt_token_ids` | Captured for trace, stripped from response |
-| Root | `prompt_logprobs` | Not used (always `null` without explicit request) |
-| Root | `kv_transfer_params` | Disaggregated prefill feature |
-| Choice | `token_ids` | Captured for trace, stripped from response |
-| Choice | `stop_reason` | vLLM-specific; standard OpenAI uses `finish_reason` |
+## Per-request flow
 
-## Provenance
+```
+POST /sessions/{sid}/v1/<endpoint>
+  → AuthMiddleware                  Bearer-checks admin or agent key (constant-time)
+  → SessionRoutingMiddleware        extracts {sid}, rewrites path to /v1/<endpoint>
+  → endpoint handler:
+      1. Look up session in store; 404 if absent
+      2. Merge session sampling_params into request body per
+         config.sampling_params_priority
+      3. If config.model is set, rewrite body.model
+      4. Adapter mode:
+           - reject n>1 (unsupported in adapter mode)
+           - shaper.to_normalized_request → adapter(req) → shaper.from_normalized_response_*
+           - AdapterError → return its (message, status_code)
+         Passthrough mode:
+           - strip Authorization/x-api-key headers
+           - inject upstream_api_key (if set) as Authorization+x-api-key
+           - httpx forward to upstream_url + UPSTREAM_PATH (with retry on ConnectError)
+      5. Spawn async _do_persist (TraceRecord + extras blob)
+      6. Return wire response
+```
 
-| Module | Inspired By | Key Changes |
-|--------|------------|-------------|
-| `store/sqlite_store.py` | `rllm/sdk/store/sqlite_store.py` | Simplified schema; added `list_sessions()`, `delete_session()` |
-| `data_process.py` | `rllm/sdk/data_process.py` | Removed `ModelOutput`/`Step`/`Trajectory` deps; outputs `TraceRecord` |
-| `middleware.py` | `rllm/sdk/proxy/middleware.py` + `litellm_callbacks.py` | Merged session routing + param injection; pure ASGI (no LiteLLM) |
-| `session_router.py` | verl `agent_loop.py` + miles `router.py` | Combined sticky routing (verl LRU) with health checks (miles pattern) |
-| `proxy.py` | miles `router.py` `_do_proxy()` | Added streaming support, trace capture, response sanitization |
+## Adapter contract
+
+```python
+async def adapter(req: NormalizedRequest) -> NormalizedResponse:
+    ...
+```
+
+- Must be `async def`. Sync functions raise `TypeError` at `create_app` time.
+- `NormalizedRequest.session_id` is set by the gateway; adapter can use it as a cache key (worker affinity, prefix-cache hint, etc.).
+- Return `NormalizedResponse` populated with whatever subset of fields makes sense.
+- Raise `AdapterError(message, status_code=4xx)` to signal a specific HTTP status. Other exceptions become 502.
+
+## Per-trace fields the adapter can populate
+
+| Field | Storage | Purpose |
+|---|---|---|
+| `extras: dict[str, Any]` | `trace_extras` blob (msgpack) | Large binary-ish data; fetched per-trace. Pinned keys in `extras.py`: `prompt_ids`, `completion_ids`, `logprobs`, `prompt_logprobs`, `routing_matrices`. |
+| `metrics: dict[str, float]` | `traces.metrics` JSON column | Numeric measurements you want to aggregate. Returned with `get_session_traces`. Gateway always adds `gateway_latency_ms`. |
+| `metadata: dict[str, Any]` | `traces.metadata` JSON column | Free-form non-numeric tags. Returned with `get_session_traces`. |
+
+## Storage schema (SQLite, WAL mode, one file)
+
+```sql
+CREATE TABLE sessions (
+    session_id      TEXT PRIMARY KEY,
+    created_at      REAL NOT NULL,
+    metadata        TEXT,
+    sampling_params TEXT
+);
+
+CREATE TABLE traces (
+    trace_id          TEXT PRIMARY KEY,
+    session_id        TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    timestamp         REAL NOT NULL,
+    endpoint          TEXT NOT NULL,
+    model             TEXT,
+    messages          TEXT,
+    prompt            TEXT,
+    tools             TEXT,
+    sampling_params   TEXT,
+    content           TEXT,
+    reasoning         TEXT,
+    tool_calls        TEXT,
+    finish_reason     TEXT,
+    prompt_tokens     INTEGER,
+    completion_tokens INTEGER,
+    metrics           TEXT,
+    metadata          TEXT
+);
+CREATE INDEX idx_traces_session ON traces(session_id, timestamp);
+
+CREATE TABLE trace_extras (
+    trace_id  TEXT PRIMARY KEY REFERENCES traces(trace_id) ON DELETE CASCADE,
+    format    TEXT NOT NULL,    -- "msgpack"
+    data      BLOB NOT NULL
+);
+```
+
+The split between `traces` and `trace_extras` keeps `get_traces(session_id)` free of blob I/O.
+
+## Two-tier auth
+
+`AuthMiddleware` runs ahead of `SessionRoutingMiddleware`. Accepts both
+`Authorization: Bearer <key>` and `x-api-key: <key>` (Anthropic SDK convention).
+
+- `/health`: public.
+- `/sessions/{sid}/v1/...`: agent OR admin key.
+- everything else: admin key only.
+
+Comparison uses `hmac.compare_digest` (constant-time).
+
+## Trace persistence
+
+Always async fire-and-forget. The handler calls `_spawn_persist(...)`, which schedules `_do_persist` on the event loop and tracks the task in a per-app set. `POST /admin/flush` drains the set then issues a SQLite WAL checkpoint. The lifespan exit also drains on shutdown (no timeout — uvicorn waits).
 
 ## Dependencies
 
-6 runtime dependencies: `fastapi`, `uvicorn`, `httpx`, `pydantic`, `aiosqlite`, `PyYAML`. No torch/ray/verl/transformers.
-
+Runtime: `fastapi`, `uvicorn`, `httpx`, `pydantic`, `aiosqlite`, `PyYAML`, `msgpack`, `openai` (typing only).
 Build backend: `hatchling`. Do not use setuptools.
-
-## Usage Example
-
-```python
-from rllm_model_gateway import GatewayClient
-
-client = GatewayClient("http://localhost:9090")
-sid = client.create_session()
-url = client.get_session_url(sid)  # → http://localhost:9090/sessions/{sid}/v1
-
-# Agent uses: OpenAI(base_url=url, api_key="EMPTY")
-# Training retrieves: client.get_session_traces(sid)
-```

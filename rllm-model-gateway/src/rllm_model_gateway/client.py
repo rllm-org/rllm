@@ -1,26 +1,30 @@
-"""Training-side client for interacting with the model gateway."""
+"""REST clients for the gateway API."""
+
+from __future__ import annotations
 
 from typing import Any
 
 import httpx
 
-from rllm_model_gateway.models import TraceRecord, WorkerInfo
+from rllm_model_gateway.trace import TraceRecord
 
 
 class GatewayClient:
-    """Synchronous client for the rllm-model-gateway REST API.
-
-    Intended for use by the training framework to create sessions, retrieve
-    traces, and manage workers.
-    """
-
     def __init__(
         self,
         gateway_url: str,
+        api_key: str | None = None,
         timeout: float = 30.0,
     ) -> None:
+        """Sync client.
+
+        Pass the gateway's admin_api_key to access management endpoints
+        (sessions, traces, admin). Reading config from a freshly created
+        gateway exposes the key as ``app.state.config.admin_api_key``.
+        """
         self.gateway_url = gateway_url.rstrip("/")
-        self._http = httpx.Client(timeout=timeout)
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        self._http = httpx.Client(timeout=timeout, headers=headers)
 
     def close(self) -> None:
         self._http.close()
@@ -31,7 +35,7 @@ class GatewayClient:
     def __exit__(self, *exc):
         self.close()
 
-    # -- Session lifecycle -------------------------------------------------
+    # -- Sessions ------------------------------------------------------
 
     def create_session(
         self,
@@ -39,7 +43,6 @@ class GatewayClient:
         metadata: dict[str, Any] | None = None,
         sampling_params: dict[str, Any] | None = None,
     ) -> str:
-        """Create a session (or let the gateway generate an ID)."""
         body: dict[str, Any] = {}
         if session_id:
             body["session_id"] = session_id
@@ -52,10 +55,15 @@ class GatewayClient:
         return resp.json()["session_id"]
 
     def get_session_url(self, session_id: str) -> str:
-        """Return the OpenAI-compatible base URL for an agent to use."""
+        """Base URL for OpenAI-style SDKs (includes ``/v1`` suffix)."""
         return f"{self.gateway_url}/sessions/{session_id}/v1"
 
-    def get_session_info(self, session_id: str) -> dict[str, Any]:
+    def get_anthropic_session_url(self, session_id: str) -> str:
+        """Base URL for the Anthropic Python SDK (no ``/v1`` suffix; SDK
+        appends its own version-prefixed path)."""
+        return f"{self.gateway_url}/sessions/{session_id}"
+
+    def get_session(self, session_id: str) -> dict[str, Any]:
         resp = self._http.get(f"{self.gateway_url}/sessions/{session_id}")
         resp.raise_for_status()
         return resp.json()
@@ -75,7 +83,7 @@ class GatewayClient:
         resp.raise_for_status()
         return resp.json().get("deleted", 0)
 
-    # -- Trace retrieval ---------------------------------------------------
+    # -- Traces --------------------------------------------------------
 
     def get_session_traces(
         self,
@@ -90,41 +98,22 @@ class GatewayClient:
             params["limit"] = limit
         resp = self._http.get(f"{self.gateway_url}/sessions/{session_id}/traces", params=params)
         resp.raise_for_status()
-        data = resp.json()
-        return [TraceRecord(**t) for t in data]
+        return [TraceRecord(**t) for t in resp.json()]
 
     def get_trace(self, trace_id: str) -> TraceRecord:
         resp = self._http.get(f"{self.gateway_url}/traces/{trace_id}")
         resp.raise_for_status()
         return TraceRecord(**resp.json())
 
-    # -- Worker management -------------------------------------------------
-
-    def add_worker(
-        self,
-        url: str,
-        api_path: str = "/v1",
-        model_name: str | None = None,
-        weight: int = 1,
-    ) -> str:
-        """Register a worker.  Returns worker_id."""
-        body: dict[str, Any] = {"url": url, "api_path": api_path, "weight": weight}
-        if model_name:
-            body["model_name"] = model_name
-        resp = self._http.post(f"{self.gateway_url}/admin/workers", json=body)
+    def get_trace_extras(self, trace_id: str) -> tuple[str, bytes] | None:
+        resp = self._http.get(f"{self.gateway_url}/traces/{trace_id}/extras")
+        if resp.status_code == 404:
+            return None
         resp.raise_for_status()
-        return resp.json()["worker_id"]
+        fmt = resp.headers.get("X-Extras-Format", "msgpack")
+        return (fmt, resp.content)
 
-    def remove_worker(self, worker_id: str) -> None:
-        resp = self._http.delete(f"{self.gateway_url}/admin/workers/{worker_id}")
-        resp.raise_for_status()
-
-    def list_workers(self) -> list[WorkerInfo]:
-        resp = self._http.get(f"{self.gateway_url}/admin/workers")
-        resp.raise_for_status()
-        return [WorkerInfo(**w) for w in resp.json()]
-
-    # -- Lifecycle ---------------------------------------------------------
+    # -- Lifecycle -----------------------------------------------------
 
     def flush(self, timeout: float = 30.0) -> bool:
         resp = self._http.post(f"{self.gateway_url}/admin/flush", timeout=timeout)
@@ -138,15 +127,15 @@ class GatewayClient:
 
 
 class AsyncGatewayClient:
-    """Async variant of :class:`GatewayClient` using ``httpx.AsyncClient``."""
-
     def __init__(
         self,
         gateway_url: str,
+        api_key: str | None = None,
         timeout: float = 30.0,
     ) -> None:
         self.gateway_url = gateway_url.rstrip("/")
-        self._http = httpx.AsyncClient(timeout=timeout)
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        self._http = httpx.AsyncClient(timeout=timeout, headers=headers)
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -157,7 +146,7 @@ class AsyncGatewayClient:
     async def __aexit__(self, *exc):
         await self.close()
 
-    # -- Session lifecycle -------------------------------------------------
+    # -- Sessions ------------------------------------------------------
 
     async def create_session(
         self,
@@ -179,7 +168,10 @@ class AsyncGatewayClient:
     def get_session_url(self, session_id: str) -> str:
         return f"{self.gateway_url}/sessions/{session_id}/v1"
 
-    async def get_session_info(self, session_id: str) -> dict[str, Any]:
+    def get_anthropic_session_url(self, session_id: str) -> str:
+        return f"{self.gateway_url}/sessions/{session_id}"
+
+    async def get_session(self, session_id: str) -> dict[str, Any]:
         resp = await self._http.get(f"{self.gateway_url}/sessions/{session_id}")
         resp.raise_for_status()
         return resp.json()
@@ -199,7 +191,7 @@ class AsyncGatewayClient:
         resp.raise_for_status()
         return resp.json().get("deleted", 0)
 
-    # -- Trace retrieval ---------------------------------------------------
+    # -- Traces --------------------------------------------------------
 
     async def get_session_traces(
         self,
@@ -214,40 +206,22 @@ class AsyncGatewayClient:
             params["limit"] = limit
         resp = await self._http.get(f"{self.gateway_url}/sessions/{session_id}/traces", params=params)
         resp.raise_for_status()
-        data = resp.json()
-        return [TraceRecord(**t) for t in data]
+        return [TraceRecord(**t) for t in resp.json()]
 
     async def get_trace(self, trace_id: str) -> TraceRecord:
         resp = await self._http.get(f"{self.gateway_url}/traces/{trace_id}")
         resp.raise_for_status()
         return TraceRecord(**resp.json())
 
-    # -- Worker management -------------------------------------------------
-
-    async def add_worker(
-        self,
-        url: str,
-        api_path: str = "/v1",
-        model_name: str | None = None,
-        weight: int = 1,
-    ) -> str:
-        body: dict[str, Any] = {"url": url, "api_path": api_path, "weight": weight}
-        if model_name:
-            body["model_name"] = model_name
-        resp = await self._http.post(f"{self.gateway_url}/admin/workers", json=body)
+    async def get_trace_extras(self, trace_id: str) -> tuple[str, bytes] | None:
+        resp = await self._http.get(f"{self.gateway_url}/traces/{trace_id}/extras")
+        if resp.status_code == 404:
+            return None
         resp.raise_for_status()
-        return resp.json()["worker_id"]
+        fmt = resp.headers.get("X-Extras-Format", "msgpack")
+        return (fmt, resp.content)
 
-    async def remove_worker(self, worker_id: str) -> None:
-        resp = await self._http.delete(f"{self.gateway_url}/admin/workers/{worker_id}")
-        resp.raise_for_status()
-
-    async def list_workers(self) -> list[WorkerInfo]:
-        resp = await self._http.get(f"{self.gateway_url}/admin/workers")
-        resp.raise_for_status()
-        return [WorkerInfo(**w) for w in resp.json()]
-
-    # -- Lifecycle ---------------------------------------------------------
+    # -- Lifecycle -----------------------------------------------------
 
     async def flush(self, timeout: float = 30.0) -> bool:
         resp = await self._http.post(f"{self.gateway_url}/admin/flush", timeout=timeout)

@@ -1,49 +1,77 @@
-"""TraceStore protocol — the abstract interface for trace persistence."""
+"""TraceStore protocol — abstract interface for trace persistence."""
+
+from __future__ import annotations
 
 from typing import Any, Protocol
 
+from rllm_model_gateway.trace import TraceRecord
+
+
+class SessionInfo(dict):
+    """Plain dict alias for session metadata returned by the store."""
+
 
 class TraceStore(Protocol):
-    """Abstract storage backend for trace persistence.
+    # -- Sessions --------------------------------------------------------
 
-    Implementations must be async.  The interface uses plain dicts so that
-    backends are free to serialise however they like (JSON columns, DynamoDB
-    items, etc.).
-    """
-
-    async def store_trace(self, trace_id: str, session_id: str, data: dict[str, Any]) -> None:
-        """Store a single trace."""
-        ...
-
-    async def get_trace(self, trace_id: str) -> dict[str, Any] | None:
-        """Get a trace by ID.  Returns ``None`` when not found."""
-        ...
-
-    async def get_session_traces(
+    async def create_session(
         self,
         session_id: str,
-        since: float | None = None,
-        limit: int | None = None,
-    ) -> list[dict[str, Any]]:
-        """Get all traces for a session, ordered by timestamp ascending."""
+        metadata: dict[str, Any] | None = None,
+        sampling_params: dict[str, Any] | None = None,
+    ) -> None:
+        """Create or update a session row."""
         ...
 
-    async def delete_session(self, session_id: str) -> int:
-        """Delete all traces for a session.  Returns count deleted."""
-        ...
+    async def get_session(self, session_id: str) -> dict[str, Any] | None: ...
 
     async def list_sessions(
         self,
         since: float | None = None,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """List sessions with trace counts."""
+        """Return sessions with their trace counts."""
         ...
 
-    async def flush(self) -> None:
-        """Flush any buffered writes to durable storage."""
+    async def delete_session(self, session_id: str) -> int:
+        """Delete a session and cascade its traces. Returns trace count deleted."""
         ...
 
-    async def close(self) -> None:
-        """Release any resources held by the store."""
+    # -- Traces ----------------------------------------------------------
+
+    async def store_trace(
+        self,
+        trace: TraceRecord,
+        extras: tuple[str, bytes] | None = None,
+    ) -> None:
+        """Persist a trace + optional extras blob.
+
+        ``extras`` is ``(format, bytes)`` where format is e.g. "msgpack".
+        """
         ...
+
+    async def get_trace(self, trace_id: str) -> TraceRecord | None:
+        """Return a trace's metadata (no extras)."""
+        ...
+
+    async def get_traces(
+        self,
+        session_id: str,
+        since: float | None = None,
+        limit: int | None = None,
+    ) -> list[TraceRecord]:
+        """Return all traces for a session, ordered by timestamp asc.
+
+        Metadata only — extras are not loaded. Use ``get_trace_extras`` to
+        fetch the per-trace blob.
+        """
+        ...
+
+    async def get_trace_extras(self, trace_id: str) -> tuple[str, bytes] | None:
+        """Return ``(format, bytes)`` for a trace's extras, or None."""
+        ...
+
+    # -- Lifecycle -------------------------------------------------------
+
+    async def flush(self) -> None: ...
+    async def close(self) -> None: ...
