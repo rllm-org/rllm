@@ -40,6 +40,7 @@ python -m examples.countdown.unified_trainer.train_countdown_unified_verl \
     rllm.algorithm.kl_beta=0.0 \
     rllm.async_training.enable=false \
     rllm.trainer.total_epochs=1 \
+    rllm.trainer.total_batches=500 \
     rllm.trainer.logger='[console,wandb]' \
     rllm.trainer.project_name='rllm-countdown' \
     rllm.trainer.experiment_name='countdown-verl-sync' \

@@ -149,16 +149,7 @@ class UnifiedTrainer:
         self._validate_and_setup_configs()
         self._setup_logging()
 
-        # Async training config
-        async_cfg = self.rllm_config.get("async_training", {})
-        self.async_config = AsyncTrainingConfig(
-            enable=async_cfg.get("enable", False),
-            mini_batch_size=async_cfg.get("mini_batch_size", 1),
-            fwd_bwd_group_size=async_cfg.get("fwd_bwd_group_size", 1),
-            staleness_threshold=async_cfg.get("staleness_threshold", 0.0),
-            trigger_parameter_sync_step=async_cfg.get("trigger_parameter_sync_step", 1),
-            partial_rollout=async_cfg.get("partial_rollout", True),
-        )
+        self.async_config = AsyncTrainingConfig.from_config(self.rllm_config.get("async_training", {}))
 
         rollout_engine: RolloutEngine = self.backend.init_rollout_engine(
             cf_config=self.cf_config,
@@ -257,32 +248,11 @@ class UnifiedTrainer:
         # validate backend-specific configs
         self.backend.validate_config()
 
-        # compact filtering config (used for filtering out episodes that are not valid)
         self.cf_config = CompactFilteringConfig.from_config(self.rllm_config.compact_filtering)
-
-        # transform config (used for transforming episodes to trajectory groups)
-        self.transform_config = TransformConfig(broadcast=self.rllm_config.stepwise_advantage.mode == "broadcast")
-
-        # rejection sampling config (used for rejection sampling)
-        rs_mode = "episode" if self.rllm_config.rejection_sample.enable else "none"
-
-        self.rs_config = RejectionSamplingConfig(
-            mode=rs_mode,
-            min_partial_solve_tasks=self.rllm_config.rejection_sample.min_partial_solve_tasks,
-            min_trajs_per_group=self.rllm_config.rejection_sample.min_trajs_per_group,
-            filter_uniform_groups=self.rllm_config.rejection_sample.get("filter_uniform_groups", False),
-        )
-
-        # algorithm config (used for rLLM-native advantage computation)
-        self.algorithm_config = AlgorithmConfig(
-            estimator=self.rllm_config.algorithm.adv_estimator,
-            estimator_map=self.traj_group_adv_estimator_map,  # TODO(listar2000): see if we can make this configurable in config as well
-            stepwise_advantage_mode=self.rllm_config.stepwise_advantage.mode,
-            norm_adv_by_std_in_grpo=self.rllm_config.algorithm.get("norm_adv_by_std_in_grpo", True),
-            use_precomputed_advantage=self.rllm_config.algorithm.get("use_precomputed_advantage", False),
-            loss_fn=self.rllm_config.algorithm.get("loss_fn", None),
-            lr_schedule=self.rllm_config.algorithm.get("lr_schedule", "constant"),
-            warmup_steps_ratio=self.rllm_config.algorithm.get("warmup_steps_ratio", 0.0),
+        self.transform_config = TransformConfig.from_config(self.rllm_config)
+        self.rs_config = RejectionSamplingConfig.from_config(self.rllm_config.rejection_sample)
+        self.algorithm_config = AlgorithmConfig.from_config(
+            self.rllm_config, estimator_map=self.traj_group_adv_estimator_map
         )
 
     def _setup_logging(self):

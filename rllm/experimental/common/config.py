@@ -39,6 +39,10 @@ class AsyncTrainingConfig:
             assert self.fwd_bwd_group_size >= 1
             assert self.mini_batch_size % self.fwd_bwd_group_size == 0, f"mini_batch_size ({self.mini_batch_size}) must be divisible by fwd_bwd_group_size ({self.fwd_bwd_group_size})"
 
+    @classmethod
+    def from_config(cls, config: DictConfig) -> "AsyncTrainingConfig":
+        return cls(**OmegaConf.to_container(config))  # type: ignore
+
 
 @dataclass
 class CompactFilteringConfig:
@@ -108,6 +112,16 @@ class TransformConfig:
     # Reward configuration
     broadcast: bool = True  # If True, use trajectory-level rewards; if False, use per-step rewards
 
+    @classmethod
+    def from_config(cls, rllm_config: DictConfig) -> "TransformConfig":
+        t_section = rllm_config.get("transform", {})
+        return cls(
+            impute_missing_names=t_section.get("impute_missing_names", True),
+            default_traj_name=t_section.get("default_traj_name", _DEFAULT_TRAJ_NAME),
+            drop_unnamed_traj=t_section.get("drop_unnamed_traj", False),
+            broadcast=rllm_config.stepwise_advantage.mode == "broadcast",
+        )
+
 
 @dataclass
 class RejectionSamplingConfig:
@@ -129,6 +143,18 @@ class RejectionSamplingConfig:
     # Applied at the accumulator level in async training, before groups enter the buffer.
     filter_uniform_groups: bool = False
 
+    @classmethod
+    def from_config(cls, config: DictConfig) -> "RejectionSamplingConfig":
+        mode = config.get("mode", None)
+        if mode is None:
+            mode = "episode" if config.get("enable", False) else "none"
+        return cls(
+            mode=mode,
+            min_trajs_per_group=config.get("min_trajs_per_group", 2),
+            min_partial_solve_tasks=config.get("min_partial_solve_tasks", 1),
+            filter_uniform_groups=config.get("filter_uniform_groups", False),
+        )
+
 
 @dataclass
 class RolloutCorrectionConfig:
@@ -148,6 +174,8 @@ class RolloutCorrectionConfig:
     tis_mode: str | None = None
     bypass_mode: bool = False
     tis_cap: float = 5.0
+    rs_mode: str | None = None
+    rs_threshold: str | float | None = None
 
 
 class rLLMAdvantageEstimator(str, Enum):
@@ -207,34 +235,31 @@ class AlgorithmConfig:
     router_replay: bool = False
 
     @classmethod
-    def from_config(cls, config: DictConfig) -> "AlgorithmConfig":
-        """Create an AlgorithmConfig from a dictionary configuration.
-
-        Args:
-            config: Dictionary configuration.
-        Returns:
-            AlgorithmConfig: The AlgorithmConfig built from the configuration.
-        """
-        rc_section = config.rllm.algorithm.get("rollout_correction", {})
+    def from_config(cls, rllm_config: DictConfig, estimator_map: dict | None = None) -> "AlgorithmConfig":
+        algo = rllm_config.algorithm
+        rc_section = algo.get("rollout_correction", {})
         rollout_correction = RolloutCorrectionConfig(
             tis_mode=rc_section.get("tis_mode", None),
             bypass_mode=rc_section.get("bypass_mode", False),
-            tis_cap=rc_section.get("tis_cap", 5.0),
+            tis_cap=rc_section.get("tis_cap", 2.0),
+            rs_mode=rc_section.get("rs_mode", None),
+            rs_threshold=rc_section.get("rs_threshold", None),
         )
         return cls(
-            estimator=rLLMAdvantageEstimator(config.rllm.algorithm.adv_estimator),
-            stepwise_advantage_mode=config.rllm.stepwise_advantage.mode,
-            norm_adv_by_std_in_grpo=config.rllm.algorithm.get("norm_adv_by_std_in_grpo", True),
-            use_precomputed_advantage=config.rllm.algorithm.get("use_precomputed_advantage", False),
-            loss_fn=config.rllm.algorithm.get("loss_fn", None),
-            lr_schedule=config.rllm.algorithm.get("lr_schedule", "constant"),
-            warmup_steps_ratio=config.rllm.algorithm.get("warmup_steps_ratio", 0.0),
-            kl_beta=config.rllm.algorithm.get("kl_beta", 0.0),
-            eps_clip=config.rllm.algorithm.get("eps_clip", 0.2),
-            eps_clip_high=config.rllm.algorithm.get("eps_clip_high", None),
-            loss_agg_mode=config.rllm.algorithm.get("loss_agg_mode", None),
+            estimator=rLLMAdvantageEstimator(algo.adv_estimator),
+            estimator_map=estimator_map or {},
+            stepwise_advantage_mode=rllm_config.stepwise_advantage.mode,
+            norm_adv_by_std_in_grpo=algo.get("norm_adv_by_std_in_grpo", True),
+            use_precomputed_advantage=algo.get("use_precomputed_advantage", False),
+            loss_fn=algo.get("loss_fn", None),
+            lr_schedule=algo.get("lr_schedule", "constant"),
+            warmup_steps_ratio=algo.get("warmup_steps_ratio", 0.0),
+            kl_beta=algo.get("kl_beta", 0.0),
+            eps_clip=algo.get("eps_clip", 0.2),
+            eps_clip_high=algo.get("eps_clip_high", None),
+            loss_agg_mode=algo.get("loss_agg_mode", None),
             rollout_correction=rollout_correction,
-            router_replay=config.rllm.algorithm.get("router_replay", False),
+            router_replay=algo.get("router_replay", False),
         )
 
     def __post_init__(self):

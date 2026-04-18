@@ -460,24 +460,37 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
                 batch = batch.union(DataProto.from_tensordict(tu.get_tensordict({"old_log_probs": log_probs.float()})))
 
-            # Compute rollout IS weights if tis_mode is set (3-policy correction)
             tis_mode = rc.tis_mode if rc is not None else None
-            if tis_mode is not None and "rollout_log_probs" in batch.batch:
+            rs_mode = rc.rs_mode if rc is not None else None
+            if (tis_mode is not None or rs_mode is not None) and "rollout_log_probs" in batch.batch:
                 with simple_timer("rollout_correction", timing_dict):
-                    from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_weights
-
                     log_ratio = batch.batch["old_log_probs"] - batch.batch["rollout_log_probs"]
                     response_length = batch.batch["responses"].size(1)
-                    response_mask = batch.batch["attention_mask"][:, -response_length:]
+                    attn_response_mask = batch.batch["attention_mask"][:, -response_length:]
 
-                    rollout_is_weights, is_metrics = compute_rollout_correction_weights(
-                        log_ratio=log_ratio,
-                        response_mask=response_mask,
-                        rollout_is=tis_mode,
-                        rollout_is_threshold=rc.tis_cap,
-                    )
-                    batch.batch["rollout_is_weights"] = rollout_is_weights
-                    metrics.update({f"rollout_correction/{k}": v for k, v in is_metrics.items()})
+                    if tis_mode is not None:
+                        from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_weights
+
+                        rollout_is_weights, is_metrics = compute_rollout_correction_weights(
+                            log_ratio=log_ratio,
+                            response_mask=attn_response_mask,
+                            rollout_is=tis_mode,
+                            rollout_is_threshold=rc.tis_cap,
+                        )
+                        batch.batch["rollout_is_weights"] = rollout_is_weights
+                        metrics.update({f"rollout_correction/{k}": v for k, v in is_metrics.items()})
+
+                    if rs_mode is not None:
+                        from verl.trainer.ppo.rollout_corr_helper import compute_rollout_rejection_mask
+
+                        modified_response_mask, rs_metrics = compute_rollout_rejection_mask(
+                            log_ratio=log_ratio,
+                            response_mask=batch.batch["response_mask"],
+                            rollout_rs=rs_mode,
+                            rollout_rs_threshold=rc.rs_threshold,
+                        )
+                        batch.batch["response_mask"] = modified_response_mask
+                        metrics.update({f"rollout_correction/{k}": v for k, v in rs_metrics.items()})
 
             # Off-policy diagnostics (KL, PPL, chi-squared, etc.)
             if "rollout_log_probs" in batch.batch:

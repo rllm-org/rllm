@@ -79,6 +79,8 @@ algorithm:
     bypass_mode: False    # true = pi_old = pi_rollout, false = pi_old is computed from the model
     tis_mode: null        # null = disabled, "token" or "sequence" = TIS importance sampling level
     tis_cap: 2.0          # Upper clamp on TIS importance weight
+    rs_mode: null         # null = disabled; token_k{1,2,3} / seq_sum_k{1,2,3} / seq_mean_k{1,2,3} / seq_max_k{2,3}, comma-chained
+    rs_threshold: null    # "lower_upper" for k1 (e.g. "0.1_1.2"); upper bound for k2/k3
 
 # Stepwise advantage
 # TODO(listar2000): deprecate the `per_step` mode and refactor this config.
