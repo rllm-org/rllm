@@ -35,14 +35,23 @@ class RejectionSamplingMetrics:
         self.groups_dropped_insufficient_trajs = 0
 
     def to_dict(self, prefix: str = "batch/") -> dict:
-        """Convert metrics to a dictionary for logging."""
-        total_tasks = max(self.solve_none + self.solve_all + self.solve_partial, 1)
+        """Convert metrics to a dictionary for logging.
+
+        ``solve_none`` / ``solve_all`` / ``solve_partial`` are emitted as raw
+        task counts; the matching ``_rate`` keys emit the same values divided
+        by the total-task denominator for dashboards that want proportions.
+        """
+        total_tasks = self.solve_none + self.solve_all + self.solve_partial
+        denom = max(total_tasks, 1)
 
         return {
             f"{prefix}num_tasks": total_tasks,
-            f"{prefix}solve_none": self.solve_none / total_tasks,
-            f"{prefix}solve_all": self.solve_all / total_tasks,
-            f"{prefix}solve_partial": self.solve_partial / total_tasks,
+            f"{prefix}solve_none": self.solve_none,
+            f"{prefix}solve_all": self.solve_all,
+            f"{prefix}solve_partial": self.solve_partial,
+            f"{prefix}solve_none_rate": self.solve_none / denom,
+            f"{prefix}solve_all_rate": self.solve_all / denom,
+            f"{prefix}solve_partial_rate": self.solve_partial / denom,
             f"{prefix}groups_before_filter": self.groups_before_filter,
             f"{prefix}groups_after_filter": self.groups_after_filter,
             f"{prefix}groups_dropped_insufficient_trajs": self.groups_dropped_insufficient_trajs,
@@ -189,12 +198,15 @@ def apply_rejection_sampling_and_filtering(
 
     metrics = state.metrics
 
+    # Step 0: Compute solve_* on pre-filter episodes so zero-advantage group
+    # drops (which by construction remove every solve_none and solve_all group
+    # under binary rewards) don't bias the task-outcome distribution toward
+    # solve_partial.
+    update_episode_metrics(episodes, metrics)
+
     # Step 1: Filter groups and episodes based on config
     filtered_groups, dropped_groups = filter_groups(groups, config, metrics)
     filtered_episodes = filter_episodes(episodes, dropped_groups)
-
-    # Step 2: Compute episode-level correctness metrics (always, for logging)
-    update_episode_metrics(filtered_episodes, metrics)
 
     # Step 3: Apply mode-specific logic (TODO(listar2000): implement a group-level rejection sampling)
     if config.mode == "none":
