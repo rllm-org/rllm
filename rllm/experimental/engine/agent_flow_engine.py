@@ -176,7 +176,7 @@ class AgentFlowEngine:
                     return task_id, rollout_idx, result_idx, episode
 
                 except Exception as e:
-                    logger.error("[%s] Attempt %d/%d failed: %s", uid, retry_attempt, self.retry_limit, e)
+                    logger.error("[%s] Attempt %d/%d failed (%s): %s", uid, retry_attempt, self.retry_limit, type(e).__name__, e)
                     if retry_attempt < self.retry_limit:
                         continue
 
@@ -213,6 +213,7 @@ class AgentFlowEngine:
             base_url=session_url,
             model=self.model,
             session_uid=uid,
+            metadata={"is_validation": is_validation},
         )
 
         # 3. Run agent flow (prefers arun if available, else run in executor)
@@ -251,7 +252,9 @@ class AgentFlowEngine:
         for signal in eval_output.signals:
             enriched.metrics[signal.name] = signal.value
 
-        enriched.termination_reason = TerminationReason.ENV_DONE
+        # Preserve termination_reason from agent flow if set; default to ENV_DONE
+        if enriched.termination_reason is None:
+            enriched.termination_reason = TerminationReason.ENV_DONE
         return enriched
 
     def _enrich_episode(
@@ -329,6 +332,12 @@ class AgentFlowEngine:
         metrics = compute_step_metrics(enriched_trajectories)
         metrics["empty"] = int(len(traces) == 0)
         metrics["steps_collected"] = len(traces)
+
+        # One-hot encode termination reason for aggregation across batches
+        if episode.termination_reason is not None:
+            for reason in TerminationReason:
+                metrics[f"termination_reason/{reason.value}"] = float(episode.termination_reason == reason)
+
         metrics.update(episode.metrics)
 
         return Episode(
