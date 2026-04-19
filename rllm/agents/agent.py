@@ -25,6 +25,7 @@ class Step(_StepBase):
     response_ids: list[int] = Field(default_factory=list)
     logprobs: list[float] = Field(default_factory=list)
     routing_matrices: list[str] | None = None  # per-token routing matrices (R3, transient)
+    response_mask: list[float] = Field(default_factory=list)
 
     chat_completions: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -69,10 +70,14 @@ class Step(_StepBase):
             self.routing_matrices = self.model_output.routing_matrices
         if self.weight_version is None and hasattr(self.model_output, "weight_version"):
             self.weight_version = self.model_output.weight_version
+        if len(self.response_mask) == 0 and len(self.response_ids) > 0:
+            self.response_mask = [1.0] * len(self.response_ids)
 
         # check that the lengths would match up
         if len(self.logprobs) > 0:
             assert len(self.response_ids) == len(self.logprobs), f"length mismatch between response_ids and logprobs, got {len(self.response_ids)}, {len(self.logprobs)}"
+        if len(self.response_mask) > 0:
+            assert len(self.response_ids) == len(self.response_mask), f"length mismatch between response_ids and response_mask, got {len(self.response_ids)}, {len(self.response_mask)}"
 
     def to_dict(self) -> dict:
         from rllm.tools.tool_base import ToolCall, ToolOutput
@@ -93,6 +98,7 @@ class Step(_StepBase):
             "response_ids": self.response_ids,
             "logprobs": self.logprobs,
             "routing_matrices": self.routing_matrices,
+            "response_mask": self.response_mask,
             "chat_completions": _serialize_value(self.chat_completions),
             "observation": self.observation,
             "thought": self.thought,
@@ -116,6 +122,7 @@ class Step(_StepBase):
             response_ids=data["response_ids"],
             logprobs=data["logprobs"],
             routing_matrices=data.get("routing_matrices"),
+            response_mask=data.get("response_mask", []),
             chat_completions=data["chat_completions"],
             observation=data["observation"],
             thought=data["thought"],
@@ -137,6 +144,7 @@ class Step(_StepBase):
             response_ids=model_output.completion_ids or [],
             logprobs=model_output.logprobs or [],
             routing_matrices=getattr(model_output, "routing_matrices", None),
+            response_mask=[1.0] * len(model_output.completion_ids or []),
             chat_completions=(messages or []) + [{"role": "assistant", "content": model_output.content, "reasoning": model_output.reasoning}],
             thought=model_output.reasoning or "",
             action=action,
