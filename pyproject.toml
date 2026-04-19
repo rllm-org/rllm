@@ -145,6 +145,7 @@ agentcore = [
 ]
 
 code-tools = [
+    "daytona",
     "e2b_code_interpreter",
     "together>=1.4",
 ]
