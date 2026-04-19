@@ -85,6 +85,27 @@ def _build_per_step_advantages(response_mask: torch.Tensor, advantages: list[flo
     return advantages_tensor * response_mask
 
 
+def _is_qwen_vl_processor(processor) -> bool:
+    """True if ``processor`` is a Qwen2-VL or Qwen3-VL multimodal processor.
+
+    Qwen2-VL and Qwen3-VL both use ``Qwen2VLImageProcessor`` under the hood;
+    we distinguish them at ``processor.__class__.__name__`` when picking a
+    rope-index function. Extend this predicate as additional VLM families
+    are wired up.
+    """
+    if processor is None or not hasattr(processor, "image_processor"):
+        return False
+    return "Qwen2VLImageProcessor" in processor.image_processor.__class__.__name__
+
+
+def _get_qwen_rope_index_fn(processor):
+    if "Qwen3VLProcessor" in processor.__class__.__name__:
+        from verl.models.transformers.qwen3_vl import get_rope_index
+    else:
+        from verl.models.transformers.qwen2_vl import get_rope_index
+    return get_rope_index
+
+
 def _handle_multimodal_position_ids(processor, input_ids: torch.Tensor, attention_mask: torch.Tensor, multi_modal_inputs: list[dict]) -> torch.Tensor:
     """Handle multimodal position ids calculation. Borrowed from verl.utils.dataset.rl_dataset.py
 
@@ -96,34 +117,29 @@ def _handle_multimodal_position_ids(processor, input_ids: torch.Tensor, attentio
     Returns:
         torch.Tensor: Position IDs tensor with shape (batch_size, 4, seq_length) for Qwen-VL models.
     """
+    if not _is_qwen_vl_processor(processor):
+        raise ValueError(
+            f"Unsupported multimodal processor type: {processor.__class__.__name__ if processor else None}. Only Qwen2-VL and Qwen3-VL are wired up in the experimental unified trainer today."
+        )
+
+    get_rope_index = _get_qwen_rope_index_fn(processor)
     batch_size = input_ids.shape[0]
     position_ids_list = []
 
-    if processor is not None and "Qwen2VLImageProcessor" in processor.image_processor.__class__.__name__:
-        # qwen-vl mrope
-        if "Qwen3VLProcessor" in processor.__class__.__name__:
-            from verl.models.transformers.qwen3_vl import get_rope_index
-        else:
-            from verl.models.transformers.qwen2_vl import get_rope_index
-
-        for i in range(batch_size):
-            model_inputs = multi_modal_inputs[i] if i < len(multi_modal_inputs) else {}
-            vision_position_ids = get_rope_index(
-                processor,
-                input_ids=input_ids[i],
-                image_grid_thw=model_inputs.get("image_grid_thw"),
-                video_grid_thw=model_inputs.get("video_grid_thw"),
-                second_per_grid_ts=model_inputs.get("second_per_grid_ts"),
-                attention_mask=attention_mask[i],
-            )  # (3, seq_length)
-            valid_mask = attention_mask[i].bool()
-            text_position_ids = torch.ones((1, len(input_ids[i])), dtype=torch.long)
-            text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item())
-            position_ids_list.append(torch.cat((text_position_ids, vision_position_ids), dim=0))  # (4, seq_length)
-
-    else:
-        # Fallback: should not reach here if called correctly
-        raise ValueError(f"Unsupported processor type: {processor.__class__.__name__ if processor else None}")
+    for i in range(batch_size):
+        model_inputs = multi_modal_inputs[i] if i < len(multi_modal_inputs) else {}
+        vision_position_ids = get_rope_index(
+            processor,
+            input_ids=input_ids[i],
+            image_grid_thw=model_inputs.get("image_grid_thw"),
+            video_grid_thw=model_inputs.get("video_grid_thw"),
+            second_per_grid_ts=model_inputs.get("second_per_grid_ts"),
+            attention_mask=attention_mask[i],
+        )  # (3, seq_length)
+        valid_mask = attention_mask[i].bool()
+        text_position_ids = torch.ones((1, len(input_ids[i])), dtype=torch.long)
+        text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item())
+        position_ids_list.append(torch.cat((text_position_ids, vision_position_ids), dim=0))  # (4, seq_length)
 
     # Stack all position_ids to form batch: (batch_size, 4, seq_length)
     position_ids = torch.stack(position_ids_list, dim=0)
@@ -151,8 +167,11 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
     responses_mask = _retrieve_batch_attention_masks(responses_batch, pad_token_id, max_response_length)
     attention_mask = torch.concat([prompts_mask, responses_mask], dim=1)  # shape: [bs, max_prompt_length + max_response_length]
 
-    # Handle position_ids: use multimodal handler if processor is available
-    if processor is not None and hasattr(processor, "image_processor") and "Qwen2VLImageProcessor" in processor.image_processor.__class__.__name__:
+    # Handle position_ids: use multimodal handler if processor is VLM-aware AND
+    # any sample in the batch actually carries multimodal inputs. Text-only
+    # batches with a VLM processor loaded fall through to the 1-D path.
+    has_mm = any(mm_inputs for mm_inputs in accumulated.multi_modal_inputs)
+    if _is_qwen_vl_processor(processor) and has_mm:
         position_ids = _handle_multimodal_position_ids(
             processor=processor,
             input_ids=input_ids,

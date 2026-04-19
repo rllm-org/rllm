@@ -12,7 +12,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from rllm.experimental.parser.utils import normalize_tools
+from rllm.experimental.parser.utils import extract_images_pil, normalize_messages_for_images, normalize_tools
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +51,11 @@ class VLLMParser:
         tokenizer,
         reasoning_parser_name: str | None = None,
         tool_parser_name: str | None = None,
+        processor=None,
         **kwargs,
     ):
         self.tokenizer = tokenizer
+        self.processor = processor
         self._reasoning_parser_cls = None
         self._tool_parser_cls = None
         self._skip_special_tokens = True
@@ -81,6 +83,8 @@ class VLLMParser:
         if tools:
             tools = normalize_tools(tools)
 
+        messages = normalize_messages_for_images(messages)
+
         return self.tokenizer.apply_chat_template(
             messages,
             tools=tools,
@@ -88,6 +92,13 @@ class VLLMParser:
             add_generation_prompt=add_generation_prompt,
             **kwargs,
         )
+
+    def process_image_data(self, messages: list[dict]) -> list:
+        """Resolve image payloads in messages to PIL images. Requires a processor."""
+        if self.processor is None:
+            raise RuntimeError("VLLMParser.process_image_data called without a multimodal processor")
+        messages = normalize_messages_for_images(messages)
+        return extract_images_pil(messages, self.processor)
 
     def parse_completion(self, completion_ids: list[int], **kwargs) -> dict[str, Any]:
         tools = kwargs.pop("tools", None)

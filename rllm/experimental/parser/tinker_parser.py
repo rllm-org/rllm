@@ -21,7 +21,7 @@ import json
 import logging
 from typing import Any
 
-from rllm.experimental.parser.utils import normalize_tools
+from rllm.experimental.parser.utils import normalize_messages_for_tinker, normalize_tools
 
 logger = logging.getLogger(__name__)
 
@@ -53,15 +53,20 @@ class TinkerParser:
         self.stop_sequences: list[int] = self.renderer.get_stop_sequences()
         logger.info("TinkerParser: using renderer %r (kwargs=%r)", renderer_name, renderer_kwargs)
 
-    def parse(self, messages: list[dict], add_generation_prompt: bool = False, **kwargs) -> str:
+    def _build_model_input(self, messages: list[dict], add_generation_prompt: bool, tools: list | None):
+        """Shared path: messages + tools → tinker ModelInput via the renderer.
+
+        Multimodal inputs (OpenAI ``content: list[dict]`` or the
+        ``message["images"]`` side channel) are normalized into tinker's
+        ``ContentPart`` form before handoff so the VL renderers see image
+        parts and emit ImageChunks in the output ModelInput.
+        """
         from tinker_cookbook.third_party.openai_compat import (
             openai_messages_to_tinker,
             openai_tools_to_tinker,
         )
 
-        tools = kwargs.pop("tools", None)
-        tools = normalize_tools(tools) if tools else []
-
+        messages = normalize_messages_for_tinker(messages)
         tinker_messages = openai_messages_to_tinker(messages)
 
         if tools:
@@ -75,18 +80,37 @@ class TinkerParser:
             tinker_messages = prefix + tinker_messages
 
         if add_generation_prompt:
-            model_input = self.renderer.build_generation_prompt(tinker_messages)
-        else:
-            model_input, _weights = self.renderer.build_supervised_example(tinker_messages)
+            return self.renderer.build_generation_prompt(tinker_messages)
+        model_input, _weights = self.renderer.build_supervised_example(tinker_messages)
+        return model_input
+
+    def parse(self, messages: list[dict], add_generation_prompt: bool = False, **kwargs) -> str:
+        tools = kwargs.pop("tools", None)
+        tools = normalize_tools(tools) if tools else []
+
+        model_input = self._build_model_input(messages, add_generation_prompt, tools)
 
         tokens: list[int] = []
         for chunk in model_input.chunks:
             if hasattr(chunk, "tokens"):
                 tokens.extend(chunk.tokens)
         # Tinker produces tokens natively; callers typically re-encode the
-        # returned string back to token IDs. That round-trip is wasteful.
-        # TODO(kylemontgomery1): expose a way to return tokens directly
+        # returned string back to token IDs. That round-trip is wasteful and
+        # silently loses image chunks — use ``parse_to_model_input`` for any
+        # multimodal path.
         return self.tokenizer.decode(tokens, skip_special_tokens=False)
+
+    def parse_to_model_input(self, messages: list[dict], add_generation_prompt: bool = False, **kwargs):
+        """Return the tinker ``ModelInput`` directly, preserving ImageChunks.
+
+        TinkerEngine prefers this method (duck-typed) over ``parse`` so the
+        chunked representation (text tokens + image chunks) survives
+        end-to-end into the sampling client without a decode/re-encode
+        round-trip that drops image chunks.
+        """
+        tools = kwargs.pop("tools", None)
+        tools = normalize_tools(tools) if tools else []
+        return self._build_model_input(messages, add_generation_prompt, tools)
 
     def parse_completion(self, completion_ids: list[int], **kwargs) -> dict[str, Any]:
         message, _success = self.renderer.parse_response(completion_ids)

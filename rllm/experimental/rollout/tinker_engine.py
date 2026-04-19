@@ -78,6 +78,7 @@ class TinkerEngine(RolloutEngine):
         self.max_response_length = max_response_length
         self.max_model_length = max_model_length - 1
         self.tokenizer = tokenizer
+        self.processor = processor
 
         if chat_template:
             from pathlib import Path
@@ -243,13 +244,26 @@ class TinkerEngine(RolloutEngine):
         template_kwargs.update(kwargs.pop("chat_template_kwargs", {}))
         template_kwargs.update({k: kwargs.pop(k) for k in list(kwargs) if k in CHAT_TEMPLATE_KWARG_NAMES})
 
-        prompt = self.chat_parser.parse(
-            messages,
-            add_generation_prompt=True,
-            is_first_msg=True,
-            **template_kwargs,
-        )
-        token_input: TinkerTokenInput = self.tokenizer.encode(prompt, add_special_tokens=False)  # type: ignore
+        # Prefer the chunked path so ImageChunks survive into the sampling
+        # client. ``parse`` returns a decoded string, which silently drops any
+        # image chunks on re-encode — so we only fall back to it for
+        # text-only parsers (rllm, vllm, sglang) without a chunk-aware hook.
+        if hasattr(self.chat_parser, "parse_to_model_input"):
+            model_input = self.chat_parser.parse_to_model_input(
+                messages,
+                add_generation_prompt=True,
+                is_first_msg=True,
+                **template_kwargs,
+            )
+            token_input: TinkerTokenInput = list(model_input.chunks)  # type: ignore[assignment]
+        else:
+            prompt = self.chat_parser.parse(
+                messages,
+                add_generation_prompt=True,
+                is_first_msg=True,
+                **template_kwargs,
+            )
+            token_input = self.tokenizer.encode(prompt, add_special_tokens=False)  # type: ignore[assignment]
 
         sampled_sequence = await self.get_token_output_from_token_input(token_input=token_input, **kwargs)
         return self.assemble_model_output(token_input=token_input, token_output=sampled_sequence)

@@ -6,6 +6,7 @@ from typing_extensions import override
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager, AsyncLLMServerManager
 
 from rllm.experimental.parser import get_chat_parser
+from rllm.experimental.parser.utils import normalize_messages_for_images
 from rllm.experimental.rollout.rollout_engine import CHAT_TEMPLATE_KWARG_NAMES, ModelOutput, RolloutEngine
 from rllm.experimental.rollout.types import TokenInput, Tokenizer, TokenOutput, VerlTokenOutput
 from rllm.workflows import TerminationEvent, TerminationReason
@@ -98,14 +99,20 @@ class VerlEngine(RolloutEngine):
         prompt = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, **template_kwargs)
         request_prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)  # list[int]
 
-        if any(msg.get("images", None) is not None and msg["role"] == "user" for msg in messages) and self.processor is not None:
-            image_data = self.chat_parser.process_image_data(messages)  # list[PIL.Image.Image]
+        normalized = normalize_messages_for_images(messages)
+        has_images = any(msg.get("images") and msg["role"] == "user" for msg in normalized)
+
+        if has_images and self.processor is not None:
+            if not hasattr(self.chat_parser, "process_image_data"):
+                raise RuntimeError(
+                    f"Multimodal input detected but {type(self.chat_parser).__name__} does not implement process_image_data(); use parser_backend='rllm', 'vllm', or 'sglang' for multimodal training."
+                )
+            image_data = self.chat_parser.process_image_data(normalized)  # list[PIL.Image.Image]
             model_inputs = self.processor(text=[prompt], images=image_data)
             prompt_ids = model_inputs.pop("input_ids")[0]  # list[int]
             model_inputs.pop("attention_mask")
             multi_modal_inputs = dict(model_inputs)
         else:
-            image_data = None
             multi_modal_inputs = None
             prompt_ids = request_prompt_ids
 

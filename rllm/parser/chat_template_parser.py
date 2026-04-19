@@ -393,6 +393,10 @@ class QwenChatTemplateParser(ChatTemplateParser):
         self.tool_parser = QwenToolParser()
 
     def parse(self, messages: list[dict], add_generation_prompt: bool = False, is_first_msg: bool = False, tools: list[Tool] = None, accumulate_reasoning: bool = False, **kwargs) -> str:
+        from rllm.experimental.parser.utils import normalize_messages_for_images
+
+        messages = normalize_messages_for_images(messages)
+
         tools = tools or []
         tools_prompt_str = ""
         if tools:
@@ -575,21 +579,10 @@ class QwenChatTemplateParser(ChatTemplateParser):
         }
 
     def process_image_data(self, messages):
-        from qwen_vl_utils import fetch_image
+        from rllm.experimental.parser.utils import extract_images_pil, normalize_messages_for_images
 
-        messages = deepcopy(messages)
-        image_data = []
-        for message in messages:
-            if "images" in message and message["images"] is not None:
-                assert isinstance(message["images"], list), "images must be a list"
-                images = message["images"]
-                if not images or images[0] is None:
-                    continue
-                for image in images:
-                    image_dict = image if isinstance(image, dict) else {"image": image}
-                    processed_image = fetch_image(image_dict, image_patch_size=self.processor.image_processor.patch_size)  # PIL.Image.Image
-                    image_data.append(processed_image)
-        return image_data
+        messages = normalize_messages_for_images(deepcopy(messages))
+        return extract_images_pil(messages, self.processor)
 
 
 class LlamaChatTemplateParser(ChatTemplateParser):

@@ -15,6 +15,43 @@ if TYPE_CHECKING:
     from rllm.engine.rollout import ModelOutput
 
 
+def _sanitize_task(task_obj: Any) -> Any:
+    """Drop non-JSON-serializable payloads (PIL images, raw bytes) from task
+    data while preserving URL / path / data-URI strings so trace records can
+    still carry enough info for retraining.
+    """
+    try:
+        from PIL.Image import Image as _PILImage
+    except ImportError:  # PIL is optional at runtime
+        _PILImage = None  # type: ignore[assignment]
+
+    _MAX_BYTES = 1024
+
+    _DROP = object()
+
+    def _walk(obj: Any) -> Any:
+        if _PILImage is not None and isinstance(obj, _PILImage):
+            return _DROP
+        if isinstance(obj, bytes | bytearray | memoryview) and len(obj) > _MAX_BYTES:
+            return _DROP
+        if isinstance(obj, dict):
+            out = {}
+            for k, v in obj.items():
+                cleaned = _walk(v)
+                if cleaned is _DROP:
+                    continue
+                out[k] = cleaned
+            return out
+        if isinstance(obj, list):
+            return [c for c in (_walk(v) for v in obj) if c is not _DROP]
+        if isinstance(obj, tuple):
+            return tuple(c for c in (_walk(v) for v in obj) if c is not _DROP)
+        return obj
+
+    result = _walk(task_obj)
+    return None if result is _DROP else result
+
+
 class Step(_StepBase):
     """Training step with token IDs, logprobs, advantage."""
 
@@ -171,13 +208,6 @@ class Trajectory(_TrajectoryBase):
         self.metadata = value
 
     def to_dict(self):
-        # Remove large/non-serializable payloads (e.g., images) from task
-        def _sanitize_task(task_obj):
-            if isinstance(task_obj, dict):
-                cleaned = {k: v for k, v in task_obj.items() if k not in ("image", "images")}
-                return cleaned
-            return task_obj
-
         return {
             "uid": self.uid,
             "name": self.name,
@@ -230,13 +260,6 @@ class Episode(_EpisodeBase):
         self.metadata = value
 
     def to_dict(self):
-        # Remove large/non-serializable payloads (e.g., images) from task
-        def _sanitize_task(task_obj):
-            if isinstance(task_obj, dict):
-                cleaned = {k: v for k, v in task_obj.items() if k not in ("image", "images")}
-                return cleaned
-            return task_obj
-
         return {
             "id": self.id,
             "task": _sanitize_task(self.task),
