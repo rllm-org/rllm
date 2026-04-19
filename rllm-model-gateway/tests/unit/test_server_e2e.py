@@ -15,7 +15,7 @@ async def _adapter(req: NormalizedRequest) -> NormalizedResponse:
     return NormalizedResponse(
         content="answer",
         reasoning="thought",
-        tool_calls=[ToolCall(id="c1", name="t", arguments={"x": 1}, arguments_raw='{"x":1}')],
+        tool_calls=[ToolCall(id="c1", name="t", arguments='{"x":1}')],
         finish_reason="tool_calls",
         usage=Usage(prompt_tokens=10, completion_tokens=5),
         extras={"completion_ids": [1, 2, 3, 4, 5], "logprobs": [-0.1] * 5},
@@ -251,7 +251,7 @@ def test_model_pin_overrides_request_model(gateway_app_factory):
     captured = {}
 
     async def capture_adapter(req: NormalizedRequest) -> NormalizedResponse:
-        captured["sampling_params"] = dict(req.sampling_params)
+        captured["kwargs"] = dict(req.kwargs)
         return NormalizedResponse(content="ok", finish_reason="stop")
 
     with gateway_app_factory(adapter=capture_adapter, model="pinned-model") as client:
@@ -274,7 +274,7 @@ def test_session_sampling_priority_client_wins(gateway_app_factory):
     captured = {}
 
     async def capture(req: NormalizedRequest) -> NormalizedResponse:
-        captured["sampling_params"] = dict(req.sampling_params)
+        captured["kwargs"] = dict(req.kwargs)
         return NormalizedResponse(content="ok", finish_reason="stop")
 
     with gateway_app_factory(adapter=capture, sampling_params_priority="client") as client:
@@ -294,15 +294,15 @@ def test_session_sampling_priority_client_wins(gateway_app_factory):
             },
         )
         # Client wins on overlap, session fills missing.
-        assert captured["sampling_params"]["temperature"] == 0.9
-        assert captured["sampling_params"]["max_tokens"] == 999
+        assert captured["kwargs"]["temperature"] == 0.9
+        assert captured["kwargs"]["max_tokens"] == 999
 
 
 def test_session_sampling_priority_session_wins(gateway_app_factory):
     captured = {}
 
     async def capture(req: NormalizedRequest) -> NormalizedResponse:
-        captured["sampling_params"] = dict(req.sampling_params)
+        captured["kwargs"] = dict(req.kwargs)
         return NormalizedResponse(content="ok", finish_reason="stop")
 
     with gateway_app_factory(adapter=capture, sampling_params_priority="session") as client:
@@ -322,5 +322,5 @@ def test_session_sampling_priority_session_wins(gateway_app_factory):
             },
         )
         # Session value wins on conflict.
-        assert captured["sampling_params"]["temperature"] == 0.1
-        assert captured["sampling_params"]["max_tokens"] == 999
+        assert captured["kwargs"]["temperature"] == 0.1
+        assert captured["kwargs"]["max_tokens"] == 999

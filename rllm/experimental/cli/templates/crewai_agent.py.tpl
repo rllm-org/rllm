@@ -22,7 +22,7 @@ class {{agent_class}}:
     def run(self, task: dict, config: AgentConfig) -> Episode:
         # CrewAI uses environment variables for LLM configuration
         os.environ["OPENAI_API_BASE"] = config.base_url
-        os.environ["OPENAI_API_KEY"] = "EMPTY"
+        os.environ["OPENAI_API_KEY"] = config.api_key
         os.environ["OPENAI_MODEL_NAME"] = config.model
 
         question = task.get("question", "")

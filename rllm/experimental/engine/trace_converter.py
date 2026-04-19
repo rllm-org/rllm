@@ -1,72 +1,80 @@
-"""Convert gateway TraceRecord to training-compatible Step, plus shared metrics."""
+"""Convert gateway TraceRecord to a training-compatible Step."""
+
+from __future__ import annotations
 
 import json
 from typing import Any
 
-from rllm_model_gateway.models import TraceRecord
+from rllm_model_gateway import TraceRecord
 
 from rllm.agents.agent import Step, Trajectory
 from rllm.experimental.rollout import ModelOutput
-from rllm.tools.tool_base import ToolCall
-
-
-def _parse_openai_tool_calls(raw_tool_calls: list[dict[str, Any]]) -> list[ToolCall]:
-    """Convert OpenAI-format tool_calls to rLLM ToolCall objects."""
-    result = []
-    for tc in raw_tool_calls:
-        func = tc.get("function", {})
-        name = func.get("name", "")
-        args_raw = func.get("arguments", "{}")
-        if isinstance(args_raw, str):
-            try:
-                arguments = json.loads(args_raw)
-            except (json.JSONDecodeError, ValueError):
-                arguments = {"raw": args_raw}
-        else:
-            arguments = args_raw
-        result.append(ToolCall(name=name, arguments=arguments))
-    return result
+from rllm.tools.tool_base import ToolCall as RLLMToolCall
 
 
 def trace_record_to_step(trace: TraceRecord) -> Step:
-    """Convert a gateway TraceRecord to a training Step.
+    """Convert a gateway ``TraceRecord`` to a training ``Step``.
 
-    TraceRecord has clean top-level fields from vLLM:
-    - prompt_token_ids
-    - completion_token_ids
-    - logprobs (per-token)
+    The trace's ``extras`` field carries token-level data (prompt_ids,
+    completion_ids, logprobs, etc.). When extras is None (caller used the
+    lightweight ``get_traces`` path) or an empty dict (no extras emitted by
+    the adapter), the Step is built without token data.
     """
-    content = trace.response_message.get("content", "") or ""
-    reasoning = trace.response_message.get("reasoning", "") or ""
+    extras = trace.extras or {}
 
-    # Extract tool_calls from response message (OpenAI format)
-    raw_tool_calls = trace.response_message.get("tool_calls")
-    tool_calls = _parse_openai_tool_calls(raw_tool_calls) if raw_tool_calls else None
+    prompt_ids = list(extras.get("prompt_ids") or [])
+    completion_ids = list(extras.get("completion_ids") or [])
+    logprobs = list(extras.get("logprobs") or [])
+    prompt_logprobs = extras.get("prompt_logprobs")
+    routing_matrices = extras.get("routing_matrices")
+
+    tool_calls: list[RLLMToolCall] | None = None
+    if trace.tool_calls:
+        tool_calls = [RLLMToolCall(name=tc.name, arguments=_safe_json_loads(tc.arguments), arguments_raw=tc.arguments) for tc in trace.tool_calls]
 
     model_output = ModelOutput(
-        content=content,
-        reasoning=reasoning,
+        text=trace.text,
+        content=trace.content or "",
+        reasoning=trace.reasoning or "",
         tool_calls=tool_calls,
-        prompt_ids=trace.prompt_token_ids,
-        completion_ids=trace.completion_token_ids,
-        logprobs=trace.logprobs or [],
-        prompt_length=len(trace.prompt_token_ids),
-        completion_length=len(trace.completion_token_ids),
+        prompt_ids=prompt_ids,
+        completion_ids=completion_ids,
+        logprobs=logprobs,
+        prompt_logprobs=list(prompt_logprobs) if prompt_logprobs else None,
+        routing_matrices=list(routing_matrices) if routing_matrices else None,
+        prompt_length=len(prompt_ids),
+        completion_length=len(completion_ids),
         finish_reason=trace.finish_reason,
+        weight_version=trace.metadata.get("weight_version") if trace.metadata else None,
     )
 
-    # Build chat_completions: input messages + assistant response
-    chat_completions = list(trace.messages)
-    chat_completions.append(trace.response_message)
+    # chat_completions = input messages (as dicts) + assistant response (as dict).
+    chat_completions: list[dict[str, Any]] = [m.model_dump(exclude_none=True) for m in (trace.messages or [])]
+    assistant_msg: dict[str, Any] = {"role": "assistant", "content": trace.content or ""}
+    if trace.reasoning:
+        assistant_msg["reasoning"] = trace.reasoning
+    if trace.tool_calls:
+        assistant_msg["tool_calls"] = [tc.model_dump(exclude_none=True) for tc in trace.tool_calls]
+    chat_completions.append(assistant_msg)
 
     return Step(
         id=trace.trace_id,
         chat_completions=chat_completions,
         model_output=model_output,
-        model_response=content,
-        thought=reasoning,
-        metadata=trace.metadata,
+        model_response=trace.content or "",
+        thought=trace.reasoning or "",
+        metadata={},
     )
+
+
+def _safe_json_loads(s: str) -> dict[str, Any]:
+    if not s:
+        return {}
+    try:
+        parsed = json.loads(s)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def compute_step_metrics(trajectories: list[Trajectory]) -> dict:

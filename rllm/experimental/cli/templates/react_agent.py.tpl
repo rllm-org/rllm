@@ -54,7 +54,7 @@ class {{agent_class}}:
     """Multi-turn ReAct agent with tool use."""
 
     def run(self, task: dict, config: AgentConfig) -> Episode:
-        client = OpenAI(base_url=config.base_url, api_key="EMPTY")
+        client = OpenAI(base_url=config.base_url, api_key=config.api_key)
         question = task.get("question", "")
 
         messages = [

@@ -6,7 +6,7 @@ from typing_extensions import override
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager, AsyncLLMServerManager
 
 from rllm.experimental.parser import get_chat_parser
-from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
+from rllm.experimental.rollout.rollout_engine import CHAT_TEMPLATE_KWARG_NAMES, ModelOutput, RolloutEngine
 from rllm.experimental.rollout.types import TokenInput, Tokenizer, TokenOutput, VerlTokenOutput
 from rllm.workflows import TerminationEvent, TerminationReason
 
@@ -29,35 +29,38 @@ class VerlEngine(RolloutEngine):
         self.tokenizer = tokenizer
         self.processor = processor
 
-        rllm_cfg = config.get("rllm", {})
-        parser_cfg = rllm_cfg.get("parser", {})
+        rollout_cfg = config.get("rollout", {}) or {}
+        ctk = dict(rollout_cfg.get("chat_template_kwargs", {}) or {})
+        parser_backend = ctk.pop("parser_backend", "rllm")
+        reasoning_parser_name = ctk.pop("reasoning_parser_name", None)
+        tool_parser_name = ctk.pop("tool_parser_name", None)
+        renderer_name = ctk.pop("renderer_name", None)
+        disable_thinking = ctk.pop("disable_thinking", False)
+        chat_template = ctk.pop("chat_template", None)
+        if chat_template:
+            from pathlib import Path
+
+            tokenizer.chat_template = Path(chat_template).read_text()
+        self.default_template_kwargs: dict = dict(tools=[], **ctk)
+
         self.chat_parser = get_chat_parser(
             tokenizer,
             processor=processor,
-            parser_backend=parser_cfg.get("parser_backend", "rllm"),
-            reasoning_parser_name=parser_cfg.get("reasoning_parser_name"),
-            tool_parser_name=parser_cfg.get("tool_parser_name"),
-            renderer_name=parser_cfg.get("renderer_name"),
-            disable_thinking=rllm_cfg.get("disable_thinking", False),
+            parser_backend=parser_backend,
+            reasoning_parser_name=reasoning_parser_name,
+            tool_parser_name=tool_parser_name,
+            renderer_name=renderer_name,
+            disable_thinking=disable_thinking,
         )
 
         self.max_prompt_length = config.data.max_prompt_length
         self.max_response_length = config.data.max_response_length
-        self.accumulate_reasoning = config.get("rllm", {}).get("accumulate_reasoning", False)
 
-        self.train_sampling_params = dict(
-            temperature=0.0 if config.actor_rollout_ref.rollout.do_sample is False else config.actor_rollout_ref.rollout.temperature,
-            top_k=config.actor_rollout_ref.rollout.top_k,
-            top_p=config.actor_rollout_ref.rollout.top_p,
-            logprobs=1,
-        )
-
-        self.val_sampling_params = dict(
-            temperature=0.0 if config.actor_rollout_ref.rollout.val_kwargs.do_sample is False else config.actor_rollout_ref.rollout.val_kwargs.temperature,
-            top_k=config.actor_rollout_ref.rollout.val_kwargs.top_k,
-            top_p=config.actor_rollout_ref.rollout.val_kwargs.top_p,
-            logprobs=1,
-        )
+        sp = rollout_cfg.get("sampling", {}) or {}
+        self.train_sampling_params = dict(sp.get("train", {}) or {})
+        self.val_sampling_params = dict(sp.get("val", {}) or {})
+        self.train_sampling_params.setdefault("logprobs", 1)
+        self.val_sampling_params.setdefault("logprobs", 1)
 
         print(f"train_sampling_params: {self.train_sampling_params}")
         print(f"val_sampling_params: {self.val_sampling_params}")
@@ -88,12 +91,11 @@ class VerlEngine(RolloutEngine):
 
     @override
     async def _get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
-        # these go to the parser
-        tools = kwargs.pop("tools", [])
-        accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
-        reasoning_effort = kwargs.pop("reasoning_effort", "medium")
+        template_kwargs = self.default_template_kwargs.copy()
+        template_kwargs.update(kwargs.pop("chat_template_kwargs", {}))
+        template_kwargs.update({k: kwargs.pop(k) for k in list(kwargs) if k in CHAT_TEMPLATE_KWARG_NAMES})
 
-        prompt = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, tools=tools, accumulate_reasoning=accumulate_reasoning, reasoning_effort=reasoning_effort)
+        prompt = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, **template_kwargs)
         request_prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)  # list[int]
 
         if any(msg.get("images", None) is not None and msg["role"] == "user" for msg in messages) and self.processor is not None:
@@ -108,12 +110,11 @@ class VerlEngine(RolloutEngine):
             prompt_ids = request_prompt_ids
 
         token_output: TokenOutput = await self.get_token_output_from_token_input(token_input=request_prompt_ids, **kwargs)
-        extra_kwargs = dict(prompt_ids=prompt_ids, multi_modal_inputs=multi_modal_inputs)
-        return self.assemble_model_output(token_input=request_prompt_ids, token_output=token_output, **extra_kwargs)
+        return self.assemble_model_output(token_input=prompt_ids, token_output=token_output, multi_modal_inputs=multi_modal_inputs)
 
     @override
     def assemble_model_output(self, token_input: TokenInput, token_output: TokenOutput, **kwargs) -> ModelOutput:
-        prompt_ids = kwargs.pop("prompt_ids", None)
+        prompt_ids = list(token_input) if token_input is not None else None
         multi_modal_inputs = kwargs.pop("multi_modal_inputs", None)
         prompt_length = len(prompt_ids) if prompt_ids is not None else 0
 
@@ -122,7 +123,7 @@ class VerlEngine(RolloutEngine):
         logprobs = token_output.log_probs
 
         # convert the stop reason from verl back to the standard finish reason TODO(listar2000): check backward-compatibility
-        reason_mapping = {"aborted": "abort", "completed": "stop"}
+        reason_mapping = {"aborted": "error", "abort": "error", "completed": "stop"}
         if token_output.stop_reason is not None:
             finish_reason = reason_mapping.get(token_output.stop_reason, token_output.stop_reason)
         else:

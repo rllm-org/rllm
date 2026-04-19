@@ -74,7 +74,7 @@ class TinkerParser:
                 tokens.extend(chunk.tokens)
         # Tinker produces tokens natively; callers typically re-encode the
         # returned string back to token IDs. That round-trip is wasteful.
-        # TODO: expose a way to return tokens directly to skip decode/encode.
+        # TODO(kylemontgomery1): expose a way to return tokens directly
         return self.tokenizer.decode(tokens, skip_special_tokens=False)
 
     def parse_completion(self, completion_ids: list[int], **kwargs) -> dict[str, Any]:

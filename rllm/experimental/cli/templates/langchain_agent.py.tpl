@@ -61,7 +61,7 @@ class {{agent_class}}:
         model = ChatOpenAI(
             model=config.model,
             base_url=config.base_url,
-            api_key="EMPTY",
+            api_key=config.api_key,
         )
         graph = self._build_graph(model)
         question = task.get("question", "")

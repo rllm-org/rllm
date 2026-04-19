@@ -1,18 +1,27 @@
-"""Integration tests for RemoteAgentFlowEngine + GatewayManager against live ACR.
+"""Integration tests for RemoteAgentFlowEngine + a passthrough gateway against live ACR.
 
-Tests the full flow: GatewayManager (auto-detected IP, dynamic port) ->
-RemoteAgentFlowEngine -> AgentCoreRuntime -> live ACR container -> gateway traces.
+Tests the full flow: gateway in passthrough mode (forwards to BASE_URL/vLLM)
+-> RemoteAgentFlowEngine -> AgentCoreRuntime -> live ACR container -> gateway
+traces.
 
 Skipped unless all env vars are set: AGENTCORE_AGENT_ARN, AGENTCORE_S3_BUCKET,
 AGENTCORE_BASE_URL, and AGENTCORE_MODEL_ID.
+
+The gateway here runs in passthrough mode (no adapter), pointing at the vLLM
+URL. We bypass ``GatewayManager`` since it's adapter-only — for an HTTP-only
+upstream we wire ``create_app`` directly.
 """
 
+from __future__ import annotations
+
+import threading
+import time
 import uuid
 
+import httpx
 import pytest
-from omegaconf import OmegaConf
+import uvicorn
 
-from rllm.experimental.engine.gateway_manager import GatewayManager
 from rllm.experimental.engine.remote_agent_flow_engine import RemoteAgentFlowEngine
 from rllm.experimental.engine.remote_runtime.agentcore_runtime import AgentCoreRuntime
 from rllm.experimental.engine.remote_runtime.protocol import RemoteRuntimeConfig
@@ -21,31 +30,106 @@ from rllm.workflows.workflow import TerminationReason
 from .conftest import AGENT_ARN, BASE_URL, MODEL_ID, S3_BUCKET, requires_agentcore
 
 # ---------------------------------------------------------------------------
+# Passthrough gateway shim
+# ---------------------------------------------------------------------------
+
+
+def _free_port() -> int:
+    import socket
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+class _PassthroughGateway:
+    """Minimal stand-in for GatewayManager that runs the gateway in passthrough
+    mode. RemoteAgentFlowEngine only needs ``acreate_session``, ``get_session_url``,
+    ``aget_traces``, and ``agent_api_key`` from the gateway interface.
+    """
+
+    def __init__(self, upstream_url: str):
+        from rllm_model_gateway import (
+            AsyncGatewayClient,
+            GatewayClient,
+            GatewayConfig,
+            create_app,
+            deserialize_extras,
+        )
+        from rllm_model_gateway.store.memory_store import MemoryTraceStore
+
+        self._deserialize_extras = deserialize_extras
+
+        port = _free_port()
+        self.host = "127.0.0.1"
+        self.port = port
+        self._url = f"http://{self.host}:{self.port}"
+
+        config = GatewayConfig(
+            host=self.host,
+            port=self.port,
+            upstream_url=upstream_url.rstrip("/"),
+            admin_api_key="integ-admin",
+            agent_api_key="integ-agent",
+        )
+        self._config = config
+        self._app = create_app(config, store=MemoryTraceStore())
+
+        self._server = uvicorn.Server(uvicorn.Config(self._app, host=self.host, port=self.port, log_level="error"))
+        self._thread = threading.Thread(target=self._server.run, daemon=True)
+        self._thread.start()
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            try:
+                if httpx.get(f"{self._url}/health", timeout=0.5).status_code == 200:
+                    break
+            except Exception:
+                time.sleep(0.05)
+        else:
+            raise RuntimeError("passthrough gateway did not start")
+
+        self._client = GatewayClient(self._url, api_key=config.admin_api_key)
+        self._async_client = AsyncGatewayClient(self._url, api_key=config.admin_api_key)
+
+    @property
+    def agent_api_key(self) -> str:
+        return self._config.agent_api_key
+
+    def get_session_url(self, session_id: str) -> str:
+        return f"{self._url}/sessions/{session_id}/v1"
+
+    async def acreate_session(self, session_id: str, is_validation: bool = False) -> str:
+        return await self._async_client.create_session(session_id=session_id)
+
+    async def aget_traces(self, session_id: str, extras: bool = False):
+        await self._async_client.flush()
+        return await self._async_client.get_session_traces(session_id, extras=extras)
+
+    def stop(self):
+        self._server.should_exit = True
+        self._thread.join(timeout=5)
+        self._client.close()
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
 def gateway():
-    """Module-scoped gateway with auto-detected host."""
-    config = OmegaConf.create({"rllm": {"gateway": {"host": None, "port": 9090, "db_path": None}}})
-    gw = GatewayManager(config, mode="thread")
-    gw._start_thread()
-
-    # Register the vLLM worker (strip /v1 suffix — gateway manages routing)
+    """Module-scoped passthrough gateway pointing at the live vLLM upstream."""
     assert BASE_URL is not None, "AGENTCORE_BASE_URL must be set"
-    worker_url = BASE_URL.rstrip("/")
-    if worker_url.endswith("/v1"):
-        worker_url = worker_url[:-3]
-    gw.client.add_worker(url=worker_url)
-
+    gw = _PassthroughGateway(upstream_url=BASE_URL)
     yield gw
     gw.stop()
 
 
 @pytest.fixture(scope="module")
 def engine(gateway):
-    """Module-scoped RemoteAgentFlowEngine backed by live ACR + gateway."""
+    """Module-scoped RemoteAgentFlowEngine backed by live ACR + passthrough gateway."""
     config = RemoteRuntimeConfig(
         enabled=True,
         backend="agentcore",
@@ -74,27 +158,21 @@ GSM8K_PROBLEM = "Toula went to the bakery and bought various types of pastries. 
 class TestSingleTaskE2E:
     @pytest.mark.asyncio
     async def test_single_task_e2e(self, engine):
-        """Full flow: engine creates session -> submits to ACR -> agent calls
-        gateway for inference -> reward + traces -> Episode with steps."""
         tasks = [{"prompt": GSM8K_PROBLEM, "answer": "694"}]
-
         episodes = await engine.execute_tasks(tasks, task_ids=["gsm-694"])
 
         assert len(episodes) == 1
         ep = episodes[0]
         assert ep is not None
         assert ep.id == "gsm-694:0"
-        # Should have at least one trajectory with steps from gateway traces
         assert len(ep.trajectories) >= 1
         traj = ep.trajectories[0]
         assert len(traj.steps) > 0
-        # Each step should have prompt and response token IDs
+        # In passthrough mode we have no token IDs (vLLM doesn't return them
+        # without explicit opt-in), so we only check the structured fields.
         for step in traj.steps:
-            assert len(step.prompt_ids) > 0
-            assert len(step.response_ids) > 0
-        # Reward should be set
+            assert step.model_response is not None
         assert traj.reward is not None
-        # Metrics should be populated
         assert ep.metrics["steps_used"] > 0
         assert ep.metrics["steps_collected"] > 0
 
@@ -103,8 +181,6 @@ class TestSingleTaskE2E:
 class TestBatchTasksSessionCorrelation:
     @pytest.mark.asyncio
     async def test_batch_tasks_session_correlation(self, engine):
-        """Submit 3 tasks -> verify 3 Episodes, each with correct session
-        correlation and no cross-contamination of traces."""
         tasks = [
             {"prompt": "What is 2 + 2?", "answer": "4"},
             {"prompt": "What is 10 * 5?", "answer": "50"},
@@ -115,10 +191,8 @@ class TestBatchTasksSessionCorrelation:
         episodes = await engine.execute_tasks(tasks, task_ids=task_ids)
 
         assert len(episodes) == 3
-        # Each episode should have a unique ID matching its task
         ep_ids = {ep.id for ep in episodes}
         assert ep_ids == {"arith-4:0", "arith-50:0", "arith-25:0"}
-        # Each episode should be non-None and have at least one trajectory
         for ep in episodes:
             assert ep is not None
             assert len(ep.trajectories) >= 1
@@ -128,10 +202,8 @@ class TestBatchTasksSessionCorrelation:
 class TestTimeoutProducesErrorEpisode:
     @pytest.mark.asyncio
     async def test_timeout_produces_error_episode(self, engine):
-        """Tiny timeout -> Episode with is_correct=False, termination_reason=ERROR."""
         tasks = [{"prompt": "What is 1 + 1?", "answer": "2"}]
 
-        # Override timeout to be impossibly small
         original_timeout = engine.session_timeout
         engine.session_timeout = 0.01
         try:
@@ -149,14 +221,11 @@ class TestTimeoutProducesErrorEpisode:
 class TestBatchRateLimiting:
     @pytest.mark.asyncio
     async def test_batch_rate_limiting(self, engine):
-        """Submit 8 tasks with tps_limit=5 -> all 8 results returned
-        successfully (validates gather + rate limiter don't deadlock)."""
         tasks = [{"prompt": f"What is {i} + {i}?", "answer": str(2 * i)} for i in range(1, 9)]
         task_ids = [f"rate-{i}" for i in range(1, 9)]
 
         episodes = await engine.execute_tasks(tasks, task_ids=task_ids)
 
         assert len(episodes) == 8
-        # All episodes should be non-None (no lost tasks)
         for ep in episodes:
             assert ep is not None

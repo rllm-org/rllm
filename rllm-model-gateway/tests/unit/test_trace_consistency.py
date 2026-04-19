@@ -109,7 +109,7 @@ def test_passthrough_and_adapter_traces_have_same_shape(fake_upstream):
     assert len(traces_pt) == 1 and len(traces_ad) == 1
     t1, t2 = traces_pt[0], traces_ad[0]
 
-    for key in ("messages", "content", "finish_reason", "endpoint", "model", "tools", "sampling_params", "tool_calls", "reasoning"):
+    for key in ("messages", "content", "finish_reason", "endpoint", "model", "tools", "kwargs", "tool_calls", "reasoning"):
         assert key in t1, f"passthrough trace missing {key}"
         assert key in t2, f"adapter trace missing {key}"
 

@@ -82,6 +82,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
         # Store full config reference
         self.full_config = config
+        self.rllm_config = config.rllm
 
         # Tinker service client
         self.service_client = tinker.ServiceClient(base_url=config.tinker_base_url)
@@ -129,42 +130,42 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # we need to get it from `AutoTokenizer` since the `policy_trainer` has not been initialized yet
         self.tokenizer = AutoTokenizer.from_pretrained(self.full_config.model.name)
 
-        # Load image processor for vision-language models
-        image_processor = None
-        model_name_lower = self.full_config.model.name.lower()
-        if "vl" in model_name_lower or "vision" in model_name_lower:
-            try:
-                from transformers import AutoProcessor
+        # Text-only models make AutoProcessor fall back to the tokenizer rather
+        # than raising; gate on .image_processor to catch that case.
+        processor = None
+        try:
+            from transformers import AutoProcessor
 
-                processor = AutoProcessor.from_pretrained(self.full_config.model.name, trust_remote_code=True)
-                if hasattr(processor, "image_processor") and processor.image_processor is not None:
-                    image_processor = processor.image_processor
-                    logger.info(f"Loaded image_processor for VLM model: {self.full_config.model.name}")
-            except Exception as e:
-                logger.warning(f"Failed to load image_processor for VLM model: {e}")
+            p = AutoProcessor.from_pretrained(self.full_config.model.name, trust_remote_code=True)
+            if getattr(p, "image_processor", None) is not None:
+                processor = p
+        except Exception:
+            pass
 
         self.rollout_engine = TinkerEngine(
             base_url=self.full_config.tinker_base_url,
             model_name=self.full_config.model.name,
             service_client=self.service_client,
             tokenizer=self.tokenizer,
+            processor=processor,
             max_prompt_length=self.full_config.data.max_prompt_length,
             max_response_length=self.full_config.data.max_response_length,
             max_model_length=self.full_config.training.max_length,
-            sampling_params=self.full_config.sampling,
-            **self.full_config.rollout_engine,
-            image_processor=image_processor,
+            sampling_params=self.rllm_config.rollout.sampling,
+            **dict(self.rllm_config.rollout.chat_template_kwargs or {}),
         )
         return self.rollout_engine
 
     def validate_config(self) -> None:
         """Validate Tinker-specific configuration settings."""
-        # Check for recommended sampling parameters
-        sampling_params = self.full_config.sampling
-        if sampling_params.get("temperature", 1.0) != 1.0 or sampling_params.get("top_p", 1.0) != 1.0:
+        # Train-time non-unit sampling can break logprob reliability for RL.
+        # Val is fine — users commonly sample greedily or with custom temps.
+        train_sp = (self.rllm_config.rollout.get("sampling", {}) or {}).get("train", {}) or {}
+        if train_sp.get("temperature", 1.0) != 1.0 or train_sp.get("top_p", 1.0) != 1.0:
             logger.warning(
-                "Temperature and top_p are set away from 1.0, this is not recommended by Tinker and can cause mysterious issues with logprobs."
-                "See https://github.com/thinking-machines-lab/tinker-cookbook/pull/86 for discussion."
+                "Train temperature/top_p set away from 1.0 is not recommended by Tinker and can cause "
+                "mysterious issues with logprobs. See "
+                "https://github.com/thinking-machines-lab/tinker-cookbook/pull/86 for discussion."
             )
 
         # Validate num_minibatches (currently only support 1)
@@ -241,9 +242,9 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
 
         # Build interleaved batch
         if is_validation:
-            group_size = self.full_config.rllm.rollout.n_val
+            group_size = self.rllm_config.rollout.n_val
         else:
-            group_size = self.full_config.rllm.rollout.n
+            group_size = self.rllm_config.rollout.n
         interleaved_batch = _build_interleave_batch(batch, group_size)
 
         # Extract task IDs
@@ -419,7 +420,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         assert self.policy_trainer is not None, "policy_trainer is not initialized"
 
         # Save final checkpoint if we didn't just save it in the last batch
-        if trainer_state.global_step % self.full_config.rllm.trainer.save_freq != 0:
+        if trainer_state.global_step % self.rllm_config.trainer.save_freq != 0:
             logger.info(f"Saving final checkpoint at step {trainer_state.global_step}")
             await self.policy_trainer.save_checkpoint_and_get_sampling_client(trainer_state.global_step, kind="both", do_save=True)
 
@@ -429,7 +430,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         self._policy_updated_this_step = True
 
         global_step = trainer_state.global_step
-        save_freq = self.full_config.rllm.trainer.save_freq
+        save_freq = self.rllm_config.trainer.save_freq
         do_save = save_freq > 0 and global_step % save_freq == 0
         self.sampling_client = await self.policy_trainer.save_checkpoint_and_get_sampling_client(global_step, kind="both", do_save=do_save)
 

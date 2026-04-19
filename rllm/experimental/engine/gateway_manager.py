@@ -1,25 +1,29 @@
-"""GatewayManager: manages the rllm-model-gateway lifecycle for training.
+"""GatewayManager: starts the rllm-model-gateway in a background thread,
+exposes a sync + async client to the engine, and surfaces the agent API key
+so engines can hand it down to agent flows.
 
-Supports two execution modes:
-- 'process': subprocess via ``rllm-model-gateway`` CLI (for verl / distributed)
-- 'thread': background thread via ``create_app`` + uvicorn (for tinker / single-machine)
-
-For Tinker backends, an in-process handler is injected into the gateway
-(via ``local_handler``), avoiding the need for a separate HTTP backend server.
+The gateway is always run in adapter mode: a generic engine adapter built
+from the rollout engine handles every request. There is no separate HTTP
+backend, no worker registration.
 """
 
 from __future__ import annotations
 
 import logging
 import socket
-import subprocess
-import sys
 import threading
 import time
 from typing import TYPE_CHECKING, Any
 
-from rllm_model_gateway.client import AsyncGatewayClient, GatewayClient
-from rllm_model_gateway.models import TraceRecord
+from rllm_model_gateway import (
+    AsyncGatewayClient,
+    GatewayClient,
+    GatewayConfig,
+    TraceRecord,
+    create_app,
+)
+
+from rllm.experimental.engine.engine_adapter import create_engine_adapter
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
@@ -69,14 +73,9 @@ def _get_routable_ip() -> str:
 
 
 class GatewayManager:
-    """Manages model gateway lifecycle for training.
+    """Manages model gateway lifecycle for training."""
 
-    Supports two execution modes:
-    - 'process': subprocess.Popen (for verl / distributed)
-    - 'thread': background thread via create_app + uvicorn (for tinker / single-machine)
-    """
-
-    def __init__(self, config: DictConfig, mode: str = "thread") -> None:
+    def __init__(self, config: DictConfig) -> None:
         gw_cfg = config.rllm.get("gateway", {})
         configured_host = gw_cfg.get("host", None)
         self.host: str = configured_host if configured_host else _get_routable_ip()
@@ -84,14 +83,12 @@ class GatewayManager:
         self.db_path: str | None = gw_cfg.get("db_path", None)
         self.public_url: str | None = gw_cfg.get("public_url", None)
         self.sampling_params_priority: str = gw_cfg.get("sampling_params_priority", "client")
-        # The gateway always pins ``body.model`` to whatever the trainer is serving
+        # Engine pins body.model so agents can pass anything they like.
         self.model: str | None = config.get("model", {}).get("name", None)
-        self.mode = mode
 
-        self._process: subprocess.Popen | None = None
         self._thread: threading.Thread | None = None
-        self._server: Any = None  # uvicorn.Server when using thread mode
-        self._local_handler: Any = None  # in-process handler for tinker
+        self._server: Any = None  # uvicorn.Server
+        self._gateway_config: GatewayConfig | None = None
         self._client: GatewayClient | None = None
         self._async_client: AsyncGatewayClient | None = None
 
@@ -104,63 +101,81 @@ class GatewayManager:
         return f"http://{self.host}:{self.port}"
 
     @property
+    def admin_api_key(self) -> str:
+        if self._gateway_config is None or self._gateway_config.admin_api_key is None:
+            raise RuntimeError("GatewayManager not started")
+        return self._gateway_config.admin_api_key
+
+    @property
+    def agent_api_key(self) -> str:
+        if self._gateway_config is None or self._gateway_config.agent_api_key is None:
+            raise RuntimeError("GatewayManager not started")
+        return self._gateway_config.agent_api_key
+
+    @property
     def client(self) -> GatewayClient:
-        """Sync client for lifecycle operations (start, stop, health polling)."""
         if self._client is None:
-            self._client = GatewayClient(self.gateway_url)
+            self._client = GatewayClient(self.gateway_url, api_key=self.admin_api_key)
         return self._client
 
     @property
     def async_client(self) -> AsyncGatewayClient:
-        """Async client for runtime operations (sessions, traces)."""
         if self._async_client is None:
-            self._async_client = AsyncGatewayClient(self.gateway_url)
+            self._async_client = AsyncGatewayClient(self.gateway_url, api_key=self.admin_api_key)
         return self._async_client
 
     # -- Lifecycle -----------------------------------------------------------
 
     def start(self, rollout_engine: RolloutEngine) -> None:
-        """Start the gateway and register inference workers.
+        """Build the engine adapter and start the gateway in a background thread."""
+        adapter = create_engine_adapter(rollout_engine)
 
-        For VerlEngine: registers the existing vLLM server addresses.
-        For TinkerEngine: creates an in-process handler (no sidecar needed).
-        """
-        engine_cls = type(rollout_engine).__name__
+        self._gateway_config = GatewayConfig(
+            host=self.host,
+            port=self.port,
+            db_path=self.db_path,
+            model=self.model,
+            sampling_params_priority=self.sampling_params_priority,
+        )
+        # admin_api_key / agent_api_key auto-populate inside create_app.
 
-        if engine_cls == "TinkerEngine":
-            # In-process handler — no HTTP backend, no worker registration
-            from rllm.experimental.engine.tinker_adapter import create_tinker_handler
+        import uvicorn
 
-            self._local_handler = create_tinker_handler(rollout_engine)
-            self._start_thread(local_handler=self._local_handler)
+        app = create_app(self._gateway_config, adapter=adapter)
+
+        uvi_config = uvicorn.Config(
+            app,
+            host=self.host,
+            port=self.port,
+            log_level="warning",
+        )
+        server = uvicorn.Server(uvi_config)
+        self._server = server
+
+        self._thread = threading.Thread(target=server.run, daemon=True)
+        self._thread.start()
+
+        deadline = time.monotonic() + _HEALTH_POLL_TIMEOUT
+        while time.monotonic() < deadline:
+            if server.started:
+                logger.info(
+                    "Gateway thread healthy at %s (admin_api_key=%s, agent_api_key=%s)",
+                    self.gateway_url,
+                    self.admin_api_key,
+                    self.agent_api_key,
+                )
+                break
+            time.sleep(_HEALTH_POLL_INTERVAL)
         else:
-            if self.mode == "process":
-                self._start_process()
-            else:
-                self._start_thread()
+            raise TimeoutError(f"Gateway thread did not start within {_HEALTH_POLL_TIMEOUT}s")
 
-            worker_urls = self._ensure_workers(rollout_engine)
-            for url in worker_urls:
-                worker_id = self.client.add_worker(url=url)
-                logger.info("Registered worker %s -> %s", worker_id, url)
-
-        # Extract per-mode sampling params from the rollout engine
-        self._train_sampling_params = getattr(rollout_engine, "train_sampling_params", {})
-        self._val_sampling_params = getattr(rollout_engine, "val_sampling_params", {})
+        self._train_sampling_params = getattr(rollout_engine, "train_sampling_params", {}) or {}
+        self._val_sampling_params = getattr(rollout_engine, "val_sampling_params", {}) or {}
 
     def stop(self) -> None:
-        """Terminate the gateway (process or thread)."""
         if self._client is not None:
             self._client.close()
             self._client = None
-
-        if self._process is not None:
-            self._process.terminate()
-            try:
-                self._process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-            self._process = None
 
         if self._server is not None:
             self._server.should_exit = True
@@ -168,8 +183,6 @@ class GatewayManager:
                 self._thread.join(timeout=5)
             self._thread = None
             self._server = None
-
-        self._local_handler = None
 
     # -- Session / trace API -------------------------------------------------
 
@@ -183,9 +196,9 @@ class GatewayManager:
             return f"{base}/sessions/{session_id}/v1"
         return self.client.get_session_url(session_id)
 
-    def get_traces(self, session_id: str) -> list[TraceRecord]:
+    def get_traces(self, session_id: str, extras: bool = False) -> list[TraceRecord]:
         self.client.flush()
-        return self.client.get_session_traces(session_id)
+        return self.client.get_session_traces(session_id, extras=extras)
 
     # -- Async session / trace API -------------------------------------------
 
@@ -193,99 +206,6 @@ class GatewayManager:
         sp = self._val_sampling_params if is_validation else self._train_sampling_params
         return await self.async_client.create_session(session_id=session_id, sampling_params=sp or None)
 
-    async def aget_traces(self, session_id: str) -> list[TraceRecord]:
+    async def aget_traces(self, session_id: str, extras: bool = False) -> list[TraceRecord]:
         await self.async_client.flush()
-        return await self.async_client.get_session_traces(session_id)
-
-    # -- Worker setup --------------------------------------------------------
-
-    def _ensure_workers(self, rollout_engine: RolloutEngine) -> list[str]:
-        """Get or create worker URLs for the given engine type."""
-        engine_cls = type(rollout_engine).__name__
-
-        if engine_cls == "VerlEngine":
-            addresses = rollout_engine.rollout_manager.server_addresses
-            return [f"http://{addr}" if not addr.startswith("http") else addr for addr in addresses]
-
-        logger.warning("Unknown engine type %s — no workers registered", engine_cls)
-        return []
-
-    # -- Internal ------------------------------------------------------------
-
-    def _start_process(self) -> None:
-        """Launch gateway as a subprocess and poll until healthy."""
-        cmd = [
-            sys.executable,
-            "-m",
-            "rllm_model_gateway",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            str(self.port),
-        ]
-        if self.db_path:
-            cmd.extend(["--db-path", self.db_path])
-        if self.sampling_params_priority != "client":
-            cmd.extend(["--sampling-params-priority", self.sampling_params_priority])
-        if self.model:
-            cmd.extend(["--model", self.model])
-
-        logger.info("Starting gateway subprocess: %s", " ".join(cmd))
-        # Inherit parent's stdout/stderr so gateway logs are visible for debugging.
-        # subprocess.PIPE causes problems as without an active reader, the OS pipe
-        # buffer (~64KB on Linux) fills up under high-throughput logging, causing the
-        # gateway process to block on write and eventually hang.
-        self._process = subprocess.Popen(cmd)
-
-        # Poll health endpoint
-        deadline = time.monotonic() + _HEALTH_POLL_TIMEOUT
-        while time.monotonic() < deadline:
-            try:
-                self.client.health()
-                logger.info("Gateway process healthy at %s", self.gateway_url)
-                return
-            except Exception as e:
-                if self._process.poll() is not None:
-                    raise RuntimeError(f"Gateway process exited unexpectedly (rc={self._process.returncode})") from e
-                time.sleep(_HEALTH_POLL_INTERVAL)
-
-        self._process.terminate()
-        raise TimeoutError(f"Gateway did not become healthy within {_HEALTH_POLL_TIMEOUT}s")
-
-    def _start_thread(self, local_handler: Any = None) -> None:
-        """Start gateway in a background thread using create_app + uvicorn."""
-        import uvicorn
-        from rllm_model_gateway.models import GatewayConfig
-        from rllm_model_gateway.server import create_app
-
-        gw_config = GatewayConfig(
-            host="0.0.0.0",
-            port=self.port,
-            db_path=self.db_path,
-            store_worker="sqlite" if self.db_path else "memory",
-            sampling_params_priority=self.sampling_params_priority,
-            model=self.model,
-        )
-        app = create_app(config=gw_config, local_handler=local_handler)
-
-        uvi_config = uvicorn.Config(
-            app,
-            host="0.0.0.0",
-            port=self.port,
-            log_level="warning",
-        )
-        server = uvicorn.Server(uvi_config)
-        self._server = server
-
-        self._thread = threading.Thread(target=server.run, daemon=True)
-        self._thread.start()
-
-        # Wait for server to start
-        deadline = time.monotonic() + _HEALTH_POLL_TIMEOUT
-        while time.monotonic() < deadline:
-            if server.started:
-                logger.info("Gateway thread healthy at %s", self.gateway_url)
-                return
-            time.sleep(_HEALTH_POLL_INTERVAL)
-
-        raise TimeoutError(f"Gateway thread did not start within {_HEALTH_POLL_TIMEOUT}s")
+        return await self.async_client.get_session_traces(session_id, extras=extras)

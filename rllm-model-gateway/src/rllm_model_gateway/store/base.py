@@ -50,8 +50,9 @@ class TraceStore(Protocol):
         """
         ...
 
-    async def get_trace(self, trace_id: str) -> TraceRecord | None:
-        """Return a trace's metadata (no extras)."""
+    async def get_trace(self, trace_id: str, extras: bool = False) -> TraceRecord | None:
+        """Return a trace. ``extras=False`` leaves the field None; ``extras=True``
+        populates it from the trace_extras table (or ``{}`` if empty)."""
         ...
 
     async def get_traces(
@@ -59,16 +60,13 @@ class TraceStore(Protocol):
         session_id: str,
         since: float | None = None,
         limit: int | None = None,
+        extras: bool = False,
     ) -> list[TraceRecord]:
         """Return all traces for a session, ordered by timestamp asc.
 
-        Metadata only — extras are not loaded. Use ``get_trace_extras`` to
-        fetch the per-trace blob.
+        ``extras=False`` leaves the field None on each row; ``extras=True``
+        populates it from the trace_extras table.
         """
-        ...
-
-    async def get_trace_extras(self, trace_id: str) -> tuple[str, bytes] | None:
-        """Return ``(format, bytes)`` for a trace's extras, or None."""
         ...
 
     # -- Lifecycle -------------------------------------------------------

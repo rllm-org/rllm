@@ -2,9 +2,9 @@
 
 system top-level becomes a system Message. content blocks (text / thinking /
 tool_use / tool_result) collapse to plain str + reasoning + tool_calls + tool
-messages. Tool schema renames input_schema↔parameters, tool_use input dict ↔
-arguments dict (with raw JSON in arguments_raw). stop_reason maps to OpenAI's
-finish_reason vocabulary.
+messages. Tool schema renames input_schema↔parameters, tool_use input dict
+becomes a JSON-encoded arguments string (chat-completions shape). stop_reason
+maps to OpenAI's finish_reason vocabulary.
 """
 
 from __future__ import annotations
@@ -27,13 +27,12 @@ NAME = "anthropic_messages"
 PATH = "/v1/messages"  # Anthropic SDK posts here when base_url has no /v1 suffix
 UPSTREAM_PATH = "/v1/messages"  # Anthropic upstream convention: base_url has no /v1, SDK adds it
 
-_NON_SAMPLING_KEYS = frozenset(
+_RESERVED_KEYS = frozenset(
     {
         "model",
         "messages",
         "system",
         "tools",
-        "tool_choice",
         "stream",
         "metadata",
         "anthropic_beta",
@@ -65,11 +64,11 @@ def to_normalized_request(body: dict[str, Any]) -> NormalizedRequest:
 
     tools = _anthropic_tools_to_normalized(body.get("tools"))
 
-    sampling = {k: v for k, v in body.items() if k not in _NON_SAMPLING_KEYS}
+    kwargs = {k: v for k, v in body.items() if k not in _RESERVED_KEYS}
     return NormalizedRequest(
         messages=messages or None,
         tools=tools,
-        sampling_params=sampling,
+        kwargs=kwargs,
     )
 
 
@@ -105,8 +104,7 @@ def _anthropic_message_to_normalized(m: dict[str, Any]) -> list[Message]:
                 ToolCall(
                     id=block.get("id", ""),
                     name=block.get("name", ""),
-                    arguments=input_dict,
-                    arguments_raw=json.dumps(input_dict, ensure_ascii=False),
+                    arguments=json.dumps(input_dict, ensure_ascii=False),
                 )
             )
         elif btype == "tool_result":
@@ -177,8 +175,7 @@ def parse_upstream_response(body: dict[str, Any]) -> NormalizedResponse:
                 ToolCall(
                     id=block.get("id", ""),
                     name=block.get("name", ""),
-                    arguments=input_dict,
-                    arguments_raw=json.dumps(input_dict, ensure_ascii=False),
+                    arguments=json.dumps(input_dict, ensure_ascii=False),
                 )
             )
 
@@ -250,16 +247,11 @@ def parse_upstream_stream(chunks: list[dict[str, Any]]) -> NormalizedResponse:
         elif b["type"] == "thinking":
             thinking_parts.append(b["thinking"])
         elif b["type"] == "tool_use":
-            try:
-                arguments = json.loads(b["input_partial"]) if b["input_partial"] else {}
-            except (json.JSONDecodeError, TypeError):
-                arguments = {}
             tool_calls.append(
                 ToolCall(
                     id=b["id"] or "",
                     name=b["name"] or "",
-                    arguments=arguments,
-                    arguments_raw=b["input_partial"] or None,
+                    arguments=b["input_partial"] or "",
                 )
             )
 
@@ -280,6 +272,25 @@ def _anthropic_stop_reason_to_normalized(sr: str | None) -> str:
         "stop_sequence": "stop",
         None: "stop",
     }.get(sr, sr or "stop")
+
+
+def _parse_args(args: str) -> dict[str, Any]:
+    if not args:
+        return {}
+    try:
+        parsed = json.loads(args)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _effective_finish(resp: NormalizedResponse) -> str:
+    """If tool_calls are present, the wire finish must be 'tool_use' regardless
+    of what the adapter said (the model may have emitted a stop token after
+    the call)."""
+    if resp.tool_calls and resp.finish_reason == "stop":
+        return "tool_calls"
+    return resp.finish_reason
 
 
 def _normalized_finish_to_anthropic(fr: str) -> str:
@@ -309,7 +320,7 @@ def from_normalized_response_nonstream(resp: NormalizedResponse, model: str) -> 
                 "type": "tool_use",
                 "id": tc.id or f"toolu_{uuid.uuid4().hex[:24]}",
                 "name": tc.name,
-                "input": tc.arguments,
+                "input": _parse_args(tc.arguments),
             }
         )
 
@@ -319,7 +330,7 @@ def from_normalized_response_nonstream(resp: NormalizedResponse, model: str) -> 
         "role": "assistant",
         "model": model,
         "content": content_blocks,
-        "stop_reason": _normalized_finish_to_anthropic(resp.finish_reason),
+        "stop_reason": _normalized_finish_to_anthropic(_effective_finish(resp)),
         "stop_sequence": None,
         "usage": {
             "input_tokens": resp.usage.prompt_tokens,
@@ -385,10 +396,9 @@ async def from_normalized_response_stream(resp: NormalizedResponse, model: str) 
                 },
             },
         )
-        partial = tc.arguments_raw if tc.arguments_raw is not None else json.dumps(tc.arguments, ensure_ascii=False)
         yield event(
             "content_block_delta",
-            {"index": idx, "delta": {"type": "input_json_delta", "partial_json": partial}},
+            {"index": idx, "delta": {"type": "input_json_delta", "partial_json": tc.arguments}},
         )
         yield event("content_block_stop", {"index": idx})
         idx += 1
@@ -397,7 +407,7 @@ async def from_normalized_response_stream(resp: NormalizedResponse, model: str) 
     yield event(
         "message_delta",
         {
-            "delta": {"stop_reason": _normalized_finish_to_anthropic(resp.finish_reason), "stop_sequence": None},
+            "delta": {"stop_reason": _normalized_finish_to_anthropic(_effective_finish(resp)), "stop_sequence": None},
             "usage": {"output_tokens": resp.usage.completion_tokens},
         },
     )

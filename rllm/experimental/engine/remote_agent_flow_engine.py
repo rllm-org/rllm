@@ -116,6 +116,7 @@ class RemoteAgentFlowEngine:
                 session_id=session_id,
                 task_id=task_id,
                 inference_url=session_url,
+                api_key=self.gateway.agent_api_key,
             )
             results = await self.runtime.execute_tasks([submission], timeout=self.session_timeout)
             result = results[0]
@@ -124,7 +125,7 @@ class RemoteAgentFlowEngine:
                 logger.warning("[%s] Remote task failed (assigning reward=0): %s", uid, result.error)
                 result.reward = 0.0
 
-            traces = await self.gateway.aget_traces(session_id)
+            traces = await self.gateway.aget_traces(session_id, extras=True)
             episode = _build_episode(traces, result, uid, task)
             if result.metadata:
                 episode.metadata.update(result.metadata)

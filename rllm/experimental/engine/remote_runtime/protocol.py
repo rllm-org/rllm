@@ -29,6 +29,7 @@ class TaskSubmission:
     session_id: str
     task_id: str  # GRPO grouping key (maps to ART input_id)
     inference_url: str  # Per-session gateway URL
+    api_key: str = ""  # Agent API key for authenticating to the gateway
 
 
 @dataclass

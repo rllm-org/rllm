@@ -183,8 +183,7 @@ class UnifiedTrainer:
             from rllm.experimental.engine.agent_flow_engine import AgentFlowEngine
             from rllm.experimental.engine.gateway_manager import GatewayManager
 
-            gateway_mode = "process" if kwargs.get("backend_name") == "verl" else "thread"
-            self._gateway = GatewayManager(self.config, mode=gateway_mode)
+            self._gateway = GatewayManager(self.config)
 
             self.agent_workflow_engine = AgentFlowEngine(
                 agent_flow=agent_flow,
@@ -206,8 +205,7 @@ class UnifiedTrainer:
                 create_remote_runtime,
             )
 
-            gateway_mode = "process" if kwargs.get("backend_name") == "verl" else "thread"
-            self._gateway = GatewayManager(self.config, mode=gateway_mode)
+            self._gateway = GatewayManager(self.config)
 
             remote_runtime_config = RemoteRuntimeConfig(
                 enabled=True,

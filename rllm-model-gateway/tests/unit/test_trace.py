@@ -19,12 +19,12 @@ def test_build_trace_assembles_all_fields():
     req = NormalizedRequest(
         messages=[Message(role="user", content="hi")],
         tools=[ToolSpec(name="t", description="d", parameters={"k": 1})],
-        sampling_params={"temperature": 0.7},
+        kwargs={"temperature": 0.7},
     )
     resp = NormalizedResponse(
         content="answer",
         reasoning="thought",
-        tool_calls=[ToolCall(id="c", name="t", arguments={"x": 1}, arguments_raw='{"x":1}')],
+        tool_calls=[ToolCall(id="c", name="t", arguments='{"x":1}')],
         finish_reason="tool_calls",
         usage=Usage(prompt_tokens=10, completion_tokens=5),
         extras={"completion_ids": [1, 2, 3]},
@@ -44,7 +44,7 @@ def test_build_trace_assembles_all_fields():
     assert t.model == "m"
     assert t.messages[0].content == "hi"
     assert t.tools[0].name == "t"
-    assert t.sampling_params == {"temperature": 0.7}
+    assert t.kwargs == {"temperature": 0.7}
     assert t.content == "answer"
     assert t.reasoning == "thought"
     assert len(t.tool_calls) == 1

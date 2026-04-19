@@ -7,7 +7,7 @@ from omegaconf import OmegaConf
 
 from rllm.agents.agent import Step, Trajectory
 from rllm.experimental.engine.gateway_manager import GatewayManager, _get_routable_ip
-from rllm.experimental.engine.remote_agent_flow_engine import _build_episode, _error_episode
+from rllm.experimental.engine.remote_agent_flow_engine import _build_episode
 from rllm.experimental.engine.remote_runtime.agentcore_runtime import AgentCoreRuntime
 from rllm.experimental.engine.remote_runtime.protocol import (
     RemoteRuntimeConfig,
@@ -15,7 +15,6 @@ from rllm.experimental.engine.remote_runtime.protocol import (
     TaskSubmission,
 )
 from rllm.experimental.engine.trace_converter import compute_step_metrics
-from rllm.workflows.workflow import TerminationReason
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -23,7 +22,6 @@ from rllm.workflows.workflow import TerminationReason
 
 
 def _make_runtime() -> AgentCoreRuntime:
-    """Create an AgentCoreRuntime with a mock client (skips initialize())."""
     config = RemoteRuntimeConfig(
         enabled=True,
         backend="agentcore",
@@ -43,11 +41,11 @@ def _make_submission(session_id: str = "sess-1", task_id: str = "task-1") -> Tas
         session_id=session_id,
         task_id=task_id,
         inference_url="http://localhost:8000/v1",
+        api_key="agent-key",
     )
 
 
 def _make_future(result: dict, elapsed: float = 1.5):
-    """Create a mock RolloutFuture."""
     future = AsyncMock()
     future.result_async = AsyncMock(return_value=result)
     future.elapsed = MagicMock(return_value=elapsed)
@@ -55,7 +53,6 @@ def _make_future(result: dict, elapsed: float = 1.5):
 
 
 def _make_step(prompt_len: int = 10, response_len: int = 20) -> Step:
-    """Create a Step with specified token lengths."""
     return Step(
         prompt_ids=list(range(prompt_len)),
         response_ids=list(range(response_len)),
@@ -63,13 +60,12 @@ def _make_step(prompt_len: int = 10, response_len: int = 20) -> Step:
 
 
 # ---------------------------------------------------------------------------
-# _run_one tests
+# AgentCoreRuntime._run_one tests
 # ---------------------------------------------------------------------------
 
 
 class TestRunOneSuccess:
     def test_success_with_reward(self):
-        """status_code=200 result -> RemoteTaskResult(success=True, reward=1.0)."""
         runtime = _make_runtime()
         sub = _make_submission()
         future = _make_future(
@@ -80,7 +76,7 @@ class TestRunOneSuccess:
 
         result = asyncio.run(runtime._run_one(sub, timeout=300.0))
 
-        assert result.success is True
+        assert result.finished is True
         assert result.reward == 1.0
         assert result.session_id == "sess-1"
         assert result.task_id == "task-1"
@@ -88,7 +84,6 @@ class TestRunOneSuccess:
         assert result.raw_result["status_code"] == 200
 
     def test_success_reward_scalar(self):
-        """Non-list reward is preserved as-is (None)."""
         runtime = _make_runtime()
         sub = _make_submission()
         future = _make_future(result={"rewards": None}, elapsed=1.0)
@@ -96,13 +91,12 @@ class TestRunOneSuccess:
 
         result = asyncio.run(runtime._run_one(sub, timeout=300.0))
 
-        assert result.success is True
+        assert result.finished is True
         assert result.reward is None
 
 
 class TestRunOneErrorStatus:
     def test_error_status_500(self):
-        """status_code=500 result -> RemoteTaskResult(success=False, error=...)."""
         runtime = _make_runtime()
         sub = _make_submission()
         future = _make_future(
@@ -117,13 +111,12 @@ class TestRunOneErrorStatus:
 
         result = asyncio.run(runtime._run_one(sub, timeout=300.0))
 
-        assert result.success is False
+        assert result.finished is False
         assert "ZeroDivisionError" in result.error
         assert result.elapsed == 3.0
         assert result.raw_result["status_code"] == 500
 
     def test_error_status_no_stop_reason(self):
-        """Error without stop_reason gets default message."""
         runtime = _make_runtime()
         sub = _make_submission()
         future = _make_future(result={"status_code": 500}, elapsed=1.0)
@@ -131,24 +124,22 @@ class TestRunOneErrorStatus:
 
         result = asyncio.run(runtime._run_one(sub, timeout=300.0))
 
-        assert result.success is False
+        assert result.finished is False
         assert result.error == "Unknown remote error"
 
 
 class TestRunOneTransportError:
     def test_invoke_raises(self):
-        """invoke_async raising -> RemoteTaskResult(success=False)."""
         runtime = _make_runtime()
         sub = _make_submission()
         runtime._client.invoke_async = AsyncMock(side_effect=ConnectionError("network down"))
 
         result = asyncio.run(runtime._run_one(sub, timeout=300.0))
 
-        assert result.success is False
+        assert result.finished is False
         assert "network down" in result.error
 
     def test_result_async_raises(self):
-        """result_async raising (timeout) -> RemoteTaskResult(success=False)."""
         runtime = _make_runtime()
         sub = _make_submission()
         future = AsyncMock()
@@ -157,7 +148,7 @@ class TestRunOneTransportError:
 
         result = asyncio.run(runtime._run_one(sub, timeout=1.0))
 
-        assert result.success is False
+        assert result.finished is False
         assert "timed out" in result.error
 
 
@@ -168,23 +159,13 @@ class TestRunOneTransportError:
 
 class TestBuildEpisodeWithTraces:
     def test_traces_converted_to_steps(self):
-        """Traces are converted to Steps, metrics computed correctly."""
-        # Create mock TraceRecord-like objects
-        traces = []
-        for i in range(3):
-            trace = MagicMock()
-            trace.trace_id = f"trace-{i}"
-            trace.response_message = {"content": f"answer {i}", "reasoning": ""}
-            trace.prompt_token_ids = list(range(10 + i))
-            trace.completion_token_ids = list(range(20 + i))
-            trace.logprobs = [0.1] * (20 + i)
-            trace.finish_reason = "stop"
-            trace.messages = [{"role": "user", "content": f"question {i}"}]
-            trace.metadata = {}
-            traces.append(trace)
+        # `_build_episode` accepts list[(TraceRecord, dict)] under the new API.
+        # Since `trace_record_to_step` is mocked here, the trace + extras shapes
+        # don't matter — the mock returns canned Steps.
+        traces_with_extras = [(MagicMock(), {}) for _ in range(3)]
 
         result = RemoteTaskResult(
-            success=True,
+            finished=True,
             session_id="sess-1",
             task_id="task-1",
             reward=1.0,
@@ -192,9 +173,8 @@ class TestBuildEpisodeWithTraces:
         )
 
         with patch("rllm.experimental.engine.remote_agent_flow_engine.trace_record_to_step") as mock_convert:
-            # Return Steps with proper token lengths
             mock_convert.side_effect = [_make_step(prompt_len=10 + i, response_len=20 + i) for i in range(3)]
-            episode = _build_episode(traces, result, "task-1:0", {"prompt": "test"})
+            episode = _build_episode(traces_with_extras, result, "task-1:0", {"prompt": "test"})
 
         assert len(episode.trajectories) == 1
         assert len(episode.trajectories[0].steps) == 3
@@ -208,9 +188,8 @@ class TestBuildEpisodeWithTraces:
 
 class TestBuildEpisodeNoTraces:
     def test_no_traces_with_reward(self):
-        """No traces + reward -> empty-steps trajectory."""
         result = RemoteTaskResult(
-            success=True,
+            finished=True,
             session_id="sess-1",
             task_id="task-1",
             reward=0.5,
@@ -225,9 +204,8 @@ class TestBuildEpisodeNoTraces:
         assert episode.metrics["empty"] == 1
 
     def test_no_traces_no_reward(self):
-        """No traces + no reward -> no trajectories."""
         result = RemoteTaskResult(
-            success=True,
+            finished=True,
             session_id="sess-1",
             task_id="task-1",
             reward=None,
@@ -239,16 +217,6 @@ class TestBuildEpisodeNoTraces:
         assert episode.metrics["empty"] == 1
 
 
-class TestErrorEpisode:
-    def test_error_episode_fields(self):
-        """Error episode has termination_reason=ERROR."""
-        episode = _error_episode("task-1:0", {"prompt": "test"}, "something broke")
-
-        assert episode.is_correct is False
-        assert episode.termination_reason == TerminationReason.ERROR
-        assert episode.metadata["error"]["message"] == "something broke"
-
-
 # ---------------------------------------------------------------------------
 # compute_step_metrics tests
 # ---------------------------------------------------------------------------
@@ -256,7 +224,6 @@ class TestErrorEpisode:
 
 class TestComputeStepMetrics:
     def test_basic_metrics(self):
-        """Shared utility produces correct dict."""
         trajectories = [
             Trajectory(
                 name="t1",
@@ -274,16 +241,13 @@ class TestComputeStepMetrics:
 
         assert metrics["num_trajectories"] == 2
         assert metrics["steps_used"] == 3
-        # response_lens: [20, 25, 30]
         assert metrics["mean_response_len"] == 25.0
         assert metrics["max_response_len"] == 30
         assert metrics["min_response_len"] == 20
-        # prompt_lens: [10, 15, 12]
         assert metrics["max_prompt_len"] == 15
         assert metrics["min_prompt_len"] == 10
 
     def test_empty_trajectories(self):
-        """Empty input returns zero-valued metrics."""
         metrics = compute_step_metrics([])
 
         assert metrics["num_trajectories"] == 0
@@ -292,7 +256,6 @@ class TestComputeStepMetrics:
         assert metrics["max_response_len"] == 0
 
     def test_trajectory_with_no_steps(self):
-        """Trajectory with no steps returns correct counts but zero lengths."""
         trajectories = [Trajectory(name="empty", task={}, steps=[])]
 
         metrics = compute_step_metrics(trajectories)
@@ -309,28 +272,21 @@ class TestComputeStepMetrics:
 
 class TestGatewayExternalURL:
     def test_default_host_uses_routable_ip(self):
-        """When host is null/None in config, gateway_url uses auto-detected routable IP."""
         config = OmegaConf.create({"rllm": {"gateway": {"host": None, "port": 9090}}})
-        gw = GatewayManager(config, mode="thread")
+        gw = GatewayManager(config)
 
         routable = _get_routable_ip()
         assert gw.host == routable
         assert gw.gateway_url == f"http://{routable}:9090"
-        # Should not be 127.0.0.1 on machines with a network interface
-        # (but we tolerate it in CI where it might be the only option)
 
     def test_explicit_host_override(self):
-        """When host is explicitly set in config, that value is used."""
         config = OmegaConf.create({"rllm": {"gateway": {"host": "10.0.0.42", "port": 8080}}})
-        gw = GatewayManager(config, mode="thread")
+        gw = GatewayManager(config)
 
         assert gw.host == "10.0.0.42"
         assert gw.gateway_url == "http://10.0.0.42:8080"
 
     def test_routable_ip_not_loopback(self):
-        """_get_routable_ip() returns a non-loopback address when a network route exists."""
         ip = _get_routable_ip()
-        # On machines with network access, should not be loopback
-        # This is a best-effort check — in isolated CI it may still be 127.0.0.1
         assert isinstance(ip, str)
         assert len(ip) > 0

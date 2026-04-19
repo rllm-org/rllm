@@ -32,9 +32,10 @@ class TraceRecord(BaseModel):
     messages: list[Message] | None = None
     prompt: str | None = None  # legacy completions
     tools: list[ToolSpec] | None = None
-    sampling_params: dict[str, Any] = Field(default_factory=dict)
+    kwargs: dict[str, Any] = Field(default_factory=dict)
 
     # Response (from NormalizedResponse)
+    text: str | None = None
     content: str = ""
     reasoning: str | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
@@ -45,6 +46,13 @@ class TraceRecord(BaseModel):
     # ``metrics["gateway_latency_ms"]`` (end-to-end as seen by the gateway).
     metrics: dict[str, float] = Field(default_factory=dict)  # numeric measurements
     metadata: dict[str, Any] = Field(default_factory=dict)  # free-form tags
+
+    # Adapter-emitted training-side blob (token IDs, logprobs, MoE matrices,
+    # etc.). Stored in a separate table internally; populated only when the
+    # caller asks for it (e.g. via ``get_traces(..., extras=True)``). When this is
+    # ``None`` the caller fetched the lightweight trace; ``{}`` would mean
+    # the caller asked for extras and the trace genuinely has none.
+    extras: dict[str, Any] | None = None
 
 
 def build_trace(
@@ -70,8 +78,9 @@ def build_trace(
         messages=request.messages,
         prompt=request.prompt,
         tools=request.tools,
-        sampling_params=request.sampling_params,
+        kwargs=request.kwargs,
         content=response.content,
+        text=response.text,
         reasoning=response.reasoning,
         tool_calls=response.tool_calls,
         finish_reason=response.finish_reason,

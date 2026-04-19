@@ -90,22 +90,27 @@ class GatewayClient:
         session_id: str,
         since: float | None = None,
         limit: int | None = None,
+        extras: bool = False,
     ) -> list[TraceRecord]:
         params: dict[str, Any] = {}
         if since is not None:
             params["since"] = since
         if limit is not None:
             params["limit"] = limit
+        if extras:
+            params["include_extras"] = "true"
         resp = self._http.get(f"{self.gateway_url}/sessions/{session_id}/traces", params=params)
         resp.raise_for_status()
         return [TraceRecord(**t) for t in resp.json()]
 
-    def get_trace(self, trace_id: str) -> TraceRecord:
-        resp = self._http.get(f"{self.gateway_url}/traces/{trace_id}")
+    def get_trace(self, trace_id: str, extras: bool = False) -> TraceRecord:
+        params = {"include_extras": "true"} if extras else {}
+        resp = self._http.get(f"{self.gateway_url}/traces/{trace_id}", params=params)
         resp.raise_for_status()
         return TraceRecord(**resp.json())
 
     def get_trace_extras(self, trace_id: str) -> tuple[str, bytes] | None:
+        """Standalone fetch of just the extras blob, separate from a TraceRecord."""
         resp = self._http.get(f"{self.gateway_url}/traces/{trace_id}/extras")
         if resp.status_code == 404:
             return None
@@ -198,18 +203,22 @@ class AsyncGatewayClient:
         session_id: str,
         since: float | None = None,
         limit: int | None = None,
+        extras: bool = False,
     ) -> list[TraceRecord]:
         params: dict[str, Any] = {}
         if since is not None:
             params["since"] = since
         if limit is not None:
             params["limit"] = limit
+        if extras:
+            params["include_extras"] = "true"
         resp = await self._http.get(f"{self.gateway_url}/sessions/{session_id}/traces", params=params)
         resp.raise_for_status()
         return [TraceRecord(**t) for t in resp.json()]
 
-    async def get_trace(self, trace_id: str) -> TraceRecord:
-        resp = await self._http.get(f"{self.gateway_url}/traces/{trace_id}")
+    async def get_trace(self, trace_id: str, extras: bool = False) -> TraceRecord:
+        params = {"include_extras": "true"} if extras else {}
+        resp = await self._http.get(f"{self.gateway_url}/traces/{trace_id}", params=params)
         resp.raise_for_status()
         return TraceRecord(**resp.json())
 

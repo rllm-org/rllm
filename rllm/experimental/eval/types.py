@@ -37,6 +37,7 @@ class AgentConfig:
     base_url: str
     model: str
     session_uid: str
+    api_key: str = ""
     metadata: dict = field(default_factory=dict)
 
 

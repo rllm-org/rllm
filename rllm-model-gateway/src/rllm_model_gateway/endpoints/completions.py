@@ -14,7 +14,7 @@ NAME = "completions"
 PATH = "/v1/completions"
 UPSTREAM_PATH = "/completions"
 
-_NON_SAMPLING_KEYS = frozenset({"model", "prompt", "stream", "user", "n", "logprobs", "stream_options"})
+_RESERVED_KEYS = frozenset({"model", "prompt", "stream", "user", "stream_options"})
 
 
 def to_normalized_request(body: dict[str, Any]) -> NormalizedRequest:
@@ -22,8 +22,8 @@ def to_normalized_request(body: dict[str, Any]) -> NormalizedRequest:
     if isinstance(prompt, list):
         # Legacy completions accepts a list; we only support the first.
         prompt = prompt[0] if prompt else ""
-    sampling = {k: v for k, v in body.items() if k not in _NON_SAMPLING_KEYS}
-    return NormalizedRequest(prompt=prompt or "", sampling_params=sampling)
+    kwargs = {k: v for k, v in body.items() if k not in _RESERVED_KEYS}
+    return NormalizedRequest(prompt=prompt or "", kwargs=kwargs)
 
 
 def parse_upstream_response(body: dict[str, Any]) -> NormalizedResponse:
@@ -31,7 +31,7 @@ def parse_upstream_response(body: dict[str, Any]) -> NormalizedResponse:
     choice = choices[0]
     usage_raw = body.get("usage") or {}
     return NormalizedResponse(
-        content=choice.get("text", ""),
+        text=choice.get("text", ""),
         finish_reason=choice.get("finish_reason") or "stop",
         usage=Usage(
             prompt_tokens=usage_raw.get("prompt_tokens", 0),
@@ -56,7 +56,7 @@ def parse_upstream_stream(chunks: list[dict[str, Any]]) -> NormalizedResponse:
         if chunk.get("usage"):
             usage_raw = chunk["usage"]
     return NormalizedResponse(
-        content="".join(text_parts),
+        text="".join(text_parts),
         finish_reason=finish_reason or "stop",
         usage=Usage(
             prompt_tokens=usage_raw.get("prompt_tokens", 0),
@@ -75,7 +75,7 @@ def from_normalized_response_nonstream(resp: NormalizedResponse, model: str) -> 
         "choices": [
             {
                 "index": 0,
-                "text": resp.content,
+                "text": resp.text or "",
                 "finish_reason": resp.finish_reason,
                 "logprobs": None,
             }
@@ -100,7 +100,7 @@ async def from_normalized_response_stream(resp: NormalizedResponse, model: str) 
         "choices": [
             {
                 "index": 0,
-                "text": resp.content,
+                "text": resp.text or "",
                 "finish_reason": resp.finish_reason,
                 "logprobs": None,
             }

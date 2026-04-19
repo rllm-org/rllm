@@ -56,7 +56,7 @@ class SearchAgentFlow:
 
     def run(self, task: Task, config: AgentConfig) -> Episode:
         task_data = task.data if isinstance(task, Task) else task
-        client = OpenAI(base_url=config.base_url, api_key="EMPTY")
+        client = OpenAI(base_url=config.base_url, api_key=config.api_key)
         backend_name = config.metadata.get("search_backend")
         tool = resolve_search_backend(backend_name)
 

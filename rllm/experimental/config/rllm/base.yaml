@@ -29,10 +29,28 @@ workflow:
   retry_limit: 3
   raise_on_error: true
 
-# Rollout Configuration (note: this is just for logging purpose, the actual rollout configs are backend-specific)
+# Rollout Configuration
 rollout:
-  n: 8
+  n: 8 # group size
   n_val: 1  # number of validation samples per prompt
+  sampling:
+    train:
+      temperature: 1.0
+      top_p: 1.0
+      top_k: -1
+    val:
+      temperature: ${..train.temperature}
+      top_p: ${..train.top_p}
+      top_k: ${..train.top_k}
+  chat_template_kwargs:
+    parser_backend: rllm         # rllm | vllm | sglang | tinker
+    reasoning_parser_name: null  # vllm/sglang only: e.g. "deepseek_r1", "qwen3"
+    tool_parser_name: null       # vllm/sglang only: e.g. "deepseek_v3", "qwen3_coder"
+    renderer_name: null          # tinker only; auto-detected from model name if null
+    disable_thinking: ${...disable_thinking} # Disable thinking
+    accumulate_reasoning: ${...accumulate_reasoning} # Accumulate reasoning
+    reasoning_effort: medium # low, medium, high
+    chat_template: null # path to a custom chat template file
 
 # Trainer Configuration
 trainer:
@@ -74,22 +92,10 @@ stepwise_advantage:
   mode: broadcast # support `broadcast` only now
   normalize_by_steps: False
 
-# Disable thinking
-disable_thinking: False
-
-# Accumulate reasoning
-accumulate_reasoning: False
-
-# Parser configuration — which backend's native parsers to use for rendering/parsing
-parser:
-  parser_backend: rllm         # rllm | vllm | sglang | tinker
-  reasoning_parser_name: null  # vllm/sglang only: e.g. "deepseek_r1", "qwen3"
-  tool_parser_name: null       # vllm/sglang only: e.g. "deepseek_v3", "qwen3_coder"
-  renderer_name: null          # tinker only; auto-detected from model name if null
-
-# Mask truncated samples
-mask_truncated_samples: False
-filter_token_mismatch: True
+# Deprecated
+disable_thinking: False # (moved to rollout.chat_template_kwargs)
+accumulate_reasoning: False # (moved to rollout.chat_template_kwargs)
+mask_truncated_samples: False # (moved to algorithm.mask_truncated_samples)
 
 # Compact filtering
 compact_filtering:

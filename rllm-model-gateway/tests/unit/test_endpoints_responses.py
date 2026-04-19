@@ -67,7 +67,7 @@ def test_input_with_function_call_and_output():
     assert len(req.messages) == 3
     assert req.messages[1].role == "assistant"
     assert req.messages[1].tool_calls[0].name == "get_weather"
-    assert req.messages[1].tool_calls[0].arguments == {"city": "SF"}
+    assert req.messages[1].tool_calls[0].arguments == '{"city":"SF"}'
     assert req.messages[2].role == "tool"
     assert req.messages[2].tool_call_id == "call_1"
     assert req.messages[2].content == "sunny"
@@ -114,19 +114,19 @@ def test_background_rejected():
 
 def test_max_output_tokens_translated():
     req = responses.to_normalized_request({"input": "hi", "max_output_tokens": 256})
-    assert req.sampling_params == {"max_tokens": 256}
+    assert req.kwargs == {"max_tokens": 256}
 
 
 def test_reasoning_effort_extracted():
     req = responses.to_normalized_request({"input": "hi", "reasoning": {"effort": "high"}})
-    assert req.reasoning_effort == "high"
+    assert req.kwargs["reasoning_effort"] == "high"
 
 
 def test_outbound_emits_typed_output_items():
     resp = NormalizedResponse(
         content="The answer is 42",
         reasoning="I used calculation",
-        tool_calls=[ToolCall(id="call_1", name="calc", arguments={"x": 42}, arguments_raw='{"x":42}')],
+        tool_calls=[ToolCall(id="call_1", name="calc", arguments='{"x":42}')],
         finish_reason="tool_calls",
         usage=Usage(prompt_tokens=10, completion_tokens=8),
     )
@@ -158,7 +158,7 @@ def test_parse_upstream_response_round_trip():
     assert resp.reasoning == "thought"
     assert len(resp.tool_calls) == 1
     assert resp.tool_calls[0].name == "f"
-    assert resp.tool_calls[0].arguments == {"a": 1}
+    assert resp.tool_calls[0].arguments == '{"a":1}'
     assert resp.finish_reason == "tool_calls"
     assert resp.usage.prompt_tokens == 5
 
@@ -187,7 +187,7 @@ async def test_outbound_stream_event_sequence():
     resp = NormalizedResponse(
         content="hi",
         reasoning="thinking",
-        tool_calls=[ToolCall(id="c1", name="t", arguments={}, arguments_raw="{}")],
+        tool_calls=[ToolCall(id="c1", name="t", arguments="{}")],
         finish_reason="tool_calls",
     )
     events = []

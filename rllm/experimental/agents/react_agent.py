@@ -47,7 +47,7 @@ class ReactAgentFlow:
         system_prompt = spec.instruction if spec else _DEFAULT_SYSTEM
         user_content = spec.render_input(task.data) if spec else task.data.get("question", "")
 
-        client = OpenAI(base_url=config.base_url, api_key="EMPTY")
+        client = OpenAI(base_url=config.base_url, api_key=config.api_key)
 
         # Tools supplied by the caller (list of OpenAI tool dicts).
         # Each entry must also carry an "execute" callable under the

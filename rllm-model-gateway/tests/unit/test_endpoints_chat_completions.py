@@ -26,7 +26,7 @@ def test_request_to_normalized():
     assert req.messages[0].role == "system"
     assert req.messages[1].content == "hi"
     assert req.tools is not None and req.tools[0].name == "weather"
-    assert req.sampling_params == {"temperature": 0.7, "max_tokens": 100}
+    assert req.kwargs == {"temperature": 0.7, "max_tokens": 100}
 
 
 def test_request_tool_call_arguments_round_trip():
@@ -48,8 +48,7 @@ def test_request_tool_call_arguments_round_trip():
     req = cc.to_normalized_request(body)
     tc = req.messages[0].tool_calls[0]
     assert tc.name == "weather"
-    assert tc.arguments == {"city": "SF"}
-    assert tc.arguments_raw == '{"city":"SF"}'
+    assert tc.arguments == '{"city":"SF"}'
 
 
 def test_parse_upstream_response():
@@ -101,15 +100,14 @@ def test_parse_upstream_stream_tool_call_accumulation():
     tc = resp.tool_calls[0]
     assert tc.id == "c1"
     assert tc.name == "weather"
-    assert tc.arguments == {"city": "SF"}
-    assert tc.arguments_raw == '{"city":"SF"}'
+    assert tc.arguments == '{"city":"SF"}'
 
 
 def test_from_normalized_response_nonstream_shape():
     resp = NormalizedResponse(
         content="hi",
         reasoning="thinking",
-        tool_calls=[ToolCall(id="c1", name="t", arguments={"x": 1}, arguments_raw='{"x":1}')],
+        tool_calls=[ToolCall(id="c1", name="t", arguments='{"x":1}')],
         finish_reason="tool_calls",
         usage=Usage(prompt_tokens=3, completion_tokens=4),
     )

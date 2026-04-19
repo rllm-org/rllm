@@ -5,8 +5,8 @@ from tinker.types import ModelInput
 from typing_extensions import override  # need to use typing_extensions for python < 3.12
 
 from rllm.experimental.parser import get_chat_parser
-from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
-from rllm.experimental.rollout.types import ImageProcessor, Processor, TinkerTokenInput, TinkerTokenOutput, TokenInput, Tokenizer, TokenOutput
+from rllm.experimental.rollout.rollout_engine import CHAT_TEMPLATE_KWARG_NAMES, ModelOutput, RolloutEngine
+from rllm.experimental.rollout.types import Processor, TinkerTokenInput, TinkerTokenOutput, TokenInput, Tokenizer, TokenOutput
 from rllm.workflows import TerminationEvent, TerminationReason
 
 
@@ -54,45 +54,23 @@ class TinkerEngine(RolloutEngine):
         self,
         base_url: str,
         model_name: str,
-        tokenizer: Tokenizer,
         service_client: tinker.ServiceClient,
+        tokenizer: Tokenizer,
+        processor: Processor | None = None,
         max_prompt_length: int = 4096,
         max_response_length: int = 4096,
         max_model_length: int = 32768,
         sampling_params: dict | None = None,
-        processor: Processor | None = None,
-        image_processor: ImageProcessor | None = None,
-        disable_thinking: bool = False,
-        accumulate_reasoning: bool = False,
-        reasoning_effort: str = "medium",
         parser_backend: str = "tinker",
         reasoning_parser_name: str | None = None,
         tool_parser_name: str | None = None,
         renderer_name: str | None = None,
+        disable_thinking: bool = False,
+        accumulate_reasoning: bool = False,
+        reasoning_effort: str = "medium",
+        chat_template: str | None = None,
         **kwargs,
     ):
-        """
-        Initialize TinkerEngine.
-
-        Args:
-            base_url: Tinker service base URL
-            model_name: Name of the model to use
-            tokenizer: Tokenizer for encoding/decoding
-            service_client: Tinker ServiceClient instance
-            max_prompt_length: Maximum prompt length in tokens
-            max_response_length: Maximum response length in tokens
-            max_model_length: Maximum total length (prompt + response) in tokens
-            sampling_params: Default sampling parameters (temperature, top_p, etc.)
-            processor: Optional multimodal processor (forwarded to the parser).
-            image_processor: Optional image processor (forwarded to the parser).
-            disable_thinking: Whether to disable thinking in generation prompt.
-            accumulate_reasoning: Whether to accumulate reasoning.
-            reasoning_effort: The effort level for reasoning.
-            parser_backend: Which parser backend to use ("tinker" by default for TinkerEngine).
-            reasoning_parser_name: Reasoning parser name (for vllm/sglang backends).
-            tool_parser_name: Tool parser name (for vllm/sglang backends).
-            renderer_name: Tinker renderer name (auto-detected from model if null).
-        """
         super().__init__()
         self.base_url = base_url
         self.model_name = model_name
@@ -100,8 +78,17 @@ class TinkerEngine(RolloutEngine):
         self.max_response_length = max_response_length
         self.max_model_length = max_model_length - 1
         self.tokenizer = tokenizer
-        self.accumulate_reasoning = accumulate_reasoning
-        self.reasoning_effort = reasoning_effort
+
+        if chat_template:
+            from pathlib import Path
+
+            tokenizer.chat_template = Path(chat_template).read_text()
+
+        self.default_template_kwargs: dict = dict(
+            tools=[],
+            accumulate_reasoning=accumulate_reasoning,
+            reasoning_effort=reasoning_effort,
+        )
 
         self.train_sampling_params = dict(sampling_params.get("train", {})) if sampling_params else {}
         self.val_sampling_params = dict(sampling_params.get("val", {})) if sampling_params else {}
@@ -115,7 +102,6 @@ class TinkerEngine(RolloutEngine):
             tool_parser_name=tool_parser_name,
             renderer_name=renderer_name,
             disable_thinking=disable_thinking,
-            image_processor=image_processor,
         )
 
         # Tinker's sampling client requires stop sequences. Prefer parser-provided
@@ -250,34 +236,17 @@ class TinkerEngine(RolloutEngine):
 
     @override
     async def _get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
-        """
-        Generate model response for a given set of messages.
-
-        Args:
-            messages: List of message dictionaries (OpenAI format)
-            **kwargs: Additional parameters, including:
-                - application_id: Session/application ID for tracing
-                - enforce_max_prompt_length: Whether to enforce max prompt length
-                - tools: List of tools
-                - accumulate_reasoning: Whether to accumulate reasoning
-                - reasoning_effort: Reasoning effort level
-
-        Returns:
-            ModelOutput with generated text and metadata
-        """
         kwargs.pop("application_id", None)
 
-        tools = kwargs.pop("tools", [])
-        accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
-        reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
+        template_kwargs = self.default_template_kwargs.copy()
+        template_kwargs.update(kwargs.pop("chat_template_kwargs", {}))
+        template_kwargs.update({k: kwargs.pop(k) for k in list(kwargs) if k in CHAT_TEMPLATE_KWARG_NAMES})
 
         prompt = self.chat_parser.parse(
             messages,
             add_generation_prompt=True,
             is_first_msg=True,
-            tools=tools,
-            reasoning_effort=reasoning_effort,
-            accumulate_reasoning=accumulate_reasoning,
+            **template_kwargs,
         )
         token_input: TinkerTokenInput = self.tokenizer.encode(prompt, add_special_tokens=False)  # type: ignore
 

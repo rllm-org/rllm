@@ -12,6 +12,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Kwarg names the chat parser/template consumes. Everything else in **kwargs
+# to get_model_response goes to the sampler via get_token_output_from_token_input.
+CHAT_TEMPLATE_KWARG_NAMES = frozenset(
+    {
+        "tools",
+        "reasoning_effort",
+        "accumulate_reasoning",
+        "tool_choice",
+        "parallel_tool_calls",
+        "disable_thinking",
+    }
+)
+
+
 @dataclass
 class ModelOutput:
     text: str | None = None

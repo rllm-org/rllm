@@ -40,12 +40,12 @@ def _make_trace(session_id: str = "s1", endpoint: str = "chat_completions") -> T
     req = NormalizedRequest(
         messages=[Message(role="user", content="hi")],
         tools=[ToolSpec(name="t", description="d", parameters={})],
-        sampling_params={"temperature": 0.7},
+        kwargs={"temperature": 0.7},
     )
     resp = NormalizedResponse(
         content="hello",
         reasoning="thinking",
-        tool_calls=[ToolCall(id="c1", name="t", arguments={"x": 1})],
+        tool_calls=[ToolCall(id="c1", name="t", arguments='{"x":1}')],
         finish_reason="stop",
         usage=Usage(prompt_tokens=2, completion_tokens=3),
     )
@@ -80,7 +80,7 @@ async def test_store_and_get_trace_round_trip(store):
     assert fetched.reasoning == "thinking"
     assert fetched.messages[0].content == "hi"
     assert len(fetched.tool_calls) == 1
-    assert fetched.tool_calls[0].arguments == {"x": 1}
+    assert fetched.tool_calls[0].arguments == '{"x":1}'
 
 
 @pytest.mark.asyncio

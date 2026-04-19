@@ -9,7 +9,6 @@ v1 is local-docker-only and eval-focused: no gateway, no training loop.
 
 import asyncio
 import logging
-import os
 import time
 
 from rllm.experimental.engine.remote_runtime.protocol import (
@@ -46,19 +45,26 @@ def _map_termination_reason(
     return TerminationReason.ERROR
 
 
-# Provider API key env vars that harbor's installed agent scaffolds pre-flight
-# check on the host process before the trial runs. When routing through a
-# gateway the actual key value is irrelevant — vLLM doesn't validate it — but
-# the var must exist or harbor raises. We set dummies for any that are unset,
-# leaving real values alone if the user did set them.
-_DUMMY_API_KEYS = {
-    "OPENAI_API_KEY": "empty",  # mini-swe-agent, codex, swe-agent, qwen-coder
-    "ANTHROPIC_API_KEY": "empty",  # claude-code
-    "LLM_API_KEY": "empty",  # openhands, openhands-sdk (litellm)
-}
-
-# Placeholder model fed to harbor, which get's overridden by gateway
+# Placeholder model fed to harbor, which gets overridden by the gateway's
+# config.model pin.
 _HARBOR_MODEL_PLACEHOLDER = "openai/placeholder"
+
+# Env-var names the various harbor-installed agent scaffolds read for the
+# inference base URL. Each scaffold reads a different one — set them all so
+# any agent works.
+_BASE_URL_ENV_VARS = (
+    "OPENAI_API_BASE",  # mini-swe-agent (also openhands fallback)
+    "OPENAI_BASE_URL",  # codex, hermes, qwen-coder, swe-agent
+    "LLM_BASE_URL",  # openhands, openhands-sdk (litellm)
+    "ANTHROPIC_BASE_URL",  # claude-code
+)
+
+# Env-var names the various scaffolds read for the API key.
+_API_KEY_ENV_VARS = (
+    "OPENAI_API_KEY",  # mini-swe-agent, codex, swe-agent, qwen-coder
+    "ANTHROPIC_API_KEY",  # claude-code
+    "LLM_API_KEY",  # openhands, openhands-sdk (litellm)
+)
 
 
 _HARBOR_FILTER_ATTR = "_rllm_drop_harbor_installed"
@@ -100,12 +106,6 @@ class HarborRuntime(RemoteAgentRuntime):
         # Lazy import — keeps harbor off the rllm import path for other backends.
         import harbor.trial.trial  # noqa: F401
 
-        # Satisfy harbor scaffolds' provider-key pre-flight checks. Real keys
-        # (if the user set them) are left alone; only missing ones get dummies.
-        for key, dummy in _DUMMY_API_KEYS.items():
-            if key not in os.environ:
-                os.environ[key] = dummy
-
         # Drop harbor's noisy DEBUG output from the host logging stream.
         silence_harbor()
 
@@ -129,16 +129,11 @@ class HarborRuntime(RemoteAgentRuntime):
 
         env: dict[str, str] = {}
         if sub.inference_url:
-            # Set the inference base URL under every name harbor's installed
-            # agent scaffolds read. Each scaffold checks a different one:
-            #   OPENAI_API_BASE   — mini-swe-agent (also openhands fallback)
-            #   OPENAI_BASE_URL   — codex, hermes, qwen-coder, swe-agent
-            #   LLM_BASE_URL      — openhands, openhands-sdk
-            #   ANTHROPIC_BASE_URL — claude-code
-            env["OPENAI_API_BASE"] = sub.inference_url
-            env["OPENAI_BASE_URL"] = sub.inference_url
-            env["LLM_BASE_URL"] = sub.inference_url
-            env["ANTHROPIC_BASE_URL"] = sub.inference_url
+            for name in _BASE_URL_ENV_VARS:
+                env[name] = sub.inference_url
+        if sub.api_key:
+            for name in _API_KEY_ENV_VARS:
+                env[name] = sub.api_key
 
         env_type = EnvironmentType(self._h_config.environment_type) if self._h_config.environment_type else None
 

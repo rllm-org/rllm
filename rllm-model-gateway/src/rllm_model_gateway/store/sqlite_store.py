@@ -118,8 +118,9 @@ class SqliteTraceStore:
                 messages          TEXT,
                 prompt            TEXT,
                 tools             TEXT,
-                sampling_params   TEXT,
+                kwargs            TEXT,
                 content           TEXT,
+                text              TEXT,
                 reasoning         TEXT,
                 tool_calls        TEXT,
                 finish_reason     TEXT,
@@ -265,10 +266,10 @@ class SqliteTraceStore:
             """
             INSERT OR REPLACE INTO traces (
                 trace_id, session_id, timestamp, endpoint, model,
-                messages, prompt, tools, sampling_params,
-                content, reasoning, tool_calls, finish_reason,
+                messages, prompt, tools, kwargs,
+                content, text, reasoning, tool_calls, finish_reason,
                 prompt_tokens, completion_tokens, metrics, metadata
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 trace.trace_id,
@@ -279,8 +280,9 @@ class SqliteTraceStore:
                 _to_json(trace.messages),
                 trace.prompt,
                 _to_json(trace.tools),
-                _to_json(trace.sampling_params),
+                _to_json(trace.kwargs),
                 trace.content,
+                trace.text,
                 trace.reasoning,
                 _to_json(trace.tool_calls),
                 trace.finish_reason,
@@ -301,37 +303,49 @@ class SqliteTraceStore:
             )
         await conn.commit()
 
-    async def get_trace(self, trace_id: str) -> TraceRecord | None:
+    async def get_trace(self, trace_id: str, extras: bool = False) -> TraceRecord | None:
         conn = await self._get_conn()
         conn.row_factory = aiosqlite.Row
-        async with conn.execute("SELECT * FROM traces WHERE trace_id = ?", (trace_id,)) as cur:
+        if extras:
+            sql = "SELECT t.*, x.format AS _extras_format, x.data AS _extras_data FROM traces t LEFT JOIN trace_extras x ON x.trace_id = t.trace_id WHERE t.trace_id = ?"
+        else:
+            sql = "SELECT * FROM traces WHERE trace_id = ?"
+        async with conn.execute(sql, (trace_id,)) as cur:
             row = await cur.fetchone()
         if row is None:
             return None
-        return _row_to_trace(row)
+        return _row_to_trace(row, with_extras=extras)
 
     async def get_traces(
         self,
         session_id: str,
         since: float | None = None,
         limit: int | None = None,
+        extras: bool = False,
     ) -> list[TraceRecord]:
         conn = await self._get_conn()
         conn.row_factory = aiosqlite.Row
-        sql = "SELECT * FROM traces WHERE session_id = ?"
+        if extras:
+            sql = "SELECT t.*, x.format AS _extras_format, x.data AS _extras_data FROM traces t LEFT JOIN trace_extras x ON x.trace_id = t.trace_id WHERE t.session_id = ?"
+        else:
+            sql = "SELECT * FROM traces WHERE session_id = ?"
         params: list[Any] = [session_id]
+        ts_col = "t.timestamp" if extras else "timestamp"
         if since is not None:
-            sql += " AND timestamp >= ?"
+            sql += f" AND {ts_col} >= ?"
             params.append(since)
-        sql += " ORDER BY timestamp ASC"
+        sql += f" ORDER BY {ts_col} ASC"
         if limit is not None:
             sql += " LIMIT ?"
             params.append(limit)
         async with conn.execute(sql, params) as cur:
             rows = await cur.fetchall()
-        return [_row_to_trace(r) for r in rows]
+        return [_row_to_trace(r, with_extras=extras) for r in rows]
 
     async def get_trace_extras(self, trace_id: str) -> tuple[str, bytes] | None:
+        """Standalone fetch of an extras blob. Mostly useful for the
+        HTTP endpoint; Python consumers should use ``get_trace(..., extras=True)``
+        or ``get_traces(..., extras=True)``."""
         conn = await self._get_conn()
         conn.row_factory = aiosqlite.Row
         async with conn.execute("SELECT format, data FROM trace_extras WHERE trace_id = ?", (trace_id,)) as cur:
@@ -341,7 +355,19 @@ class SqliteTraceStore:
         return (row["format"], row["data"])
 
 
-def _row_to_trace(row) -> TraceRecord:
+def _row_to_trace(row, *, with_extras: bool = False) -> TraceRecord:
+    extras: dict[str, Any] | None
+    if with_extras:
+        fmt = row["_extras_format"] if "_extras_format" in row.keys() else None
+        data = row["_extras_data"] if "_extras_data" in row.keys() else None
+        if fmt and data is not None:
+            from rllm_model_gateway.trace import deserialize_extras
+
+            extras = deserialize_extras(fmt, data)
+        else:
+            extras = {}
+    else:
+        extras = None
     return TraceRecord(
         trace_id=row["trace_id"],
         session_id=row["session_id"],
@@ -351,8 +377,9 @@ def _row_to_trace(row) -> TraceRecord:
         messages=_from_json_list(row["messages"], Message),
         prompt=row["prompt"],
         tools=_from_json_list(row["tools"], ToolSpec),
-        sampling_params=_from_json_dict(row["sampling_params"]),
+        kwargs=_from_json_dict(row["kwargs"]),
         content=row["content"] or "",
+        text=row["text"],
         reasoning=row["reasoning"],
         tool_calls=_from_json_list(row["tool_calls"], ToolCall) or [],
         finish_reason=row["finish_reason"] or "stop",
@@ -362,4 +389,5 @@ def _row_to_trace(row) -> TraceRecord:
         ),
         metrics=_from_json_dict(row["metrics"]),
         metadata=_from_json_dict(row["metadata"]),
+        extras=extras,
     )

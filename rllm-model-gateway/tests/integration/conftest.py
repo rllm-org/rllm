@@ -34,7 +34,7 @@ def fake_adapter():
         return NormalizedResponse(
             content="Hello from adapter",
             reasoning="I considered options",
-            tool_calls=[ToolCall(id="call_1", name="lookup", arguments={"q": "rllm"}, arguments_raw='{"q":"rllm"}')],
+            tool_calls=[ToolCall(id="call_1", name="lookup", arguments='{"q":"rllm"}')],
             finish_reason="tool_calls",
             usage=Usage(prompt_tokens=12, completion_tokens=7),
             extras={"completion_ids": [10, 20, 30, 40, 50, 60, 70], "logprobs": [-0.1] * 7},

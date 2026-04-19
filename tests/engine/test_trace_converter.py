@@ -1,110 +1,53 @@
-"""Tests for trace_converter: trace_record_to_step with tool_calls support."""
+"""Tests for trace_converter: trace_record_to_step against the new TraceRecord shape."""
 
-from rllm_model_gateway.models import TraceRecord
+from __future__ import annotations
 
-from rllm.experimental.engine.trace_converter import (
-    _parse_openai_tool_calls,
-    trace_record_to_step,
+from rllm_model_gateway import (
+    Message,
+    NormalizedRequest,
+    NormalizedResponse,
+    Usage,
+    build_trace,
+)
+from rllm_model_gateway import (
+    ToolCall as GatewayToolCall,
 )
 
-# ------------------------------------------------------------------
-# _parse_openai_tool_calls
-# ------------------------------------------------------------------
+from rllm.experimental.engine.trace_converter import trace_record_to_step
 
 
-class TestParseOpenaiToolCalls:
-    def test_basic_conversion(self):
-        raw = [
-            {
-                "id": "call_0",
-                "type": "function",
-                "function": {
-                    "name": "get_weather",
-                    "arguments": '{"city": "London"}',
-                },
-            }
-        ]
-        result = _parse_openai_tool_calls(raw)
-        assert len(result) == 1
-        assert result[0].name == "get_weather"
-        assert result[0].arguments == {"city": "London"}
-
-    def test_multiple_tool_calls(self):
-        raw = [
-            {
-                "id": "call_0",
-                "type": "function",
-                "function": {"name": "search", "arguments": '{"q": "test"}'},
-            },
-            {
-                "id": "call_1",
-                "type": "function",
-                "function": {"name": "calc", "arguments": '{"expr": "1+1"}'},
-            },
-        ]
-        result = _parse_openai_tool_calls(raw)
-        assert len(result) == 2
-        assert result[0].name == "search"
-        assert result[1].name == "calc"
-        assert result[1].arguments == {"expr": "1+1"}
-
-    def test_invalid_json_arguments(self):
-        raw = [
-            {
-                "id": "call_0",
-                "type": "function",
-                "function": {"name": "foo", "arguments": "not-json"},
-            }
-        ]
-        result = _parse_openai_tool_calls(raw)
-        assert result[0].name == "foo"
-        assert result[0].arguments == {"raw": "not-json"}
-
-    def test_dict_arguments(self):
-        """Arguments already parsed as dict (e.g. from in-process handler)."""
-        raw = [
-            {
-                "id": "call_0",
-                "type": "function",
-                "function": {"name": "bar", "arguments": {"x": 1}},
-            }
-        ]
-        result = _parse_openai_tool_calls(raw)
-        assert result[0].arguments == {"x": 1}
-
-    def test_empty_list(self):
-        assert _parse_openai_tool_calls([]) == []
+def _build(*, content="Hi there!", reasoning=None, tool_calls=None, finish_reason="stop", extras=None):
+    req = NormalizedRequest(messages=[Message(role="user", content="hello")])
+    resp = NormalizedResponse(
+        content=content,
+        reasoning=reasoning,
+        tool_calls=tool_calls or [],
+        finish_reason=finish_reason,
+        usage=Usage(prompt_tokens=3, completion_tokens=2),
+    )
+    trace = build_trace(
+        session_id="s-001",
+        endpoint="chat_completions",
+        model="test-model",
+        request=req,
+        response=resp,
+        gateway_latency_ms=12.5,
+    )
+    if extras is not None:
+        trace.extras = extras
+    return trace
 
 
-# ------------------------------------------------------------------
-# trace_record_to_step with tool_calls
-# ------------------------------------------------------------------
+def _default_extras():
+    return {"prompt_ids": [1, 2, 3], "completion_ids": [10, 11], "logprobs": [-0.5, -0.3]}
 
 
 class TestTraceRecordToStep:
-    def _make_trace(self, **overrides) -> TraceRecord:
-        defaults = {
-            "trace_id": "t-001",
-            "session_id": "s-001",
-            "model": "test-model",
-            "messages": [{"role": "user", "content": "hello"}],
-            "prompt_token_ids": [1, 2, 3],
-            "response_message": {
-                "role": "assistant",
-                "content": "Hi there!",
-            },
-            "completion_token_ids": [10, 11],
-            "logprobs": [-0.5, -0.3],
-            "finish_reason": "stop",
-        }
-        defaults.update(overrides)
-        return TraceRecord(**defaults)
-
     def test_basic_step(self):
-        trace = self._make_trace()
+        trace = _build(extras=_default_extras())
         step = trace_record_to_step(trace)
 
-        assert step.id == "t-001"
+        assert step.id == trace.trace_id
         assert step.model_response == "Hi there!"
         assert step.model_output.content == "Hi there!"
         assert step.model_output.prompt_ids == [1, 2, 3]
@@ -113,31 +56,11 @@ class TestTraceRecordToStep:
         assert step.model_output.tool_calls is None
 
     def test_step_with_tool_calls(self):
-        trace = self._make_trace(
-            response_message={
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "call_0",
-                        "type": "function",
-                        "function": {
-                            "name": "get_weather",
-                            "arguments": '{"city": "London"}',
-                        },
-                    },
-                    {
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {
-                            "name": "calculate",
-                            "arguments": '{"expr": "2+2"}',
-                        },
-                    },
-                ],
-            },
-            finish_reason="tool_calls",
-        )
+        tcs = [
+            GatewayToolCall(id="call_0", name="get_weather", arguments='{"city":"London"}'),
+            GatewayToolCall(id="call_1", name="calculate", arguments='{"expr":"2+2"}'),
+        ]
+        trace = _build(content="", tool_calls=tcs, finish_reason="tool_calls", extras=_default_extras())
         step = trace_record_to_step(trace)
 
         assert step.model_output.tool_calls is not None
@@ -149,27 +72,41 @@ class TestTraceRecordToStep:
         assert step.model_output.finish_reason == "tool_calls"
 
     def test_step_with_reasoning(self):
-        trace = self._make_trace(
-            response_message={
-                "role": "assistant",
-                "content": "42",
-                "reasoning": "Let me think...",
-            },
-        )
+        trace = _build(content="42", reasoning="Let me think...", extras=_default_extras())
         step = trace_record_to_step(trace)
         assert step.thought == "Let me think..."
         assert step.model_output.reasoning == "Let me think..."
 
     def test_chat_completions_includes_response(self):
-        trace = self._make_trace()
+        trace = _build(extras=_default_extras())
         step = trace_record_to_step(trace)
-        assert len(step.chat_completions) == 2  # user msg + assistant msg
+        assert len(step.chat_completions) == 2
         assert step.chat_completions[-1]["role"] == "assistant"
+        assert step.chat_completions[-1]["content"] == "Hi there!"
 
-    def test_no_tool_calls_key_means_none(self):
-        """If response_message has no tool_calls key, model_output.tool_calls should be None."""
-        trace = self._make_trace(
-            response_message={"role": "assistant", "content": "just text"},
-        )
+    def test_no_tool_calls_means_none(self):
+        trace = _build(content="just text", extras=_default_extras())
         step = trace_record_to_step(trace)
         assert step.model_output.tool_calls is None
+
+    def test_no_extras_yields_empty_token_data(self):
+        trace = _build(extras=None)  # caller fetched the lightweight trace
+        step = trace_record_to_step(trace)
+        assert step.model_output.prompt_ids == []
+        assert step.model_output.completion_ids == []
+        assert step.model_output.logprobs == []
+
+    def test_empty_extras_dict_also_yields_empty_token_data(self):
+        trace = _build(extras={})  # asked for extras, adapter emitted none
+        step = trace_record_to_step(trace)
+        assert step.model_output.prompt_ids == []
+        assert step.model_output.completion_ids == []
+
+    def test_optional_extras_fields(self):
+        extras = _default_extras()
+        extras["prompt_logprobs"] = [-0.1, -0.2, -0.05]
+        extras["routing_matrices"] = ["a", "b"]
+        trace = _build(extras=extras)
+        step = trace_record_to_step(trace)
+        assert step.model_output.prompt_logprobs == [-0.1, -0.2, -0.05]
+        assert step.model_output.routing_matrices == ["a", "b"]

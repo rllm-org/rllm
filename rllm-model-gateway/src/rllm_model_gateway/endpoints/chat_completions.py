@@ -21,22 +21,16 @@ NAME = "chat_completions"
 PATH = "/v1/chat/completions"  # FastAPI route inside the gateway
 UPSTREAM_PATH = "/chat/completions"  # appended to user-supplied upstream_url
 
-# Sampling-param keys we strip from the request before forwarding to the
-# adapter; they're either consumed at the gateway level or have no meaning
-# inside the adapter.
-_NON_SAMPLING_KEYS = frozenset(
+# Wire fields consumed at the gateway level or already captured as structured
+# request fields — excluded from the flat kwargs bag.
+_RESERVED_KEYS = frozenset(
     {
         "model",
         "messages",
         "tools",
-        "tool_choice",
         "stream",
-        "reasoning_effort",
         "user",
-        "n",
         "metadata",
-        "logprobs",
-        "top_logprobs",
         "stream_options",
     }
 )
@@ -50,12 +44,11 @@ _NON_SAMPLING_KEYS = frozenset(
 def to_normalized_request(body: dict[str, Any]) -> NormalizedRequest:
     messages = [_msg_from_wire(m) for m in body.get("messages") or []]
     tools = _tools_from_wire(body.get("tools"))
-    sampling = {k: v for k, v in body.items() if k not in _NON_SAMPLING_KEYS}
+    kwargs = {k: v for k, v in body.items() if k not in _RESERVED_KEYS}
     return NormalizedRequest(
         messages=messages or None,
         tools=tools,
-        sampling_params=sampling,
-        reasoning_effort=body.get("reasoning_effort"),
+        kwargs=kwargs,
     )
 
 
@@ -75,25 +68,14 @@ def _msg_from_wire(m: dict[str, Any]) -> Message:
 
 def _tool_call_from_wire(tc: dict[str, Any]) -> ToolCall:
     fn = tc.get("function") or {}
-    args_raw = fn.get("arguments")
-    if isinstance(args_raw, str):
-        try:
-            arguments = json.loads(args_raw) if args_raw else {}
-        except (json.JSONDecodeError, TypeError):
-            arguments = {}
-        raw = args_raw
-    elif isinstance(args_raw, dict):
-        arguments = args_raw
-        raw = json.dumps(args_raw, ensure_ascii=False)
+    args = fn.get("arguments")
+    if isinstance(args, str):
+        arguments = args
+    elif isinstance(args, dict):
+        arguments = json.dumps(args, ensure_ascii=False)
     else:
-        arguments = {}
-        raw = None
-    return ToolCall(
-        id=tc.get("id", ""),
-        name=fn.get("name", ""),
-        arguments=arguments,
-        arguments_raw=raw,
-    )
+        arguments = ""
+    return ToolCall(id=tc.get("id", ""), name=fn.get("name", ""), arguments=arguments)
 
 
 def _tools_from_wire(tools: list[dict] | None) -> list[ToolSpec] | None:
@@ -157,14 +139,14 @@ def parse_upstream_stream(chunks: list[dict[str, Any]]) -> NormalizedResponse:
                 reasoning_parts.append(r)
             for tc_delta in delta.get("tool_calls") or []:
                 idx = tc_delta.get("index", 0)
-                acc = tool_calls_acc.setdefault(idx, {"id": "", "name": "", "arguments_raw": ""})
+                acc = tool_calls_acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
                 if tc_delta.get("id"):
                     acc["id"] = tc_delta["id"]
                 fn = tc_delta.get("function") or {}
                 if fn.get("name"):
                     acc["name"] = fn["name"]
                 if isinstance(fn.get("arguments"), str):
-                    acc["arguments_raw"] += fn["arguments"]
+                    acc["arguments"] += fn["arguments"]
             if ch.get("finish_reason"):
                 finish_reason = ch["finish_reason"]
         if chunk.get("usage"):
@@ -173,11 +155,7 @@ def parse_upstream_stream(chunks: list[dict[str, Any]]) -> NormalizedResponse:
     tool_calls: list[ToolCall] = []
     for idx in sorted(tool_calls_acc):
         a = tool_calls_acc[idx]
-        try:
-            arguments = json.loads(a["arguments_raw"]) if a["arguments_raw"] else {}
-        except (json.JSONDecodeError, TypeError):
-            arguments = {}
-        tool_calls.append(ToolCall(id=a["id"], name=a["name"], arguments=arguments, arguments_raw=a["arguments_raw"] or None))
+        tool_calls.append(ToolCall(id=a["id"], name=a["name"], arguments=a["arguments"]))
 
     return NormalizedResponse(
         content="".join(content_parts),
@@ -219,7 +197,7 @@ def from_normalized_response_nonstream(resp: NormalizedResponse, model: str) -> 
             {
                 "index": 0,
                 "message": msg,
-                "finish_reason": resp.finish_reason,
+                "finish_reason": _wire_finish_reason(resp),
             }
         ],
         "usage": {
@@ -230,12 +208,20 @@ def from_normalized_response_nonstream(resp: NormalizedResponse, model: str) -> 
     }
 
 
+def _wire_finish_reason(resp: NormalizedResponse) -> str:
+    """OpenAI requires finish_reason='tool_calls' when tool_calls are present.
+    The adapter may legitimately set 'stop' (model emitted a stop token after
+    the call); patch it here so the wire response is spec-compliant."""
+    if resp.tool_calls and resp.finish_reason == "stop":
+        return "tool_calls"
+    return resp.finish_reason
+
+
 def _tool_call_to_wire(tc: ToolCall) -> dict[str, Any]:
-    args = tc.arguments_raw if tc.arguments_raw is not None else json.dumps(tc.arguments, ensure_ascii=False)
     return {
         "id": tc.id or f"call_{uuid.uuid4().hex[:24]}",
         "type": "function",
-        "function": {"name": tc.name, "arguments": args},
+        "function": {"name": tc.name, "arguments": tc.arguments},
     }
 
 
@@ -273,7 +259,7 @@ async def from_normalized_response_stream(resp: NormalizedResponse, model: str) 
         yield chunk(content_delta)
 
     # Finish
-    yield chunk({}, finish_reason=resp.finish_reason)
+    yield chunk({}, finish_reason=_wire_finish_reason(resp))
 
     # Final usage chunk (OpenAI emits this when stream_options.include_usage=true)
     usage_body = {

@@ -152,7 +152,7 @@ def test_passthrough_completions(upstream):
         assert r.json()["choices"][0]["text"] == "hi from upstream"
         traces = _flush_and_get_traces(gw, "s2")
         assert traces[0]["endpoint"] == "completions"
-        assert traces[0]["content"] == "hi from upstream"
+        assert traces[0]["text"] == "hi from upstream"
 
 
 def test_passthrough_responses(upstream):

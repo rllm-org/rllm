@@ -82,14 +82,19 @@ class MemoryTraceStore:
         if extras is not None:
             self._extras[trace.trace_id] = extras
 
-    async def get_trace(self, trace_id: str) -> TraceRecord | None:
-        return self._traces.get(trace_id)
+    async def get_trace(self, trace_id: str, extras: bool = False) -> TraceRecord | None:
+        t = self._traces.get(trace_id)
+        if t is None:
+            return None
+        update = {"extras": self._decode_extras(trace_id)} if extras else {"extras": None}
+        return t.model_copy(update=update)
 
     async def get_traces(
         self,
         session_id: str,
         since: float | None = None,
         limit: int | None = None,
+        extras: bool = False,
     ) -> list[TraceRecord]:
         results = [t for t in self._traces.values() if t.session_id == session_id]
         if since is not None:
@@ -97,7 +102,17 @@ class MemoryTraceStore:
         results.sort(key=lambda t: t.timestamp)
         if limit is not None:
             results = results[:limit]
-        return results
+        if extras:
+            return [t.model_copy(update={"extras": self._decode_extras(t.trace_id)}) for t in results]
+        return [t.model_copy(update={"extras": None}) for t in results]
+
+    def _decode_extras(self, trace_id: str) -> dict[str, Any]:
+        blob = self._extras.get(trace_id)
+        if blob is None:
+            return {}
+        from rllm_model_gateway.trace import deserialize_extras
+
+        return deserialize_extras(*blob)
 
     async def get_trace_extras(self, trace_id: str) -> tuple[str, bytes] | None:
         return self._extras.get(trace_id)

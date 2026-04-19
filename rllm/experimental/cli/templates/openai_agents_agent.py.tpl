@@ -28,7 +28,7 @@ class {{agent_class}}:
 
     def run(self, task: dict, config: AgentConfig) -> Episode:
         provider = OpenAIProvider(
-            api_key="EMPTY",
+            api_key=config.api_key,
             base_url=config.base_url,
             use_responses=False,
         )

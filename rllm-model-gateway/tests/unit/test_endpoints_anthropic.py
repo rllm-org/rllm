@@ -61,8 +61,7 @@ def test_tool_use_in_assistant_message():
     tc = req.messages[0].tool_calls[0]
     assert tc.id == "toolu_1"
     assert tc.name == "calc"
-    assert tc.arguments == {"x": 5}
-    assert tc.arguments_raw == '{"x": 5}'
+    assert tc.arguments == '{"x": 5}'
 
 
 def test_tool_result_becomes_tool_message():
@@ -110,7 +109,7 @@ def test_parse_upstream_response_round_trip():
     assert resp.content == "Reply"
     assert resp.reasoning == "I think"
     assert len(resp.tool_calls) == 1
-    assert resp.tool_calls[0].arguments == {"a": 1}
+    assert resp.tool_calls[0].arguments == '{"a": 1}'
     assert resp.finish_reason == "tool_calls"
 
 
@@ -126,7 +125,7 @@ def test_outbound_nonstream_emits_blocks():
     resp = NormalizedResponse(
         content="hi",
         reasoning="thinking",
-        tool_calls=[ToolCall(id="toolu_x", name="t", arguments={"k": 1}, arguments_raw='{"k":1}')],
+        tool_calls=[ToolCall(id="toolu_x", name="t", arguments='{"k":1}')],
         finish_reason="tool_calls",
         usage=Usage(prompt_tokens=3, completion_tokens=4),
     )
@@ -156,7 +155,7 @@ def test_parse_upstream_stream_event_accumulation():
     resp = am.parse_upstream_stream(chunks)
     assert resp.content == "Hello world"
     assert len(resp.tool_calls) == 1
-    assert resp.tool_calls[0].arguments == {"a": 1}
+    assert resp.tool_calls[0].arguments == '{"a": 1}'
     assert resp.finish_reason == "tool_calls"
     assert resp.usage.prompt_tokens == 5
     assert resp.usage.completion_tokens == 7
@@ -167,7 +166,7 @@ async def test_outbound_stream_event_order():
     resp = NormalizedResponse(
         content="hi",
         reasoning="t",
-        tool_calls=[ToolCall(id="x", name="t", arguments={}, arguments_raw="{}")],
+        tool_calls=[ToolCall(id="x", name="t", arguments="{}")],
         finish_reason="tool_calls",
     )
     events = []

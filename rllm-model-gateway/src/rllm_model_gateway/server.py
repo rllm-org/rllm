@@ -180,8 +180,9 @@ def create_app(
         session_id: str,
         since: float | None = Query(None),
         limit: int | None = Query(None),
+        include_extras: bool = Query(False),
     ):
-        traces = await store.get_traces(session_id, since=since, limit=limit)
+        traces = await store.get_traces(session_id, since=since, limit=limit, extras=include_extras)
         return [t.model_dump(mode="json") for t in traces]
 
     @app.delete("/sessions/{session_id}")
@@ -192,8 +193,8 @@ def create_app(
     # -- Traces --------------------------------------------------------
 
     @app.get("/traces/{trace_id}")
-    async def get_trace(trace_id: str):
-        trace = await store.get_trace(trace_id)
+    async def get_trace(trace_id: str, include_extras: bool = Query(False)):
+        trace = await store.get_trace(trace_id, extras=include_extras)
         if trace is None:
             return _error(404, f"Trace {trace_id!r} not found")
         return trace.model_dump(mode="json")

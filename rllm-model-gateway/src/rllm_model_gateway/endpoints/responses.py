@@ -31,13 +31,12 @@ PATH = "/v1/responses"
 UPSTREAM_PATH = "/responses"
 
 # Sampling-param keys we do not forward to the adapter.
-_NON_SAMPLING_KEYS = frozenset(
+_RESERVED_KEYS = frozenset(
     {
         "model",
         "input",
         "instructions",
         "tools",
-        "tool_choice",
         "stream",
         "metadata",
         "previous_response_id",
@@ -76,19 +75,20 @@ def to_normalized_request(body: dict[str, Any]) -> NormalizedRequest:
 
     tools = _responses_tools_to_normalized(body.get("tools"))
 
-    sampling = {k: v for k, v in body.items() if k not in _NON_SAMPLING_KEYS}
+    kwargs = {k: v for k, v in body.items() if k not in _RESERVED_KEYS}
     # Translate `max_output_tokens` → `max_tokens` (closer to chat-completions).
-    if "max_output_tokens" in sampling:
-        sampling["max_tokens"] = sampling.pop("max_output_tokens")
+    if "max_output_tokens" in kwargs:
+        kwargs["max_tokens"] = kwargs.pop("max_output_tokens")
 
+    # Lift `reasoning.effort` to `reasoning_effort` at the top level.
     reasoning_cfg = body.get("reasoning") or {}
-    reasoning_effort = reasoning_cfg.get("effort") if isinstance(reasoning_cfg, dict) else None
+    if isinstance(reasoning_cfg, dict) and reasoning_cfg.get("effort") is not None:
+        kwargs["reasoning_effort"] = reasoning_cfg["effort"]
 
     return NormalizedRequest(
         messages=messages or None,
         tools=tools,
-        sampling_params=sampling,
-        reasoning_effort=reasoning_effort,
+        kwargs=kwargs,
     )
 
 
@@ -114,11 +114,9 @@ def _flatten_input_items(items: list[dict[str, Any]]) -> list[Message]:
             out.append(Message(role=role, content=text))
 
         elif itype == "function_call":
-            arguments_raw = item.get("arguments", "")
-            try:
-                arguments = json.loads(arguments_raw) if arguments_raw else {}
-            except (json.JSONDecodeError, TypeError):
-                arguments = {}
+            arguments = item.get("arguments", "")
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments, ensure_ascii=False)
             out.append(
                 Message(
                     role="assistant",
@@ -128,7 +126,6 @@ def _flatten_input_items(items: list[dict[str, Any]]) -> list[Message]:
                             id=item.get("call_id") or item.get("id", ""),
                             name=item.get("name", ""),
                             arguments=arguments,
-                            arguments_raw=arguments_raw if isinstance(arguments_raw, str) else None,
                         )
                     ],
                 )
@@ -225,17 +222,14 @@ def parse_upstream_response(body: dict[str, Any]) -> NormalizedResponse:
                 if isinstance(content, list) and content:
                     reasoning_parts.append(content[0].get("text", ""))
         elif itype == "function_call":
-            arguments_raw = item.get("arguments", "")
-            try:
-                arguments = json.loads(arguments_raw) if arguments_raw else {}
-            except (json.JSONDecodeError, TypeError):
-                arguments = {}
+            arguments = item.get("arguments", "")
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments, ensure_ascii=False)
             tool_calls.append(
                 ToolCall(
                     id=item.get("call_id") or item.get("id", ""),
                     name=item.get("name", ""),
                     arguments=arguments,
-                    arguments_raw=arguments_raw if isinstance(arguments_raw, str) else None,
                 )
             )
 
@@ -284,29 +278,24 @@ def parse_upstream_stream(chunks: list[dict[str, Any]]) -> NormalizedResponse:
             reasoning_parts.append(chunk.get("delta", ""))
         elif ctype == "response.function_call_arguments.delta":
             iid = chunk.get("item_id", "")
-            tc = tool_calls_acc.setdefault(iid, {"id": iid, "name": "", "arguments_raw": ""})
-            tc["arguments_raw"] += chunk.get("delta", "")
+            tc = tool_calls_acc.setdefault(iid, {"id": iid, "name": "", "arguments": ""})
+            tc["arguments"] += chunk.get("delta", "")
         elif ctype == "response.output_item.added":
             item = chunk.get("item") or {}
             if item.get("type") == "function_call":
                 iid = item.get("id", "")
-                tc = tool_calls_acc.setdefault(iid, {"id": iid, "name": "", "arguments_raw": ""})
+                tc = tool_calls_acc.setdefault(iid, {"id": iid, "name": "", "arguments": ""})
                 tc["name"] = item.get("name", "")
                 tc["call_id"] = item.get("call_id", "")
 
     tool_calls: list[ToolCall] = []
     for iid in tool_calls_acc:
         a = tool_calls_acc[iid]
-        try:
-            arguments = json.loads(a["arguments_raw"]) if a["arguments_raw"] else {}
-        except (json.JSONDecodeError, TypeError):
-            arguments = {}
         tool_calls.append(
             ToolCall(
                 id=a.get("call_id") or a["id"] or "",
                 name=a["name"],
-                arguments=arguments,
-                arguments_raw=a["arguments_raw"] or None,
+                arguments=a["arguments"],
             )
         )
 
@@ -364,7 +353,7 @@ def from_normalized_response_nonstream(resp: NormalizedResponse, model: str) -> 
                 "status": "completed",
                 "call_id": tc.id or f"call_{uuid.uuid4().hex[:24]}",
                 "name": tc.name,
-                "arguments": tc.arguments_raw if tc.arguments_raw is not None else json.dumps(tc.arguments, ensure_ascii=False),
+                "arguments": tc.arguments,
             }
         )
 
@@ -549,7 +538,7 @@ async def from_normalized_response_stream(resp: NormalizedResponse, model: str) 
     for tc in resp.tool_calls:
         fc_id = f"fc_{uuid.uuid4().hex}"
         call_id = tc.id or f"call_{uuid.uuid4().hex[:24]}"
-        arguments = tc.arguments_raw if tc.arguments_raw is not None else json.dumps(tc.arguments, ensure_ascii=False)
+        arguments = tc.arguments
         item = {
             "id": fc_id,
             "type": "function_call",

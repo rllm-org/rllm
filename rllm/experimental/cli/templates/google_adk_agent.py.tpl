@@ -31,7 +31,7 @@ class {{agent_class}}:
         model = LiteLlm(
             model=f"openai/{config.model}",
             api_base=config.base_url,
-            api_key="EMPTY",
+            api_key=config.api_key,
         )
 
         agent = ADKAgent(

@@ -24,7 +24,7 @@ from rllm.utils import colorful_print
 from rllm.workflows.workflow import TerminationReason
 
 if TYPE_CHECKING:
-    from rllm_model_gateway.models import TraceRecord
+    from rllm_model_gateway import TraceRecord
 
     from rllm.experimental.engine.gateway_manager import GatewayManager
     from rllm.experimental.eval.types import AgentFlow, Evaluator
@@ -213,6 +213,7 @@ class AgentFlowEngine:
             base_url=session_url,
             model=self.model,
             session_uid=uid,
+            api_key=self.gateway.agent_api_key,
         )
 
         # 3. Run agent flow (prefers arun if available, else run in executor)
@@ -238,7 +239,7 @@ class AgentFlowEngine:
         episode.is_correct = eval_output.is_correct
 
         # 5. Retrieve traces from gateway
-        traces = await self.gateway.aget_traces(uid)
+        traces = await self.gateway.aget_traces(uid, extras=True)
 
         # 6. Enrich episode with token data
         enriched = self._enrich_episode(episode, traces, uid, task)

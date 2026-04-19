@@ -12,12 +12,10 @@ Role = Literal["system", "user", "assistant", "tool", "developer"]
 class ToolCall(BaseModel):
     id: str = ""
     name: str
-    arguments: dict[str, Any] = Field(default_factory=dict)
-    # Original arguments string emitted by the model, unparsed. Matches the
-    # OpenAI chat completions spec (function.arguments is a string that may
-    # be invalid JSON). Anthropic emits a dict directly; we json.dumps it
-    # into arguments_raw on conversion.
-    arguments_raw: str | None = None
+    # JSON string per OpenAI chat completions spec (function.arguments is a
+    # string that may be invalid JSON). Anthropic emits a dict directly; the
+    # anthropic shaper json.dumps it into this string when normalizing.
+    arguments: str = ""
 
 
 class ToolSpec(BaseModel):
@@ -44,9 +42,8 @@ class NormalizedRequest(BaseModel):
     tools: list[ToolSpec] | None = None
     # Completion mode (legacy /v1/completions)
     prompt: str | None = None
-    # Common
-    sampling_params: dict[str, Any] = Field(default_factory=dict)
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    # Additional kwargs (e.g., sampling params, chat template kwargs)
+    kwargs: dict[str, Any] = Field(default_factory=dict)
     # Identifier the adapter can use as a cache key (e.g. for prefix-cache
     # affinity in its own worker pool).
     session_id: str = ""
@@ -64,6 +61,7 @@ FinishReason = Literal["stop", "length", "tool_calls", "content_filter", "error"
 class NormalizedResponse(BaseModel):
     """Adapter → gateway output. Also the response shape stored in TraceRecord."""
 
+    text: str | None = None
     content: str = ""
     reasoning: str | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
