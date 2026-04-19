@@ -143,6 +143,13 @@ def build_mock_vllm_app() -> FastAPI:
             app.state.request_log.append(body)
         return JSONResponse(content=MOCK_RESPONSE)
 
+    @app.post("/tokenize")
+    async def tokenize(request: Request):
+        body = await request.json()
+        with app.state._log_lock:
+            app.state.request_log.append({"_path": "/tokenize", **body})
+        return JSONResponse(content={"tokens": [1, 2, 3, 4, 5], "count": 5, "max_model_len": 4096})
+
     return app
 
 

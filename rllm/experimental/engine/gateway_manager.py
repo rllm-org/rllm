@@ -110,7 +110,7 @@ class GatewayManager:
     def async_client(self) -> AsyncGatewayClient:
         """Async client for runtime operations (sessions, traces)."""
         if self._async_client is None:
-            self._async_client = AsyncGatewayClient(self.gateway_url)
+            self._async_client = AsyncGatewayClient(self.gateway_url, timeout=600.0)
         return self._async_client
 
     # -- Lifecycle -----------------------------------------------------------
@@ -187,7 +187,7 @@ class GatewayManager:
         return await self.async_client.create_session(session_id=session_id, sampling_params=sp or None)
 
     async def aget_traces(self, session_id: str) -> list[TraceRecord]:
-        await self.async_client.flush()
+        await self.async_client.flush(timeout=600.0)
         return await self.async_client.get_session_traces(session_id)
 
     async def adelete_session(self, session_id: str) -> int:

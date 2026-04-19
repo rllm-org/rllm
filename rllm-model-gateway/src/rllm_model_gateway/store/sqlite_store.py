@@ -61,7 +61,7 @@ class SqliteTraceStore:
         if self._conn is None:
             conn = await aiosqlite.connect(self.db_path, timeout=self._busy_timeout_ms / 1000.0)
             for pragma in (
-                "PRAGMA journal_mode=DELETE",
+                "PRAGMA journal_mode=WAL",
                 "PRAGMA synchronous=NORMAL",
                 f"PRAGMA busy_timeout={self._busy_timeout_ms}",
                 "PRAGMA temp_store=MEMORY",
