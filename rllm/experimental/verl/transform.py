@@ -249,10 +249,7 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
         response_ids = torch.tensor(step.model_output.completion_ids, dtype=torch.long)
         if step.response_mask:
             if len(step.response_mask) != len(response_ids):
-                raise ValueError(
-                    f"Step {step_idx} in trajectory {trajectory_id} has mismatched response_mask and completion_ids lengths: "
-                    f"{len(step.response_mask)} vs {len(response_ids)}"
-                )
+                raise ValueError(f"Step {step_idx} in trajectory {trajectory_id} has mismatched response_mask and completion_ids lengths: {len(step.response_mask)} vs {len(response_ids)}")
             mask = torch.tensor(step.response_mask, dtype=torch.float32)
         else:
             mask = torch.ones_like(response_ids, dtype=torch.float32)
