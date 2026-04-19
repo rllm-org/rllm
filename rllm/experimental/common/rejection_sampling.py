@@ -129,6 +129,12 @@ def filter_groups(
             dropped.append(group)
             continue
 
+        # Drop groups where all trajectories have the same reward (zero GRPO advantage)
+        rewards = set(t.reward for t in group.trajectories if t.reward is not None)
+        if len(rewards) <= 1:
+            dropped.append(group)
+            continue
+
         filtered.append(group)
 
     metrics.groups_after_filter += len(filtered)
