@@ -41,8 +41,10 @@ class ChatTemplateParser:
         else:
             return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt)
 
-    def parse_completion(self, completion_ids: list[int]):
-        raise NotImplementedError("ChatTemplateParser does not support parse_completion")
+    def parse_completion(self, completion_ids: list[int]) -> dict:
+        """Default: decode tokens as content, with no reasoning or tool_calls."""
+        content = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
+        return {"content": content, "reasoning": "", "tool_calls": []}
 
     def verify_equivalence(self, messages, verbose=True):
         """Verify that parsing messages together is equivalent to parsing them individually.
@@ -641,10 +643,6 @@ class LlamaChatTemplateParser(ChatTemplateParser):
 
     def parse_tool(self, message):
         return self.user_token + self.tool_response_start_token + message["content"] + self.tool_response_end_token + self.eot_token
-
-    def parse_completion(self, completion_ids):
-        # TODO: add parse_completion for llama
-        raise NotImplementedError("LLamaChatTemplateParser does not support parse_completion")
 
 
 class HarmonyChatTemplateParser(ChatTemplateParser):

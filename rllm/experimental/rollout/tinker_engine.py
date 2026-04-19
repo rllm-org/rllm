@@ -102,6 +102,7 @@ class TinkerEngine(RolloutEngine):
             tool_parser_name=tool_parser_name,
             renderer_name=renderer_name,
             disable_thinking=disable_thinking,
+            **kwargs,
         )
 
         # Tinker's sampling client requires stop sequences. Prefer parser-provided

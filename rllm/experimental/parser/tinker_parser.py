@@ -31,7 +31,7 @@ class TinkerParser:
         self,
         tokenizer,
         renderer_name: str | None = None,
-        **kwargs,
+        **renderer_kwargs,
     ):
         from tinker_cookbook import model_info, renderers
 
@@ -39,8 +39,19 @@ class TinkerParser:
         if renderer_name is None:
             renderer_name = model_info.get_recommended_renderer_name(tokenizer.name_or_path)
         self.renderer = renderers.get_renderer(renderer_name, tokenizer)
+        # tinker's get_renderer() is a fixed-arg factory; apply renderer-specific
+        # kwargs (e.g. strip_thinking_from_history) via setattr after construction.
+        for k, v in renderer_kwargs.items():
+            if not hasattr(self.renderer, k):
+                logger.warning(
+                    "Renderer %r has no attribute %r; ignoring (check chat_template_kwargs)",
+                    type(self.renderer).__name__,
+                    k,
+                )
+                continue
+            setattr(self.renderer, k, v)
         self.stop_sequences: list[int] = self.renderer.get_stop_sequences()
-        logger.info("TinkerParser: using renderer %r", renderer_name)
+        logger.info("TinkerParser: using renderer %r (kwargs=%r)", renderer_name, renderer_kwargs)
 
     def parse(self, messages: list[dict], add_generation_prompt: bool = False, **kwargs) -> str:
         from tinker_cookbook.third_party.openai_compat import (

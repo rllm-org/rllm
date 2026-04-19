@@ -47,9 +47,9 @@ rollout:
     reasoning_parser_name: null  # vllm/sglang only: e.g. "deepseek_r1", "qwen3"
     tool_parser_name: null       # vllm/sglang only: e.g. "deepseek_v3", "qwen3_coder"
     renderer_name: null          # tinker only; auto-detected from model name if null
-    disable_thinking: ${...disable_thinking} # Disable thinking
-    accumulate_reasoning: ${...accumulate_reasoning} # Accumulate reasoning
-    reasoning_effort: medium # low, medium, high
+    disable_thinking: ${...disable_thinking} # rllm only: disable thinking
+    accumulate_reasoning: ${...accumulate_reasoning} # rllm only: accumulate reasoning
+    reasoning_effort: medium # low, medium, high (gpt-oss)
     chat_template: null # path to a custom chat template file
 
 # Trainer Configuration

@@ -34,8 +34,6 @@ def get_chat_parser(
         renderer_name: Name of the Tinker renderer (tinker backend only).
             If None, auto-detects from the model name.
         **kwargs: Additional keyword arguments passed to the backend.
-            For rllm: disable_thinking (bool).
-            For tinker: image_processor.
 
     Returns:
         A parser object with parse() and parse_completion().
