@@ -40,6 +40,7 @@ from rllm.experimental.common import (
 )
 from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.rollout import RolloutEngine, VerlEngine
+from rllm.experimental.verl.metrics import compute_rollout_probs_diff_metrics
 from rllm.experimental.verl import compute_advantage_verl, transform_episodes_to_dataproto, update_dataproto_with_advantages
 
 if TYPE_CHECKING:
@@ -384,22 +385,8 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
             if "rollout_log_probs" in batch.batch:
                 rollout_old_log_probs = batch.batch["rollout_log_probs"]
                 actor_old_log_probs = batch.batch["old_log_probs"]
-                attention_mask = batch.batch["attention_mask"]
-                responses = batch.batch["responses"]
-                response_length = responses.size(1)
-                response_mask = attention_mask[:, -response_length:]
-
-                rollout_probs = torch.exp(rollout_old_log_probs)
-                actor_probs = torch.exp(actor_old_log_probs)
-                rollout_probs_diff = torch.abs(rollout_probs - actor_probs)
-                rollout_probs_diff = torch.masked_select(rollout_probs_diff, response_mask.bool())
-
-                rollout_probs_diff_metrics = {
-                    "training/rollout_probs_diff_max": torch.max(rollout_probs_diff).detach().item(),
-                    "training/rollout_probs_diff_mean": torch.mean(rollout_probs_diff).detach().item(),
-                    "training/rollout_probs_diff_std": torch.std(rollout_probs_diff).detach().item(),
-                }
-                metrics.update(rollout_probs_diff_metrics)
+                response_mask = batch.batch["response_mask"]
+                metrics.update(compute_rollout_probs_diff_metrics(rollout_old_log_probs, actor_old_log_probs, response_mask))
 
         # --- Compute reference log_probs (reuse batch_td) ---
         if self.use_reference_policy:

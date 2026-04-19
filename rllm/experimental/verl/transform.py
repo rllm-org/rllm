@@ -8,6 +8,7 @@ from verl.utils.torch_functional import pad_sequence_to_length
 
 from rllm.agents.agent import Episode, Trajectory, TrajectoryGroup
 from rllm.experimental.rollout import VerlEngine
+from rllm.experimental.verl.collapse import collapse_trajectory_steps
 from rllm.experimental.verl.dataclass import AccumulatedData, ProcessedStepData
 from rllm.workflows.workflow import TerminationReason
 
@@ -212,17 +213,21 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
             "repeat_counts": accumulated.repeat_counts,
         },
     )
-
-
 def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: AccumulatedData) -> int:
-    """Processes a trajectory and returns an AccumulatedData.
+    """Processes a trajectory with prefix-based collapse.
+
+    Steps whose prompt is a cumulative extension of the previous step's
+    (prompt + response) are merged into a single training row. The merged row
+    keeps the earliest prompt and concatenates all response tokens with a mask
+    that is 1 on assistant completion tokens and 0 on gap (observation/template)
+    tokens between turns.
 
     Args:
         trajectory: Trajectory to process.
         task_id: Task identifier corresponding to the episode.
         accumulated: AccumulatedData to process the trajectory into.
     Returns:
-        n_steps: The number of steps in the trajectory.
+        added_steps: The number of rows added to accumulated (after collapse).
     """
     name = trajectory.name
     trajectory_id = f"{task_id}_{name}"
@@ -230,41 +235,15 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
         print(f"Trajectory {trajectory_id} has no steps, skipping")
         return 0
 
-    n_steps = len(trajectory.steps)
-
-    # This corresponds to case when we have `per_step` mode for stepwise advantage computation
-    traj_reward = 0.0 if trajectory.reward is None else trajectory.reward
-
     added_steps = 0
-    for step_idx, step in enumerate(trajectory.steps):
-        if step.model_output is None or step.model_output.prompt_ids is None:
-            logger.warning(f"Step {step_idx} in trajectory {trajectory_id} has no valid model_output, skipping")
-            continue
-        prompt_ids = torch.tensor(step.model_output.prompt_ids, dtype=torch.long)
-        response_ids = torch.tensor(step.model_output.completion_ids, dtype=torch.long)
-        mask = torch.ones_like(response_ids, dtype=torch.long)
-        step_reward = step.reward
-        multi_modal_inputs = step.model_output.multi_modal_inputs or {}
-        step_id = f"{trajectory_id}_step{step_idx}"
-
-        step_data = ProcessedStepData(
-            prompt=prompt_ids,
-            response=response_ids,
-            mask=mask,
-            step_reward=step_reward,
-            step_id=step_id,
-            multi_modal_inputs=multi_modal_inputs,
-            advantage=step.advantage,
-            logprobs=step.model_output.logprobs,
-        )
-
+    for collapsed_step in collapse_trajectory_steps(trajectory, task_id):
         accumulated.add_step(
-            step_data=step_data,
-            trajectory_id=trajectory_id,
-            traj_reward=traj_reward,
-            step_num=n_steps,
-            is_last=step_idx == n_steps - 1,
-            group_role=name,
+            step_data=collapsed_step.step_data,
+            trajectory_id=collapsed_step.trajectory_id,
+            traj_reward=collapsed_step.traj_reward,
+            step_num=collapsed_step.step_num,
+            is_last=collapsed_step.is_last_step,
+            group_role=collapsed_step.group_role,
         )
         added_steps += 1
 
