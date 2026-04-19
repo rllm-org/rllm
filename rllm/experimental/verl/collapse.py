@@ -48,8 +48,13 @@ def collapse_trajectory_steps(trajectory: Trajectory, task_id: str) -> list[Coll
             logger.warning(f"Step {step_idx} in trajectory {trajectory_id} has no valid model_output, skipping")
             continue
 
+        completion_ids = step.model_output.completion_ids
+        if not completion_ids:
+            logger.debug(f"Step {step_idx} in {trajectory_id} has empty completion_ids, skipping")
+            continue
+
         prompt_ids = torch.tensor(step.model_output.prompt_ids, dtype=torch.long)
-        response_ids = torch.tensor(step.model_output.completion_ids, dtype=torch.long)
+        response_ids = torch.tensor(completion_ids, dtype=torch.long)
 
         merged = False
         for i, collapsed_step in enumerate(processed_steps):

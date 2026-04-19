@@ -195,9 +195,15 @@ def visualize_trajectory_last_steps(
         print(_format_token(prompt_str, config.masked_token_style))
         print("----------------")
 
-        # for response string, we simply highlight the last token
-        response_str_prev = abbreviate_string(tokenizer.decode(response_ids[:-1]))
-        response_str_last = tokenizer.decode([response_ids[-1]])
+        # for response string, we simply highlight the last token.
+        # Empty response (e.g. when the rollout returned no completion tokens) would
+        # blow up .decode([response_ids[-1]]); fall back to placeholders instead.
+        if not response_ids:
+            response_str_prev = ""
+            response_str_last = "<empty>"
+        else:
+            response_str_prev = abbreviate_string(tokenizer.decode(response_ids[:-1]))
+            response_str_last = tokenizer.decode([response_ids[-1]])
 
         response_style = config.unmasked_token_style
         response_str_prev = _format_token(response_str_prev, response_style)
