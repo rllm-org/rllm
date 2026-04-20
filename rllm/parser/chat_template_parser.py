@@ -103,7 +103,7 @@ class ChatTemplateParser:
             model_name = tokenizer.name_or_path.lower()
             tokenizer_cls = tokenizer.__class__.__name__.lower()
             logger.info(f"model_name: {model_name}, tokenizer_cls: {tokenizer_cls}")
-            if any(x in model_name for x in ("deepseek", "deepscaler", "deepcoder")) and "llama" in tokenizer_cls:
+            if any(x in model_name for x in ("deepseek", "deepscaler", "deepcoder")) and ("llama" in tokenizer_cls or "distill-qwen" in model_name):
                 if "deepseek-math-v2" in model_name or "deepseek-v3.2-exp" in model_name:
                     logger.info(f"Using DeepSeekV32ExpChatTemplateParser for {tokenizer.name_or_path}")
                     return DeepSeekV32ExpChatTemplateParser(tokenizer, disable_thinking=disable_thinking)

@@ -73,7 +73,7 @@ def test_parser_with_disable_thinking():
     parser = QwenChatTemplateParser(tokenizer, disable_thinking=True)
 
     # Verify that thinking is disabled in the generation prompt
-    assert "<think>\\n\\n</think>\\n\\n" in parser.assistant_token
+    assert "<think>\n\n</think>\n\n" in parser.assistant_token
 
     # Test equivalence check
     assert parser.verify_equivalence(PARSER_TEST_MESSAGES)
