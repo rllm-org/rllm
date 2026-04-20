@@ -26,7 +26,10 @@ class ChatTemplateParser:
         self.generation_prompt = self._get_generation_prompt(tokenizer)
 
     def _get_generation_prompt(self, tokenizer):
-        messages = [{"role": "assistant", "content": ""}]
+        # Some chat templates (e.g. Qwen3.5) reject a lone assistant message,
+        # so prepend a stub user message. It is present in both with_prompt
+        # and without_prompt and cancels out in the slice below.
+        messages = [{"role": "user", "content": ""}, {"role": "assistant", "content": ""}]
 
         with_prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
         without_prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=False, tokenize=False)
