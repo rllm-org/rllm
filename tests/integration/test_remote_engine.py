@@ -49,7 +49,7 @@ def engine(gateway):
     config = RemoteRuntimeConfig(
         enabled=True,
         backend="agentcore",
-        backend_config={
+        agentcore={
             "agent_runtime_arn": AGENT_ARN,
             "s3_bucket": S3_BUCKET,
         },

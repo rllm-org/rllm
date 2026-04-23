@@ -14,7 +14,7 @@ python -m examples.solver_judge_tinker.train_solver_judge_flow_tinker \
     algorithm.grouping_level=trajectory \
     data.max_prompt_length=2048 \
     data.max_response_length=1024 \
-    data.train_batch_size=64 \
+    data.train_batch_size=32 \
     data.val_batch_size=512 \
     trainer.total_epochs=100 \
     trainer.logger=['wandb'] \

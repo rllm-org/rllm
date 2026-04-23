@@ -223,7 +223,44 @@ class ReverseProxy:
             content=raw_body,
             headers=headers,
         )
-        resp = await upstream.__aenter__()
+        # Retry is needed because pooled TCP connections can go stale during the
+        # weight-update idle window: VPC silently drops idle sockets, and the next
+        # request on that socket fails with httpx.ReadError / RemoteProtocolError
+        # ("Server disconnected without sending a response") / ConnectError.
+        # Without retry, these transient failures propagate as failed rollouts and
+        # surface as ASGI exceptions in the agent loop.  The retry uses a fresh
+        # single-use client (no pool) so it cannot hit another stale socket.
+        # retry_client is non-None only when we fell back; event_generator's
+        # finally block closes it after streaming completes.
+        retry_client: httpx.AsyncClient | None = None
+        try:
+            resp = await upstream.__aenter__()
+        except (httpx.ReadError, httpx.ConnectError, httpx.RemoteProtocolError, httpx.TimeoutException) as first_exc:
+            logger.warning(
+                "Connection error to %s (type=%s, msg=%s). Retrying with a fresh connection.",
+                url,
+                type(first_exc).__name__,
+                first_exc,
+            )
+
+            retry_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(timeout=None),
+                limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
+                follow_redirects=True,
+            )
+            retry_upstream = retry_client.stream(
+                method=request.method,
+                url=url,
+                content=raw_body,
+                headers=headers,
+            )
+            try:
+                resp = await retry_upstream.__aenter__()
+                upstream = retry_upstream
+            except Exception:
+                await retry_client.aclose()
+                self.router.release(worker.url)
+                raise
 
         t0 = time.perf_counter()
         chunks: list[dict[str, Any]] = []
@@ -259,6 +296,8 @@ class ReverseProxy:
                     yield line + "\n"
             finally:
                 await upstream.__aexit__(None, None, None)
+                if retry_client is not None:
+                    await retry_client.aclose()
                 self.router.release(worker.url)
 
                 latency_ms = (time.perf_counter() - t0) * 1000

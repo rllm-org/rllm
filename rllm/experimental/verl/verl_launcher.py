@@ -1,3 +1,5 @@
+import logging
+
 import ray
 from omegaconf import DictConfig
 
@@ -7,6 +9,8 @@ from rllm.experimental.verl.verl_backend import VerlBackend
 from rllm.trainer.verl.ray_runtime_env import get_ppo_ray_runtime_env
 from rllm.trainer.verl.train_agent_ppo import TaskRunner as _BaseTaskRunner
 from rllm.workflows.workflow import Workflow
+
+logger = logging.getLogger(__name__)
 
 
 @ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head

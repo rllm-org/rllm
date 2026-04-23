@@ -60,6 +60,8 @@ class RemoteAgentFlowEngine:
         **kwargs,
     ) -> list[Episode]:
         """Submit tasks to remote runtime, gather results, build Episodes from gateway traces."""
+        from tqdm.asyncio import tqdm
+
         if task_ids is None:
             task_ids = [str(uuid.uuid4()) for _ in tasks]
 
@@ -72,7 +74,7 @@ class RemoteAgentFlowEngine:
             task_id_counter[task_id] += 1
             futures.append(self.process_task_with_retry(task, task_id, rollout_idx, idx, is_validation=is_validation))
 
-        for future in asyncio.as_completed(futures):
+        for future in tqdm(asyncio.as_completed(futures), total=len(futures), desc="rollouts"):
             task_id, rollout_idx, idx, episode = await future
             results[idx] = episode
 
@@ -124,6 +126,8 @@ class RemoteAgentFlowEngine:
 
             traces = await self.gateway.aget_traces(session_id)
             episode = _build_episode(traces, result, uid, task)
+            if result.metadata:
+                episode.metadata.update(result.metadata)
             if not result.finished:
                 episode.metadata["error"] = {"message": result.error or "Unknown error"}
 
@@ -185,5 +189,5 @@ def _build_episode(
         is_correct=is_correct,
         trajectories=trajectories,
         metrics=metrics,
-        termination_reason=TerminationReason.ENV_DONE if training_steps else TerminationReason.ERROR,
+        termination_reason=result.termination_reason or TerminationReason.UNKNOWN,
     )

@@ -156,21 +156,32 @@ sdk:
     #   max_retry_attempts: boto3 adaptive retry attempts (default: 5)
     extra: {}
 
-# Remote Runtime Configuration (for agent-in-container runtimes like AgentCore)
+# Remote Runtime Configuration (for agent-in-container runtimes like AgentCore, Harbor)
 remote_runtime:
   enabled: false
-  backend: agentcore
-  backend_config:
+  backend: agentcore   # agentcore | harbor
+  # Per-backend named sub-configs. Only the sub-dict matching `backend` is read.
+  agentcore:
     agent_runtime_arn: ""
     s3_bucket: ""
     tps_limit: 25
+  harbor:
+    agent: mini-swe-agent       # scaffold name (mini-swe-agent | aider | openhands | swe-agent | qwen-coder | ...)
+    environment_type: docker    # docker | modal | daytona | e2b | runloop | gke | apple-container
+    agent_kwargs: {}            # pass-through to harbor's AgentConfig.kwargs (scaffold-specific flags)
+    agent_timeout_multiplier: null
+    verifier_timeout_multiplier: null
+    agent_setup_timeout_multiplier: null
+    environment_build_timeout_multiplier: null
   session_timeout: 300.0
 
 # Gateway Configuration (model gateway for AgentFlow-based training)
 gateway:
   port: 9090
   host: null          # Auto-detects routable IP; set explicitly to override
+  public_url: null    # Public URL for remote agents (e.g. http://<tunnel-host>:9090); defaults to http://<host>:<port>
   db_path: null       # Defaults to temp file
+  sampling_params_priority: session   # "session" | "client" — who wins when both set the same key
 
 # Async Training Configuration
 async_training:

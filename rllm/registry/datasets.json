@@ -22,6 +22,17 @@
       "eval_split": "test",
       "transform": "rllm.data.transforms:math500_transform"
     },
+    "hendrycks_math": {
+      "description": "MATH: Competition mathematics (7.5K train, 5K test across 7 subjects)",
+      "source": "EleutherAI/hendrycks_math",
+      "category": "math",
+      "splits": ["train", "test"],
+      "default_agent": "react",
+      "reward_fn": "math_reward_fn",
+      "eval_split": "test",
+      "aggregate_configs": true,
+      "transform": "rllm.data.transforms:hendrycks_math_transform"
+    },
     "countdown": {
       "description": "Countdown arithmetic puzzle (1K train, 500 test)",
       "source": "predibase/countdown",

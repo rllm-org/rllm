@@ -101,7 +101,10 @@ class AgentFlowFn:
         if self._is_async:
             result = await self._fn(task, config)
         else:
-            result = self._fn(task, config)
+            # Run sync functions in a thread executor so they don't block
+            # the event loop (sync agent flows make blocking HTTP calls).
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, self._fn, task, config)
         return _coerce_to_episode(result, task, self._name)
 
     def __call__(self, task: Task, config: AgentConfig) -> Episode:

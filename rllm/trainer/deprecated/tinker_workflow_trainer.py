@@ -224,7 +224,7 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
         # Update trajectory-level rewards from step-level rewards
         for episode in episodes:
             for trajectory in episode.trajectories:
-                if trajectory.reward == 0.0 and trajectory.steps:
+                if trajectory.reward is None and trajectory.steps:
                     # Compute trajectory reward from step rewards
                     trajectory.reward = sum(step.reward if step.reward is not None else 0.0 for step in trajectory.steps)
 
