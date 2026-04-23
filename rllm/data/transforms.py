@@ -181,6 +181,20 @@ def math500_transform(row: dict) -> dict:
     }
 
 
+def deepscaler_math_transform(row: dict) -> dict:
+    """Transform agentica-org/DeepScaleR-Preview-Dataset row to standard math format.
+
+    Source rows contain ``problem``, ``solution``, and ``answer`` fields; we
+    surface ``problem`` as the question and the pre-extracted ``answer`` as the
+    ground truth.
+    """
+    return {
+        "question": row.get("problem", ""),
+        "ground_truth": row.get("answer", ""),
+        "data_source": "deepscaler_math",
+    }
+
+
 def hendrycks_math_transform(row: dict) -> dict:
     """Transform EleutherAI/hendrycks_math row to standard math format.
 

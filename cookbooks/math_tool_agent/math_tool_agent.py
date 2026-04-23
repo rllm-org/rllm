@@ -7,8 +7,10 @@ training (the gateway handles trace capture).
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
+import math
 import re
 
 from openai import AsyncOpenAI
@@ -33,18 +35,26 @@ Answers given without any prior tool call will be marked wrong.
 4. When you have the final answer, put it in \\boxed{ANSWER} in your response.
 """
 
+_CALCULATOR_DESCRIPTION = (
+    "Evaluate a mathematical expression. Supports operators +, -, *, /, //, ** (power), "
+    "% (modulo), and parentheses. Functions: abs, round, min, max, sum, pow, sqrt, exp, "
+    "log, log2, log10, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, floor, "
+    "ceil, trunc, factorial, gcd, lcm, comb (aka binom), perm, degrees, radians. "
+    "Constants: pi, e, tau."
+)
+
 TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "calculate",
-            "description": "Evaluate an arithmetic expression. Supports +, -, *, /, ** (power), % (modulo), and parentheses.",
+            "description": _CALCULATOR_DESCRIPTION,
             "parameters": {
                 "type": "object",
                 "properties": {
                     "expression": {
                         "type": "string",
-                        "description": "The arithmetic expression to evaluate, e.g. '(3 + 4) * 2'",
+                        "description": "The expression to evaluate, e.g. 'sqrt(64 + 225)' or 'binom(10, 3) * pi'",
                     }
                 },
                 "required": ["expression"],
@@ -54,23 +64,65 @@ TOOLS = [
 ]
 
 
-def _safe_eval(expression: str) -> str:
-    """Safely evaluate an arithmetic expression.
+# Whitelisted names exposed inside _safe_eval. Anything not here raises an error.
+_SAFE_NAMES: dict[str, object] = {
+    # constants
+    "pi": math.pi, "e": math.e, "tau": math.tau, "inf": math.inf,
+    # builtins
+    "abs": abs, "round": round, "min": min, "max": max, "sum": sum, "pow": pow,
+    # math
+    "sqrt": math.sqrt, "exp": math.exp,
+    "log": math.log, "log2": math.log2, "log10": math.log10,
+    "sin": math.sin, "cos": math.cos, "tan": math.tan,
+    "asin": math.asin, "acos": math.acos, "atan": math.atan, "atan2": math.atan2,
+    "sinh": math.sinh, "cosh": math.cosh, "tanh": math.tanh,
+    "floor": math.floor, "ceil": math.ceil, "trunc": math.trunc,
+    "factorial": math.factorial, "gcd": math.gcd, "lcm": math.lcm,
+    "comb": math.comb, "binom": math.comb, "perm": math.perm,
+    "degrees": math.degrees, "radians": math.radians,
+}
 
-    Only digits, operators, parentheses, dots, and whitespace are allowed.
+_ALLOWED_NODES: tuple[type, ...] = (
+    ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant,
+    ast.Name, ast.Load, ast.Call, ast.List, ast.Tuple,
+    # binary operators
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow,
+    # unary operators
+    ast.USub, ast.UAdd,
+)
+
+
+def _safe_eval(expression: str) -> str:
+    """Safely evaluate a mathematical expression.
+
+    Parses the expression into an AST and rejects anything outside a fixed
+    whitelist of node types and names (see ``_SAFE_NAMES``). Attribute access,
+    imports, comparisons, comprehensions, and statements are not allowed.
     """
-    if len(expression) > 100:
+    if len(expression) > 200:
         return "Error: expression too long"
-    allowed = set("0123456789+-*/().  %")
-    if not all(c in allowed for c in expression):
-        return "Error: invalid characters in expression"
     try:
-        result = eval(expression)
-        if isinstance(result, float) and result == int(result):
-            return str(int(result))
-        return str(round(result, 6))
+        tree = ast.parse(expression, mode="eval")
+    except SyntaxError as e:
+        return f"Error: {e.msg}"
+    for node in ast.walk(tree):
+        if not isinstance(node, _ALLOWED_NODES):
+            return f"Error: disallowed syntax ({type(node).__name__})"
+        if isinstance(node, ast.Name) and node.id not in _SAFE_NAMES:
+            return f"Error: unknown name '{node.id}'"
+    try:
+        result = eval(compile(tree, "<expr>", "eval"), {"__builtins__": {}}, _SAFE_NAMES)
     except Exception as e:
         return f"Error: {e}"
+    if isinstance(result, bool):
+        return str(result)
+    if isinstance(result, int):
+        return str(result)
+    if isinstance(result, float):
+        if result == int(result):
+            return str(int(result))
+        return str(round(result, 6))
+    return str(result)
 
 
 def _extract_answer(text: str) -> str:
@@ -144,7 +196,6 @@ async def math_tool_agent(task: Task, config: AgentConfig) -> Episode:
     used_tool = False
 
     for turn in range(MAX_TURNS):
-        logger.info("Task %s turn %d: calling LLM (%d messages)", question[:40], turn, len(messages))
         try:
             response = await client.chat.completions.create(
                 model=config.model,
@@ -165,7 +216,6 @@ async def math_tool_agent(task: Task, config: AgentConfig) -> Episode:
         # Append the assistant message (may include tool_calls)
         assistant_msg = _msg_to_dict(msg)
         messages.append(assistant_msg)
-        logger.info("Task %s turn %d: got %d chars, %d tool calls", question[:40], turn, len(content), len(tool_calls))
 
         # Record this LLM call as a step
         steps.append(
