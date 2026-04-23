@@ -336,7 +336,7 @@ class UnifiedTrainer:
 
         await self.backend.on_train_start(trainer_state)
 
-        if hasattr(self, "_gateway"):
+        if hasattr(self, "_gateway") and self._gateway is not None:
             self._gateway.start(self.backend.rollout_engine)
 
         if self.rllm_config.trainer.get("val_before_train", True):

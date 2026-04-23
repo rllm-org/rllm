@@ -1,6 +1,7 @@
 import uuid
 from typing import cast
 
+import torch
 from omegaconf import DictConfig
 from typing_extensions import override
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager, AsyncLLMServerManager
@@ -77,6 +78,7 @@ class VerlEngine(RolloutEngine):
         input_length = len(token_input)
         application_id = kwargs.pop("application_id", str(uuid.uuid4()))
         enforce_max_prompt_length = kwargs.pop("enforce_max_prompt_length", True)
+        image_data = kwargs.pop("image_data", None)
 
         if enforce_max_prompt_length and input_length > self.max_prompt_length:
             raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
@@ -87,7 +89,7 @@ class VerlEngine(RolloutEngine):
         # starting from verl 0.7.0, we can pass in per-turn max_tokens into the sampling_params
         sampling_params["max_tokens"] = max_tokens
 
-        token_output = await self.server_manager.generate(request_id=application_id, prompt_ids=token_input, sampling_params=sampling_params)
+        token_output = await self.server_manager.generate(request_id=application_id, prompt_ids=token_input, image_data=image_data, sampling_params=sampling_params)
         return token_output
 
     @override
@@ -108,15 +110,19 @@ class VerlEngine(RolloutEngine):
                     f"Multimodal input detected but {type(self.chat_parser).__name__} does not implement process_image_data(); use parser_backend='rllm', 'vllm', or 'sglang' for multimodal training."
                 )
             image_data = self.chat_parser.process_image_data(normalized)  # list[PIL.Image.Image]
-            model_inputs = self.processor(text=[prompt], images=image_data)
-            prompt_ids = model_inputs.pop("input_ids")[0]  # list[int]
+            model_inputs = self.processor(text=[prompt], images=image_data, return_tensors="pt")
+            prompt_ids = model_inputs.pop("input_ids")[0].tolist()  # list[int]
             model_inputs.pop("attention_mask")
             multi_modal_inputs = dict(model_inputs)
+            image_grid_thw = multi_modal_inputs.get("image_grid_thw")
+            if image_grid_thw is not None:
+                multi_modal_inputs["images_seqlens"] = torch.repeat_interleave(image_grid_thw[:, 1] * image_grid_thw[:, 2], image_grid_thw[:, 0])
         else:
+            image_data = None
             multi_modal_inputs = None
             prompt_ids = request_prompt_ids
 
-        token_output: TokenOutput = await self.get_token_output_from_token_input(token_input=request_prompt_ids, **kwargs)
+        token_output: TokenOutput = await self.get_token_output_from_token_input(token_input=request_prompt_ids, image_data=image_data, **kwargs)
         return self.assemble_model_output(token_input=prompt_ids, token_output=token_output, multi_modal_inputs=multi_modal_inputs)
 
     @override
