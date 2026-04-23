@@ -1,9 +1,7 @@
 set -x
 
-export TRITON_CACHE_DIR=/tmp/triton_cache
-
 python3 -m examples.countdown.train_countdown \
-    data.train_batch_size=32 \
+    data.train_batch_size=64 \
     data.val_batch_size=1024 \
     data.max_prompt_length=2048 \
     data.max_response_length=1024 \
@@ -13,7 +11,7 @@ python3 -m examples.countdown.train_countdown \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=32768 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=64 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
@@ -59,7 +57,5 @@ python3 -m examples.countdown.train_countdown \
     trainer.test_freq=10 \
     trainer.default_hdfs_dir=null \
     trainer.total_epochs=1 \
-    trainer.total_training_steps=100 \
     rllm.workflow.use_workflow=True \
-    rllm.workflow.n_parallel_tasks=256 \
-    rllm.workflow.retry_limit=1
+    rllm.workflow.n_parallel_tasks=256

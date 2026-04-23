@@ -28,7 +28,10 @@ rollout:
   n_gpus_per_node: 8
 
 async_training:
-  partial_rollout: True
+  partial_rollout: False
 
 rllm:
   backend: verl
+  algorithm:
+    rollout_correction:
+      bypass_mode: False

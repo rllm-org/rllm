@@ -172,7 +172,7 @@ class RolloutCorrectionConfig:
     """
 
     tis_mode: str | None = None
-    bypass_mode: bool = False
+    bypass_mode: bool | None = None
     tis_cap: float = 5.0
     rs_mode: str | None = None
     rs_threshold: str | float | None = None
@@ -240,7 +240,7 @@ class AlgorithmConfig:
         rc_section = algo.get("rollout_correction", {})
         rollout_correction = RolloutCorrectionConfig(
             tis_mode=rc_section.get("tis_mode", None),
-            bypass_mode=rc_section.get("bypass_mode", False),
+            bypass_mode=rc_section.get("bypass_mode", None),
             tis_cap=rc_section.get("tis_cap", 2.0),
             rs_mode=rc_section.get("rs_mode", None),
             rs_threshold=rc_section.get("rs_threshold", None),

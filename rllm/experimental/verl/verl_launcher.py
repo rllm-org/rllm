@@ -7,14 +7,14 @@ from rllm.data import Dataset
 from rllm.experimental.unified_trainer import TrainerLauncher, UnifiedTrainer
 from rllm.experimental.verl.verl_backend import VerlBackend
 from rllm.trainer.verl.ray_runtime_env import get_ppo_ray_runtime_env
-from rllm.trainer.verl.train_agent_ppo import TaskRunner as _BaseTaskRunner
+from rllm.trainer.verl.train_agent_ppo import TaskRunner
 from rllm.workflows.workflow import Workflow
 
 logger = logging.getLogger(__name__)
 
 
 @ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head
-class VerlTaskRunner(_BaseTaskRunner):
+class VerlTaskRunner(TaskRunner):
     """Ray remote class for executing training with the unified trainer."""
 
     def run(self, config, workflow_class: type[Workflow], workflow_args: dict, **kwargs):  # type: ignore

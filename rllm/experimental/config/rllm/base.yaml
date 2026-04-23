@@ -76,7 +76,7 @@ algorithm:
   router_replay: false    # Router Replay (R3): replay MoE expert routing from inference during training
   mask_truncated_samples: ${..mask_truncated_samples}  # Mask truncated samples
   rollout_correction:
-    bypass_mode: False    # true = pi_old = pi_rollout, false = pi_old is computed from the model
+    bypass_mode: null     # true = pi_old = pi_rollout, false = pi_old is computed (null = backend default)
     tis_mode: null        # null = disabled, "token" or "sequence" = TIS importance sampling level
     tis_cap: 2.0          # Upper clamp on TIS importance weight
     rs_mode: null         # null = disabled; token_k{1,2,3} / seq_sum_k{1,2,3} / seq_mean_k{1,2,3} / seq_max_k{2,3}, comma-chained

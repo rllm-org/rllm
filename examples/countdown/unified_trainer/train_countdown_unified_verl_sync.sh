@@ -1,7 +1,5 @@
 set -x
 
-export TRITON_CACHE_DIR=/tmp/triton_cache
-
 python -m examples.countdown.unified_trainer.train_countdown_unified_verl \
     rllm/backend=verl \
     actor_rollout_ref.model.path=Qwen/Qwen3-0.6B \
