@@ -11,7 +11,7 @@ import json
 import logging
 import re
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 import rllm
 from rllm.experimental.eval.types import AgentConfig, Task
@@ -129,9 +129,9 @@ def _msg_to_dict(msg) -> dict:
 
 
 @rllm.rollout(name="math-tool-agent")
-def math_tool_agent(task: Task, config: AgentConfig) -> Episode:
+async def math_tool_agent(task: Task, config: AgentConfig) -> Episode:
     """Multi-turn agent that solves math problems using a calculator tool."""
-    client = OpenAI(base_url=config.base_url, api_key="EMPTY")
+    client = AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")
     question = task.data["question"]
 
     messages: list[dict] = [
@@ -146,7 +146,7 @@ def math_tool_agent(task: Task, config: AgentConfig) -> Episode:
     for turn in range(MAX_TURNS):
         logger.info("Task %s turn %d: calling LLM (%d messages)", question[:40], turn, len(messages))
         try:
-            response = client.chat.completions.create(
+            response = await client.chat.completions.create(
                 model=config.model,
                 messages=messages,
                 tools=TOOLS,

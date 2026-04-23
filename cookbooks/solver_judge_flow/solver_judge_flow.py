@@ -7,10 +7,10 @@ for eval and training (the gateway handles trace capture).
 
 from __future__ import annotations
 
+import asyncio
 import re
-from concurrent.futures import ThreadPoolExecutor
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 import rllm
 from rllm.experimental.eval.types import AgentConfig, Task
@@ -20,18 +20,18 @@ N_SOLUTIONS = 2
 
 
 @rllm.rollout(name="solver-judge")
-def solver_judge_flow(task: Task, config: AgentConfig) -> Episode:
+async def solver_judge_flow(task: Task, config: AgentConfig) -> Episode:
     """AgentFlow: solver generates N solutions, judge picks the best."""
     data = task.data
-    client = OpenAI(base_url=config.base_url, api_key="EMPTY")
+    client = AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")
     problem = data.get("question", "")
 
     # Step 1: Solver generates N solutions in parallel
-    solver_trajectories = _generate_solutions(client, config.model, problem)
+    solver_trajectories = await _generate_solutions(client, config.model, problem)
 
     # Step 2: Judge selects the best solution
     solutions = [t.steps[0].action for t in solver_trajectories]
-    judge_trajectory = _judge_solutions(client, config.model, problem, solutions)
+    judge_trajectory = await _judge_solutions(client, config.model, problem, solutions)
 
     selected = judge_trajectory.steps[0].action
     return Episode(
@@ -40,12 +40,10 @@ def solver_judge_flow(task: Task, config: AgentConfig) -> Episode:
     )
 
 
-def _generate_solutions(client: OpenAI, model: str, problem: str) -> list[Trajectory]:
-    """Generate N solutions in parallel using threads."""
-
-    def _solve() -> Trajectory:
+async def _generate_solutions(client: AsyncOpenAI, model: str, problem: str) -> list[Trajectory]:
+    async def _solve() -> Trajectory:
         messages = [{"role": "user", "content": f"{problem}. Output the final answer within <answer>...</answer>"}]
-        response = client.chat.completions.create(
+        response = await client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=1,
@@ -64,15 +62,13 @@ def _generate_solutions(client: OpenAI, model: str, problem: str) -> list[Trajec
             ],
         )
 
-    with ThreadPoolExecutor(max_workers=N_SOLUTIONS) as pool:
-        futures = [pool.submit(_solve) for _ in range(N_SOLUTIONS)]
-        return [f.result() for f in futures]
+    return await asyncio.gather(*(_solve() for _ in range(N_SOLUTIONS)))
 
 
-def _judge_solutions(client: OpenAI, model: str, problem: str, solutions: list[str]) -> Trajectory:
+async def _judge_solutions(client: AsyncOpenAI, model: str, problem: str, solutions: list[str]) -> Trajectory:
     prompt = _create_judge_prompt(problem, solutions)
     messages = [{"role": "user", "content": prompt}]
-    response = client.chat.completions.create(
+    response = await client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=1,
