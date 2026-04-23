@@ -40,7 +40,7 @@ from rllm.experimental.common import (
 )
 from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.rollout import RolloutEngine, VerlEngine
-from rllm.experimental.verl.metrics import compute_rollout_probs_diff_metrics
+from rllm.experimental.verl.metrics import calculate_debug_metrics_compat
 from rllm.experimental.verl import compute_advantage_verl, transform_episodes_to_dataproto, update_dataproto_with_advantages
 
 if TYPE_CHECKING:
@@ -383,13 +383,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
 
             # Compute rollout log prob diff if available
             if "rollout_log_probs" in batch.batch:
-                metrics.update(
-                    compute_rollout_probs_diff_metrics(
-                        rollout_log_probs=batch.batch["rollout_log_probs"],
-                        actor_log_probs=batch.batch["old_log_probs"],
-                        response_mask=batch.batch["response_mask"],
-                    )
-                )
+                metrics.update(calculate_debug_metrics_compat(batch))
 
         # --- Compute reference log_probs (reuse batch_td) ---
         if self.use_reference_policy:

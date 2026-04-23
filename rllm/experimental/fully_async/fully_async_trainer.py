@@ -32,6 +32,7 @@ from verl.utils.debug import marked_timer
 
 from rllm.experimental.fully_async.message_queue import MessageQueueClient
 from rllm.experimental.fully_async.metric_utils import MetricsAggregator, ValidateMetrics
+from rllm.experimental.verl.metrics import calculate_debug_metrics_compat
 from rllm.experimental.fully_async.utils import (
     assemble_batch_from_trajectory_group_ls,
     compute_grpo_outcome_advantage,
@@ -540,9 +541,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 batch = batch.union(old_log_prob)
                 if "rollout_log_probs" in batch.batch.keys():
                     # TODO: we may want to add diff of probs too.
-                    from verl.utils.debug.metrics import calculate_debug_metrics
-
-                    metrics.update(calculate_debug_metrics(batch))
+                    metrics.update(calculate_debug_metrics_compat(batch))
                 return batch
 
             async_training = self.config.get("async_training", None)

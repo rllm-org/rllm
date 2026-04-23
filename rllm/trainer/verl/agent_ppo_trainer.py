@@ -28,7 +28,7 @@ from verl.utils.debug import marked_timer
 from verl.utils.metric import reduce_metrics
 
 from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
-from rllm.experimental.verl.metrics import compute_rollout_probs_diff_metrics
+from rllm.experimental.verl.metrics import calculate_debug_metrics_compat
 
 
 class AgentPPOTrainer(RayPPOTrainer):
@@ -328,13 +328,7 @@ class AgentPPOTrainer(RayPPOTrainer):
 
                             if "rollout_log_probs" in batch.batch.keys():
                                 # TODO: we may want to add diff of probs too.
-                                metrics.update(
-                                    compute_rollout_probs_diff_metrics(
-                                        rollout_log_probs=batch.batch["rollout_log_probs"],
-                                        actor_log_probs=batch.batch["old_log_probs"],
-                                        response_mask=batch.batch["response_mask"],
-                                    )
-                                )
+                                metrics.update(calculate_debug_metrics_compat(batch))
 
                         if self.use_reference_policy:
                             # compute reference log_prob
