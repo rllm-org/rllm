@@ -17,7 +17,7 @@ python -u train.py \
     algorithm.adv_estimator=grpo \
     algorithm.norm_adv_by_std_in_grpo=true \
     rllm.algorithm.use_rllm=true \
-    data.train_batch_size=64 \
+    data.train_batch_size=32 \
     data.val_batch_size=256 \
     data.max_prompt_length=4096 \
     data.max_response_length=2048 \
@@ -40,8 +40,8 @@ python -u train.py \
     actor_rollout_ref.rollout.enforce_eager=False \
     +actor_rollout_ref.rollout.max_model_len=8192 \
     actor_rollout_ref.rollout.temperature=1.0 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
-    actor_rollout_ref.rollout.n=8 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
+    actor_rollout_ref.rollout.n=4 \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
@@ -57,5 +57,4 @@ python -u train.py \
     trainer.total_epochs=1 \
     trainer.default_hdfs_dir=null \
     trainer.resume_mode=disable \
-    rllm.workflow.n_parallel_tasks=32 \
     "$@"

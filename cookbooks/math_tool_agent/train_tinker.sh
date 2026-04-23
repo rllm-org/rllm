@@ -14,8 +14,8 @@ python -u train.py \
     rllm/backend=tinker \
     model.name=Qwen/Qwen3-4B-Instruct-2507 \
     model.lora_rank=32 \
-    training.group_size=8 \
-    rllm.workflow.n_parallel_tasks=32 \
+    training.group_size=4 \
+    data.train_batch_size=32 \
     rllm.trainer.total_epochs=1 \
     rllm.trainer.test_freq=5 \
     rllm.trainer.project_name=math_tool_agent \
