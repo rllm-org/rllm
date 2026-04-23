@@ -154,6 +154,14 @@ class AgentFlowEngine:
         async with self._semaphore:
             for retry_attempt in range(1, self.retry_limit + 1):
                 uid = f"{task_id}:{rollout_idx}"
+                # Clear any traces from a prior failed attempt so the gateway
+                # doesn't mix old attempt's traces with the new attempt's steps
+                # (positional match in _enrich_episode would then corrupt data).
+                if retry_attempt > 1:
+                    try:
+                        await self.gateway.adelete_session(uid)
+                    except Exception as cleanup_err:
+                        logger.warning("[%s] failed to clear prior traces before retry: %s", uid, cleanup_err)
                 try:
                     episode = await self._run_single(task, uid, is_validation=is_validation)
                     episode.id = uid
@@ -272,10 +280,35 @@ class AgentFlowEngine:
         """
         if not traces:
             logger.warning("[%s] No traces found — returning episode without token data", uid)
-            return episode
+            # Coerce to the training Trajectory/Episode subclass so downstream
+            # pydantic validators (e.g. TrajectoryGroup.trajectories) accept
+            # instances produced by agents that imported from rllm.types.
+            return Episode(
+                id=episode.id,
+                task=episode.task,
+                is_correct=episode.is_correct,
+                termination_reason=episode.termination_reason,
+                trajectories=[
+                    t if isinstance(t, Trajectory) else Trajectory(**t.model_dump())
+                    for t in episode.trajectories
+                ],
+                metrics=episode.metrics,
+                metadata=episode.metadata,
+                artifacts=episode.artifacts,
+            )
 
         # Convert all traces to training steps
         training_steps = [trace_record_to_step(t) for t in traces]
+
+        # Diagnostic: flag token-id problems at the earliest point we can see them.
+        n_agent_steps = sum(len(t.steps) for t in episode.trajectories)
+        empty_prompt = sum(1 for s in training_steps if not s.model_output.prompt_ids)
+        empty_compl = sum(1 for s in training_steps if not s.model_output.completion_ids)
+        if empty_prompt or empty_compl or len(training_steps) != n_agent_steps:
+            logger.warning(
+                "[%s] enrich mismatch: traces=%d agent_steps=%d empty_prompt_ids=%d empty_completion_ids=%d",
+                uid, len(training_steps), n_agent_steps, empty_prompt, empty_compl,
+            )
 
         # Build enriched trajectories
         enriched_trajectories: list[Trajectory] = []
