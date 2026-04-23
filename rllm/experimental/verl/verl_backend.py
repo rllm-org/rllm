@@ -288,38 +288,61 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         batch = batch.select_idxs(non_pad_step_indices)  # This batch only has non_pad steps
         return batch
 
-    def _get_dp_world_size(self) -> int | None:
-        """Compute the LCM of all worker group world sizes for DP splitting."""
+    def _get_dp_size(self, worker_group, mesh_name: str) -> int:
+        """Query actual DP size for a worker group mesh via dispatch info.
 
-        world_sizes = []
+        Mirrors ``RayPPOTrainer._get_dp_size``: the dispatch-info mapping
+        assigns a dp_rank to each global worker rank, so dp_size is
+        ``max(dp_rank_mapping) + 1``.
+        """
+        if mesh_name not in worker_group._dispatch_info:
+            worker_group._dispatch_info[mesh_name] = worker_group._query_dispatch_info(mesh_name)
+        return max(worker_group._dispatch_info[mesh_name]) + 1
+
+    def _get_aggregate_dp_size(self) -> int | None:
+        """Compute the LCM of DP sizes across all active worker-group meshes.
+
+        Uses the per-mesh dp_size queried from dispatch info, not the
+        worker_group ``world_size``.  They differ when TP/PP/CP > 1.
+        """
+        dp_sizes: list[int] = []
         if self.use_critic and self.critic_wg.world_size != 0:
-            world_sizes.append(self.critic_wg.world_size)
+            dp_sizes.append(self._get_dp_size(self.critic_wg, "train"))
         if self.use_reference_policy and self.ref_policy_wg.world_size != 0:
-            world_sizes.append(self.ref_policy_wg.world_size)
+            dp_sizes.append(self._get_dp_size(self.ref_policy_wg, "ref"))
         if self.use_rm and self.rm_wg.world_size != 0:
-            world_sizes.append(self.rm_wg.world_size)
+            dp_sizes.append(self._get_dp_size(self.rm_wg, "train"))
         if self.hybrid_engine:
             if self.actor_rollout_wg.world_size != 0:
-                world_sizes.append(self.actor_rollout_wg.world_size)
+                dp_sizes.append(self._get_dp_size(self.actor_rollout_wg, "actor"))
         else:
             if hasattr(self, "actor_wg") and self.actor_wg.world_size != 0:
-                world_sizes.append(self.actor_wg.world_size)
+                dp_sizes.append(self._get_dp_size(self.actor_wg, "actor"))
             if hasattr(self, "rollout_wg") and self.rollout_wg.world_size != 0:
-                world_sizes.append(self.rollout_wg.world_size)
-        if not world_sizes:
+                dp_sizes.append(self._get_dp_size(self.rollout_wg, "actor"))
+        if not dp_sizes:
             return None
-        return reduce(math.lcm, world_sizes)
+        return reduce(math.lcm, dp_sizes)
 
     def _pad_dataproto_to_world_size(self, batch: DataProto) -> DataProto:
         from verl.protocol import pad_dataproto_to_divisor
 
-        world_size = self._get_dp_world_size()
-        if world_size is None:
+        dp_size = self._get_aggregate_dp_size()
+        if dp_size is None:
             return batch
+
+        # Also account for mini-batch divisibility required by make_iterator
+        # in the new EngineWorker path. train_mini_batch needs:
+        #   batch_per_gpu % (ppo_mini_batch_size * rollout_n / dp_size) == 0
+        # i.e. globally: batch_size % (ppo_mini_batch_size * rollout_n) == 0
+        rollout_n = self.config.actor_rollout_ref.rollout.n
+        ppo_mbs = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+        mini_batch_global = ppo_mbs * rollout_n
+        divisor = math.lcm(dp_size, mini_batch_global)
 
         batch = self._remove_padding(batch)  # Remove any padded steps from the batch (just in case)
         original_batch_size = batch.batch["prompts"].shape[0]
-        batch, pad_size = pad_dataproto_to_divisor(batch, world_size)
+        batch, pad_size = pad_dataproto_to_divisor(batch, divisor)
 
         # for the padded dataproto, make the traj mask to 0. is_last_step also False
         pad_start, pad_end = original_batch_size, original_batch_size + pad_size
