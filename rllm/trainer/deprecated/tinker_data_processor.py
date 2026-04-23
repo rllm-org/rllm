@@ -56,6 +56,8 @@ class TinkerAdvantageComputer:
 
             mean_reward = sum(valid_group_rewards) / len(valid_group_rewards)
             std_reward = np.std(valid_group_rewards)
+            if std_reward == 0.0:
+                std_reward = 1.0
             return mean_reward, float(std_reward)
 
         valid_group_rewards = [r for r in group_rewards if r is not None]

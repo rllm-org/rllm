@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Train solver-judge via train.py with Hydra overrides.
+# Train the math tool agent via train.py with Hydra overrides.
 #
 # Prerequisites:
 #   1. Install rllm with tinker extras:  uv pip install -e ".[tinker]"
-#   2. Install this cookbook:             uv pip install -e cookbooks/solver_judge_flow
-#   3. Pull the dataset:                 rllm dataset pull countdown
+#   2. Install this cookbook:             uv pip install --no-deps -e cookbooks/math_tool_agent
+#   3. Pull the datasets:                rllm dataset pull hendrycks_math && rllm dataset pull math500
 #
 # To enable UI logging, append: rllm.trainer.logger=[console,ui]
 
@@ -15,10 +15,10 @@ python -u train.py \
     model.name=Qwen/Qwen3-4B-Instruct-2507 \
     model.lora_rank=32 \
     training.group_size=4 \
-    data.max_response_length=1024 \
+    data.train_batch_size=32 \
     rllm.trainer.total_epochs=1 \
     rllm.trainer.test_freq=5 \
-    rllm.trainer.project_name=solver_judge \
-    rllm.trainer.experiment_name=qwen3-4b \
+    rllm.trainer.project_name=math_tool_agent \
+    rllm.trainer.experiment_name=qwen3-4b-instruct \
     rllm.trainer.logger=[console,ui] \
     "$@"

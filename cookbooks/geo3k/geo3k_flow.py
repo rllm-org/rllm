@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 import logging
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 import rllm
 from rllm.experimental.eval.types import AgentConfig, Task
@@ -28,10 +28,10 @@ For example: The answer is \\boxed{42}."""
 
 
 @rllm.rollout
-def geo3k_flow(task: Task, config: AgentConfig) -> Episode:
+async def geo3k_flow(task: Task, config: AgentConfig) -> Episode:
     """Single-turn VLM geometry solver."""
     data = task.data
-    client = OpenAI(base_url=config.base_url, api_key="EMPTY")
+    client = AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")
     question = data.get("question", "")
     images = data.get("images", [])
 
@@ -44,7 +44,7 @@ def geo3k_flow(task: Task, config: AgentConfig) -> Episode:
 
     response_text = ""
     try:
-        response = client.chat.completions.create(
+        response = await client.chat.completions.create(
             model=config.model,
             messages=messages,
             temperature=0.6,

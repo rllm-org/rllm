@@ -111,6 +111,7 @@ class SolverJudgeWorkflow(Workflow):
             solutions.append(solution)
             reward = self.reward_function(task, solution).reward
             traj.steps[0].reward = reward
+            traj.reward = reward
 
         # Step 2: Judge selects the best solution
         judge_trajectory = await self.judge.judge_solutions(problem, solutions)
@@ -119,6 +120,7 @@ class SolverJudgeWorkflow(Workflow):
         # Evaluate the selected solution
         reward_result = self.reward_function(task, selected_solution)
         judge_trajectory.steps[0].reward = reward_result.reward
+        judge_trajectory.reward = reward_result.reward
         is_correct = reward_result.is_correct
 
         # Compute metrics
