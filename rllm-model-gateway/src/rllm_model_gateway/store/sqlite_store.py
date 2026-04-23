@@ -27,7 +27,8 @@ class SqliteTraceStore:
     Features:
     - Junction table for session_id ↔ trace_id mapping
     - Composite indexes for fast session-scoped queries
-    - DELETE journal mode for NFS compatibility (not WAL)
+    - WAL journal mode for faster local-disk read/write concurrency
+    - Checkpoint-on-close to keep WAL growth bounded after long runs
     """
 
     def __init__(self, db_path: str | None = None) -> None:
@@ -61,7 +62,7 @@ class SqliteTraceStore:
         if self._conn is None:
             conn = await aiosqlite.connect(self.db_path, timeout=self._busy_timeout_ms / 1000.0)
             for pragma in (
-                "PRAGMA journal_mode=DELETE",
+                "PRAGMA journal_mode=WAL",
                 "PRAGMA synchronous=NORMAL",
                 f"PRAGMA busy_timeout={self._busy_timeout_ms}",
                 "PRAGMA temp_store=MEMORY",
@@ -101,8 +102,9 @@ class SqliteTraceStore:
         return self._conn
 
     async def close(self) -> None:
-        """Close the persistent connection."""
+        """Close the persistent connection and checkpoint WAL state."""
         if self._conn is not None:
+            await self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             await self._conn.close()
             self._conn = None
 
