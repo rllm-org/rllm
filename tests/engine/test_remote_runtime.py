@@ -27,7 +27,7 @@ def _make_runtime() -> AgentCoreRuntime:
     config = RemoteRuntimeConfig(
         enabled=True,
         backend="agentcore",
-        backend_config={
+        agentcore={
             "agent_runtime_arn": "arn:aws:bedrock:us-east-1:123456789:agent-runtime/test",
             "s3_bucket": "test-bucket",
         },

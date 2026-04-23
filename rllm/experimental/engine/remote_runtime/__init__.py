@@ -30,6 +30,16 @@ def create_remote_runtime(
 
         return AgentCoreRuntime(config, exp_id=exp_id, model_id=model_id)
 
+    if config.backend == "harbor":
+        from rllm.experimental.engine.remote_runtime.harbor_runtime import (
+            HarborRuntime,
+        )
+
+        # HarborRuntime doesn't use exp_id or model_id — the gateway pins the
+        # served model name via its own ``model`` config (auto-pulled from
+        # ``config.model.name`` by GatewayManager).
+        return HarborRuntime(config)
+
     raise ValueError(f"Unknown remote runtime backend: {config.backend!r}")
 
 

@@ -21,7 +21,7 @@ def _make_runtime() -> AgentCoreRuntime:
     config = RemoteRuntimeConfig(
         enabled=True,
         backend="agentcore",
-        backend_config={
+        agentcore={
             "agent_runtime_arn": AGENT_ARN,
             "s3_bucket": S3_BUCKET,
         },
@@ -57,7 +57,7 @@ class TestSingleTask:
 
         assert len(results) == 1
         result = results[0]
-        assert result.success is True
+        assert result.finished is True
         assert result.reward is not None
         assert result.elapsed > 0
         runtime.shutdown()
@@ -96,5 +96,5 @@ class TestTimeoutHandling:
         results = await runtime.execute_tasks([sub], timeout=0.01)
 
         assert len(results) == 1
-        assert results[0].success is False
+        assert results[0].finished is False
         runtime.shutdown()
