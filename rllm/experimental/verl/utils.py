@@ -126,10 +126,7 @@ def save_checkpoint(
     print(f"local_global_step_folder: {local_global_step_folder}")
 
     actor_local_path = os.path.join(local_global_step_folder, "actor")
-    actor_remote_path = (
-        None if config.trainer.default_hdfs_dir is None
-        else os.path.join(config.trainer.default_hdfs_dir, f"global_step_{global_steps}", "actor")
-    )
+    actor_remote_path = None if config.trainer.default_hdfs_dir is None else os.path.join(config.trainer.default_hdfs_dir, f"global_step_{global_steps}", "actor")
 
     remove_previous = config.trainer.get("remove_previous_ckpt_in_save", False)
     if remove_previous:
@@ -238,11 +235,11 @@ def balance_batch(
         seqlen_list = global_seqlen_lst.tolist()
         num_groups = len(set(uid_list))
         if num_groups % dp_size != 0:
-            raise ValueError(
-                f"PrefixGrouper with balance_batch requires num_uid_groups ({num_groups}) % dp_size ({dp_size}) == 0."
-            )
+            raise ValueError(f"PrefixGrouper with balance_batch requires num_uid_groups ({num_groups}) % dp_size ({dp_size}) == 0.")
         global_partition_lst = get_group_balanced_partitions(
-            seqlen_list=seqlen_list, uid_list=uid_list, k_partitions=dp_size,
+            seqlen_list=seqlen_list,
+            uid_list=uid_list,
+            k_partitions=dp_size,
         )
     else:
         global_partition_lst = get_seqlen_balanced_partitions(workload_lst, k_partitions=dp_size, equal_size=True)
@@ -256,21 +253,21 @@ def balance_batch(
     global_idx = torch.tensor([j for partition in global_partition_lst for j in partition])
     batch.reorder(global_idx)
     global_balance_stats = log_seqlen_unbalance(
-        seqlen_list=global_seqlen_lst.tolist(), partitions=global_partition_lst, prefix=logging_prefix,
+        seqlen_list=global_seqlen_lst.tolist(),
+        partitions=global_partition_lst,
+        prefix=logging_prefix,
     )
     metrics.update(global_balance_stats)
 
 
-def start_profiling(global_steps, actor_rollout_wg, ref_policy_wg=None,
-                    use_reference_policy=False) -> None:
+def start_profiling(global_steps, actor_rollout_wg, ref_policy_wg=None, use_reference_policy=False) -> None:
     """Start profiling for all worker groups."""
     actor_rollout_wg.start_profile(role="e2e", profile_step=global_steps)
     if use_reference_policy and ref_policy_wg is not None:
         ref_policy_wg.start_profile(profile_step=global_steps)
 
 
-def stop_profiling(actor_rollout_wg, ref_policy_wg=None,
-                   use_reference_policy=False) -> None:
+def stop_profiling(actor_rollout_wg, ref_policy_wg=None, use_reference_policy=False) -> None:
     """Stop profiling for all worker groups."""
     actor_rollout_wg.stop_profile()
     if use_reference_policy and ref_policy_wg is not None:
@@ -286,9 +283,7 @@ def build_wg_kwargs(config: DictConfig, device_name: str) -> dict[str, Any]:
         wg_kwargs["profile_steps"] = OmegaConf.select(config, "global_profiler.steps")
         if OmegaConf.select(config, "global_profiler.tool") == "nsys":
             assert OmegaConf.select(config, "global_profiler.global_tool_config.nsys.worker_nsight_options") is not None
-            wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(
-                OmegaConf.select(config, "global_profiler.global_tool_config.nsys.worker_nsight_options")
-            )
+            wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(OmegaConf.select(config, "global_profiler.global_tool_config.nsys.worker_nsight_options"))
     return wg_kwargs
 
 
@@ -302,11 +297,17 @@ def create_dataloaders(config: DictConfig, tokenizer, processor=None):
     from verl.utils.dataset.rl_dataset import collate_fn as default_collate_fn
 
     train_dataset = create_rl_dataset(
-        config.data.train_files, config.data, tokenizer, processor,
+        config.data.train_files,
+        config.data,
+        tokenizer,
+        processor,
         max_samples=config.data.get("train_max_samples", -1),
     )
     val_dataset = create_rl_dataset(
-        config.data.val_files, config.data, tokenizer, processor,
+        config.data.val_files,
+        config.data,
+        tokenizer,
+        processor,
         max_samples=config.data.get("val_max_samples", -1),
     )
 
@@ -316,8 +317,10 @@ def create_dataloaders(config: DictConfig, tokenizer, processor=None):
     train_dataloader = StatefulDataLoader(
         dataset=train_dataset,
         batch_size=config.data.get("gen_batch_size", config.data.train_batch_size),
-        num_workers=num_workers, drop_last=True,
-        collate_fn=default_collate_fn, sampler=train_sampler,
+        num_workers=num_workers,
+        drop_last=True,
+        collate_fn=default_collate_fn,
+        sampler=train_sampler,
     )
 
     val_batch_size = config.data.val_batch_size
@@ -325,9 +328,12 @@ def create_dataloaders(config: DictConfig, tokenizer, processor=None):
         val_batch_size = len(val_dataset)
 
     val_dataloader = StatefulDataLoader(
-        dataset=val_dataset, batch_size=val_batch_size,
-        num_workers=num_workers, shuffle=config.data.get("validation_shuffle", True),
-        drop_last=False, collate_fn=default_collate_fn,
+        dataset=val_dataset,
+        batch_size=val_batch_size,
+        num_workers=num_workers,
+        shuffle=config.data.get("validation_shuffle", True),
+        drop_last=False,
+        collate_fn=default_collate_fn,
     )
 
     assert len(train_dataloader) >= 1, "Train dataloader is empty!"

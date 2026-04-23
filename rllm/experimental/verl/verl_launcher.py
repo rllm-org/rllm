@@ -39,6 +39,7 @@ class VerlTaskRunner(TaskRunner):
         # Must happen before worker mapping creation since verl's
         # need_reference_policy() reads from the verl config.
         from rllm.experimental.verl.utils import propagate_rllm_to_verl_config
+
         propagate_rllm_to_verl_config(config)
 
         # Force new model engine (required by VerlBackend)

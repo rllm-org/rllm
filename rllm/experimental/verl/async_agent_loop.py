@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Optional
+from typing import Any
 
 import ray
 import torch
 from omegaconf import DictConfig
-
 from verl.experimental.agent_loop.agent_loop import (
     AgentLoopManager,
     AgentLoopWorker,
@@ -27,8 +26,8 @@ class FullyAsyncLLMServerManager(AsyncLLMServerManager):
         *,
         prompt_ids: list[int],
         sampling_params: dict[str, Any],
-        image_data: Optional[list[Any]] = None,
-        video_data: Optional[list[Any]] = None,
+        image_data: list[Any] | None = None,
+        video_data: list[Any] | None = None,
     ) -> TokenOutput:
         limit_key = None
         if "max_tokens" in sampling_params:

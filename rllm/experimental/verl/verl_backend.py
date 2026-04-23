@@ -27,9 +27,6 @@ from verl.checkpoint_engine import CheckpointEngineManager
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.core_algos import agg_loss
-from verl.utils.config import omega_conf_to_dataclass
-from verl.workers.config import ActorConfig
-from verl.workers.utils.losses import ppo_loss
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
@@ -37,18 +34,21 @@ from verl.trainer.ppo.metric_utils import (
 )
 from verl.trainer.ppo.utils import Role, WorkerType, need_reference_policy
 from verl.utils import tensordict_utils as tu
+from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.metric import reduce_metrics
+from verl.workers.config import ActorConfig
+from verl.workers.utils.losses import ppo_loss
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 from rllm.agents.agent import Episode
 from rllm.data import Dataset
-from rllm.experimental.rollout import RolloutEngine, VerlEngine
 from rllm.experimental.common import (
     AlgorithmConfig,
     collect_reward_and_advantage_from_trajectory_groups,
     simple_timer,
 )
 from rllm.experimental.protocol import BackendProtocol
+from rllm.experimental.rollout import RolloutEngine, VerlEngine
 from rllm.experimental.verl import (
     transform_episodes_to_dataproto,
     transform_trajectory_groups_to_dataproto,
@@ -128,7 +128,9 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
         # Dataloaders
         self.train_dataloader, self.val_dataloader, self.total_training_steps = create_dataloaders(
-            config, tokenizer, processor,
+            config,
+            tokenizer,
+            processor,
         )
 
     # =========================================================================
@@ -145,14 +147,18 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self._role_worker_mapping else Role.ActorRollout
         actor_rollout_resource_pool = self._resource_pool_manager.get_resource_pool(actor_role)
         resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = RayClassWithInitArgs(
-            cls=self._role_worker_mapping[actor_role], config=config.actor_rollout_ref, role=str(actor_role),
+            cls=self._role_worker_mapping[actor_role],
+            config=config.actor_rollout_ref,
+            role=str(actor_role),
         )
 
         # Reference policy
         if self.use_reference_policy and Role.RefPolicy in self._role_worker_mapping:
             resource_pool = self._resource_pool_manager.get_resource_pool(Role.RefPolicy)
             resource_pool_to_cls[resource_pool][str(Role.RefPolicy)] = RayClassWithInitArgs(
-                self._role_worker_mapping[Role.RefPolicy], config=config.actor_rollout_ref, role=str(Role.RefPolicy),
+                self._role_worker_mapping[Role.RefPolicy],
+                config=config.actor_rollout_ref,
+                role=str(Role.RefPolicy),
             )
 
         # Spawn worker groups
@@ -183,15 +189,18 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
         # AgentLoopManager (async rollout)
         from verl.experimental.agent_loop import AgentLoopManager
+
         self.async_rollout_manager = AgentLoopManager.create(
-            config=config, worker_group=self.actor_rollout_wg,
+            config=config,
+            worker_group=self.actor_rollout_wg,
             rollout_resource_pool=actor_rollout_resource_pool,
         )
 
         # CheckpointEngineManager
         ckpt_cfg = omega_conf_to_dataclass(config.actor_rollout_ref.rollout.checkpoint_engine)
         self.checkpoint_manager = CheckpointEngineManager(
-            config=ckpt_cfg, trainer=self.actor_rollout_wg,
+            config=ckpt_cfg,
+            trainer=self.actor_rollout_wg,
             replicas=self.async_rollout_manager.rollout_replicas,
         )
         self.checkpoint_manager.sleep_replicas()
@@ -219,13 +228,17 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
         resource_pool = self._resource_pool_manager.get_resource_pool(actor_role)
         resource_pool_to_cls[resource_pool][str(actor_role)] = RayClassWithInitArgs(
-            cls=self._role_worker_mapping[actor_role], config=config.actor_rollout_ref, role=str(actor_role),
+            cls=self._role_worker_mapping[actor_role],
+            config=config.actor_rollout_ref,
+            role=str(actor_role),
         )
 
         if self.use_reference_policy and Role.RefPolicy in self._role_worker_mapping:
             ref_pool = self._resource_pool_manager.get_resource_pool(Role.RefPolicy)
             resource_pool_to_cls[ref_pool][str(Role.RefPolicy)] = RayClassWithInitArgs(
-                self._role_worker_mapping[Role.RefPolicy], config=config.actor_rollout_ref, role=str(Role.RefPolicy),
+                self._role_worker_mapping[Role.RefPolicy],
+                config=config.actor_rollout_ref,
+                role=str(Role.RefPolicy),
             )
 
         all_wg = {}
@@ -249,14 +262,17 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
         # --- Rollout servers (standalone, launched by AgentLoopManager) ---
         from rllm.experimental.verl.async_agent_loop import FullyAsyncAgentLoopManager
+
         self.async_rollout_manager = FullyAsyncAgentLoopManager.create(
-            config=config, worker_group=None,
+            config=config,
+            worker_group=None,
         )
 
         # CheckpointEngineManager: trainer=actor_wg, replicas from standalone rollout servers
         ckpt_cfg = omega_conf_to_dataclass(config.actor_rollout_ref.rollout.checkpoint_engine)
         self.checkpoint_manager = CheckpointEngineManager(
-            config=ckpt_cfg, trainer=self.actor_rollout_wg,
+            config=ckpt_cfg,
+            trainer=self.actor_rollout_wg,
             replicas=self.async_rollout_manager.rollout_replicas,
         )
 
@@ -266,11 +282,13 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
     def init_rollout_engine(self, **kwargs) -> RolloutEngine:
         from rllm.experimental.verl.patch import patch_verl_dynamic_batch_sync
+
         patch_verl_dynamic_batch_sync()
 
         sdk_enabled = self.full_config.rllm.get("sdk", {}).get("enable", False)
         if sdk_enabled:
             from rllm.experimental.verl.patch import patch_vllm_for_sdk
+
             patch_vllm_for_sdk()
 
         if self.is_separated:
@@ -288,15 +306,19 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         servers = zip(self.async_rollout_manager.server_addresses, self.async_rollout_manager.server_handles, strict=True)
         if self.is_separated:
             from rllm.experimental.verl.async_agent_loop import FullyAsyncLLMServerManager
+
             server_manager = FullyAsyncLLMServerManager(self.config, servers=servers, load_balancer_handle=self.async_rollout_manager.global_load_balancer)
         else:
             from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
+
             server_manager = AsyncLLMServerManager(self.config, servers=servers, load_balancer_handle=self.async_rollout_manager.global_load_balancer)
 
         # Create VerlEngine
         self.rollout_engine = VerlEngine(
-            config=self.config, server_manager=server_manager,
-            tokenizer=self.tokenizer, processor=self.processor,
+            config=self.config,
+            server_manager=server_manager,
+            tokenizer=self.tokenizer,
+            processor=self.processor,
         )
 
         self.algorithm_config = kwargs.get("algorithm_config")
@@ -308,8 +330,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             async_cfg = self.config.rllm.async_training
             fwd_bwd = async_cfg.fwd_bwd_group_size if async_cfg.fwd_bwd_group_size is not None else async_cfg.mini_batch_size
             assert fwd_bwd == async_cfg.mini_batch_size, (
-                f"VerlBackend requires async_training.fwd_bwd_group_size == mini_batch_size "
-                f"(got {async_cfg.fwd_bwd_group_size} vs {async_cfg.mini_batch_size})"
+                f"VerlBackend requires async_training.fwd_bwd_group_size == mini_batch_size (got {async_cfg.fwd_bwd_group_size} vs {async_cfg.mini_batch_size})"
             )
         if self.use_legacy_worker_impl != "disable":
             logger.warning(f"VerlBackend forces use_legacy_worker_impl='disable', got '{self.use_legacy_worker_impl}'.")
@@ -369,16 +390,21 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         assert self.rollout_engine is not None
         if trainer_state.episodes is not None:
             return transform_episodes_to_dataproto(
-                trainer_state.episodes, self.rollout_engine,
-                self.config.data.max_prompt_length, self.config.data.max_response_length,
+                trainer_state.episodes,
+                self.rollout_engine,
+                self.config.data.max_prompt_length,
+                self.config.data.max_response_length,
             )
         assert trainer_state.trajectory_groups is not None
         batch = transform_trajectory_groups_to_dataproto(
-            trainer_state.trajectory_groups, self.rollout_engine,
-            self.config.data.max_prompt_length, self.config.data.max_response_length,
+            trainer_state.trajectory_groups,
+            self.rollout_engine,
+            self.config.data.max_prompt_length,
+            self.config.data.max_response_length,
         )
         return update_dataproto_with_advantages(
-            batch, trainer_state.trajectory_groups,
+            batch,
+            trainer_state.trajectory_groups,
             mode=self.algorithm_config.stepwise_advantage_mode,
         )
 
@@ -561,10 +587,13 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         def _send_actor_update(sub_batch: DataProto) -> None:
             batch_td = sub_batch.to_tensordict()
             batch_td = left_right_2_no_padding(batch_td)
-            tu.assign_non_tensor(batch_td,
+            tu.assign_non_tensor(
+                batch_td,
                 calculate_entropy=(actor_cfg.entropy_coeff != 0.0),
-                global_batch_size=ppo_mbs, mini_batch_size=ppo_mbs,
-                epochs=actor_cfg.ppo_epochs, seed=actor_cfg.data_loader_seed,
+                global_batch_size=ppo_mbs,
+                mini_batch_size=ppo_mbs,
+                epochs=actor_cfg.ppo_epochs,
+                seed=actor_cfg.data_loader_seed,
                 dataloader_kwargs={"shuffle": actor_cfg.shuffle},
             )
             actor_output = self.actor_rollout_wg.update_actor(batch_td)
@@ -613,7 +642,8 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
     async def on_train_start(self, trainer_state: TrainerState) -> None:
         resumed_step = load_checkpoint(
-            self.config, self.actor_rollout_wg,
+            self.config,
+            self.actor_rollout_wg,
             train_dataloader=self.train_dataloader,
         )
         if resumed_step > 0:
@@ -622,40 +652,25 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
         await self.checkpoint_manager.update_weights(trainer_state.global_step)
 
-
     async def on_train_end(self, trainer_state: TrainerState) -> None:
         if self.config.trainer.save_freq <= 0 or trainer_state.global_step % self.config.trainer.save_freq != 0:
-            save_checkpoint(self.config, trainer_state.global_step, self.actor_rollout_wg,
-                train_dataloader=self.train_dataloader)
+            save_checkpoint(self.config, trainer_state.global_step, self.actor_rollout_wg, train_dataloader=self.train_dataloader)
 
     async def on_batch_start(self, trainer_state: TrainerState) -> None:
-        do_profile = (
-            trainer_state.is_training
-            and self.config.trainer.get("profile_steps") is not None
-            and trainer_state.global_step in self.config.trainer.profile_steps
-        )
+        do_profile = trainer_state.is_training and self.config.trainer.get("profile_steps") is not None and trainer_state.global_step in self.config.trainer.profile_steps
         if do_profile:
             with simple_timer("start_profile", trainer_state.timing_dict):
-                start_profiling(trainer_state.global_step, self.actor_rollout_wg,
-                    ref_policy_wg=self.ref_policy_wg,
-                    use_reference_policy=self.use_reference_policy)
+                start_profiling(trainer_state.global_step, self.actor_rollout_wg, ref_policy_wg=self.ref_policy_wg, use_reference_policy=self.use_reference_policy)
 
     async def on_batch_end(self, trainer_state: TrainerState) -> None:
-        do_profile = (
-            trainer_state.is_training
-            and self.config.trainer.get("profile_steps") is not None
-            and trainer_state.global_step in self.config.trainer.profile_steps
-        )
+        do_profile = trainer_state.is_training and self.config.trainer.get("profile_steps") is not None and trainer_state.global_step in self.config.trainer.profile_steps
         if do_profile:
             with simple_timer("stop_profile", trainer_state.timing_dict):
-                stop_profiling(self.actor_rollout_wg,
-                    ref_policy_wg=self.ref_policy_wg,
-                    use_reference_policy=self.use_reference_policy)
+                stop_profiling(self.actor_rollout_wg, ref_policy_wg=self.ref_policy_wg, use_reference_policy=self.use_reference_policy)
 
         if self.config.trainer.save_freq > 0 and trainer_state.global_step % self.config.trainer.save_freq == 0:
             with simple_timer("save_checkpoint", trainer_state.timing_dict):
-                save_checkpoint(self.config, trainer_state.global_step, self.actor_rollout_wg,
-                    train_dataloader=self.train_dataloader)
+                save_checkpoint(self.config, trainer_state.global_step, self.actor_rollout_wg, train_dataloader=self.train_dataloader)
 
         # Weight synchronization (colocated only — separated syncs in on_policy_updated)
         if not self.is_separated:

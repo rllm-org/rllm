@@ -124,12 +124,10 @@ class VerlEngine(RolloutEngine):
         if token_output.routed_experts is not None:
             import base64
             import json as _json
+
             arr = token_output.routed_experts  # (completion_len, num_layers, topk)
             shape_header = _json.dumps({"shape": list(arr.shape[1:])})
-            routing_matrices = [shape_header] + [
-                base64.b64encode(arr[i].tobytes()).decode("ascii")
-                for i in range(len(arr))
-            ]
+            routing_matrices = [shape_header] + [base64.b64encode(arr[i].tobytes()).decode("ascii") for i in range(len(arr))]
 
         return ModelOutput(
             text=completion_text,

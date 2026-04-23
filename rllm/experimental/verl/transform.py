@@ -215,10 +215,7 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
         for step_rm in accumulated.routing_matrices:
             shape = _json.loads(step_rm[0])["shape"]  # [num_layers, topk]
             num_layers, topk = shape
-            token_arrays = [
-                np.frombuffer(base64.b64decode(s), dtype=np.int32).reshape(num_layers, topk)
-                for s in step_rm[1:]
-            ]
+            token_arrays = [np.frombuffer(base64.b64decode(s), dtype=np.int32).reshape(num_layers, topk) for s in step_rm[1:]]
             response_tensors.append(torch.from_numpy(np.stack(token_arrays)))  # (completion_len, num_layers, topk)
 
         # Pad response routing to max_response_length

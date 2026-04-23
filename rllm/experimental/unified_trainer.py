@@ -250,9 +250,7 @@ class UnifiedTrainer:
         self.cf_config = CompactFilteringConfig.from_config(self.rllm_config.compact_filtering)
         self.transform_config = TransformConfig.from_config(self.rllm_config)
         self.rs_config = RejectionSamplingConfig.from_config(self.rllm_config.rejection_sample)
-        self.algorithm_config = AlgorithmConfig.from_config(
-            self.rllm_config, estimator_map=self.traj_group_adv_estimator_map
-        )
+        self.algorithm_config = AlgorithmConfig.from_config(self.rllm_config, estimator_map=self.traj_group_adv_estimator_map)
 
     def _setup_logging(self):
         """Setup up both the tracking and episode logging."""
