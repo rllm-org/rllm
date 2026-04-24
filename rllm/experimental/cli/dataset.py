@@ -156,17 +156,27 @@ def list_datasets(local_only: bool):
 @dataset.command()
 @click.argument("name")
 def pull(name: str):
-    """Pull a dataset from HuggingFace."""
+    """Pull a dataset from HuggingFace or Harbor."""
     catalog = load_dataset_catalog()
     catalog_datasets = catalog.get("datasets", {})
 
-    if name not in catalog_datasets:
+    catalog_entry = catalog_datasets.get(name)
+    if catalog_entry is None:
+        # Try Harbor registry auto-discovery
+        from rllm.experimental.cli._pull import resolve_harbor_catalog_entry
+
+        _console.print(f"[dim]Looking up '{name}' in Harbor registry...[/]")
+        catalog_entry = resolve_harbor_catalog_entry(name)
+        if catalog_entry:
+            _console.print(f"[bold green]Found Harbor dataset:[/] {name}")
+
+    if catalog_entry is None:
         available = ", ".join(sorted(catalog_datasets.keys()))
-        click.echo(f"Error: Dataset '{name}' not found in catalog. Available: {available}")
+        click.echo(f"Error: Dataset '{name}' not found in catalog or Harbor registry. Catalog: {available}")
         raise SystemExit(1)
 
-    click.echo(f"Pulling {name} from {catalog_datasets[name]['source']}...")
-    pull_dataset(name, catalog_datasets[name])
+    click.echo(f"Pulling {name} from {catalog_entry['source']}...")
+    pull_dataset(name, catalog_entry)
     click.echo(f"Done. Use 'rllm dataset info {name}' to view details.")
 
 

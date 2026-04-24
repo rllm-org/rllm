@@ -178,6 +178,14 @@ def _run_train(
     catalog = load_dataset_catalog()
     catalog_entry = catalog.get("datasets", {}).get(benchmark)
 
+    # ---- If not in catalog, try resolving as a Harbor dataset ----
+    if catalog_entry is None:
+        from rllm.experimental.cli._pull import resolve_harbor_catalog_entry
+
+        catalog_entry = resolve_harbor_catalog_entry(benchmark)
+        if catalog_entry:
+            console.print(f"  [success]Found Harbor dataset:[/] [val]{benchmark}[/]")
+
     # ---- Docker check for Harbor datasets ----
     if catalog_entry and catalog_entry.get("source", "").startswith("harbor:"):
         from rllm.experimental.harbor.utils import check_docker_available
@@ -215,6 +223,12 @@ def _run_train(
         if evaluator is not None:
             reward_fn_name = catalog_entry.get("reward_fn", "") if catalog_entry else ""
             evaluator_display = reward_fn_name or type(evaluator).__name__
+        elif catalog_entry and catalog_entry.get("reward_fn"):
+            try:
+                evaluator = load_evaluator(catalog_entry["reward_fn"])
+                evaluator_display = catalog_entry["reward_fn"]
+            except (KeyError, ImportError):
+                pass
 
     if evaluator is None:
         console.print(f"  [error]No evaluator found for '{benchmark}'. Specify --evaluator explicitly.[/]")
