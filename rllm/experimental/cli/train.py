@@ -178,13 +178,15 @@ def _run_train(
     catalog = load_dataset_catalog()
     catalog_entry = catalog.get("datasets", {}).get(benchmark)
 
-    # ---- If not in catalog, try resolving as a Harbor dataset ----
-    if catalog_entry is None:
+    # ---- Explicit Harbor prefix: "harbor:<name>" ----
+    if catalog_entry is None and benchmark.startswith("harbor:"):
         from rllm.experimental.cli._pull import resolve_harbor_catalog_entry
 
-        catalog_entry = resolve_harbor_catalog_entry(benchmark)
+        harbor_name = benchmark.removeprefix("harbor:")
+        catalog_entry = resolve_harbor_catalog_entry(harbor_name)
         if catalog_entry:
-            console.print(f"  [success]Found Harbor dataset:[/] [val]{benchmark}[/]")
+            console.print(f"  [success]Found Harbor dataset:[/] [val]{harbor_name}[/]")
+            benchmark = harbor_name
 
     # ---- Docker check for Harbor datasets ----
     if catalog_entry and catalog_entry.get("source", "").startswith("harbor:"):

@@ -111,6 +111,9 @@ def list_datasets(local_only: bool):
         _console.print(Text("  Legend: ", style="bold") + Text("● pulled  ", style="bold green") + Text("○ available  ", style="dim") + Text("◆ local", style="bold yellow"))
         _console.print(Text("  Run ", style="dim") + Text("rllm dataset pull <name>", style="bold #00D4FF") + Text(" to download a dataset.", style="dim"))
         _console.print()
+        _console.print(Text("  Harbor: ", style="bold #FFD700") + Text("80+ agent benchmarks available via ", style="dim") + Text("harbor:", style="bold #00D4FF") + Text(" prefix", style="dim"))
+        _console.print(Text("  Browse: ", style="dim") + Text("https://harbor.ai/datasets", style="bold dim") + Text("  |  ", style="dim") + Text("rllm eval harbor:<name>", style="bold #00D4FF"))
+        _console.print()
     else:
         if not local_names:
             _console.print()
@@ -156,23 +159,29 @@ def list_datasets(local_only: bool):
 @dataset.command()
 @click.argument("name")
 def pull(name: str):
-    """Pull a dataset from HuggingFace or Harbor."""
+    """Pull a dataset from HuggingFace or Harbor.
+
+    Use the harbor: prefix for Harbor datasets (e.g., harbor:swebench-verified).
+    """
     catalog = load_dataset_catalog()
     catalog_datasets = catalog.get("datasets", {})
 
     catalog_entry = catalog_datasets.get(name)
-    if catalog_entry is None:
-        # Try Harbor registry auto-discovery
+
+    # Explicit Harbor prefix: "harbor:<name>"
+    if catalog_entry is None and name.startswith("harbor:"):
         from rllm.experimental.cli._pull import resolve_harbor_catalog_entry
 
-        _console.print(f"[dim]Looking up '{name}' in Harbor registry...[/]")
-        catalog_entry = resolve_harbor_catalog_entry(name)
+        harbor_name = name.removeprefix("harbor:")
+        _console.print(f"[dim]Looking up '{harbor_name}' in Harbor registry...[/]")
+        catalog_entry = resolve_harbor_catalog_entry(harbor_name)
         if catalog_entry:
-            _console.print(f"[bold green]Found Harbor dataset:[/] {name}")
+            _console.print(f"[bold green]Found Harbor dataset:[/] {harbor_name}")
+            name = harbor_name
 
     if catalog_entry is None:
-        available = ", ".join(sorted(catalog_datasets.keys()))
-        click.echo(f"Error: Dataset '{name}' not found in catalog or Harbor registry. Catalog: {available}")
+        click.echo(f"Error: Dataset '{name}' not found in catalog.")
+        click.echo("Use harbor: prefix for Harbor datasets (e.g., rllm dataset pull harbor:swebench-verified).")
         raise SystemExit(1)
 
     click.echo(f"Pulling {name} from {catalog_entry['source']}...")
