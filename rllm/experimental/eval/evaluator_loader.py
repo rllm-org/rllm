@@ -123,6 +123,11 @@ _EVALUATOR_REGISTRY: dict[str, type] = {
     "depth_reward_fn": DepthEvaluator,
 }
 
+# Lazy-loaded evaluators (avoid importing optional dependencies at module level)
+_LAZY_EVALUATOR_REGISTRY: dict[str, str] = {
+    "harbor_reward_fn": "rllm.experimental.harbor.evaluator:HarborEvaluator",
+}
+
 
 def _load_dataset_catalog() -> dict:
     """Load the datasets.json catalog from the registry directory."""
@@ -174,6 +179,10 @@ def load_evaluator(name_or_path: str) -> Evaluator:
     if name_or_path in _EVALUATOR_REGISTRY:
         return _EVALUATOR_REGISTRY[name_or_path]()
 
+    # 3b. Lazy-loaded evaluators (optional dependencies)
+    if name_or_path in _LAZY_EVALUATOR_REGISTRY:
+        return _load_and_instantiate(_LAZY_EVALUATOR_REGISTRY[name_or_path], name_or_path)
+
     # 4. Plugin discovery via entry points
     eps = entry_points(group="rllm.evaluators")
     for ep in eps:
@@ -214,6 +223,10 @@ def resolve_evaluator_from_catalog(benchmark: str) -> Evaluator | None:
     evaluator_cls = _EVALUATOR_REGISTRY.get(reward_fn_name)
     if evaluator_cls is not None:
         return evaluator_cls()
+
+    # Lazy-loaded evaluators
+    if reward_fn_name in _LAZY_EVALUATOR_REGISTRY:
+        return _load_and_instantiate(_LAZY_EVALUATOR_REGISTRY[reward_fn_name], reward_fn_name)
 
     # Fall through to full loader (user registry, import paths, entry points)
     try:

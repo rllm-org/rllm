@@ -10,6 +10,11 @@
       "description": "Multi-turn search agent with web search tool calling",
       "module": "rllm.experimental.agents.search",
       "function": "search_agent"
+    },
+    "harbor_agent": {
+      "description": "Harbor container-based agent (default: mini-swe-agent)",
+      "module": "rllm.experimental.harbor.agent_flow",
+      "function": "default_harbor_agent"
     }
   }
 }

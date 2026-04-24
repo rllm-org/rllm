@@ -292,16 +292,56 @@ def _pull_generated_dataset(name: str, catalog_entry: dict, generator_path: str)
             raise
 
 
+def _pull_harbor_dataset(name: str, catalog_entry: dict) -> None:
+    """Download a Harbor dataset and register it locally.
+
+    The catalog entry must have a ``source`` starting with ``"harbor:"``.
+    Tasks are downloaded from the Harbor registry and flattened into rows.
+
+    Args:
+        name: Dataset name (e.g., 'terminal-bench').
+        catalog_entry: Entry from datasets.json with 'source' starting with 'harbor:'.
+    """
+    from rllm.data import DatasetRegistry
+    from rllm.experimental.harbor.dataset_loader import load_harbor_dataset
+
+    source = catalog_entry["source"]
+    # Strip "harbor:" prefix to get the registry identifier
+    harbor_id = source.removeprefix("harbor:")
+
+    data_list = load_harbor_dataset(harbor_id)
+    if not data_list:
+        raise RuntimeError(f"No tasks loaded from Harbor dataset '{harbor_id}'")
+
+    # Harbor datasets have a single "default" split
+    split = catalog_entry.get("eval_split", "default")
+    DatasetRegistry.register_dataset(
+        name=name,
+        data=data_list,
+        split=split,
+        source=source,
+        description=catalog_entry.get("description", ""),
+        category=catalog_entry.get("category", ""),
+    )
+    logger.info("Registered Harbor dataset %s/%s (%d tasks)", name, split, len(data_list))
+
+
 def pull_dataset(name: str, catalog_entry: dict) -> None:
-    """Download a dataset from HuggingFace (or generate it) and register locally.
+    """Download a dataset from HuggingFace, Harbor, or generate it, and register locally.
 
     Supports optional field_map, hf_config, aggregate_configs, transform,
-    and generator for procedurally-generated datasets.
+    generator for procedurally-generated datasets, and Harbor registry datasets.
 
     Args:
         name: Dataset name (e.g., 'gsm8k').
         catalog_entry: Entry from datasets.json with 'source', 'splits', etc.
     """
+    # Check for Harbor datasets (source starts with "harbor:")
+    source = catalog_entry.get("source", "")
+    if source.startswith("harbor:"):
+        _pull_harbor_dataset(name, catalog_entry)
+        return
+
     # Check for a generator function (procedural datasets that don't live on HF)
     generator_path = catalog_entry.get("generator")
     if generator_path:

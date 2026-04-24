@@ -77,6 +77,14 @@ def _run_eval(
         else:
             split = "test"
 
+    # Docker check for Harbor tasks
+    if (agent_name and agent_name.startswith("harbor:")) or (catalog_entry and catalog_entry.get("source", "").startswith("harbor:")):
+        from rllm.experimental.harbor.utils import check_docker_available
+
+        if not check_docker_available():
+            console.print("  [error]Harbor tasks require Docker. Make sure Docker is installed and running.[/]")
+            raise SystemExit(1)
+
     # Load agent (now returns AgentFlow)
     try:
         agent = load_agent(agent_name)

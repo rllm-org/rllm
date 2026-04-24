@@ -618,6 +618,24 @@
       "reward_fn": "depth_reward_fn",
       "eval_split": "test",
       "transform": "rllm.data.transforms:sunrgbd_transform"
+    },
+    "terminal-bench": {
+      "description": "Terminal-Bench: Agent coding benchmark (Harbor)",
+      "source": "harbor:terminal-bench@2.0",
+      "category": "agentic",
+      "splits": ["default"],
+      "default_agent": "harbor:mini-swe-agent",
+      "reward_fn": "harbor_reward_fn",
+      "eval_split": "default"
+    },
+    "swebench": {
+      "description": "SWE-bench: Real-world GitHub issue resolution (Harbor)",
+      "source": "harbor:swebench",
+      "category": "agentic",
+      "splits": ["default"],
+      "default_agent": "harbor:mini-swe-agent",
+      "reward_fn": "harbor_reward_fn",
+      "eval_split": "default"
     }
   }
 }
