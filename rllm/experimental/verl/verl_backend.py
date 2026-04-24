@@ -302,24 +302,22 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
     def _get_aggregate_dp_size(self) -> int | None:
         """Compute the LCM of DP sizes across all active worker-group meshes.
 
-        Uses the per-mesh dp_size queried from dispatch info, not the
-        worker_group ``world_size``.  They differ when TP/PP/CP > 1.
+        Mesh names target the new EngineWorker path (verl_launcher pins
+        ``use_legacy_worker_impl='disable'``):
+        - actor_rollout_wg -> ``engine_workers.ActorRolloutRefWorker``
+            registers ``"actor"`` and ``"ref"``.
+        - critic_wg       -> ``CriticWorker`` is aliased to ``TrainingWorker``
+            in ``main_ppo.add_critic_worker``, which registers ``"train"``.
+        - ref_policy_wg   -> same ``ActorRolloutRefWorker`` as actor_rollout_wg,
+            so the registered mesh is ``"ref"``.
         """
         dp_sizes: list[int] = []
         if self.use_critic and self.critic_wg.world_size != 0:
             dp_sizes.append(self._get_dp_size(self.critic_wg, "train"))
         if self.use_reference_policy and self.ref_policy_wg.world_size != 0:
             dp_sizes.append(self._get_dp_size(self.ref_policy_wg, "ref"))
-        if self.use_rm and self.rm_wg.world_size != 0:
-            dp_sizes.append(self._get_dp_size(self.rm_wg, "train"))
-        if self.hybrid_engine:
-            if self.actor_rollout_wg.world_size != 0:
-                dp_sizes.append(self._get_dp_size(self.actor_rollout_wg, "actor"))
-        else:
-            if hasattr(self, "actor_wg") and self.actor_wg.world_size != 0:
-                dp_sizes.append(self._get_dp_size(self.actor_wg, "actor"))
-            if hasattr(self, "rollout_wg") and self.rollout_wg.world_size != 0:
-                dp_sizes.append(self._get_dp_size(self.rollout_wg, "actor"))
+        if self.actor_rollout_wg.world_size != 0:
+            dp_sizes.append(self._get_dp_size(self.actor_rollout_wg, "actor"))
         if not dp_sizes:
             return None
         return reduce(math.lcm, dp_sizes)
@@ -331,10 +329,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         if dp_size is None:
             return batch
 
-        # Also account for mini-batch divisibility required by make_iterator
-        # in the new EngineWorker path. train_mini_batch needs:
-        #   batch_per_gpu % (ppo_mini_batch_size * rollout_n / dp_size) == 0
-        # i.e. globally: batch_size % (ppo_mini_batch_size * rollout_n) == 0
+        # From verl RayPPOTrainer._update_actor: ppo_mini_batch_size is multiplied
+        # by rollout.n before being passed as mini_batch_size to update_actor and
+        # make_iterator enforces batch_per_gpu % mini_batch_size == 0. Globally this
+        # requires batch_size % (ppo_mini_batch_size * rollout.n) == 0.
         rollout_n = self.config.actor_rollout_ref.rollout.n
         ppo_mbs = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
         mini_batch_global = ppo_mbs * rollout_n
