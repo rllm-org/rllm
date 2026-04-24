@@ -107,10 +107,16 @@ def _run_eval(
     # Apply sandbox CLI overrides to agent
     if agent_metadata:
         from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow
+        from rllm.experimental.harbor.agent_flow import HarborAgentFlow
 
         if isinstance(agent, SandboxedAgentFlow):
             if "sandbox_backend" in agent_metadata:
                 agent.sandbox_backend = agent_metadata["sandbox_backend"]
+            if "sandbox_concurrency" in agent_metadata:
+                agent.max_concurrent = agent_metadata["sandbox_concurrency"]
+        elif isinstance(agent, HarborAgentFlow):
+            if "sandbox_backend" in agent_metadata:
+                agent.environment_type = agent_metadata["sandbox_backend"]
             if "sandbox_concurrency" in agent_metadata:
                 agent.max_concurrent = agent_metadata["sandbox_concurrency"]
 
@@ -289,8 +295,8 @@ def _run_eval(
     "--sandbox-backend",
     "sandbox_backend",
     default=None,
-    type=click.Choice(["docker", "local", "modal"], case_sensitive=False),
-    help="Sandbox backend for sandboxed agents (auto-detected from agent if omitted).",
+    type=click.Choice(["docker", "local", "modal", "daytona", "e2b", "runloop", "gke", "apple-container"], case_sensitive=False),
+    help="Sandbox/environment backend (auto-detected if omitted). Harbor agents support: docker, daytona, modal, e2b, runloop, gke, apple-container.",
 )
 @click.option("--sandbox-concurrency", "sandbox_concurrency", default=None, type=int, help="Override max concurrent sandboxes (default: agent's max_concurrent).")
 @click.option("--ui/--no-ui", "enable_ui", default=None, help="Enable/disable live UI logging. Default: auto-enabled when logged in (see 'rllm login').")
