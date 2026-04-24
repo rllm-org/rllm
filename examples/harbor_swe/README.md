@@ -1,34 +1,23 @@
-## Installation
+## Harbor SWE Example
+
+Train and evaluate SWE agents on Harbor tasks using the rLLM CLI.
+
+### Installation
 ```bash
 uv venv --python=3.12
 uv pip install -e .[harbor,tinker]
 ```
 
-## Data
-To convert SWE-Smith (training) and SWE-Bench Verified (evaluation) into Harbor format:
+### Evaluation
+Evaluate on SWE-Bench Verified (dataset is auto-pulled on first run):
 ```bash
-git clone https://github.com/harbor-framework/harbor.git external/harbor
-
-cd external/harbor/adapters/swesmith
-uv run run_adapter.py
-
-cd external/harbor/adapters/swebench
-uv run run_adapter.py --task-dir ../../datasets/swebench_verified
+rllm eval harbor:swebench-verified --agent harbor:mini-swe-agent
 ```
 
-Next, wrap both with rLLM dataset:
-```bash
-python examples/harbor-swe/prepare_data.py
-```
-
-## Evaluation
-Example evaluation with Harbor on SWE-Bench Verified through the remote runtime engine:
-```bash
-python examples/harbor-swe/eval.py
-```
-
-## Training
-To run fully-async trining with the tinker backend, run:
+### Training
+Fully-async RL training with the tinker backend on SWE-Smith:
 ```bash
 bash examples/harbor_swe/train_harbor.sh
 ```
+
+The script automatically pulls the `harbor:swesmith` and `harbor:swebench-verified` datasets before launching training. Edit `train_harbor.sh` to adjust the model, hyperparameters, or W&B project name.
