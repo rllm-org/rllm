@@ -54,25 +54,28 @@ def _run_eval(
     all_datasets = catalog.get("datasets", {})
     catalog_entry = all_datasets.get(benchmark)
 
-    # If not in catalog, try resolving as a Harbor dataset
-    if catalog_entry is None:
+    # Explicit Harbor prefix: "harbor:<name>" resolves from Harbor registry
+    if catalog_entry is None and benchmark.startswith("harbor:"):
         from rllm.experimental.cli._pull import resolve_harbor_catalog_entry
 
-        with Status(f"[dim]Looking up '{benchmark}' in Harbor registry...[/]", console=console):
-            catalog_entry = resolve_harbor_catalog_entry(benchmark)
+        harbor_name = benchmark.removeprefix("harbor:")
+        with Status(f"[dim]Looking up '{harbor_name}' in Harbor registry...[/]", console=console):
+            catalog_entry = resolve_harbor_catalog_entry(harbor_name)
         if catalog_entry:
-            console.print(f"  [success]Found Harbor dataset:[/] [val]{benchmark}[/]")
+            console.print(f"  [success]Found Harbor dataset:[/] [val]{harbor_name}[/]")
+            benchmark = harbor_name  # Use the clean name for display and registry
 
     # Resolve agent
     if agent_name is None:
         if catalog_entry and "default_agent" in catalog_entry:
             agent_name = catalog_entry["default_agent"]
         elif not catalog_entry:
-            msg = f"  [error]Benchmark '{benchmark}' not found in catalog or Harbor registry.[/]"
+            msg = f"  [error]Benchmark '{benchmark}' not found.[/]"
             suggestions = _suggest_benchmarks(benchmark, list(all_datasets.keys()))
             if suggestions:
                 msg += f"\n\n  Did you mean: [bold]{', '.join(suggestions)}[/]?"
-            msg += "\n\n  Run [bold]rllm dataset list --all[/] to see available benchmarks."
+            msg += "\n\n  Run [bold]rllm dataset list[/] to see available benchmarks."
+            msg += "\n  Use [bold]harbor:[/] prefix for Harbor datasets (e.g., [bold]rllm eval harbor:swebench-verified[/])."
             console.print(msg)
             raise SystemExit(1)
         else:
