@@ -81,6 +81,7 @@ BENCHMARK_INSTRUCTIONS: dict[str, str] = {
     "llm_judge_reward_fn": ("Provide a thorough, well-reasoned response. Your answer will be evaluated by an LLM judge against a rubric."),
     "swebench_reward_fn": ("Fix the described GitHub issue by modifying the repository code. Use the provided tools to explore the codebase, identify the bug, and submit a patch."),
     "frozenlake_reward_fn": ("Navigate the FrozenLake grid from Start (S) to Goal (G), avoiding Holes (H). Respond with a sequence of moves: Left, Down, Right, Up."),
+    "harbor_reward_fn": ("Complete the task described below by interacting with the provided environment. Your work will be verified by automated tests."),
 }
 
 # Override instruction for search-category benchmarks that use llm_equality
@@ -107,6 +108,7 @@ REWARD_FN_TO_EVAL_METHOD: dict[str, str] = {
     "llm_judge_reward_fn": "llm_judge",
     "swebench_reward_fn": "code_execution",
     "frozenlake_reward_fn": "symbolic_match",
+    "harbor_reward_fn": "container_verification",
 }
 
 

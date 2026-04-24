@@ -178,6 +178,14 @@ def _run_train(
     catalog = load_dataset_catalog()
     catalog_entry = catalog.get("datasets", {}).get(benchmark)
 
+    # ---- Docker check for Harbor datasets ----
+    if catalog_entry and catalog_entry.get("source", "").startswith("harbor:"):
+        from rllm.experimental.harbor.utils import check_docker_available
+
+        if not check_docker_available():
+            console.print("  [error]Harbor tasks require Docker. Make sure Docker is installed and running.[/]")
+            raise SystemExit(1)
+
     # ---- Resolve agent ----
     if agent_name is None:
         if catalog_entry and "default_agent" in catalog_entry:
@@ -250,6 +258,39 @@ def _run_train(
         output_dir=output_dir,
         config_file=config_file,
     )
+
+    # ---- Auto-configure Harbor remote runtime ----
+    is_harbor = catalog_entry and catalog_entry.get("source", "").startswith("harbor:")
+    if is_harbor:
+        from omegaconf import OmegaConf
+
+        # Extract the Harbor agent name from the "harbor:" prefix
+        harbor_agent = agent_name
+        if harbor_agent and harbor_agent.startswith("harbor:"):
+            harbor_agent = harbor_agent.removeprefix("harbor:")
+        elif harbor_agent is None:
+            harbor_agent = "mini-swe-agent"
+
+        config = OmegaConf.merge(
+            config,
+            OmegaConf.create(
+                {
+                    "rllm": {
+                        "remote_runtime": {
+                            "enabled": True,
+                            "backend": "harbor",
+                            "harbor": {
+                                "agent": harbor_agent,
+                            },
+                        },
+                    },
+                }
+            ),
+        )
+        # Harbor uses its own agent/evaluator pipeline, so clear the agent_flow/evaluator
+        # to route through RemoteAgentFlowEngine instead of AgentFlowEngine.
+        agent_flow = None
+        evaluator = None
 
     # ---- Wire UI logging ----
     if enable_ui:

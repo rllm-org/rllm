@@ -128,6 +128,13 @@ def load_agent(name_or_path: str) -> AgentFlow:
     Returns:
         An AgentFlow instance with a ``.run()`` method.
     """
+    # 0. Harbor agent prefix: "harbor:claude-code" -> HarborAgentFlow(agent_name="claude-code")
+    if name_or_path.startswith("harbor:"):
+        harbor_agent_name = name_or_path.removeprefix("harbor:")
+        from rllm.experimental.harbor.agent_flow import HarborAgentFlow
+
+        return HarborAgentFlow(agent_name=harbor_agent_name)
+
     # 1. User-registered agents (persistent, from register_agent())
     user_agents = _load_user_agents()
     if name_or_path in user_agents:
