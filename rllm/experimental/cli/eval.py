@@ -54,12 +54,21 @@ def _run_eval(
     all_datasets = catalog.get("datasets", {})
     catalog_entry = all_datasets.get(benchmark)
 
+    # If not in catalog, try resolving as a Harbor dataset
+    if catalog_entry is None:
+        from rllm.experimental.cli._pull import resolve_harbor_catalog_entry
+
+        with Status(f"[dim]Looking up '{benchmark}' in Harbor registry...[/]", console=console):
+            catalog_entry = resolve_harbor_catalog_entry(benchmark)
+        if catalog_entry:
+            console.print(f"  [success]Found Harbor dataset:[/] [val]{benchmark}[/]")
+
     # Resolve agent
     if agent_name is None:
         if catalog_entry and "default_agent" in catalog_entry:
             agent_name = catalog_entry["default_agent"]
         elif not catalog_entry:
-            msg = f"  [error]Benchmark '{benchmark}' not found.[/]"
+            msg = f"  [error]Benchmark '{benchmark}' not found in catalog or Harbor registry.[/]"
             suggestions = _suggest_benchmarks(benchmark, list(all_datasets.keys()))
             if suggestions:
                 msg += f"\n\n  Did you mean: [bold]{', '.join(suggestions)}[/]?"
@@ -118,6 +127,14 @@ def _run_eval(
         if evaluator is not None:
             reward_fn_name = catalog_entry.get("reward_fn", "") if catalog_entry else ""
             evaluator_display = reward_fn_name or type(evaluator).__name__
+        elif catalog_entry and catalog_entry.get("reward_fn"):
+            # Catalog entry exists (possibly synthesized for Harbor) but
+            # resolve_evaluator_from_catalog missed it — try loading directly.
+            try:
+                evaluator = load_evaluator(catalog_entry["reward_fn"])
+                evaluator_display = catalog_entry["reward_fn"]
+            except (KeyError, ImportError):
+                pass
 
     if evaluator is None:
         console.print(f"  [error]No evaluator found for '{benchmark}'. Specify --evaluator explicitly.[/]")

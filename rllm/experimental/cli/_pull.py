@@ -292,6 +292,50 @@ def _pull_generated_dataset(name: str, catalog_entry: dict, generator_path: str)
             raise
 
 
+def resolve_harbor_catalog_entry(name: str) -> dict | None:
+    """Try to resolve an unknown benchmark name as a Harbor dataset.
+
+    Probes the Harbor package registry. If a dataset with the given name exists,
+    returns a synthesized catalog entry compatible with rLLM's dataset system.
+    Returns None if the name doesn't match any Harbor dataset.
+
+    This allows users to run ``rllm eval <any-harbor-dataset>`` without needing
+    a pre-registered entry in ``datasets.json``.
+    """
+    try:
+        from harbor.registry.client.factory import RegistryClientFactory
+    except ImportError:
+        return None
+
+    import asyncio
+
+    async def _probe():
+        client = RegistryClientFactory.create()
+        try:
+            metadata = await client.get_dataset_metadata(name)
+            return metadata
+        except Exception:
+            return None
+
+    try:
+        metadata = asyncio.run(_probe())
+    except Exception:
+        return None
+
+    if metadata is None:
+        return None
+
+    return {
+        "description": getattr(metadata, "description", "") or f"Harbor dataset: {name}",
+        "source": f"harbor:{name}",
+        "category": "agentic",
+        "splits": ["default"],
+        "default_agent": "harbor:mini-swe-agent",
+        "reward_fn": "harbor_reward_fn",
+        "eval_split": "default",
+    }
+
+
 def _pull_harbor_dataset(name: str, catalog_entry: dict) -> None:
     """Download a Harbor dataset and register it locally.
 
