@@ -344,8 +344,13 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         original_batch_size = batch.batch["prompts"].shape[0]
         batch, pad_size = pad_dataproto_to_divisor(batch, divisor)
 
-        # for the padded dataproto, make the traj mask to 0. is_last_step also False
+        # Neutralise the padded rows. `advantages=0` (set by
+        # update_dataproto_with_advantages via is_pad_step) zeros the loss
+        # numerator; zeroing `response_mask` keeps pad tokens out of
+        # `batch_num_tokens` so the loss denominator equals the real-token
+        # count and loss magnitude is invariant to pad_size.
         pad_start, pad_end = original_batch_size, original_batch_size + pad_size
+        batch.batch["response_mask"][pad_start:pad_end] = 0
         batch.non_tensor_batch["is_last_step"][pad_start:pad_end] = False
         batch.non_tensor_batch["is_pad_step"][pad_start:pad_end] = True
         batch.non_tensor_batch["is_valid"][pad_start:pad_end] = False
