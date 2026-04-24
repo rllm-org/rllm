@@ -3,11 +3,19 @@ import hydra
 from rllm.data.dataset import DatasetRegistry
 from rllm.experimental.unified_trainer import AgentTrainer
 
+TRAIN_DATASET = "swesmith"
+VAL_DATASET = "swebench-verified"
+
 
 @hydra.main(config_path="pkg://rllm.experimental.config", config_name="unified", version_base=None)
 def main(config):
-    train_dataset = DatasetRegistry.load_dataset("swesmith_harbor", "train")
-    val_dataset = DatasetRegistry.load_dataset("swebench_verified_harbor", "test")
+    train_dataset = DatasetRegistry.load_dataset(TRAIN_DATASET, "default")
+    val_dataset = DatasetRegistry.load_dataset(VAL_DATASET, "default")
+
+    if train_dataset is None:
+        raise RuntimeError(f"Dataset '{TRAIN_DATASET}' not found. Run: rllm dataset pull harbor:{TRAIN_DATASET}")
+    if val_dataset is None:
+        raise RuntimeError(f"Dataset '{VAL_DATASET}' not found. Run: rllm dataset pull harbor:{VAL_DATASET}")
 
     trainer = AgentTrainer(
         config=config,

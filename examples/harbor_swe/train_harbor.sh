@@ -1,4 +1,8 @@
-set -x
+set -ex
+
+# Pull Harbor datasets (no-ops if already pulled)
+rllm dataset pull harbor:swesmith
+rllm dataset pull harbor:swebench-verified
 
 python -m examples.harbor_swe.train_harbor \
     rllm/backend=tinker \
