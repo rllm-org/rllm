@@ -32,12 +32,12 @@ from verl.utils.debug import marked_timer
 
 from rllm.experimental.fully_async.message_queue import MessageQueueClient
 from rllm.experimental.fully_async.metric_utils import MetricsAggregator, ValidateMetrics
-from rllm.experimental.verl.metrics import calculate_debug_metrics_compat
 from rllm.experimental.fully_async.utils import (
     assemble_batch_from_trajectory_group_ls,
     compute_grpo_outcome_advantage,
     reduce_metrics_with_flatten,
 )
+from rllm.experimental.verl.metrics import calculate_debug_metrics_compat
 
 
 @ray.remote(num_cpus=10)

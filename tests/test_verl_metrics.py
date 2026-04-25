@@ -7,7 +7,6 @@ import math
 from pathlib import Path
 
 import pytest
-import torch
 
 _METRICS_PATH = Path(__file__).resolve().parents[1] / "rllm" / "experimental" / "verl" / "metrics.py"
 _SPEC = importlib.util.spec_from_file_location("rllm_test_verl_metrics", _METRICS_PATH)
@@ -18,39 +17,12 @@ calculate_debug_metrics_compat = _METRICS_MODULE.calculate_debug_metrics_compat
 
 
 class _DummyData:
-    def __init__(self, batch: dict[str, torch.Tensor]) -> None:
+    def __init__(self, batch: dict[str, object]) -> None:
         self.batch = batch
 
 
-def test_calculate_debug_metrics_compat_prefers_response_mask(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An all-zero response_mask should short-circuit even if attention_mask is permissive."""
-    monkeypatch.setattr(
-        _METRICS_MODULE,
-        "_load_verl_calculate_debug_metrics",
-        lambda: pytest.fail("upstream helper should not be called for all-zero response_mask"),
-    )
-
-    data = _DummyData(
-        {
-            "rollout_log_probs": torch.zeros((1, 3), dtype=torch.float32),
-            "old_log_probs": torch.zeros((1, 3), dtype=torch.float32),
-            "response_mask": torch.zeros((1, 3), dtype=torch.long),
-            "attention_mask": torch.ones((1, 5), dtype=torch.long),
-            "responses": torch.ones((1, 3), dtype=torch.long),
-        }
-    )
-
-    metrics = calculate_debug_metrics_compat(data)
-
-    assert metrics["training/rollout_probs_diff_valid"] == 0
-    assert math.isnan(metrics["training/rollout_probs_diff_max"])
-    assert math.isnan(metrics["training/rollout_probs_diff_mean"])
-    assert math.isnan(metrics["training/rollout_probs_diff_std"])
-    assert math.isnan(metrics["training/rollout_actor_probs_pearson_corr"])
-
-
-def test_calculate_debug_metrics_compat_uses_attention_mask_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When response_mask is absent, the wrapper should follow Verl's attention-mask fallback."""
+def test_calculate_debug_metrics_compat_passes_through_upstream_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Normal upstream results should pass through unchanged."""
     expected_metrics = {
         "training/rollout_probs_diff_valid": 1,
         "training/rollout_probs_diff_max": 0.3,
@@ -66,19 +38,35 @@ def test_calculate_debug_metrics_compat_uses_attention_mask_fallback(monkeypatch
 
     monkeypatch.setattr(_METRICS_MODULE, "_load_verl_calculate_debug_metrics", lambda: fake_upstream)
 
-    data = _DummyData(
-        {
-            "rollout_log_probs": torch.zeros((1, 3), dtype=torch.float32),
-            "old_log_probs": torch.zeros((1, 3), dtype=torch.float32),
-            "attention_mask": torch.tensor([[1, 1, 1, 0, 1]], dtype=torch.long),
-            "responses": torch.ones((1, 3), dtype=torch.long),
-        }
-    )
+    data = _DummyData({"batch_id": "pass-through"})
 
     metrics = calculate_debug_metrics_compat(data)
 
     assert calls == [data]
     assert metrics == expected_metrics
+
+
+def test_calculate_debug_metrics_compat_keeps_newer_upstream_empty_mask_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If upstream already returns the default empty-mask payload, keep it unchanged."""
+    expected_metrics = {
+        "training/rollout_probs_diff_valid": 0,
+        "training/rollout_probs_diff_max": float("nan"),
+        "training/rollout_probs_diff_mean": float("nan"),
+        "training/rollout_probs_diff_std": float("nan"),
+        "training/rollout_actor_probs_pearson_corr": float("nan"),
+    }
+
+    monkeypatch.setattr(_METRICS_MODULE, "_load_verl_calculate_debug_metrics", lambda: lambda _: dict(expected_metrics))
+
+    metrics = calculate_debug_metrics_compat(_DummyData({"batch_id": "newer-upstream-empty-mask"}))
+
+    assert metrics["training/rollout_probs_diff_valid"] == 0
+    assert math.isnan(metrics["training/rollout_probs_diff_max"])
+    assert math.isnan(metrics["training/rollout_probs_diff_mean"])
+    assert math.isnan(metrics["training/rollout_probs_diff_std"])
+    assert math.isnan(metrics["training/rollout_actor_probs_pearson_corr"])
 
 
 def test_calculate_debug_metrics_compat_single_token_std_is_zero(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -93,63 +81,44 @@ def test_calculate_debug_metrics_compat_single_token_std_is_zero(monkeypatch: py
 
     monkeypatch.setattr(_METRICS_MODULE, "_load_verl_calculate_debug_metrics", lambda: lambda _: dict(upstream_metrics))
 
-    data = _DummyData(
-        {
-            "rollout_log_probs": torch.zeros((1, 3), dtype=torch.float32),
-            "old_log_probs": torch.zeros((1, 3), dtype=torch.float32),
-            "response_mask": torch.tensor([[0, 1, 0]], dtype=torch.long),
-            "responses": torch.ones((1, 3), dtype=torch.long),
-        }
-    )
-
-    metrics = calculate_debug_metrics_compat(data)
+    metrics = calculate_debug_metrics_compat(_DummyData({"batch_id": "single-token"}))
 
     assert metrics["training/rollout_probs_diff_std"] == pytest.approx(0.0)
     assert math.isnan(metrics["training/rollout_actor_probs_pearson_corr"])
 
 
-def test_calculate_debug_metrics_compat_short_circuits_empty_attention_tail(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The wrapper should emulate newer upstream behavior for empty valid-token masks."""
+def test_calculate_debug_metrics_compat_backfills_legacy_empty_mask_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Older upstream helpers raise on empty reductions; the wrapper should return default metrics."""
+
+    def raise_empty_mask(_: _DummyData) -> dict[str, float]:
+        raise RuntimeError(f"max(): {_METRICS_MODULE._EMPTY_REDUCTION_ERROR_SNIPPETS[0]} for {_METRICS_MODULE._EMPTY_REDUCTION_ERROR_SNIPPETS[1]}")
+
     monkeypatch.setattr(
         _METRICS_MODULE,
         "_load_verl_calculate_debug_metrics",
-        lambda: pytest.fail("upstream helper should not be called for all-zero effective mask"),
+        lambda: raise_empty_mask,
     )
 
-    data = _DummyData(
-        {
-            "rollout_log_probs": torch.zeros((1, 3), dtype=torch.float32),
-            "old_log_probs": torch.zeros((1, 3), dtype=torch.float32),
-            "attention_mask": torch.tensor([[1, 1, 0, 0, 0]], dtype=torch.long),
-            "responses": torch.ones((1, 3), dtype=torch.long),
-        }
-    )
-
-    metrics = calculate_debug_metrics_compat(data)
+    metrics = calculate_debug_metrics_compat(_DummyData({"batch_id": "legacy-empty-mask"}))
 
     assert metrics["training/rollout_probs_diff_valid"] == 0
     assert math.isnan(metrics["training/rollout_probs_diff_max"])
+    assert math.isnan(metrics["training/rollout_probs_diff_mean"])
+    assert math.isnan(metrics["training/rollout_probs_diff_std"])
     assert math.isnan(metrics["training/rollout_actor_probs_pearson_corr"])
 
 
-def test_calculate_debug_metrics_compat_short_circuits_empty_responses(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Empty responses should also hit the compatibility fallback instead of delegating upstream."""
-    monkeypatch.setattr(
-        _METRICS_MODULE,
-        "_load_verl_calculate_debug_metrics",
-        lambda: pytest.fail("upstream helper should not be called for zero-length responses"),
-    )
+def test_calculate_debug_metrics_compat_reraises_unrelated_runtime_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not hide unrelated upstream failures behind the empty-mask compatibility path."""
 
-    data = _DummyData(
-        {
-            "rollout_log_probs": torch.zeros((1, 0), dtype=torch.float32),
-            "old_log_probs": torch.zeros((1, 0), dtype=torch.float32),
-            "attention_mask": torch.tensor([[1, 1]], dtype=torch.long),
-            "responses": torch.zeros((1, 0), dtype=torch.long),
-        }
-    )
+    def raise_unrelated(_: _DummyData) -> dict[str, float]:
+        raise RuntimeError("unexpected upstream failure")
 
-    metrics = calculate_debug_metrics_compat(data)
+    monkeypatch.setattr(_METRICS_MODULE, "_load_verl_calculate_debug_metrics", lambda: raise_unrelated)
 
-    assert metrics["training/rollout_probs_diff_valid"] == 0
-    assert math.isnan(metrics["training/rollout_probs_diff_std"])
+    with pytest.raises(RuntimeError, match="unexpected upstream failure"):
+        calculate_debug_metrics_compat(_DummyData({"batch_id": "unexpected-error"}))

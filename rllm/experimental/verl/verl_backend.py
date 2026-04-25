@@ -40,8 +40,8 @@ from rllm.experimental.common import (
 )
 from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.rollout import RolloutEngine, VerlEngine
-from rllm.experimental.verl.metrics import calculate_debug_metrics_compat
 from rllm.experimental.verl import compute_advantage_verl, transform_episodes_to_dataproto, update_dataproto_with_advantages
+from rllm.experimental.verl.metrics import calculate_debug_metrics_compat
 
 if TYPE_CHECKING:
     from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
