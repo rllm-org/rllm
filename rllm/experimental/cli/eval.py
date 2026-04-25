@@ -235,7 +235,10 @@ def _run_eval(
 
     result, episodes = asyncio.run(runner.run(dataset, agent, evaluator, agent_name=agent_name, on_episode_complete=on_episode_complete))
 
-    # Flush remaining buffered episodes
+    # Flush remaining buffered episodes BEFORE posting eval result / finishing
+    # session.  The flush enqueues episodes onto the UILogger background
+    # thread; we must give the thread time to drain before finish() shuts it
+    # down, otherwise episodes arrive after the session is closed (500).
     if _flush_episode_buffer is not None:
         _flush_episode_buffer()
 

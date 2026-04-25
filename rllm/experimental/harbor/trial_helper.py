@@ -242,7 +242,8 @@ def trial_result_to_episode(result, uid: str, task: dict):
     Returns:
         An ``rllm.types.Episode`` populated with reward and metadata.
     """
-    from rllm.types import Episode, Trajectory
+    from rllm.agents.agent import Episode, Trajectory
+    from rllm.experimental.harbor.atif_trajectory_bridge import load_atif_steps
     from rllm.workflows.workflow import TerminationReason
 
     reward, is_correct, error_msg = trial_result_to_reward(result)
@@ -262,13 +263,19 @@ def trial_result_to_episode(result, uid: str, task: dict):
     else:
         termination = TerminationReason.ERROR
 
+    # Load ATIF trajectory steps from disk if available.
+    steps = []
+    trial_uri = getattr(result, "trial_uri", None)
+    if trial_uri:
+        steps = load_atif_steps(trial_uri)
+
     trajectories = []
     if reward is not None:
         trajectories.append(
             Trajectory(
                 name="harbor_trial",
                 task=task,
-                steps=[],
+                steps=steps,
                 reward=reward,
             )
         )
