@@ -2,8 +2,8 @@
 
 Bridges Harbor's directory-per-task format into rLLM's flat tabular format.
 Each Harbor task directory becomes a dict row with ``task_path``, ``instruction``,
-and metadata fields that downstream components (HarborAgentFlow, HarborEvaluator,
-HarborRuntime) consume.
+and metadata fields that downstream components (HarborRuntime, HarborEvaluator)
+consume.
 """
 
 from __future__ import annotations

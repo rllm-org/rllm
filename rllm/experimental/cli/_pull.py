@@ -347,7 +347,7 @@ def _pull_harbor_dataset(name: str, catalog_entry: dict) -> None:
         catalog_entry: Entry from datasets.json with 'source' starting with 'harbor:'.
     """
     from rllm.data import DatasetRegistry
-    from rllm.experimental.harbor.dataset_loader import load_harbor_dataset
+    from rllm.integrations.harbor.dataset_loader import load_harbor_dataset
 
     source = catalog_entry["source"]
     # Strip "harbor:" prefix to get the registry identifier

@@ -1,6 +1,6 @@
 """Harbor evaluator: scores Episodes using Harbor's container-based verification.
 
-When used with HarborAgentFlow, the trial already ran verification (test.sh)
+When used with HarborRuntime, the trial already ran verification (test.sh)
 and the reward is stored in episode.artifacts. The evaluator just reads it.
 
 When used with a non-Harbor agent (standalone mode), this evaluator cannot
@@ -27,7 +27,7 @@ class HarborEvaluator:
     """
 
     def evaluate(self, task: dict, episode: Episode) -> EvalOutput:
-        # Integrated mode: HarborAgentFlow already ran the trial + verifier.
+        # Integrated mode: HarborRuntime already ran the trial + verifier.
         # Check for the sentinel key to distinguish "trial ran" from "no trial".
         if episode.artifacts.get("harbor_trial_ran"):
             reward = float(episode.artifacts.get("harbor_reward", 0.0))
@@ -51,7 +51,7 @@ class HarborEvaluator:
                     metadata={"eval_mode": "harbor_trajectory_fallback"},
                 )
 
-        # No Harbor reward available -- agent was not a HarborAgentFlow
+        # No Harbor reward available -- agent was not a HarborRuntime
         logger.warning(
             "HarborEvaluator: no harbor_trial_ran in episode artifacts for task '%s'. Harbor tasks require a Harbor agent (e.g., --agent harbor:mini-swe-agent) for container-based verification.",
             task.get("task_id", "unknown"),
