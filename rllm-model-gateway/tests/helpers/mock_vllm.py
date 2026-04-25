@@ -6,6 +6,7 @@ Provides:
 """
 
 import json
+import socket
 import threading
 import time
 from typing import Any
@@ -208,6 +209,14 @@ def build_controllable_mock_vllm_app(response_delay: float = 0.0) -> FastAPI:
     return app
 
 
+def _reserve_local_port(host: str) -> int:
+    """Reserve an ephemeral local TCP port for a test server."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((host, 0))
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return sock.getsockname()[1]
+
+
 class MockVLLMServer:
     """Run a mock vLLM server in a background thread."""
 
@@ -227,6 +236,8 @@ class MockVLLMServer:
         return self.app.state.request_log
 
     def start(self) -> None:
+        if self.port == 0:
+            self.port = _reserve_local_port(self.host)
         config = uvicorn.Config(
             self.app,
             host=self.host,
@@ -239,8 +250,6 @@ class MockVLLMServer:
         deadline = time.time() + 5.0
         while time.time() < deadline:
             if self._server.started:
-                for sock in self._server.servers:
-                    self.port = sock.sockets[0].getsockname()[1]
                 return
             time.sleep(0.05)
         raise RuntimeError("Mock vLLM server failed to start")
@@ -277,6 +286,8 @@ class ControllableMockVLLMServer:
         self.app.state.should_malform = malform
 
     def start(self) -> None:
+        if self.port == 0:
+            self.port = _reserve_local_port(self.host)
         config = uvicorn.Config(
             self.app,
             host=self.host,
@@ -289,8 +300,6 @@ class ControllableMockVLLMServer:
         deadline = time.time() + 5.0
         while time.time() < deadline:
             if self._server.started:
-                for sock in self._server.servers:
-                    self.port = sock.sockets[0].getsockname()[1]
                 return
             time.sleep(0.05)
         raise RuntimeError("Controllable mock vLLM server failed to start")

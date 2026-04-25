@@ -54,6 +54,7 @@ from rllm.experimental.verl import (
     transform_trajectory_groups_to_dataproto,
     update_dataproto_with_advantages,
 )
+from rllm.experimental.verl.metrics import calculate_debug_metrics_compat
 from rllm.experimental.verl.utils import (
     balance_batch,
     build_wg_kwargs,
@@ -412,28 +413,67 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         is_pad_step = batch.non_tensor_batch["is_pad_step"]
         return batch.select_idxs(np.where(is_pad_step == False)[0])  # noqa: E712
 
-    def _get_dp_world_size(self) -> int | None:
-        world_sizes = []
-        if self.use_reference_policy and self.ref_policy_wg is not None and self.ref_policy_wg.world_size != 0:
-            world_sizes.append(self.ref_policy_wg.world_size)
-        if self.actor_rollout_wg is not None and self.actor_rollout_wg.world_size != 0:
-            world_sizes.append(self.actor_rollout_wg.world_size)
-        if not world_sizes:
+    def _get_dp_size(self, worker_group, mesh_name: str) -> int:
+        """Query actual DP size for a worker group mesh via dispatch info.
+
+        Mirrors ``RayPPOTrainer._get_dp_size``: the dispatch-info mapping
+        assigns a dp_rank to each global worker rank, so dp_size is
+        ``max(dp_rank_mapping) + 1``.
+        """
+        if mesh_name not in worker_group._dispatch_info:
+            worker_group._dispatch_info[mesh_name] = worker_group._query_dispatch_info(mesh_name)
+        return max(worker_group._dispatch_info[mesh_name]) + 1
+
+    def _get_aggregate_dp_size(self) -> int | None:
+        """Compute the LCM of DP sizes across all active worker-group meshes.
+
+        Mesh names target the new EngineWorker path (verl_launcher pins
+        ``use_legacy_worker_impl='disable'``):
+        - actor_rollout_wg -> ``engine_workers.ActorRolloutRefWorker``
+            registers ``"actor"`` and ``"ref"``.
+        - critic_wg       -> ``CriticWorker`` is aliased to ``TrainingWorker``
+            in ``main_ppo.add_critic_worker``, which registers ``"train"``.
+        - ref_policy_wg   -> same ``ActorRolloutRefWorker`` as actor_rollout_wg,
+            so the registered mesh is ``"ref"``.
+        """
+        dp_sizes: list[int] = []
+        if self.use_critic and self.critic_wg.world_size != 0:
+            dp_sizes.append(self._get_dp_size(self.critic_wg, "train"))
+        if self.use_reference_policy and self.ref_policy_wg.world_size != 0:
+            dp_sizes.append(self._get_dp_size(self.ref_policy_wg, "ref"))
+        if self.actor_rollout_wg.world_size != 0:
+            dp_sizes.append(self._get_dp_size(self.actor_rollout_wg, "actor"))
+        if not dp_sizes:
             return None
-        return reduce(math.lcm, world_sizes)
+        return reduce(math.lcm, dp_sizes)
 
     def _pad_dataproto_to_world_size(self, batch: DataProto) -> DataProto:
         from verl.protocol import pad_dataproto_to_divisor
 
-        world_size = self._get_dp_world_size()
-        if world_size is None:
+        dp_size = self._get_aggregate_dp_size()
+        if dp_size is None:
             return batch
 
-        batch = self._remove_padding(batch)
-        original_batch_size = batch.batch["prompts"].shape[0]
-        batch, pad_size = pad_dataproto_to_divisor(batch, world_size)
+        # From verl RayPPOTrainer._update_actor: ppo_mini_batch_size is multiplied
+        # by rollout.n before being passed as mini_batch_size to update_actor and
+        # make_iterator enforces batch_per_gpu % mini_batch_size == 0. Globally this
+        # requires batch_size % (ppo_mini_batch_size * rollout.n) == 0.
+        rollout_n = self.config.actor_rollout_ref.rollout.n
+        ppo_mbs = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+        mini_batch_global = ppo_mbs * rollout_n
+        divisor = math.lcm(dp_size, mini_batch_global)
 
+        batch = self._remove_padding(batch)  # Remove any padded steps from the batch (just in case)
+        original_batch_size = batch.batch["prompts"].shape[0]
+        batch, pad_size = pad_dataproto_to_divisor(batch, divisor)
+
+        # Neutralise the padded rows. `advantages=0` (set by
+        # update_dataproto_with_advantages via is_pad_step) zeros the loss
+        # numerator; zeroing `response_mask` keeps pad tokens out of
+        # `batch_num_tokens` so the loss denominator equals the real-token
+        # count and loss magnitude is invariant to pad_size.
         pad_start, pad_end = original_batch_size, original_batch_size + pad_size
+        batch.batch["response_mask"][pad_start:pad_end] = 0
         batch.non_tensor_batch["is_last_step"][pad_start:pad_end] = False
         batch.non_tensor_batch["is_pad_step"][pad_start:pad_end] = True
         batch.non_tensor_batch["is_valid"][pad_start:pad_end] = False
@@ -530,8 +570,9 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
                     response_mask=response_mask,
                 )
                 metrics.update({f"offpolicy/{k}": v for k, v in offpolicy_metrics.items()})
+                metrics.update(calculate_debug_metrics_compat(batch))
 
-        # ref_log_probs
+        # --- Compute reference log_probs (reuse batch_td) ---
         if self.use_reference_policy:
             with simple_timer("ref", timing_dict):
                 tu.assign_non_tensor(batch_td, calculate_entropy=False, compute_loss=False)
