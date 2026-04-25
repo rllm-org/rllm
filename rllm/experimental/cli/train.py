@@ -190,7 +190,7 @@ def _run_train(
 
     # ---- Docker check for Harbor datasets ----
     if catalog_entry and catalog_entry.get("source", "").startswith("harbor:"):
-        from rllm.experimental.harbor.utils import check_docker_available
+        from rllm.integrations.harbor.utils import check_docker_available
 
         if not check_docker_available():
             console.print("  [error]Harbor tasks require Docker. Make sure Docker is installed and running.[/]")

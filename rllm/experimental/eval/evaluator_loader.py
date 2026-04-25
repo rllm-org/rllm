@@ -125,7 +125,7 @@ _EVALUATOR_REGISTRY: dict[str, type] = {
 
 # Lazy-loaded evaluators (avoid importing optional dependencies at module level)
 _LAZY_EVALUATOR_REGISTRY: dict[str, str] = {
-    "harbor_reward_fn": "rllm.experimental.harbor.evaluator:HarborEvaluator",
+    "harbor_reward_fn": "rllm.integrations.harbor.evaluator:HarborEvaluator",
 }
 
 

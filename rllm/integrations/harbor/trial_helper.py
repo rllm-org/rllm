@@ -1,15 +1,21 @@
 """Shared Harbor trial execution helpers.
 
 Contains the core logic for building TrialConfigs, running trials, and parsing
-results. Used by both HarborAgentFlow (eval) and HarborRuntime (training) to
-avoid duplicating Harbor interaction code.
+results.  ``HarborRuntime`` delegates to ``run_harbor_task()`` for both the
+eval and training paths.
+
+The primary entry point is ``run_harbor_task()``, which encapsulates the full
+single-task lifecycle: build config → run trial → extract reward → handle
+errors → map termination reason.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import os
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -114,7 +120,7 @@ def build_harbor_trial_config(
     """Build a Harbor TrialConfig from rLLM task data.
 
     This is the single source of truth for constructing trial configs, used
-    by both eval (HarborAgentFlow) and training (HarborRuntime).
+    by HarborRuntime for both eval and training.
 
     Args:
         task_path: Absolute path to a Harbor task directory.
@@ -231,11 +237,182 @@ def trial_result_to_reward(result) -> tuple[float | None, bool, str | None]:
     return None, False, error_msg or "harbor trial produced no verifier reward"
 
 
-def trial_result_to_episode(result, uid: str, task: dict):
-    """Convert a Harbor TrialResult into an rLLM Episode.
+# ---------------------------------------------------------------------------
+# Unified single-task execution
+# ---------------------------------------------------------------------------
+
+# Map harbor exception_type strings to rllm TerminationReason.
+_EXCEPTION_TYPE_MAP: dict[str, Any] | None = None
+
+
+def _get_exception_type_map() -> dict[str, Any]:
+    """Lazily build the exception-type → TerminationReason map."""
+    global _EXCEPTION_TYPE_MAP
+    if _EXCEPTION_TYPE_MAP is None:
+        from rllm.workflows.workflow import TerminationReason
+
+        _EXCEPTION_TYPE_MAP = {
+            "AgentTimeoutError": TerminationReason.TIMEOUT,
+            "ContextLengthExceededError": TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED,
+            "OutputLengthExceededError": TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED,
+        }
+    return _EXCEPTION_TYPE_MAP
+
+
+def map_termination_reason(
+    finished: bool,
+    exception_type: str | None,
+    timed_out: bool = False,
+):
+    """Derive TerminationReason from harbor trial outcome.
+
+    Shared by both eval and training paths.
+    """
+    from rllm.workflows.workflow import TerminationReason
+
+    if finished:
+        return TerminationReason.ENV_DONE
+    if timed_out:
+        return TerminationReason.TIMEOUT
+    if exception_type:
+        return _get_exception_type_map().get(exception_type, TerminationReason.ERROR)
+    return TerminationReason.ERROR
+
+
+@dataclasses.dataclass
+class HarborTaskOutcome:
+    """Result of a single harbor task execution.
+
+    This is the unified return type from ``run_harbor_task()``.  Both the eval
+    ``HarborRuntime`` converts this into protocol-specific result types
+    (Episode for eval, RemoteTaskResult for training).
+    """
+
+    finished: bool
+    reward: float | None = None
+    is_correct: bool = False
+    error: str | None = None
+    termination_reason: Any = None  # TerminationReason (lazy import)
+    elapsed: float = 0.0
+    raw_result: dict[str, Any] | None = None
+    trial_uri: str | None = None
+    # The raw TrialResult for callers that need deeper access (e.g. ATIF steps).
+    _trial_result: Any = None
+
+
+async def run_harbor_task(
+    *,
+    task_path: str,
+    agent_name: str,
+    model_name: str | None = None,
+    inference_url: str | None = None,
+    environment_type: str | None = None,
+    agent_kwargs: dict[str, Any] | None = None,
+    agent_timeout_multiplier: float | None = None,
+    verifier_timeout_multiplier: float | None = None,
+    agent_setup_timeout_multiplier: float | None = None,
+    environment_build_timeout_multiplier: float | None = None,
+    trial_name: str = "",
+    timeout: float | None = None,
+) -> HarborTaskOutcome:
+    """Run a single Harbor task end-to-end and return a unified outcome.
+
+    This is the single code path for both eval and training.  It builds the
+    trial config, executes the trial, extracts the reward, and maps errors to
+    termination reasons — all in one place.
 
     Args:
-        result: A ``harbor.models.trial.result.TrialResult``.
+        task_path: Absolute path to a Harbor task directory.
+        agent_name: Harbor agent name (e.g., "mini-swe-agent").
+        model_name: LLM model identifier, or MODEL_PLACEHOLDER for training.
+        inference_url: Base URL for LLM API calls.
+        environment_type: Harbor environment backend.
+        agent_kwargs: Extra kwargs for the Harbor agent scaffold.
+        agent_timeout_multiplier: Multiply agent timeout.
+        verifier_timeout_multiplier: Multiply verifier timeout.
+        agent_setup_timeout_multiplier: Multiply agent setup timeout.
+        environment_build_timeout_multiplier: Multiply environment build timeout.
+        trial_name: Unique trial identifier.
+        timeout: Maximum time in seconds.  None means no timeout.
+
+    Returns:
+        A ``HarborTaskOutcome`` with reward, termination reason, and raw result.
+    """
+    from rllm.workflows.workflow import TerminationReason
+
+    start = time.monotonic()
+    try:
+        trial_config = build_harbor_trial_config(
+            task_path=task_path,
+            agent_name=agent_name,
+            model_name=model_name,
+            inference_url=inference_url,
+            environment_type=environment_type,
+            agent_kwargs=agent_kwargs,
+            agent_timeout_multiplier=agent_timeout_multiplier,
+            verifier_timeout_multiplier=verifier_timeout_multiplier,
+            agent_setup_timeout_multiplier=agent_setup_timeout_multiplier,
+            environment_build_timeout_multiplier=environment_build_timeout_multiplier,
+            trial_name=trial_name,
+        )
+        result = await run_harbor_trial(trial_config, timeout=timeout)
+    except asyncio.TimeoutError:
+        elapsed = time.monotonic() - start
+        logger.warning("Task %s timed out after %.1fs", trial_name, elapsed)
+        return HarborTaskOutcome(
+            finished=False,
+            error=f"harbor trial timed out after {timeout:.1f}s" if timeout else "harbor trial timed out",
+            termination_reason=TerminationReason.TIMEOUT,
+            elapsed=elapsed,
+        )
+    except Exception as e:
+        elapsed = time.monotonic() - start
+        logger.exception("Task %s failed: %s", trial_name, e)
+        return HarborTaskOutcome(
+            finished=False,
+            error=f"{type(e).__name__}: {e}",
+            termination_reason=map_termination_reason(False, type(e).__name__),
+            elapsed=elapsed,
+        )
+
+    elapsed = time.monotonic() - start
+    raw = result.model_dump(mode="json")
+    reward, is_correct, error_msg = trial_result_to_reward(result)
+    exc_type = result.exception_info.exception_type if result.exception_info else None
+    trial_uri = getattr(result, "trial_uri", None)
+
+    if reward is not None:
+        return HarborTaskOutcome(
+            finished=True,
+            reward=reward,
+            is_correct=is_correct,
+            error=error_msg,
+            termination_reason=map_termination_reason(True, exc_type),
+            elapsed=elapsed,
+            raw_result=raw,
+            trial_uri=trial_uri,
+            _trial_result=result,
+        )
+
+    # No reward signal → finished=False.
+    return HarborTaskOutcome(
+        finished=False,
+        reward=None,
+        is_correct=False,
+        error=error_msg or "harbor trial produced no verifier reward",
+        termination_reason=map_termination_reason(False, exc_type),
+        elapsed=elapsed,
+        raw_result=raw,
+        trial_uri=trial_uri,
+        _trial_result=result,
+    )
+
+
+def outcome_to_episode(outcome: HarborTaskOutcome, uid: str, task: dict):
+    """Convert a ``HarborTaskOutcome`` into an rLLM Episode.
+
+    Args:
+        outcome: Result from ``run_harbor_task()``.
         uid: Unique episode identifier.
         task: The original task dict (from the dataset row).
 
@@ -243,31 +420,15 @@ def trial_result_to_episode(result, uid: str, task: dict):
         An ``rllm.types.Episode`` populated with reward and metadata.
     """
     from rllm.agents.agent import Episode, Trajectory
-    from rllm.experimental.harbor.atif_trajectory_bridge import load_atif_steps
-    from rllm.workflows.workflow import TerminationReason
+    from rllm.integrations.harbor.atif_trajectory_bridge import load_atif_steps
 
-    reward, is_correct, error_msg = trial_result_to_reward(result)
-
-    # Map Harbor exception types to rLLM termination reasons
-    _EXCEPTION_TYPE_MAP = {
-        "AgentTimeoutError": TerminationReason.TIMEOUT,
-        "ContextLengthExceededError": TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED,
-        "OutputLengthExceededError": TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED,
-    }
-
-    exc_type = result.exception_info.exception_type if result.exception_info else None
-    if reward is not None:
-        termination = TerminationReason.ENV_DONE
-    elif exc_type:
-        termination = _EXCEPTION_TYPE_MAP.get(exc_type, TerminationReason.ERROR)
-    else:
-        termination = TerminationReason.ERROR
+    reward = outcome.reward
+    is_correct = outcome.is_correct
 
     # Load ATIF trajectory steps from disk if available.
     steps = []
-    trial_uri = getattr(result, "trial_uri", None)
-    if trial_uri:
-        steps = load_atif_steps(trial_uri)
+    if outcome.trial_uri:
+        steps = load_atif_steps(outcome.trial_uri)
 
     trajectories = []
     if reward is not None:
@@ -280,21 +441,18 @@ def trial_result_to_episode(result, uid: str, task: dict):
             )
         )
 
-    metrics = {
+    metrics: dict[str, Any] = {
         "reward": reward if reward is not None else 0.0,
         "is_correct": int(is_correct),
     }
-
-    # Extract timing info if available
-    if hasattr(result, "started_at") and result.started_at and hasattr(result, "finished_at") and result.finished_at:
-        elapsed = (result.finished_at - result.started_at).total_seconds()
-        metrics["elapsed_sec"] = elapsed
+    if outcome.elapsed > 0:
+        metrics["elapsed_sec"] = outcome.elapsed
 
     metadata: dict[str, Any] = {}
-    if hasattr(result, "trial_uri") and result.trial_uri:
-        metadata["trial_uri"] = result.trial_uri
-    if error_msg:
-        metadata["error"] = {"message": error_msg}
+    if outcome.trial_uri:
+        metadata["trial_uri"] = outcome.trial_uri
+    if outcome.error:
+        metadata["error"] = {"message": outcome.error}
 
     return Episode(
         id=uid,
@@ -303,5 +461,5 @@ def trial_result_to_episode(result, uid: str, task: dict):
         trajectories=trajectories,
         metrics=metrics,
         metadata=metadata,
-        termination_reason=termination,
+        termination_reason=outcome.termination_reason,
     )
