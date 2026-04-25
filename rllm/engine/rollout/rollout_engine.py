@@ -59,6 +59,21 @@ class RolloutEngine:
     async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         raise NotImplementedError("get_model_response is not implemented")
 
+    @property
+    def supports_token_in_token_out(self) -> bool:
+        """Whether the engine can continue generation from tokenized inputs."""
+        return False
+
+    async def get_token_output_from_token_input(self, token_input, **kwargs):
+        raise NotImplementedError("get_token_output_from_token_input is not implemented")
+
+    def assemble_model_output(self, token_input, token_output, **kwargs) -> ModelOutput:
+        raise NotImplementedError("assemble_model_output is not implemented")
+
+    async def get_model_response_from_token_input(self, token_input, **kwargs) -> ModelOutput:
+        token_output = await self.get_token_output_from_token_input(token_input, **kwargs)
+        return self.assemble_model_output(token_input, token_output, **kwargs)
+
     async def wake_up(self):
         pass
 

@@ -56,17 +56,12 @@ class TimingTrackingMixin:
             self._current_step_timing["step_end_time"] = time.time()
             self._current_step_timing["step_end_timestamp"] = datetime.now(timezone.utc).isoformat()
 
-    async def timed_llm_call(self, *args, **kwargs):
-        """Wrapper for LLM calls with timing.
-
-        Returns:
-            ModelOutput from the rollout engine
-        """
-        # Start a new step timing when we make an LLM call
-        self._start_new_step_timing()
-
+    async def _timed_model_call(self, call, *, start_new_step: bool):
+        """Record timing around a model call."""
+        if start_new_step:
+            self._start_new_step_timing()
         start = time.time()
-        result = await self.rollout_engine.get_model_response(*args, **kwargs)
+        result = await call()
         duration = time.time() - start
 
         self._timing_data["llm_time"] += duration
@@ -74,6 +69,28 @@ class TimingTrackingMixin:
             self._current_step_timing["llm_time"] += duration
 
         return result
+
+    async def timed_llm_call(self, *args, **kwargs):
+        """Wrapper for message-based LLM calls with timing."""
+        return await self._timed_model_call(
+            lambda: self.rollout_engine.get_model_response(*args, **kwargs),
+            start_new_step=True,
+        )
+
+    async def timed_llm_call_from_token_input(self, token_input, **kwargs):
+        """Wrapper for token-based LLM continuation calls within the current step."""
+
+        async def _call():
+            if hasattr(self.rollout_engine, "get_model_response_from_token_input"):
+                return await self.rollout_engine.get_model_response_from_token_input(token_input, **kwargs)
+
+            if getattr(self.rollout_engine, "supports_token_in_token_out", False):
+                token_output = await self.rollout_engine.get_token_output_from_token_input(token_input, **kwargs)
+                return self.rollout_engine.assemble_model_output(token_input, token_output)
+
+            raise NotImplementedError("Rollout engine does not support token-in/token-out generation")
+
+        return await self._timed_model_call(_call, start_new_step=False)
 
     async def timed_env_call(self, func, *args, **kwargs):
         """Wrapper for environment calls with timing.

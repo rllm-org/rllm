@@ -2,8 +2,8 @@ import hydra
 
 from rllm.agents.agent import Episode
 from rllm.data.dataset import DatasetRegistry
-from rllm.engine.rollout.rollout_engine import ModelOutput
 from rllm.trainer.agent_trainer import AgentTrainer
+from rllm.workflows.early_finalize_workflows import EarlyFinalizeWorkflowMixin
 from rllm.workflows.multi_turn_workflow import MultiTurnWorkflow
 from rllm.workflows.workflow import TerminationEvent, TerminationReason
 
@@ -48,23 +48,24 @@ class FinQAWorkflow(MultiTurnWorkflow):
             if prompt_length > max_model_len - min_response_buffer:
                 raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
 
-            output: ModelOutput = await self.rollout_engine.get_model_response(
+            output, response_mask, metadata = await self._generate_model_step(
                 self.agent.chat_completions,
                 application_id=uid,
+                task=task,
                 enforce_max_prompt_length=False,
                 **kwargs,
             )
             response = output.text
 
             action = self.agent.update_from_model(response)
-
-            # Store model_output on step for Tinker training (verl uses chat_completions)
-            if not hasattr(self.rollout_engine, "chat_parser") and self.agent.trajectory.steps:
-                self.agent.trajectory.steps[-1].model_output = output
+            current_step = self.agent.trajectory.steps[-1] if self.agent.trajectory.steps else None
 
             next_obs, reward, done, info = await self.run_in_executor(self.env.step, action.action)
 
             self.agent.update_from_env(next_obs, reward, done, info)
+            self._attach_model_step(current_step, output, response_mask, metadata)
+            if current_step is not None and current_step.model_output is None and not hasattr(self.rollout_engine, "chat_parser"):
+                current_step.model_output = output
 
             if output.finish_reason == "length":
                 raise TerminationEvent(TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED)
@@ -93,6 +94,10 @@ class FinQAWorkflow(MultiTurnWorkflow):
             episode.metrics.update(metadata)
 
 
+class FinQAWorkflowWithEarlyFinalize(EarlyFinalizeWorkflowMixin, FinQAWorkflow):
+    pass
+
+
 @hydra.main(
     config_path="pkg://rllm.trainer.config",
     config_name="agent_ppo_trainer",
@@ -105,11 +110,16 @@ def main(config):
     config.rllm.workflow.use_workflow = True
 
     trainer = AgentTrainer(
-        workflow_class=FinQAWorkflow,
+        workflow_class=FinQAWorkflowWithEarlyFinalize,
         workflow_args={
             "agent_cls": FinQAAgent,
             "env_cls": FinQAEnvironment,
             "max_steps": 20,
+            "early_finalize_config": {
+                "reserve_response_tokens": 2048,
+                "min_phase2_tokens": 128,
+                "suffix_mode": "auto",
+            },
         },
         config=config,
         train_dataset=train_dataset,

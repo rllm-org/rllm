@@ -12,6 +12,9 @@ __all__ = [
     "SingleTurnWorkflow",
     "MultiTurnWorkflow",
     "CumulativeWorkflow",
+    "SingleTurnWorkflowWithEarlyFinalize",
+    "MultiTurnWorkflowWithEarlyFinalize",
+    "CumulativeWorkflowWithEarlyFinalize",
     "TimingTrackingMixin",
 ]
 
@@ -29,6 +32,18 @@ def __getattr__(name):
         from .cumulative_workflow import CumulativeWorkflow as _Cumulative
 
         return _Cumulative
+    if name == "SingleTurnWorkflowWithEarlyFinalize":
+        from .early_finalize_workflows import SingleTurnWorkflowWithEarlyFinalize as _SingleEarlyFinalize
+
+        return _SingleEarlyFinalize
+    if name == "MultiTurnWorkflowWithEarlyFinalize":
+        from .early_finalize_workflows import MultiTurnWorkflowWithEarlyFinalize as _MultiEarlyFinalize
+
+        return _MultiEarlyFinalize
+    if name == "CumulativeWorkflowWithEarlyFinalize":
+        from .early_finalize_workflows import CumulativeWorkflowWithEarlyFinalize as _CumulativeEarlyFinalize
+
+        return _CumulativeEarlyFinalize
     if name == "TimingTrackingMixin":
         from .timing_mixin import TimingTrackingMixin as _Mixin
 

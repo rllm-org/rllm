@@ -47,6 +47,54 @@ class VerlEngine(RolloutEngine):
 
         self.validate = False
 
+    @property
+    def supports_token_in_token_out(self) -> bool:
+        return True
+
+    async def get_token_output_from_token_input(self, token_input: list[int], **kwargs) -> TokenOutput:
+        application_id = kwargs.pop("application_id", str(uuid.uuid4()))
+        validate = self.validate or kwargs.pop("validate", False)
+        enforce_max_prompt_length = kwargs.pop("enforce_max_prompt_length", True)
+
+        if enforce_max_prompt_length and len(token_input) > self.max_prompt_length:
+            raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
+
+        sampling_params = self.val_sampling_params.copy() if validate else self.train_sampling_params.copy()
+        sampling_params.update(kwargs)
+
+        max_tokens = sampling_params.pop("max_tokens", sampling_params.pop("max_new_tokens", self.max_response_length))
+        sampling_params["max_tokens"] = max_tokens
+
+        return await self.server_manager.generate(
+            request_id=application_id,
+            prompt_ids=token_input,
+            sampling_params=sampling_params,
+        )  # type: ignore[arg-type]
+
+    def assemble_model_output(self, token_input: list[int], token_output: TokenOutput, **kwargs) -> ModelOutput:
+        completion_ids: list[int] = token_output.token_ids
+        logprobs: list[float] = token_output.log_probs
+        prompt_ids = kwargs.pop("prompt_ids", token_input)
+        multi_modal_inputs = kwargs.pop("multi_modal_inputs", None)
+
+        finish_reason = token_output.stop_reason
+        completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
+        parsed_output = self.chat_parser.parse_completion(completion_ids)
+
+        return ModelOutput(
+            text=completion_text,
+            content=parsed_output["content"],
+            reasoning=parsed_output["reasoning"],
+            tool_calls=parsed_output["tool_calls"],
+            prompt_ids=prompt_ids,
+            completion_ids=completion_ids,
+            multi_modal_inputs=multi_modal_inputs,
+            logprobs=logprobs,
+            prompt_length=len(prompt_ids),
+            completion_length=len(completion_ids),
+            finish_reason=finish_reason,
+        )
+
     async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         application_id = kwargs.pop("application_id", str(uuid.uuid4()))
         validate = self.validate or kwargs.pop("validate", False)
@@ -81,25 +129,15 @@ class VerlEngine(RolloutEngine):
         if enforce_max_prompt_length and prompt_length > self.max_prompt_length:
             raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
 
-        token_output: TokenOutput = await self.server_manager.generate(request_id=application_id, prompt_ids=request_prompt_ids, image_data=image_data, sampling_params=sampling_params)  # type: ignore
-        completion_ids: list[int] = token_output.token_ids
-        logprobs: list[float] = token_output.log_probs
-
-        finish_reason = token_output.stop_reason
-        completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
-        # TODO: implement parse_completion for the standard parser
-        parsed_output = self.chat_parser.parse_completion(completion_ids)
-
-        return ModelOutput(
-            text=completion_text,
-            content=parsed_output["content"],
-            reasoning=parsed_output["reasoning"],
-            tool_calls=parsed_output["tool_calls"],
+        token_output: TokenOutput = await self.server_manager.generate(
+            request_id=application_id,
+            prompt_ids=request_prompt_ids,
+            image_data=image_data,
+            sampling_params=sampling_params,
+        )  # type: ignore[arg-type]
+        return self.assemble_model_output(
+            request_prompt_ids,
+            token_output,
             prompt_ids=prompt_ids,
-            completion_ids=completion_ids,
             multi_modal_inputs=multi_modal_inputs,
-            logprobs=logprobs,
-            prompt_length=prompt_length,
-            completion_length=len(completion_ids),
-            finish_reason=finish_reason,
         )
