@@ -37,6 +37,7 @@ from rllm.experimental.fully_async.utils import (
     compute_grpo_outcome_advantage,
     reduce_metrics_with_flatten,
 )
+from rllm.experimental.verl.metrics import calculate_debug_metrics_compat
 
 
 @ray.remote(num_cpus=10)
@@ -540,9 +541,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
                 batch = batch.union(old_log_prob)
                 if "rollout_log_probs" in batch.batch.keys():
                     # TODO: we may want to add diff of probs too.
-                    from verl.utils.debug.metrics import calculate_debug_metrics
-
-                    metrics.update(calculate_debug_metrics(batch))
+                    metrics.update(calculate_debug_metrics_compat(batch))
                 return batch
 
             async_training = self.config.get("async_training", None)
