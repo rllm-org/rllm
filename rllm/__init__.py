@@ -5,7 +5,7 @@ Main package for the rLLM framework.
 
 import sys
 
-__all__ = ["BaseAgent", "Action", "Step", "Trajectory", "Episode", "rollout", "evaluator"]
+__all__ = ["BaseAgent", "Action", "Step", "Trajectory", "Episode", "rollout", "evaluator", "TaskExecutor"]
 
 
 def __getattr__(name: str):
@@ -16,6 +16,13 @@ def __getattr__(name: str):
         _mod.rollout = rollout
         _mod.evaluator = evaluator
         return rollout if name == "rollout" else evaluator
+
+    if name == "TaskExecutor":
+        from rllm.tasks.task_executor import TaskExecutor
+
+        _mod = sys.modules[__name__]
+        _mod.TaskExecutor = TaskExecutor
+        return TaskExecutor
 
     _agent_exports = {"BaseAgent", "Action", "Step", "Trajectory", "Episode"}
     if name in _agent_exports:

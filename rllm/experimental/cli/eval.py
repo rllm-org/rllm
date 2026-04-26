@@ -50,117 +50,157 @@ def _run_eval(
     from rllm.experimental.eval.evaluator_loader import load_evaluator, resolve_evaluator_from_catalog
     from rllm.experimental.eval.runner import EvalRunner
 
-    # Load catalog for defaults
-    catalog = load_dataset_catalog()
-    all_datasets = catalog.get("datasets", {})
-    catalog_entry = all_datasets.get(benchmark)
+    # ------------------------------------------------------------------
+    # Local benchmark path: directory with dataset.toml / task.toml
+    # ------------------------------------------------------------------
+    from rllm.tasks.loader import BenchmarkLoader
 
-    # Explicit Harbor prefix: "harbor:<name>" resolves from Harbor registry
-    if catalog_entry is None and benchmark.startswith("harbor:"):
-        from rllm.experimental.cli._pull import resolve_harbor_catalog_entry
+    if BenchmarkLoader.is_local_benchmark(benchmark):
+        sandbox_backend = (agent_metadata or {}).get("sandbox_backend")
+        bench_result = BenchmarkLoader.load(benchmark, sandbox_backend=sandbox_backend)
+        dataset = bench_result.dataset
+        catalog_entry = bench_result.catalog_entry
 
-        harbor_name = benchmark.removeprefix("harbor:")
-        with Status(f"[dim]Looking up '{harbor_name}' in Harbor registry...[/]", console=console):
-            catalog_entry = resolve_harbor_catalog_entry(harbor_name)
-        if catalog_entry:
-            console.print(f"  [success]Found Harbor dataset:[/] [val]{harbor_name}[/]")
-            benchmark = harbor_name  # Use the clean name for display and registry
+        if split is None:
+            split = dataset.split or "test"
 
-    # Resolve agent
-    if agent_name is None:
-        if catalog_entry and "default_agent" in catalog_entry:
-            agent_name = catalog_entry["default_agent"]
-        elif not catalog_entry:
-            msg = f"  [error]Benchmark '{benchmark}' not found.[/]"
-            suggestions = _suggest_benchmarks(benchmark, list(all_datasets.keys()))
-            if suggestions:
-                msg += f"\n\n  Did you mean: [bold]{', '.join(suggestions)}[/]?"
-            msg += "\n\n  Run [bold]rllm dataset list[/] to see available benchmarks."
-            msg += "\n  Use [bold]harbor:[/] prefix for Harbor datasets (e.g., [bold]rllm eval harbor:swebench-verified[/])."
-            console.print(msg)
-            raise SystemExit(1)
+        # Agent: CLI --agent overrides loader default
+        if agent_name is not None:
+            agent = load_agent(agent_name)
+        elif bench_result.agent is not None:
+            agent = bench_result.agent
+            agent_name = catalog_entry.get("default_agent", "task-executor")
         else:
-            console.print(f"  [error]No --agent specified and no default_agent in catalog for '{benchmark}'.[/]")
+            console.print(f"  [error]No --agent specified and no default agent for local benchmark '{benchmark}'.[/]")
             raise SystemExit(1)
 
-    # Resolve split
-    if split is None:
-        if catalog_entry:
-            split = catalog_entry.get("eval_split", "test")
-        else:
-            split = "test"
-
-    # Docker check for Harbor tasks
-    if (agent_name and agent_name.startswith("harbor:")) or (catalog_entry and catalog_entry.get("source", "").startswith("harbor:")):
-        from rllm.integrations.harbor.utils import check_docker_available
-
-        if not check_docker_available():
-            console.print("  [error]Harbor tasks require Docker. Make sure Docker is installed and running.[/]")
-            raise SystemExit(1)
-
-    # Load agent (now returns AgentFlow)
-    try:
-        agent = load_agent(agent_name)
-    except (KeyError, ImportError, AttributeError, TypeError) as e:
-        console.print(f"  [error]Error loading agent '{agent_name}': {e}[/]")
-        raise SystemExit(1) from None
-
-    # Apply sandbox CLI overrides to agent
-    if agent_metadata:
-        from rllm.integrations.harbor.runtime import HarborRuntime
-
-        if isinstance(agent, HarborRuntime):
-            if "sandbox_backend" in agent_metadata:
-                agent.environment_type = agent_metadata["sandbox_backend"]
-        else:
-            from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow
-
-            if isinstance(agent, SandboxedAgentFlow):
-                if "sandbox_backend" in agent_metadata:
-                    agent.sandbox_backend = agent_metadata["sandbox_backend"]
-                if "sandbox_concurrency" in agent_metadata:
-                    agent.max_concurrent = agent_metadata["sandbox_concurrency"]
-
-    # Load evaluator
-    evaluator = None
-    evaluator_display = "N/A"
-    if evaluator_name is not None:
-        try:
+        # Evaluator: CLI --evaluator overrides loader default
+        evaluator_display = "N/A"
+        if evaluator_name is not None:
             evaluator = load_evaluator(evaluator_name)
             evaluator_display = evaluator_name
-        except (KeyError, ImportError, AttributeError, TypeError) as e:
-            console.print(f"  [error]Error loading evaluator '{evaluator_name}': {e}[/]")
-            raise SystemExit(1) from None
+        elif bench_result.evaluator is not None:
+            evaluator = bench_result.evaluator
+            evaluator_display = type(evaluator).__name__
+        else:
+            console.print(f"  [error]No --evaluator specified and no default evaluator for local benchmark '{benchmark}'.[/]")
+            raise SystemExit(1)
+
+    # ------------------------------------------------------------------
+    # Catalog / Harbor path (existing behavior)
+    # ------------------------------------------------------------------
     else:
-        # Auto-resolve from catalog
-        evaluator = resolve_evaluator_from_catalog(benchmark)
-        if evaluator is not None:
-            reward_fn_name = catalog_entry.get("reward_fn", "") if catalog_entry else ""
-            evaluator_display = reward_fn_name or type(evaluator).__name__
-        elif catalog_entry and catalog_entry.get("reward_fn"):
-            # Catalog entry exists (possibly synthesized for Harbor) but
-            # resolve_evaluator_from_catalog missed it — try loading directly.
+        # Load catalog for defaults
+        catalog = load_dataset_catalog()
+        all_datasets = catalog.get("datasets", {})
+        catalog_entry = all_datasets.get(benchmark)
+
+        # Explicit Harbor prefix: "harbor:<name>" resolves from Harbor registry
+        if catalog_entry is None and benchmark.startswith("harbor:"):
+            from rllm.experimental.cli._pull import resolve_harbor_catalog_entry
+
+            harbor_name = benchmark.removeprefix("harbor:")
+            with Status(f"[dim]Looking up '{harbor_name}' in Harbor registry...[/]", console=console):
+                catalog_entry = resolve_harbor_catalog_entry(harbor_name)
+            if catalog_entry:
+                console.print(f"  [success]Found Harbor dataset:[/] [val]{harbor_name}[/]")
+                benchmark = harbor_name  # Use the clean name for display and registry
+
+        # Resolve agent
+        if agent_name is None:
+            if catalog_entry and "default_agent" in catalog_entry:
+                agent_name = catalog_entry["default_agent"]
+            elif not catalog_entry:
+                msg = f"  [error]Benchmark '{benchmark}' not found.[/]"
+                suggestions = _suggest_benchmarks(benchmark, list(all_datasets.keys()))
+                if suggestions:
+                    msg += f"\n\n  Did you mean: [bold]{', '.join(suggestions)}[/]?"
+                msg += "\n\n  Run [bold]rllm dataset list[/] to see available benchmarks."
+                msg += "\n  Use [bold]harbor:[/] prefix for Harbor datasets (e.g., [bold]rllm eval harbor:swebench-verified[/])."
+                console.print(msg)
+                raise SystemExit(1)
+            else:
+                console.print(f"  [error]No --agent specified and no default_agent in catalog for '{benchmark}'.[/]")
+                raise SystemExit(1)
+
+        # Resolve split
+        if split is None:
+            if catalog_entry:
+                split = catalog_entry.get("eval_split", "test")
+            else:
+                split = "test"
+
+        # Docker check for Harbor tasks
+        if (agent_name and agent_name.startswith("harbor:")) or (catalog_entry and catalog_entry.get("source", "").startswith("harbor:")):
+            from rllm.integrations.harbor.utils import check_docker_available
+
+            if not check_docker_available():
+                console.print("  [error]Harbor tasks require Docker. Make sure Docker is installed and running.[/]")
+                raise SystemExit(1)
+
+        # Load agent (now returns AgentFlow)
+        try:
+            agent = load_agent(agent_name)
+        except (KeyError, ImportError, AttributeError, TypeError) as e:
+            console.print(f"  [error]Error loading agent '{agent_name}': {e}[/]")
+            raise SystemExit(1) from None
+
+        # Apply sandbox CLI overrides to agent
+        if agent_metadata:
+            from rllm.integrations.harbor.runtime import HarborRuntime
+
+            if isinstance(agent, HarborRuntime):
+                if "sandbox_backend" in agent_metadata:
+                    agent.environment_type = agent_metadata["sandbox_backend"]
+            else:
+                from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow
+
+                if isinstance(agent, SandboxedAgentFlow):
+                    if "sandbox_backend" in agent_metadata:
+                        agent.sandbox_backend = agent_metadata["sandbox_backend"]
+                    if "sandbox_concurrency" in agent_metadata:
+                        agent.max_concurrent = agent_metadata["sandbox_concurrency"]
+
+        # Load evaluator
+        evaluator = None
+        evaluator_display = "N/A"
+        if evaluator_name is not None:
             try:
-                evaluator = load_evaluator(catalog_entry["reward_fn"])
-                evaluator_display = catalog_entry["reward_fn"]
-            except (KeyError, ImportError):
-                pass
+                evaluator = load_evaluator(evaluator_name)
+                evaluator_display = evaluator_name
+            except (KeyError, ImportError, AttributeError, TypeError) as e:
+                console.print(f"  [error]Error loading evaluator '{evaluator_name}': {e}[/]")
+                raise SystemExit(1) from None
+        else:
+            # Auto-resolve from catalog
+            evaluator = resolve_evaluator_from_catalog(benchmark)
+            if evaluator is not None:
+                reward_fn_name = catalog_entry.get("reward_fn", "") if catalog_entry else ""
+                evaluator_display = reward_fn_name or type(evaluator).__name__
+            elif catalog_entry and catalog_entry.get("reward_fn"):
+                # Catalog entry exists (possibly synthesized for Harbor) but
+                # resolve_evaluator_from_catalog missed it — try loading directly.
+                try:
+                    evaluator = load_evaluator(catalog_entry["reward_fn"])
+                    evaluator_display = catalog_entry["reward_fn"]
+                except (KeyError, ImportError):
+                    pass
 
-    if evaluator is None:
-        console.print(f"  [error]No evaluator found for '{benchmark}'. Specify --evaluator explicitly.[/]")
-        raise SystemExit(1)
+        if evaluator is None:
+            console.print(f"  [error]No evaluator found for '{benchmark}'. Specify --evaluator explicitly.[/]")
+            raise SystemExit(1)
 
-    # Load dataset — auto-pull if not available locally
-    dataset = DatasetRegistry.load_dataset(benchmark, split)
-    if dataset is None:
-        if catalog_entry:
-            with Status(f"[dim]Pulling {benchmark} from {catalog_entry['source']}...[/]", console=console):
-                pull_dataset(benchmark, catalog_entry)
-            dataset = DatasetRegistry.load_dataset(benchmark, split)
+        # Load dataset — auto-pull if not available locally
+        dataset = DatasetRegistry.load_dataset(benchmark, split)
+        if dataset is None:
+            if catalog_entry:
+                with Status(f"[dim]Pulling {benchmark} from {catalog_entry['source']}...[/]", console=console):
+                    pull_dataset(benchmark, catalog_entry)
+                dataset = DatasetRegistry.load_dataset(benchmark, split)
 
-    if dataset is None:
-        console.print(f"  [error]Could not load dataset '{benchmark}' split '{split}'.[/]")
-        raise SystemExit(1)
+        if dataset is None:
+            console.print(f"  [error]Could not load dataset '{benchmark}' split '{split}'.[/]")
+            raise SystemExit(1)
 
     # Filter to specific task indices if requested
     if task_indices is not None:

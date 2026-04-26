@@ -174,89 +174,135 @@ def _run_train(
         console.print("  Install with: [bold]pip install rllm\\[train][/]")
         raise SystemExit(1) from None
 
-    # ---- Load catalog ----
-    catalog = load_dataset_catalog()
-    catalog_entry = catalog.get("datasets", {}).get(benchmark)
+    # ------------------------------------------------------------------
+    # Local benchmark path: directory with dataset.toml / task.toml
+    # ------------------------------------------------------------------
+    from rllm.tasks.loader import BenchmarkLoader
 
-    # ---- Explicit Harbor prefix: "harbor:<name>" ----
-    if catalog_entry is None and benchmark.startswith("harbor:"):
-        from rllm.experimental.cli._pull import resolve_harbor_catalog_entry
+    catalog = {}  # needed for Harbor config path later
+    catalog_entry = None
 
-        harbor_name = benchmark.removeprefix("harbor:")
-        catalog_entry = resolve_harbor_catalog_entry(harbor_name)
-        if catalog_entry:
-            console.print(f"  [success]Found Harbor dataset:[/] [val]{harbor_name}[/]")
-            benchmark = harbor_name
+    if BenchmarkLoader.is_local_benchmark(benchmark):
+        bench_result = BenchmarkLoader.load(benchmark)
+        catalog_entry = bench_result.catalog_entry
 
-    # ---- Docker check for Harbor datasets ----
-    if catalog_entry and catalog_entry.get("source", "").startswith("harbor:"):
-        from rllm.integrations.harbor.utils import check_docker_available
-
-        if not check_docker_available():
-            console.print("  [error]Harbor tasks require Docker. Make sure Docker is installed and running.[/]")
-            raise SystemExit(1)
-
-    # ---- Resolve agent ----
-    if agent_name is None:
-        if catalog_entry and "default_agent" in catalog_entry:
-            agent_name = catalog_entry["default_agent"]
+        # Agent
+        if agent_name is not None:
+            agent_flow = load_agent(agent_name)
+        elif bench_result.agent is not None:
+            agent_flow = bench_result.agent
+            agent_name = catalog_entry.get("default_agent", "task-executor")
         else:
-            console.print(f"  [error]No --agent specified and no default_agent in catalog for '{benchmark}'.[/]")
+            console.print(f"  [error]No --agent specified for local benchmark '{benchmark}'.[/]")
             raise SystemExit(1)
 
-    try:
-        agent_flow = load_agent(agent_name)
-    except (KeyError, ImportError, AttributeError, TypeError) as e:
-        console.print(f"  [error]Error loading agent '{agent_name}': {e}[/]")
-        raise SystemExit(1) from None
-
-    # ---- Resolve evaluator ----
-    evaluator = None
-    evaluator_display = "N/A"
-    if evaluator_name is not None:
-        try:
+        # Evaluator
+        evaluator_display = "N/A"
+        if evaluator_name is not None:
             evaluator = load_evaluator(evaluator_name)
             evaluator_display = evaluator_name
-        except (KeyError, ImportError, AttributeError, TypeError) as e:
-            console.print(f"  [error]Error loading evaluator '{evaluator_name}': {e}[/]")
-            raise SystemExit(1) from None
+        elif bench_result.evaluator is not None:
+            evaluator = bench_result.evaluator
+            evaluator_display = type(evaluator).__name__
+        else:
+            console.print(f"  [error]No --evaluator specified for local benchmark '{benchmark}'.[/]")
+            raise SystemExit(1)
+
+        # Datasets: use the loaded dataset for both train and val
+        train_dataset = bench_result.dataset
+        if max_examples is not None and max_examples < len(train_dataset):
+            train_dataset = train_dataset.select(range(max_examples))
+        val_dataset = bench_result.dataset  # same dataset for val
+        if val_split is None:
+            val_split = train_dataset.split or "test"
+
+    # ------------------------------------------------------------------
+    # Catalog / Harbor path (existing behavior)
+    # ------------------------------------------------------------------
     else:
-        evaluator = resolve_evaluator_from_catalog(benchmark)
-        if evaluator is not None:
-            reward_fn_name = catalog_entry.get("reward_fn", "") if catalog_entry else ""
-            evaluator_display = reward_fn_name or type(evaluator).__name__
-        elif catalog_entry and catalog_entry.get("reward_fn"):
+        # ---- Load catalog ----
+        catalog = load_dataset_catalog()
+        catalog_entry = catalog.get("datasets", {}).get(benchmark)
+
+        # ---- Explicit Harbor prefix: "harbor:<name>" ----
+        if catalog_entry is None and benchmark.startswith("harbor:"):
+            from rllm.experimental.cli._pull import resolve_harbor_catalog_entry
+
+            harbor_name = benchmark.removeprefix("harbor:")
+            catalog_entry = resolve_harbor_catalog_entry(harbor_name)
+            if catalog_entry:
+                console.print(f"  [success]Found Harbor dataset:[/] [val]{harbor_name}[/]")
+                benchmark = harbor_name
+
+        # ---- Docker check for Harbor datasets ----
+        if catalog_entry and catalog_entry.get("source", "").startswith("harbor:"):
+            from rllm.integrations.harbor.utils import check_docker_available
+
+            if not check_docker_available():
+                console.print("  [error]Harbor tasks require Docker. Make sure Docker is installed and running.[/]")
+                raise SystemExit(1)
+
+        # ---- Resolve agent ----
+        if agent_name is None:
+            if catalog_entry and "default_agent" in catalog_entry:
+                agent_name = catalog_entry["default_agent"]
+            else:
+                console.print(f"  [error]No --agent specified and no default_agent in catalog for '{benchmark}'.[/]")
+                raise SystemExit(1)
+
+        try:
+            agent_flow = load_agent(agent_name)
+        except (KeyError, ImportError, AttributeError, TypeError) as e:
+            console.print(f"  [error]Error loading agent '{agent_name}': {e}[/]")
+            raise SystemExit(1) from None
+
+        # ---- Resolve evaluator ----
+        evaluator = None
+        evaluator_display = "N/A"
+        if evaluator_name is not None:
             try:
-                evaluator = load_evaluator(catalog_entry["reward_fn"])
-                evaluator_display = catalog_entry["reward_fn"]
-            except (KeyError, ImportError):
-                pass
+                evaluator = load_evaluator(evaluator_name)
+                evaluator_display = evaluator_name
+            except (KeyError, ImportError, AttributeError, TypeError) as e:
+                console.print(f"  [error]Error loading evaluator '{evaluator_name}': {e}[/]")
+                raise SystemExit(1) from None
+        else:
+            evaluator = resolve_evaluator_from_catalog(benchmark)
+            if evaluator is not None:
+                reward_fn_name = catalog_entry.get("reward_fn", "") if catalog_entry else ""
+                evaluator_display = reward_fn_name or type(evaluator).__name__
+            elif catalog_entry and catalog_entry.get("reward_fn"):
+                try:
+                    evaluator = load_evaluator(catalog_entry["reward_fn"])
+                    evaluator_display = catalog_entry["reward_fn"]
+                except (KeyError, ImportError):
+                    pass
 
-    if evaluator is None:
-        console.print(f"  [error]No evaluator found for '{benchmark}'. Specify --evaluator explicitly.[/]")
-        raise SystemExit(1)
+        if evaluator is None:
+            console.print(f"  [error]No evaluator found for '{benchmark}'. Specify --evaluator explicitly.[/]")
+            raise SystemExit(1)
 
-    # ---- Resolve dataset names ----
-    train_ds_name = train_dataset_name or benchmark
-    val_ds_name = val_dataset_name or benchmark
+        # ---- Resolve dataset names ----
+        train_ds_name = train_dataset_name or benchmark
+        val_ds_name = val_dataset_name or benchmark
 
-    # Resolve val split from catalog if not provided
-    if val_split is None:
-        val_catalog_entry = catalog.get("datasets", {}).get(val_ds_name)
-        val_split = val_catalog_entry.get("eval_split", "test") if val_catalog_entry else "test"
+        # Resolve val split from catalog if not provided
+        if val_split is None:
+            val_catalog_entry = catalog.get("datasets", {}).get(val_ds_name)
+            val_split = val_catalog_entry.get("eval_split", "test") if val_catalog_entry else "test"
 
-    # ---- Load training dataset ----
-    train_dataset = _load_or_pull_dataset(train_ds_name, train_split, catalog)
-    if train_dataset is None:
-        console.print(f"  [error]Could not load training dataset '{train_ds_name}' split '{train_split}'.[/]")
-        raise SystemExit(1)
+        # ---- Load training dataset ----
+        train_dataset = _load_or_pull_dataset(train_ds_name, train_split, catalog)
+        if train_dataset is None:
+            console.print(f"  [error]Could not load training dataset '{train_ds_name}' split '{train_split}'.[/]")
+            raise SystemExit(1)
 
-    if max_examples is not None and max_examples < len(train_dataset):
-        train_dataset = train_dataset.select(range(max_examples))
+        if max_examples is not None and max_examples < len(train_dataset):
+            train_dataset = train_dataset.select(range(max_examples))
 
-    # ---- Load validation dataset ----
-    val_dataset = _load_or_pull_dataset(val_ds_name, val_split, catalog)
-    # val_dataset can be None — training will proceed without validation
+        # ---- Load validation dataset ----
+        val_dataset = _load_or_pull_dataset(val_ds_name, val_split, catalog)
+        # val_dataset can be None — training will proceed without validation
 
     # ---- Build config ----
     config = build_train_config(
