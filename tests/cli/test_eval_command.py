@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from rllm.experimental.cli.main import cli
+from rllm.cli.main import cli
 from rllm.experimental.eval.config import RllmConfig
 from rllm.experimental.eval.types import AgentConfig, EvalOutput, Signal, Task
 from rllm.types import Episode, Step, Trajectory
@@ -89,7 +89,7 @@ def test_eval_with_proxy_mode(runner, tmp_rllm_home, mock_dataset):
     with (
         patch("rllm.experimental.eval.config.load_config", return_value=config),
         patch("rllm.experimental.eval.proxy.EvalProxyManager", return_value=mock_pm),
-        patch("rllm.experimental.cli.eval._run_eval"),
+        patch("rllm.cli.eval._run_eval"),
     ):
         result = runner.invoke(
             cli,

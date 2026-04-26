@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import click
 
-from rllm.experimental.cli._display import format_table
-from rllm.experimental.cli._pull import load_agent_catalog, load_dataset_catalog
+from rllm.cli._display import format_table
+from rllm.cli._pull import load_agent_catalog, load_dataset_catalog
 
 
 @click.group()

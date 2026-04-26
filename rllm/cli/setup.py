@@ -7,7 +7,7 @@ compatibility.  New code should import from ``_ui`` and ``model_cmd``.
 from __future__ import annotations
 
 # Re-export UI helpers so existing patch paths in tests keep working
-from rllm.experimental.cli._ui import (  # noqa: F401
+from rllm.cli._ui import (  # noqa: F401
     _get_terminal_menu,
     _has_tty,
     _mask_key,
@@ -17,4 +17,4 @@ from rllm.experimental.cli._ui import (  # noqa: F401
     console,
     theme,
 )
-from rllm.experimental.cli.model_cmd import model_setup as setup_cmd  # noqa: F401
+from rllm.cli.model_cmd import model_setup as setup_cmd  # noqa: F401

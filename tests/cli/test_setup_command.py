@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from rllm.experimental.cli.main import cli
+from rllm.cli.main import cli
 from rllm.experimental.eval.config import RllmConfig, load_config, save_config
 
 
@@ -170,7 +170,7 @@ def test_setup_with_tty_uses_terminal_menu(tmp_rllm_home):
     mock_menu_instance.show.return_value = 0
     mock_menu_cls = MagicMock(return_value=mock_menu_instance)
 
-    with patch("rllm.experimental.cli._ui._has_tty", return_value=True), patch("rllm.experimental.cli._ui._get_terminal_menu", return_value=mock_menu_cls):
+    with patch("rllm.cli._ui._has_tty", return_value=True), patch("rllm.cli._ui._get_terminal_menu", return_value=mock_menu_cls):
         runner = CliRunner()
         result = runner.invoke(cli, ["setup"], input="sk-testkey\n")
 

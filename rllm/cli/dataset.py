@@ -12,7 +12,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from rllm.experimental.cli._pull import load_dataset_catalog, pull_dataset
+from rllm.cli._pull import load_dataset_catalog, pull_dataset
 
 _console = Console()
 
@@ -170,7 +170,7 @@ def pull(name: str):
 
     # Explicit Harbor prefix: "harbor:<name>"
     if catalog_entry is None and name.startswith("harbor:"):
-        from rllm.experimental.cli._pull import resolve_harbor_catalog_entry
+        from rllm.cli._pull import resolve_harbor_catalog_entry
 
         harbor_name = name.removeprefix("harbor:")
         _console.print(f"[dim]Looking up '{harbor_name}' in Harbor registry...[/]")

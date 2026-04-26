@@ -38,13 +38,13 @@ class _LazyGroup(click.Group):
 
     # (module_path, attr_name, short_help)
     _COMMANDS: dict[str, tuple[str, str, str] | None] = {
-        "agent": ("rllm.experimental.cli.agent", "agent", "Manage agent scaffolds."),
-        "dataset": ("rllm.experimental.cli.dataset", "dataset", "Manage datasets."),
-        "eval": ("rllm.experimental.cli.eval", "eval_cmd", "Evaluate a model on a benchmark dataset."),
-        "init": ("rllm.experimental.cli.init", "init_cmd", "Scaffold a new agent project."),
-        "model": ("rllm.experimental.cli.model_cmd", "model", "Manage provider and model configuration."),
-        "train": ("rllm.experimental.cli.train", "train_cmd", "Train a model on a benchmark dataset using RL."),
-        "login": ("rllm.experimental.cli.login", "login_cmd", "Log in to rLLM UI."),
+        "agent": ("rllm.cli.agent", "agent", "Manage agent scaffolds."),
+        "dataset": ("rllm.cli.dataset", "dataset", "Manage datasets."),
+        "eval": ("rllm.cli.eval", "eval_cmd", "Evaluate a model on a benchmark dataset."),
+        "init": ("rllm.cli.init", "init_cmd", "Scaffold a new agent project."),
+        "model": ("rllm.cli.model_cmd", "model", "Manage provider and model configuration."),
+        "train": ("rllm.cli.train", "train_cmd", "Train a model on a benchmark dataset using RL."),
+        "login": ("rllm.cli.login", "login_cmd", "Log in to rLLM UI."),
         "setup": None,  # handled inline
     }
 
@@ -166,7 +166,7 @@ def cli(ctx):
 def setup_alias(ctx):
     """[deprecated] Use ``rllm model setup`` instead."""
     click.echo("Hint: use `rllm model setup` (the `setup` command is deprecated).\n", err=True)
-    from rllm.experimental.cli.model_cmd import model_setup
+    from rllm.cli.model_cmd import model_setup
 
     ctx.invoke(model_setup)
 

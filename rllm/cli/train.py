@@ -18,7 +18,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.theme import Theme
 
-from rllm.experimental.cli._pull import load_dataset_catalog, pull_dataset
+from rllm.cli._pull import load_dataset_catalog, pull_dataset
 
 theme = Theme({"label": "dim", "success": "bold green", "error": "bold red", "val": "bold", "key": "yellow"})
 console = Console(theme=theme)
@@ -226,7 +226,7 @@ def _run_train(
 
         # ---- Explicit Harbor prefix: "harbor:<name>" ----
         if catalog_entry is None and benchmark.startswith("harbor:"):
-            from rllm.experimental.cli._pull import resolve_harbor_catalog_entry
+            from rllm.cli._pull import resolve_harbor_catalog_entry
 
             harbor_name = benchmark.removeprefix("harbor:")
             catalog_entry = resolve_harbor_catalog_entry(harbor_name)
