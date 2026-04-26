@@ -19,7 +19,7 @@ def load_dataset_catalog() -> dict:
     Returns:
         dict: The full catalog with 'version' and 'datasets' keys.
     """
-    catalog_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "registry", "datasets.json")
+    catalog_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "registry", "datasets.json")
     with open(catalog_path, encoding="utf-8") as f:
         return json.load(f)
 
@@ -30,7 +30,7 @@ def load_agent_catalog() -> dict:
     Returns:
         dict: The full catalog with 'version' and 'agents' keys.
     """
-    catalog_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "registry", "agents.json")
+    catalog_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "registry", "agents.json")
     with open(catalog_path, encoding="utf-8") as f:
         return json.load(f)
 

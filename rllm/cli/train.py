@@ -24,7 +24,7 @@ theme = Theme({"label": "dim", "success": "bold green", "error": "bold red", "va
 console = Console(theme=theme)
 
 # Path to the bundled YAML config templates
-_CONFIG_PKG = Path(__file__).resolve().parent.parent / "config"
+_CONFIG_PKG = Path(__file__).resolve().parent.parent / "experimental" / "config"
 
 
 # ---------------------------------------------------------------------------
