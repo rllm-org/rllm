@@ -306,27 +306,16 @@ class AgentFlowEngine:
         # Convert all traces to training steps
         training_steps = [trace_record_to_step(t) for t in traces]
 
-        # Validate trace integrity. Any of these conditions indicates an upstream
-        # failure (gateway dropped/lost a trace, vLLM returned a response with no
-        # token_ids, etc.) that would silently corrupt the training batch — empty
-        # response tensors break advantage/loss math, and placeholder agent_steps
-        # without model_output get skipped at transform time, shrinking the group
-        # and skewing GRPO baselines. Raise so process_task_with_retry can reissue
-        # the rollout instead of letting bad data into the batch.
+        # Bad traces (missing or empty token_ids) silently corrupt loss math and
+        # shrink GRPO groups; raise on real mismatches so retries can reissue.
         n_agent_steps = sum(len(t.steps) for t in episode.trajectories)
         agent_populates_steps = any(len(t.steps) > 0 for t in episode.trajectories)
 
-        # Multi-turn agents commonly produce a *trailing* malformed trace: the
-        # final LLM call was captured by the gateway (request/response made it
-        # through the proxy) but vLLM returned an empty body — typically because
-        # prompt + max_tokens hit max_model_len, or vLLM disconnected mid-stream
-        # during weight sync. The OpenAI client raises on the empty response,
-        # the agent catches it and breaks *without* recording a Step. Result:
-        # traces = N+1 with the (N+1)-th malformed; agent_steps = N with all N
-        # backed by valid leading traces. Discard the abandoned trailing traces
-        # and proceed — the prefix carries real training signal. Strict failure
-        # here would burn the entire rollout, and at large MAX_TURNS the failure
-        # rate compounds enough to exhaust retries and crash training.
+        # Common case: vLLM returns an empty body on the final call (e.g. prompt
+        # hit max_model_len, or weight-sync disconnect). The agent breaks without
+        # recording a Step, leaving N+1 traces vs N agent_steps with the trailing
+        # one malformed. Drop the trailing trace rather than burn the whole
+        # rollout — at high MAX_TURNS the failure rate would exhaust retries.
         if agent_populates_steps and len(training_steps) > n_agent_steps:
             extra = training_steps[n_agent_steps:]
             extras_all_malformed = all(not s.model_output.prompt_ids or not s.model_output.completion_ids for s in extra)
