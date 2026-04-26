@@ -81,6 +81,10 @@ class TaskEvaluator:
         """Try reading reward from the sandbox at each path in order."""
         for path in paths:
             try:
+                # Check if file exists before reading (avoids noisy Docker warnings)
+                check = sandbox.exec(f"test -f {path} && echo yes || echo no", timeout=10).strip()
+                if check != "yes":
+                    continue
                 raw = sandbox.exec(f"cat {path}", timeout=10).strip()
                 if not raw:
                     continue
@@ -88,9 +92,11 @@ class TaskEvaluator:
                     reward = float(raw)
                     return EvalOutput(reward=reward, is_correct=reward >= 1.0)
                 return _parse_reward_json(raw)
-            except Exception:
+            except Exception as e:
+                logger.debug("Could not read reward from %s: %s", path, e)
                 continue
 
+        logger.warning("No reward file found at any of: %s", paths)
         return EvalOutput(reward=0.0, is_correct=False, metadata={"error": "no reward file found"})
 
     def _evaluate_from_artifacts(self, episode: Episode) -> EvalOutput:

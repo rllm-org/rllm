@@ -45,7 +45,11 @@ class TaskExecutor(SandboxedAgentFlow):
         # Create sandbox
         image = loaded.image
         task_id = task.get("task_id", loaded.task_name)
-        name = f"rllm-{task_id}-{uuid.uuid4().hex[:6]}"
+        # Sanitize for Docker container naming: only [a-zA-Z0-9_.-] allowed
+        import re
+
+        task_id_safe = re.sub(r"[^a-zA-Z0-9_.-]", "-", task_id)
+        name = f"rllm-{task_id_safe}-{uuid.uuid4().hex[:6]}"
         self._sandbox = create_sandbox(self.sandbox_backend, name=name, image=image)
 
         # Create workdir
