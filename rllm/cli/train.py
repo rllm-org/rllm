@@ -183,15 +183,17 @@ def _run_train(
     catalog_entry = None
 
     if BenchmarkLoader.is_local_benchmark(benchmark):
-        bench_result = BenchmarkLoader.load(benchmark)
+        # For local sandbox tasks, --agent is the harness name.
+        bench_result = BenchmarkLoader.load(benchmark, harness_name=agent_name)
         catalog_entry = bench_result.catalog_entry
 
-        # Agent
-        if agent_name is not None:
-            agent_flow = load_agent(agent_name)
-        elif bench_result.agent is not None:
+        # Agent: BenchmarkLoader returns TaskRunner with the selected harness.
+        if bench_result.agent is not None:
             agent_flow = bench_result.agent
-            agent_name = catalog_entry.get("default_agent", "task-executor")
+            if agent_name is None:
+                agent_name = catalog_entry.get("default_agent", "react")
+        elif agent_name is not None:
+            agent_flow = load_agent(agent_name)
         else:
             console.print(f"  [error]No --agent specified for local benchmark '{benchmark}'.[/]")
             raise SystemExit(1)

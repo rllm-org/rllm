@@ -57,19 +57,29 @@ def _run_eval(
 
     if BenchmarkLoader.is_local_benchmark(benchmark):
         sandbox_backend = (agent_metadata or {}).get("sandbox_backend")
-        bench_result = BenchmarkLoader.load(benchmark, sandbox_backend=sandbox_backend)
+        # For local sandbox benchmarks, --agent selects the harness (react,
+        # claude-code, etc.). For local simple datasets, --agent goes through
+        # the regular agent_loader.
+        bench_result = BenchmarkLoader.load(
+            benchmark,
+            sandbox_backend=sandbox_backend,
+            harness_name=agent_name,
+        )
         dataset = bench_result.dataset
         catalog_entry = bench_result.catalog_entry
 
         if split is None:
             split = dataset.split or "test"
 
-        # Agent: CLI --agent overrides loader default
-        if agent_name is not None:
-            agent = load_agent(agent_name)
-        elif bench_result.agent is not None:
+        # Agent: BenchmarkLoader returns the right agent (TaskRunner with
+        # selected harness for sandbox tasks; None for simple datasets).
+        if bench_result.agent is not None:
             agent = bench_result.agent
-            agent_name = catalog_entry.get("default_agent", "task-executor")
+            if agent_name is None:
+                agent_name = catalog_entry.get("default_agent", "react")
+        elif agent_name is not None:
+            # Simple dataset path: load agent from registry/import
+            agent = load_agent(agent_name)
         else:
             console.print(f"  [error]No --agent specified and no default agent for local benchmark '{benchmark}'.[/]")
             raise SystemExit(1)
