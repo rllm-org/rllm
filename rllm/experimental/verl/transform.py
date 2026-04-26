@@ -217,12 +217,35 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
 def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: AccumulatedData) -> int:
     """Processes a trajectory and returns an AccumulatedData.
 
+    Multi-turn trajectories whose steps form a cumulative-prefix chain
+    (each step's prompt is an extension of the previous step's full sequence,
+    e.g. a ReAct/tool-call agent that appends tool messages and assistant
+    responses to a growing message list) are merged into a SINGLE row whose
+    response is the concatenation of [A0, obs1, A1, obs2, A2, ...] with
+    response_mask = 1 only on action tokens (the model's outputs at each
+    turn) and 0 on observation tokens (tool messages, system messages
+    inserted between turns).
+
+    This mirrors Tinker's ``trajectory_to_datums`` representation. Combined
+    with ``loss_agg_mode=seq-mean-token-mean`` it gives per-trajectory
+    equal-weighted gradients regardless of step count: a 6-turn rollout
+    contributes the same to the loss as a 2-turn rollout, which matches
+    Tinker's per-Datum aggregation. Without merging, verl emits one row per
+    step and per-trajectory weight scales with step count.
+
+    A step that is *not* a prefix-extension of the running segment (e.g.
+    the agent reset its context mid-trajectory) closes the current segment
+    and starts a new one — the trajectory then contributes multiple rows.
+    For typical agents this never fires, so the common case is one row per
+    trajectory.
+
     Args:
         trajectory: Trajectory to process.
         task_id: Task identifier corresponding to the episode.
         accumulated: AccumulatedData to process the trajectory into.
     Returns:
-        n_steps: The number of steps in the trajectory.
+        Number of rows emitted to ``accumulated`` (typically 1; >1 only if
+        the trajectory's steps couldn't all be prefix-merged).
     """
     name = trajectory.name
     trajectory_id = f"{task_id}_{name}"
@@ -230,51 +253,111 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
         print(f"Trajectory {trajectory_id} has no steps, skipping")
         return 0
 
-    n_steps = len(trajectory.steps)
-
-    # This corresponds to case when we have `per_step` mode for stepwise advantage computation
     traj_reward = 0.0 if trajectory.reward is None else trajectory.reward
 
-    added_steps = 0
+    # Drop steps without valid model_output up-front; the merge logic below
+    # assumes every entry has prompt_ids and completion_ids.
+    valid_steps = []
     for step_idx, step in enumerate(trajectory.steps):
         if step.model_output is None or step.model_output.prompt_ids is None:
             logger.warning(f"Step {step_idx} in trajectory {trajectory_id} has no valid model_output, skipping")
             continue
-        prompt_ids = torch.tensor(step.model_output.prompt_ids, dtype=torch.long)
-        response_ids = torch.tensor(step.model_output.completion_ids, dtype=torch.long)
-        mask = torch.ones_like(response_ids, dtype=torch.long)
-        step_reward = step.reward
-        multi_modal_inputs = step.model_output.multi_modal_inputs or {}
-        # step_id must uniquely identify this row across the whole batch so
-        # update_dataproto_with_advantages can scatter per-trajectory advantages
-        # back without collisions. trajectory_id alone is f"{task_id}_{name}",
-        # which collides across rollouts of the same task and across multiple
-        # same-named trajectories within one episode (e.g. solver-judge with N
-        # solver trajectories). trajectory.uid is a per-Trajectory UUID4.
-        step_id = f"{trajectory.uid}_step{step_idx}"
+        valid_steps.append(step)
 
+    if not valid_steps:
+        return 0
+
+    # ------------------------------------------------------------------
+    # Walk steps and merge prefix-extending steps into segments.
+    # ------------------------------------------------------------------
+    # A *segment* is one merged row in the batch. We accumulate response
+    # tokens and a parallel mask:
+    #   response = [action_tokens for step0,
+    #               delta_obs_for_step1, action_tokens_step1,
+    #               delta_obs_for_step2, action_tokens_step2, ...]
+    #   mask     = [1*N_act0,
+    #               0*N_obs1, 1*N_act1,
+    #               0*N_obs2, 1*N_act2, ...]
+    # The segment's prompt is the *initial* prompt of the first step in
+    # that segment. ``full_seq`` tracks prompt+all-action-and-obs tokens
+    # so we can detect prefix-extension on the next step.
+
+    def _new_segment(step):
+        prompt = list(step.model_output.prompt_ids)
+        action = list(step.model_output.completion_ids)
+        action_lp = list(step.model_output.logprobs or [])
+        # If logprobs missing/short, pad to action length with zeros so
+        # accumulator lists stay aligned. add_step skips logprobs entirely
+        # when the list is empty, but we keep parity with action_tokens.
+        if action_lp and len(action_lp) != len(action):
+            action_lp = list(action_lp) + [0.0] * (len(action) - len(action_lp))
+        return {
+            "prompt": prompt,
+            "response": list(action),
+            "mask": [1] * len(action),
+            "logprobs": list(action_lp),
+            "full_seq": list(prompt) + list(action),
+            "multi_modal": step.model_output.multi_modal_inputs or {},
+        }
+
+    def _emit(seg):
+        prompt_t = torch.tensor(seg["prompt"], dtype=torch.long)
+        response_t = torch.tensor(seg["response"], dtype=torch.long)
+        mask_t = torch.tensor(seg["mask"], dtype=torch.long)
+        # step_id is keyed by trajectory.uid (no per-segment suffix). All
+        # segments of one trajectory share the same scalar advantage from
+        # collect_reward_and_advantage_from_trajectory_groups (broadcast
+        # mode), so collisions across segments are harmless: the dict in
+        # update_dataproto_with_advantages would write the same value
+        # for either key.
         step_data = ProcessedStepData(
-            prompt=prompt_ids,
-            response=response_ids,
-            mask=mask,
-            step_reward=step_reward,
-            step_id=step_id,
-            multi_modal_inputs=multi_modal_inputs,
-            advantage=step.advantage,
-            logprobs=step.model_output.logprobs,
+            prompt=prompt_t,
+            response=response_t,
+            mask=mask_t,
+            step_reward=traj_reward,
+            step_id=trajectory.uid,
+            multi_modal_inputs=seg["multi_modal"],
+            advantage=None,
+            logprobs=seg["logprobs"] if seg["logprobs"] else None,
         )
-
         accumulated.add_step(
             step_data=step_data,
             trajectory_id=trajectory_id,
             traj_reward=traj_reward,
-            step_num=n_steps,
-            is_last=step_idx == n_steps - 1,
+            step_num=1,
+            is_last=True,
             group_role=name,
         )
-        added_steps += 1
 
-    return added_steps
+    seg = _new_segment(valid_steps[0])
+    segments_emitted = 0
+    for step in valid_steps[1:]:
+        prompt_ids = list(step.model_output.prompt_ids)
+        if len(prompt_ids) >= len(seg["full_seq"]) and prompt_ids[: len(seg["full_seq"])] == seg["full_seq"]:
+            # Cumulative — extend the current segment.
+            delta_obs = prompt_ids[len(seg["full_seq"]) :]
+            action = list(step.model_output.completion_ids)
+            action_lp = list(step.model_output.logprobs or [])
+            if action_lp and len(action_lp) != len(action):
+                action_lp = list(action_lp) + [0.0] * (len(action) - len(action_lp))
+
+            seg["response"].extend(delta_obs)
+            seg["response"].extend(action)
+            seg["mask"].extend([0] * len(delta_obs))
+            seg["mask"].extend([1] * len(action))
+            seg["logprobs"].extend([0.0] * len(delta_obs))
+            seg["logprobs"].extend(action_lp)
+            seg["full_seq"].extend(delta_obs)
+            seg["full_seq"].extend(action)
+        else:
+            # Non-cumulative — close out current segment, start a new one.
+            _emit(seg)
+            segments_emitted += 1
+            seg = _new_segment(step)
+
+    _emit(seg)
+    segments_emitted += 1
+    return segments_emitted
 
 
 def _process_episode(episode: Episode, task_id: str, accumulated: AccumulatedData) -> int:
@@ -391,22 +474,35 @@ def update_dataproto_with_advantages(batch: DataProto, container: list[Episode] 
     after which we need to update the DataProto with the advantages.
     """
     # Build a step_id → advantage mapping from episodes/trajectory groups.
-    # step_id format must match _process_trajectory: f"{trajectory.uid}_step{step_idx}".
-    # Keying on trajectory.uid (not task_id_name) is required for correctness — see
-    # the comment in _process_trajectory.
-    adv_by_step_id: dict[str, float] = {}
+    # step_id format must match _process_trajectory's emit: just trajectory.uid.
+    # _process_trajectory now emits one row per *trajectory* (prefix-merged
+    # multi-step) rather than one row per step, so a single advantage per
+    # trajectory is sufficient. In broadcast mode all steps in a trajectory
+    # share the same scalar advantage from
+    # collect_reward_and_advantage_from_trajectory_groups, so reading from
+    # the first valid step is safe.
+    adv_by_traj_uid: dict[str, float] = {}
     for item in container:
         for trajectory in item.trajectories:
-            for step_idx, step in enumerate(trajectory.steps):
-                step_id = f"{trajectory.uid}_step{step_idx}"
-                adv_by_step_id[step_id] = step.advantage if step.advantage is not None else 0.0
+            if not trajectory.steps:
+                continue
+            adv = next(
+                (s.advantage for s in trajectory.steps if s.advantage is not None),
+                0.0,
+            )
+            adv_by_traj_uid[trajectory.uid] = adv if isinstance(adv, float) else float(adv)
 
     # Match advantages to batch entries by step_id (robust to batch reordering and padding)
     n_total = len(batch.non_tensor_batch["trajectory_ids"])
     step_ids = batch.non_tensor_batch["step_ids"]
     is_pad = batch.non_tensor_batch.get("is_pad_step", np.zeros(n_total, dtype=bool))
 
-    advantages = [0.0 if is_pad[i] else adv_by_step_id.get(str(step_ids[i]), 0.0) for i in range(n_total)]
+    # step_ids in the batch are trajectory.uid values (set by _process_trajectory).
+    # The scalar advantage is broadcast across response tokens by
+    # _build_per_step_advantages, multiplied by response_mask which is 0
+    # on observation tokens between actions — so observation tokens
+    # automatically receive zero advantage in the loss.
+    advantages = [0.0 if is_pad[i] else adv_by_traj_uid.get(str(step_ids[i]), 0.0) for i in range(n_total)]
 
     advantage_tensor = _build_per_step_advantages(batch.batch["response_mask"], advantages)
     batch.batch["advantages"] = advantage_tensor
