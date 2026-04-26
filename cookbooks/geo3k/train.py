@@ -25,7 +25,7 @@ def main(config: DictConfig):
         raise RuntimeError("geo3k train split not found. Run: rllm dataset pull geo3k")
 
     trainer = AgentTrainer(
-        backend="tinker",
+        backend=config.rllm.get("backend", "tinker"),
         agent_flow=geo3k_flow,
         evaluator=geo3k_evaluator,
         config=config,
