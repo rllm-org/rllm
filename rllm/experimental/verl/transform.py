@@ -412,7 +412,7 @@ def _process_trajectory_group(trajectory_group: TrajectoryGroup, task_id: str, a
     return total_steps
 
 
-def _compute_merge_metrics(accumulated: AccumulatedData) -> dict[str, float]:
+def _compute_merge_metrics(accumulated: AccumulatedData, total_agent_steps: int) -> dict[str, float]:
     """Per-batch metrics characterising the merge step.
 
     Naming matches Tinker's transform_trajectory_groups_to_datums so the
@@ -426,6 +426,15 @@ def _compute_merge_metrics(accumulated: AccumulatedData) -> dict[str, float]:
       region per row (action tokens + any interleaved observation tokens).
       For unmerged single-step trajectories this is just the action token
       count; for merged multi-turn it's actions + tool/observation tokens.
+
+    - batch/action_token_ratio/{mean,min,max}: fraction of response
+      tokens per row that are trainable (mask=1). =1.0 for single-step
+      rows (no observations); <1.0 for merged multi-turn (the lower it
+      is, the more tool/observation overhead is in the row).
+
+    - batch/merge_compression_ratio: total agent steps ÷ total emitted
+      rows. =N for a fully cumulative N-turn batch; =1 means no merging
+      occurred (per-step rows, or all single-step trajectories).
     """
     if not accumulated.responses:
         return {}
@@ -438,6 +447,12 @@ def _compute_merge_metrics(accumulated: AccumulatedData) -> dict[str, float]:
 
     rows_per_traj = list(Counter(accumulated.step_ids).values())
     response_lens = [int(r.numel()) for r in accumulated.responses]
+    action_token_ratios = []
+    for mask in accumulated.traj_mask:
+        n = int(mask.numel())
+        if n > 0:
+            action_token_ratios.append(float(mask.sum().item()) / n)
+    total_emitted_rows = len(accumulated.responses)
 
     return {
         "batch/steps_per_traj/mean": float(_np.mean(rows_per_traj)),
@@ -446,6 +461,12 @@ def _compute_merge_metrics(accumulated: AccumulatedData) -> dict[str, float]:
         "batch/step_response_length/mean": float(_np.mean(response_lens)),
         "batch/step_response_length/min": int(_np.min(response_lens)),
         "batch/step_response_length/max": int(_np.max(response_lens)),
+        "batch/action_token_ratio/mean": float(_np.mean(action_token_ratios)) if action_token_ratios else 0.0,
+        "batch/action_token_ratio/min": float(_np.min(action_token_ratios)) if action_token_ratios else 0.0,
+        "batch/action_token_ratio/max": float(_np.max(action_token_ratios)) if action_token_ratios else 0.0,
+        "batch/merge_compression_ratio": (
+            total_agent_steps / total_emitted_rows if total_emitted_rows > 0 else 0.0
+        ),
     }
 
 
@@ -474,15 +495,17 @@ def transform_episodes_to_dataproto(
     processor = getattr(rollout_engine, "processor", None)
 
     accumulated = AccumulatedData()
+    total_agent_steps = 0
     for episode in episodes:
         task_id = episode.task_id
+        total_agent_steps += sum(len(traj.steps) for traj in episode.trajectories)
         total_steps = _process_episode(episode, task_id, accumulated)
         accumulated.repeat_counts.append(total_steps)
 
     assert hasattr(tokenizer, "pad_token_id"), "Tokenizer must have a pad token ID"
     pad_token_id = tokenizer.pad_token_id
     batch = _batch_tensors_and_build_data_proto(accumulated, pad_token_id, max_prompt_length, max_response_length, processor)
-    batch.meta_info["merge_metrics"] = _compute_merge_metrics(accumulated)
+    batch.meta_info["merge_metrics"] = _compute_merge_metrics(accumulated, total_agent_steps)
     return batch
 
 
