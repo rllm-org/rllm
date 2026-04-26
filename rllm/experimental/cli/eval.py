@@ -39,6 +39,7 @@ def _run_eval(
     split: str,
     concurrency: int,
     max_examples: int | None,
+    task_indices: list[int] | None,
     output_path: str | None,
     agent_metadata: dict | None = None,
     enable_ui: bool = False,
@@ -106,13 +107,19 @@ def _run_eval(
 
     # Apply sandbox CLI overrides to agent
     if agent_metadata:
-        from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow
+        from rllm.integrations.harbor.runtime import HarborRuntime
 
-        if isinstance(agent, SandboxedAgentFlow):
+        if isinstance(agent, HarborRuntime):
             if "sandbox_backend" in agent_metadata:
-                agent.sandbox_backend = agent_metadata["sandbox_backend"]
-            if "sandbox_concurrency" in agent_metadata:
-                agent.max_concurrent = agent_metadata["sandbox_concurrency"]
+                agent.environment_type = agent_metadata["sandbox_backend"]
+        else:
+            from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow
+
+            if isinstance(agent, SandboxedAgentFlow):
+                if "sandbox_backend" in agent_metadata:
+                    agent.sandbox_backend = agent_metadata["sandbox_backend"]
+                if "sandbox_concurrency" in agent_metadata:
+                    agent.max_concurrent = agent_metadata["sandbox_concurrency"]
 
     # Load evaluator
     evaluator = None
@@ -155,8 +162,14 @@ def _run_eval(
         console.print(f"  [error]Could not load dataset '{benchmark}' split '{split}'.[/]")
         raise SystemExit(1)
 
-    # Limit examples if requested
-    if max_examples is not None and max_examples < len(dataset):
+    # Filter to specific task indices if requested
+    if task_indices is not None:
+        out_of_range = [i for i in task_indices if i < 0 or i >= len(dataset)]
+        if out_of_range:
+            console.print(f"  [error]Task indices out of range (dataset has {len(dataset)} examples): {out_of_range}[/]")
+            raise SystemExit(1)
+        dataset = dataset.select(task_indices)
+    elif max_examples is not None and max_examples < len(dataset):
         dataset = dataset.select(range(max_examples))
 
     # Resolve agent description
@@ -259,6 +272,15 @@ def _run_eval(
 
     console.print(Panel(res_table, title="[bold]Results[/]", border_style="green" if result.score >= 0.5 else "yellow", expand=False))
 
+    # Print error details so the user knows what went wrong
+    if result.errors > 0:
+        error_items = [item for item in result.items if item.error]
+        console.print()
+        for item in error_items[:5]:
+            console.print(f"  [bold red]Task {item.idx}:[/] {item.error}")
+        if len(error_items) > 5:
+            console.print(f"  [dim]... and {len(error_items) - 5} more errors (see JSON output for details)[/]")
+
     # Save results
     saved_path = result.save(output_path)
     console.print(f"\n  [dim]Saved to {saved_path}[/]")
@@ -280,6 +302,7 @@ def _run_eval(
 @click.option("--split", default=None, help="Dataset split (default: from catalog eval_split).")
 @click.option("--concurrency", default=64, type=int, help="Number of parallel requests.")
 @click.option("--max-examples", default=None, type=int, help="Limit number of examples (for dev/testing).")
+@click.option("--task-indices", default=None, type=str, help="Comma-separated task indices to evaluate (e.g., '0', '3,7,12', '0-9').")
 @click.option("--output", "output_path", default=None, help="Output file path for results JSON.")
 @click.option(
     "--search-backend",
@@ -292,8 +315,8 @@ def _run_eval(
     "--sandbox-backend",
     "sandbox_backend",
     default=None,
-    type=click.Choice(["docker", "local", "modal"], case_sensitive=False),
-    help="Sandbox backend for sandboxed agents (auto-detected from agent if omitted).",
+    type=click.Choice(["docker", "local", "modal", "daytona", "e2b", "runloop", "gke", "apple-container"], case_sensitive=False),
+    help="Sandbox/environment backend. For Harbor agents: docker, daytona, modal, e2b, etc. For sandboxed agents: docker, local, modal.",
 )
 @click.option("--sandbox-concurrency", "sandbox_concurrency", default=None, type=int, help="Override max concurrent sandboxes (default: agent's max_concurrent).")
 @click.option("--ui/--no-ui", "enable_ui", default=None, help="Enable/disable live UI logging. Default: auto-enabled when logged in (see 'rllm login').")
@@ -306,6 +329,7 @@ def eval_cmd(
     split: str | None,
     concurrency: int,
     max_examples: int | None,
+    task_indices: str | None,
     output_path: str | None,
     search_backend: str | None,
     sandbox_backend: str | None,
@@ -384,8 +408,20 @@ def eval_cmd(
     if sandbox_concurrency is not None:
         agent_metadata["sandbox_concurrency"] = sandbox_concurrency
 
+    # Parse --task-indices: "5", "3,7,12", "0-9", or "2,5-8,11"
+    parsed_indices = None
+    if task_indices is not None:
+        parsed_indices = []
+        for part in task_indices.split(","):
+            part = part.strip()
+            if "-" in part:
+                lo, hi = part.split("-", 1)
+                parsed_indices.extend(range(int(lo), int(hi) + 1))
+            else:
+                parsed_indices.append(int(part))
+
     try:
-        _run_eval(benchmark, agent_name, evaluator_name, base_url, model, split, concurrency, max_examples, output_path, agent_metadata=agent_metadata, enable_ui=enable_ui)
+        _run_eval(benchmark, agent_name, evaluator_name, base_url, model, split, concurrency, max_examples, parsed_indices, output_path, agent_metadata=agent_metadata, enable_ui=enable_ui)
     finally:
         if proxy_manager is not None:
             proxy_manager.shutdown_proxy()

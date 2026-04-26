@@ -135,6 +135,11 @@ class HarborRuntime:
             trial_name=config.session_uid,
         )
 
+        # Surface infrastructure failures as exceptions so EvalRunner counts
+        # them as errors rather than silently reporting 0% accuracy.
+        if not outcome.finished:
+            raise RuntimeError(f"Harbor trial failed ({config.session_uid}): {outcome.error}")
+
         episode = outcome_to_episode(outcome, config.session_uid, task.data)
 
         # Store reward in artifacts so HarborEvaluator can read it.
