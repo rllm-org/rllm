@@ -297,10 +297,7 @@ class AgentFlowEngine:
                 task=episode.task,
                 is_correct=episode.is_correct,
                 termination_reason=episode.termination_reason,
-                trajectories=[
-                    t if isinstance(t, Trajectory) else Trajectory(**t.model_dump())
-                    for t in episode.trajectories
-                ],
+                trajectories=[t if isinstance(t, Trajectory) else Trajectory(**t.model_dump()) for t in episode.trajectories],
                 metrics=episode.metrics,
                 metadata=episode.metadata,
                 artifacts=episode.artifacts,
@@ -332,14 +329,13 @@ class AgentFlowEngine:
         # rate compounds enough to exhaust retries and crash training.
         if agent_populates_steps and len(training_steps) > n_agent_steps:
             extra = training_steps[n_agent_steps:]
-            extras_all_malformed = all(
-                not s.model_output.prompt_ids or not s.model_output.completion_ids
-                for s in extra
-            )
+            extras_all_malformed = all(not s.model_output.prompt_ids or not s.model_output.completion_ids for s in extra)
             if extras_all_malformed:
                 logger.warning(
                     "[%s] dropping %d trailing malformed trace(s); keeping %d aligned with agent_steps",
-                    uid, len(extra), n_agent_steps,
+                    uid,
+                    len(extra),
+                    n_agent_steps,
                 )
                 training_steps = training_steps[:n_agent_steps]
 
@@ -350,11 +346,7 @@ class AgentFlowEngine:
         # (see branch below), and trajectories with steps consume traces 1:1.
         traces_short = agent_populates_steps and len(training_steps) < n_agent_steps
         if traces_short or empty_prompt or empty_compl:
-            raise EnrichMismatchError(
-                f"[{uid}] enrich mismatch: traces={len(training_steps)} "
-                f"agent_steps={n_agent_steps} empty_prompt_ids={empty_prompt} "
-                f"empty_completion_ids={empty_compl}"
-            )
+            raise EnrichMismatchError(f"[{uid}] enrich mismatch: traces={len(training_steps)} agent_steps={n_agent_steps} empty_prompt_ids={empty_prompt} empty_completion_ids={empty_compl}")
 
         # Build enriched trajectories
         enriched_trajectories: list[Trajectory] = []
