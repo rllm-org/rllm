@@ -35,6 +35,15 @@ logger = logging.getLogger(__name__)
 _MIN_FD_LIMIT = 8192
 
 
+class EnrichMismatchError(RuntimeError):
+    """Raised when gateway traces don't align with the agent's reported steps.
+
+    Indicates a real upstream failure (lost trace, empty token_ids in the vLLM
+    response, etc.). process_task_with_retry treats it like any other failure
+    and reissues the rollout.
+    """
+
+
 def _raise_fd_limit(target: int = _MIN_FD_LIMIT) -> None:
     """Best-effort raise of the process soft file-descriptor limit.
 
@@ -300,14 +309,51 @@ class AgentFlowEngine:
         # Convert all traces to training steps
         training_steps = [trace_record_to_step(t) for t in traces]
 
-        # Diagnostic: flag token-id problems at the earliest point we can see them.
+        # Validate trace integrity. Any of these conditions indicates an upstream
+        # failure (gateway dropped/lost a trace, vLLM returned a response with no
+        # token_ids, etc.) that would silently corrupt the training batch — empty
+        # response tensors break advantage/loss math, and placeholder agent_steps
+        # without model_output get skipped at transform time, shrinking the group
+        # and skewing GRPO baselines. Raise so process_task_with_retry can reissue
+        # the rollout instead of letting bad data into the batch.
         n_agent_steps = sum(len(t.steps) for t in episode.trajectories)
+        agent_populates_steps = any(len(t.steps) > 0 for t in episode.trajectories)
+
+        # Multi-turn agents commonly produce a *trailing* malformed trace: the
+        # final LLM call was captured by the gateway (request/response made it
+        # through the proxy) but vLLM returned an empty body — typically because
+        # prompt + max_tokens hit max_model_len, or vLLM disconnected mid-stream
+        # during weight sync. The OpenAI client raises on the empty response,
+        # the agent catches it and breaks *without* recording a Step. Result:
+        # traces = N+1 with the (N+1)-th malformed; agent_steps = N with all N
+        # backed by valid leading traces. Discard the abandoned trailing traces
+        # and proceed — the prefix carries real training signal. Strict failure
+        # here would burn the entire rollout, and at large MAX_TURNS the failure
+        # rate compounds enough to exhaust retries and crash training.
+        if agent_populates_steps and len(training_steps) > n_agent_steps:
+            extra = training_steps[n_agent_steps:]
+            extras_all_malformed = all(
+                not s.model_output.prompt_ids or not s.model_output.completion_ids
+                for s in extra
+            )
+            if extras_all_malformed:
+                logger.warning(
+                    "[%s] dropping %d trailing malformed trace(s); keeping %d aligned with agent_steps",
+                    uid, len(extra), n_agent_steps,
+                )
+                training_steps = training_steps[:n_agent_steps]
+
         empty_prompt = sum(1 for s in training_steps if not s.model_output.prompt_ids)
         empty_compl = sum(1 for s in training_steps if not s.model_output.completion_ids)
-        if empty_prompt or empty_compl or len(training_steps) != n_agent_steps:
-            logger.warning(
-                "[%s] enrich mismatch: traces=%d agent_steps=%d empty_prompt_ids=%d empty_completion_ids=%d",
-                uid, len(training_steps), n_agent_steps, empty_prompt, empty_compl,
+        # Only enforce step-count parity when the agent actually populates steps.
+        # Trajectories with no agent steps absorb remaining traces wholesale
+        # (see branch below), and trajectories with steps consume traces 1:1.
+        traces_short = agent_populates_steps and len(training_steps) < n_agent_steps
+        if traces_short or empty_prompt or empty_compl:
+            raise EnrichMismatchError(
+                f"[{uid}] enrich mismatch: traces={len(training_steps)} "
+                f"agent_steps={n_agent_steps} empty_prompt_ids={empty_prompt} "
+                f"empty_completion_ids={empty_compl}"
             )
 
         # Build enriched trajectories
@@ -318,17 +364,15 @@ class AgentFlowEngine:
             traj_steps: list[Step] = []
 
             if traj.steps:
-                # Match agent steps to traces positionally
+                # Match agent steps to traces positionally. The validation above
+                # guarantees trace_idx < len(training_steps) for every agent_step
+                # when agent_populates_steps is True.
                 for agent_step in traj.steps:
-                    if trace_idx < len(training_steps):
-                        step = training_steps[trace_idx]
-                        # Preserve reward and done from agent's step
-                        step.reward = agent_step.reward
-                        step.done = agent_step.done
-                        trace_idx += 1
-                    else:
-                        # No more traces — keep original step
-                        step = agent_step
+                    step = training_steps[trace_idx]
+                    # Preserve reward and done from agent's step
+                    step.reward = agent_step.reward
+                    step.done = agent_step.done
+                    trace_idx += 1
                     traj_steps.append(step)
             else:
                 # No agent steps — assign all remaining traces to this trajectory
