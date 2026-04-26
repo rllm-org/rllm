@@ -280,7 +280,15 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         assert trainer_state.episodes is not None, "Episodes are not set"
         episodes: list[Episode] = trainer_state.episodes
         assert self.rollout_engine is not None, "rollout_engine is not initialized."
-        return transform_episodes_to_dataproto(episodes, self.rollout_engine, self.config.data.max_prompt_length, self.config.data.max_response_length)
+        batch = transform_episodes_to_dataproto(episodes, self.rollout_engine, self.config.data.max_prompt_length, self.config.data.max_response_length)
+        # Lift per-batch merge metrics (batch/steps_per_traj,
+        # batch/step_response_length) out of meta_info so they show up in
+        # the standard trainer_state.metrics path. Same metric names the
+        # tinker backend logs, so dashboards work across both.
+        merge_metrics = batch.meta_info.pop("merge_metrics", None)
+        if merge_metrics:
+            trainer_state.metrics.update(merge_metrics)
+        return batch
 
     def _remove_padding(self, batch: DataProto) -> DataProto:
         """Removes padded steps from the batch"""

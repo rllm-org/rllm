@@ -412,6 +412,43 @@ def _process_trajectory_group(trajectory_group: TrajectoryGroup, task_id: str, a
     return total_steps
 
 
+def _compute_merge_metrics(accumulated: AccumulatedData) -> dict[str, float]:
+    """Per-batch metrics characterising the merge step.
+
+    Naming matches Tinker's transform_trajectory_groups_to_datums so the
+    same metric paths show up regardless of backend:
+
+    - batch/steps_per_traj/{mean,min,max}: number of rows emitted per
+      trajectory after prefix-merging. =1 for cumulative trajectories,
+      >1 if a prefix break forced a split mid-trajectory.
+
+    - batch/step_response_length/{mean,min,max}: length of the response
+      region per row (action tokens + any interleaved observation tokens).
+      For unmerged single-step trajectories this is just the action token
+      count; for merged multi-turn it's actions + tool/observation tokens.
+    """
+    if not accumulated.responses:
+        return {}
+
+    import numpy as _np
+
+    # Each row's step_id is trajectory.uid (set by _process_trajectory),
+    # so counting occurrences gives rows-per-trajectory.
+    from collections import Counter
+
+    rows_per_traj = list(Counter(accumulated.step_ids).values())
+    response_lens = [int(r.numel()) for r in accumulated.responses]
+
+    return {
+        "batch/steps_per_traj/mean": float(_np.mean(rows_per_traj)),
+        "batch/steps_per_traj/min": int(_np.min(rows_per_traj)),
+        "batch/steps_per_traj/max": int(_np.max(rows_per_traj)),
+        "batch/step_response_length/mean": float(_np.mean(response_lens)),
+        "batch/step_response_length/min": int(_np.min(response_lens)),
+        "batch/step_response_length/max": int(_np.max(response_lens)),
+    }
+
+
 def transform_episodes_to_dataproto(
     episodes: list[Episode],
     rollout_engine: VerlEngine,
@@ -428,7 +465,10 @@ def transform_episodes_to_dataproto(
         max_response_length: The maximum length of the responses.
         stepwise_advantage_mode: The mode of stepwise advantage computation.
     Returns:
-        DataProto: The DataProto built from the episodes.
+        DataProto: The DataProto built from the episodes. Per-batch merge
+        metrics (batch/steps_per_traj, batch/step_response_length) are
+        stashed on ``meta_info["merge_metrics"]`` so the caller can lift
+        them into trainer_state.metrics without a signature change.
     """
     tokenizer = rollout_engine.tokenizer
     processor = getattr(rollout_engine, "processor", None)
@@ -441,7 +481,9 @@ def transform_episodes_to_dataproto(
 
     assert hasattr(tokenizer, "pad_token_id"), "Tokenizer must have a pad token ID"
     pad_token_id = tokenizer.pad_token_id
-    return _batch_tensors_and_build_data_proto(accumulated, pad_token_id, max_prompt_length, max_response_length, processor)
+    batch = _batch_tensors_and_build_data_proto(accumulated, pad_token_id, max_prompt_length, max_response_length, processor)
+    batch.meta_info["merge_metrics"] = _compute_merge_metrics(accumulated)
+    return batch
 
 
 # TODO: extract common logic from transform_episodes_to_dataproto and transform_trajectory_groups_to_dataproto

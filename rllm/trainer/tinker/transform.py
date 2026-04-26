@@ -157,28 +157,51 @@ def transform_trajectory_groups_to_datums(
     else:
         datums = []
 
-    # step 2: iterate over all steps and build the Tinker Datum objects
-    seqs_per_traj = []
-    seq_lengths = []
+    # step 2: iterate over all steps and build the Tinker Datum objects.
+    # Track per-trajectory split count and per-Datum response length so the
+    # caller can log the same metrics across backends. Metric semantics are
+    # shared with verl's transform_episodes_to_dataproto:
+    #   - steps_per_traj: number of training rows/datums one trajectory
+    #     becomes after prefix-merging. Healthy cumulative agents = 1; any
+    #     value > 1 indicates a prefix break (re-tokenization quirk, mid-
+    #     trajectory context reset, etc.).
+    #   - step_response_length: length of the response region per row,
+    #     i.e. everything from the first action token onward (action tokens
+    #     plus interleaved observation tokens), excluding the initial
+    #     prompt. For an unmerged single-step trajectory this collapses to
+    #     the action token count; for a merged multi-turn trajectory it's
+    #     actions + tool/observation tokens between actions.
+    steps_per_traj = []
+    step_response_lengths = []
     for group in trajectory_groups:
         for trajectory in group.trajectories:
             traj_datums = trajectory_to_datums(trajectory, router_replay=algorithm_config.router_replay)
-            seqs_per_traj.append(len(traj_datums))
+            steps_per_traj.append(len(traj_datums))
             for d in traj_datums:
-                seq_lengths.append(d.model_input.length)
+                # Response region = total Datum length - leading prompt
+                # length. The mask is 0 over the initial prompt (before
+                # any action token) and follows the action/observation
+                # pattern after that, so the position of the first mask=1
+                # token is the prompt boundary.
+                mask_data = d.loss_fn_inputs["mask"].data
+                first_action = next(
+                    (i for i, m in enumerate(mask_data) if m > 0.5),
+                    len(mask_data),
+                )
+                step_response_lengths.append(len(mask_data) - first_action)
             if algorithm_config.estimator_map:
                 datums_dict[group.group_role].extend(traj_datums)
             else:
                 datums.extend(traj_datums)
 
-    if seqs_per_traj:
+    if steps_per_traj:
         import numpy as _np
 
-        adv_metrics["batch/seqs_per_traj/mean"] = _np.mean(seqs_per_traj)
-        adv_metrics["batch/seqs_per_traj/min"] = _np.min(seqs_per_traj)
-        adv_metrics["batch/seqs_per_traj/max"] = _np.max(seqs_per_traj)
-        adv_metrics["batch/seq_length/mean"] = _np.mean(seq_lengths)
-        adv_metrics["batch/seq_length/min"] = _np.min(seq_lengths)
-        adv_metrics["batch/seq_length/max"] = _np.max(seq_lengths)
+        adv_metrics["batch/steps_per_traj/mean"] = _np.mean(steps_per_traj)
+        adv_metrics["batch/steps_per_traj/min"] = _np.min(steps_per_traj)
+        adv_metrics["batch/steps_per_traj/max"] = _np.max(steps_per_traj)
+        adv_metrics["batch/step_response_length/mean"] = _np.mean(step_response_lengths)
+        adv_metrics["batch/step_response_length/min"] = _np.min(step_response_lengths)
+        adv_metrics["batch/step_response_length/max"] = _np.max(step_response_lengths)
 
     return (datums if not algorithm_config.estimator_map else datums_dict), adv_metrics
