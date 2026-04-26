@@ -78,9 +78,10 @@ class EvalResult:
             rllm_home = os.path.expanduser(os.environ.get("RLLM_HOME", "~/.rllm"))
             results_dir = os.path.join(rllm_home, "eval_results")
             os.makedirs(results_dir, exist_ok=True)
-            # Sanitize model name for filename
+            # Sanitize names for filename
             model_safe = self.model.replace("/", "_").replace("\\", "_")
-            path = os.path.join(results_dir, f"{self.dataset_name}_{model_safe}_{self.timestamp}.json")
+            dataset_safe = self.dataset_name.replace("/", "_").replace("\\", "_")
+            path = os.path.join(results_dir, f"{dataset_safe}_{model_safe}_{self.timestamp}.json")
 
         data = {
             "dataset_name": self.dataset_name,
