@@ -49,10 +49,11 @@ class TaskEvaluator:
         except Exception:
             pass
 
-        # Upload tests/ directory
+        # Upload tests/ directory to /tests/ (Harbor convention — test scripts
+        # may reference /tests/*.py by absolute path)
         tests_dir = loaded.path / "tests"
         if tests_dir.is_dir():
-            sandbox.upload_dir(str(tests_dir), "/tmp/tests")
+            sandbox.upload_dir(str(tests_dir), "/tests")
         else:
             return EvalOutput(reward=0.0, is_correct=False, metadata={"error": f"no tests/ directory in {loaded.path}"})
 
@@ -64,7 +65,7 @@ class TaskEvaluator:
         timeout = float(loaded.verifier_timeout)
         try:
             sandbox.exec(
-                f"chmod +x /tmp/tests/{test_script} && cd {loaded.workdir} && /tmp/tests/{test_script}",
+                f"chmod +x /tests/{test_script} && cd {loaded.workdir} && /tests/{test_script}",
                 timeout=timeout,
             )
         except Exception as e:

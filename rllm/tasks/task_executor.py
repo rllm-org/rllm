@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from pathlib import Path
 
 from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow, _safe_exec, create_sandbox
 from rllm.experimental.eval.types import AgentConfig, Task
@@ -42,12 +43,17 @@ class TaskExecutor(SandboxedAgentFlow):
         if required != "any" and required != self.sandbox_backend:
             raise ValueError(f"Task '{loaded.task_name}' requires sandbox={required!r}, but got --sandbox-backend={self.sandbox_backend!r}")
 
-        # Create sandbox
-        image = loaded.image
-        task_id = task.get("task_id", loaded.task_name)
-        # Sanitize for Docker container naming: only [a-zA-Z0-9_.-] allowed
+        # Determine image: build from Dockerfile if present, else use config
         import re
 
+        dockerfile = loaded.path / "environment" / "Dockerfile"
+        if dockerfile.exists() and self.sandbox_backend == "docker":
+            image = _build_docker_image(loaded.path / "environment", loaded.task_name)
+        else:
+            image = loaded.image
+
+        task_id = task.get("task_id", loaded.task_name)
+        # Sanitize for Docker container naming: only [a-zA-Z0-9_.-] allowed
         task_id_safe = re.sub(r"[^a-zA-Z0-9_.-]", "-", task_id)
         name = f"rllm-{task_id_safe}-{uuid.uuid4().hex[:6]}"
         self._sandbox = create_sandbox(self.sandbox_backend, name=name, image=image)
@@ -89,8 +95,16 @@ class TaskExecutor(SandboxedAgentFlow):
 
         client = OpenAI(base_url=config.base_url, api_key="EMPTY")
 
+        system_prompt = (
+            "You are a skilled software engineer working inside a sandbox environment. "
+            "Complete the task by executing shell commands. "
+            "To run a command, wrap it in a ```bash code block like this:\n\n"
+            "```bash\necho 'Hello, world!' > hello.txt\n```\n\n"
+            "After each command, you will see its output. "
+            "When you are finished, respond with 'Task completed' (no code block)."
+        )
         messages = [
-            {"role": "system", "content": "You are a skilled software engineer. Complete the task by executing commands in the sandbox."},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": instruction},
         ]
 
@@ -104,6 +118,7 @@ class TaskExecutor(SandboxedAgentFlow):
             )
 
             assistant_msg = response.choices[0].message.content or ""
+            logger.debug("[TaskExecutor turn %d] response (%d chars): %s", turn, len(assistant_msg), assistant_msg[:300])
             messages.append({"role": "assistant", "content": assistant_msg})
 
             steps.append(
@@ -114,22 +129,21 @@ class TaskExecutor(SandboxedAgentFlow):
                 )
             )
 
-            # Check if agent signals completion
-            if _is_done(assistant_msg):
-                break
-
-            # If sandbox is available, the agent can execute commands
-            # by wrapping them in ```bash blocks
+            # Extract and execute any bash command first, then check for completion
             command = _extract_command(assistant_msg)
             if command and self._sandbox is not None:
                 try:
                     result = self._sandbox.exec(command, timeout=float(loaded.agent_timeout))
                 except Exception as e:
                     result = f"Error: {e}"
-
                 messages.append({"role": "user", "content": f"Command output:\n{result}"})
-            else:
-                # No command to execute — agent is done
+
+            # Check if agent signals completion (after executing any command)
+            if _is_done(assistant_msg):
+                break
+
+            # No command and no done signal — agent is stuck, stop
+            if not command:
                 break
 
         trajectory = Trajectory(
@@ -153,6 +167,24 @@ class TaskExecutor(SandboxedAgentFlow):
             return loaded.image
         except Exception:
             return self.image
+
+
+def _build_docker_image(context_dir: Path, task_name: str) -> str:
+    """Build a Docker image from a Dockerfile and return the image tag."""
+    import re
+    import subprocess
+
+    tag = "rllm-task-" + re.sub(r"[^a-zA-Z0-9_.-]", "-", task_name).lower()
+    logger.info("Building Docker image '%s' from %s", tag, context_dir)
+    result = subprocess.run(
+        ["docker", "build", "-t", tag, "--rm", "."],
+        cwd=str(context_dir),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Docker build failed for {task_name}:\n{result.stderr[:1000]}")
+    return tag
 
 
 def _is_done(text: str) -> bool:
