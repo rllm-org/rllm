@@ -63,7 +63,7 @@ class Runner:
         self.evaluator_override = evaluator_override
 
     async def run(self, task: Task, config: AgentConfig) -> Episode:
-        from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow
+        from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
 
         verifier_kind, verifier_config = _detect_verifier(task)
         # Force a sandbox if the agent_flow needs one, even when the
@@ -262,7 +262,7 @@ def _needs_sandbox(task: Task, verifier_kind: str) -> bool:
 
 
 def _create_sandbox_for_task(task: Task, sandbox_backend: str | None) -> Sandbox:
-    from rllm.experimental.agents.sandboxed_agent import create_sandbox
+    from rllm.sandbox.sandboxed_flow import create_sandbox
 
     backend = sandbox_backend or task.metadata.get("sandbox_backend") or "docker"
     image = _resolve_image(task, backend)

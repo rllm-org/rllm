@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import shlex
 
-from rllm.experimental.agents.sandboxed_agent import _safe_exec
-from rllm.sandbox.protocol import Sandbox
+from rllm.sandbox.protocol import Sandbox, _safe_exec
 
 
 class FileEditorTool:

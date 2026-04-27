@@ -136,7 +136,7 @@ def _run_eval(
 
         # Apply CLI sandbox overrides
         if agent_metadata:
-            from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow
+            from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
 
             if isinstance(agent, SandboxedAgentFlow):
                 if "sandbox_backend" in agent_metadata:
@@ -243,7 +243,7 @@ def _run_eval(
                 if "sandbox_backend" in agent_metadata:
                     agent.environment_type = agent_metadata["sandbox_backend"]
             else:
-                from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow
+                from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
 
                 if isinstance(agent, SandboxedAgentFlow):
                     if "sandbox_backend" in agent_metadata:
@@ -321,7 +321,7 @@ def _run_eval(
 
                 agent = _load_harness(agent_name)
                 if agent_metadata:
-                    from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow
+                    from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
 
                     if isinstance(agent, SandboxedAgentFlow):
                         if "sandbox_backend" in agent_metadata:

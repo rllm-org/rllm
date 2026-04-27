@@ -1,7 +1,7 @@
 """Harness registry: name → AgentFlow constructor.
 
 Built-in harnesses (``ReActHarness``, ``ClaudeCodeHarness``, ...) are
-:class:`rllm.experimental.agents.sandboxed_agent.SandboxedAgentFlow`
+:class:`rllm.sandbox.sandboxed_flow.SandboxedAgentFlow`
 subclasses; they implement the standard ``AgentFlow`` protocol. This
 module just maps user-facing names (``"react"``, ``"claude-code"``)
 to their classes for the CLI's ``--agent`` flag.

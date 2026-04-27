@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import re
 
-from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow
+from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
 from rllm.tasks.harness import register_harness
 from rllm.types import Episode, Step, Task, Trajectory
 

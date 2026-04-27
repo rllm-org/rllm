@@ -193,7 +193,7 @@ def _render_multimodal(task: dict) -> str | list[dict]:
 
     # Build multimodal content blocks (reuse VLM utilities)
     try:
-        from rllm.experimental.agents.vlm_utils import _build_vlm_content
+        from rllm.eval.vlm_utils import _build_vlm_content
     except ImportError:
         # If vlm_utils is not available, return plain text
         return question

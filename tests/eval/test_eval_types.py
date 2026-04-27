@@ -50,10 +50,10 @@ def test_evaluator_protocol():
     assert isinstance(evaluator, Evaluator)
 
 
-def test_react_agent_is_agent_flow():
-    from rllm.experimental.agents import react_agent
+def test_react_harness_is_agent_flow():
+    from rllm.harnesses.react import ReActHarness
 
-    assert isinstance(react_agent, AgentFlow), "react_agent is not an AgentFlow"
+    assert isinstance(ReActHarness(), AgentFlow), "ReActHarness is not an AgentFlow"
 
 
 def test_builtin_evaluators_are_evaluators():

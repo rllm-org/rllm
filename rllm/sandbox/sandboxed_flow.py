@@ -11,11 +11,10 @@ from __future__ import annotations
 
 import copy
 import logging
-import subprocess
 import uuid
 from abc import ABC, abstractmethod
 
-from rllm.sandbox.protocol import Sandbox
+from rllm.sandbox.protocol import Sandbox, _safe_exec
 from rllm.types import AgentConfig, Episode, Task
 
 logger = logging.getLogger(__name__)
@@ -73,11 +72,9 @@ class SandboxedAgentFlow(ABC):
         name = f"rllm-{task_id}-{uuid.uuid4().hex[:6]}"
         self._sandbox = create_sandbox(self.sandbox_backend, name=name, image=image)
 
-        # Run global setup commands
         for cmd in self.setup_commands:
             _safe_exec(self._sandbox, cmd, timeout=300)
 
-        # Run task-specific setup commands with template interpolation
         for cmd_template in self.task_setup_commands:
             try:
                 cmd = cmd_template.format(**task)
@@ -85,7 +82,6 @@ class SandboxedAgentFlow(ABC):
                 cmd = cmd_template
             _safe_exec(self._sandbox, cmd, timeout=300)
 
-        # Subclass hook for additional setup
         self.on_sandbox_ready(task, config)
 
     def on_sandbox_ready(self, task: dict, config: AgentConfig) -> None:  # noqa: B027
@@ -131,11 +127,3 @@ def create_sandbox(backend: str, name: str, image: str, **kwargs) -> Sandbox:
         return ModalSandbox(name=name, **kwargs)
     else:
         raise ValueError(f"Unknown sandbox backend: {backend}. Available: docker, local, modal")
-
-
-def _safe_exec(sandbox: Sandbox, command: str, timeout: float | None = None) -> str:
-    """Execute command, returning stderr on non-zero exit instead of raising."""
-    try:
-        return sandbox.exec(command, timeout=timeout)
-    except (RuntimeError, subprocess.CalledProcessError) as e:
-        return str(e)

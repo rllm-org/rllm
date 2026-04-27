@@ -1,10 +1,4 @@
 {
   "version": 1,
-  "agents": {
-    "search": {
-      "description": "Multi-turn search agent with web search tool calling",
-      "module": "rllm.experimental.agents.search",
-      "function": "search_agent"
-    }
-  }
+  "agents": {}
 }

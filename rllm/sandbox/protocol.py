@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -92,3 +93,11 @@ class Sandbox(Protocol):
 
 # Type alias for sandbox factory callables
 SandboxFactory = type[Sandbox] | Any  # Callable that returns a Sandbox
+
+
+def _safe_exec(sandbox: Sandbox, command: str, timeout: float | None = None) -> str:
+    """Execute command, returning stderr on non-zero exit instead of raising."""
+    try:
+        return sandbox.exec(command, timeout=timeout)
+    except (RuntimeError, subprocess.CalledProcessError) as e:
+        return str(e)

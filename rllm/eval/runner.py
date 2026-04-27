@@ -33,7 +33,7 @@ def _is_sandboxed(agent) -> bool:
     absence so non-sandboxed agents (e.g. ``search``) keep running.
     """
     try:
-        from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow
+        from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
     except ImportError:
         return False
     return isinstance(agent, SandboxedAgentFlow)
@@ -69,8 +69,8 @@ async def run_dataset(
 
     Returns ``(EvalResult, list[Episode])``.
     """
-    from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow
     from rllm.runner import Runner
+    from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
 
     if hasattr(agent_flow, "max_concurrent"):
         concurrency = min(concurrency, agent_flow.max_concurrent)
