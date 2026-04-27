@@ -166,8 +166,8 @@ def _run_train(
     """Core training logic: resolve catalog, load data, build config, launch trainer."""
 
     try:
-        from rllm.experimental.eval.agent_loader import load_agent
-        from rllm.experimental.eval.evaluator_loader import load_evaluator, resolve_evaluator_from_catalog
+        from rllm.eval.agent_loader import load_agent
+        from rllm.eval.evaluator_loader import load_evaluator, resolve_evaluator_from_catalog
         from rllm.experimental.unified_trainer import AgentTrainer
     except ImportError as e:
         console.print(f"  [error]Missing training dependencies: {e}[/]")
@@ -488,7 +488,7 @@ def train_cmd(
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
     _ui_explicit = enable_ui is not None
     if enable_ui is None:
-        from rllm.experimental.eval.config import load_ui_config
+        from rllm.eval.config import load_ui_config
 
         ui_config = load_ui_config()
         enable_ui = bool(os.environ.get("RLLM_API_KEY") or ui_config.get("ui_api_key"))

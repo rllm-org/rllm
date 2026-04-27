@@ -17,7 +17,7 @@ from agents import Agent, Runner
 from agents.extensions.models.litellm_model import LitellmModel
 from agents.run import RunConfig
 
-from rllm.experimental.eval.types import AgentConfig
+from rllm.eval.types import AgentConfig
 from rllm.sdk.integrations.openai_agents import RLLMTrajectoryHooks
 from rllm.types import Episode
 

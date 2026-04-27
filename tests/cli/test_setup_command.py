@@ -6,7 +6,7 @@ import pytest
 from click.testing import CliRunner
 
 from rllm.cli.main import cli
-from rllm.experimental.eval.config import RllmConfig, load_config, save_config
+from rllm.eval.config import RllmConfig, load_config, save_config
 
 
 @pytest.fixture
@@ -47,7 +47,7 @@ def test_setup_select_different_model(runner, tmp_rllm_home):
 
 def test_setup_custom_model(runner, tmp_rllm_home):
     """Setup should allow entering a custom model name."""
-    from rllm.experimental.eval.config import PROVIDER_MODELS
+    from rllm.eval.config import PROVIDER_MODELS
 
     other_num = len(PROVIDER_MODELS["openai"]) + 1  # "Other (enter manually)"
 

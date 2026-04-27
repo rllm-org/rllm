@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from rllm.experimental.eval.evaluator_loader import (
+from rllm.eval.evaluator_loader import (
     _EVALUATOR_REGISTRY,
     list_evaluators,
     load_evaluator,
@@ -14,7 +14,7 @@ from rllm.experimental.eval.evaluator_loader import (
     resolve_evaluator_from_catalog,
     unregister_evaluator,
 )
-from rllm.experimental.eval.types import (
+from rllm.eval.types import (
     CodeEvaluator,
     CountdownEvaluator,
     EvalOutput,
@@ -43,7 +43,7 @@ class TestLoadEvaluator:
         assert isinstance(evaluator, F1Evaluator)
 
     def test_load_by_import_path(self):
-        evaluator = load_evaluator("rllm.experimental.eval.types:MathEvaluator")
+        evaluator = load_evaluator("rllm.eval.types:MathEvaluator")
         assert isinstance(evaluator, MathEvaluator)
 
     def test_load_unknown_name_raises(self):
@@ -57,7 +57,7 @@ class TestLoadEvaluator:
     def test_load_object_without_evaluate_raises(self):
         # EvalOutput is a dataclass with required args, so instantiation fails with TypeError
         with pytest.raises(TypeError):
-            load_evaluator("rllm.experimental.eval.types:EvalOutput")
+            load_evaluator("rllm.eval.types:EvalOutput")
 
     def test_all_registry_entries_are_evaluators(self):
         for name in _EVALUATOR_REGISTRY:
@@ -110,7 +110,7 @@ class TestEntryPointDiscovery:
             return []
 
         monkeypatch.setattr(
-            "rllm.experimental.eval.evaluator_loader.entry_points",
+            "rllm.eval.evaluator_loader.entry_points",
             fake_entry_points,
         )
 
@@ -131,7 +131,7 @@ class TestEntryPointDiscovery:
             return []
 
         monkeypatch.setattr(
-            "rllm.experimental.eval.evaluator_loader.entry_points",
+            "rllm.eval.evaluator_loader.entry_points",
             fake_entry_points,
         )
 
@@ -150,7 +150,7 @@ class TestEntryPointDiscovery:
             return []
 
         monkeypatch.setattr(
-            "rllm.experimental.eval.evaluator_loader.entry_points",
+            "rllm.eval.evaluator_loader.entry_points",
             fake_entry_points,
         )
 
@@ -187,7 +187,7 @@ class TestListEvaluators:
             return []
 
         monkeypatch.setattr(
-            "rllm.experimental.eval.evaluator_loader.entry_points",
+            "rllm.eval.evaluator_loader.entry_points",
             fake_entry_points,
         )
 
@@ -204,11 +204,11 @@ class TestRegisterEvaluator:
     def _isolate_registry(self, tmp_path, monkeypatch):
         """Point the evaluator registry at a temp directory."""
         evals_file = str(tmp_path / "evaluators.json")
-        monkeypatch.setattr("rllm.experimental.eval.evaluator_loader._USER_EVALUATORS_FILE", evals_file)
-        monkeypatch.setattr("rllm.experimental.eval.evaluator_loader._RLLM_HOME", str(tmp_path))
+        monkeypatch.setattr("rllm.eval.evaluator_loader._USER_EVALUATORS_FILE", evals_file)
+        monkeypatch.setattr("rllm.eval.evaluator_loader._RLLM_HOME", str(tmp_path))
 
     def test_register_string_path_and_load(self):
-        register_evaluator("test_eval", "rllm.experimental.eval.types:MathEvaluator")
+        register_evaluator("test_eval", "rllm.eval.types:MathEvaluator")
         evaluator = load_evaluator("test_eval")
         assert isinstance(evaluator, MathEvaluator)
 
@@ -223,21 +223,21 @@ class TestRegisterEvaluator:
         assert isinstance(evaluator, MathEvaluator)
 
     def test_persists_to_disk(self, tmp_path):
-        register_evaluator("test_eval", "rllm.experimental.eval.types:MathEvaluator")
+        register_evaluator("test_eval", "rllm.eval.types:MathEvaluator")
         import json
 
         data = json.loads((tmp_path / "evaluators.json").read_text())
         assert "test_eval" in data
 
     def test_appears_in_list(self):
-        register_evaluator("test_eval", "rllm.experimental.eval.types:MathEvaluator")
+        register_evaluator("test_eval", "rllm.eval.types:MathEvaluator")
         evaluators = list_evaluators()
         registered = [e for e in evaluators if e["name"] == "test_eval"]
         assert len(registered) == 1
         assert registered[0]["source"] == "registered"
 
     def test_unregister(self):
-        register_evaluator("test_eval", "rllm.experimental.eval.types:MathEvaluator")
+        register_evaluator("test_eval", "rllm.eval.types:MathEvaluator")
         assert unregister_evaluator("test_eval") is True
         with pytest.raises(KeyError):
             load_evaluator("test_eval")

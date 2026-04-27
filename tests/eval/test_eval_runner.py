@@ -7,9 +7,9 @@ import asyncio
 import pytest
 
 from rllm.data.dataset import Dataset
-from rllm.experimental.eval.results import EvalItem, EvalResult
-from rllm.experimental.eval.runner import EvalRunner
-from rllm.experimental.eval.types import AgentConfig, EvalOutput, Signal, Task
+from rllm.eval.results import EvalItem, EvalResult
+from rllm.eval.runner import EvalRunner
+from rllm.eval.types import AgentConfig, EvalOutput, Signal, Task
 from rllm.types import Episode, Step, Trajectory
 
 # ---------------------------------------------------------------------------

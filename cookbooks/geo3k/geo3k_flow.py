@@ -13,7 +13,7 @@ import logging
 from openai import AsyncOpenAI
 
 import rllm
-from rllm.experimental.eval.types import AgentConfig, Task
+from rllm.eval.types import AgentConfig, Task
 from rllm.types import Episode, Trajectory
 
 logger = logging.getLogger(__name__)

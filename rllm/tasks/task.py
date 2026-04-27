@@ -26,7 +26,7 @@ from typing import Any
 
 import tomllib
 
-from rllm.experimental.eval.types import EvalOutput, Signal
+from rllm.eval.types import EvalOutput, Signal
 from rllm.sandbox.protocol import Sandbox
 
 logger = logging.getLogger(__name__)

@@ -8,7 +8,7 @@ from rich.console import Console
 from rich.prompt import Prompt
 from rich.theme import Theme
 
-from rllm.experimental.eval.config import (
+from rllm.eval.config import (
     PROVIDER_MODELS,
     PROVIDER_REGISTRY,
     RllmConfig,

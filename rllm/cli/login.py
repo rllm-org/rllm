@@ -13,7 +13,7 @@ def login_cmd(relogin):
 
     import httpx
 
-    from rllm.experimental.eval.config import load_ui_config, save_ui_config
+    from rllm.eval.config import load_ui_config, save_ui_config
 
     ui_url = os.getenv("RLLM_UI_URL", "https://ui.rllm-project.com")
 

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from rllm.experimental.eval.ifeval_evaluator import (
+from rllm.eval.ifeval_evaluator import (
     IFEvalEvaluator,
     verify_instruction,
 )
-from rllm.experimental.eval.types import Evaluator
+from rllm.eval.types import Evaluator
 from rllm.types import Episode
 
 # ---------------------------------------------------------------------------

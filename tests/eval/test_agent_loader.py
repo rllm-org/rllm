@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from rllm.experimental.eval.agent_loader import (
+from rllm.eval.agent_loader import (
     list_agents,
     load_agent,
     register_agent,
@@ -42,11 +42,11 @@ class TestLoadAgent:
 
     def test_load_missing_attr_raises(self):
         with pytest.raises(AttributeError):
-            load_agent("rllm.experimental.eval.types:nonexistent_attr")
+            load_agent("rllm.eval.types:nonexistent_attr")
 
     def test_load_object_without_run_raises(self):
         with pytest.raises(TypeError, match="must be an AgentFlow"):
-            load_agent("rllm.experimental.eval.evaluator_loader:_EVALUATOR_REGISTRY")
+            load_agent("rllm.eval.evaluator_loader:_EVALUATOR_REGISTRY")
 
     def test_load_unknown_name_raises(self):
         with pytest.raises(KeyError, match="not found"):
@@ -66,7 +66,7 @@ class TestLoadAgent:
             return []
 
         monkeypatch.setattr(
-            "rllm.experimental.eval.agent_loader.entry_points",
+            "rllm.eval.agent_loader.entry_points",
             fake_entry_points,
         )
 
@@ -88,7 +88,7 @@ class TestLoadAgent:
             return []
 
         monkeypatch.setattr(
-            "rllm.experimental.eval.agent_loader.entry_points",
+            "rllm.eval.agent_loader.entry_points",
             fake_entry_points,
         )
 
@@ -124,7 +124,7 @@ class TestListAgents:
             return []
 
         monkeypatch.setattr(
-            "rllm.experimental.eval.agent_loader.entry_points",
+            "rllm.eval.agent_loader.entry_points",
             fake_entry_points,
         )
 
@@ -141,8 +141,8 @@ class TestRegisterAgent:
     def _isolate_registry(self, tmp_path, monkeypatch):
         """Point the agent registry at a temp directory."""
         agents_file = str(tmp_path / "agents.json")
-        monkeypatch.setattr("rllm.experimental.eval.agent_loader._USER_AGENTS_FILE", agents_file)
-        monkeypatch.setattr("rllm.experimental.eval.agent_loader._RLLM_HOME", str(tmp_path))
+        monkeypatch.setattr("rllm.eval.agent_loader._USER_AGENTS_FILE", agents_file)
+        monkeypatch.setattr("rllm.eval.agent_loader._RLLM_HOME", str(tmp_path))
 
     def test_register_string_path_and_load(self):
         register_agent("test_agent", "rllm.experimental.agents.react_agent:ReactAgentFlow")

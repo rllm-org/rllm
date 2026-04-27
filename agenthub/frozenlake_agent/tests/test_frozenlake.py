@@ -8,7 +8,7 @@ from agent.agent import FrozenLakeAgentFlow, _parse_action
 from agent.env import FrozenLakeEnv, generate_random_map
 from eval.evaluator import FrozenLakeEvaluator
 
-from rllm.experimental.eval.types import AgentConfig
+from rllm.eval.types import AgentConfig
 from rllm.types import Episode
 
 # ---------------------------------------------------------------------------
@@ -128,7 +128,7 @@ class TestParseAction:
 
 class TestFrozenLakeAgentFlow:
     def test_protocol_conformance(self):
-        from rllm.experimental.eval.types import AgentFlow
+        from rllm.eval.types import AgentFlow
 
         assert isinstance(FrozenLakeAgentFlow(), AgentFlow)
 

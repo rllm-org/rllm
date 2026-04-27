@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from rllm.experimental.eval.types import AgentConfig, Task
+from rllm.eval.types import AgentConfig, Task
 from rllm.types import Episode
 
 

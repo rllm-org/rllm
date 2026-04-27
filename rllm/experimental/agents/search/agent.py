@@ -13,8 +13,8 @@ import time
 
 from openai import OpenAI
 
+from rllm.eval.types import AgentConfig, Task
 from rllm.experimental.agents.search.backends import resolve_search_backend
-from rllm.experimental.eval.types import AgentConfig, Task
 from rllm.rewards.math_utils.utils import extract_boxed_answer
 from rllm.types import Episode, Step, Trajectory
 

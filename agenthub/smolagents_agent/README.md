@@ -20,7 +20,7 @@ rllm eval mmlu_pro --agent smolagents --model gpt-4o-mini --max-examples 5
 ### Python
 
 ```python
-from rllm.experimental.eval.agent_loader import load_agent
+from rllm.eval.agent_loader import load_agent
 
 agent = load_agent("smolagents")
 episode = agent.run(task, config)

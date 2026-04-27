@@ -12,7 +12,7 @@ import re
 import string
 from collections import Counter
 
-from rllm.experimental.eval.types import EvalOutput, Signal, _extract_agent_answer
+from rllm.eval.types import EvalOutput, Signal, _extract_agent_answer
 from rllm.types import Episode
 
 

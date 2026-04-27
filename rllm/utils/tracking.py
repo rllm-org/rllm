@@ -101,7 +101,7 @@ class Tracking:
             try:
                 import os as _os
 
-                from rllm.experimental.eval.config import load_ui_config
+                from rllm.eval.config import load_ui_config
 
                 ui_config = load_ui_config()
                 has_key = bool(_os.getenv("RLLM_API_KEY") or ui_config.get("ui_api_key"))
@@ -334,7 +334,7 @@ class UILogger:
 
         self.logger = logging.getLogger(__name__)
         self.session_type = session_type
-        from rllm.experimental.eval.config import load_ui_config
+        from rllm.eval.config import load_ui_config
 
         ui_config = load_ui_config()
         api_key = os.getenv("RLLM_API_KEY") or ui_config.get("ui_api_key")
@@ -577,7 +577,7 @@ class UILogger:
         """Post an EvalResult to the UI backend.
 
         Args:
-            result: An EvalResult dataclass from rllm.experimental.eval.results
+            result: An EvalResult dataclass from rllm.eval.results
         """
         if self.session_id is None:
             return

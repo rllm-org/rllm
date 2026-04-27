@@ -6,7 +6,7 @@ import stat
 
 import pytest
 
-from rllm.experimental.eval.config import (
+from rllm.eval.config import (
     DEFAULT_MODELS,
     PROVIDER_REGISTRY,
     SUPPORTED_PROVIDERS,

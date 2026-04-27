@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from rllm.types import Episode
 
 if TYPE_CHECKING:
-    from rllm.experimental.eval.task_spec import TaskSpec
+    from rllm.eval.task_spec import TaskSpec
 
 
 # ---------------------------------------------------------------------------

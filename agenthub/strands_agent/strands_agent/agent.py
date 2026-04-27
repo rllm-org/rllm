@@ -17,7 +17,7 @@ from strands.models.openai import OpenAIModel
 from strands.types.content import ContentBlock
 from strands.types.media import ImageContent, ImageSource
 
-from rllm.experimental.eval.types import AgentConfig
+from rllm.eval.types import AgentConfig
 from rllm.sdk.integrations.strands import RLLMTrajectoryHookProvider
 from rllm.types import Episode
 

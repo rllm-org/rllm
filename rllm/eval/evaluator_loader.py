@@ -7,12 +7,12 @@ import json
 import os
 from importlib.metadata import entry_points
 
-from rllm.experimental.eval.bfcl_evaluator import BFCLEvaluator
-from rllm.experimental.eval.ifeval_evaluator import IFEvalEvaluator
-from rllm.experimental.eval.llm_equality_evaluator import LLMEqualityEvaluator
-from rllm.experimental.eval.llm_judge_evaluator import LLMJudgeEvaluator
-from rllm.experimental.eval.translation_evaluator import TranslationEvaluator
-from rllm.experimental.eval.types import (
+from rllm.eval.bfcl_evaluator import BFCLEvaluator
+from rllm.eval.ifeval_evaluator import IFEvalEvaluator
+from rllm.eval.llm_equality_evaluator import LLMEqualityEvaluator
+from rllm.eval.llm_judge_evaluator import LLMJudgeEvaluator
+from rllm.eval.translation_evaluator import TranslationEvaluator
+from rllm.eval.types import (
     CodeEvaluator,
     CountdownEvaluator,
     DepthEvaluator,
@@ -23,7 +23,7 @@ from rllm.experimental.eval.types import (
     MCQEvaluator,
     PointInMaskEvaluator,
 )
-from rllm.experimental.eval.widesearch_evaluator import WideSearchEvaluator
+from rllm.eval.widesearch_evaluator import WideSearchEvaluator
 
 _RLLM_HOME = os.environ.get("RLLM_HOME", os.path.expanduser("~/.rllm"))
 _USER_EVALUATORS_FILE = os.path.join(_RLLM_HOME, "evaluators.json")
@@ -132,7 +132,7 @@ _LAZY_EVALUATOR_REGISTRY: dict[str, str] = {
 def _load_dataset_catalog() -> dict:
     """Load the datasets.json catalog from the registry directory."""
     catalog_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "registry",
         "datasets.json",
     )

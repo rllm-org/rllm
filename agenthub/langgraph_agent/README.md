@@ -20,7 +20,7 @@ rllm eval mmlu_pro --agent langgraph --model gpt-4o-mini --max-examples 5
 ### Python
 
 ```python
-from rllm.experimental.eval.agent_loader import load_agent
+from rllm.eval.agent_loader import load_agent
 
 agent = load_agent("langgraph")
 episode = agent.run(task, config)

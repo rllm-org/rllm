@@ -46,9 +46,9 @@ def _run_eval(
 ):
     """Core eval logic, extracted for clean proxy lifecycle management."""
     from rllm.data import DatasetRegistry
-    from rllm.experimental.eval.agent_loader import load_agent
-    from rllm.experimental.eval.evaluator_loader import load_evaluator, resolve_evaluator_from_catalog
-    from rllm.experimental.eval.runner import EvalRunner
+    from rllm.eval.agent_loader import load_agent
+    from rllm.eval.evaluator_loader import load_evaluator, resolve_evaluator_from_catalog
+    from rllm.eval.runner import EvalRunner
 
     # ------------------------------------------------------------------
     # Local benchmark path: directory with dataset.toml / task.toml
@@ -392,7 +392,7 @@ def eval_cmd(
     if enable_ui is None:
         import os
 
-        from rllm.experimental.eval.config import load_ui_config
+        from rllm.eval.config import load_ui_config
 
         ui_config = load_ui_config()
         enable_ui = bool(os.environ.get("RLLM_API_KEY") or ui_config.get("ui_api_key"))
@@ -409,7 +409,7 @@ def eval_cmd(
             raise SystemExit(1)
     else:
         # Proxy mode: auto-start LiteLLM proxy from config
-        from rllm.experimental.eval.config import load_config
+        from rllm.eval.config import load_config
 
         config = load_config()
         if not config.is_configured():
@@ -431,7 +431,7 @@ def eval_cmd(
                 _os.environ.setdefault("OPENAI_API_KEY", config.api_key)
             console.print(f"  [success]Using custom endpoint[/] at [dim]{base_url}[/]")
         else:
-            from rllm.experimental.eval.proxy import EvalProxyManager
+            from rllm.eval.proxy import EvalProxyManager
 
             proxy_manager = EvalProxyManager(
                 provider=config.provider,

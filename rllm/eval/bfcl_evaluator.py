@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 
-from rllm.experimental.eval.types import EvalOutput, Signal, _extract_agent_answer
+from rllm.eval.types import EvalOutput, Signal, _extract_agent_answer
 from rllm.types import Episode
 
 

@@ -10,7 +10,7 @@ import importlib.util
 from collections.abc import Callable
 from pathlib import Path
 
-from rllm.experimental.eval.types import EvalOutput, Signal, _extract_agent_answer
+from rllm.eval.types import EvalOutput, Signal, _extract_agent_answer
 from rllm.types import Episode
 
 

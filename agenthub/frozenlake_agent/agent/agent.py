@@ -7,7 +7,7 @@ import re
 
 import openai
 
-from rllm.experimental.eval.types import AgentConfig
+from rllm.eval.types import AgentConfig
 from rllm.types import Episode, Step, Trajectory
 
 from .env import ACTION_INVALID, FrozenLakeEnv

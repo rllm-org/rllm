@@ -16,7 +16,7 @@ from typing import Any
 from PIL import Image
 from smolagents import OpenAIServerModel, Tool, ToolCallingAgent
 
-from rllm.experimental.eval.types import AgentConfig
+from rllm.eval.types import AgentConfig
 from rllm.sdk.integrations.smolagents import RLLMSmolAgentsTracer
 from rllm.types import Episode
 

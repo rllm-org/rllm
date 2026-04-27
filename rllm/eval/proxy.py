@@ -51,7 +51,7 @@ class EvalProxyManager(ProxyManager):
 
     def _generate_litellm_config(self) -> dict[str, Any]:
         """Generate LiteLLM configuration for the configured provider."""
-        from rllm.experimental.eval.config import get_provider_info
+        from rllm.eval.config import get_provider_info
 
         # Use the registry's litellm_prefix (e.g. "together_ai" for "together")
         info = get_provider_info(self.provider)

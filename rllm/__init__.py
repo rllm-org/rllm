@@ -10,7 +10,7 @@ __all__ = ["BaseAgent", "Action", "Step", "Trajectory", "Episode", "rollout", "e
 
 def __getattr__(name: str):
     if name in ("rollout", "evaluator"):
-        from rllm.experimental.eval.rollout_decorator import evaluator, rollout
+        from rllm.eval.rollout_decorator import evaluator, rollout
 
         _mod = sys.modules[__name__]
         _mod.rollout = rollout

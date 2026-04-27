@@ -16,8 +16,8 @@ from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow, create_
 from rllm.tasks.task import Task
 
 if TYPE_CHECKING:
-    from rllm.experimental.eval.types import AgentConfig
-    from rllm.experimental.eval.types import Task as EvalTask
+    from rllm.eval.types import AgentConfig
+    from rllm.eval.types import Task as EvalTask
     from rllm.tasks.harness import AgentHarness
     from rllm.types import Episode
 

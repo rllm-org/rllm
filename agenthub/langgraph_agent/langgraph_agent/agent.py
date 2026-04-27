@@ -16,7 +16,7 @@ from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, MessagesState, StateGraph
 
-from rllm.experimental.eval.types import AgentConfig
+from rllm.eval.types import AgentConfig
 from rllm.sdk.integrations.langgraph import RLLMTrajectoryCallbackHandler
 from rllm.types import Episode
 

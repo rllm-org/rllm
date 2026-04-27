@@ -69,7 +69,7 @@ Define a rollout (your agent) and an evaluator (your reward function), then hand
 # my_flow.py
 from openai import OpenAI
 import rllm
-from rllm.experimental.eval.types import AgentConfig, Task
+from rllm.eval.types import AgentConfig, Task
 from rllm.types import Episode, Trajectory
 
 @rllm.rollout
@@ -89,7 +89,7 @@ def solve(task: Task, config: AgentConfig) -> Episode:
 ```python
 # my_evaluator.py
 import rllm
-from rllm.experimental.eval.types import EvalOutput, Signal, _extract_agent_answer
+from rllm.eval.types import EvalOutput, Signal, _extract_agent_answer
 from rllm.types import Episode
 
 @rllm.evaluator

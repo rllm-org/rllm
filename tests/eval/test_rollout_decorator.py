@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from rllm.experimental.eval.rollout_decorator import (
+from rllm.eval.rollout_decorator import (
     AgentFlowFn,
     EvaluatorFn,
     _coerce_to_episode,
@@ -15,7 +15,7 @@ from rllm.experimental.eval.rollout_decorator import (
     evaluator,
     rollout,
 )
-from rllm.experimental.eval.types import AgentConfig, AgentFlow, EvalOutput, Evaluator, Task, run_agent_flow
+from rllm.eval.types import AgentConfig, AgentFlow, EvalOutput, Evaluator, Task, run_agent_flow
 from rllm.types import Episode, Trajectory
 
 # ---------------------------------------------------------------------------
@@ -106,7 +106,7 @@ class TestRolloutParameterizedDecorator:
         assert episode.trajectories[0].name == "reasoning"
 
     def test_register_calls_register_agent(self):
-        with patch("rllm.experimental.eval.agent_loader.register_agent") as mock_reg:
+        with patch("rllm.eval.agent_loader.register_agent") as mock_reg:
 
             @rollout(register="my-agent")
             def my_agent(task, config):
@@ -263,7 +263,7 @@ class TestEvaluatorBareDecorator:
 
 class TestEvaluatorParameterizedDecorator:
     def test_register_calls_register_evaluator(self):
-        with patch("rllm.experimental.eval.evaluator_loader.register_evaluator") as mock_reg:
+        with patch("rllm.eval.evaluator_loader.register_evaluator") as mock_reg:
 
             @evaluator(register="my-eval")
             def my_eval(task, episode):

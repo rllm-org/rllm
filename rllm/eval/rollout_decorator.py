@@ -15,7 +15,7 @@ from collections.abc import Callable
 from functools import update_wrapper
 from typing import Any, overload
 
-from rllm.experimental.eval.types import AgentConfig, EvalOutput, Task
+from rllm.eval.types import AgentConfig, EvalOutput, Task
 from rllm.types import Episode, Trajectory
 
 logger = logging.getLogger(__name__)
@@ -195,7 +195,7 @@ def rollout(
     def _decorator(fn: Callable) -> AgentFlowFn:
         agent = AgentFlowFn(fn, name=name)
         if register is not None:
-            from rllm.experimental.eval.agent_loader import register_agent
+            from rllm.eval.agent_loader import register_agent
 
             register_agent(register, agent)
         return agent
@@ -254,7 +254,7 @@ def evaluator(
     def _decorator(fn: Callable) -> EvaluatorFn:
         ev = EvaluatorFn(fn)
         if register is not None:
-            from rllm.experimental.eval.evaluator_loader import register_evaluator
+            from rllm.eval.evaluator_loader import register_evaluator
 
             register_evaluator(register, ev)
         return ev

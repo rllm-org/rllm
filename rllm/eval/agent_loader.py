@@ -7,7 +7,7 @@ import json
 import os
 from importlib.metadata import entry_points
 
-from rllm.experimental.eval.types import AgentFlow
+from rllm.eval.types import AgentFlow
 
 _RLLM_HOME = os.environ.get("RLLM_HOME", os.path.expanduser("~/.rllm"))
 _USER_AGENTS_FILE = os.path.join(_RLLM_HOME, "agents.json")
@@ -79,7 +79,7 @@ def unregister_agent(name: str) -> bool:
 
 def _load_agent_catalog() -> dict:
     """Load the agents.json catalog from the registry directory."""
-    catalog_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "registry", "agents.json")
+    catalog_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "registry", "agents.json")
     with open(catalog_path, encoding="utf-8") as f:
         return json.load(f)
 

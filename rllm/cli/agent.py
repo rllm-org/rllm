@@ -19,7 +19,7 @@ def agent():
 @agent.command(name="list")
 def list_agents():
     """List registered agent scaffolds (built-in and agenthub)."""
-    from rllm.experimental.eval.agent_loader import list_agents as _list_agents
+    from rllm.eval.agent_loader import list_agents as _list_agents
 
     agents = _list_agents()
 
@@ -44,7 +44,7 @@ def info(name: str):
 
     if name not in agents:
         # Check if it's a plugin agent
-        from rllm.experimental.eval.agent_loader import list_agents as _list_agents
+        from rllm.eval.agent_loader import list_agents as _list_agents
 
         plugin_agents = {a["name"]: a for a in _list_agents()}
         if name in plugin_agents:
@@ -90,7 +90,7 @@ def register(name: str, import_path: str):
     After registration, use it with:
         rllm eval gsm8k --agent my-agent
     """
-    from rllm.experimental.eval.agent_loader import register_agent
+    from rllm.eval.agent_loader import register_agent
 
     register_agent(name, import_path)
     click.echo(f"Registered agent '{name}' -> {import_path}")
@@ -101,7 +101,7 @@ def register(name: str, import_path: str):
 @click.argument("name")
 def unregister(name: str):
     """Remove a registered custom agent."""
-    from rllm.experimental.eval.agent_loader import unregister_agent
+    from rllm.eval.agent_loader import unregister_agent
 
     if unregister_agent(name):
         click.echo(f"Unregistered agent '{name}'.")

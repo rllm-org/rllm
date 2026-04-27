@@ -18,16 +18,16 @@ from typing import TYPE_CHECKING
 from tqdm import tqdm
 
 from rllm.agents.agent import Episode, Step, Trajectory
+from rllm.eval.types import AgentConfig, EvalOutput, Task, run_agent_flow
 from rllm.experimental.engine.trace_converter import compute_step_metrics, trace_record_to_step
-from rllm.experimental.eval.types import AgentConfig, EvalOutput, Task, run_agent_flow
 from rllm.utils import colorful_print
 from rllm.workflows.workflow import TerminationReason
 
 if TYPE_CHECKING:
     from rllm_model_gateway.models import TraceRecord
 
+    from rllm.eval.types import AgentFlow, Evaluator
     from rllm.experimental.engine.gateway_manager import GatewayManager
-    from rllm.experimental.eval.types import AgentFlow, Evaluator
     from rllm.utils.episode_logger import EpisodeLogger
 
 logger = logging.getLogger(__name__)

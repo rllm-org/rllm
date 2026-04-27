@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from rllm.experimental.eval.types import EvalOutput, Signal
+from rllm.eval.types import EvalOutput, Signal
 from rllm.types import Episode
 
 

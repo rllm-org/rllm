@@ -7,7 +7,7 @@ class just bridges the rLLM ``Evaluator`` protocol.
 
 from __future__ import annotations
 
-from rllm.experimental.eval.types import EvalOutput
+from rllm.eval.types import EvalOutput
 from rllm.tasks.task import Task
 from rllm.types import Episode
 

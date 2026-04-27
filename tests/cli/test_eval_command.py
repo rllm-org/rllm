@@ -7,8 +7,8 @@ import pytest
 from click.testing import CliRunner
 
 from rllm.cli.main import cli
-from rllm.experimental.eval.config import RllmConfig
-from rllm.experimental.eval.types import AgentConfig, EvalOutput, Signal, Task
+from rllm.eval.config import RllmConfig
+from rllm.eval.types import AgentConfig, EvalOutput, Signal, Task
 from rllm.types import Episode, Step, Trajectory
 
 
@@ -66,7 +66,7 @@ class _MockEvaluator:
 
 def test_eval_missing_config(runner, tmp_rllm_home):
     """Eval without --base-url and no config should tell user to run 'rllm setup'."""
-    with patch("rllm.experimental.eval.config.load_config", return_value=RllmConfig()):
+    with patch("rllm.eval.config.load_config", return_value=RllmConfig()):
         result = runner.invoke(cli, ["eval", "gsm8k"])
     assert result.exit_code != 0
     assert "rllm setup" in result.output
@@ -87,8 +87,8 @@ def test_eval_with_proxy_mode(runner, tmp_rllm_home, mock_dataset):
     mock_pm.build_proxy_config.return_value = {"model_list": []}
 
     with (
-        patch("rllm.experimental.eval.config.load_config", return_value=config),
-        patch("rllm.experimental.eval.proxy.EvalProxyManager", return_value=mock_pm),
+        patch("rllm.eval.config.load_config", return_value=config),
+        patch("rllm.eval.proxy.EvalProxyManager", return_value=mock_pm),
         patch("rllm.cli.eval._run_eval"),
     ):
         result = runner.invoke(
@@ -111,9 +111,9 @@ def test_eval_base_url_skips_proxy(runner, tmp_rllm_home, mock_dataset):
     mock_agent = _MockAgentFlow()
 
     with (
-        patch("rllm.experimental.eval.proxy.EvalProxyManager") as mock_pm_cls,
-        patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent),
-        patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=_MockEvaluator()),
+        patch("rllm.eval.proxy.EvalProxyManager") as mock_pm_cls,
+        patch("rllm.eval.agent_loader.load_agent", return_value=mock_agent),
+        patch("rllm.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=_MockEvaluator()),
     ):
         result = runner.invoke(
             cli,
@@ -138,8 +138,8 @@ def test_eval_with_mock_agent(runner, tmp_rllm_home, mock_dataset):
     mock_agent = _MockAgentFlow()
 
     with (
-        patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent),
-        patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=_MockEvaluator()),
+        patch("rllm.eval.agent_loader.load_agent", return_value=mock_agent),
+        patch("rllm.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=_MockEvaluator()),
     ):
         result = runner.invoke(
             cli,
@@ -166,8 +166,8 @@ def test_eval_with_max_examples(runner, tmp_rllm_home, mock_dataset):
     mock_agent = _MockAgentFlow()
 
     with (
-        patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent),
-        patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=_MockEvaluator()),
+        patch("rllm.eval.agent_loader.load_agent", return_value=mock_agent),
+        patch("rllm.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=_MockEvaluator()),
     ):
         result = runner.invoke(
             cli,
@@ -195,8 +195,8 @@ def test_eval_saves_results(runner, tmp_rllm_home, mock_dataset):
     mock_agent = _MockAgentFlow()
 
     with (
-        patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent),
-        patch("rllm.experimental.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=_MockEvaluator()),
+        patch("rllm.eval.agent_loader.load_agent", return_value=mock_agent),
+        patch("rllm.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=_MockEvaluator()),
     ):
         result = runner.invoke(
             cli,
@@ -221,8 +221,8 @@ def test_eval_with_explicit_evaluator(runner, tmp_rllm_home, mock_dataset):
     mock_agent = _MockAgentFlow()
 
     with (
-        patch("rllm.experimental.eval.agent_loader.load_agent", return_value=mock_agent),
-        patch("rllm.experimental.eval.evaluator_loader.load_evaluator", return_value=_MockEvaluator()) as mock_load_eval,
+        patch("rllm.eval.agent_loader.load_agent", return_value=mock_agent),
+        patch("rllm.eval.evaluator_loader.load_evaluator", return_value=_MockEvaluator()) as mock_load_eval,
     ):
         result = runner.invoke(
             cli,

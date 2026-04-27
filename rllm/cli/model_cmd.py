@@ -20,7 +20,7 @@ from rllm.cli._ui import (
     _select_provider,
     console,
 )
-from rllm.experimental.eval.config import (
+from rllm.eval.config import (
     PROVIDER_ENV_KEYS,
     RllmConfig,
     get_provider_info,
