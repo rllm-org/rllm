@@ -6,7 +6,7 @@ to the LLM response so downstream reward_fns can extract the answer.
 
 Implements the rLLM ``AgentFlow`` protocol with no sandbox dependency.
 
-For sandbox tasks (Harbor, SWE-bench), use :class:`rllm.tasks.harnesses.bash.BashHarness`
+For sandbox tasks (Harbor, SWE-bench), use :class:`rllm.harnesses.bash.BashHarness`
 instead — it runs a multi-turn ReAct loop with bash tool calls inside the sandbox.
 """
 
