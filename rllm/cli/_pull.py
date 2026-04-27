@@ -474,6 +474,16 @@ def pull_dataset(name: str, catalog_entry: dict) -> None:
             )
             num_examples = len(register_data)
             logger.info(f"  Registered {name}/{split} ({num_examples} examples)")
+
+            # Materialise as a self-describing benchmark directory so the
+            # same Runner path can evaluate catalog datasets and locally-
+            # authored benchmarks. The parquet sibling stays for verl.
+            try:
+                from rllm.eval.materialize import materialize_benchmark
+
+                materialize_benchmark(name=name, split=split, rows=register_data, catalog_entry=catalog_entry)
+            except Exception as e:
+                logger.warning("  Failed to materialize benchmark dir for %s/%s: %s", name, split, e)
         except Exception as e:
             # Provide a clearer message for gated datasets
             err_str = str(e)
