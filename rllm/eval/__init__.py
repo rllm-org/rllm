@@ -5,14 +5,8 @@ from rllm.eval.proxy import EvalProxyManager
 from rllm.eval.results import EvalItem, EvalResult
 from rllm.eval.runner import EvalRunner
 from rllm.eval.task_spec import TaskSpec, build_task_spec
-from rllm.eval.types import (
-    AgentConfig,
-    AgentFlow,
-    EvalOutput,
-    Evaluator,
-    Signal,
-    run_agent_flow,
-)
+from rllm.eval.types import EvalOutput, Signal
+from rllm.types import AgentConfig, AgentFlow, Evaluator, run_agent_flow
 
 __all__ = [
     "load_agent",

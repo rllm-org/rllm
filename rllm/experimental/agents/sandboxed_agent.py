@@ -15,9 +15,8 @@ import subprocess
 import uuid
 from abc import ABC, abstractmethod
 
-from rllm.eval.types import AgentConfig, Task
 from rllm.sandbox.protocol import Sandbox
-from rllm.types import Episode
+from rllm.types import AgentConfig, Episode, Task
 
 logger = logging.getLogger(__name__)
 

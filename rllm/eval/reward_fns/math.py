@@ -7,8 +7,7 @@ from __future__ import annotations
 
 from rllm.eval.reward_fns._helpers import extract_answer_text
 from rllm.eval.types import EvalOutput, Signal
-from rllm.task import Task
-from rllm.types import Episode
+from rllm.types import Episode, Task
 
 SYSTEM_PROMPT = "Solve the math problem step by step, showing your reasoning clearly. Put your final answer in \\boxed{} notation.\nExample: The answer is \\boxed{42}."
 

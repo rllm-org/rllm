@@ -6,8 +6,7 @@ import re
 
 from rllm.eval.reward_fns._helpers import extract_answer_text
 from rllm.eval.types import EvalOutput, Signal
-from rllm.task import Task
-from rllm.types import Episode
+from rllm.types import Episode, Task
 
 SYSTEM_PROMPT = "Choose the correct answer from the given options. Think through the problem carefully, then respond with ONLY the letter of the correct answer (A, B, C, D, etc.)."
 

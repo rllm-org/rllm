@@ -9,8 +9,7 @@ import json
 
 from rllm.eval.reward_fns._helpers import extract_answer_text
 from rllm.eval.types import EvalOutput, Signal
-from rllm.task import Task
-from rllm.types import Episode
+from rllm.types import Episode, Task
 
 SYSTEM_PROMPT = 'Respond with the appropriate function call(s) using the provided function definitions. Output a JSON array of function calls: [{"name": "func", "arguments": {...}}]'
 

@@ -1,7 +1,7 @@
 """BenchmarkLoader: load a local benchmark directory into ``list[Task]``.
 
 After PR 2, both task-per-directory and rows-with-shared-verifier shapes
-return the new :class:`rllm.task.Task` abstraction. The CLI then runs
+return the new :class:`rllm.types.Task` abstraction. The CLI then runs
 each task through :class:`rllm.runner.Runner` — same code path for both.
 
 Three on-disk shapes recognised:
@@ -28,8 +28,8 @@ from pathlib import Path
 
 import tomllib
 
-from rllm.task import Task
 from rllm.tasks.dataset_config import DatasetConfig, load_dataset_config
+from rllm.types import Task
 
 logger = logging.getLogger(__name__)
 
@@ -285,7 +285,7 @@ def _load_task_from_dir(
     benchmark_dir: Path,
     sub_dir: Path | None | type = ...,
 ) -> Task:
-    """Load a Harbor-style task directory into the new ``rllm.task.Task``.
+    """Load a Harbor-style task directory into the new ``rllm.types.Task``.
 
     The whole task.toml goes into ``metadata``. Convenience keys (workdir,
     agent_user, verifier_user, verifier_timeout, etc.) are also lifted to

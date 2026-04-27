@@ -13,9 +13,8 @@ import logging
 import shlex
 
 from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow
-from rllm.task import Task
 from rllm.tasks.harness import register_harness
-from rllm.types import Episode, Step, Trajectory
+from rllm.types import Episode, Step, Task, Trajectory
 
 logger = logging.getLogger(__name__)
 

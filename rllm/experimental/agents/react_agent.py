@@ -16,8 +16,7 @@ import logging
 
 from openai import OpenAI
 
-from rllm.eval.types import AgentConfig, Task
-from rllm.types import Episode, Step, Trajectory
+from rllm.types import AgentConfig, Episode, Step, Task, Trajectory
 
 logger = logging.getLogger(__name__)
 

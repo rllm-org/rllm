@@ -18,7 +18,7 @@ def __getattr__(name: str):
         return rollout if name == "rollout" else evaluator
 
     if name == "Task":
-        from rllm.task import Task
+        from rllm.types import Task
 
         _mod = sys.modules[__name__]
         _mod.Task = Task

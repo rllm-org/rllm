@@ -15,8 +15,8 @@ from collections.abc import Callable
 from functools import update_wrapper
 from typing import Any, overload
 
-from rllm.eval.types import AgentConfig, EvalOutput, Task
-from rllm.types import Episode, Trajectory
+from rllm.eval.types import EvalOutput
+from rllm.types import AgentConfig, Episode, Task, Trajectory
 
 logger = logging.getLogger(__name__)
 
@@ -30,27 +30,27 @@ def _coerce_to_episode(result: Any, task: Task, traj_name: str) -> Episode:
     """Convert a user function's return value into an Episode."""
     if isinstance(result, Episode):
         if result.task is None:
-            result.task = task.data
+            result.task = task.metadata
         return result
 
     if isinstance(result, list) and result and isinstance(result[0], Trajectory):
         answer = ""
         if result and result[-1].output:
             answer = str(result[-1].output)
-        return Episode(task=task.data, trajectories=result, artifacts={"answer": answer})
+        return Episode(task=task.metadata, trajectories=result, artifacts={"answer": answer})
 
     if isinstance(result, str):
         traj = Trajectory(name=traj_name, steps=[])
-        return Episode(task=task.data, trajectories=[traj], artifacts={"answer": result})
+        return Episode(task=task.metadata, trajectories=[traj], artifacts={"answer": result})
 
     if isinstance(result, dict):
         traj = Trajectory(name=traj_name, steps=[])
         answer = result.get("answer", "")
-        return Episode(task=task.data, trajectories=[traj], artifacts={"answer": answer, **result})
+        return Episode(task=task.metadata, trajectories=[traj], artifacts={"answer": answer, **result})
 
     # Fallback: stringify
     traj = Trajectory(name=traj_name, steps=[])
-    return Episode(task=task.data, trajectories=[traj], artifacts={"answer": str(result)})
+    return Episode(task=task.metadata, trajectories=[traj], artifacts={"answer": str(result)})
 
 
 def _coerce_to_eval_output(result: Any) -> EvalOutput:
@@ -177,7 +177,7 @@ def rollout(
             client = OpenAI(base_url=config.base_url, api_key="EMPTY")
             resp = client.chat.completions.create(
                 model=config.model,
-                messages=[{"role": "user", "content": task.data["question"]}],
+                messages=[{"role": "user", "content": task.metadata["question"]}],
             )
             return resp.choices[0].message.content
 

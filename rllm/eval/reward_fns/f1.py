@@ -8,8 +8,7 @@ from collections import Counter
 
 from rllm.eval.reward_fns._helpers import extract_answer_text
 from rllm.eval.types import EvalOutput, Signal
-from rllm.task import Task
-from rllm.types import Episode
+from rllm.types import Episode, Task
 
 SYSTEM_PROMPT = "Answer the question directly and concisely. Provide only the answer, no additional explanation."
 

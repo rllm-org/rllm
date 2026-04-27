@@ -14,8 +14,7 @@ from collections import Counter
 
 from rllm.eval.reward_fns._helpers import extract_answer_text
 from rllm.eval.types import EvalOutput, Signal
-from rllm.task import Task
-from rllm.types import Episode
+from rllm.types import Episode, Task
 
 logger = logging.getLogger(__name__)
 

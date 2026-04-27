@@ -3,7 +3,7 @@
 Used when ``dataset.toml`` declares ``[verifier].module = "tests.evaluate"``
 or when ``tests/evaluate.py`` is auto-detected. Imports the file, finds the
 ``evaluate`` function (or one named in ``[verifier].function``), and wraps
-it as an :class:`~rllm.eval.types.Evaluator`.
+it as an :class:`~rllm.types.Evaluator`.
 
 Supports two function signatures:
 
@@ -23,8 +23,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from rllm.eval.types import EvalOutput, Signal
-from rllm.task import Task
-from rllm.types import Episode
+from rllm.types import Episode, Task
 
 logger = logging.getLogger(__name__)
 

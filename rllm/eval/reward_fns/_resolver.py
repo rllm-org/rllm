@@ -13,7 +13,7 @@ import logging
 
 import tomllib
 
-from rllm.task import Task
+from rllm.types import Task
 
 logger = logging.getLogger(__name__)
 

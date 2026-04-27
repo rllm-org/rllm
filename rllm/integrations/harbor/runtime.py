@@ -118,15 +118,15 @@ class HarborRuntime:
         Satisfies the ``AgentFlow`` protocol for ``EvalRunner``.
 
         Args:
-            task: rLLM Task wrapping a dict with ``task_path`` field.
+            task: :class:`rllm.types.Task` whose ``metadata`` carries a ``task_path`` field.
             config: AgentConfig with ``base_url`` and ``model``.
 
         Returns:
             Episode with harbor_reward and harbor_is_correct in artifacts.
         """
-        task_path = task.data.get("task_path")
+        task_path = task.metadata.get("task_path")
         if not task_path:
-            raise ValueError(f"Harbor task missing 'task_path' field in task data: {list(task.data.keys())}")
+            raise ValueError(f"Harbor task missing 'task_path' field in task data: {list(task.metadata.keys())}")
 
         outcome = await self._run_one(
             task_path=task_path,
@@ -140,7 +140,7 @@ class HarborRuntime:
         if not outcome.finished:
             raise RuntimeError(f"Harbor trial failed ({config.session_uid}): {outcome.error}")
 
-        episode = outcome_to_episode(outcome, config.session_uid, task.data)
+        episode = outcome_to_episode(outcome, config.session_uid, task.metadata)
 
         # Store reward in artifacts so HarborEvaluator can read it.
         episode.artifacts["harbor_trial_ran"] = True

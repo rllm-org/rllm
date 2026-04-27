@@ -16,20 +16,26 @@ import asyncio
 import logging
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from tqdm.asyncio import tqdm_asyncio
 
 from rllm.eval.results import EvalItem, EvalResult
-from rllm.eval.task_spec import build_task_spec
-from rllm.eval.types import AgentConfig, AgentFlow, Evaluator, Task, run_agent_flow
+from rllm.types import AgentConfig, AgentFlow, Evaluator, Task, run_agent_flow
 
 logger = logging.getLogger(__name__)
 
 
 def _is_sandboxed(agent) -> bool:
-    """Check if an agent is a SandboxedAgentFlow without importing at module level."""
-    from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow
+    """Check if an agent is a SandboxedAgentFlow without importing at module level.
 
+    The experimental agent modules are slated for removal; tolerate their
+    absence so non-sandboxed agents (e.g. ``search``) keep running.
+    """
+    try:
+        from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow
+    except ImportError:
+        return False
     return isinstance(agent, SandboxedAgentFlow)
 
 
@@ -39,7 +45,7 @@ def _is_sandboxed(agent) -> bool:
 
 
 async def run_dataset(
-    tasks: list,  # list[rllm.task.Task]
+    tasks: list,  # list[rllm.types.Task]
     agent_flow: AgentFlow,
     base_url: str,
     model: str,
@@ -50,7 +56,7 @@ async def run_dataset(
     dataset_name: str = "unknown",
     on_episode_complete: Callable | None = None,
 ) -> tuple[EvalResult, list]:
-    """Run a list of :class:`rllm.task.Task` objects through :class:`rllm.runner.Runner`.
+    """Run a list of :class:`rllm.types.Task` objects through :class:`rllm.runner.Runner`.
 
     Per-task: creates a fresh :class:`Runner`, optionally with a per-task
     copy of the agent_flow (for sandboxed flows), and awaits its result.
@@ -133,15 +139,11 @@ class EvalRunner:
         model: str,
         concurrency: int = 64,
         agent_metadata: dict | None = None,
-        catalog_entry: dict | None = None,
-        benchmark_name: str = "",
     ):
         self.base_url = base_url
         self.model = model
         self.concurrency = concurrency
         self.agent_metadata = agent_metadata or {}
-        self.catalog_entry = catalog_entry or {}
-        self.benchmark_name = benchmark_name
         self._executor = ThreadPoolExecutor(max_workers=concurrency)
 
     async def run(self, dataset, agent: AgentFlow, evaluator: Evaluator, agent_name: str = "", on_episode_complete=None) -> tuple[EvalResult, list]:
@@ -162,12 +164,6 @@ class EvalRunner:
             concurrency = min(concurrency, agent.max_concurrent)
         semaphore = asyncio.Semaphore(concurrency)
 
-        # Build TaskSpec once from catalog + first sample task
-        task_spec = None
-        if self.catalog_entry:
-            sample_task = dataset[0] if len(dataset) > 0 else {}
-            task_spec = build_task_spec(self.benchmark_name, self.catalog_entry, sample_task)
-
         async def eval_one(idx: int, task: dict) -> tuple[EvalItem, object | None]:
             async with semaphore:
                 # Create per-task agent instance for sandboxed agents
@@ -185,8 +181,13 @@ class EvalRunner:
                         metadata=metadata,
                     )
 
-                    # Wrap raw task dict into Task object
-                    task_obj = Task(data=task, spec=task_spec)
+                    # Wrap raw task dict into the canonical Task shape
+                    task_obj = Task(
+                        id=str(idx),
+                        instruction=str(task.get("question", task.get("instruction", ""))),
+                        metadata=task,
+                        benchmark_dir=Path("."),
+                    )
 
                     # Setup sandbox if needed
                     if is_sandboxed:
@@ -200,8 +201,8 @@ class EvalRunner:
                     if is_sandboxed and task_agent.sandbox is not None:
                         episode.artifacts["_sandbox"] = task_agent.sandbox
 
-                    # Stage 2: Evaluate (evaluators receive raw dict)
-                    eval_output = evaluator.evaluate(task_obj.data, episode)
+                    # Stage 2: Evaluate (legacy evaluators expect a dict — pass metadata)
+                    eval_output = evaluator.evaluate(task_obj.metadata, episode)
 
                     # Write back onto trajectories
                     for traj in episode.trajectories:

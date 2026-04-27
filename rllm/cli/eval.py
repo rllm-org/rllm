@@ -368,8 +368,6 @@ def _run_eval(
         model=model,
         concurrency=concurrency,
         agent_metadata=agent_metadata or {},
-        catalog_entry=catalog_entry,
-        benchmark_name=benchmark,
     )
 
     # Create UI logger before run for progressive episode uploads

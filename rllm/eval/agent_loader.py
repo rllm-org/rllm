@@ -7,7 +7,7 @@ import json
 import os
 from importlib.metadata import entry_points
 
-from rllm.eval.types import AgentFlow
+from rllm.types import AgentFlow
 
 _RLLM_HOME = os.environ.get("RLLM_HOME", os.path.expanduser("~/.rllm"))
 _USER_AGENTS_FILE = os.path.join(_RLLM_HOME, "agents.json")

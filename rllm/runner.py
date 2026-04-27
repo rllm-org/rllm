@@ -28,10 +28,9 @@ import tomllib
 
 from rllm.eval.module_evaluator import PythonModuleEvaluator, _coerce_eval_result
 from rllm.eval.script_evaluator import ShellScriptEvaluator
-from rllm.eval.types import AgentConfig, AgentFlow, EvalOutput, Evaluator
+from rllm.eval.types import EvalOutput
 from rllm.sandbox.protocol import Sandbox
-from rllm.task import Task
-from rllm.types import Episode
+from rllm.types import AgentConfig, AgentFlow, Episode, Evaluator, Task
 
 logger = logging.getLogger(__name__)
 

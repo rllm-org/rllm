@@ -1,17 +1,76 @@
 """Canonical lightweight types for rLLM.
 
-These Pydantic BaseModel classes are the single source of truth for
-Step, Trajectory, and Episode. The SDK uses them directly, while the
-training code in ``rllm.agents.agent`` extends them with
-training-specific fields (token IDs, logprobs, advantage, etc.).
+Single source of truth for the core data shapes (:class:`Task`,
+:class:`Step`, :class:`Trajectory`, :class:`Episode`) and the
+producer/consumer protocols around them (:class:`AgentFlow`,
+:class:`Evaluator`, :class:`AgentConfig`, :func:`run_agent_flow`).
+
+Eval-specific result shapes (:class:`~rllm.eval.types.EvalOutput`,
+:class:`~rllm.eval.types.Signal`) live in :mod:`rllm.eval.types`.
 """
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import uuid
-from typing import Any
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    from rllm.eval.types import EvalOutput
+
+
+@dataclass
+class Task:
+    """A single problem instance.
+
+    Pure data — describes itself (instruction, metadata) and points at the
+    directory where its verifier lives. The :class:`rllm.runner.Runner`
+    reads the task config and resolves the appropriate :class:`Evaluator`
+    at run time.
+
+    Two physical shapes both produce ``Task`` instances:
+
+    1. **Task-per-directory** (Harbor-style): each ``task-NNN/`` is one
+       Task with ``sub_dir`` set to its subdirectory. Verifier lives in
+       ``benchmark_dir/sub_dir/tests/``.
+
+    2. **Rows-with-shared-verifier** (gsm8k-style): one row from a JSONL
+       file becomes one Task. ``sub_dir`` is ``None``; the verifier is
+       shared across all rows and lives in ``benchmark_dir/tests/`` (or
+       is referenced by name in ``dataset.toml``).
+    """
+
+    id: str
+    """Stable identifier (e.g. row index, task-NNN, or harbor task name)."""
+
+    instruction: str | list[dict]
+    """What the agent sees. Plain text, or multimodal content blocks."""
+
+    metadata: dict[str, Any] = field(default_factory=dict)
+    """Arbitrary task data (ground truth, MCQ choices, harbor task.toml, ...).
+    For data tasks, this is the source row. For sandbox tasks, this is
+    the parsed ``task.toml`` plus anything else the verifier needs."""
+
+    benchmark_dir: Path = field(default_factory=Path)
+    """Path to the benchmark directory (where ``dataset.toml`` lives)."""
+
+    sub_dir: Path | None = None
+    """For task-per-directory shape: relative path of this task's subdir
+    within ``benchmark_dir``. ``None`` for rows-with-shared-verifier."""
+
+    @property
+    def task_dir(self) -> Path:
+        """The directory holding *this* task's files.
+
+        For per-task-dir tasks: ``benchmark_dir / sub_dir``.
+        For shared-verifier tasks: ``benchmark_dir`` (verifier is shared).
+        """
+        return self.benchmark_dir / self.sub_dir if self.sub_dir else self.benchmark_dir
 
 
 class Step(BaseModel):
@@ -70,3 +129,80 @@ class Episode(BaseModel):
     @property
     def rollout_idx(self) -> str:
         return self.id.split(":")[1]
+
+
+# ---------------------------------------------------------------------------
+# Core protocols + agent config
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AgentConfig:
+    """Configuration injected into every :class:`AgentFlow` call."""
+
+    base_url: str
+    model: str
+    session_uid: str
+    metadata: dict = field(default_factory=dict)
+
+
+@runtime_checkable
+class AgentFlow(Protocol):
+    """A runnable agent program that produces an :class:`Episode`.
+
+    An AgentFlow may orchestrate one or many agents internally; each
+    contributes one or more Trajectories to the resulting Episode.
+
+    Implementations may provide either ``run`` (sync) or ``arun``
+    (async). If both are present, callers should prefer ``arun`` when
+    running inside an event loop — see :func:`run_agent_flow`.
+    """
+
+    def run(self, task: Any, config: AgentConfig) -> Episode: ...
+
+
+@runtime_checkable
+class Evaluator(Protocol):
+    """Scores an :class:`Episode` produced by an :class:`AgentFlow`.
+
+    The evaluator examines the task + episode trajectories and returns
+    an :class:`~rllm.eval.output.EvalOutput`. The runner then writes the
+    reward back onto each Trajectory, making them ready for RL training.
+    """
+
+    def evaluate(self, task: Any, episode: Episode) -> EvalOutput: ...
+
+
+async def run_agent_flow(
+    agent: AgentFlow,
+    task: Any,
+    config: AgentConfig,
+    executor=None,
+) -> Episode:
+    """Run an :class:`AgentFlow`, preferring its async ``arun`` when present.
+
+    Falls back to running ``run`` in *executor* (a ``ThreadPoolExecutor``)
+    so that sync agent flows don't block the event loop.
+    """
+    if hasattr(agent, "arun") and inspect.iscoroutinefunction(agent.arun):
+        return await agent.arun(task, config)
+
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, agent.run, task, config)
+
+
+def _extract_agent_answer(episode: Episode) -> str:
+    """Extract the final textual answer from an :class:`Episode`.
+
+    Checks ``episode.artifacts["answer"]`` first (preferred), then falls
+    back to the last trajectory's ``output`` or last step's ``output``.
+    """
+    if "answer" in episode.artifacts:
+        return str(episode.artifacts["answer"])
+    if episode.trajectories:
+        traj = episode.trajectories[-1]
+        if traj.output:
+            return str(traj.output)
+        if traj.steps:
+            return str(traj.steps[-1].output or "")
+    return ""

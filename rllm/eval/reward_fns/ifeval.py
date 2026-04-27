@@ -14,8 +14,7 @@ from typing import Any
 
 from rllm.eval.reward_fns._helpers import extract_answer_text
 from rllm.eval.types import EvalOutput, Signal
-from rllm.task import Task
-from rllm.types import Episode
+from rllm.types import Episode, Task
 
 SYSTEM_PROMPT = "Follow the instructions in the prompt exactly. Your response will be verified against specific formatting and content constraints."
 

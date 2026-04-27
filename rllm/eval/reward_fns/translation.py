@@ -10,8 +10,7 @@ from collections import Counter
 
 from rllm.eval.reward_fns._helpers import extract_answer_text
 from rllm.eval.types import EvalOutput, Signal
-from rllm.task import Task
-from rllm.types import Episode
+from rllm.types import Episode, Task
 
 SYSTEM_PROMPT = "Translate the given text accurately. Provide only the translation, no explanation or commentary."
 

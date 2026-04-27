@@ -15,7 +15,8 @@ import os
 from importlib.metadata import entry_points
 from typing import Any
 
-from rllm.eval.types import EvalOutput, Evaluator, Signal
+from rllm.eval.types import EvalOutput, Signal
+from rllm.types import Evaluator
 
 _RLLM_HOME = os.environ.get("RLLM_HOME", os.path.expanduser("~/.rllm"))
 _USER_EVALUATORS_FILE = os.path.join(_RLLM_HOME, "evaluators.json")
@@ -151,7 +152,7 @@ def _load_and_instantiate(import_path: str, name: str) -> Evaluator:
 class _FunctionEvaluator:
     """Wrap a score_fn ``evaluate(task, episode)`` callable as an Evaluator.
 
-    Score_fns expect ``task`` to be an ``rllm.task.Task`` object. Legacy
+    Score_fns expect ``task`` to be an ``rllm.types.Task`` object. Legacy
     callers (``EvalRunner``) pass a dict. We auto-wrap the dict in a Task
     so both call styles work.
     """
@@ -166,7 +167,7 @@ class _FunctionEvaluator:
         if isinstance(task, dict):
             from pathlib import Path
 
-            from rllm.task import Task
+            from rllm.types import Task
 
             task = Task(id="", instruction="", metadata=task, benchmark_dir=Path("/"))
 

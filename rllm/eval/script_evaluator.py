@@ -2,7 +2,7 @@
 
 Used when ``dataset.toml`` / ``task.toml`` declares ``[verifier].script``
 or when ``tests/test.sh`` is auto-detected. Implements the rLLM
-:class:`~rllm.eval.types.Evaluator` protocol.
+:class:`~rllm.types.Evaluator` protocol.
 
 Reward contract (Harbor-compatible): the script writes to one of
 ``/tmp/rllm/reward.json``, ``/logs/verifier/reward.json``, or
@@ -17,8 +17,7 @@ from pathlib import Path
 
 from rllm.eval.types import EvalOutput, Signal
 from rllm.sandbox.protocol import Sandbox
-from rllm.task import Task
-from rllm.types import Episode
+from rllm.types import Episode, Task
 
 logger = logging.getLogger(__name__)
 

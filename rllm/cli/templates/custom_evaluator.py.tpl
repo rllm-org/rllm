@@ -4,8 +4,8 @@ Usage:
     rllm eval gsm8k --evaluator {{module_name}}.evaluator:{{evaluator_class}}
 """
 
-from rllm.experimental.eval.types import EvalOutput, Signal, _extract_agent_answer
-from rllm.types import Episode
+from rllm.eval.types import EvalOutput, Signal
+from rllm.types import Episode, _extract_agent_answer
 
 
 class {{evaluator_class}}:
