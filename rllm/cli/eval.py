@@ -144,12 +144,17 @@ def _run_eval(
                 if "sandbox_concurrency" in agent_metadata:
                     agent.max_concurrent = agent_metadata["sandbox_concurrency"]
 
-        # Evaluator: comes from each Task's [verifier] config. CLI --evaluator
-        # is ignored for local benchmarks (would override per-task settings).
+        # Evaluator: comes from each Task's [verifier] config by default.
+        # CLI --evaluator (when provided) overrides for every task.
         evaluator = None
         evaluator_display = f"per-task ({len(bench_result.tasks)} tasks)"
         if evaluator_name is not None:
-            console.print("  [dim]--evaluator override is not supported for local benchmarks; verifier comes from task.toml/dataset.toml[/]")
+            try:
+                evaluator = load_evaluator(evaluator_name)
+                evaluator_display = f"{evaluator_name} (overrides per-task verifier)"
+            except (KeyError, ImportError, AttributeError, TypeError) as e:
+                console.print(f"  [error]Error loading evaluator '{evaluator_name}': {e}[/]")
+                raise SystemExit(1) from None
 
         # Wrap tasks in a Dataset so the existing CLI filter code (select, len) works
         from rllm.data.dataset import Dataset
@@ -425,6 +430,7 @@ def _run_eval(
                 agent_name=agent_name,
                 dataset_name=_local_bench_result.name,
                 on_episode_complete=on_episode_complete,
+                evaluator_override=evaluator,
             )
         )
     else:

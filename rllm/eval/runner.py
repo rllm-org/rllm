@@ -55,12 +55,17 @@ async def run_dataset(
     agent_name: str = "",
     dataset_name: str = "unknown",
     on_episode_complete: Callable | None = None,
+    evaluator_override: Evaluator | None = None,
 ) -> tuple[EvalResult, list]:
     """Run a list of :class:`rllm.types.Task` objects through :class:`rllm.runner.Runner`.
 
     Per-task: creates a fresh :class:`Runner`, optionally with a per-task
     copy of the agent_flow (for sandboxed flows), and awaits its result.
     Concurrency is bounded by ``min(concurrency, agent_flow.max_concurrent)``.
+
+    Args:
+        evaluator_override: If provided, all tasks are scored with this
+            evaluator instead of their per-task verifier (CLI ``--evaluator``).
 
     Returns ``(EvalResult, list[Episode])``.
     """
@@ -75,7 +80,11 @@ async def run_dataset(
         async with semaphore:
             # Per-task fresh agent_flow for sandboxed flows so sandbox state doesn't leak
             af = agent_flow.create_instance() if isinstance(agent_flow, SandboxedAgentFlow) else agent_flow
-            runner = Runner(agent_flow=af, sandbox_backend=sandbox_backend)
+            runner = Runner(
+                agent_flow=af,
+                sandbox_backend=sandbox_backend,
+                evaluator_override=evaluator_override,
+            )
             config = AgentConfig(
                 base_url=base_url,
                 model=model,

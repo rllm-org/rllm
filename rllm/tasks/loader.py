@@ -115,9 +115,14 @@ def _load_data_dataset(
     rows = _load_jsonl(data_file)
 
     instruction_field, metadata_fields = _read_dataset_meta(path)
+    category = _read_dataset_category(path)
     tasks: list[Task] = []
     for idx, row in enumerate(rows):
-        instruction = _render_instruction(path, row, instruction_field)
+        text = _render_instruction(path, row, instruction_field)
+        if category == "vlm":
+            instruction: str | list[dict] = _build_multimodal_instruction(text, row, path)
+        else:
+            instruction = text
         task_metadata = _build_metadata(row, metadata_fields)
         tasks.append(
             Task(
@@ -136,7 +141,7 @@ def _load_data_dataset(
         harness_name=harness_name or config.default_agent or "simple",
         sandbox_backend=sandbox_backend,
         description=config.description,
-        category="custom",
+        category=category or "custom",
     )
 
 
@@ -175,6 +180,51 @@ def _read_dataset_meta(path: Path) -> tuple[str | None, list[str] | None]:
     return ds.get("instruction_field"), ds.get("metadata_fields")
 
 
+def _read_dataset_category(path: Path) -> str | None:
+    """Read the ``category`` field from dataset.toml (e.g. ``"vlm"``)."""
+    cfg = path / "dataset.toml"
+    if not cfg.exists():
+        return None
+    raw = tomllib.loads(cfg.read_text())
+    return raw.get("dataset", {}).get("category")
+
+
+def _build_multimodal_instruction(text: str, row: dict, bench_dir: Path) -> list[dict]:
+    """Construct OpenAI-format multimodal content blocks for VLM tasks.
+
+    Picks up image paths from any row column (single string or list of
+    strings) that points at a file under ``bench_dir/images/``. Each
+    image becomes one ``{"type": "image_url", "image_url": {...}}`` block,
+    encoded inline as a base64 data URI.
+    """
+    import base64
+    import mimetypes
+
+    blocks: list[dict] = [{"type": "text", "text": text}]
+    seen: set[str] = set()
+    for value in row.values():
+        candidates: list[str] = []
+        if isinstance(value, str):
+            candidates = [value]
+        elif isinstance(value, list):
+            candidates = [v for v in value if isinstance(v, str)]
+        for cand in candidates:
+            if not cand.startswith("images/"):
+                continue
+            if cand in seen:
+                continue
+            file_path = bench_dir / cand
+            if not file_path.is_file():
+                continue
+            seen.add(cand)
+            mime, _ = mimetypes.guess_type(file_path.name)
+            if mime is None:
+                mime = "image/png"
+            data = base64.b64encode(file_path.read_bytes()).decode("ascii")
+            blocks.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}})
+    return blocks
+
+
 def _render_instruction(path: Path, row: dict, instruction_field: str | None) -> str:
     """Render the instruction for a row.
 
@@ -193,14 +243,30 @@ def _render_instruction(path: Path, row: dict, instruction_field: str | None) ->
 
 
 def _render_simple_template(tpl: str, row: dict) -> str:
-    """Render ``{{field}}`` placeholders. Missing fields → empty string."""
+    """Render ``{{field}}`` placeholders. Missing fields → empty string.
+
+    List-valued fields (e.g. MCQ ``choices``) are formatted as a
+    lettered block: ``(A) ...\n(B) ...\n...``.
+    """
     import re
 
     def replace(match: re.Match[str]) -> str:
         field = match.group(1).strip()
-        return str(row.get(field, ""))
+        value = row.get(field, "")
+        if isinstance(value, list):
+            return _format_choices(value)
+        return str(value)
 
     return re.sub(r"\{\{\s*(\w+)\s*\}\}", replace, tpl)
+
+
+def _format_choices(items: list) -> str:
+    """Format a list as a lettered MCQ block: ``(A) ...\n(B) ...``."""
+    lines = []
+    for i, item in enumerate(items):
+        letter = chr(ord("A") + i)
+        lines.append(f"({letter}) {item}")
+    return "\n".join(lines)
 
 
 def _build_metadata(row: dict, metadata_fields: list[str] | None) -> dict:

@@ -177,44 +177,68 @@ def _run_train(
     # ------------------------------------------------------------------
     # Local benchmark path: directory with dataset.toml / task.toml
     # ------------------------------------------------------------------
+    from rllm.tasks.harness import is_harness_name, load_harness
     from rllm.tasks.loader import BenchmarkLoader
 
     catalog = {}  # needed for Harbor config path later
     catalog_entry = None
+    train_ds_name = train_dataset_name or benchmark
+    val_ds_name = val_dataset_name or benchmark
+
+    def _load_agent_or_harness(name: str):
+        """Try the harness registry first, fall back to the agent registry.
+
+        Mirrors the eval CLI so harness names (``react``, ``bash``,
+        ``claude-code``) and ``module:Class`` import paths Just Work for
+        ``rllm train`` too.
+        """
+        if ":" in name or is_harness_name(name):
+            return load_harness(name)
+        return load_agent(name)
 
     if BenchmarkLoader.is_local_benchmark(benchmark):
         # For local sandbox tasks, --agent is the harness name.
         bench_result = BenchmarkLoader.load(benchmark, harness_name=agent_name)
-        catalog_entry = bench_result.catalog_entry
+        catalog_entry = {
+            "description": bench_result.description,
+            "category": bench_result.category,
+            "default_agent": bench_result.harness_name,
+        }
+        if agent_name is None:
+            agent_name = bench_result.harness_name or "react"
 
-        # Agent: BenchmarkLoader returns TaskRunner with the selected harness.
-        if bench_result.agent is not None:
-            agent_flow = bench_result.agent
-            if agent_name is None:
-                agent_name = catalog_entry.get("default_agent", "react")
-        elif agent_name is not None:
-            agent_flow = load_agent(agent_name)
-        else:
-            console.print(f"  [error]No --agent specified for local benchmark '{benchmark}'.[/]")
-            raise SystemExit(1)
+        try:
+            agent_flow = _load_agent_or_harness(agent_name)
+        except (KeyError, ImportError, AttributeError, TypeError) as e:
+            console.print(f"  [error]Cannot load agent/harness '{agent_name}': {e}[/]")
+            raise SystemExit(1) from None
 
-        # Evaluator
+        # Evaluator: explicit override; otherwise leave to Runner-style
+        # per-task resolution (the trainer needs a single Evaluator, so
+        # we error out if neither is available).
         evaluator_display = "N/A"
         if evaluator_name is not None:
             evaluator = load_evaluator(evaluator_name)
             evaluator_display = evaluator_name
-        elif bench_result.evaluator is not None:
-            evaluator = bench_result.evaluator
-            evaluator_display = type(evaluator).__name__
         else:
-            console.print(f"  [error]No --evaluator specified for local benchmark '{benchmark}'.[/]")
+            console.print("  [error]Local benchmarks need an explicit --evaluator for training (per-task verifier resolution is eval-only for now).[/]")
             raise SystemExit(1)
 
-        # Datasets: use the loaded dataset for both train and val
-        train_dataset = bench_result.dataset
+        # Datasets: pass the Task list as both train and val for now
+        from rllm.data.dataset import Dataset as _Dataset
+
+        train_dataset = _Dataset(
+            data=list(bench_result.tasks),
+            name=bench_result.name,
+            split=bench_result.split or "train",
+        )
         if max_examples is not None and max_examples < len(train_dataset):
             train_dataset = train_dataset.select(range(max_examples))
-        val_dataset = bench_result.dataset  # same dataset for val
+        val_dataset = _Dataset(
+            data=list(bench_result.tasks),
+            name=bench_result.name,
+            split=bench_result.split or "test",
+        )
         if val_split is None:
             val_split = train_dataset.split or "test"
 
@@ -253,7 +277,7 @@ def _run_train(
                 raise SystemExit(1)
 
         try:
-            agent_flow = load_agent(agent_name)
+            agent_flow = _load_agent_or_harness(agent_name)
         except (KeyError, ImportError, AttributeError, TypeError) as e:
             console.print(f"  [error]Error loading agent '{agent_name}': {e}[/]")
             raise SystemExit(1) from None

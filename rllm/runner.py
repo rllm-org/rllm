@@ -41,17 +41,34 @@ logger = logging.getLogger(__name__)
 
 
 class Runner:
-    """Run an AgentFlow on a Task, then resolve and run its verifier."""
+    """Run an AgentFlow on a Task, then resolve and run its verifier.
 
-    def __init__(self, agent_flow: AgentFlow, sandbox_backend: str | None = None):
+    Args:
+        agent_flow: The :class:`AgentFlow` to drive the task.
+        sandbox_backend: Optional override for the sandbox backend
+            (``"docker"``, ``"local"``, ``"modal"``, ...).
+        evaluator_override: If provided, bypass per-task verifier
+            resolution and use this :class:`Evaluator` for every task.
+            The CLI's ``--evaluator`` flag flows through here.
+    """
+
+    def __init__(
+        self,
+        agent_flow: AgentFlow,
+        sandbox_backend: str | None = None,
+        evaluator_override: Evaluator | None = None,
+    ):
         self.agent_flow = agent_flow
         self.sandbox_backend = sandbox_backend
+        self.evaluator_override = evaluator_override
 
     async def run(self, task: Task, config: AgentConfig) -> Episode:
         from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow
 
         verifier_kind, verifier_config = _detect_verifier(task)
-        needs_sandbox = _needs_sandbox(task, verifier_kind)
+        # Force a sandbox if the agent_flow needs one, even when the
+        # evaluator override doesn't.
+        needs_sandbox = _needs_sandbox(task, verifier_kind) or isinstance(self.agent_flow, SandboxedAgentFlow)
 
         sandbox: Sandbox | None = None
         try:
@@ -65,8 +82,11 @@ class Runner:
             # AgentFlow runs the agent → Episode
             episode = await _run_agent_flow(self.agent_flow, task, config)
 
-            # Resolve and run evaluator
-            evaluator = _resolve_evaluator(task, sandbox, verifier_kind, verifier_config)
+            # Evaluator: explicit override > per-task resolution
+            if self.evaluator_override is not None:
+                evaluator = _adapt_legacy_evaluator(self.evaluator_override)
+            else:
+                evaluator = _resolve_evaluator(task, sandbox, verifier_kind, verifier_config)
             eval_output = evaluator.evaluate(task, episode)
 
             # Write rewards back

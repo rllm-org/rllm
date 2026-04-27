@@ -76,24 +76,100 @@ def materialize_benchmark(
 
 
 def _write_data_jsonl(bench_dir: Path, split: str, rows: list[dict], catalog_entry: dict) -> None:
-    """Write rows to data/<split>.jsonl. Strips binary columns (images)."""
+    """Write rows to data/<split>.jsonl.
+
+    For VLM benchmarks (``category == "vlm"``) any image-typed values
+    (PIL Image, bytes, list of either) are extracted to ``images/`` as
+    PNG files and replaced with their relative paths so the jsonl stays
+    serialisable. The loader reconstructs multimodal content blocks at
+    read time.
+    """
     data_dir = bench_dir / "data"
     data_dir.mkdir(exist_ok=True)
     out_path = data_dir / f"{split}.jsonl"
 
+    is_vlm = catalog_entry.get("category") == "vlm"
+    images_dir = bench_dir / "images" if is_vlm else None
+    if images_dir is not None:
+        images_dir.mkdir(exist_ok=True)
+
     with out_path.open("w", encoding="utf-8") as f:
-        for row in rows:
+        for idx, row in enumerate(rows):
+            if is_vlm:
+                row = _extract_images_from_row(row, idx, images_dir)
             cleaned = _strip_non_serializable(row)
             f.write(json.dumps(cleaned, ensure_ascii=False) + "\n")
 
 
+def _extract_images_from_row(row: dict, row_idx: int, images_dir: Path) -> dict:
+    """Replace image-typed values with their saved filename (relative path).
+
+    Looks at every column value: PIL Images, raw bytes, and lists of
+    either. Each image is written under ``images/<idx>_<col>[_n].png``;
+    the column value becomes the path string (or list of paths).
+    """
+    out: dict = {}
+    for col, value in row.items():
+        out[col] = _replace_images(value, row_idx, col, images_dir)
+    return out
+
+
+def _replace_images(value, row_idx: int, col: str, images_dir: Path):
+    """If *value* is image-like, save it and return the relative path."""
+    if _is_pil_image(value) or isinstance(value, bytes):
+        path = images_dir / f"{row_idx}_{col}.png"
+        _save_image(value, path)
+        return f"images/{path.name}"
+    if isinstance(value, list):
+        replaced = []
+        any_image = False
+        for n, item in enumerate(value):
+            if _is_pil_image(item) or isinstance(item, bytes):
+                path = images_dir / f"{row_idx}_{col}_{n}.png"
+                _save_image(item, path)
+                replaced.append(f"images/{path.name}")
+                any_image = True
+            else:
+                replaced.append(item)
+        return replaced if any_image else value
+    return value
+
+
+def _is_pil_image(value) -> bool:
+    try:
+        from PIL.Image import Image as PILImage
+    except ImportError:
+        return False
+    return isinstance(value, PILImage)
+
+
+def _save_image(value, path: Path) -> None:
+    if isinstance(value, bytes):
+        path.write_bytes(value)
+        return
+    # PIL Image
+    img = value
+    if img.mode not in ("RGB", "RGBA", "L"):
+        img = img.convert("RGB")
+    img.save(path, format="PNG")
+
+
 def _write_instruction_template(bench_dir: Path, catalog_entry: dict) -> None:
-    """Write instruction.md.tpl using ``instruction_field`` if set."""
+    """Write ``instruction.md.tpl`` using ``instruction_field`` if set.
+
+    For MCQ datasets (``category == "mcq"``), also append a
+    ``{{choices}}`` block so the rendered prompt includes the lettered
+    options that the loader formats from the row's ``choices`` list.
+    """
     field = catalog_entry.get("instruction_field")
     if not field:
         return
     tpl_path = bench_dir / "instruction.md.tpl"
-    tpl_path.write_text("{{" + field + "}}\n", encoding="utf-8")
+    if catalog_entry.get("category") == "mcq":
+        body = "{{" + field + "}}\n\n{{choices}}\n"
+    else:
+        body = "{{" + field + "}}\n"
+    tpl_path.write_text(body, encoding="utf-8")
 
 
 def _write_dataset_toml(bench_dir: Path, name: str, catalog_entry: dict) -> None:
