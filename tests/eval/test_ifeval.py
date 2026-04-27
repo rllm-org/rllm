@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from rllm.eval.ifeval_evaluator import (
+from rllm.eval.evaluator.ifeval import (
     IFEvalEvaluator,
     verify_instruction,
 )

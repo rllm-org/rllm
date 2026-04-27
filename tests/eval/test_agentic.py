@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 
-from rllm.eval.bfcl_evaluator import BFCLEvaluator, _compare_function_calls
-from rllm.eval.llm_judge_evaluator import LLMJudgeEvaluator
+from rllm.eval.evaluator.bfcl import BFCLEvaluator, _compare_function_calls
+from rllm.eval.evaluator.llm_judge import LLMJudgeEvaluator
 from rllm.eval.types import Evaluator
 from rllm.types import Episode
 

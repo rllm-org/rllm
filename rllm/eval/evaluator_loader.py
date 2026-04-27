@@ -7,11 +7,12 @@ import json
 import os
 from importlib.metadata import entry_points
 
-from rllm.eval.bfcl_evaluator import BFCLEvaluator
-from rllm.eval.ifeval_evaluator import IFEvalEvaluator
-from rllm.eval.llm_equality_evaluator import LLMEqualityEvaluator
-from rllm.eval.llm_judge_evaluator import LLMJudgeEvaluator
-from rllm.eval.translation_evaluator import TranslationEvaluator
+from rllm.eval.evaluator.bfcl import BFCLEvaluator
+from rllm.eval.evaluator.ifeval import IFEvalEvaluator
+from rllm.eval.evaluator.llm_equality import LLMEqualityEvaluator
+from rllm.eval.evaluator.llm_judge import LLMJudgeEvaluator
+from rllm.eval.evaluator.translation import TranslationEvaluator
+from rllm.eval.evaluator.widesearch import WideSearchEvaluator
 from rllm.eval.types import (
     CodeEvaluator,
     CountdownEvaluator,
@@ -23,7 +24,6 @@ from rllm.eval.types import (
     MCQEvaluator,
     PointInMaskEvaluator,
 )
-from rllm.eval.widesearch_evaluator import WideSearchEvaluator
 
 _RLLM_HOME = os.environ.get("RLLM_HOME", os.path.expanduser("~/.rllm"))
 _USER_EVALUATORS_FILE = os.path.join(_RLLM_HOME, "evaluators.json")
