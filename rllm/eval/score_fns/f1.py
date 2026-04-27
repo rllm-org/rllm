@@ -11,6 +11,8 @@ from rllm.eval.types import EvalOutput, Signal
 from rllm.task import Task
 from rllm.types import Episode
 
+SYSTEM_PROMPT = "Answer the question directly and concisely. Provide only the answer, no additional explanation."
+
 
 def evaluate(task: Task, episode: Episode) -> EvalOutput:
     answer_text = extract_answer_text(episode)

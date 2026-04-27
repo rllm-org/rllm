@@ -7,6 +7,13 @@ from rllm.eval.types import EvalOutput, Signal
 from rllm.task import Task
 from rllm.types import Episode
 
+SYSTEM_PROMPT = (
+    "You are given a target number and a set of numbers. Use each number exactly once "
+    "with basic arithmetic (+, -, *, /) to reach the target. Show your reasoning, "
+    "then provide your equation inside <answer>...</answer> tags.\n"
+    "Example: <answer>(25 + 3) * 2</answer>"
+)
+
 
 def evaluate(task: Task, episode: Episode) -> EvalOutput:
     from rllm.rewards.countdown_reward import compute_score

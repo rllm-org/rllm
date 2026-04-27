@@ -10,6 +10,8 @@ from rllm.eval.types import EvalOutput, Signal
 from rllm.task import Task
 from rllm.types import Episode
 
+SYSTEM_PROMPT = "Solve the math problem step by step, showing your reasoning clearly. Put your final answer in \\boxed{} notation.\nExample: The answer is \\boxed{42}."
+
 
 def evaluate(task: Task, episode: Episode) -> EvalOutput:
     from rllm.rewards.math_utils.utils import extract_answer, grade_answer_mathd, grade_answer_sympy

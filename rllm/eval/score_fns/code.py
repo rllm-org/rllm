@@ -10,6 +10,8 @@ from rllm.eval.types import EvalOutput, Signal
 from rllm.task import Task
 from rllm.types import Episode
 
+SYSTEM_PROMPT = "Write a Python function that solves the problem. Your code will be tested against hidden test cases. Put your complete solution in a ```python code block."
+
 
 def evaluate(task: Task, episode: Episode) -> EvalOutput:
     from rllm.rewards.code_reward import RewardCodeFn

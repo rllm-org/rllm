@@ -9,6 +9,8 @@ from rllm.eval.types import EvalOutput, Signal
 from rllm.task import Task
 from rllm.types import Episode
 
+SYSTEM_PROMPT = "Choose the correct answer from the given options. Think through the problem carefully, then respond with ONLY the letter of the correct answer (A, B, C, D, etc.)."
+
 
 def evaluate(task: Task, episode: Episode) -> EvalOutput:
     answer_text = extract_answer_text(episode)
