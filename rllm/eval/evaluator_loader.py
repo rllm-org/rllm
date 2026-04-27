@@ -89,20 +89,20 @@ def _validate_evaluator_class(cls: type, name: str) -> None:
 # ---------------------------------------------------------------------------
 
 _EVALUATOR_REGISTRY: dict[str, str] = {
-    "math_reward_fn": "rllm.eval.score_fns.math:evaluate",
-    "countdown_reward_fn": "rllm.eval.score_fns.countdown:evaluate",
-    "code_reward_fn": "rllm.eval.score_fns.code:evaluate",
-    "f1_reward_fn": "rllm.eval.score_fns.f1:evaluate",
-    "mcq_reward_fn": "rllm.eval.score_fns.mcq:evaluate",
-    "ifeval_reward_fn": "rllm.eval.score_fns.ifeval:evaluate",
-    "bfcl_reward_fn": "rllm.eval.score_fns.bfcl:evaluate",
-    "llm_judge_reward_fn": "rllm.eval.score_fns.llm_judge:evaluate",
-    "llm_equality_reward_fn": "rllm.eval.score_fns.llm_equality:evaluate",
-    "translation_reward_fn": "rllm.eval.score_fns.translation:evaluate",
-    "widesearch_reward_fn": "rllm.eval.score_fns.widesearch:evaluate",
-    "iou_reward_fn": "rllm.eval.score_fns.iou:evaluate",
-    "point_in_mask_reward_fn": "rllm.eval.score_fns.point_in_mask:evaluate",
-    "depth_reward_fn": "rllm.eval.score_fns.depth:evaluate",
+    "math_reward_fn": "rllm.eval.reward_fns.math:evaluate",
+    "countdown_reward_fn": "rllm.eval.reward_fns.countdown:evaluate",
+    "code_reward_fn": "rllm.eval.reward_fns.code:evaluate",
+    "f1_reward_fn": "rllm.eval.reward_fns.f1:evaluate",
+    "mcq_reward_fn": "rllm.eval.reward_fns.mcq:evaluate",
+    "ifeval_reward_fn": "rllm.eval.reward_fns.ifeval:evaluate",
+    "bfcl_reward_fn": "rllm.eval.reward_fns.bfcl:evaluate",
+    "llm_judge_reward_fn": "rllm.eval.reward_fns.llm_judge:evaluate",
+    "llm_equality_reward_fn": "rllm.eval.reward_fns.llm_equality:evaluate",
+    "translation_reward_fn": "rllm.eval.reward_fns.translation:evaluate",
+    "widesearch_reward_fn": "rllm.eval.reward_fns.widesearch:evaluate",
+    "iou_reward_fn": "rllm.eval.reward_fns.iou:evaluate",
+    "point_in_mask_reward_fn": "rllm.eval.reward_fns.point_in_mask:evaluate",
+    "depth_reward_fn": "rllm.eval.reward_fns.depth:evaluate",
 }
 
 # Lazy-loaded evaluators (optional deps)
@@ -162,7 +162,7 @@ class _FunctionEvaluator:
         self._params = list(sig.parameters.values())
 
     def evaluate(self, task, episode):
-        # Legacy callers pass a dict; score_fns expect Task. Adapt on the fly.
+        # Legacy callers pass a dict; reward_fns expect Task. Adapt on the fly.
         if isinstance(task, dict):
             from pathlib import Path
 
@@ -170,7 +170,7 @@ class _FunctionEvaluator:
 
             task = Task(id="", instruction="", metadata=task, benchmark_dir=Path("/"))
 
-        # Some score_fns may use kwarg names like 'metadata'/'trajectory'
+        # Some reward_fns may use kwarg names like 'metadata'/'trajectory'
         # rather than 'task'/'episode'. Inspect and dispatch accordingly.
         kwargs = {}
         for p in self._params:

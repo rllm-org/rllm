@@ -2,7 +2,7 @@
 
 Default harness for catalog datasets (gsm8k, MATH, MMLU, etc.) where the
 agent's "work" is a single chat completion. Sets ``trajectory.output``
-to the LLM response so downstream score_fns can extract the answer.
+to the LLM response so downstream reward_fns can extract the answer.
 
 Implements the rLLM ``AgentFlow`` protocol with no sandbox dependency.
 
@@ -40,7 +40,7 @@ class ReActHarness:
     def run(self, task: Task, config) -> Episode:
         from openai import OpenAI
 
-        from rllm.eval.score_fns._resolver import get_verifier_system_prompt
+        from rllm.eval.reward_fns._resolver import get_verifier_system_prompt
 
         client = OpenAI(base_url=config.base_url, api_key="EMPTY")
 

@@ -4,7 +4,7 @@ Each module exports a single ``evaluate(task: Task, episode: Episode) -> EvalOut
 function. Catalog entries reference these via:
 
     [verifier]
-    import_path = "rllm.eval.score_fns.math:evaluate"
+    import_path = "rllm.eval.reward_fns.math:evaluate"
 
 User-authored ``tests/evaluate.py`` files can also import from here to
 reuse common scoring without rewriting boxed-answer extraction etc.

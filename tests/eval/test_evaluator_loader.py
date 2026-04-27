@@ -44,7 +44,7 @@ class TestLoadEvaluator:
         assert _has_evaluate(evaluator)
 
     def test_load_by_import_path(self):
-        evaluator = load_evaluator("rllm.eval.score_fns.math:evaluate")
+        evaluator = load_evaluator("rllm.eval.reward_fns.math:evaluate")
         assert _has_evaluate(evaluator)
 
     def test_load_unknown_name_raises(self):
@@ -194,7 +194,7 @@ class TestRegisterEvaluator:
         monkeypatch.setattr("rllm.eval.evaluator_loader._RLLM_HOME", str(tmp_path))
 
     def test_register_string_path_and_load(self):
-        register_evaluator("test_eval", "rllm.eval.score_fns.math:evaluate")
+        register_evaluator("test_eval", "rllm.eval.reward_fns.math:evaluate")
         evaluator = load_evaluator("test_eval")
         assert _has_evaluate(evaluator)
 
@@ -209,21 +209,21 @@ class TestRegisterEvaluator:
         assert isinstance(evaluator, _DummyEvaluator)
 
     def test_persists_to_disk(self, tmp_path):
-        register_evaluator("test_eval", "rllm.eval.score_fns.math:evaluate")
+        register_evaluator("test_eval", "rllm.eval.reward_fns.math:evaluate")
         import json
 
         data = json.loads((tmp_path / "evaluators.json").read_text())
         assert "test_eval" in data
 
     def test_appears_in_list(self):
-        register_evaluator("test_eval", "rllm.eval.score_fns.math:evaluate")
+        register_evaluator("test_eval", "rllm.eval.reward_fns.math:evaluate")
         evaluators = list_evaluators()
         registered = [e for e in evaluators if e["name"] == "test_eval"]
         assert len(registered) == 1
         assert registered[0]["source"] == "registered"
 
     def test_unregister(self):
-        register_evaluator("test_eval", "rllm.eval.score_fns.math:evaluate")
+        register_evaluator("test_eval", "rllm.eval.reward_fns.math:evaluate")
         assert unregister_evaluator("test_eval") is True
         with pytest.raises(KeyError):
             load_evaluator("test_eval")

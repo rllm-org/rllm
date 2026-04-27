@@ -20,20 +20,20 @@ logger = logging.getLogger(__name__)
 
 # Map of legacy reward-fn names → score_fn module paths
 _REWARD_FN_TO_SCORE_FN: dict[str, str] = {
-    "math_reward_fn": "rllm.eval.score_fns.math",
-    "mcq_reward_fn": "rllm.eval.score_fns.mcq",
-    "f1_reward_fn": "rllm.eval.score_fns.f1",
-    "code_reward_fn": "rllm.eval.score_fns.code",
-    "countdown_reward_fn": "rllm.eval.score_fns.countdown",
-    "iou_reward_fn": "rllm.eval.score_fns.iou",
-    "point_in_mask_reward_fn": "rllm.eval.score_fns.point_in_mask",
-    "depth_reward_fn": "rllm.eval.score_fns.depth",
-    "bfcl_reward_fn": "rllm.eval.score_fns.bfcl",
-    "ifeval_reward_fn": "rllm.eval.score_fns.ifeval",
-    "llm_equality_reward_fn": "rllm.eval.score_fns.llm_equality",
-    "llm_judge_reward_fn": "rllm.eval.score_fns.llm_judge",
-    "translation_reward_fn": "rllm.eval.score_fns.translation",
-    "widesearch_reward_fn": "rllm.eval.score_fns.widesearch",
+    "math_reward_fn": "rllm.eval.reward_fns.math",
+    "mcq_reward_fn": "rllm.eval.reward_fns.mcq",
+    "f1_reward_fn": "rllm.eval.reward_fns.f1",
+    "code_reward_fn": "rllm.eval.reward_fns.code",
+    "countdown_reward_fn": "rllm.eval.reward_fns.countdown",
+    "iou_reward_fn": "rllm.eval.reward_fns.iou",
+    "point_in_mask_reward_fn": "rllm.eval.reward_fns.point_in_mask",
+    "depth_reward_fn": "rllm.eval.reward_fns.depth",
+    "bfcl_reward_fn": "rllm.eval.reward_fns.bfcl",
+    "ifeval_reward_fn": "rllm.eval.reward_fns.ifeval",
+    "llm_equality_reward_fn": "rllm.eval.reward_fns.llm_equality",
+    "llm_judge_reward_fn": "rllm.eval.reward_fns.llm_judge",
+    "translation_reward_fn": "rllm.eval.reward_fns.translation",
+    "widesearch_reward_fn": "rllm.eval.reward_fns.widesearch",
 }
 
 

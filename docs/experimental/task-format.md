@@ -78,13 +78,13 @@ module = "tests.evaluate"        # uses tests/evaluate.py
 function = "evaluate"            # default, can omit
 
 # C. registered name (works with @evaluator-decorated functions
-#    and built-in score_fns)
+#    and built-in reward_fns)
 [verifier]
 name = "math_reward_fn"
 
 # D. import path
 [verifier]
-import_path = "rllm.eval.score_fns.math:evaluate"
+import_path = "rllm.eval.reward_fns.math:evaluate"
 ```
 
 If unset, the loader auto-detects: `tests/test.sh` → A, `tests/evaluate.py` → B.

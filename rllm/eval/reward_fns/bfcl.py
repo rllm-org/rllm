@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 
-from rllm.eval.score_fns._helpers import extract_answer_text
+from rllm.eval.reward_fns._helpers import extract_answer_text
 from rllm.eval.types import EvalOutput, Signal
 from rllm.task import Task
 from rllm.types import Episode
