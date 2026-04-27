@@ -8,7 +8,6 @@ from rllm.eval.task_spec import TaskSpec, build_task_spec
 from rllm.eval.types import (
     AgentConfig,
     AgentFlow,
-    CompoundEvaluator,
     EvalOutput,
     Evaluator,
     Signal,
@@ -31,7 +30,6 @@ __all__ = [
     "Evaluator",
     "EvalOutput",
     "Signal",
-    "CompoundEvaluator",
     "TaskSpec",
     "build_task_spec",
     "run_agent_flow",
