@@ -4,7 +4,7 @@ A multi-turn agent flow for rLLM that trains a math agent to solve arithmetic pr
 
 ## Overview
 
-The agent solves competition math problems from [MATH](https://huggingface.co/datasets/EleutherAI/hendrycks_math) (train) and [MATH-500](https://huggingface.co/datasets/HuggingFaceH4/MATH-500) (test) by calling a calculator tool for each arithmetic step. These problems are harder than GSM8K and require multi-turn reasoning, making them a better test for multi-turn RL training. This cookbook serves two purposes:
+The agent solves competition math problems from [DeepScaleR-Preview](https://huggingface.co/datasets/agentica-org/DeepScaleR-Preview-Dataset) (train, ~40K problems blending AIME/AMC/Omni-MATH) and [MATH-500](https://huggingface.co/datasets/HuggingFaceH4/MATH-500) (test) by calling a calculator tool for each arithmetic step. These problems are harder than GSM8K and require multi-turn reasoning, making them a better test for multi-turn RL training. This cookbook serves two purposes:
 
 1. **End-to-end system test** — a multi-turn tool-use example that exercises the full training loop
 2. **Onboarding** — shows new users how to build a tool-calling agent with rLLM
@@ -45,7 +45,7 @@ rllm agent list    # should show "math_tool_agent" as a plugin
 Pull the datasets (one-time):
 
 ```bash
-rllm dataset pull hendrycks_math   # ~12.5K train problems across 7 subjects
+rllm dataset pull deepscaler_math   # ~40K competition math problems (AIME/AMC/Omni-MATH/STILL)
 rllm dataset pull math500           # 500-problem test benchmark
 ```
 

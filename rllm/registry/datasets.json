@@ -33,6 +33,16 @@
       "aggregate_configs": true,
       "transform": "rllm.data.transforms:hendrycks_math_transform"
     },
+    "deepscaler_math": {
+      "description": "DeepScaleR-Preview: ~40K competition math problems (AIME/AMC/Omni-MATH/STILL)",
+      "source": "agentica-org/DeepScaleR-Preview-Dataset",
+      "category": "math",
+      "splits": ["train"],
+      "default_agent": "react",
+      "reward_fn": "math_reward_fn",
+      "eval_split": "train",
+      "transform": "rllm.data.transforms:deepscaler_math_transform"
+    },
     "countdown": {
       "description": "Countdown arithmetic puzzle (1K train, 500 test)",
       "source": "predibase/countdown",

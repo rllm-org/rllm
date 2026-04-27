@@ -35,7 +35,54 @@ def test_safe_eval_modulo():
 def test_safe_eval_rejects_invalid():
     assert "Error" in _safe_eval("import os")
     assert "Error" in _safe_eval("__import__('os')")
-    assert "Error" in _safe_eval("a" * 101)
+    assert "Error" in _safe_eval("a" * 201)
+
+
+def test_safe_eval_sqrt():
+    assert _safe_eval("sqrt(9)") == "3"
+    assert _safe_eval("sqrt(64 + 225)") == "17"
+
+
+def test_safe_eval_abs():
+    assert _safe_eval("abs(-5)") == "5"
+    assert _safe_eval("abs(3.14 - 2.71)") == "0.43"
+
+
+def test_safe_eval_combinatorics():
+    assert _safe_eval("comb(5, 2)") == "10"
+    assert _safe_eval("binom(10, 3)") == "120"
+    assert _safe_eval("factorial(5)") == "120"
+
+
+def test_safe_eval_constants():
+    assert _safe_eval("pi") == "3.141593"
+    assert _safe_eval("e") == "2.718282"
+
+
+def test_safe_eval_trig():
+    # cos(0) = 1
+    assert _safe_eval("cos(0)") == "1"
+    # sin(pi/2) = 1
+    assert _safe_eval("sin(pi / 2)") == "1"
+
+
+def test_safe_eval_nested_functions():
+    # 2 * sqrt(2) - 2
+    out = _safe_eval("2 * sqrt(2) - 2")
+    assert out.startswith("0.828")
+
+
+def test_safe_eval_rejects_attribute_access():
+    assert "Error" in _safe_eval("(1).bit_length()")
+    assert "Error" in _safe_eval("math.sqrt(4)")  # 'math' not in whitelist
+
+
+def test_safe_eval_rejects_comparison():
+    assert "Error" in _safe_eval("1 < 2")
+
+
+def test_safe_eval_rejects_unknown_name():
+    assert "unknown name" in _safe_eval("foo(2)")
 
 
 # -- Answer extraction tests ---------------------------------------------------
