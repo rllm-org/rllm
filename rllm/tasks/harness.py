@@ -48,6 +48,16 @@ def list_harnesses() -> list[str]:
     return sorted(_HARNESS_REGISTRY.keys())
 
 
+def is_harness_name(name: str) -> bool:
+    """True if *name* refers to a registered harness or import-path harness."""
+    if not name:
+        return False
+    if ":" in name:
+        return True
+    _ensure_builtins_registered()
+    return name in _HARNESS_REGISTRY
+
+
 _BUILTINS_REGISTERED = False
 
 

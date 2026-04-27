@@ -9,6 +9,8 @@ configuration from ``rllm setup`` (stored in ``~/.rllm/config.json``).
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 
 import click
 from rich.console import Console
@@ -18,6 +20,8 @@ from rich.table import Table
 from rich.theme import Theme
 
 from rllm.cli._pull import load_dataset_catalog, pull_dataset
+
+logger = logging.getLogger(__name__)
 
 theme = Theme({"label": "dim", "success": "bold green", "error": "bold red", "val": "bold", "key": "yellow"})
 console = Console(theme=theme)
@@ -58,6 +62,32 @@ def _run_eval(
     _is_local = BenchmarkLoader.is_local_benchmark(benchmark)
     _local_bench_result = None
 
+    # If `benchmark` is a bare name (not a path) and a materialised dir
+    # exists under ~/.rllm/datasets/<name>/, transparently use that —
+    # but only when the user has picked a harness that doesn't collide
+    # with the legacy catalog agent registry (so existing users running
+    # `rllm eval gsm8k --agent react` keep getting the legacy agent).
+    _materialised_path_override = None
+    if not _is_local and not benchmark.startswith(("./", "../", "/", "~", "harbor:")):
+        _materialised = os.path.expanduser(os.path.join(os.environ.get("RLLM_HOME", "~/.rllm"), "datasets", benchmark))
+        if os.path.isfile(os.path.join(_materialised, "dataset.toml")):
+            from rllm.cli._pull import load_agent_catalog as _load_agent_catalog
+            from rllm.tasks.harness import is_harness_name as _is_harness
+
+            try:
+                _legacy_agents = set(_load_agent_catalog().get("agents", {}).keys())
+            except Exception:
+                _legacy_agents = set()
+
+            # Auto-redirect when --agent is unambiguously a harness:
+            #   - registered harness name not also in legacy catalog, OR
+            #   - colon import-path
+            _can_redirect = bool(agent_name) and (":" in agent_name or (_is_harness(agent_name) and agent_name not in _legacy_agents))
+            if _can_redirect and BenchmarkLoader.is_local_benchmark(_materialised):
+                console.print(f"  [dim]Using materialised dataset at {_materialised}[/]")
+                _materialised_path_override = _materialised
+                _is_local = True
+
     # Helpful error when user clearly intended a path but it doesn't resolve.
     if not _is_local and (benchmark.startswith("./") or benchmark.startswith("../") or benchmark.startswith("/") or benchmark.startswith("~")):
         import os as _os
@@ -73,8 +103,9 @@ def _run_eval(
         sandbox_backend = (agent_metadata or {}).get("sandbox_backend")
         # For local benchmarks, --agent picks the harness ("react",
         # "claude-code", ...) or a module:Class import path.
+        _load_path = _materialised_path_override or benchmark
         bench_result = BenchmarkLoader.load(
-            benchmark,
+            _load_path,
             sandbox_backend=sandbox_backend,
             harness_name=agent_name,
         )

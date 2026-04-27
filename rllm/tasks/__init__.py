@@ -6,7 +6,7 @@ benchmark-directory loader and the registry of built-in agent harnesses.
 """
 
 from rllm.tasks.dataset_config import DatasetConfig, EvaluationConfig, TaskRef, load_dataset_config
-from rllm.tasks.harness import list_harnesses, load_harness, register_harness
+from rllm.tasks.harness import is_harness_name, list_harnesses, load_harness, register_harness
 from rllm.tasks.loader import BenchmarkLoader, BenchmarkResult
 
 __all__ = [
@@ -15,6 +15,7 @@ __all__ = [
     "DatasetConfig",
     "EvaluationConfig",
     "TaskRef",
+    "is_harness_name",
     "list_harnesses",
     "load_dataset_config",
     "load_harness",
