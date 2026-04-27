@@ -208,15 +208,30 @@ def _run_eval(
                 console.print("  [error]Harbor tasks require Docker. Make sure Docker is installed and running.[/]")
                 raise SystemExit(1)
 
-        # Load agent (now returns AgentFlow)
-        try:
-            agent = load_agent(agent_name)
-        except (KeyError, ImportError, AttributeError, TypeError) as e:
-            console.print(f"  [error]Error loading agent '{agent_name}': {e}[/]")
-            raise SystemExit(1) from None
+        # If --agent is a harness (not a legacy catalog agent), defer agent
+        # loading until after the pull so we can route through the Runner
+        # path on the freshly-materialised dataset directory.
+        from rllm.cli._pull import load_agent_catalog as _load_agent_catalog
+        from rllm.tasks.harness import is_harness_name as _is_harness
 
-        # Apply sandbox CLI overrides to agent
-        if agent_metadata:
+        try:
+            _legacy_agents = set(_load_agent_catalog().get("agents", {}).keys())
+        except Exception:
+            _legacy_agents = set()
+        _agent_is_harness_only = bool(agent_name) and (":" in agent_name or (_is_harness(agent_name) and agent_name not in _legacy_agents))
+
+        if _agent_is_harness_only:
+            agent = None  # Resolved post-pull below
+        else:
+            try:
+                agent = load_agent(agent_name)
+            except (KeyError, ImportError, AttributeError, TypeError) as e:
+                console.print(f"  [error]Error loading agent '{agent_name}': {e}[/]")
+                raise SystemExit(1) from None
+
+        # Apply sandbox CLI overrides (legacy agent only — harness-only path
+        # applies overrides post-pull below)
+        if agent is not None and agent_metadata:
             from rllm.integrations.harbor.runtime import HarborRuntime
 
             if isinstance(agent, HarborRuntime):
@@ -231,34 +246,33 @@ def _run_eval(
                     if "sandbox_concurrency" in agent_metadata:
                         agent.max_concurrent = agent_metadata["sandbox_concurrency"]
 
-        # Load evaluator
+        # Load evaluator (legacy path only)
         evaluator = None
         evaluator_display = "N/A"
-        if evaluator_name is not None:
-            try:
-                evaluator = load_evaluator(evaluator_name)
-                evaluator_display = evaluator_name
-            except (KeyError, ImportError, AttributeError, TypeError) as e:
-                console.print(f"  [error]Error loading evaluator '{evaluator_name}': {e}[/]")
-                raise SystemExit(1) from None
-        else:
-            # Auto-resolve from catalog
-            evaluator = resolve_evaluator_from_catalog(benchmark)
-            if evaluator is not None:
-                reward_fn_name = catalog_entry.get("reward_fn", "") if catalog_entry else ""
-                evaluator_display = reward_fn_name or type(evaluator).__name__
-            elif catalog_entry and catalog_entry.get("reward_fn"):
-                # Catalog entry exists (possibly synthesized for Harbor) but
-                # resolve_evaluator_from_catalog missed it — try loading directly.
+        if not _agent_is_harness_only:
+            if evaluator_name is not None:
                 try:
-                    evaluator = load_evaluator(catalog_entry["reward_fn"])
-                    evaluator_display = catalog_entry["reward_fn"]
-                except (KeyError, ImportError):
-                    pass
+                    evaluator = load_evaluator(evaluator_name)
+                    evaluator_display = evaluator_name
+                except (KeyError, ImportError, AttributeError, TypeError) as e:
+                    console.print(f"  [error]Error loading evaluator '{evaluator_name}': {e}[/]")
+                    raise SystemExit(1) from None
+            else:
+                # Auto-resolve from catalog
+                evaluator = resolve_evaluator_from_catalog(benchmark)
+                if evaluator is not None:
+                    reward_fn_name = catalog_entry.get("reward_fn", "") if catalog_entry else ""
+                    evaluator_display = reward_fn_name or type(evaluator).__name__
+                elif catalog_entry and catalog_entry.get("reward_fn"):
+                    try:
+                        evaluator = load_evaluator(catalog_entry["reward_fn"])
+                        evaluator_display = catalog_entry["reward_fn"]
+                    except (KeyError, ImportError):
+                        pass
 
-        if evaluator is None:
-            console.print(f"  [error]No evaluator found for '{benchmark}'. Specify --evaluator explicitly.[/]")
-            raise SystemExit(1)
+            if evaluator is None:
+                console.print(f"  [error]No evaluator found for '{benchmark}'. Specify --evaluator explicitly.[/]")
+                raise SystemExit(1)
 
         # Load dataset — auto-pull if not available locally
         dataset = DatasetRegistry.load_dataset(benchmark, split)
@@ -271,6 +285,35 @@ def _run_eval(
         if dataset is None:
             console.print(f"  [error]Could not load dataset '{benchmark}' split '{split}'.[/]")
             raise SystemExit(1)
+
+        # Post-pull harness-only redirect: if --agent is a harness and the
+        # pull just materialised ~/.rllm/datasets/<name>/, switch to the
+        # new Runner path on the materialised directory.
+        if _agent_is_harness_only:
+            _materialised = os.path.expanduser(os.path.join(os.environ.get("RLLM_HOME", "~/.rllm"), "datasets", benchmark))
+            if os.path.isfile(os.path.join(_materialised, "dataset.toml")) and BenchmarkLoader.is_local_benchmark(_materialised):
+                console.print(f"  [dim]Using materialised dataset at {_materialised}[/]")
+                bench_result = BenchmarkLoader.load(_materialised, harness_name=agent_name)
+                _local_bench_result = bench_result
+                _is_local = True
+                from rllm.data.dataset import Dataset
+
+                dataset = Dataset(data=list(bench_result.tasks), name=bench_result.name, split=bench_result.split or split)
+                from rllm.tasks.harness import load_harness as _load_harness
+
+                agent = _load_harness(agent_name)
+                if agent_metadata:
+                    from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow
+
+                    if isinstance(agent, SandboxedAgentFlow):
+                        if "sandbox_backend" in agent_metadata:
+                            agent.sandbox_backend = agent_metadata["sandbox_backend"]
+                        if "sandbox_concurrency" in agent_metadata:
+                            agent.max_concurrent = agent_metadata["sandbox_concurrency"]
+                evaluator_display = "per-task (from dataset.toml)"
+            else:
+                console.print(f"  [error]--agent '{agent_name}' is a harness but no materialised dataset directory found at {_materialised}.[/]")
+                raise SystemExit(1)
 
     # Filter to specific task indices if requested
     if task_indices is not None:
