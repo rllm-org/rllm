@@ -58,6 +58,17 @@ def _run_eval(
     _is_local = BenchmarkLoader.is_local_benchmark(benchmark)
     _local_bench_result = None
 
+    # Helpful error when user clearly intended a path but it doesn't resolve.
+    if not _is_local and (benchmark.startswith("./") or benchmark.startswith("../") or benchmark.startswith("/") or benchmark.startswith("~")):
+        import os as _os
+
+        resolved = _os.path.expanduser(benchmark)
+        console.print(f"  [error]Path-like benchmark '{benchmark}' did not resolve to a benchmark directory.[/]")
+        console.print(f"  [dim]Resolved to: {_os.path.abspath(resolved)}[/]")
+        console.print(f"  [dim]Exists: {_os.path.exists(resolved)}, is dir: {_os.path.isdir(resolved) if _os.path.exists(resolved) else 'N/A'}[/]")
+        console.print("  [dim]A benchmark directory must contain dataset.toml, task.toml, or sub-dirs with task.toml.[/]")
+        raise SystemExit(1)
+
     if _is_local:
         sandbox_backend = (agent_metadata or {}).get("sandbox_backend")
         # For local benchmarks, --agent picks the harness ("react",
