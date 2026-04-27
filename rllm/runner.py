@@ -60,8 +60,7 @@ class Runner:
                 sandbox = _create_sandbox_for_task(task, self.sandbox_backend)
                 _setup_task_environment(task, sandbox)
                 if isinstance(self.agent_flow, SandboxedAgentFlow):
-                    # Pass through the sandbox the Runner already created
-                    self.agent_flow._sandbox = sandbox  # noqa: SLF001
+                    self.agent_flow.set_sandbox(sandbox)
                     self.agent_flow.on_sandbox_ready({"task_path": str(task.task_dir)}, config)
 
             # AgentFlow runs the agent → Episode

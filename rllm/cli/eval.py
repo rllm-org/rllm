@@ -55,46 +55,64 @@ def _run_eval(
     # ------------------------------------------------------------------
     from rllm.tasks.loader import BenchmarkLoader
 
-    if BenchmarkLoader.is_local_benchmark(benchmark):
+    _is_local = BenchmarkLoader.is_local_benchmark(benchmark)
+    _local_bench_result = None
+
+    if _is_local:
         sandbox_backend = (agent_metadata or {}).get("sandbox_backend")
-        # For local sandbox benchmarks, --agent selects the harness (react,
-        # claude-code, etc.). For local simple datasets, --agent goes through
-        # the regular agent_loader.
+        # For local benchmarks, --agent picks the harness ("react",
+        # "claude-code", ...) or a module:Class import path.
         bench_result = BenchmarkLoader.load(
             benchmark,
             sandbox_backend=sandbox_backend,
             harness_name=agent_name,
         )
-        dataset = bench_result.dataset
-        catalog_entry = bench_result.catalog_entry
+        _local_bench_result = bench_result
+        catalog_entry = {
+            "description": bench_result.description,
+            "category": bench_result.category,
+        }
 
         if split is None:
-            split = dataset.split or "test"
+            split = bench_result.split or "test"
 
-        # Agent: BenchmarkLoader returns the right agent (TaskRunner with
-        # selected harness for sandbox tasks; None for simple datasets).
-        if bench_result.agent is not None:
-            agent = bench_result.agent
-            if agent_name is None:
-                agent_name = catalog_entry.get("default_agent", "react")
-        elif agent_name is not None:
-            # Simple dataset path: load agent from registry/import
-            agent = load_agent(agent_name)
-        else:
-            console.print(f"  [error]No --agent specified and no default agent for local benchmark '{benchmark}'.[/]")
-            raise SystemExit(1)
+        # Resolve agent name (display + harness lookup)
+        if agent_name is None:
+            agent_name = bench_result.harness_name or "react"
 
-        # Evaluator: CLI --evaluator overrides loader default
-        evaluator_display = "N/A"
+        # Construct the AgentFlow: prefer harness registry, fall back to general agent loader
+        from rllm.tasks.harness import load_harness
+
+        try:
+            agent = load_harness(agent_name)
+        except KeyError:
+            try:
+                agent = load_agent(agent_name)
+            except (KeyError, ImportError, AttributeError, TypeError) as e:
+                console.print(f"  [error]Cannot load agent/harness '{agent_name}': {e}[/]")
+                raise SystemExit(1) from None
+
+        # Apply CLI sandbox overrides
+        if agent_metadata:
+            from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow
+
+            if isinstance(agent, SandboxedAgentFlow):
+                if "sandbox_backend" in agent_metadata:
+                    agent.sandbox_backend = agent_metadata["sandbox_backend"]
+                if "sandbox_concurrency" in agent_metadata:
+                    agent.max_concurrent = agent_metadata["sandbox_concurrency"]
+
+        # Evaluator: comes from each Task's [verifier] config. CLI --evaluator
+        # is ignored for local benchmarks (would override per-task settings).
+        evaluator = None
+        evaluator_display = f"per-task ({len(bench_result.tasks)} tasks)"
         if evaluator_name is not None:
-            evaluator = load_evaluator(evaluator_name)
-            evaluator_display = evaluator_name
-        elif bench_result.evaluator is not None:
-            evaluator = bench_result.evaluator
-            evaluator_display = type(evaluator).__name__
-        else:
-            console.print(f"  [error]No --evaluator specified and no default evaluator for local benchmark '{benchmark}'.[/]")
-            raise SystemExit(1)
+            console.print("  [dim]--evaluator override is not supported for local benchmarks; verifier comes from task.toml/dataset.toml[/]")
+
+        # Wrap tasks in a Dataset so the existing CLI filter code (select, len) works
+        from rllm.data.dataset import Dataset
+
+        dataset = Dataset(data=list(bench_result.tasks), name=bench_result.name, split=bench_result.split)
 
     # ------------------------------------------------------------------
     # Catalog / Harbor path (existing behavior)
@@ -296,7 +314,26 @@ def _run_eval(
                 if batch:
                     ui_logger.log(data={}, step=0, episodes=batch)
 
-    result, episodes = asyncio.run(runner.run(dataset, agent, evaluator, agent_name=agent_name, on_episode_complete=on_episode_complete))
+    if _is_local and _local_bench_result is not None:
+        # New path: each Task carries its own verifier; Runner resolves at run time.
+        from rllm.eval.runner import run_dataset
+
+        result, episodes = asyncio.run(
+            run_dataset(
+                tasks=list(dataset.data),
+                agent_flow=agent,
+                base_url=base_url,
+                model=model,
+                concurrency=concurrency,
+                sandbox_backend=(agent_metadata or {}).get("sandbox_backend"),
+                agent_name=agent_name,
+                dataset_name=_local_bench_result.name,
+                on_episode_complete=on_episode_complete,
+            )
+        )
+    else:
+        # Legacy path: catalog datasets with separate Evaluator
+        result, episodes = asyncio.run(runner.run(dataset, agent, evaluator, agent_name=agent_name, on_episode_complete=on_episode_complete))
 
     # Flush remaining buffered episodes BEFORE posting eval result / finishing
     # session.  The flush enqueues episodes onto the UILogger background

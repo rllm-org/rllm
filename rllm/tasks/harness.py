@@ -1,80 +1,26 @@
-"""AgentHarness protocol: a pluggable agent harness for solving Tasks.
+"""Harness registry: name → AgentFlow constructor.
 
-A harness drives an agent to complete a task in a sandbox. Two flavors:
-
-- **Host-side**: harness runs in Python on the host, calls the LLM via the
-  LiteLLM proxy, and uses the sandbox as a tool (e.g., :class:`ReActHarness`).
-
-- **In-sandbox**: harness installs a CLI agent (Claude Code, Codex, OpenCode,
-  ...) inside the sandbox and runs it pointed at the LiteLLM proxy.
-
-Harnesses are registered by name and selected via the CLI ``--agent`` flag.
+Built-in harnesses (``ReActHarness``, ``ClaudeCodeHarness``, ...) are
+:class:`rllm.experimental.agents.sandboxed_agent.SandboxedAgentFlow`
+subclasses; they implement the standard ``AgentFlow`` protocol. This
+module just maps user-facing names (``"react"``, ``"claude-code"``)
+to their classes for the CLI's ``--agent`` flag.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import Any
 
-if TYPE_CHECKING:
-    from rllm.eval.types import AgentConfig
-    from rllm.sandbox.protocol import Sandbox
-    from rllm.tasks.task import Task
-    from rllm.types import Trajectory
+_HARNESS_REGISTRY: dict[str, type] = {}
 
 
-@runtime_checkable
-class AgentHarness(Protocol):
-    """A pluggable agent harness.
-
-    Implementations:
-
-    - :class:`rllm.tasks.harnesses.react.ReActHarness` — Python ReAct loop
-    - :class:`rllm.tasks.harnesses.claude_code.ClaudeCodeHarness` — Claude Code in sandbox
-
-    A harness is a long-lived object reused across tasks. Per-task state
-    (sandbox, current task) is passed to ``run`` rather than stored on ``self``.
-    """
-
-    name: str
-    """Stable identifier used for registration and CLI ``--agent`` lookup."""
-
-    def setup(self, sandbox: Sandbox, config: AgentConfig) -> None:
-        """Install/configure the harness inside the sandbox.
-
-        Called once per sandbox, after ``Task.setup``. For host-side harnesses,
-        this is typically a no-op.
-        """
-        ...
-
-    def run(self, task: Task, sandbox: Sandbox, config: AgentConfig) -> Trajectory:
-        """Drive the agent to complete the task.
-
-        Args:
-            task: The :class:`Task` instance.
-            sandbox: The configured sandbox (already had ``Task.setup`` and
-                ``self.setup`` called on it).
-            config: ``AgentConfig`` with ``base_url``, ``model``, ``session_uid``.
-
-        Returns:
-            A :class:`Trajectory` describing the agent's interactions.
-        """
-        ...
-
-
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
-
-_HARNESS_REGISTRY: dict[str, type[AgentHarness]] = {}
-
-
-def register_harness(name: str, cls: type[AgentHarness]) -> None:
+def register_harness(name: str, cls: type) -> None:
     """Register a harness class under a name."""
     _HARNESS_REGISTRY[name] = cls
 
 
-def load_harness(name: str) -> AgentHarness:
-    """Resolve a harness by name (or ``module:Class`` import path).
+def load_harness(name: str) -> Any:
+    """Resolve a harness name to a fresh instance.
 
     Args:
         name: Registered name (``"react"``, ``"claude-code"``) or
@@ -88,7 +34,6 @@ def load_harness(name: str) -> AgentHarness:
         cls = getattr(module, attr_name)
         return cls()
 
-    # Trigger lazy registration of built-ins on first lookup
     _ensure_builtins_registered()
 
     if name not in _HARNESS_REGISTRY:
@@ -98,7 +43,7 @@ def load_harness(name: str) -> AgentHarness:
 
 
 def list_harnesses() -> list[str]:
-    """Return the names of all registered harnesses."""
+    """Return registered harness names."""
     _ensure_builtins_registered()
     return sorted(_HARNESS_REGISTRY.keys())
 
@@ -111,7 +56,6 @@ def _ensure_builtins_registered() -> None:
     global _BUILTINS_REGISTERED
     if _BUILTINS_REGISTERED:
         return
-    # Import for side effect: each module calls register_harness on import
     from rllm.tasks.harnesses import claude_code, react  # noqa: F401
 
     _BUILTINS_REGISTERED = True

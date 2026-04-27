@@ -40,12 +40,22 @@ class SandboxedAgentFlow(ABC):
 
     def __init__(self, **kwargs):
         self._sandbox: Sandbox | None = None
+        self._sandbox_externally_managed: bool = False
         for k, v in kwargs.items():
             setattr(self, k, v)
 
     @property
     def sandbox(self) -> Sandbox | None:
         return self._sandbox
+
+    def set_sandbox(self, sandbox: Sandbox) -> None:
+        """Inject a sandbox managed by an external orchestrator (e.g. ``Runner``).
+
+        The agent flow will use this sandbox but will not close it; the
+        orchestrator owns the lifecycle. ``teardown_sandbox`` becomes a no-op.
+        """
+        self._sandbox = sandbox
+        self._sandbox_externally_managed = True
 
     def create_instance(self) -> SandboxedAgentFlow:
         """Create a per-task copy with fresh sandbox state.
@@ -54,6 +64,7 @@ class SandboxedAgentFlow(ABC):
         """
         instance = copy.copy(self)
         instance._sandbox = None
+        instance._sandbox_externally_managed = False
         return instance
 
     def setup_sandbox(self, task: dict, config: AgentConfig) -> None:
@@ -82,13 +93,20 @@ class SandboxedAgentFlow(ABC):
         """Hook for subclasses to run additional setup after sandbox creation."""
 
     def teardown_sandbox(self) -> None:
-        """Destroy sandbox. Called by EvalRunner after evaluate(), even on failure."""
-        if self._sandbox is not None:
-            try:
-                self._sandbox.close()
-            except Exception:
-                logger.exception("Sandbox teardown error")
+        """Destroy sandbox. Called by EvalRunner after evaluate(), even on failure.
+
+        No-op when the sandbox was injected externally (the orchestrator owns it).
+        """
+        if self._sandbox is None:
+            return
+        if self._sandbox_externally_managed:
             self._sandbox = None
+            return
+        try:
+            self._sandbox.close()
+        except Exception:
+            logger.exception("Sandbox teardown error")
+        self._sandbox = None
 
     def get_image(self, task: dict) -> str:
         """Return container image for this task. Override for per-task images."""

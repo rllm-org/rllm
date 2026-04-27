@@ -1,24 +1,23 @@
-"""ReActHarness: a host-side ReAct loop using the OpenAI SDK.
+"""ReActHarness: a host-side ReAct loop, implemented as a SandboxedAgentFlow.
 
-The harness runs in Python on the host machine and uses the sandbox as a
-tool (executes shell commands via ``sandbox.exec``). It calls the LLM via
-the LiteLLM proxy, so all LLM calls are visible to the gateway for trace
-capture / training.
+Loop: prompt LLM → extract bash from response → exec in sandbox → feed
+output back → repeat until done or ``[rllm].max_turns``. The harness
+calls the LLM via the LiteLLM proxy at ``config.base_url`` so all LLM
+calls are visible to the gateway for trace capture / training.
+
+Conforms to the rLLM ``AgentFlow`` protocol — produces an Episode with
+a single Trajectory.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING
 
+from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow
+from rllm.task import Task
 from rllm.tasks.harness import register_harness
-from rllm.types import Step, Trajectory
-
-if TYPE_CHECKING:
-    from rllm.eval.types import AgentConfig
-    from rllm.sandbox.protocol import Sandbox
-    from rllm.tasks.task import Task
+from rllm.types import Episode, Step, Trajectory
 
 logger = logging.getLogger(__name__)
 
@@ -39,35 +38,36 @@ When you are finished, respond with 'Task completed' (no code block)."""
 _DONE_MARKERS = ("task completed", "task is complete", "done", "finished", "i have completed")
 
 
-class ReActHarness:
-    """Host-side ReAct loop. Default harness for tasks.
+class ReActHarness(SandboxedAgentFlow):
+    """Default harness: a one-trajectory ReAct loop.
 
-    Loop: prompt LLM → extract bash from response → exec in sandbox →
-    feed output back → repeat until done or max_turns.
+    The Runner sets the sandbox via ``set_sandbox()`` before ``run()`` is called.
     """
 
     name = "react"
+    sandbox_backend = "docker"
+    max_concurrent = 4
 
-    def setup(self, sandbox: Sandbox, config: AgentConfig) -> None:  # noqa: D401
-        """No-op for host-side harnesses."""
-
-    def run(self, task: Task, sandbox: Sandbox, config: AgentConfig) -> Trajectory:
+    def run(self, task: Task, config) -> Episode:
         from openai import OpenAI
 
+        sandbox = self.sandbox
+        if sandbox is None:
+            raise RuntimeError("ReActHarness requires a sandbox. The Runner should set one before calling run().")
+
         client = OpenAI(base_url=config.base_url, api_key="EMPTY")
-        max_turns = task.rllm.max_turns or 50
+        max_turns = int(task.metadata.get("rllm", {}).get("max_turns") or 50)
+        agent_timeout = float(task.metadata.get("agent_timeout", 600))
+        agent_user = task.metadata.get("agent_user")
 
         messages = [
             {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": task.instruction},
+            {"role": "user", "content": str(task.instruction)},
         ]
         steps: list[Step] = []
 
         for turn in range(max_turns):
-            response = client.chat.completions.create(
-                model=config.model,
-                messages=messages,
-            )
+            response = client.chat.completions.create(model=config.model, messages=messages)
             assistant_msg = response.choices[0].message.content or ""
             logger.debug("[react turn %d] %d chars: %s", turn, len(assistant_msg), assistant_msg[:200])
             messages.append({"role": "assistant", "content": assistant_msg})
@@ -80,44 +80,39 @@ class ReActHarness:
                 )
             )
 
-            # Execute any bash command in the response (as agent_user if configured)
             command = _extract_command(assistant_msg)
             if command:
                 try:
-                    result = sandbox.exec(
-                        command,
-                        timeout=float(task.agent_timeout),
-                        user=task.agent_user,
-                    )
+                    result = sandbox.exec(command, timeout=agent_timeout, user=agent_user)
                 except Exception as e:
                     result = f"Error: {e}"
                 messages.append({"role": "user", "content": f"Command output:\n{result}"})
 
-            # Done check (after executing any pending command)
             if _is_done(assistant_msg):
                 break
-
-            # No command to run and no done signal → agent stuck, stop
             if not command:
                 break
 
-        return Trajectory(
+        trajectory = Trajectory(
             uid=config.session_uid,
             name=self.name,
-            task=task.name,
+            task=task.id,
             steps=steps,
             output=steps[-1].output if steps else "",
+        )
+        return Episode(
+            id=config.session_uid,
+            task=task.id,
+            trajectories=[trajectory],
         )
 
 
 def _is_done(text: str) -> bool:
-    """Heuristic: did the agent signal completion?"""
     lower = text.lower().strip()
     return any(lower.endswith(m) or lower.startswith(m) for m in _DONE_MARKERS)
 
 
 def _extract_command(text: str) -> str | None:
-    """Extract a bash command from a markdown code fence."""
     match = re.search(r"```(?:bash|shell|sh)\n(.*?)```", text, re.DOTALL)
     return match.group(1).strip() if match else None
 

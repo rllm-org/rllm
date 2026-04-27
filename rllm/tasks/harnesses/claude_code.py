@@ -1,27 +1,21 @@
 """ClaudeCodeHarness: runs the Claude Code CLI inside the sandbox.
 
-The harness installs ``@anthropic-ai/claude-code`` (npm) inside the sandbox
-on first use, then invokes ``claude`` non-interactively with the task
-instruction.  All LLM calls are routed through the LiteLLM proxy via
-``ANTHROPIC_BASE_URL``, so token-level traces are captured by the gateway
-exactly like host-side harnesses.
-
-Requires the sandbox to have ``node``/``npm`` available (or installable).
+Implemented as a SandboxedAgentFlow. Installs ``@anthropic-ai/claude-code``
+(npm) inside the sandbox on first use (via ``on_sandbox_ready`` hook),
+then invokes ``claude`` non-interactively. All LLM calls are routed
+through the LiteLLM proxy via ``ANTHROPIC_BASE_URL`` so token-level
+traces are captured by the gateway like host-side harnesses.
 """
 
 from __future__ import annotations
 
 import logging
 import shlex
-from typing import TYPE_CHECKING
 
+from rllm.experimental.agents.sandboxed_agent import SandboxedAgentFlow
+from rllm.task import Task
 from rllm.tasks.harness import register_harness
-from rllm.types import Step, Trajectory
-
-if TYPE_CHECKING:
-    from rllm.eval.types import AgentConfig
-    from rllm.sandbox.protocol import Sandbox
-    from rllm.tasks.task import Task
+from rllm.types import Episode, Step, Trajectory
 
 logger = logging.getLogger(__name__)
 
@@ -44,55 +38,59 @@ fi
 """
 
 
-class ClaudeCodeHarness:
-    """Run Anthropic's Claude Code CLI inside the sandbox.
-
-    The CLI is invoked in non-interactive mode (``-p``) with the task
-    instruction. Set ``ANTHROPIC_BASE_URL`` so LLM traffic flows through
-    the LiteLLM proxy.
-    """
+class ClaudeCodeHarness(SandboxedAgentFlow):
+    """Run Anthropic's Claude Code CLI inside the sandbox."""
 
     name = "claude-code"
+    sandbox_backend = "docker"
+    max_concurrent = 4
 
-    def setup(self, sandbox: Sandbox, config: AgentConfig) -> None:
-        """Install claude-code in the sandbox if not already present.
-
-        Always runs as root — needs apt-get / npm install -g which require
-        privileges. The agent itself runs as the configured agent_user later.
-        """
+    def on_sandbox_ready(self, task: dict, config) -> None:
+        """Install claude-code if not already present (root)."""
+        if self.sandbox is None:
+            return
         try:
-            sandbox.exec(_INSTALL_SCRIPT, timeout=600, user="root")
+            self.sandbox.exec(_INSTALL_SCRIPT, timeout=600, user="root")
         except Exception as e:
             raise RuntimeError(f"Failed to install claude-code in sandbox: {e}") from e
 
-    def run(self, task: Task, sandbox: Sandbox, config: AgentConfig) -> Trajectory:
-        # Route claude-code's API calls through the LiteLLM proxy. The proxy
-        # exposes an Anthropic-compatible endpoint at /anthropic when running
-        # in unified mode; tweak as needed for your deployment.
+    def run(self, task: Task, config) -> Episode:
+        sandbox = self.sandbox
+        if sandbox is None:
+            raise RuntimeError("ClaudeCodeHarness requires a sandbox.")
+
         env = {
             "ANTHROPIC_BASE_URL": config.base_url,
-            "ANTHROPIC_API_KEY": "sk-rllm-proxy",  # any non-empty value; proxy ignores
+            "ANTHROPIC_API_KEY": "sk-rllm-proxy",
             "ANTHROPIC_MODEL": config.model,
         }
         env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
 
-        instruction = task.instruction.strip()
-        # Use -p for non-interactive print mode; --output-format text for plain stdout
-        cmd = f"cd {shlex.quote(task.workdir)} && {env_prefix} claude -p {shlex.quote(instruction)} --output-format text --permission-mode acceptEdits"
+        instruction = str(task.instruction).strip()
+        workdir = task.metadata.get("workdir", "/workspace")
+        agent_timeout = float(task.metadata.get("agent_timeout", 600))
+        agent_user = task.metadata.get("agent_user")
+
+        cmd = f"cd {shlex.quote(workdir)} && {env_prefix} claude -p {shlex.quote(instruction)} --output-format text --permission-mode acceptEdits"
 
         try:
-            output = sandbox.exec(cmd, timeout=float(task.agent_timeout), user=task.agent_user)
+            output = sandbox.exec(cmd, timeout=agent_timeout, user=agent_user)
         except Exception as e:
             output = f"claude-code execution failed: {e}"
             logger.warning("ClaudeCodeHarness: %s", output)
 
         step = Step(id="step-0", input=instruction, output=output)
-        return Trajectory(
+        trajectory = Trajectory(
             uid=config.session_uid,
             name=self.name,
-            task=task.name,
+            task=task.id,
             steps=[step],
             output=output,
+        )
+        return Episode(
+            id=config.session_uid,
+            task=task.id,
+            trajectories=[trajectory],
         )
 
 
