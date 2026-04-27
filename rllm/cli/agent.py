@@ -18,7 +18,7 @@ def agent():
 
 @agent.command(name="list")
 def list_agents():
-    """List registered agent scaffolds (built-in and agenthub)."""
+    """List registered agent scaffolds."""
     from rllm.eval.agent_loader import list_agents as _list_agents
 
     agents = _list_agents()

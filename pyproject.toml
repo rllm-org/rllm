@@ -207,7 +207,6 @@ ignore = [
 "rllm/agents/frozenlake_agent.py" = ["E501"]
 "rllm/agents/miniwob_agent.py" = ["E501"]
 "rllm/agents/webarena_agent.py" = ["E501"]
-"agenthub/frozenlake_agent/agent/agent.py" = ["E501"]
 "examples/archive/deepresearch/deepresearch_agent.py" = ["E501"]
 "examples/fully_async/deepresearch/refine_agent.py" = ["E501"]
 "examples/fully_async/deepresearch/search_agent.py" = ["E501"]
