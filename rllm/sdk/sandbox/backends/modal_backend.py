@@ -88,8 +88,10 @@ class ModalSandbox:
             image if isinstance(image, str) else "<modal.Image>",
         )
 
-    def exec(self, command: str, timeout: float | None = None) -> str:
+    def exec(self, command: str, timeout: float | None = None, user: str | None = None) -> str:  # noqa: ARG002
         """Execute a command inside the Modal sandbox.
+
+        ``user`` is accepted for protocol compatibility but currently ignored.
 
         Runs ``bash -c <command>`` and returns stdout. Raises
         ``RuntimeError`` on non-zero exit code (matching DockerSandbox

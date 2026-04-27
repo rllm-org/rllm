@@ -80,11 +80,15 @@ class ReActHarness:
                 )
             )
 
-            # Execute any bash command in the response
+            # Execute any bash command in the response (as agent_user if configured)
             command = _extract_command(assistant_msg)
             if command:
                 try:
-                    result = sandbox.exec(command, timeout=float(task.agent_timeout))
+                    result = sandbox.exec(
+                        command,
+                        timeout=float(task.agent_timeout),
+                        user=task.agent_user,
+                    )
                 except Exception as e:
                     result = f"Error: {e}"
                 messages.append({"role": "user", "content": f"Command output:\n{result}"})

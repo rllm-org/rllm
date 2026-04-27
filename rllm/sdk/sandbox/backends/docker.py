@@ -36,11 +36,22 @@ class DockerSandbox:
         )
         logger.info("DockerSandbox %s created (container: %s, image: %s)", name, self._container.short_id, image)
 
-    def exec(self, command: str, timeout: float | None = None) -> str:
-        """Execute a command inside the container."""
+    def exec(self, command: str, timeout: float | None = None, user: str | None = None) -> str:
+        """Execute a command inside the container.
+
+        Args:
+            command: Shell command to run.
+            timeout: Optional per-call timeout (currently unused by Docker SDK).
+            user: Optional UID/username to run as (e.g., ``"agent"``, ``"1000"``).
+                Maps to ``docker exec --user``. If ``None``, runs as the
+                container's default user.
+        """
+        kwargs: dict = {"demux": True}
+        if user is not None:
+            kwargs["user"] = user
         exit_code, output = self._container.exec_run(
             ["bash", "-c", command],
-            demux=True,
+            **kwargs,
         )
         stdout = (output[0] or b"").decode("utf-8", errors="replace")
         stderr = (output[1] or b"").decode("utf-8", errors="replace")

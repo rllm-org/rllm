@@ -57,8 +57,16 @@ class ExecutionResult:
 class Sandbox(Protocol):
     """Protocol for sandbox backends (Docker, Local, Modal, etc.)."""
 
-    def exec(self, command: str, timeout: float | None = None) -> str:
-        """Execute a command inside the sandbox and return stdout."""
+    def exec(self, command: str, timeout: float | None = None, user: str | None = None) -> str:
+        """Execute a command inside the sandbox and return stdout.
+
+        Args:
+            command: Shell command to run.
+            timeout: Optional per-call timeout (seconds).
+            user: Optional UID or username to run the command as. Backends
+                that support user isolation (e.g., Docker) should honor this;
+                others may ignore it.
+        """
         ...
 
     def upload_file(self, local_path: str, remote_path: str) -> None:

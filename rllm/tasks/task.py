@@ -124,6 +124,25 @@ class Task:
     def metadata(self) -> dict[str, Any]:
         return self.config.get("metadata", {})
 
+    @property
+    def agent_user(self) -> str | None:
+        """Username/UID the harness should run agent commands as.
+
+        Read from ``[agent].user`` in task.toml. ``None`` (the default) means
+        no user split — the harness runs as the container's default user.
+        """
+        return self.config.get("agent", {}).get("user")
+
+    @property
+    def verifier_user(self) -> str | None:
+        """Username/UID the verifier runs as.
+
+        Read from ``[verifier].user`` in task.toml. ``None`` means default
+        (root). When :attr:`agent_user` is set, this should typically be a
+        privileged user so the agent can't tamper with reward files.
+        """
+        return self.config.get("verifier", {}).get("user")
+
     def required_sandbox_backend(self) -> str:
         """Return the sandbox compatibility hint from ``[rllm].sandbox``."""
         return self.rllm.sandbox
@@ -154,7 +173,13 @@ class Task:
     # ------------------------------------------------------------------
 
     def setup(self, sandbox: Sandbox) -> None:
-        """Prepare the sandbox: upload files, run setup, set env vars."""
+        """Prepare the sandbox: upload files, run setup, set env vars.
+
+        All setup runs as root. If :attr:`agent_user` is configured, the
+        verifier directories (``/logs/verifier``, ``/tmp/rllm``, ``/tests``)
+        are locked to root-only and the workdir is chown'd to the agent
+        user — so the agent can't tamper with reward files or test scripts.
+        """
         # Workdir
         _safe_exec(sandbox, f"mkdir -p {self.workdir}", timeout=30)
 
@@ -163,15 +188,26 @@ class Task:
         if files_dir.is_dir():
             sandbox.upload_dir(str(files_dir), self.workdir)
 
-        # environment/setup.sh
+        # environment/setup.sh (run as root)
         setup_script = self.path / "environment" / "setup.sh"
         if setup_script.exists():
             sandbox.upload_file(str(setup_script), "/tmp/rllm_setup.sh")
             _safe_exec(sandbox, "chmod +x /tmp/rllm_setup.sh && /tmp/rllm_setup.sh", timeout=300)
 
-        # [rllm].setup_commands
+        # [rllm].setup_commands (run as root)
         for cmd in self.rllm.setup_commands:
             _safe_exec(sandbox, cmd, timeout=300)
+
+        # User-split lockdown: only when [agent].user is set.
+        if self.agent_user:
+            # Create verifier-owned directories. They must exist before
+            # we lock them so root can write to them later.
+            _safe_exec(sandbox, "mkdir -p /logs/verifier /tmp/rllm /tests", timeout=10)
+            # Strip group/world perms — only root can read/write
+            _safe_exec(sandbox, "chmod 700 /logs/verifier /tmp/rllm /tests", timeout=10)
+            _safe_exec(sandbox, "chown root:root /logs/verifier /tmp/rllm /tests", timeout=10)
+            # Hand the workdir to the agent
+            _safe_exec(sandbox, f"chown -R {self.agent_user} {self.workdir}", timeout=30)
 
         # [environment].env
         if self.env_vars:
@@ -183,14 +219,21 @@ class Task:
     # ------------------------------------------------------------------
 
     def evaluate(self, sandbox: Sandbox) -> EvalOutput:
-        """Run the verifier in the sandbox and return reward."""
+        """Run the verifier in the sandbox and return reward.
+
+        All verifier operations run as :attr:`verifier_user` (default: root).
+        When the user split is active, this is a privileged user that can
+        write the reward file even though the agent could not.
+        """
         tests_dir = self.path / "tests"
         if not tests_dir.is_dir():
             return EvalOutput(reward=0.0, is_correct=False, metadata={"error": f"no tests/ directory in {self.path}"})
 
+        v_user = self.verifier_user  # None → backend default (typically root)
+
         # Prepare reward directories
         try:
-            sandbox.exec("mkdir -p /tmp/rllm /logs/verifier", timeout=10)
+            sandbox.exec("mkdir -p /tmp/rllm /logs/verifier", timeout=10, user=v_user)
         except Exception:
             pass
 
@@ -206,15 +249,16 @@ class Task:
             sandbox.exec(
                 f"chmod +x /tests/{test_script} && cd {self.workdir} && /tests/{test_script}",
                 timeout=float(self.verifier_timeout),
+                user=v_user,
             )
         except Exception as e:
             logger.warning("Test script execution error for %s: %s", self.name, e)
 
-        # Read reward
+        # Read reward (as verifier — agent may not have read access)
         reward_paths = list(_REWARD_PATHS)
         if self.rllm.reward_file:
             reward_paths.insert(0, self.rllm.reward_file)
-        return _read_reward_from_sandbox(sandbox, reward_paths)
+        return _read_reward_from_sandbox(sandbox, reward_paths, user=v_user)
 
 
 # ---------------------------------------------------------------------------
@@ -222,10 +266,10 @@ class Task:
 # ---------------------------------------------------------------------------
 
 
-def _safe_exec(sandbox: Sandbox, command: str, timeout: float | None = None) -> str:
+def _safe_exec(sandbox: Sandbox, command: str, timeout: float | None = None, user: str | None = None) -> str:
     """Execute command, log on failure but don't raise."""
     try:
-        return sandbox.exec(command, timeout=timeout)
+        return sandbox.exec(command, timeout=timeout, user=user)
     except Exception as e:
         logger.debug("Command failed (suppressed): %s — %s", command[:200], e)
         return ""
@@ -239,14 +283,14 @@ def _find_test_script(tests_dir: Path) -> str | None:
     return None
 
 
-def _read_reward_from_sandbox(sandbox: Sandbox, paths: list[str]) -> EvalOutput:
+def _read_reward_from_sandbox(sandbox: Sandbox, paths: list[str], user: str | None = None) -> EvalOutput:
     """Try reading reward from the sandbox at each path in order."""
     for path in paths:
         try:
-            check = sandbox.exec(f"test -f {path} && echo yes || echo no", timeout=10).strip()
+            check = sandbox.exec(f"test -f {path} && echo yes || echo no", timeout=10, user=user).strip()
             if check != "yes":
                 continue
-            raw = sandbox.exec(f"cat {path}", timeout=10).strip()
+            raw = sandbox.exec(f"cat {path}", timeout=10, user=user).strip()
             if not raw:
                 continue
             if path.endswith(".txt"):

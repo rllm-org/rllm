@@ -25,8 +25,12 @@ class LocalSandbox:
         self._env = os.environ.copy()
         logger.info("LocalSandbox %s created at %s", name, self._workdir)
 
-    def exec(self, command: str, timeout: float | None = None) -> str:
-        """Execute a command in the sandbox working directory."""
+    def exec(self, command: str, timeout: float | None = None, user: str | None = None) -> str:  # noqa: ARG002
+        """Execute a command in the sandbox working directory.
+
+        ``user`` is accepted for protocol compatibility but ignored — the
+        local backend always runs as the host user.
+        """
         timeout = timeout or 300.0
         # Translate absolute /app/ paths to the workdir
         translated_cmd = command.replace("/app/", f"{self._workdir}/app/")

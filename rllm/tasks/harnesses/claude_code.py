@@ -55,9 +55,13 @@ class ClaudeCodeHarness:
     name = "claude-code"
 
     def setup(self, sandbox: Sandbox, config: AgentConfig) -> None:
-        """Install claude-code in the sandbox if not already present."""
+        """Install claude-code in the sandbox if not already present.
+
+        Always runs as root — needs apt-get / npm install -g which require
+        privileges. The agent itself runs as the configured agent_user later.
+        """
         try:
-            sandbox.exec(_INSTALL_SCRIPT, timeout=600)
+            sandbox.exec(_INSTALL_SCRIPT, timeout=600, user="root")
         except Exception as e:
             raise RuntimeError(f"Failed to install claude-code in sandbox: {e}") from e
 
@@ -77,7 +81,7 @@ class ClaudeCodeHarness:
         cmd = f"cd {shlex.quote(task.workdir)} && {env_prefix} claude -p {shlex.quote(instruction)} --output-format text --permission-mode acceptEdits"
 
         try:
-            output = sandbox.exec(cmd, timeout=float(task.agent_timeout))
+            output = sandbox.exec(cmd, timeout=float(task.agent_timeout), user=task.agent_user)
         except Exception as e:
             output = f"claude-code execution failed: {e}"
             logger.warning("ClaudeCodeHarness: %s", output)
