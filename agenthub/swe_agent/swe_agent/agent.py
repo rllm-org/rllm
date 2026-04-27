@@ -29,7 +29,7 @@ from rllm.experimental.agents.sandboxed_agent import (
     _safe_exec,
     create_sandbox,
 )
-from rllm.sdk.sandbox.protocol import Sandbox
+from rllm.sandbox.protocol import Sandbox
 from rllm.types import Episode, Step, Trajectory
 
 from .prompts import BASH_TOOL, FORMAT_ERROR_MSG, INSTANCE_PROMPT, SYSTEM_PROMPT
@@ -295,7 +295,7 @@ class SWEAgentFlow(SandboxedAgentFlow):
         if self.sandbox_backend == "modal":
             # Build modal.Image from swebench test spec scripts
             modal_image = _build_modal_image(task)
-            from rllm.sdk.sandbox.backends.modal_backend import ModalSandbox
+            from rllm.sandbox.backends.modal_backend import ModalSandbox
 
             self._sandbox = ModalSandbox(
                 name=name,

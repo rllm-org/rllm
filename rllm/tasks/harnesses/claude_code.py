@@ -20,7 +20,7 @@ from rllm.types import Step, Trajectory
 
 if TYPE_CHECKING:
     from rllm.experimental.eval.types import AgentConfig
-    from rllm.sdk.sandbox.protocol import Sandbox
+    from rllm.sandbox.protocol import Sandbox
     from rllm.tasks.task import Task
 
 logger = logging.getLogger(__name__)

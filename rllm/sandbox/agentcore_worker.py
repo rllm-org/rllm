@@ -12,7 +12,7 @@ dependencies inside the container.
 
 Usage (as ACR entrypoint)::
 
-    python -m rllm.sdk.sandbox.agentcore_worker \
+    python -m rllm.sandbox.agentcore_worker \
         --agent-module agent \
         --agent-func rollout \
         --agent-dir /app/agent

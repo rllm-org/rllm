@@ -17,7 +17,7 @@ from typing import Any
 
 import aiohttp
 
-from rllm.sdk.sandbox.protocol import ExecutionResult, SandboxConfig
+from rllm.sandbox.protocol import ExecutionResult, SandboxConfig
 
 logger = logging.getLogger(__name__)
 

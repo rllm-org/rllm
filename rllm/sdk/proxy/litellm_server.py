@@ -279,7 +279,7 @@ def main() -> None:
 
     # --- Execution result store routes (for sandbox workers) ---
     if args.enable_result_store:
-        from rllm.sdk.sandbox.result_store import ExecutionResultStore
+        from rllm.sandbox.result_store import ExecutionResultStore
 
         result_store = ExecutionResultStore(db_path=args.db_path)
         logging.info("Execution result store enabled (db_path=%s)", args.db_path)
@@ -296,7 +296,7 @@ def main() -> None:
                 from fastapi.responses import JSONResponse
 
                 return JSONResponse(status_code=202, content={"status": "pending", "execution_id": execution_id})
-            from rllm.sdk.sandbox.serialization import serialize_execution_result
+            from rllm.sandbox.serialization import serialize_execution_result
 
             return {"status": "completed", "execution_id": execution_id, "result": serialize_execution_result(result)}
 

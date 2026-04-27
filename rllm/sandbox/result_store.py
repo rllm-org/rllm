@@ -15,8 +15,8 @@ import sqlite3
 import threading
 import time
 
-from rllm.sdk.sandbox.protocol import ExecutionResult
-from rllm.sdk.sandbox.serialization import deserialize_execution_result
+from rllm.sandbox.protocol import ExecutionResult
+from rllm.sandbox.serialization import deserialize_execution_result
 
 logger = logging.getLogger(__name__)
 

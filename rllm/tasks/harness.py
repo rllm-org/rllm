@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from rllm.experimental.eval.types import AgentConfig
-    from rllm.sdk.sandbox.protocol import Sandbox
+    from rllm.sandbox.protocol import Sandbox
     from rllm.tasks.task import Task
     from rllm.types import Trajectory
 

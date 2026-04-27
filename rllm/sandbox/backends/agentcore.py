@@ -24,7 +24,7 @@ import re
 import uuid
 from typing import Any
 
-from rllm.sdk.sandbox.protocol import ExecutionResult, SandboxConfig
+from rllm.sandbox.protocol import ExecutionResult, SandboxConfig
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ class AgentCoreOrchestrator:
         # Validate required extra fields
         arn = config.extra.get("agent_runtime_arn")
         if not arn:
-            raise ValueError("AgentCore backend requires 'agent_runtime_arn' in sandbox.extra. Example: rllm.sdk.sandbox.extra.agent_runtime_arn=arn:aws:bedrock-agentcore:...")
+            raise ValueError("AgentCore backend requires 'agent_runtime_arn' in sandbox.extra. Example: rllm.sandbox.extra.agent_runtime_arn=arn:aws:bedrock-agentcore:...")
         self._arn: str = arn
         self._region: str = _extract_region(arn)
 
@@ -99,7 +99,7 @@ class AgentCoreOrchestrator:
         else:
             self._proxy_url = proxy_url
             logger.warning(
-                "No base_url override in sandbox.extra — using proxy_url=%s. If the ACR container cannot reach this address, set rllm.sdk.sandbox.extra.base_url to a reachable URL.",
+                "No base_url override in sandbox.extra — using proxy_url=%s. If the ACR container cannot reach this address, set rllm.sandbox.extra.base_url to a reachable URL.",
                 proxy_url,
             )
 

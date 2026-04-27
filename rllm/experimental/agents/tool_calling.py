@@ -11,7 +11,7 @@ import logging
 
 import openai
 
-from rllm.sdk.sandbox.protocol import Sandbox
+from rllm.sandbox.protocol import Sandbox
 from rllm.types import Step
 
 logger = logging.getLogger(__name__)

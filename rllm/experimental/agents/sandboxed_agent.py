@@ -16,7 +16,7 @@ import uuid
 from abc import ABC, abstractmethod
 
 from rllm.experimental.eval.types import AgentConfig, Task
-from rllm.sdk.sandbox.protocol import Sandbox
+from rllm.sandbox.protocol import Sandbox
 from rllm.types import Episode
 
 logger = logging.getLogger(__name__)
@@ -101,15 +101,15 @@ class SandboxedAgentFlow(ABC):
 def create_sandbox(backend: str, name: str, image: str, **kwargs) -> Sandbox:
     """Factory: create a Sandbox from a backend name. Lazy imports."""
     if backend == "docker":
-        from rllm.sdk.sandbox.backends.docker import DockerSandbox
+        from rllm.sandbox.backends.docker import DockerSandbox
 
         return DockerSandbox(name=name, image=image, **kwargs)
     elif backend == "local":
-        from rllm.sdk.sandbox.backends.local import LocalSandbox
+        from rllm.sandbox.backends.local import LocalSandbox
 
         return LocalSandbox(name=name, **kwargs)
     elif backend == "modal":
-        from rllm.sdk.sandbox.backends.modal_backend import ModalSandbox
+        from rllm.sandbox.backends.modal_backend import ModalSandbox
 
         return ModalSandbox(name=name, **kwargs)
     else:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from rllm.sdk.sandbox.protocol import ExecutionResult
+from rllm.sandbox.protocol import ExecutionResult
 
 
 def serialize_execution_result(result: ExecutionResult) -> dict:
