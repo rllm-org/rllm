@@ -25,7 +25,7 @@ def main(config: DictConfig):
         raise RuntimeError("countdown train split not found. Run: rllm dataset pull countdown")
 
     trainer = AgentTrainer(
-        backend="tinker",
+        backend=config.rllm.get("backend", "tinker"),
         agent_flow=solver_judge_flow,
         evaluator=solver_judge_countdown_evaluator,
         config=config,

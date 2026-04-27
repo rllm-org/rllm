@@ -245,7 +245,13 @@ def _process_trajectory(trajectory: Trajectory, task_id: str, accumulated: Accum
         mask = torch.ones_like(response_ids, dtype=torch.long)
         step_reward = step.reward
         multi_modal_inputs = step.model_output.multi_modal_inputs or {}
-        step_id = f"{trajectory_id}_step{step_idx}"
+        # step_id must uniquely identify this row across the whole batch so
+        # update_dataproto_with_advantages can scatter per-trajectory advantages
+        # back without collisions. trajectory_id alone is f"{task_id}_{name}",
+        # which collides across rollouts of the same task and across multiple
+        # same-named trajectories within one episode (e.g. solver-judge with N
+        # solver trajectories). trajectory.uid is a per-Trajectory UUID4.
+        step_id = f"{trajectory.uid}_step{step_idx}"
 
         step_data = ProcessedStepData(
             prompt=prompt_ids,
@@ -385,13 +391,14 @@ def update_dataproto_with_advantages(batch: DataProto, container: list[Episode] 
     after which we need to update the DataProto with the advantages.
     """
     # Build a step_id → advantage mapping from episodes/trajectory groups.
-    # step_id format must match _process_trajectory: f"{task_id}_{trajectory.name}_step{step_idx}"
+    # step_id format must match _process_trajectory: f"{trajectory.uid}_step{step_idx}".
+    # Keying on trajectory.uid (not task_id_name) is required for correctness — see
+    # the comment in _process_trajectory.
     adv_by_step_id: dict[str, float] = {}
     for item in container:
         for trajectory in item.trajectories:
-            trajectory_id = f"{item.task_id}_{trajectory.name}"
             for step_idx, step in enumerate(trajectory.steps):
-                step_id = f"{trajectory_id}_step{step_idx}"
+                step_id = f"{trajectory.uid}_step{step_idx}"
                 adv_by_step_id[step_id] = step.advantage if step.advantage is not None else 0.0
 
     # Match advantages to batch entries by step_id (robust to batch reordering and padding)
