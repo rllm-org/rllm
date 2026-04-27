@@ -212,6 +212,23 @@ def _resolve_evaluator(
     raise RuntimeError(f"No verifier configured for task '{task.id}' (benchmark_dir={task.benchmark_dir})")
 
 
+def build_dataset_evaluator(benchmark_dir: Path, sub_dir: Path | None = None) -> Evaluator | None:
+    """Build a single :class:`Evaluator` from a benchmark's ``[verifier]`` config.
+
+    Supports the host-only verifier kinds (``module``, ``name``,
+    ``import_path``, plus auto-detected ``tests/evaluate.py``) so the
+    trainer — which expects one Evaluator for the whole dataset — can
+    reuse the same per-task resolution that :class:`Runner` performs for
+    eval. Sandbox-shell verifiers return ``None`` because they need a
+    per-task sandbox lifecycle that lives inside :class:`Runner`.
+    """
+    probe = Task(id="", instruction="", metadata={}, benchmark_dir=benchmark_dir, sub_dir=sub_dir)
+    kind, config = _detect_verifier(probe)
+    if kind in ("sandbox-shell", "python-hybrid", "missing"):
+        return None
+    return _resolve_evaluator(probe, sandbox=None, kind=kind, verifier_config=config)
+
+
 def _wrap_with_sandbox_if_needed(ev: PythonModuleEvaluator, sandbox: Sandbox | None) -> Evaluator:
     """If the user's evaluate() signature includes ``sandbox``, inject it."""
     if sandbox is None:

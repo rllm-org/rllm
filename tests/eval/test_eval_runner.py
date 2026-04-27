@@ -9,8 +9,8 @@ import pytest
 from rllm.data.dataset import Dataset
 from rllm.eval.results import EvalItem, EvalResult
 from rllm.eval.runner import EvalRunner
-from rllm.eval.types import AgentConfig, EvalOutput, Signal, Task
-from rllm.types import Episode, Step, Trajectory
+from rllm.eval.types import EvalOutput, Signal
+from rllm.types import AgentConfig, Episode, Step, Task, Trajectory
 
 # ---------------------------------------------------------------------------
 # Test agents and evaluators
@@ -19,7 +19,7 @@ from rllm.types import Episode, Step, Trajectory
 
 class _PerfectAgent:
     def run(self, task: Task, config: AgentConfig) -> Episode:
-        data = task.data if isinstance(task, Task) else task
+        data = task.metadata if isinstance(task, Task) else task
         step = Step(input=data.get("question", ""), output="correct", done=True)
         return Episode(task=data, trajectories=[Trajectory(name="test", steps=[step])], artifacts={"answer": "correct"})
 
@@ -77,7 +77,7 @@ def small_dataset():
 
 def test_perfect_score(small_dataset):
     runner = EvalRunner(base_url="http://fake", model="test")
-    result = asyncio.run(runner.run(small_dataset, _PerfectAgent(), _AlwaysCorrectEvaluator(), agent_name="perfect"))
+    result, _episodes = asyncio.run(runner.run(small_dataset, _PerfectAgent(), _AlwaysCorrectEvaluator(), agent_name="perfect"))
 
     assert isinstance(result, EvalResult)
     assert result.score == 1.0
@@ -88,7 +88,7 @@ def test_perfect_score(small_dataset):
 
 def test_zero_score(small_dataset):
     runner = EvalRunner(base_url="http://fake", model="test")
-    result = asyncio.run(runner.run(small_dataset, _PerfectAgent(), _AlwaysWrongEvaluator(), agent_name="failing"))
+    result, _episodes = asyncio.run(runner.run(small_dataset, _PerfectAgent(), _AlwaysWrongEvaluator(), agent_name="failing"))
 
     assert result.score == 0.0
     assert result.correct == 0
@@ -97,7 +97,7 @@ def test_zero_score(small_dataset):
 
 def test_error_handling(small_dataset):
     runner = EvalRunner(base_url="http://fake", model="test")
-    result = asyncio.run(runner.run(small_dataset, _ErrorAgent(), _AlwaysCorrectEvaluator(), agent_name="error"))
+    result, _episodes = asyncio.run(runner.run(small_dataset, _ErrorAgent(), _AlwaysCorrectEvaluator(), agent_name="error"))
 
     assert result.errors == 5
     assert result.score == 0.0
@@ -106,7 +106,7 @@ def test_error_handling(small_dataset):
 
 def test_signals_on_items(small_dataset):
     runner = EvalRunner(base_url="http://fake", model="test")
-    result = asyncio.run(runner.run(small_dataset, _PerfectAgent(), _MultiSignalEvaluator(), agent_name="multi"))
+    result, _episodes = asyncio.run(runner.run(small_dataset, _PerfectAgent(), _MultiSignalEvaluator(), agent_name="multi"))
 
     for item in result.items:
         assert "accuracy" in item.signals
@@ -117,7 +117,7 @@ def test_signals_on_items(small_dataset):
 
 def test_signal_averages(small_dataset):
     runner = EvalRunner(base_url="http://fake", model="test")
-    result = asyncio.run(runner.run(small_dataset, _PerfectAgent(), _MultiSignalEvaluator(), agent_name="multi"))
+    result, _episodes = asyncio.run(runner.run(small_dataset, _PerfectAgent(), _MultiSignalEvaluator(), agent_name="multi"))
 
     assert result.signal_averages["accuracy"] == pytest.approx(1.0)
     assert result.signal_averages["format"] == pytest.approx(0.5)
@@ -134,7 +134,7 @@ def test_reward_written_back_to_trajectories():
 
     class _CapturingAgent:
         def run(self, task: Task, config: AgentConfig) -> Episode:
-            data = task.data if isinstance(task, Task) else task
+            data = task.metadata if isinstance(task, Task) else task
             step = Step(input="q", output="a", done=True)
             ep = Episode(task=data, trajectories=[Trajectory(name="t", steps=[step])])
             episodes.append(ep)

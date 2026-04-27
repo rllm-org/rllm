@@ -213,16 +213,28 @@ def _run_train(
             console.print(f"  [error]Cannot load agent/harness '{agent_name}': {e}[/]")
             raise SystemExit(1) from None
 
-        # Evaluator: explicit override; otherwise leave to Runner-style
-        # per-task resolution (the trainer needs a single Evaluator, so
-        # we error out if neither is available).
+        # Evaluator: --evaluator > dataset.toml [verifier].
+        # Sandbox-shell verifiers aren't supported here (per-task sandbox
+        # lifecycle lives inside Runner) — use --evaluator to override.
         evaluator_display = "N/A"
         if evaluator_name is not None:
             evaluator = load_evaluator(evaluator_name)
             evaluator_display = evaluator_name
         else:
-            console.print("  [error]Local benchmarks need an explicit --evaluator for training (per-task verifier resolution is eval-only for now).[/]")
-            raise SystemExit(1)
+            from pathlib import Path as _Path
+
+            from rllm.runner import build_dataset_evaluator
+
+            evaluator = build_dataset_evaluator(_Path(benchmark).resolve())
+            if evaluator is None:
+                console.print(
+                    "  [error]Could not resolve a verifier for this benchmark. "
+                    "Declare a host-side verifier in dataset.toml ([verifier].name / "
+                    ".module / .import_path) or pass --evaluator explicitly. "
+                    "Sandbox-shell verifiers aren't supported in training yet.[/]"
+                )
+                raise SystemExit(1)
+            evaluator_display = f"{type(evaluator).__name__} (from dataset.toml)"
 
         # Datasets: pass the Task list as both train and val for now
         from rllm.data.dataset import Dataset as _Dataset

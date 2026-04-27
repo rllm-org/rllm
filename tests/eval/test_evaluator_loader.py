@@ -14,8 +14,8 @@ from rllm.eval.evaluator_loader import (
     resolve_evaluator_from_catalog,
     unregister_evaluator,
 )
-from rllm.eval.types import EvalOutput, Evaluator
-from rllm.types import Episode
+from rllm.eval.types import EvalOutput
+from rllm.types import Episode, Evaluator
 
 
 def _has_evaluate(obj):

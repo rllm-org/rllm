@@ -1,18 +1,21 @@
-"""Tests for IFEval evaluator and instruction verification."""
+"""Tests for the IFEval reward function and instruction verifiers.
+
+The class-based ``IFEvalEvaluator`` was inlined into
+``rllm.eval.reward_fns.ifeval`` as a plain ``evaluate(task, episode)``
+function. ``load_evaluator`` returns an adapter that accepts the
+legacy dict-call form.
+"""
 
 from __future__ import annotations
 
 import pytest
 
-from rllm.eval.evaluator.ifeval import (
-    IFEvalEvaluator,
-    verify_instruction,
-)
-from rllm.eval.types import Evaluator
-from rllm.types import Episode
+from rllm.eval.evaluator_loader import load_evaluator
+from rllm.eval.reward_fns.ifeval import _verify_instruction as verify_instruction
+from rllm.types import Episode, Evaluator
 
 # ---------------------------------------------------------------------------
-# Instruction verification functions
+# Instruction verification dispatcher
 # ---------------------------------------------------------------------------
 
 
@@ -195,13 +198,13 @@ class TestVerifyInstruction:
 
 
 # ---------------------------------------------------------------------------
-# IFEvalEvaluator
+# ifeval_reward_fn (loaded via the registry adapter)
 # ---------------------------------------------------------------------------
 
 
 class TestIFEvalEvaluator:
     def test_all_pass(self):
-        evaluator = IFEvalEvaluator()
+        evaluator = load_evaluator("ifeval_reward_fn")
         task = {
             "instruction_id_list": ["keywords:existence", "punctuation:no_comma"],
             "kwargs": [{"keywords": ["hello"]}, {}],
@@ -213,7 +216,7 @@ class TestIFEvalEvaluator:
         assert any(s.name == "strict_accuracy" and s.value == 1.0 for s in result.signals)
 
     def test_partial_pass(self):
-        evaluator = IFEvalEvaluator()
+        evaluator = load_evaluator("ifeval_reward_fn")
         task = {
             "instruction_id_list": ["keywords:existence", "punctuation:no_comma"],
             "kwargs": [{"keywords": ["hello"]}, {}],
@@ -227,18 +230,18 @@ class TestIFEvalEvaluator:
         assert loose.value == pytest.approx(0.5)
 
     def test_no_instructions(self):
-        evaluator = IFEvalEvaluator()
+        evaluator = load_evaluator("ifeval_reward_fn")
         task = {"instruction_id_list": [], "kwargs": []}
         ep = Episode(artifacts={"answer": "anything"})
         result = evaluator.evaluate(task, ep)
         assert result.is_correct is True
 
     def test_is_evaluator(self):
-        evaluator = IFEvalEvaluator()
+        evaluator = load_evaluator("ifeval_reward_fn")
         assert isinstance(evaluator, Evaluator)
 
     def test_metadata_has_results(self):
-        evaluator = IFEvalEvaluator()
+        evaluator = load_evaluator("ifeval_reward_fn")
         task = {
             "instruction_id_list": ["keywords:existence"],
             "kwargs": [{"keywords": ["test"]}],

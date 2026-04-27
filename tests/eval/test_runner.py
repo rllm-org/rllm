@@ -9,15 +9,15 @@ import pytest
 from rllm.data.dataset import Dataset
 from rllm.eval.results import EvalItem, EvalResult
 from rllm.eval.runner import EvalRunner
-from rllm.eval.types import AgentConfig, EvalOutput, Signal, Task
-from rllm.types import Episode, Step, Trajectory
+from rllm.eval.types import EvalOutput, Signal
+from rllm.types import AgentConfig, Episode, Step, Task, Trajectory
 
 
 class _PerfectAgent:
     """Agent that always returns a trajectory."""
 
     def run(self, task: Task, config: AgentConfig) -> Episode:
-        data = task.data if isinstance(task, Task) else task
+        data = task.metadata if isinstance(task, Task) else task
         step = Step(input=data.get("question", ""), output="correct", reward=1.0, done=True)
         return Episode(task=data, trajectories=[Trajectory(name="test", steps=[step])], artifacts={"answer": "correct"})
 
@@ -47,7 +47,7 @@ def small_dataset():
 
 def test_perfect_score(small_dataset):
     runner = EvalRunner(base_url="http://fake", model="test")
-    result = asyncio.run(runner.run(small_dataset, _PerfectAgent(), _AlwaysCorrectEvaluator(), agent_name="perfect"))
+    result, _ = asyncio.run(runner.run(small_dataset, _PerfectAgent(), _AlwaysCorrectEvaluator(), agent_name="perfect"))
 
     assert isinstance(result, EvalResult)
     assert result.score == 1.0
@@ -58,7 +58,7 @@ def test_perfect_score(small_dataset):
 
 def test_zero_score(small_dataset):
     runner = EvalRunner(base_url="http://fake", model="test")
-    result = asyncio.run(runner.run(small_dataset, _PerfectAgent(), _AlwaysWrongEvaluator(), agent_name="failing"))
+    result, _ = asyncio.run(runner.run(small_dataset, _PerfectAgent(), _AlwaysWrongEvaluator(), agent_name="failing"))
 
     assert result.score == 0.0
     assert result.correct == 0
@@ -67,7 +67,7 @@ def test_zero_score(small_dataset):
 
 def test_error_handling(small_dataset):
     runner = EvalRunner(base_url="http://fake", model="test")
-    result = asyncio.run(runner.run(small_dataset, _ErrorAgent(), _AlwaysCorrectEvaluator(), agent_name="error"))
+    result, _ = asyncio.run(runner.run(small_dataset, _ErrorAgent(), _AlwaysCorrectEvaluator(), agent_name="error"))
 
     assert result.errors == 5
     assert result.score == 0.0

@@ -98,9 +98,10 @@ class TestLoadAgent:
 
 class TestListAgents:
     def test_includes_builtin_agents(self):
+        # ``react`` migrated from agents.json to the harness registry; the
+        # legacy agent catalog now only ships the search agent.
         agents = list_agents()
         names = {a["name"] for a in agents}
-        assert "react" in names
         assert "search" in names
 
     def test_builtin_source(self):
