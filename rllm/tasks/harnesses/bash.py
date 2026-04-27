@@ -1,4 +1,4 @@
-"""ReActHarness: a host-side ReAct loop, implemented as a SandboxedAgentFlow.
+"""BashHarness: a multi-turn ReAct loop with bash tool calls in a sandbox.
 
 Loop: prompt LLM → extract bash from response → exec in sandbox → feed
 output back → repeat until done or ``[rllm].max_turns``. The harness
@@ -7,6 +7,9 @@ calls are visible to the gateway for trace capture / training.
 
 Conforms to the rLLM ``AgentFlow`` protocol — produces an Episode with
 a single Trajectory.
+
+For one-shot LLM calls without a sandbox (math, MCQ, QA), use
+:class:`rllm.harnesses.react.ReActHarness` instead.
 """
 
 from __future__ import annotations
@@ -38,13 +41,13 @@ When you are finished, respond with 'Task completed' (no code block)."""
 _DONE_MARKERS = ("task completed", "task is complete", "done", "finished", "i have completed")
 
 
-class ReActHarness(SandboxedAgentFlow):
-    """Default harness: a one-trajectory ReAct loop.
+class BashHarness(SandboxedAgentFlow):
+    """Sandbox bash-loop harness.
 
     The Runner sets the sandbox via ``set_sandbox()`` before ``run()`` is called.
     """
 
-    name = "react"
+    name = "bash"
     sandbox_backend = "docker"
     max_concurrent = 4
 
@@ -53,7 +56,7 @@ class ReActHarness(SandboxedAgentFlow):
 
         sandbox = self.sandbox
         if sandbox is None:
-            raise RuntimeError("ReActHarness requires a sandbox. The Runner should set one before calling run().")
+            raise RuntimeError("BashHarness requires a sandbox. The Runner should set one before calling run().")
 
         client = OpenAI(base_url=config.base_url, api_key="EMPTY")
         max_turns = int(task.metadata.get("rllm", {}).get("max_turns") or 50)
@@ -69,7 +72,7 @@ class ReActHarness(SandboxedAgentFlow):
         for turn in range(max_turns):
             response = client.chat.completions.create(model=config.model, messages=messages)
             assistant_msg = response.choices[0].message.content or ""
-            logger.debug("[react turn %d] %d chars: %s", turn, len(assistant_msg), assistant_msg[:200])
+            logger.debug("[bash turn %d] %d chars: %s", turn, len(assistant_msg), assistant_msg[:200])
             messages.append({"role": "assistant", "content": assistant_msg})
 
             steps.append(
@@ -117,4 +120,4 @@ def _extract_command(text: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
-register_harness("react", ReActHarness)
+register_harness("bash", BashHarness)

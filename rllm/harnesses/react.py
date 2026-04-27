@@ -1,10 +1,13 @@
-"""SimpleHarness: one-shot LLM call for data tasks.
+"""ReActHarness: one-shot LLM call for data tasks.
 
-Used by catalog datasets (gsm8k, MATH, MMLU, etc.) where the agent's
-"work" is a single chat completion. Sets ``trajectory.output`` to the
-LLM response so downstream score_fns can extract the answer.
+Default harness for catalog datasets (gsm8k, MATH, MMLU, etc.) where the
+agent's "work" is a single chat completion. Sets ``trajectory.output``
+to the LLM response so downstream score_fns can extract the answer.
 
 Implements the rLLM ``AgentFlow`` protocol with no sandbox dependency.
+
+For sandbox tasks (Harbor, SWE-bench), use :class:`rllm.tasks.harnesses.bash.BashHarness`
+instead — it runs a multi-turn ReAct loop with bash tool calls inside the sandbox.
 """
 
 from __future__ import annotations
@@ -21,14 +24,14 @@ logger = logging.getLogger(__name__)
 _DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant. Answer the question to the best of your ability."
 
 
-class SimpleHarness:
-    """One-shot LLM harness for data tasks (gsm8k-style).
+class ReActHarness:
+    """One-shot LLM harness for data tasks.
 
     No sandbox required. Pure ``AgentFlow`` — produces an Episode with
     a single Trajectory whose ``output`` is the LLM response.
     """
 
-    name = "simple"
+    name = "react"
     max_concurrent = 64
 
     def __init__(self, system_prompt: str | None = None):
@@ -41,10 +44,7 @@ class SimpleHarness:
 
         instruction = task.instruction
         # Multimodal: pass through the content blocks as-is
-        if isinstance(instruction, list):
-            user_content = instruction
-        else:
-            user_content = str(instruction)
+        user_content = instruction if isinstance(instruction, list) else str(instruction)
 
         messages = [
             {"role": "system", "content": self.system_prompt},
@@ -55,7 +55,7 @@ class SimpleHarness:
             response = client.chat.completions.create(model=config.model, messages=messages)
             answer = response.choices[0].message.content or ""
         except Exception as e:
-            logger.warning("SimpleHarness LLM call failed for task %s: %s", task.id, e)
+            logger.warning("ReActHarness LLM call failed for task %s: %s", task.id, e)
             answer = ""
 
         step = Step(
@@ -77,4 +77,4 @@ class SimpleHarness:
         )
 
 
-register_harness("simple", SimpleHarness)
+register_harness("react", ReActHarness)

@@ -1,11 +1,6 @@
 {
   "version": 1,
   "agents": {
-    "react": {
-      "description": "General-purpose ReAct agent driven by TaskSpec",
-      "module": "rllm.experimental.agents.react_agent",
-      "function": "react_agent"
-    },
     "search": {
       "description": "Multi-turn search agent with web search tool calling",
       "module": "rllm.experimental.agents.search",

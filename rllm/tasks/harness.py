@@ -66,7 +66,7 @@ def _ensure_builtins_registered() -> None:
     global _BUILTINS_REGISTERED
     if _BUILTINS_REGISTERED:
         return
-    from rllm.harnesses import simple  # noqa: F401
-    from rllm.tasks.harnesses import claude_code, react  # noqa: F401
+    from rllm.harnesses import react  # noqa: F401   # one-shot LLM
+    from rllm.tasks.harnesses import bash, claude_code  # noqa: F401   # sandbox harnesses
 
     _BUILTINS_REGISTERED = True

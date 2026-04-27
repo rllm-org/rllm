@@ -127,8 +127,8 @@ JSON shape:
 
 | Name | Where it runs | Best for |
 |---|---|---|
-| `simple` | host | one-shot LLM calls (math, mcq, qa) |
-| `react` | sandbox | multi-turn bash tool use (coding, system tasks) |
+| `react` | host | one-shot LLM call (math, mcq, qa, code completion) |
+| `bash` | sandbox | multi-turn ReAct loop with bash tool calls (SWE, system tasks) |
 | `claude-code` | sandbox | spawning the Claude Code CLI inside the container |
 
 Add your own with `register_harness("my-harness", MyHarness)` or the
@@ -138,16 +138,20 @@ load harness classes from any module.
 ## Running
 
 ```bash
-# Local benchmark directory
-rllm eval ./my-benchmark/ --agent simple
-rllm eval ./my-coding-bench/ --agent react --sandbox-backend docker
+# Local data benchmark (one-shot LLM)
+rllm eval ./my-math-bench/ --agent react
+
+# Local sandbox benchmark (bash loop in container)
+rllm eval ./my-coding-bench/ --agent bash --sandbox-backend docker
 
 # Catalog dataset (auto-materialised on first pull)
-rllm dataset pull gsm8k
-rllm eval gsm8k --agent simple --max-examples 10
+rllm eval gsm8k --agent react --max-examples 10
 
-# Single task directory (one-off)
-rllm eval ./harbor/examples/tasks/hello-world --agent react --sandbox-backend docker
+# Single task directory (one-off, sandbox)
+rllm eval ./harbor/examples/tasks/hello-world --agent bash --sandbox-backend docker
+
+# Custom harness via import path
+rllm eval ./my-bench/ --agent my_module:MyHarness
 ```
 
 ## User isolation (optional, for adversarial agents)
