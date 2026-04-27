@@ -289,8 +289,21 @@ def _run_eval(
         # Post-pull harness-only redirect: if --agent is a harness and the
         # pull just materialised ~/.rllm/datasets/<name>/, switch to the
         # new Runner path on the materialised directory.
+        #
+        # If the dataset was pulled before materialise_benchmark existed
+        # (i.e. parquet sits there but no dataset.toml), materialise it
+        # now from the rows we already loaded — saves a re-pull from HF.
         if _agent_is_harness_only:
             _materialised = os.path.expanduser(os.path.join(os.environ.get("RLLM_HOME", "~/.rllm"), "datasets", benchmark))
+            if not os.path.isfile(os.path.join(_materialised, "dataset.toml")):
+                try:
+                    from rllm.eval.materialize import materialize_benchmark as _materialize_benchmark
+
+                    _materialize_benchmark(name=benchmark, split=split, rows=list(dataset.data), catalog_entry=catalog_entry or {})
+                    console.print(f"  [dim]Materialised existing dataset on the fly at {_materialised}[/]")
+                except Exception as e:
+                    logger.warning("Could not materialise %s on the fly: %s", benchmark, e)
+
             if os.path.isfile(os.path.join(_materialised, "dataset.toml")) and BenchmarkLoader.is_local_benchmark(_materialised):
                 console.print(f"  [dim]Using materialised dataset at {_materialised}[/]")
                 bench_result = BenchmarkLoader.load(_materialised, harness_name=agent_name)
