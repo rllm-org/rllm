@@ -15,8 +15,7 @@ from google.adk.models.lite_llm import LiteLlm
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 
-from rllm.experimental.eval.types import AgentConfig
-from rllm.types import Episode, Step, Trajectory
+from rllm.types import AgentConfig, Episode, Step, Trajectory
 
 
 SYSTEM_PROMPT = """\

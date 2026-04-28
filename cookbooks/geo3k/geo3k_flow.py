@@ -29,10 +29,9 @@ For example: The answer is \\boxed{42}."""
 @rllm.rollout
 async def geo3k_flow(task: Task, config: AgentConfig) -> Episode:
     """Single-turn VLM geometry solver."""
-    data = task.data
     client = AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")
-    question = data.get("question", "")
-    images = data.get("images", [])
+    question = task.instruction
+    images = task.metadata.get("images", [])
 
     user_content = _build_vlm_content(question, images) if images else question
 
@@ -54,7 +53,7 @@ async def geo3k_flow(task: Task, config: AgentConfig) -> Episode:
         logger.warning("LLM call failed: %s", e)
 
     return Episode(
-        task=data,
+        task=task.metadata,
         trajectories=[Trajectory(name="solver", steps=[])],
         artifacts={"answer": response_text},
     )

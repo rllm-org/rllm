@@ -222,7 +222,7 @@ def _msg_to_dict(msg) -> dict:
 async def math_tool_agent(task: Task, config: AgentConfig) -> Episode:
     """Multi-turn agent that solves math problems using a calculator tool."""
     client = AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")
-    question = task.data["question"]
+    question = task.instruction
 
     messages: list[dict] = [
         {"role": "system", "content": SYSTEM_PROMPT},

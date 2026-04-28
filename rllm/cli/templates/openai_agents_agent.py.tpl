@@ -14,8 +14,7 @@ from agents import Agent, Runner
 from agents.models.openai_provider import OpenAIProvider
 from agents.run_config import RunConfig
 
-from rllm.experimental.eval.types import AgentConfig
-from rllm.types import Episode, Step, Trajectory
+from rllm.types import AgentConfig, Episode, Step, Trajectory
 
 
 SYSTEM_PROMPT = """\

@@ -12,8 +12,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
-from rllm.experimental.eval.types import AgentConfig
-from rllm.types import Episode, Step, Trajectory
+from rllm.types import AgentConfig, Episode, Step, Trajectory
 
 
 SYSTEM_PROMPT = """\

@@ -57,7 +57,7 @@ class _MockAgentFlow:
     """Mock AgentFlow that returns a fixed Episode."""
 
     def run(self, task: Task, config: AgentConfig) -> Episode:
-        data = task.data if isinstance(task, Task) else task
+        data = task.metadata if isinstance(task, Task) else task
         step = Step(input=data.get("question", ""), output="mock answer", done=True)
         return Episode(task=data, trajectories=[Trajectory(name="mock", steps=[step])], artifacts={"answer": "mock answer"})
 

@@ -9,8 +9,7 @@ import json
 
 from openai import OpenAI
 
-from rllm.experimental.eval.types import AgentConfig
-from rllm.types import Episode, Step, Trajectory
+from rllm.types import AgentConfig, Episode, Step, Trajectory
 
 
 SYSTEM_PROMPT = """\

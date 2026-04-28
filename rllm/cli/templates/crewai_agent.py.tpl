@@ -12,8 +12,7 @@ import os
 
 from crewai import Agent as CrewAgent, Crew, Task
 
-from rllm.experimental.eval.types import AgentConfig
-from rllm.types import Episode, Step, Trajectory
+from rllm.types import AgentConfig, Episode, Step, Trajectory
 
 
 class {{agent_class}}:

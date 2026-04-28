@@ -76,7 +76,7 @@ def solve(task: Task, config: AgentConfig) -> Episode:
     client = OpenAI(base_url=config.base_url, api_key="EMPTY")
     response = client.chat.completions.create(
         model=config.model,
-        messages=[{"role": "user", "content": task.data["question"]}],
+        messages=[{"role": "user", "content": task.instruction}],
     )
     answer = response.choices[0].message.content or ""
     return Episode(
