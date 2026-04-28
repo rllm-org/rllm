@@ -1,10 +1,14 @@
 """SandboxedAgentFlow: base class for agents that need sandboxed execution environments.
 
-Lifecycle managed by EvalRunner:
-1. EvalRunner calls setup_sandbox(task, config) — creates Sandbox
-2. EvalRunner calls run(task, config) — agent uses self.sandbox
-3. EvalRunner calls evaluator.evaluate() — evaluator accesses sandbox via episode artifacts
-4. EvalRunner calls teardown_sandbox() — guaranteed cleanup
+Lifecycle managed by :class:`rllm.runner.Runner`:
+
+1. Runner creates a Sandbox via ``_create_sandbox_for_task`` and injects it
+   with ``set_sandbox()``, then calls ``on_sandbox_ready(task, config)``.
+2. Runner calls ``run(task, config)`` — the agent uses ``self.sandbox``.
+3. Runner resolves an Evaluator from the Task's verifier config (or uses
+   ``evaluator_override``) and runs ``evaluator.evaluate(task, episode)``.
+4. Runner calls ``teardown_sandbox()`` — guaranteed cleanup, no-op when the
+   sandbox was injected externally.
 """
 
 from __future__ import annotations
@@ -58,7 +62,8 @@ class SandboxedAgentFlow(ABC):
     def create_instance(self) -> SandboxedAgentFlow:
         """Create a per-task copy with fresh sandbox state.
 
-        Called by EvalRunner so each parallel task gets its own sandbox.
+        Called by :func:`rllm.eval.runner.run_dataset` so each parallel
+        task gets its own sandbox.
         """
         instance = copy.copy(self)
         instance._sandbox = None
@@ -66,7 +71,12 @@ class SandboxedAgentFlow(ABC):
         return instance
 
     def setup_sandbox(self, task: dict, config: AgentConfig) -> None:
-        """Create and configure sandbox. Called by EvalRunner before run()."""
+        """Create and configure sandbox.
+
+        Legacy entry point retained for callers that still build a sandbox
+        inside the agent flow. The :class:`rllm.runner.Runner` path uses
+        :meth:`set_sandbox` + :meth:`on_sandbox_ready` instead.
+        """
         image = self.get_image(task)
         task_id = task.get("instance_id", task.get("task_id", "unknown"))
         name = f"rllm-{task_id}-{uuid.uuid4().hex[:6]}"
@@ -88,7 +98,7 @@ class SandboxedAgentFlow(ABC):
         """Hook for subclasses to run additional setup after sandbox creation."""
 
     def teardown_sandbox(self) -> None:
-        """Destroy sandbox. Called by EvalRunner after evaluate(), even on failure.
+        """Destroy sandbox. Called by the Runner after evaluate(), even on failure.
 
         No-op when the sandbox was injected externally (the orchestrator owns it).
         """

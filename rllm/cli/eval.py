@@ -34,6 +34,36 @@ def _suggest_benchmarks(name: str, catalog_names: list[str], max_suggestions: in
     return get_close_matches(name, catalog_names, n=max_suggestions, cutoff=0.5)
 
 
+def _dict_rows_to_tasks(rows: list[dict]) -> list:
+    """Wrap dict-rows from a catalog dataset as Task objects.
+
+    Harbor rows carry ``task_path`` pointing at their own Harbor task
+    directory; we root the Task there so HarborRuntime and per-task
+    verifier resolution find ``task.toml`` / ``tests/`` natively. Other
+    rows get ``dataset_dir=Path(".")`` and rely on ``evaluator_override``.
+    """
+    from pathlib import Path
+
+    from rllm.types import Task
+
+    tasks: list[Task] = []
+    for idx, row in enumerate(rows):
+        instruction = row.get("instruction") or row.get("question") or ""
+        task_id = str(row.get("id") or row.get("task_id") or idx)
+        task_path = row.get("task_path")
+        dataset_dir = Path(task_path) if task_path else Path(".")
+        tasks.append(
+            Task(
+                id=task_id,
+                instruction=str(instruction),
+                metadata=dict(row),
+                dataset_dir=dataset_dir,
+                sub_dir=None,
+            )
+        )
+    return tasks
+
+
 def _run_eval(
     benchmark: str,
     agent_name: str,
@@ -54,7 +84,6 @@ def _run_eval(
     from rllm.data import DatasetRegistry
     from rllm.eval.agent_loader import load_agent
     from rllm.eval.evaluator_loader import load_evaluator, resolve_evaluator_from_catalog
-    from rllm.eval.runner import EvalRunner
 
     # ------------------------------------------------------------------
     # Local benchmark path: directory with dataset.toml / task.toml
@@ -62,29 +91,17 @@ def _run_eval(
     from rllm.tasks.loader import BenchmarkLoader
 
     _is_local = BenchmarkLoader.is_local_benchmark(benchmark)
-    _local_bench_result = None
 
     # If `benchmark` is a bare name (not a path) and a materialised dir
-    # exists under ~/.rllm/datasets/<name>/, transparently use that —
-    # but only when the user has picked a harness that doesn't collide
-    # with the legacy catalog agent registry (so existing users running
-    # `rllm eval gsm8k --agent react` keep getting the legacy agent).
+    # exists under ~/.rllm/datasets/<name>/, transparently use that
+    # whenever --agent is set to anything other than a harbor scaffold
+    # (harbor catalog datasets carry their verifier inside each task dir,
+    # so they go through the catalog branch's row-wrapping path instead).
     _materialised_path_override = None
     if not _is_local and not benchmark.startswith(("./", "../", "/", "~", "harbor:")):
         _materialised = os.path.expanduser(os.path.join(os.environ.get("RLLM_HOME", "~/.rllm"), "datasets", benchmark))
         if os.path.isfile(os.path.join(_materialised, "dataset.toml")):
-            from rllm.cli._pull import load_agent_catalog as _load_agent_catalog
-            from rllm.tasks.harness import is_harness_name as _is_harness
-
-            try:
-                _legacy_agents = set(_load_agent_catalog().get("agents", {}).keys())
-            except Exception:
-                _legacy_agents = set()
-
-            # Auto-redirect when --agent is unambiguously a harness:
-            #   - registered harness name not also in legacy catalog, OR
-            #   - colon import-path
-            _can_redirect = bool(agent_name) and (":" in agent_name or (_is_harness(agent_name) and agent_name not in _legacy_agents))
+            _can_redirect = bool(agent_name) and not agent_name.startswith("harbor:")
             if _can_redirect and BenchmarkLoader.is_local_benchmark(_materialised):
                 console.print(f"  [dim]Using materialised dataset at {_materialised}[/]")
                 _materialised_path_override = _materialised
@@ -103,7 +120,7 @@ def _run_eval(
 
     if _is_local:
         sandbox_backend = (agent_metadata or {}).get("sandbox_backend")
-        # For local benchmarks, --agent picks the harness ("react",
+        # For local benchmarks, --agent picks the AgentFlow ("react",
         # "claude-code", ...) or a module:Class import path.
         _load_path = _materialised_path_override or benchmark
         bench_result = BenchmarkLoader.load(
@@ -111,7 +128,6 @@ def _run_eval(
             sandbox_backend=sandbox_backend,
             harness_name=agent_name,
         )
-        _local_bench_result = bench_result
         catalog_entry = {
             "description": bench_result.description,
             "category": bench_result.category,
@@ -124,17 +140,13 @@ def _run_eval(
         if agent_name is None:
             agent_name = bench_result.harness_name or "react"
 
-        # Construct the AgentFlow: prefer harness registry, fall back to general agent loader
-        from rllm.tasks.harness import load_harness
-
+        # Construct the AgentFlow: catalog covers built-in harnesses
+        # (react/bash/claude-code) and any user-registered or plugin agents.
         try:
-            agent = load_harness(agent_name)
-        except KeyError:
-            try:
-                agent = load_agent(agent_name)
-            except (KeyError, ImportError, AttributeError, TypeError) as e:
-                console.print(f"  [error]Cannot load agent/harness '{agent_name}': {e}[/]")
-                raise SystemExit(1) from None
+            agent = load_agent(agent_name)
+        except (KeyError, ImportError, AttributeError, TypeError) as e:
+            console.print(f"  [error]Cannot load agent '{agent_name}': {e}[/]")
+            raise SystemExit(1) from None
 
         # Apply CLI sandbox overrides
         if agent_metadata:
@@ -218,97 +230,74 @@ def _run_eval(
                     console.print(f"  [dim]{hint}[/]")
                 raise SystemExit(1)
 
-        # If --agent is a harness (not a legacy catalog agent), defer agent
-        # loading until after the pull so we can route through the Runner
-        # path on the freshly-materialised dataset directory.
-        from rllm.cli._pull import load_agent_catalog as _load_agent_catalog
-        from rllm.tasks.harness import is_harness_name as _is_harness
-
-        try:
-            _legacy_agents = set(_load_agent_catalog().get("agents", {}).keys())
-        except Exception:
-            _legacy_agents = set()
-        # ``harbor:<scaffold>`` is a Harbor-runtime spec, not a Python
-        # ``module:attr`` import path — route it to ``load_agent`` which has
-        # a dedicated branch for it. Otherwise ``load_harness`` would try
-        # ``getattr(harbor_module, "<scaffold>")`` and fail on hyphens etc.
         _is_harbor_agent = bool(agent_name) and agent_name.startswith("harbor:")
-        _agent_is_harness_only = bool(agent_name) and not _is_harbor_agent and (":" in agent_name or (_is_harness(agent_name) and agent_name not in _legacy_agents))
 
-        if _agent_is_harness_only:
-            agent = None  # Resolved post-pull below
-        else:
-            try:
-                agent = load_agent(agent_name)
-            except (KeyError, ImportError, AttributeError, TypeError) as e:
-                console.print(f"  [error]Error loading agent '{agent_name}': {e}[/]")
-                raise SystemExit(1) from None
+        # Load the agent. Catalog covers built-in flows (react/bash/claude-code)
+        # plus user-registered + plugin agents; ``harbor:<scaffold>`` resolves
+        # to a HarborRuntime via the harbor: prefix branch in load_agent.
+        try:
+            agent = load_agent(agent_name)
+        except (KeyError, ImportError, AttributeError, TypeError) as e:
+            console.print(f"  [error]Error loading agent '{agent_name}': {e}[/]")
+            raise SystemExit(1) from None
 
-        # Apply sandbox CLI overrides (legacy agent only — harness-only path
-        # applies overrides post-pull below)
-        if agent is not None and agent_metadata:
+        # Apply sandbox CLI overrides
+        if agent_metadata:
             from rllm.integrations.harbor.runtime import HarborRuntime
+            from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
 
             if isinstance(agent, HarborRuntime):
                 if "sandbox_backend" in agent_metadata:
                     agent.environment_type = agent_metadata["sandbox_backend"]
-            else:
-                from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
+            elif isinstance(agent, SandboxedAgentFlow):
+                if "sandbox_backend" in agent_metadata:
+                    agent.sandbox_backend = agent_metadata["sandbox_backend"]
+                if "sandbox_concurrency" in agent_metadata:
+                    agent.max_concurrent = agent_metadata["sandbox_concurrency"]
 
-                if isinstance(agent, SandboxedAgentFlow):
-                    if "sandbox_backend" in agent_metadata:
-                        agent.sandbox_backend = agent_metadata["sandbox_backend"]
-                    if "sandbox_concurrency" in agent_metadata:
-                        agent.max_concurrent = agent_metadata["sandbox_concurrency"]
-
-        # Load evaluator (legacy path only)
+        # Resolve evaluator: explicit --evaluator > catalog auto-resolve >
+        # catalog reward_fn > None. When ``evaluator`` is None the Runner
+        # falls back to per-task verifier resolution (works only when each
+        # Task has its verifier config — i.e. materialised dir or harbor
+        # task.toml).
         evaluator = None
-        evaluator_display = "N/A"
-        if not _agent_is_harness_only:
-            if evaluator_name is not None:
+        evaluator_display = "per-task (from dataset.toml)"
+        if evaluator_name is not None:
+            try:
+                evaluator = load_evaluator(evaluator_name)
+                evaluator_display = f"{evaluator_name} (overrides per-task verifier)"
+            except (KeyError, ImportError, AttributeError, TypeError) as e:
+                console.print(f"  [error]Error loading evaluator '{evaluator_name}': {e}[/]")
+                raise SystemExit(1) from None
+        else:
+            evaluator = resolve_evaluator_from_catalog(benchmark)
+            if evaluator is not None:
+                reward_fn_name = catalog_entry.get("reward_fn", "") if catalog_entry else ""
+                evaluator_display = reward_fn_name or type(evaluator).__name__
+            elif catalog_entry and catalog_entry.get("reward_fn"):
                 try:
-                    evaluator = load_evaluator(evaluator_name)
-                    evaluator_display = evaluator_name
-                except (KeyError, ImportError, AttributeError, TypeError) as e:
-                    console.print(f"  [error]Error loading evaluator '{evaluator_name}': {e}[/]")
-                    raise SystemExit(1) from None
-            else:
-                # Auto-resolve from catalog
-                evaluator = resolve_evaluator_from_catalog(benchmark)
-                if evaluator is not None:
-                    reward_fn_name = catalog_entry.get("reward_fn", "") if catalog_entry else ""
-                    evaluator_display = reward_fn_name or type(evaluator).__name__
-                elif catalog_entry and catalog_entry.get("reward_fn"):
-                    try:
-                        evaluator = load_evaluator(catalog_entry["reward_fn"])
-                        evaluator_display = catalog_entry["reward_fn"]
-                    except (KeyError, ImportError):
-                        pass
-
-            if evaluator is None:
-                console.print(f"  [error]No evaluator found for '{benchmark}'. Specify --evaluator explicitly.[/]")
-                raise SystemExit(1)
+                    evaluator = load_evaluator(catalog_entry["reward_fn"])
+                    evaluator_display = catalog_entry["reward_fn"]
+                except (KeyError, ImportError):
+                    pass
 
         # Load dataset — auto-pull if not available locally
         dataset = DatasetRegistry.load_dataset(benchmark, split)
-        if dataset is None:
-            if catalog_entry:
-                with Status(f"[dim]Pulling {benchmark} from {catalog_entry['source']}...[/]", console=console):
-                    pull_dataset(benchmark, catalog_entry)
-                dataset = DatasetRegistry.load_dataset(benchmark, split)
+        if dataset is None and catalog_entry:
+            with Status(f"[dim]Pulling {benchmark} from {catalog_entry['source']}...[/]", console=console):
+                pull_dataset(benchmark, catalog_entry)
+            dataset = DatasetRegistry.load_dataset(benchmark, split)
 
         if dataset is None:
             console.print(f"  [error]Could not load dataset '{benchmark}' split '{split}'.[/]")
             raise SystemExit(1)
 
-        # Post-pull harness-only redirect: if --agent is a harness and the
-        # pull just materialised ~/.rllm/datasets/<name>/, switch to the
-        # new Runner path on the materialised directory.
-        #
-        # If the dataset was pulled before materialise_benchmark existed
-        # (i.e. parquet sits there but no dataset.toml), materialise it
-        # now from the rows we already loaded — saves a re-pull from HF.
-        if _agent_is_harness_only:
+        # Prefer a materialised local dir for non-harbor catalog datasets so
+        # each Task carries its per-task verifier from dataset.toml. Harbor
+        # datasets carry their verifier inside the harbor task dir (read via
+        # task.metadata["task_path"]), so we wrap rows directly.
+        bench_result = None
+        if not _is_harbor_agent:
             _materialised = os.path.expanduser(os.path.join(os.environ.get("RLLM_HOME", "~/.rllm"), "datasets", benchmark))
             if not os.path.isfile(os.path.join(_materialised, "dataset.toml")):
                 try:
@@ -322,26 +311,19 @@ def _run_eval(
             if os.path.isfile(os.path.join(_materialised, "dataset.toml")) and BenchmarkLoader.is_local_benchmark(_materialised):
                 console.print(f"  [dim]Using materialised dataset at {_materialised}[/]")
                 bench_result = BenchmarkLoader.load(_materialised, harness_name=agent_name)
-                _local_bench_result = bench_result
-                _is_local = True
                 from rllm.data.dataset import Dataset
 
                 dataset = Dataset(data=list(bench_result.tasks), name=bench_result.name, split=bench_result.split or split)
-                from rllm.tasks.harness import load_harness as _load_harness
 
-                agent = _load_harness(agent_name)
-                if agent_metadata:
-                    from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
-
-                    if isinstance(agent, SandboxedAgentFlow):
-                        if "sandbox_backend" in agent_metadata:
-                            agent.sandbox_backend = agent_metadata["sandbox_backend"]
-                        if "sandbox_concurrency" in agent_metadata:
-                            agent.max_concurrent = agent_metadata["sandbox_concurrency"]
-                evaluator_display = "per-task (from dataset.toml)"
-            else:
-                console.print(f"  [error]--agent '{agent_name}' is a harness but no materialised dataset directory found at {_materialised}.[/]")
+        if bench_result is None:
+            # Wrap dict-rows as Tasks; rely on evaluator_override for scoring.
+            if evaluator is None:
+                console.print(f"  [error]No evaluator found for '{benchmark}'. Specify --evaluator explicitly.[/]")
                 raise SystemExit(1)
+            from rllm.data.dataset import Dataset
+
+            tasks = _dict_rows_to_tasks(list(dataset.data))
+            dataset = Dataset(data=tasks, name=benchmark, split=split)
 
     # Filter to specific task indices if requested
     if task_indices is not None:
@@ -376,14 +358,6 @@ def _run_eval(
     console.print()
     console.print(Panel(table, border_style="cyan", expand=False))
     console.print()
-
-    # Run evaluation
-    runner = EvalRunner(
-        base_url=base_url,
-        model=model,
-        concurrency=concurrency,
-        agent_metadata=agent_metadata or {},
-    )
 
     # Single timestamp shared by UI session, results.json, and episodes dir.
     from datetime import datetime, timezone
@@ -466,27 +440,26 @@ def _run_eval(
             if _ui_callback is not None:
                 _ui_callback(episode)
 
-    if _is_local and _local_bench_result is not None:
-        # New path: each Task carries its own verifier; Runner resolves at run time.
-        from rllm.eval.runner import run_dataset
+    # Single execution path: every Task goes through Runner. ``evaluator``
+    # (when set) overrides per-task verifier resolution; otherwise the
+    # Runner reads each Task's [verifier] config (materialised dataset
+    # dirs and harbor task dirs both supply this).
+    from rllm.eval.runner import run_dataset
 
-        result, episodes = asyncio.run(
-            run_dataset(
-                tasks=list(dataset.data),
-                agent_flow=agent,
-                base_url=base_url,
-                model=model,
-                concurrency=concurrency,
-                sandbox_backend=(agent_metadata or {}).get("sandbox_backend"),
-                agent_name=agent_name,
-                dataset_name=_local_bench_result.name,
-                on_episode_complete=on_episode_complete,
-                evaluator_override=evaluator,
-            )
+    result, episodes = asyncio.run(
+        run_dataset(
+            tasks=list(dataset.data),
+            agent_flow=agent,
+            base_url=base_url,
+            model=model,
+            concurrency=concurrency,
+            sandbox_backend=(agent_metadata or {}).get("sandbox_backend"),
+            agent_name=agent_name,
+            dataset_name=getattr(dataset, "name", benchmark) or benchmark,
+            on_episode_complete=on_episode_complete,
+            evaluator_override=evaluator,
         )
-    else:
-        # Legacy path: catalog datasets with separate Evaluator
-        result, episodes = asyncio.run(runner.run(dataset, agent, evaluator, agent_name=agent_name, on_episode_complete=on_episode_complete))
+    )
 
     # Flush remaining buffered episodes BEFORE posting eval result / finishing
     # session.  The flush enqueues episodes onto the UILogger background

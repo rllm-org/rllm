@@ -2,7 +2,7 @@
 
 The built-in registry maps reward-fn names to score_fn module import paths.
 A bare function under that path is wrapped as an Evaluator at load time so
-the existing ``Evaluator`` protocol callers (``EvalRunner``, etc.) keep
+the existing ``Evaluator`` protocol callers (``Runner``, etc.) keep
 working without changes.
 """
 
@@ -153,8 +153,8 @@ class _FunctionEvaluator:
     """Wrap a score_fn ``evaluate(task, episode)`` callable as an Evaluator.
 
     Score_fns expect ``task`` to be an ``rllm.types.Task`` object. Legacy
-    callers (``EvalRunner``) pass a dict. We auto-wrap the dict in a Task
-    so both call styles work.
+    callers may pass a dict. We auto-wrap the dict in a Task so both call
+    styles work.
     """
 
     def __init__(self, fn):

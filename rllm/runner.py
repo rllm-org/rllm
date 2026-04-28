@@ -1,16 +1,16 @@
 """Runner: unified orchestrator for AgentFlow + Evaluator over a Task.
 
-The Runner replaces the split between ``EvalRunner`` (for catalog datasets)
-and ``TaskRunner`` (for sandbox tasks). It:
+Single code path for both data tasks (gsm8k-style rows) and sandbox tasks
+(Harbor-style task directories):
 
-1. Reads the task's verifier configuration.
-2. Builds the sandbox if the task requires one.
-3. Lets the AgentFlow run on the task — producing an Episode (1 or many trajectories).
-4. Resolves an Evaluator from the task config and runs it.
-5. Writes rewards back onto the trajectories.
+1. Read the task's verifier configuration.
+2. Build the sandbox if the task requires one.
+3. Let the AgentFlow run on the task — producing an Episode (1 or many trajectories).
+4. Resolve an Evaluator from the task config (or use ``evaluator_override``) and run it.
+5. Write rewards back onto the trajectories.
 
-A single code path. No ``episode.artifacts["_sandbox"]`` hack — sandbox-using
-evaluators carry their sandbox reference internally (constructed at resolve time).
+No ``episode.artifacts["_sandbox"]`` hack — sandbox-using evaluators
+carry their sandbox reference internally (constructed at resolve time).
 """
 
 from __future__ import annotations
@@ -65,10 +65,16 @@ class Runner:
     async def run(self, task: Task, config: AgentConfig) -> Episode:
         from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
 
-        verifier_kind, verifier_config = _detect_verifier(task)
-        # Force a sandbox if the agent_flow needs one, even when the
-        # evaluator override doesn't.
-        needs_sandbox = _needs_sandbox(task, verifier_kind) or isinstance(self.agent_flow, SandboxedAgentFlow)
+        # Skip per-task verifier detection when an override is provided —
+        # the override fully dictates scoring, so we shouldn't probe the
+        # task dir for verifier scripts (Harbor task dirs contain
+        # tests/test.sh + environment/ that the harbor trial runs itself).
+        if self.evaluator_override is not None:
+            verifier_kind, verifier_config = "override", {}
+            needs_sandbox = isinstance(self.agent_flow, SandboxedAgentFlow)
+        else:
+            verifier_kind, verifier_config = _detect_verifier(task)
+            needs_sandbox = _needs_sandbox(task, verifier_kind) or isinstance(self.agent_flow, SandboxedAgentFlow)
 
         sandbox: Sandbox | None = None
         try:

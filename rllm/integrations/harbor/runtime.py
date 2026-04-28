@@ -35,7 +35,7 @@ class HarborRuntime:
     Both paths share the same ``run_harbor_task()`` core.
     """
 
-    # Used by EvalRunner to cap concurrency.
+    # Used by run_dataset / Runner to cap concurrency.
     max_concurrent: int = 4
 
     def __init__(
@@ -115,7 +115,7 @@ class HarborRuntime:
     async def arun(self, task, config) -> Episode:  # noqa: F821
         """Run a Harbor trial and return the result as an Episode.
 
-        Satisfies the ``AgentFlow`` protocol for ``EvalRunner``.
+        Satisfies the ``AgentFlow`` protocol for :func:`rllm.eval.runner.run_dataset`.
 
         Args:
             task: :class:`rllm.types.Task` whose ``metadata`` carries a ``task_path`` field.
@@ -135,7 +135,7 @@ class HarborRuntime:
             trial_name=config.session_uid,
         )
 
-        # Surface infrastructure failures as exceptions so EvalRunner counts
+        # Surface infrastructure failures as exceptions so run_dataset counts
         # them as errors rather than silently reporting 0% accuracy.
         if not outcome.finished:
             raise RuntimeError(f"Harbor trial failed ({config.session_uid}): {outcome.error}")

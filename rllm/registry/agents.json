@@ -1,4 +1,20 @@
 {
   "version": 1,
-  "agents": {}
+  "agents": {
+    "react": {
+      "module": "rllm.harnesses.react",
+      "function": "ReActHarness",
+      "description": "One-shot LLM call. Default for data tasks (math, MCQ, QA)."
+    },
+    "bash": {
+      "module": "rllm.harnesses.bash",
+      "function": "BashHarness",
+      "description": "Multi-turn ReAct bash loop inside a sandbox."
+    },
+    "claude-code": {
+      "module": "rllm.harnesses.claude_code",
+      "function": "ClaudeCodeHarness",
+      "description": "Run the Claude Code CLI inside the sandbox."
+    }
+  }
 }

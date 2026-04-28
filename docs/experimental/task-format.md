@@ -131,9 +131,10 @@ JSON shape:
 | `bash` | sandbox | multi-turn ReAct loop with bash tool calls (SWE, system tasks) |
 | `claude-code` | sandbox | spawning the Claude Code CLI inside the container |
 
-Add your own with `register_harness("my-harness", MyHarness)` or the
-`@rollout` decorator. Use a `module:Class` import path on the CLI to
-load harness classes from any module.
+Add your own by listing it in `rllm/registry/agents.json`, by
+`rllm agent register my-agent my_pkg.agent:MyAgent`, or by exporting an
+`rllm.agents` entry point from a plugin. Use a `module:Class` import path
+on the CLI to load agent classes from any module.
 
 ## Running
 

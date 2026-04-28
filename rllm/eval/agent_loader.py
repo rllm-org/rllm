@@ -151,6 +151,8 @@ def load_agent(name_or_path: str) -> AgentFlow:
         entry = agents[name_or_path]
         module = importlib.import_module(entry["module"])
         obj = getattr(module, entry["function"])
+        if isinstance(obj, type):
+            obj = obj()
         _validate_agent(obj, name_or_path)
         return obj
 
@@ -163,14 +165,6 @@ def load_agent(name_or_path: str) -> AgentFlow:
                 obj = obj()
             _validate_agent(obj, name_or_path)
             return obj
-
-    # 5. Harness registry fallback — "react", "bash", "claude-code", ...
-    try:
-        from rllm.tasks.harness import load_harness as _load_harness
-
-        return _load_harness(name_or_path)
-    except (KeyError, ImportError):
-        pass
 
     available = ", ".join(sorted(agents.keys()))
     raise KeyError(f"Agent '{name_or_path}' not found in registry. Available built-in: {available}")

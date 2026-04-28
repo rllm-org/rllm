@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import logging
 
-from rllm.tasks.harness import register_harness
 from rllm.types import Episode, Step, Task, Trajectory
 
 logger = logging.getLogger(__name__)
@@ -82,6 +81,3 @@ class ReActHarness:
             task=task.id,
             trajectories=[trajectory],
         )
-
-
-register_harness("react", ReActHarness)

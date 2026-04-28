@@ -177,7 +177,6 @@ def _run_train(
     # ------------------------------------------------------------------
     # Local benchmark path: directory with dataset.toml / task.toml
     # ------------------------------------------------------------------
-    from rllm.tasks.harness import is_harness_name, load_harness
     from rllm.tasks.loader import BenchmarkLoader
 
     catalog = {}  # needed for Harbor config path later
@@ -185,23 +184,8 @@ def _run_train(
     train_ds_name = train_dataset_name or benchmark
     val_ds_name = val_dataset_name or benchmark
 
-    def _load_agent_or_harness(name: str):
-        """Try the harness registry first, fall back to the agent registry.
-
-        Mirrors the eval CLI so harness names (``react``, ``bash``,
-        ``claude-code``) and ``module:Class`` import paths Just Work for
-        ``rllm train`` too. ``harbor:<scaffold>`` is a Harbor-runtime spec,
-        not a Python ``module:attr`` import path — route it through
-        ``load_agent`` which knows how to materialise a ``HarborRuntime``.
-        """
-        if name.startswith("harbor:"):
-            return load_agent(name)
-        if ":" in name or is_harness_name(name):
-            return load_harness(name)
-        return load_agent(name)
-
     if BenchmarkLoader.is_local_benchmark(benchmark):
-        # For local sandbox tasks, --agent is the harness name.
+        # For local sandbox tasks, --agent picks the AgentFlow.
         bench_result = BenchmarkLoader.load(benchmark, harness_name=agent_name)
         catalog_entry = {
             "description": bench_result.description,
@@ -212,9 +196,9 @@ def _run_train(
             agent_name = bench_result.harness_name or "react"
 
         try:
-            agent_flow = _load_agent_or_harness(agent_name)
+            agent_flow = load_agent(agent_name)
         except (KeyError, ImportError, AttributeError, TypeError) as e:
-            console.print(f"  [error]Cannot load agent/harness '{agent_name}': {e}[/]")
+            console.print(f"  [error]Cannot load agent '{agent_name}': {e}[/]")
             raise SystemExit(1) from None
 
         # Evaluator: --evaluator > dataset.toml [verifier].
@@ -296,7 +280,7 @@ def _run_train(
                 raise SystemExit(1)
 
         try:
-            agent_flow = _load_agent_or_harness(agent_name)
+            agent_flow = load_agent(agent_name)
         except (KeyError, ImportError, AttributeError, TypeError) as e:
             console.print(f"  [error]Error loading agent '{agent_name}': {e}[/]")
             raise SystemExit(1) from None

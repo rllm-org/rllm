@@ -13,7 +13,6 @@ import logging
 import shlex
 
 from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
-from rllm.tasks.harness import register_harness
 from rllm.types import Episode, Step, Task, Trajectory
 
 logger = logging.getLogger(__name__)
@@ -91,6 +90,3 @@ class ClaudeCodeHarness(SandboxedAgentFlow):
             task=task.id,
             trajectories=[trajectory],
         )
-
-
-register_harness("claude-code", ClaudeCodeHarness)

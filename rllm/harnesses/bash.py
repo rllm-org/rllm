@@ -18,7 +18,6 @@ import logging
 import re
 
 from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
-from rllm.tasks.harness import register_harness
 from rllm.types import Episode, Step, Task, Trajectory
 
 logger = logging.getLogger(__name__)
@@ -117,6 +116,3 @@ def _is_done(text: str) -> bool:
 def _extract_command(text: str) -> str | None:
     match = re.search(r"```(?:bash|shell|sh)\n(.*?)```", text, re.DOTALL)
     return match.group(1).strip() if match else None
-
-
-register_harness("bash", BashHarness)
