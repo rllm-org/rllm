@@ -47,6 +47,8 @@ def _run_eval(
     output_path: str | None,
     agent_metadata: dict | None = None,
     enable_ui: bool = False,
+    save_episodes: bool = True,
+    episodes_dir: str | None = None,
 ):
     """Core eval logic, extracted for clean proxy lifecycle management."""
     from rllm.data import DatasetRegistry
@@ -383,16 +385,45 @@ def _run_eval(
         agent_metadata=agent_metadata or {},
     )
 
+    # Single timestamp shared by UI session, results.json, and episodes dir.
+    from datetime import datetime, timezone
+
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+    # Set up the run directory. Layout:
+    #   <run_dir>/
+    #     meta.json        — always
+    #     results.json     — written below, after the run completes
+    #     episodes/        — populated only when save_episodes is True
+    from rllm.eval.episode_store import EvalEpisodeStore
+
+    if episodes_dir is not None:
+        run_dir = os.path.expanduser(episodes_dir)
+    else:
+        rllm_home = os.path.expanduser(os.environ.get("RLLM_HOME", "~/.rllm"))
+        model_safe = model.replace("/", "_").replace("\\", "_")
+        bench_safe = benchmark.replace("/", "_").replace("\\", "_")
+        run_dir = os.path.join(rllm_home, "eval_results", f"{bench_safe}_{model_safe}_{timestamp}")
+    run_store = EvalEpisodeStore(run_dir)
+    run_store.write_meta(
+        {
+            "benchmark": benchmark,
+            "model": model,
+            "agent": agent_name,
+            "split": split,
+            "timestamp": timestamp,
+        }
+    )
+    episode_store = run_store if save_episodes else None
+
     # Create UI logger before run for progressive episode uploads
     ui_logger = None
     on_episode_complete = None
     _flush_episode_buffer = None
+    _ui_callback = None
     if enable_ui:
-        from datetime import datetime, timezone
-
         from rllm.utils.tracking import UILogger
 
-        timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
         experiment = f"{model}_{agent_name}_{timestamp}".replace("/", "_")
         ui_logger = UILogger(
             project_name=benchmark,
@@ -413,7 +444,7 @@ def _run_eval(
                         ui_logger.log(data={}, step=0, episodes=list(_episode_buffer))
                         _episode_buffer.clear()
 
-            def on_episode_complete(episode):
+            def _ui_callback(episode):
                 with _buffer_lock:
                     _episode_buffer.append(episode)
                     should_flush = len(_episode_buffer) >= _BATCH_SIZE
@@ -422,6 +453,18 @@ def _run_eval(
                         _episode_buffer.clear()
                 if batch:
                     ui_logger.log(data={}, step=0, episodes=batch)
+
+    # Wrap UI streaming and per-file dump into a single callback.
+    if episode_store is not None or _ui_callback is not None:
+
+        def on_episode_complete(idx, episode):
+            if episode_store is not None:
+                try:
+                    episode_store.write(idx, episode)
+                except Exception:
+                    logger.debug("episode_store.write failed", exc_info=True)
+            if _ui_callback is not None:
+                _ui_callback(episode)
 
     if _is_local and _local_bench_result is not None:
         # New path: each Task carries its own verifier; Runner resolves at run time.
@@ -478,9 +521,17 @@ def _run_eval(
         if len(error_items) > 5:
             console.print(f"  [dim]... and {len(error_items) - 5} more errors (see JSON output for details)[/]")
 
-    # Save results
-    saved_path = result.save(output_path)
-    console.print(f"\n  [dim]Saved to {saved_path}[/]")
+    # Save aggregate results inside the run dir so a single path holds
+    # everything: meta.json, results.json, and (optionally) episodes/.
+    result.timestamp = timestamp
+    if output_path is None:
+        result.save(os.path.join(run_dir, "results.json"))
+        run_id = os.path.basename(os.path.normpath(run_dir))
+        console.print(f"\n  [dim]Saved to {run_dir}[/]")
+        console.print(f"  [dim]View with: rllm view {run_id}[/]")
+    else:
+        saved_path = result.save(output_path)
+        console.print(f"\n  [dim]Saved to {saved_path}[/]")
 
     # Send eval result and finish UI session
     if ui_logger is not None and ui_logger.session_id:
@@ -517,6 +568,8 @@ def _run_eval(
 )
 @click.option("--sandbox-concurrency", "sandbox_concurrency", default=None, type=int, help="Override max concurrent sandboxes (default: agent's max_concurrent).")
 @click.option("--ui/--no-ui", "enable_ui", default=None, help="Enable/disable live UI logging. Default: auto-enabled when logged in (see 'rllm login').")
+@click.option("--save-episodes/--no-save-episodes", "save_episodes", default=True, help="Save each Episode as its own JSON file for later visualization (default: enabled).")
+@click.option("--episodes-dir", "episodes_dir", default=None, help="Directory to write the episode JSONs into. Default: ~/.rllm/eval_results/<bench>_<model>_<timestamp>/.")
 def eval_cmd(
     benchmark: str,
     agent_name: str | None,
@@ -532,6 +585,8 @@ def eval_cmd(
     sandbox_backend: str | None,
     sandbox_concurrency: int | None,
     enable_ui: bool | None,
+    save_episodes: bool,
+    episodes_dir: str | None,
 ):
     """Evaluate a model on a benchmark dataset."""
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
@@ -618,7 +673,22 @@ def eval_cmd(
                 parsed_indices.append(int(part))
 
     try:
-        _run_eval(benchmark, agent_name, evaluator_name, base_url, model, split, concurrency, max_examples, parsed_indices, output_path, agent_metadata=agent_metadata, enable_ui=enable_ui)
+        _run_eval(
+            benchmark,
+            agent_name,
+            evaluator_name,
+            base_url,
+            model,
+            split,
+            concurrency,
+            max_examples,
+            parsed_indices,
+            output_path,
+            agent_metadata=agent_metadata,
+            enable_ui=enable_ui,
+            save_episodes=save_episodes,
+            episodes_dir=episodes_dir,
+        )
     finally:
         if proxy_manager is not None:
             proxy_manager.shutdown_proxy()

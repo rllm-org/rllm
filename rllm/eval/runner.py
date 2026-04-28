@@ -104,7 +104,7 @@ async def run_dataset(
 
                 if on_episode_complete is not None:
                     try:
-                        on_episode_complete(episode)
+                        on_episode_complete(idx, episode)
                     except Exception:
                         logger.debug("on_episode_complete callback error", exc_info=True)
 
@@ -227,7 +227,7 @@ class EvalRunner:
                     # Notify caller for progressive logging
                     if on_episode_complete is not None:
                         try:
-                            on_episode_complete(episode)
+                            on_episode_complete(idx, episode)
                         except Exception:
                             logger.debug("on_episode_complete callback error", exc_info=True)
 

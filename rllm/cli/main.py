@@ -23,6 +23,7 @@ _COMMAND_ICONS = {
     "model": "⚙️ ",
     "login": "🔑",
     "train": "🏋️",
+    "view": "🔍",
 }
 
 console = Console()
@@ -44,6 +45,7 @@ class _LazyGroup(click.Group):
         "init": ("rllm.cli.init", "init_cmd", "Scaffold a new agent project."),
         "model": ("rllm.cli.model_cmd", "model", "Manage provider and model configuration."),
         "train": ("rllm.cli.train", "train_cmd", "Train a model on a benchmark dataset using RL."),
+        "view": ("rllm.cli.view", "view_cmd", "Browse saved eval episodes in a Gradio viewer."),
         "login": ("rllm.cli.login", "login_cmd", "Log in to rLLM UI."),
         "setup": None,  # handled inline
     }

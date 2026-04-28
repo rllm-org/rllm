@@ -220,6 +220,7 @@ ignore = [
 "examples/sdk/solver_judge/solver_judge_flow_session.py" = ["E501"]
 "examples/solver_judge/solver_judge_flow.py" = ["E501"]
 "rllm/cli/main.py" = ["E501"]
+"rllm/eval/visualizer.py" = ["E501"]
 "rllm/experimental/rllm_telemetry/examples/experiment_comparison.py" = ["E501"]
 "rllm/experimental/test_examples/opsd/math_opsd_workflow.py" = ["E501"]
 "rllm/harnesses/tools/file_editor_tool.py" = ["E501"]
