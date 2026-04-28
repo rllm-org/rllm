@@ -7,8 +7,8 @@ import pytest
 from click.testing import CliRunner
 
 from rllm.cli.main import cli
-from rllm.eval.types import AgentConfig, EvalOutput, Signal, Task
-from rllm.types import Episode, Step, Trajectory
+from rllm.eval.types import EvalOutput, Signal
+from rllm.types import AgentConfig, Episode, Step, Task, Trajectory
 
 
 @pytest.fixture

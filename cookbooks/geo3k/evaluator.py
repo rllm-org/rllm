@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import rllm
-from rllm.eval.types import EvalOutput, Signal, _extract_agent_answer
-from rllm.types import Episode
+from rllm.eval.types import EvalOutput, Signal
+from rllm.types import Episode, _extract_agent_answer
 
 
 @rllm.evaluator

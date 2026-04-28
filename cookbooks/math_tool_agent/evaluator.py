@@ -7,9 +7,9 @@ symbolic expressions, and numeric formats (e.g. ``\\frac{1}{2}`` vs ``0.5``).
 from __future__ import annotations
 
 import rllm
-from rllm.eval.types import EvalOutput, Signal, _extract_agent_answer
+from rllm.eval.types import EvalOutput, Signal
 from rllm.rewards.math_utils.utils import grade_answer_mathd, grade_answer_sympy
-from rllm.types import Episode
+from rllm.types import Episode, _extract_agent_answer
 
 
 @rllm.evaluator
