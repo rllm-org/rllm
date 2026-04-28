@@ -27,7 +27,7 @@ def _benchmark(tmp_path: Path, *, verifier_block: str = "") -> Path:
 
 def test_resolves_math_system_prompt(tmp_path):
     bench = _benchmark(tmp_path, verifier_block='[verifier]\nname = "math_reward_fn"\n')
-    task = Task(id="0", instruction="", metadata={}, benchmark_dir=bench)
+    task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
 
     prompt = get_verifier_system_prompt(task)
     assert prompt is not None
@@ -36,7 +36,7 @@ def test_resolves_math_system_prompt(tmp_path):
 
 def test_resolves_mcq_system_prompt(tmp_path):
     bench = _benchmark(tmp_path, verifier_block='[verifier]\nname = "mcq_reward_fn"\n')
-    task = Task(id="0", instruction="", metadata={}, benchmark_dir=bench)
+    task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
 
     prompt = get_verifier_system_prompt(task)
     assert prompt is not None
@@ -44,7 +44,7 @@ def test_resolves_mcq_system_prompt(tmp_path):
 
 def test_resolves_bfcl_system_prompt(tmp_path):
     bench = _benchmark(tmp_path, verifier_block='[verifier]\nname = "bfcl_reward_fn"\n')
-    task = Task(id="0", instruction="", metadata={}, benchmark_dir=bench)
+    task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
 
     prompt = get_verifier_system_prompt(task)
     assert prompt is not None
@@ -60,7 +60,7 @@ def test_resolves_via_import_path(tmp_path):
         tmp_path,
         verifier_block='[verifier]\nimport_path = "rllm.eval.reward_fns.math:evaluate"\n',
     )
-    task = Task(id="0", instruction="", metadata={}, benchmark_dir=bench)
+    task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
 
     prompt = get_verifier_system_prompt(task)
     assert prompt is not None
@@ -72,7 +72,7 @@ def test_import_path_to_module_without_system_prompt_returns_none(tmp_path):
         tmp_path,
         verifier_block='[verifier]\nimport_path = "json:loads"\n',
     )
-    task = Task(id="0", instruction="", metadata={}, benchmark_dir=bench)
+    task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
     # ``json`` has no SYSTEM_PROMPT attribute → None
     assert get_verifier_system_prompt(task) is None
 
@@ -84,13 +84,13 @@ def test_import_path_to_module_without_system_prompt_returns_none(tmp_path):
 
 def test_shell_script_verifier_returns_none(tmp_path):
     bench = _benchmark(tmp_path, verifier_block='[verifier]\nscript = "tests/test.sh"\n')
-    task = Task(id="0", instruction="", metadata={}, benchmark_dir=bench)
+    task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
     assert get_verifier_system_prompt(task) is None
 
 
 def test_python_module_verifier_returns_none(tmp_path):
     bench = _benchmark(tmp_path, verifier_block='[verifier]\nmodule = "tests.evaluate"\n')
-    task = Task(id="0", instruction="", metadata={}, benchmark_dir=bench)
+    task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
     assert get_verifier_system_prompt(task) is None
 
 
@@ -101,20 +101,20 @@ def test_python_module_verifier_returns_none(tmp_path):
 
 def test_unknown_registered_name_returns_none(tmp_path):
     bench = _benchmark(tmp_path, verifier_block='[verifier]\nname = "nope_reward_fn"\n')
-    task = Task(id="0", instruction="", metadata={}, benchmark_dir=bench)
+    task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
     assert get_verifier_system_prompt(task) is None
 
 
 def test_no_dataset_toml_returns_none(tmp_path):
     bench = tmp_path / "no-config"
     bench.mkdir()
-    task = Task(id="0", instruction="", metadata={}, benchmark_dir=bench)
+    task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
     assert get_verifier_system_prompt(task) is None
 
 
 def test_no_verifier_block_returns_none(tmp_path):
     bench = _benchmark(tmp_path, verifier_block="")  # only [dataset] section
-    task = Task(id="0", instruction="", metadata={}, benchmark_dir=bench)
+    task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
     assert get_verifier_system_prompt(task) is None
 
 
@@ -128,7 +128,7 @@ def test_per_task_toml_takes_precedence(tmp_path):
         id="0",
         instruction="",
         metadata={},
-        benchmark_dir=bench,
+        dataset_dir=bench,
         sub_dir=Path("task-001"),
     )
     prompt = get_verifier_system_prompt(task)

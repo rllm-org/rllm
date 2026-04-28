@@ -37,11 +37,11 @@ class Task:
 
     1. **Task-per-directory** (Harbor-style): each ``task-NNN/`` is one
        Task with ``sub_dir`` set to its subdirectory. Verifier lives in
-       ``benchmark_dir/sub_dir/tests/``.
+       ``dataset_dir/sub_dir/tests/``.
 
     2. **Rows-with-shared-verifier** (gsm8k-style): one row from a JSONL
        file becomes one Task. ``sub_dir`` is ``None``; the verifier is
-       shared across all rows and lives in ``benchmark_dir/tests/`` (or
+       shared across all rows and lives in ``dataset_dir/tests/`` (or
        is referenced by name in ``dataset.toml``).
     """
 
@@ -56,21 +56,21 @@ class Task:
     For data tasks, this is the source row. For sandbox tasks, this is
     the parsed ``task.toml`` plus anything else the verifier needs."""
 
-    benchmark_dir: Path = field(default_factory=Path)
-    """Path to the benchmark directory (where ``dataset.toml`` lives)."""
+    dataset_dir: Path = field(default_factory=Path)
+    """Path to the dataset directory (where ``dataset.toml`` lives)."""
 
     sub_dir: Path | None = None
     """For task-per-directory shape: relative path of this task's subdir
-    within ``benchmark_dir``. ``None`` for rows-with-shared-verifier."""
+    within ``dataset_dir``. ``None`` for rows-with-shared-verifier."""
 
     @property
     def task_dir(self) -> Path:
         """The directory holding *this* task's files.
 
-        For per-task-dir tasks: ``benchmark_dir / sub_dir``.
-        For shared-verifier tasks: ``benchmark_dir`` (verifier is shared).
+        For per-task-dir tasks: ``dataset_dir / sub_dir``.
+        For shared-verifier tasks: ``dataset_dir`` (verifier is shared).
         """
-        return self.benchmark_dir / self.sub_dir if self.sub_dir else self.benchmark_dir
+        return self.dataset_dir / self.sub_dir if self.sub_dir else self.dataset_dir
 
 
 class Step(BaseModel):

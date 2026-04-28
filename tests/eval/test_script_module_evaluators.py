@@ -75,7 +75,7 @@ class TestShellScriptEvaluator:
         bench = _bench(tmp_path)
         sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "0.75"})
         ev = ShellScriptEvaluator(sandbox=sb)
-        task = Task(id="0", instruction="", metadata={}, benchmark_dir=bench)
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
 
         out = ev.evaluate(task, _episode())
 
@@ -86,7 +86,7 @@ class TestShellScriptEvaluator:
         bench = _bench(tmp_path)
         sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "1.0"})
         ev = ShellScriptEvaluator(sandbox=sb)
-        task = Task(id="0", instruction="", metadata={}, benchmark_dir=bench)
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
 
         out = ev.evaluate(task, _episode())
         assert out.is_correct is True
@@ -99,7 +99,7 @@ class TestShellScriptEvaluator:
             }
         )
         ev = ShellScriptEvaluator(sandbox=sb)
-        task = Task(id="0", instruction="", metadata={}, benchmark_dir=bench)
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
 
         out = ev.evaluate(task, _episode())
         assert out.reward == 0.5
@@ -113,7 +113,7 @@ class TestShellScriptEvaluator:
             files={"/logs/verifier/reward.json": '{"rewards": {"a": 1.0, "b": 0.0}}'},
         )
         ev = ShellScriptEvaluator(sandbox=sb)
-        task = Task(id="0", instruction="", metadata={}, benchmark_dir=bench)
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
 
         out = ev.evaluate(task, _episode())
         assert out.reward == 0.5
@@ -128,7 +128,7 @@ class TestShellScriptEvaluator:
             }
         )
         ev = ShellScriptEvaluator(sandbox=sb)
-        task = Task(id="0", instruction="", metadata={}, benchmark_dir=bench)
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
 
         out = ev.evaluate(task, _episode())
         assert out.reward == 1.0
@@ -137,7 +137,7 @@ class TestShellScriptEvaluator:
         bench = _bench(tmp_path)
         sb = _FakeSandbox(files={})  # nothing written
         ev = ShellScriptEvaluator(sandbox=sb)
-        task = Task(id="0", instruction="", metadata={}, benchmark_dir=bench)
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
 
         out = ev.evaluate(task, _episode())
         assert out.reward == 0.0
@@ -149,7 +149,7 @@ class TestShellScriptEvaluator:
         bench.mkdir()
         sb = _FakeSandbox()
         ev = ShellScriptEvaluator(sandbox=sb)
-        task = Task(id="0", instruction="", metadata={}, benchmark_dir=bench)
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
 
         out = ev.evaluate(task, _episode())
         assert out.reward == 0.0
@@ -159,7 +159,7 @@ class TestShellScriptEvaluator:
         bench = _bench(tmp_path)
         sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "1.0"})
         ev = ShellScriptEvaluator(sandbox=sb)
-        task = Task(id="0", instruction="", metadata={}, benchmark_dir=bench)
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
 
         ev.evaluate(task, _episode())
         # The evaluator copies tests/ to /tests in the sandbox
@@ -191,7 +191,7 @@ def evaluate(task, episode):
 """,
         )
         ev = PythonModuleEvaluator.from_module(bench)
-        task = Task(id="0", instruction="", metadata={"ground_truth": "yes"}, benchmark_dir=bench)
+        task = Task(id="0", instruction="", metadata={"ground_truth": "yes"}, dataset_dir=bench)
         traj = Trajectory(uid="t", name="x", task="0", output="yes")
         ep = Episode(trajectories=[traj])
 
@@ -208,7 +208,7 @@ def evaluate(metadata, trajectory):
 """,
         )
         ev = PythonModuleEvaluator.from_module(bench)
-        task = Task(id="0", instruction="", metadata={"ok": True}, benchmark_dir=bench)
+        task = Task(id="0", instruction="", metadata={"ok": True}, dataset_dir=bench)
         ep = Episode(trajectories=[Trajectory(uid="t", name="x", task="0", output="yes")])
 
         out = ev.evaluate(task, ep)
@@ -221,7 +221,7 @@ def evaluate(metadata, trajectory):
             "def evaluate(task, episode): return 0.5\n",
         )
         ev = PythonModuleEvaluator.from_module(bench, module_path="tests.evaluate")
-        task = Task(id="0", instruction="", metadata={}, benchmark_dir=bench)
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
         out = ev.evaluate(task, Episode())
         assert out.reward == 0.5
 
@@ -231,7 +231,7 @@ def evaluate(metadata, trajectory):
             "def evaluate(task, episode): return 0.25\n",
         )
         ev = PythonModuleEvaluator.from_module(bench, module_path="tests/evaluate.py")
-        out = ev.evaluate(Task(id="0", instruction="", metadata={}, benchmark_dir=bench), Episode())
+        out = ev.evaluate(Task(id="0", instruction="", metadata={}, dataset_dir=bench), Episode())
         assert out.reward == 0.25
 
     def test_alternate_function_name(self, tmp_path):
@@ -240,7 +240,7 @@ def evaluate(metadata, trajectory):
             "def grade(task, episode): return True\n",
         )
         ev = PythonModuleEvaluator.from_module(bench, function="grade")
-        out = ev.evaluate(Task(id="0", instruction="", metadata={}, benchmark_dir=bench), Episode())
+        out = ev.evaluate(Task(id="0", instruction="", metadata={}, dataset_dir=bench), Episode())
         assert out.reward == 1.0
         assert out.is_correct is True
 
@@ -258,7 +258,7 @@ def evaluate(metadata, trajectory):
             "def evaluate(task, episode):\n    raise RuntimeError('boom')\n",
         )
         ev = PythonModuleEvaluator.from_module(bench)
-        out = ev.evaluate(Task(id="0", instruction="", metadata={}, benchmark_dir=bench), Episode())
+        out = ev.evaluate(Task(id="0", instruction="", metadata={}, dataset_dir=bench), Episode())
         assert out.reward == 0.0
         assert out.is_correct is False
         assert "boom" in out.metadata["error"]

@@ -169,7 +169,7 @@ class _FunctionEvaluator:
 
             from rllm.types import Task
 
-            task = Task(id="", instruction="", metadata=task, benchmark_dir=Path("/"))
+            task = Task(id="", instruction="", metadata=task, dataset_dir=Path("/"))
 
         # Some reward_fns may use kwarg names like 'metadata'/'trajectory'
         # rather than 'task'/'episode'. Inspect and dispatch accordingly.

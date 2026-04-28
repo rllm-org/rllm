@@ -122,7 +122,7 @@ def _detect_verifier(task: Task) -> tuple[str, dict]:
     """
     config = _read_verifier_config(task)
     task_dir = task.task_dir
-    has_dockerfile = (task_dir / "environment" / "Dockerfile").exists() or (task.benchmark_dir / "environment" / "Dockerfile").exists()
+    has_dockerfile = (task_dir / "environment" / "Dockerfile").exists() or (task.dataset_dir / "environment" / "Dockerfile").exists()
 
     if "script" in config:
         return "sandbox-shell", config
@@ -139,9 +139,9 @@ def _detect_verifier(task: Task) -> tuple[str, dict]:
     if (task_dir / "tests" / "evaluate.py").exists():
         return ("python-hybrid" if has_dockerfile else "python-host"), {"module": "tests.evaluate"}
     # Shared verifier at benchmark level (rows-with-shared-verifier shape)
-    if (task.benchmark_dir / "tests" / "evaluate.py").exists():
+    if (task.dataset_dir / "tests" / "evaluate.py").exists():
         return ("python-hybrid" if has_dockerfile else "python-host"), {"module": "tests.evaluate"}
-    if (task.benchmark_dir / "tests" / "test.sh").exists():
+    if (task.dataset_dir / "tests" / "test.sh").exists():
         return "sandbox-shell", {"script": "tests/test.sh"}
 
     return "missing", {}
@@ -151,8 +151,8 @@ def _read_verifier_config(task: Task) -> dict:
     """Read ``[verifier]`` from task.toml (per-task) or dataset.toml (shared)."""
     candidates = []
     if task.sub_dir is not None:
-        candidates.append(task.benchmark_dir / task.sub_dir / "task.toml")
-    candidates.append(task.benchmark_dir / "dataset.toml")
+        candidates.append(task.dataset_dir / task.sub_dir / "task.toml")
+    candidates.append(task.dataset_dir / "dataset.toml")
     for cfg_path in candidates:
         if cfg_path.exists():
             try:
@@ -187,13 +187,13 @@ def _resolve_evaluator(
         # Look in the task's own dir first, then the shared benchmark dir
         module = verifier_config.get("module", "tests.evaluate")
         function = verifier_config.get("function", "evaluate")
-        for base in (task.task_dir, task.benchmark_dir):
+        for base in (task.task_dir, task.dataset_dir):
             try:
                 ev = PythonModuleEvaluator.from_module(base, module, function)
                 return _wrap_with_sandbox_if_needed(ev, sandbox)
             except FileNotFoundError:
                 continue
-        raise FileNotFoundError(f"Verifier module '{module}' not found in {task.task_dir} or {task.benchmark_dir}")
+        raise FileNotFoundError(f"Verifier module '{module}' not found in {task.task_dir} or {task.dataset_dir}")
 
     if kind == "registered":
         from rllm.eval.evaluator_loader import load_evaluator
@@ -209,11 +209,11 @@ def _resolve_evaluator(
         # Bare function — wrap as a thin Evaluator
         return _FunctionEvaluator(ev)
 
-    raise RuntimeError(f"No verifier configured for task '{task.id}' (benchmark_dir={task.benchmark_dir})")
+    raise RuntimeError(f"No verifier configured for task '{task.id}' (dataset_dir={task.dataset_dir})")
 
 
-def build_dataset_evaluator(benchmark_dir: Path, sub_dir: Path | None = None) -> Evaluator | None:
-    """Build a single :class:`Evaluator` from a benchmark's ``[verifier]`` config.
+def build_dataset_evaluator(dataset_dir: Path, sub_dir: Path | None = None) -> Evaluator | None:
+    """Build a single :class:`Evaluator` from a dataset's ``[verifier]`` config.
 
     Supports the host-only verifier kinds (``module``, ``name``,
     ``import_path``, plus auto-detected ``tests/evaluate.py``) so the
@@ -222,7 +222,7 @@ def build_dataset_evaluator(benchmark_dir: Path, sub_dir: Path | None = None) ->
     eval. Sandbox-shell verifiers return ``None`` because they need a
     per-task sandbox lifecycle that lives inside :class:`Runner`.
     """
-    probe = Task(id="", instruction="", metadata={}, benchmark_dir=benchmark_dir, sub_dir=sub_dir)
+    probe = Task(id="", instruction="", metadata={}, dataset_dir=dataset_dir, sub_dir=sub_dir)
     kind, config = _detect_verifier(probe)
     if kind in ("sandbox-shell", "python-hybrid", "missing"):
         return None
@@ -256,7 +256,7 @@ def _needs_sandbox(task: Task, verifier_kind: str) -> bool:
     if verifier_kind in ("sandbox-shell", "python-hybrid"):
         return True
     # If the task ships an environment/, treat it as sandboxed
-    if (task.task_dir / "environment").is_dir() or (task.benchmark_dir / "environment").is_dir():
+    if (task.task_dir / "environment").is_dir() or (task.dataset_dir / "environment").is_dir():
         return True
     return False
 
@@ -279,7 +279,7 @@ def _resolve_image(task: Task, backend: str) -> str:
 
     dockerfile = task.task_dir / "environment" / "Dockerfile"
     if not dockerfile.exists():
-        dockerfile = task.benchmark_dir / "environment" / "Dockerfile"
+        dockerfile = task.dataset_dir / "environment" / "Dockerfile"
 
     if dockerfile.exists() and backend == "docker":
         return _build_docker_image(dockerfile.parent, task.id)
@@ -311,7 +311,7 @@ def _setup_task_environment(task: Task, sandbox: Sandbox) -> None:
     workdir = task.metadata.get("workdir", "/workspace")
     env_root = task.task_dir / "environment"
     if not env_root.is_dir():
-        env_root = task.benchmark_dir / "environment"
+        env_root = task.dataset_dir / "environment"
 
     _safe_exec(sandbox, f"mkdir -p {workdir}", timeout=30)
 

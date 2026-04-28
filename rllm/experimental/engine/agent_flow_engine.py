@@ -241,7 +241,7 @@ class AgentFlowEngine:
             id=str(uid),
             instruction=str(task.get("question", task.get("instruction", ""))),
             metadata=task,
-            benchmark_dir=Path("."),
+            dataset_dir=Path("."),
         )
         episode = await run_agent_flow(self.agent_flow, task_obj, config, executor=self.executor)
         logger.debug("[%s] Agent flow completed, %d trajectories", uid, len(episode.trajectories))

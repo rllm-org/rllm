@@ -26,7 +26,7 @@ from rllm.types import AgentConfig, AgentFlow, Episode, Evaluator, Task, Traject
 
 @pytest.fixture()
 def task():
-    return Task(id="t", instruction="", metadata={"question": "What is 2+2?", "ground_truth": "4"}, benchmark_dir=Path("."))
+    return Task(id="t", instruction="", metadata={"question": "What is 2+2?", "ground_truth": "4"}, dataset_dir=Path("."))
 
 
 @pytest.fixture()
@@ -352,18 +352,18 @@ class TestEvaluatorReturnCoercion:
 
 class TestCoerceToEpisode:
     def test_episode_passthrough(self):
-        task = Task(id="t", instruction="", metadata={"q": "test"}, benchmark_dir=Path("."))
+        task = Task(id="t", instruction="", metadata={"q": "test"}, dataset_dir=Path("."))
         ep = Episode(task={"q": "test"}, trajectories=[], artifacts={"answer": "x"})
         result = _coerce_to_episode(ep, task, "solver")
         assert result is ep
 
     def test_str(self):
-        task = Task(id="t", instruction="", metadata={"q": "test"}, benchmark_dir=Path("."))
+        task = Task(id="t", instruction="", metadata={"q": "test"}, dataset_dir=Path("."))
         result = _coerce_to_episode("hello", task, "solver")
         assert result.artifacts["answer"] == "hello"
 
     def test_dict(self):
-        task = Task(id="t", instruction="", metadata={"q": "test"}, benchmark_dir=Path("."))
+        task = Task(id="t", instruction="", metadata={"q": "test"}, dataset_dir=Path("."))
         result = _coerce_to_episode({"answer": "world", "extra": 1}, task, "solver")
         assert result.artifacts["answer"] == "world"
         assert result.artifacts["extra"] == 1

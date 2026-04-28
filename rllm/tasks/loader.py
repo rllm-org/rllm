@@ -7,7 +7,7 @@ each task through :class:`rllm.runner.Runner` — same code path for both.
 Three on-disk shapes recognised:
 
 1. ``dataset.toml`` present, ``data/<split>.jsonl`` exists → simple/data
-   (rows-with-shared-verifier). Each row becomes one Task; benchmark_dir
+   (rows-with-shared-verifier). Each row becomes one Task; dataset_dir
    is the directory itself, ``sub_dir`` is ``None``.
 
 2. ``dataset.toml`` present + sub-directories with ``task.toml`` (or
@@ -129,7 +129,7 @@ def _load_data_dataset(
                 id=str(row.get("id", idx)),
                 instruction=instruction,
                 metadata=task_metadata,
-                benchmark_dir=path,
+                dataset_dir=path,
                 sub_dir=None,
             )
         )
@@ -295,7 +295,7 @@ def _load_sandbox_dataset(
     if not task_dirs:
         raise FileNotFoundError(f"No task directories found in {path}")
 
-    tasks = [_load_task_from_dir(td, benchmark_dir=path) for td in task_dirs]
+    tasks = [_load_task_from_dir(td, dataset_dir=path) for td in task_dirs]
     return BenchmarkResult(
         tasks=tasks,
         name=config.name,
@@ -313,7 +313,7 @@ def _load_single_task(
     harness_name: str | None,
 ) -> BenchmarkResult:
     """Single task directory at the root."""
-    task = _load_task_from_dir(path, benchmark_dir=path, sub_dir=None)
+    task = _load_task_from_dir(path, dataset_dir=path, sub_dir=None)
     return BenchmarkResult(
         tasks=[task],
         name=task.id,
@@ -334,7 +334,7 @@ def _load_auto_discover(
     task_dirs = _discover_task_dirs(path)
     if not task_dirs:
         raise FileNotFoundError(f"No task directories (with task.toml) found in {path}")
-    tasks = [_load_task_from_dir(td, benchmark_dir=path) for td in task_dirs]
+    tasks = [_load_task_from_dir(td, dataset_dir=path) for td in task_dirs]
     return BenchmarkResult(
         tasks=tasks,
         name=path.name,
@@ -348,7 +348,7 @@ def _load_auto_discover(
 
 def _load_task_from_dir(
     task_dir: Path,
-    benchmark_dir: Path,
+    dataset_dir: Path,
     sub_dir: Path | None | type = ...,
 ) -> Task:
     """Load a Harbor-style task directory into the new ``rllm.types.Task``.
@@ -382,7 +382,7 @@ def _load_task_from_dir(
 
     if sub_dir is ...:
         try:
-            sub_dir = task_dir.relative_to(benchmark_dir) if task_dir != benchmark_dir else None
+            sub_dir = task_dir.relative_to(dataset_dir) if task_dir != dataset_dir else None
         except ValueError:
             sub_dir = None
 
@@ -390,7 +390,7 @@ def _load_task_from_dir(
         id=name,
         instruction=instruction,
         metadata=metadata,
-        benchmark_dir=benchmark_dir,
+        dataset_dir=dataset_dir,
         sub_dir=sub_dir,
     )
 

@@ -41,25 +41,25 @@ class PythonModuleEvaluator:
     @classmethod
     def from_module(
         cls,
-        benchmark_dir: Path,
+        dataset_dir: Path,
         module_path: str = "tests.evaluate",
         function: str = "evaluate",
     ) -> PythonModuleEvaluator:
-        """Load ``benchmark_dir/<module_path>.py`` and grab ``function``.
+        """Load ``dataset_dir/<module_path>.py`` and grab ``function``.
 
         ``module_path`` may be either dotted (``"tests.evaluate"``) or a
         path-like (``"tests/evaluate.py"``).
         """
         # Normalise to file path
         if module_path.endswith(".py"):
-            file_path = benchmark_dir / module_path
+            file_path = dataset_dir / module_path
         else:
-            file_path = benchmark_dir / (module_path.replace(".", "/") + ".py")
+            file_path = dataset_dir / (module_path.replace(".", "/") + ".py")
 
         if not file_path.exists():
             raise FileNotFoundError(f"Verifier module not found: {file_path}")
 
-        spec = importlib.util.spec_from_file_location(f"_rllm_verifier_{benchmark_dir.name}", str(file_path))
+        spec = importlib.util.spec_from_file_location(f"_rllm_verifier_{dataset_dir.name}", str(file_path))
         if spec is None or spec.loader is None:
             raise ImportError(f"Cannot load verifier from {file_path}")
         module = importlib.util.module_from_spec(spec)

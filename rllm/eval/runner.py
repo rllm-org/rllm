@@ -195,7 +195,7 @@ class EvalRunner:
                         id=str(idx),
                         instruction=str(task.get("question", task.get("instruction", ""))),
                         metadata=task,
-                        benchmark_dir=Path("."),
+                        dataset_dir=Path("."),
                     )
 
                     # Setup sandbox if needed

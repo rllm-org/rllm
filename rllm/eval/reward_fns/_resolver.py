@@ -40,7 +40,7 @@ _REWARD_FN_TO_SCORE_FN: dict[str, str] = {
 def get_verifier_system_prompt(task: Task) -> str | None:
     """Return the SYSTEM_PROMPT exported by this task's verifier module, if any.
 
-    Reads ``[verifier]`` from ``task.benchmark_dir/dataset.toml`` (or
+    Reads ``[verifier]`` from ``task.dataset_dir/dataset.toml`` (or
     ``task.toml`` if per-task), resolves the module, and returns its
     ``SYSTEM_PROMPT`` attribute. Returns ``None`` if the verifier doesn't
     expose one (e.g. shell-script verifiers).
@@ -69,8 +69,8 @@ def get_verifier_system_prompt(task: Task) -> str | None:
 def _read_verifier_config(task: Task) -> dict:
     candidates = []
     if task.sub_dir is not None:
-        candidates.append(task.benchmark_dir / task.sub_dir / "task.toml")
-    candidates.append(task.benchmark_dir / "dataset.toml")
+        candidates.append(task.dataset_dir / task.sub_dir / "task.toml")
+    candidates.append(task.dataset_dir / "dataset.toml")
     for cfg_path in candidates:
         if cfg_path.exists():
             try:

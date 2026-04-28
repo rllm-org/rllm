@@ -71,7 +71,7 @@ def _write_data_dataset(root: Path, *, verifier_block: str) -> Path:
 
 def test_runner_dispatches_to_registered_reward_fn(tmp_path, cfg):
     bench = _write_data_dataset(tmp_path, verifier_block='[verifier]\nname = "math_reward_fn"\n')
-    task = Task(id="0", instruction="x?", metadata={"ground_truth": "4"}, benchmark_dir=bench)
+    task = Task(id="0", instruction="x?", metadata={"ground_truth": "4"}, dataset_dir=bench)
 
     runner = Runner(agent_flow=_StubAgent(answer=r"\boxed{4}"))
     episode = asyncio.run(runner.run(task, cfg))
@@ -82,7 +82,7 @@ def test_runner_dispatches_to_registered_reward_fn(tmp_path, cfg):
 
 def test_runner_marks_wrong_answer_incorrect(tmp_path, cfg):
     bench = _write_data_dataset(tmp_path, verifier_block='[verifier]\nname = "math_reward_fn"\n')
-    task = Task(id="0", instruction="x?", metadata={"ground_truth": "4"}, benchmark_dir=bench)
+    task = Task(id="0", instruction="x?", metadata={"ground_truth": "4"}, dataset_dir=bench)
 
     runner = Runner(agent_flow=_StubAgent(answer=r"\boxed{5}"))
     episode = asyncio.run(runner.run(task, cfg))
@@ -101,7 +101,7 @@ def test_runner_dispatches_to_import_path(tmp_path, cfg):
         tmp_path,
         verifier_block='[verifier]\nimport_path = "rllm.eval.reward_fns.math:evaluate"\n',
     )
-    task = Task(id="0", instruction="x?", metadata={"ground_truth": "4"}, benchmark_dir=bench)
+    task = Task(id="0", instruction="x?", metadata={"ground_truth": "4"}, dataset_dir=bench)
 
     runner = Runner(agent_flow=_StubAgent(answer=r"\boxed{4}"))
     episode = asyncio.run(runner.run(task, cfg))
@@ -126,7 +126,7 @@ def test_runner_loads_python_module_verifier(tmp_path, cfg):
     bench = _write_data_dataset(tmp_path, verifier_block='[verifier]\nmodule = "tests.evaluate"\n')
     (bench / "tests").mkdir()
     (bench / "tests" / "evaluate.py").write_text(_VERIFIER_PY)
-    task = Task(id="0", instruction="x?", metadata={"ground_truth": "4"}, benchmark_dir=bench)
+    task = Task(id="0", instruction="x?", metadata={"ground_truth": "4"}, dataset_dir=bench)
 
     runner = Runner(agent_flow=_StubAgent(answer="answer is 4"))
     episode = asyncio.run(runner.run(task, cfg))
@@ -139,7 +139,7 @@ def test_runner_auto_detects_tests_evaluate_py(tmp_path, cfg):
     bench = _write_data_dataset(tmp_path, verifier_block="")
     (bench / "tests").mkdir()
     (bench / "tests" / "evaluate.py").write_text(_VERIFIER_PY)
-    task = Task(id="0", instruction="x?", metadata={"ground_truth": "5"}, benchmark_dir=bench)
+    task = Task(id="0", instruction="x?", metadata={"ground_truth": "5"}, dataset_dir=bench)
 
     runner = Runner(agent_flow=_StubAgent(answer="not 5 but 6"))
     episode = asyncio.run(runner.run(task, cfg))
@@ -164,7 +164,7 @@ class _FixedEvaluator:
 
 def test_evaluator_override_bypasses_per_task_verifier(tmp_path, cfg):
     bench = _write_data_dataset(tmp_path, verifier_block='[verifier]\nname = "math_reward_fn"\n')
-    task = Task(id="0", instruction="x?", metadata={"ground_truth": "4"}, benchmark_dir=bench)
+    task = Task(id="0", instruction="x?", metadata={"ground_truth": "4"}, dataset_dir=bench)
 
     # Per-task verifier would say wrong → 0; override says correct → 1
     override = _FixedEvaluator(EvalOutput(reward=1.0, is_correct=True))
@@ -187,7 +187,7 @@ def test_missing_verifier_raises(tmp_path, cfg):
     (bench / "data" / "test.jsonl").write_text('{"question":"x?"}\n')
     # No dataset.toml verifier block; no tests/ either
     (bench / "dataset.toml").write_text('[dataset]\nname = "bench"\n')
-    task = Task(id="0", instruction="x?", metadata={}, benchmark_dir=bench)
+    task = Task(id="0", instruction="x?", metadata={}, dataset_dir=bench)
 
     runner = Runner(agent_flow=_StubAgent())
     with pytest.raises(RuntimeError, match="No verifier configured"):
