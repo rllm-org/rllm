@@ -126,7 +126,7 @@ config = OmegaConf.merge(base, overrides)
 Or use `build_train_config()` from the CLI module and merge your overrides on top:
 
 ```python
-from rllm.experimental.cli.train import build_train_config
+from rllm.cli.train import build_train_config
 from omegaconf import OmegaConf
 
 config = build_train_config(

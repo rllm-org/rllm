@@ -1,0 +1,173 @@
+---
+title: Tasks and the Runner
+description: How rLLM models problem instances and orchestrates an agent + verifier over them
+---
+
+`Task` is the unit of work in rLLM: one problem instance — a single math row, a single sandboxed coding task — described as pure data. The `Runner` is the orchestrator that drives an [AgentFlow](/core-concepts/agentflow-evaluator) on a Task, resolves the verifier from the Task itself, and writes rewards back. There is **one code path** for both data benchmarks (gsm8k-style) and sandbox benchmarks (Harbor-style).
+
+## The Task data model
+
+```python
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+@dataclass
+class Task:
+    id: str                                          # Stable identifier
+    instruction: str | list[dict]                    # What the agent sees
+    metadata: dict[str, Any] = field(default_factory=dict)
+    dataset_dir: Path = field(default_factory=Path)  # Directory holding dataset.toml
+    sub_dir: Path | None = None                      # Per-task subdir (sandbox tasks)
+
+    @property
+    def task_dir(self) -> Path:
+        """For sandbox tasks: dataset_dir / sub_dir. Otherwise: dataset_dir."""
+        return self.dataset_dir / self.sub_dir if self.sub_dir else self.dataset_dir
+```
+
+`Task` is intentionally minimal. It says *what* the problem is and *where* its files live. It does not carry an evaluator reference, a sandbox handle, or a rendered prompt template — those are produced lazily by the Runner from on-disk config.
+
+### Instruction
+
+`instruction` is what the agent sees in the user message. Three sources, in priority order:
+
+1. `instruction.md.tpl` — a template in the dataset directory rendered with the row, supporting `{{field}}` placeholders. List-valued fields (e.g. MCQ `choices`) become a lettered block: `(A) ...\n(B) ...`.
+2. `instruction_field` — a column name declared in `dataset.toml`.
+3. `instruction.md` — a literal file (one per task directory; sandbox shape).
+
+For VLM benchmarks (`category = "vlm"` in `dataset.toml`), the loader produces a list of OpenAI-style content blocks instead of a string, with images encoded as inline data URIs.
+
+### Metadata
+
+`metadata` is the side channel between the dataset and the verifier:
+
+- **Data tasks**: the source row (or the subset of fields named in `metadata_fields`). This is where ground truth, MCQ choices, expected answer, etc. live.
+- **Sandbox tasks**: the parsed `task.toml`, plus convenience keys lifted from common sections (`workdir`, `agent_user`, `verifier_user`, `verifier_timeout`, `setup_commands`, ...).
+
+A reward function reads `task.metadata["ground_truth"]`. A sandbox verifier uses `task.task_dir` to find its files.
+
+## Two physical shapes
+
+A "benchmark" on disk is one of two shapes — both produce `list[Task]`:
+
+### 1. Rows-with-shared-verifier (gsm8k-style)
+
+```
+my-math-bench/
+├── dataset.toml                   # Declares verifier + instruction template
+├── data/
+│   └── test.jsonl                 # One row per problem
+└── instruction.md.tpl             # Optional template
+```
+
+Each row in `data/<split>.jsonl` becomes one Task. `dataset_dir` is the benchmark directory; `sub_dir` is `None`. The verifier is shared across all rows.
+
+### 2. Task-per-directory (Harbor-style sandbox)
+
+```
+my-swe-bench/
+├── dataset.toml
+├── task-001/
+│   ├── task.toml                  # Per-task config + verifier
+│   ├── instruction.md             # Per-task prompt
+│   ├── environment/               # Dockerfile, setup scripts
+│   └── tests/                     # Verifier scripts
+├── task-002/
+│   └── ...
+```
+
+Each subdirectory becomes one Task. `sub_dir` is set, so `task.task_dir` resolves to the per-task directory and the verifier finds its files there. The Runner detects whether a sandbox is needed and provisions one.
+
+## Loading a benchmark
+
+`BenchmarkLoader` autodetects the shape:
+
+```python
+from rllm.tasks import BenchmarkLoader
+
+result = BenchmarkLoader.load("./my-math-bench")
+result.tasks            # list[Task]
+result.harness_name     # Suggested AgentFlow (CLI overridable with --agent)
+result.sandbox_backend  # "docker" | "local" | "modal" | None
+```
+
+Three shapes are recognised:
+
+1. `dataset.toml` + `data/<split>.jsonl` → simple/data dataset.
+2. `dataset.toml` + subdirectories with `task.toml` (or listed under `[[tasks]]`) → sandbox dataset.
+3. Single `task.toml` at the root, or autodiscovered subdirectories with `task.toml` → still produces Tasks.
+
+Catalog datasets (gsm8k, MATH-500, MMLU, ...) materialise on first use into `~/.rllm/datasets/<name>/`, then load through the same path.
+
+## The Runner
+
+`rllm.runner.Runner` runs a single Task end-to-end:
+
+```python
+from rllm.runner import Runner
+
+runner = Runner(
+    agent_flow=my_agent_flow,
+    sandbox_backend="docker",        # Optional override
+    evaluator_override=None,         # Optional CLI-side override
+)
+episode = await runner.run(task, agent_config)
+```
+
+The pipeline:
+
+<Steps>
+  <Step title="Read verifier config">
+    Resolve the task's verifier from `task.toml` (per-task) or `dataset.toml` (shared). The `[verifier]` section names either an `import_path` (Python module) or a `name` (legacy reward-fn registry key).
+  </Step>
+
+  <Step title="Provision sandbox if needed">
+    If the task or AgentFlow requires a sandbox, build one from `task.task_dir/environment/` (Dockerfile, image, setup commands). Sandbox backends: `docker`, `local`, `modal`.
+  </Step>
+
+  <Step title="Run the AgentFlow">
+    Call `agent_flow.run(task, config)` (or `arun` if defined) to produce an Episode with one or more Trajectories.
+  </Step>
+
+  <Step title="Resolve and run the Evaluator">
+    Build an evaluator from the verifier config: a Python `evaluate` function for data tasks, or a shell-script runner for sandbox tasks. Pass it `(task, episode)` to get an `EvalOutput`.
+  </Step>
+
+  <Step title="Write rewards back">
+    Set `episode.is_correct` from the EvalOutput, and write `EvalOutput.reward` onto each trajectory so trajectories are ready for RL training.
+  </Step>
+</Steps>
+
+## Running many tasks
+
+`run_dataset` is the parallel front-end on top of Runner — it's what `rllm eval` uses internally:
+
+```python
+from rllm.eval import run_dataset
+from rllm.tasks import BenchmarkLoader
+
+result = BenchmarkLoader.load("./my-math-bench")
+
+eval_result, episodes = await run_dataset(
+    tasks=result.tasks,
+    agent_flow=my_agent,
+    base_url="http://localhost:4000",
+    model="gpt-4o-mini",
+    concurrency=64,
+    sandbox_backend=result.sandbox_backend,
+)
+print(eval_result.score, eval_result.signals)
+```
+
+Concurrency is bounded by `min(concurrency, agent_flow.max_concurrent)`. Sandboxed flows get a fresh per-task agent_flow copy so sandbox state doesn't leak.
+
+## Why this split
+
+Before this refactor, eval and training each had their own task abstraction, and sandbox tasks went through a different pipeline than data tasks. That split made it hard to share verifiers, mix shapes in one benchmark suite, or move a benchmark from "in-memory rows" to "on-disk task directories" without rewriting glue.
+
+The new model — pure-data `Task` + a single `Runner` that reads verifier config off disk — means:
+
+- Data tasks and sandbox tasks share the same Episode-producing pipeline.
+- Verifiers travel with the dataset (in `dataset.toml` / `task.toml`), not in agent code.
+- The CLI, training loop, and SDK all consume the same `Task` and `Runner`, so behaviour stays consistent across entry points.
