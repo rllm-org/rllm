@@ -194,7 +194,7 @@ class AgentFlowEngine:
                     return task_id, rollout_idx, result_idx, episode
 
                 except Exception as e:
-                    logger.error("[%s] Attempt %d/%d failed: %s", uid, retry_attempt, self.retry_limit, e)
+                    logger.error("[%s] Attempt %d/%d failed: %r (type=%s)", uid, retry_attempt, self.retry_limit, e, type(e).__name__)
                     if retry_attempt < self.retry_limit:
                         continue
 
