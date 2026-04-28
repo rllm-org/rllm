@@ -4,7 +4,6 @@ from rllm.eval.evaluator_loader import load_evaluator, resolve_evaluator_from_ca
 from rllm.eval.proxy import EvalProxyManager
 from rllm.eval.results import EvalItem, EvalResult
 from rllm.eval.runner import run_dataset
-from rllm.eval.task_spec import TaskSpec, build_task_spec
 from rllm.eval.types import EvalOutput, Signal
 from rllm.types import AgentConfig, AgentFlow, Evaluator, run_agent_flow
 
@@ -24,7 +23,5 @@ __all__ = [
     "Evaluator",
     "EvalOutput",
     "Signal",
-    "TaskSpec",
-    "build_task_spec",
     "run_agent_flow",
 ]
