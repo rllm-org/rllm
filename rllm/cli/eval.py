@@ -207,10 +207,13 @@ def _run_eval(
 
         # Docker check for Harbor tasks
         if (agent_name and agent_name.startswith("harbor:")) or (catalog_entry and catalog_entry.get("source", "").startswith("harbor:")):
-            from rllm.integrations.harbor.utils import check_docker_available
+            from rllm.integrations.harbor.utils import diagnose_docker
 
-            if not check_docker_available():
-                console.print("  [error]Harbor tasks require Docker. Make sure Docker is installed and running.[/]")
+            ok, reason, hint = diagnose_docker()
+            if not ok:
+                console.print(f"  [error]Harbor tasks require Docker — {reason}.[/]")
+                if hint:
+                    console.print(f"  [dim]{hint}[/]")
                 raise SystemExit(1)
 
         # If --agent is a harness (not a legacy catalog agent), defer agent
@@ -223,7 +226,12 @@ def _run_eval(
             _legacy_agents = set(_load_agent_catalog().get("agents", {}).keys())
         except Exception:
             _legacy_agents = set()
-        _agent_is_harness_only = bool(agent_name) and (":" in agent_name or (_is_harness(agent_name) and agent_name not in _legacy_agents))
+        # ``harbor:<scaffold>`` is a Harbor-runtime spec, not a Python
+        # ``module:attr`` import path — route it to ``load_agent`` which has
+        # a dedicated branch for it. Otherwise ``load_harness`` would try
+        # ``getattr(harbor_module, "<scaffold>")`` and fail on hyphens etc.
+        _is_harbor_agent = bool(agent_name) and agent_name.startswith("harbor:")
+        _agent_is_harness_only = bool(agent_name) and not _is_harbor_agent and (":" in agent_name or (_is_harness(agent_name) and agent_name not in _legacy_agents))
 
         if _agent_is_harness_only:
             agent = None  # Resolved post-pull below

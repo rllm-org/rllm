@@ -190,8 +190,12 @@ def _run_train(
 
         Mirrors the eval CLI so harness names (``react``, ``bash``,
         ``claude-code``) and ``module:Class`` import paths Just Work for
-        ``rllm train`` too.
+        ``rllm train`` too. ``harbor:<scaffold>`` is a Harbor-runtime spec,
+        not a Python ``module:attr`` import path — route it through
+        ``load_agent`` which knows how to materialise a ``HarborRuntime``.
         """
+        if name.startswith("harbor:"):
+            return load_agent(name)
         if ":" in name or is_harness_name(name):
             return load_harness(name)
         return load_agent(name)
@@ -274,10 +278,13 @@ def _run_train(
 
         # ---- Docker check for Harbor datasets ----
         if catalog_entry and catalog_entry.get("source", "").startswith("harbor:"):
-            from rllm.integrations.harbor.utils import check_docker_available
+            from rllm.integrations.harbor.utils import diagnose_docker
 
-            if not check_docker_available():
-                console.print("  [error]Harbor tasks require Docker. Make sure Docker is installed and running.[/]")
+            ok, reason, hint = diagnose_docker()
+            if not ok:
+                console.print(f"  [error]Harbor tasks require Docker — {reason}.[/]")
+                if hint:
+                    console.print(f"  [dim]{hint}[/]")
                 raise SystemExit(1)
 
         # ---- Resolve agent ----
