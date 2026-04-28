@@ -163,16 +163,36 @@ def _safe_eval(expression: str) -> str:
     return str(result)
 
 
+def _extract_boxed(text: str) -> str | None:
+    """Extract the contents of the last ``\\boxed{...}`` with balanced braces."""
+    idx = text.rfind(r"\boxed{")
+    if idx < 0:
+        return None
+    start = idx + len(r"\boxed{")
+    depth = 1
+    i = start
+    while i < len(text) and depth > 0:
+        c = text[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i].strip()
+        i += 1
+    return None
+
+
 def _extract_answer(text: str) -> str:
     """Try multiple patterns to extract the final answer.
 
     Order: \\boxed{} → <answer> tags → #### → "answer is X" → last number.
     """
 
-    # 1. \boxed{ANSWER}
-    m = re.search(r"\\boxed\{([^}]+)\}", text)
-    if m:
-        return m.group(1).strip()
+    # 1. \boxed{ANSWER}  (balanced braces — handles nested LaTeX like \frac{a}{b})
+    boxed = _extract_boxed(text)
+    if boxed is not None:
+        return boxed
 
     # 2. <answer>ANSWER</answer>
     m = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL)
@@ -231,7 +251,6 @@ async def math_tool_agent(task: Task, config: AgentConfig) -> Episode:
 
     steps = []
     final_answer = ""
-    used_tool = False
 
     for turn in range(MAX_TURNS):
         try:
@@ -266,7 +285,6 @@ async def math_tool_agent(task: Task, config: AgentConfig) -> Episode:
 
         # Execute any tool calls
         if tool_calls:
-            used_tool = True
             for tc in tool_calls:
                 args = json.loads(tc.function.arguments)
                 expr = args.get("expression", "")
@@ -275,11 +293,11 @@ async def math_tool_agent(task: Task, config: AgentConfig) -> Episode:
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
         else:
             # No tool calls — model produced a text response; extract answer and stop.
-            final_answer = _extract_answer(content) if used_tool else ""
+            final_answer = _extract_answer(content)
             break
 
     # If loop ended without extracting (e.g. hit MAX_TURNS), try last content
-    if not final_answer and used_tool and steps:
+    if not final_answer and steps:
         last_content = steps[-1].action or ""
         final_answer = _extract_answer(str(last_content))
 

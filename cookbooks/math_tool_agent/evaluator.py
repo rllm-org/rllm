@@ -16,7 +16,9 @@ from rllm.types import Episode
 def math_tool_evaluator(task: dict, episode: Episode) -> EvalOutput:
     """Grade the agent's answer against ground truth using symbolic math comparison."""
     answer_text = str(episode.artifacts.get("answer", ""))
-    ground_truth = str(task.get("ground_truth", ""))
+    # math500 carries the answer in `answer` and the full solution in `ground_truth`;
+    # gsm8k and others carry the answer in `ground_truth`. Prefer `answer`.
+    ground_truth = str(task.get("answer") or task.get("ground_truth") or "")
 
     is_correct = grade_answer_mathd(answer_text, ground_truth) or grade_answer_sympy(answer_text, ground_truth)
 
