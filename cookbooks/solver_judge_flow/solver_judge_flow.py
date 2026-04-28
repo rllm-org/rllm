@@ -13,8 +13,7 @@ import re
 from openai import AsyncOpenAI
 
 import rllm
-from rllm.experimental.eval.types import AgentConfig, Task
-from rllm.types import Episode, Step, Trajectory
+from rllm.types import AgentConfig, Episode, Step, Task, Trajectory
 
 N_SOLUTIONS = 2
 
@@ -22,9 +21,8 @@ N_SOLUTIONS = 2
 @rllm.rollout(name="solver-judge")
 async def solver_judge_flow(task: Task, config: AgentConfig) -> Episode:
     """AgentFlow: solver generates N solutions, judge picks the best."""
-    data = task.data
     client = AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")
-    problem = data.get("question", "")
+    problem = task.instruction
 
     # Step 1: Solver generates N solutions in parallel
     solver_trajectories = await _generate_solutions(client, config.model, problem)

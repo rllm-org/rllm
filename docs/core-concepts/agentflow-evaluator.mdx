@@ -24,18 +24,21 @@ The two arguments passed to every AgentFlow call:
 ```python
 @dataclass
 class Task:
-    data: dict                  # Raw dataset row
-    spec: TaskSpec | None       # Optional structured task specification
+    id: str                                  # Stable identifier (row index, task name, ...)
+    instruction: str | list[dict]            # What the agent sees (text or multimodal blocks)
+    metadata: dict[str, Any]                 # Ground truth, MCQ choices, parsed task.toml, ...
+    dataset_dir: Path                        # Where dataset.toml lives
+    sub_dir: Path | None                     # Per-task subdir (sandbox tasks); None for data tasks
 
 @dataclass
 class AgentConfig:
-    base_url: str               # LLM API endpoint
-    model: str                  # Model name
-    session_uid: str            # Unique session identifier
-    metadata: dict              # Extra configuration
+    base_url: str                            # LLM API endpoint
+    model: str                               # Model name
+    session_uid: str                         # Unique session identifier
+    metadata: dict                           # Extra configuration
 ```
 
-`Task` wraps a raw dataset row. Agents can use `task.spec` for structured rendering or fall back to reading `task.data` directly.
+`Task` is pure data. The instruction is rendered ahead of time (from a JSONL row, an `instruction.md` file, or an `instruction.md.tpl` template). `metadata` carries everything the verifier needs — for catalog datasets that's the source row; for sandbox tasks it's the parsed `task.toml`. See [Tasks and the Runner](/core-concepts/task-and-runner) for the loader and execution pipeline.
 
 ### Example AgentFlow
 
@@ -49,16 +52,15 @@ class MathAgentFlow:
     def run(self, task, config):
         client = OpenAI(base_url=config.base_url, api_key="unused")
 
-        question = task.data["question"]
         response = client.chat.completions.create(
             model=config.model,
-            messages=[{"role": "user", "content": question}],
+            messages=[{"role": "user", "content": task.instruction}],
         )
         answer = response.choices[0].message.content
 
-        step = Step(input=question, output=answer)
-        trajectory = Trajectory(steps=[step], task=task.data)
-        return Episode(task=task.data, trajectories=[trajectory])
+        step = Step(input=task.instruction, output=answer)
+        trajectory = Trajectory(steps=[step], output=answer)
+        return Episode(trajectories=[trajectory])
 ```
 
 ## Evaluator
@@ -68,7 +70,7 @@ An `Evaluator` scores an Episode produced by an AgentFlow. It examines the task 
 ```python
 @runtime_checkable
 class Evaluator(Protocol):
-    def evaluate(self, task: dict, episode: Episode) -> EvalOutput: ...
+    def evaluate(self, task: Task, episode: Episode) -> EvalOutput: ...
 ```
 
 ### EvalOutput
@@ -97,11 +99,11 @@ class Signal:
 A simple exact-match evaluator for math:
 
 ```python
-from rllm.experimental.eval.types import EvalOutput
+from rllm.eval.types import EvalOutput
 
 class ExactMatchEvaluator:
     def evaluate(self, task, episode):
-        expected = str(task["ground_truth"])
+        expected = str(task.metadata["ground_truth"])
         actual = episode.trajectories[0].steps[-1].output or ""
 
         # Extract boxed answer if present
@@ -115,14 +117,20 @@ class ExactMatchEvaluator:
         )
 ```
 
-### Built-in Evaluators
+In practice you rarely write a class — most rLLM evaluators are plain `evaluate(task, episode) -> EvalOutput` functions exported from a module under `rllm.eval.reward_fns`. See [Reward functions](/core-concepts/reward-functions) for the convention and how a benchmark wires one up.
 
-| Evaluator | Method | Use case |
-|-----------|--------|----------|
-| `ExactMatchEvaluator` | String comparison | Math, factoid QA |
-| `LLMJudgeEvaluator` | LLM-as-judge | Open-ended generation, summarization |
-| `BFCLEvaluator` | Function call matching | Tool-use benchmarks |
-| `IFEvalEvaluator` | Instruction-following checks | Instruction-following benchmarks |
+### Built-in reward functions
+
+A non-exhaustive selection from `rllm.eval.reward_fns`:
+
+| Module | Method | Use case |
+|--------|--------|----------|
+| `rllm.eval.reward_fns.math` | `\boxed{}` extraction + symbolic grading | Math, GSM8K, MATH-500 |
+| `rllm.eval.reward_fns.mcq` | Letter-choice match | Multiple-choice QA, MMLU |
+| `rllm.eval.reward_fns.code` | Test execution | Code generation |
+| `rllm.eval.reward_fns.llm_judge` | LLM-as-judge | Open-ended generation |
+| `rllm.eval.reward_fns.bfcl` | Function-call matching | Tool-use benchmarks |
+| `rllm.eval.reward_fns.ifeval` | Instruction-following checks | IFEval |
 
 ## How they work together
 

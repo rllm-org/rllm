@@ -7,7 +7,7 @@ symbolic expressions, and numeric formats (e.g. ``\\frac{1}{2}`` vs ``0.5``).
 from __future__ import annotations
 
 import rllm
-from rllm.experimental.eval.types import EvalOutput, Signal, _extract_agent_answer
+from rllm.eval.types import EvalOutput, Signal
 from rllm.rewards.math_utils.utils import grade_answer_mathd, grade_answer_sympy
 from rllm.types import Episode
 
@@ -15,8 +15,10 @@ from rllm.types import Episode
 @rllm.evaluator
 def math_tool_evaluator(task: dict, episode: Episode) -> EvalOutput:
     """Grade the agent's answer against ground truth using symbolic math comparison."""
-    answer_text = _extract_agent_answer(episode)
-    ground_truth = str(task.get("ground_truth", ""))
+    answer_text = str(episode.artifacts.get("answer", ""))
+    # math500 carries the answer in `answer` and the full solution in `ground_truth`;
+    # gsm8k and others carry the answer in `ground_truth`. Prefer `answer`.
+    ground_truth = str(task.get("answer") or task.get("ground_truth") or "")
 
     is_correct = grade_answer_mathd(answer_text, ground_truth) or grade_answer_sympy(answer_text, ground_truth)
 

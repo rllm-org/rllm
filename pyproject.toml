@@ -44,7 +44,7 @@ dependencies = [
 ]
 
 [project.scripts]
-rllm = "rllm.experimental.cli.main:cli"
+rllm = "rllm.cli.main:cli"
 
 [project.optional-dependencies]
 
@@ -207,7 +207,6 @@ ignore = [
 "rllm/agents/frozenlake_agent.py" = ["E501"]
 "rllm/agents/miniwob_agent.py" = ["E501"]
 "rllm/agents/webarena_agent.py" = ["E501"]
-"agenthub/frozenlake_agent/agent/agent.py" = ["E501"]
 "examples/archive/deepresearch/deepresearch_agent.py" = ["E501"]
 "examples/fully_async/deepresearch/refine_agent.py" = ["E501"]
 "examples/fully_async/deepresearch/search_agent.py" = ["E501"]
@@ -220,10 +219,11 @@ ignore = [
 "examples/sdk/solver_judge/solver_judge_flow_decorator.py" = ["E501"]
 "examples/sdk/solver_judge/solver_judge_flow_session.py" = ["E501"]
 "examples/solver_judge/solver_judge_flow.py" = ["E501"]
-"rllm/experimental/cli/main.py" = ["E501"]
+"rllm/cli/main.py" = ["E501"]
+"rllm/eval/visualizer.py" = ["E501"]
 "rllm/experimental/rllm_telemetry/examples/experiment_comparison.py" = ["E501"]
 "rllm/experimental/test_examples/opsd/math_opsd_workflow.py" = ["E501"]
-"rllm/experimental/agents/tools/file_editor_tool.py" = ["E501"]
+"rllm/harnesses/tools/file_editor_tool.py" = ["E501"]
 "rllm/rewards/math_reward.py" = ["E501"]
 "projects/finqa/fin_qa_tools.py" = ["E501"]
 "projects/finqa/scripts/data_generation/cleanup_tables.py" = ["E501"]

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from rllm.experimental.cli._pull import (
+from rllm.cli._pull import (
     _disable_image_decoding,
     _flatten_image_dicts,
     _load_transform,
@@ -56,7 +56,7 @@ class TestPullDatasetWithTransform:
     @patch("datasets.load_dataset")
     @patch("rllm.data.DatasetRegistry.register_dataset")
     def test_pull_with_field_map(self, mock_register, mock_load_dataset):
-        from rllm.experimental.cli._pull import pull_dataset
+        from rllm.cli._pull import pull_dataset
 
         # Mock HF dataset
         mock_hf = MagicMock()
@@ -81,7 +81,7 @@ class TestPullDatasetWithTransform:
     @patch("datasets.load_dataset")
     @patch("rllm.data.DatasetRegistry.register_dataset")
     def test_pull_with_hf_config(self, mock_register, mock_load_dataset):
-        from rllm.experimental.cli._pull import pull_dataset
+        from rllm.cli._pull import pull_dataset
 
         mock_hf = MagicMock()
         mock_hf.__iter__ = MagicMock(return_value=iter([]))
@@ -102,7 +102,7 @@ class TestPullDatasetWithTransform:
     @patch("datasets.load_dataset")
     @patch("rllm.data.DatasetRegistry.register_dataset")
     def test_pull_with_transform(self, mock_register, mock_load_dataset):
-        from rllm.experimental.cli._pull import pull_dataset
+        from rllm.cli._pull import pull_dataset
 
         mock_hf = MagicMock()
         mock_hf.__iter__ = MagicMock(

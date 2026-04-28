@@ -18,8 +18,9 @@ from typing import TYPE_CHECKING
 from tqdm import tqdm
 
 from rllm.agents.agent import Episode, Step, Trajectory
+from rllm.eval.types import EvalOutput
 from rllm.experimental.engine.trace_converter import compute_step_metrics, trace_record_to_step
-from rllm.experimental.eval.types import AgentConfig, EvalOutput, Task, run_agent_flow
+from rllm.types import AgentConfig, Task, run_agent_flow
 from rllm.utils import colorful_print
 from rllm.workflows.workflow import TerminationReason
 
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
     from rllm_model_gateway.models import TraceRecord
 
     from rllm.experimental.engine.gateway_manager import GatewayManager
-    from rllm.experimental.eval.types import AgentFlow, Evaluator
+    from rllm.types import AgentFlow, Evaluator
     from rllm.utils.episode_logger import EpisodeLogger
 
 logger = logging.getLogger(__name__)
@@ -193,7 +194,7 @@ class AgentFlowEngine:
                     return task_id, rollout_idx, result_idx, episode
 
                 except Exception as e:
-                    logger.error("[%s] Attempt %d/%d failed: %s", uid, retry_attempt, self.retry_limit, e)
+                    logger.error("[%s] Attempt %d/%d failed: %r (type=%s)", uid, retry_attempt, self.retry_limit, e, type(e).__name__)
                     if retry_attempt < self.retry_limit:
                         continue
 
@@ -234,7 +235,14 @@ class AgentFlowEngine:
 
         # 3. Run agent flow (prefers arun if available, else run in executor)
         logger.debug("[%s] Starting agent flow at %s", uid, session_url)
-        task_obj = Task(data=task)
+        from pathlib import Path
+
+        task_obj = Task(
+            id=str(uid),
+            instruction=str(task.get("question", task.get("instruction", ""))),
+            metadata=task,
+            dataset_dir=Path("."),
+        )
         episode = await run_agent_flow(self.agent_flow, task_obj, config, executor=self.executor)
         logger.debug("[%s] Agent flow completed, %d trajectories", uid, len(episode.trajectories))
 

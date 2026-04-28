@@ -9,8 +9,8 @@ import os
 
 import pytest
 
-from rllm.experimental.eval.config import RllmConfig, load_config, save_config
-from rllm.experimental.eval.proxy import EvalProxyManager
+from rllm.eval.config import RllmConfig, load_config, save_config
+from rllm.eval.proxy import EvalProxyManager
 
 MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY")
 

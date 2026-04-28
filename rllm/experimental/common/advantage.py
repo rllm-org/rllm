@@ -197,7 +197,7 @@ def collect_reward_and_advantage_from_trajectory_groups(
                 advantages_by_role[group_role].extend(np.asarray(advantages_by_traj).tolist())  # for metrics calculation
                 for traj, advantage in zip(traj_group.trajectories, advantages_by_traj, strict=True):
                     for step in traj.steps:
-                        step.advantage = advantage
+                        step.advantage = float(advantage)
 
     # reduce metrics by group
     final_metrics = {}

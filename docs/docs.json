@@ -64,7 +64,10 @@
             "group": "Core concepts",
             "pages": [
               "core-concepts/episodes-trajectories-steps",
+              "core-concepts/task-and-runner",
               "core-concepts/agentflow-evaluator",
+              "core-concepts/reward-functions",
+              "core-concepts/harnesses",
               "core-concepts/training"
             ]
           },

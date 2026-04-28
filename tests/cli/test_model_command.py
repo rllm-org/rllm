@@ -6,8 +6,8 @@ import os
 import pytest
 from click.testing import CliRunner
 
-from rllm.experimental.cli.main import cli
-from rllm.experimental.eval.config import RllmConfig, load_config, save_config
+from rllm.cli.main import cli
+from rllm.eval.config import RllmConfig, load_config, save_config
 
 
 @pytest.fixture
@@ -165,7 +165,7 @@ def test_model_show_with_base_url(runner, tmp_rllm_home):
 def test_model_setup_custom_provider(runner, tmp_rllm_home):
     """Setup with custom provider: provider -> base_url -> (optional key) -> model."""
     # custom is the last provider in the registry
-    from rllm.experimental.eval.config import SUPPORTED_PROVIDERS
+    from rllm.eval.config import SUPPORTED_PROVIDERS
 
     custom_idx = SUPPORTED_PROVIDERS.index("custom") + 1  # 1-based
 
@@ -186,7 +186,7 @@ def test_model_setup_custom_provider(runner, tmp_rllm_home):
 
 def test_model_setup_deepseek(runner, tmp_rllm_home):
     """Setup with deepseek provider."""
-    from rllm.experimental.eval.config import SUPPORTED_PROVIDERS
+    from rllm.eval.config import SUPPORTED_PROVIDERS
 
     ds_idx = SUPPORTED_PROVIDERS.index("deepseek") + 1
 

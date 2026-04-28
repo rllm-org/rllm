@@ -20,7 +20,7 @@ python -u train.py \
     data.max_prompt_length=8192 \
     data.max_response_length=2048 \
     rllm.trainer.total_epochs=1 \
-    rllm.trainer.test_freq=5 \
+    rllm.trainer.test_freq=10 \
     rllm.trainer.project_name=math_tool_agent \
     rllm.trainer.experiment_name=qwen3-4b-instruct \
     rllm.trainer.logger=[console,ui] \

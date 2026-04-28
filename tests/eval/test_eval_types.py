@@ -1,24 +1,27 @@
-"""Tests for eval types: protocols, AgentFlow instances, and evaluators."""
+"""Tests for the eval-side data types and protocols.
+
+The class-based ``MathEvaluator``, ``CountdownEvaluator``,
+``F1Evaluator``, ``CompoundEvaluator`` were inlined into
+``rllm.eval.reward_fns.*`` as plain ``evaluate(task, episode)``
+functions. The tests below exercise them via :func:`load_evaluator`,
+which wraps the bare functions to satisfy the :class:`Evaluator`
+protocol.
+"""
 
 from __future__ import annotations
 
 import pytest
 
-from rllm.experimental.eval.types import (
+from rllm.eval.evaluator_loader import load_evaluator
+from rllm.eval.types import EvalOutput, Signal
+from rllm.types import (
     AgentConfig,
     AgentFlow,
-    CodeEvaluator,
-    CompoundEvaluator,
-    CountdownEvaluator,
-    EvalOutput,
+    Episode,
     Evaluator,
-    F1Evaluator,
-    MathEvaluator,
-    Signal,
     Task,
-    _extract_agent_answer,
+    Trajectory,
 )
-from rllm.types import Episode, Step, Trajectory
 
 # ---------------------------------------------------------------------------
 # Protocol conformance
@@ -27,7 +30,7 @@ from rllm.types import Episode, Step, Trajectory
 
 class _DummyAgent:
     def run(self, task: Task, config: AgentConfig) -> Episode:
-        return Episode(task=task.data, trajectories=[], artifacts={"answer": "42"})
+        return Episode(task=task.metadata, trajectories=[], artifacts={"answer": "42"})
 
 
 class _DummyEvaluator:
@@ -45,54 +48,26 @@ def test_evaluator_protocol():
     assert isinstance(evaluator, Evaluator)
 
 
-def test_react_agent_is_agent_flow():
-    from rllm.experimental.agents import react_agent
+def test_react_harness_is_agent_flow():
+    from rllm.harnesses.react import ReActHarness
 
-    assert isinstance(react_agent, AgentFlow), "react_agent is not an AgentFlow"
+    assert isinstance(ReActHarness(), AgentFlow), "ReActHarness is not an AgentFlow"
 
 
 def test_builtin_evaluators_are_evaluators():
-    for cls in [MathEvaluator, CountdownEvaluator, CodeEvaluator, F1Evaluator]:
-        evaluator = cls()
-        assert isinstance(evaluator, Evaluator), f"{cls.__name__} is not an Evaluator"
+    for name in ("math_reward_fn", "countdown_reward_fn", "code_reward_fn", "f1_reward_fn"):
+        evaluator = load_evaluator(name)
+        assert isinstance(evaluator, Evaluator), f"{name} is not an Evaluator"
 
 
 # ---------------------------------------------------------------------------
-# _extract_agent_answer
-# ---------------------------------------------------------------------------
-
-
-def test_extract_answer_from_artifacts():
-    ep = Episode(artifacts={"answer": "42"})
-    assert _extract_agent_answer(ep) == "42"
-
-
-def test_extract_answer_from_trajectory_output():
-    traj = Trajectory(name="t", output="hello")
-    ep = Episode(trajectories=[traj])
-    assert _extract_agent_answer(ep) == "hello"
-
-
-def test_extract_answer_from_last_step():
-    step = Step(output="step_answer")
-    traj = Trajectory(name="t", steps=[step])
-    ep = Episode(trajectories=[traj])
-    assert _extract_agent_answer(ep) == "step_answer"
-
-
-def test_extract_answer_empty_episode():
-    ep = Episode()
-    assert _extract_agent_answer(ep) == ""
-
-
-# ---------------------------------------------------------------------------
-# MathEvaluator
+# math_reward_fn
 # ---------------------------------------------------------------------------
 
 
 class TestMathEvaluator:
     def test_correct_answer(self):
-        evaluator = MathEvaluator()
+        evaluator = load_evaluator("math_reward_fn")
         task = {"ground_truth": "4", "data_source": "test"}
         ep = Episode(artifacts={"answer": "The answer is \\boxed{4}"})
         result = evaluator.evaluate(task, ep)
@@ -100,7 +75,7 @@ class TestMathEvaluator:
         assert result.reward == 1.0
 
     def test_wrong_answer(self):
-        evaluator = MathEvaluator()
+        evaluator = load_evaluator("math_reward_fn")
         task = {"ground_truth": "4", "data_source": "test"}
         ep = Episode(artifacts={"answer": "The answer is \\boxed{5}"})
         result = evaluator.evaluate(task, ep)
@@ -108,7 +83,7 @@ class TestMathEvaluator:
         assert result.reward == 0.0
 
     def test_no_boxed_answer(self):
-        evaluator = MathEvaluator()
+        evaluator = load_evaluator("math_reward_fn")
         task = {"ground_truth": "4", "data_source": "test"}
         ep = Episode(artifacts={"answer": "The answer is 4"})
         result = evaluator.evaluate(task, ep)
@@ -116,14 +91,14 @@ class TestMathEvaluator:
         assert result.reward == 0.0
 
     def test_no_ground_truth(self):
-        evaluator = MathEvaluator()
+        evaluator = load_evaluator("math_reward_fn")
         task = {"data_source": "test"}
         ep = Episode(artifacts={"answer": "\\boxed{4}"})
         result = evaluator.evaluate(task, ep)
         assert result.is_correct is False
 
     def test_signals_present(self):
-        evaluator = MathEvaluator()
+        evaluator = load_evaluator("math_reward_fn")
         task = {"ground_truth": "4", "data_source": "test"}
         ep = Episode(artifacts={"answer": "\\boxed{4}"})
         result = evaluator.evaluate(task, ep)
@@ -132,13 +107,13 @@ class TestMathEvaluator:
 
 
 # ---------------------------------------------------------------------------
-# CountdownEvaluator
+# countdown_reward_fn
 # ---------------------------------------------------------------------------
 
 
 class TestCountdownEvaluator:
     def test_correct_countdown(self):
-        evaluator = CountdownEvaluator()
+        evaluator = load_evaluator("countdown_reward_fn")
         task = {"target": 10, "nums": [2, 3, 5]}
         ep = Episode(artifacts={"answer": "<answer>2 + 3 + 5</answer>"})
         result = evaluator.evaluate(task, ep)
@@ -146,14 +121,14 @@ class TestCountdownEvaluator:
         assert result.reward == 1.0
 
     def test_wrong_countdown(self):
-        evaluator = CountdownEvaluator()
+        evaluator = load_evaluator("countdown_reward_fn")
         task = {"target": 10, "nums": [2, 3, 5]}
         ep = Episode(artifacts={"answer": "<answer>2 + 3</answer>"})
         result = evaluator.evaluate(task, ep)
         assert result.is_correct is False
 
     def test_missing_target(self):
-        evaluator = CountdownEvaluator()
+        evaluator = load_evaluator("countdown_reward_fn")
         task = {"nums": [2, 3, 5]}
         ep = Episode(artifacts={"answer": "<answer>2 + 3 + 5</answer>"})
         result = evaluator.evaluate(task, ep)
@@ -161,13 +136,13 @@ class TestCountdownEvaluator:
 
 
 # ---------------------------------------------------------------------------
-# F1Evaluator
+# f1_reward_fn
 # ---------------------------------------------------------------------------
 
 
 class TestF1Evaluator:
     def test_exact_match(self):
-        evaluator = F1Evaluator()
+        evaluator = load_evaluator("f1_reward_fn")
         task = {"ground_truth": "Shakespeare"}
         ep = Episode(artifacts={"answer": "Shakespeare"})
         result = evaluator.evaluate(task, ep)
@@ -175,7 +150,7 @@ class TestF1Evaluator:
         assert result.is_correct is True
 
     def test_partial_match(self):
-        evaluator = F1Evaluator()
+        evaluator = load_evaluator("f1_reward_fn")
         task = {"ground_truth": "William Shakespeare"}
         ep = Episode(artifacts={"answer": "Shakespeare wrote Hamlet"})
         result = evaluator.evaluate(task, ep)
@@ -183,7 +158,7 @@ class TestF1Evaluator:
         assert result.is_correct is True
 
     def test_no_match(self):
-        evaluator = F1Evaluator()
+        evaluator = load_evaluator("f1_reward_fn")
         task = {"ground_truth": "Shakespeare"}
         ep = Episode(artifacts={"answer": "Dickens"})
         result = evaluator.evaluate(task, ep)
@@ -191,54 +166,18 @@ class TestF1Evaluator:
         assert result.is_correct is False
 
     def test_empty_prediction(self):
-        evaluator = F1Evaluator()
+        evaluator = load_evaluator("f1_reward_fn")
         task = {"ground_truth": "Shakespeare"}
         ep = Episode(artifacts={"answer": ""})
         result = evaluator.evaluate(task, ep)
         assert result.reward == 0.0
 
     def test_signals(self):
-        evaluator = F1Evaluator()
+        evaluator = load_evaluator("f1_reward_fn")
         task = {"ground_truth": "hello world"}
         ep = Episode(artifacts={"answer": "hello world"})
         result = evaluator.evaluate(task, ep)
         assert any(s.name == "f1" for s in result.signals)
-
-
-# ---------------------------------------------------------------------------
-# CompoundEvaluator
-# ---------------------------------------------------------------------------
-
-
-class TestCompoundEvaluator:
-    def test_weighted_average(self):
-        e1 = _DummyEvaluator()  # reward=1.0
-        e2 = _FixedEvaluator(0.5)
-        compound = CompoundEvaluator([(e1, 1.0), (e2, 1.0)])
-        task = {}
-        ep = Episode()
-        result = compound.evaluate(task, ep)
-        assert result.reward == pytest.approx(0.75)
-
-    def test_any_correct(self):
-        e1 = _FixedEvaluator(0.0, is_correct=False)
-        e2 = _FixedEvaluator(1.0, is_correct=True)
-        compound = CompoundEvaluator([(e1, 1.0), (e2, 1.0)])
-        result = compound.evaluate({}, Episode())
-        assert result.is_correct is True
-
-
-class _FixedEvaluator:
-    def __init__(self, reward: float, is_correct: bool | None = None):
-        self._reward = reward
-        self._is_correct = is_correct if is_correct is not None else (reward > 0)
-
-    def evaluate(self, task: dict, episode: Episode) -> EvalOutput:
-        return EvalOutput(
-            reward=self._reward,
-            is_correct=self._is_correct,
-            signals=[Signal(name="test", value=self._reward)],
-        )
 
 
 # ---------------------------------------------------------------------------

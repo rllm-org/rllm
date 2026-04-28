@@ -1,0 +1,155 @@
+---
+title: Reward functions
+description: How rLLM verifies agent output — the evaluate(task, episode) convention and how a benchmark wires it up
+---
+
+Most rLLM verifiers are **plain functions**: a module that exports `evaluate(task: Task, episode: Episode) -> EvalOutput`. They live under `rllm.eval.reward_fns` (built-ins) or in a benchmark's own directory (`tests/evaluate.py`). The same function powers both eval scoring and RL reward — there is no separate "reward" vs "evaluator" code path.
+
+## The convention
+
+Every reward function has the same shape:
+
+```python
+from rllm.eval.types import EvalOutput, Signal
+from rllm.types import Task, Episode
+
+SYSTEM_PROMPT = "Put your final answer in \\boxed{} notation."
+
+def evaluate(task: Task, episode: Episode) -> EvalOutput:
+    answer_text = episode.trajectories[0].output or ""
+    truth = task.metadata["ground_truth"]
+
+    is_correct = grade(answer_text, truth)
+    return EvalOutput(
+        reward=1.0 if is_correct else 0.0,
+        is_correct=is_correct,
+        signals=[Signal(name="accuracy", value=1.0 if is_correct else 0.0)],
+    )
+```
+
+Two things matter:
+
+- **`evaluate(task, episode) → EvalOutput`** is the contract. The Runner calls it once per Task and writes `reward` back onto each trajectory.
+- **`SYSTEM_PROMPT`** (optional, module-level) describes the output format the grader expects. Harnesses inject it into their system prompt so the model produces parseable output. Without this, a math harness might silently grade "the answer is 42" as wrong because the grader expects `\boxed{42}`.
+
+## Built-in reward functions
+
+`rllm.eval.reward_fns` ships graders for common benchmark shapes:
+
+| Module | Grades | Used by |
+|--------|--------|---------|
+| `math` | `\boxed{}` extraction + symbolic equivalence | gsm8k, MATH-500, hendrycks_math, deepscaler |
+| `mcq` | Single-letter choice match | MMLU, HellaSwag, ARC |
+| `code` | Test execution | HumanEval, MBPP |
+| `f1` | Token-level F1 | TriviaQA, NaturalQuestions |
+| `countdown` | Arithmetic puzzle solver check | Countdown |
+| `bfcl` | Function-call signature matching | BFCL |
+| `ifeval` | Instruction-following constraint checks | IFEval |
+| `llm_judge` | LLM-as-judge | Open-ended generation |
+| `llm_equality` | LLM-graded equivalence | Free-form QA |
+| `translation` | BLEU / chrF | MT benchmarks |
+| `widesearch` | Source-grounded checks | Wide-search agents |
+| `iou`, `point_in_mask`, `depth` | Vision metrics | VLM benchmarks |
+
+Each module is a few-dozen-line wrapper around the heavier `rllm.rewards` infrastructure. The wrappers stay tiny on purpose — they exist to satisfy the `evaluate(task, episode)` contract, declare a `SYSTEM_PROMPT`, and pass through to the canonical grading logic.
+
+## Wiring a verifier into a benchmark
+
+A benchmark declares its verifier in `dataset.toml` (data tasks) or `task.toml` (sandbox tasks):
+
+### Built-in reward function
+
+```toml
+# dataset.toml
+[dataset]
+name = "my-math-bench"
+type = "simple"
+
+[verifier]
+import_path = "rllm.eval.reward_fns.math:evaluate"
+```
+
+Or, equivalently, the legacy short form:
+
+```toml
+[verifier]
+name = "math_reward_fn"
+```
+
+### Custom reward function
+
+Drop a `tests/evaluate.py` next to your dataset:
+
+```
+my-bench/
+├── dataset.toml
+├── data/test.jsonl
+└── tests/
+    └── evaluate.py        # def evaluate(task, episode): ...
+```
+
+```toml
+# dataset.toml
+[verifier]
+import_path = "tests.evaluate:evaluate"
+```
+
+The Runner imports the module relative to the dataset directory and calls its `evaluate` function. You can reuse helpers from `rllm.eval.reward_fns` — for example, import its boxed-answer extraction so you don't reinvent it.
+
+### Shell-script verifier (sandbox tasks)
+
+For Harbor-style sandbox tasks, the verifier is typically a shell script that runs inside the sandbox:
+
+```toml
+# task.toml
+[verifier]
+script = "tests/test.sh"
+timeout_sec = 600
+```
+
+The Runner copies the script into the sandbox after the agent finishes, runs it as the verifier user, and grades by exit code (0 = pass, non-zero = fail).
+
+## How the system-prompt hint flows
+
+The `SYSTEM_PROMPT` constant on a reward function is how a verifier tells the harness what output format it expects:
+
+<Steps>
+  <Step title="Reward function declares the format">
+    `rllm.eval.reward_fns.math` exports `SYSTEM_PROMPT = "Put your final answer in \\boxed{}"`.
+  </Step>
+
+  <Step title="Dataset names the verifier">
+    `dataset.toml` has `[verifier] import_path = "rllm.eval.reward_fns.math:evaluate"`.
+  </Step>
+
+  <Step title="Harness reads the hint">
+    `ReActHarness` calls `get_verifier_system_prompt(task)`, which loads the verifier module and returns its `SYSTEM_PROMPT`.
+  </Step>
+
+  <Step title="Hint joins the system prompt">
+    The harness appends the hint to its own system prompt. The model now produces `\boxed{42}` instead of "the answer is 42".
+  </Step>
+</Steps>
+
+The point: the *grader* declares the format, not the harness. Swapping a benchmark from `\boxed{}`-style to letter-choice-style is a one-line `import_path` change in `dataset.toml`, with no harness modifications.
+
+## Loading a reward function programmatically
+
+Outside the CLI — e.g. when wiring a reward function into a custom training loop — use `load_evaluator`:
+
+```python
+from rllm.eval import load_evaluator, resolve_evaluator_from_catalog
+
+# By legacy registry name
+evaluator = load_evaluator("math_reward_fn")
+
+# By module path
+evaluator = load_evaluator("rllm.eval.reward_fns.math:evaluate")
+
+# Resolved from a benchmark's catalog metadata
+evaluator = resolve_evaluator_from_catalog("gsm8k")
+
+eval_output = evaluator.evaluate(task, episode)
+```
+
+`load_evaluator` returns an object that satisfies the [Evaluator protocol](/core-concepts/agentflow-evaluator). Whether the underlying source is a function or a class, the call site is the same.

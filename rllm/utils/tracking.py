@@ -101,7 +101,7 @@ class Tracking:
             try:
                 import os as _os
 
-                from rllm.experimental.eval.config import load_ui_config
+                from rllm.eval.config import load_ui_config
 
                 ui_config = load_ui_config()
                 has_key = bool(_os.getenv("RLLM_API_KEY") or ui_config.get("ui_api_key"))
@@ -334,7 +334,7 @@ class UILogger:
 
         self.logger = logging.getLogger(__name__)
         self.session_type = session_type
-        from rllm.experimental.eval.config import load_ui_config
+        from rllm.eval.config import load_ui_config
 
         ui_config = load_ui_config()
         api_key = os.getenv("RLLM_API_KEY") or ui_config.get("ui_api_key")
@@ -506,19 +506,43 @@ class UILogger:
         episodes_payloads = None
         if episodes:
             try:
-                _STEP_DROP_KEYS = {"prompt_ids", "response_ids", "logprobs", "model_output"}
+                # The UI backend accepts the base Step schema:
+                # id, input, output, action, reward, done, metadata.
+                # Training Steps add extra fields (chat_completions, thought,
+                # model_response, observation, prompt_ids, etc.) that cause
+                # 500 errors. Fold useful extras into metadata so nothing
+                # is lost.
+                _BASE_STEP_KEYS = {"id", "input", "output", "action", "reward", "done", "metadata"}
+                _PROMOTE_TO_METADATA = {"thought", "model_response", "observation"}
                 episodes_payloads = []
                 for episode in episodes:
-                    ep = episode.to_dict() if hasattr(episode, "to_dict") else episode.model_dump()
+                    ep = episode.model_dump(mode="json") if hasattr(episode, "model_dump") else episode.to_dict()
                     ep["session_id"] = self.session_id
                     ep["session_type"] = self.session_type
                     ep["step"] = step
                     ep["episode_id"] = ep.pop("id")
                     for traj in ep.get("trajectories", []):
                         for s in traj.get("steps", []):
-                            for key in _STEP_DROP_KEYS:
-                                s.pop(key, None)
-                    episodes_payloads.append(json.loads(json.dumps(ep, default=self._json_serializer)))
+                            # Fold useful training fields into metadata
+                            meta = s.get("metadata") or {}
+                            for key in _PROMOTE_TO_METADATA:
+                                val = s.get(key)
+                                if val:
+                                    # Truncate large values (chat_completions
+                                    # can be huge for multi-turn agents)
+                                    if key == "chat_completions":
+                                        meta[key] = val[-3:]  # keep last 3 messages
+                                    else:
+                                        sval = str(val)
+                                        meta[key] = sval[:2000] if len(sval) > 2000 else val
+                            if meta:
+                                s["metadata"] = meta
+                            # Strip everything not in the base schema
+                            for key in list(s.keys()):
+                                if key not in _BASE_STEP_KEYS:
+                                    del s[key]
+                    serialized = json.dumps(ep, default=self._json_serializer)
+                    episodes_payloads.append(json.loads(serialized))
                 self.logger.info(f"Queueing {len(episodes_payloads)} episodes to send to UI [step {step}]")
             except Exception as e:
                 self.logger.warning(f"Failed to serialize episodes: {e}")
@@ -553,7 +577,7 @@ class UILogger:
         """Post an EvalResult to the UI backend.
 
         Args:
-            result: An EvalResult dataclass from rllm.experimental.eval.results
+            result: An EvalResult dataclass from rllm.eval.results
         """
         if self.session_id is None:
             return
@@ -603,13 +627,17 @@ class UILogger:
         if self.session_id is None:
             return
 
-        # Drain the log queue and stop worker
+        # Drain the log queue BEFORE completing the session.  The sentinel
+        # tells the worker to exit after processing all preceding items.
+        # We must NOT set _worker_stop first — that causes the worker to
+        # exit on the next empty-queue timeout, potentially before it
+        # processes queued episodes.
         if hasattr(self, "_worker_thread"):
-            self._worker_stop.set()
-            self._queue.put(None)  # sentinel
+            self._queue.put(None)  # sentinel: worker exits after draining
             self._worker_thread.join(timeout=30)
             if self._worker_thread.is_alive():
                 self.logger.warning("UILogger worker thread did not finish within 30s")
+                self._worker_stop.set()  # force-stop only if join timed out
 
         # Stop heartbeat thread
         self._heartbeat_stop.set()
@@ -630,13 +658,7 @@ class UILogger:
         except Exception as e:
             self.logger.warning(f"Failed to complete session: {e}")
         finally:
-            # Drain the log queue and stop worker
-            if hasattr(self, "_worker_thread"):
-                self._worker_stop.set()
-                self._queue.put(None)  # sentinel
-                self._worker_thread.join(timeout=30)
-                if self._worker_thread.is_alive():
-                    self.logger.warning("UILogger worker thread did not finish within 30s")
+            self._worker_stop.set()
             self.client.close()
 
 
