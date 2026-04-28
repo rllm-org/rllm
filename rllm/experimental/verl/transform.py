@@ -439,11 +439,11 @@ def _compute_merge_metrics(accumulated: AccumulatedData, total_agent_steps: int)
     if not accumulated.responses:
         return {}
 
-    import numpy as _np
-
     # Each row's step_id is trajectory.uid (set by _process_trajectory),
     # so counting occurrences gives rows-per-trajectory.
     from collections import Counter
+
+    import numpy as _np
 
     rows_per_traj = list(Counter(accumulated.step_ids).values())
     response_lens = [int(r.numel()) for r in accumulated.responses]
@@ -464,9 +464,7 @@ def _compute_merge_metrics(accumulated: AccumulatedData, total_agent_steps: int)
         "batch/action_token_ratio/mean": float(_np.mean(action_token_ratios)) if action_token_ratios else 0.0,
         "batch/action_token_ratio/min": float(_np.min(action_token_ratios)) if action_token_ratios else 0.0,
         "batch/action_token_ratio/max": float(_np.max(action_token_ratios)) if action_token_ratios else 0.0,
-        "batch/merge_compression_ratio": (
-            total_agent_steps / total_emitted_rows if total_emitted_rows > 0 else 0.0
-        ),
+        "batch/merge_compression_ratio": (total_agent_steps / total_emitted_rows if total_emitted_rows > 0 else 0.0),
     }
 
 

@@ -218,8 +218,6 @@ def transform_trajectory_groups_to_datums(
         adv_metrics["batch/action_token_ratio/mean"] = _np.mean(action_token_ratios)
         adv_metrics["batch/action_token_ratio/min"] = _np.min(action_token_ratios)
         adv_metrics["batch/action_token_ratio/max"] = _np.max(action_token_ratios)
-        adv_metrics["batch/merge_compression_ratio"] = (
-            total_agent_steps / total_emitted_rows if total_emitted_rows > 0 else 0.0
-        )
+        adv_metrics["batch/merge_compression_ratio"] = total_agent_steps / total_emitted_rows if total_emitted_rows > 0 else 0.0
 
     return (datums if not algorithm_config.estimator_map else datums_dict), adv_metrics
