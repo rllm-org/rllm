@@ -5,9 +5,7 @@ These tests verify that trajectories are correctly converted to Tinker Datum obj
 especially the logic for merging consecutive steps that share a prefix relationship.
 """
 
-from dataclasses import dataclass
 from typing import Literal
-from unittest.mock import MagicMock
 
 import pytest
 import tinker
@@ -21,22 +19,6 @@ from rllm.trainer.tinker.transform import (
 )
 
 # =============================================================================
-# Mock Types
-# =============================================================================
-
-
-@dataclass
-class MockSampledSequence:
-    """Mock SampledSequence that mimics tinker's SampledSequence interface."""
-
-    tokens: list[int]
-    logprobs: list[float]
-
-    def __post_init__(self):
-        assert len(self.tokens) == len(self.logprobs), "tokens and logprobs must have same length"
-
-
-# =============================================================================
 # Helper Functions
 # =============================================================================
 
@@ -47,18 +29,18 @@ def make_step(
     response_logprobs: list[float] | None = None,
     advantage: float | list[float] = 1.0,
 ) -> Step:
-    """Helper to create a Step with mock TinkerTokenOutput."""
+    """Helper to create a Step populated as ``trajectory_to_datums`` expects."""
     if response_logprobs is None:
         response_logprobs = [0.1] * len(response_tokens)
 
-    mock_output = MockSampledSequence(tokens=response_tokens, logprobs=response_logprobs)
+    assert len(response_tokens) == len(response_logprobs), "tokens and logprobs must have same length"
 
-    step = Step(
+    return Step(
         prompt_ids=prompt_ids,
-        response_ids=mock_output,
+        response_ids=response_tokens,
+        logprobs=response_logprobs,
         advantage=advantage,
     )
-    return step
 
 
 def make_image_chunk(expected_tokens: int = 256, data: bytes = b"image_data", format: Literal["png", "jpeg"] = "png") -> ImageChunk:
@@ -389,7 +371,8 @@ class TestTrajectoryToDataWithChunks:
         chunk = tinker.EncodedTextChunk(tokens=[1, 2, 3])
         step = Step(
             prompt_ids=[chunk, 4, 5],  # Flattens to [1, 2, 3, 4, 5]
-            response_ids=MockSampledSequence(tokens=[6, 7], logprobs=[-0.1, -0.2]),
+            response_ids=[6, 7],
+            logprobs=[-0.1, -0.2],
             advantage=0.5,
         )
         trajectory = Trajectory(steps=[step])
@@ -414,7 +397,8 @@ class TestTrajectoryToDataWithChunks:
         img_chunk = make_image_chunk(expected_tokens=3)  # Occupies 3 token positions
         step = Step(
             prompt_ids=[1, img_chunk, 2],  # 1 + 3 (image) + 1 = 5 token positions
-            response_ids=MockSampledSequence(tokens=[10, 11], logprobs=[-0.1, -0.2]),
+            response_ids=[10, 11],
+            logprobs=[-0.1, -0.2],
             advantage=0.5,
         )
         trajectory = Trajectory(steps=[step])
@@ -495,7 +479,8 @@ class TestTrajectoryToDataEdgeCases:
         """If advantage list length doesn't match response tokens, should raise."""
         step = Step(
             prompt_ids=[1, 2, 3],
-            response_ids=MockSampledSequence(tokens=[4, 5, 6], logprobs=[-0.1, -0.2, -0.3]),
+            response_ids=[4, 5, 6],
+            logprobs=[-0.1, -0.2, -0.3],
             advantage=[0.5, 0.6],  # Only 2 elements, but 3 response tokens
         )
         trajectory = Trajectory(steps=[step])
@@ -504,26 +489,24 @@ class TestTrajectoryToDataEdgeCases:
             trajectory_to_datums(trajectory)
 
     def test_missing_logprobs_raises(self):
-        """If logprobs is None, should raise."""
-        mock_output = MagicMock()
-        mock_output.logprobs = None
-        mock_output.tokens = [4, 5]
-
+        """If logprobs is empty, should raise."""
         step = Step(
             prompt_ids=[1, 2, 3],
-            response_ids=mock_output,
+            response_ids=[4, 5],
+            logprobs=[],
             advantage=0.5,
         )
         trajectory = Trajectory(steps=[step])
 
-        with pytest.raises(AssertionError, match="logprobs is None"):
+        with pytest.raises(AssertionError, match="logprobs is empty"):
             trajectory_to_datums(trajectory)
 
     def test_missing_advantage_raises(self):
         """If advantage is None, should raise."""
         step = Step(
             prompt_ids=[1, 2, 3],
-            response_ids=MockSampledSequence(tokens=[4, 5], logprobs=[-0.1, -0.2]),
+            response_ids=[4, 5],
+            logprobs=[-0.1, -0.2],
             advantage=None,
         )
         trajectory = Trajectory(steps=[step])

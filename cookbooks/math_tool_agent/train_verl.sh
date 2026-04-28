@@ -19,8 +19,8 @@ python -u train.py \
     rllm.algorithm.use_rllm=true \
     data.train_batch_size=32 \
     data.val_batch_size=256 \
-    data.max_prompt_length=4096 \
-    data.max_response_length=2048 \
+    data.max_prompt_length=2048 \
+    data.max_response_length=20480 \
     +model.name=$MODEL_PATH \
     actor_rollout_ref.model.path=$MODEL_PATH \
     +actor_rollout_ref.model.lora.rank=32 \
@@ -30,7 +30,7 @@ python -u train.py \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.ppo_mini_batch_size=64 \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384 \
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=32768 \
     actor_rollout_ref.actor.fsdp_config.param_offload=true \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=true \
     actor_rollout_ref.actor.use_kl_loss=False \
