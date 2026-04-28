@@ -1,0 +1,162 @@
+---
+title: Introduction to rLLM
+description: Train your AI agents with RL. Any framework. Minimal code changes.
+---
+
+<div align="center">
+  <h1>rLLM</h1>
+  <p>Train your AI agents with RL. Any framework. Minimal code changes.</p>
+</div>
+
+rLLM is an open-source framework for training AI agents with reinforcement learning. Swap in a tracked client, define a reward function, and let RL handle the rest — no matter what agent framework you use.
+
+## Why rLLM?
+
+rLLM works with **any agent framework** — LangGraph, SmolAgents, Strands, OpenAI Agents SDK, Google ADK, or plain `openai.OpenAI`. Just swap the client. Add `@rllm.rollout` to wrap your agent code, and rLLM traces every LLM call automatically. The framework has powered state-of-the-art agents including:
+
+- **[rLLM-FinQA-4B](https://rllm-project.com/blog)**: A 4B financial analysis agent that outperforms Qwen3-235B (59.7% vs 51.4%) and rivals Gemini 2.5 Pro on Snorkel Finance Benchmark
+- **[DeepSWE](https://pretty-radio-b75.notion.site/DeepSWE-Training-a-Fully-Open-sourced-State-of-the-Art-by-Scaling-RL-22281902c1468193aabbe9a8c59bbe33)**: A 32B software engineering agent achieving 59% on SWEBench-Verified
+- **[DeepCoder-14B](https://pretty-radio-b75.notion.site/DeepCoder-A-Fully-Open-Source-14B-Coder-at-O3-mini-Level-1cf81902c14680b3bee5eb349a512a51)**: A 14B coding model achieving 60.6% on LiveCodeBench, matching o3-mini performance
+- **[DeepScaleR-1.5B](https://pretty-radio-b75.notion.site/DeepScaleR-Surpassing-O1-Preview-with-a-1-5B-Model-by-Scaling-RL-19681902c1468005bed8ca303013a4e2)**: A 1.5B model surpassing O1-Preview with 43.1% on AIME
+
+rLLM is also used by a growing community of researchers and teams building on top of the framework:
+
+<CardGroup cols={3}>
+  <Card title="Tongyi DeepResearch" icon="flask" href="/projects/tongyi-deep-research">
+    Open-source AI research assistant by Alibaba NLP
+  </Card>
+  <Card title="PettingLLMs" icon="users" href="/projects/petting-llms">
+    Multi-agent RL for language systems
+  </Card>
+  <Card title="V1" icon="scale-balanced" href="/projects/v1-parallel-reasoners">
+    Pairwise self-verification for parallel reasoners
+  </Card>
+  <Card title="SETA" icon="server" href="/projects/seta">
+    Scaling environments for terminal agent training
+  </Card>
+  <Card title="Terminal-Bench-RL" icon="terminal" href="/projects/terminal-bench-rl">
+    Training long-horizon terminal agents with RL
+  </Card>
+  <Card title="LLM-in-Sandbox" icon="box" href="/projects/llm-in-sandbox">
+    Building general agents by running LLMs in a sandbox
+  </Card>
+  <Card title="Experiential RL" icon="brain" href="/projects/experiential-rl">
+    Experience-reflection-consolidation training loop
+  </Card>
+  <Card title="Cogito, Ergo Ludo" icon="gamepad" href="/projects/cogito-ergo-ludo">
+    An agent that learns to play by reasoning and planning
+  </Card>
+</CardGroup>
+
+<Card title="View all projects" icon="arrow-right" href="/projects/finqa">
+  See the full list of projects and case studies built with rLLM
+</Card>
+
+## The rLLM CLI
+
+The fastest way to use rLLM is through its command-line interface. Evaluate any model on 50+ benchmarks and launch RL training with a single command:
+
+```bash
+rllm model setup              # Configure your model provider
+rllm eval gsm8k                # Evaluate on a benchmark
+rllm train gsm8k --model Qwen/Qwen3-8B   # Train with RL
+rllm init my-agent             # Scaffold a custom agent
+```
+
+Datasets are auto-pulled from HuggingFace, agents and evaluators are resolved from the catalog, and a local LiteLLM proxy handles API routing — no boilerplate required.
+
+<Card title="CLI quick start" icon="terminal" href="/quickstart-cli">
+  Go from zero to evaluation and training in 5 minutes
+</Card>
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Works with any agent framework" icon="plug">
+    LangGraph, SmolAgents, Strands, OpenAI Agents SDK, Google ADK, or plain `openai.OpenAI` — just swap the client
+  </Card>
+
+  <Card title="Near-zero code changes" icon="wand-magic-sparkles">
+    Add `@rllm.rollout` to wrap your agent code, and rLLM traces every LLM call automatically
+  </Card>
+
+  <Card title="CLI-first workflow" icon="terminal">
+    Evaluate, train, and scaffold agents from the command line with 50+ built-in benchmarks
+  </Card>
+
+  <Card title="Battle-tested results" icon="chart-line">
+    rLLM-trained agents beat models 50x their size — 4B outperforms 235B on finance, 1.5B surpasses O1-Preview on math
+  </Card>
+
+  <Card title="Multiple RL algorithms" icon="brain">
+    GRPO, REINFORCE, RLOO, rejection sampling, and more — pick the algorithm that fits your task
+  </Card>
+
+  <Card title="Two training backends" icon="server">
+    `verl` for distributed multi-GPU training, `tinker` for single-machine / CPU setups — same API either way
+  </Card>
+
+  <Card title="Advanced training features" icon="sparkles">
+    LoRA training, VLM support, rejection sampling, and multi-agent workflows out of the box
+  </Card>
+
+  <Card title="Production ready" icon="shield-check">
+    Battle-tested in real-world deployments with Docker support and comprehensive documentation
+  </Card>
+</CardGroup>
+
+## How it works
+
+rLLM follows a simple pipeline: **run your agent → collect traces → compute rewards → update the model**.
+
+Your agent runs as-is — rLLM's SDK intercepts LLM calls and structures them into **Episodes** (one task) containing **Trajectories** (one agent run) made of **Steps** (one LLM call). A reward function scores the result, and the RL algorithm updates the model weights. The same agent code works for both eval and training.
+
+Under the hood:
+1. **Workflow Engine** runs N parallel agent instances to collect rollouts
+2. **LiteLLM Proxy** routes requests and captures token IDs + logprobs
+3. **Transform Pipeline** groups trajectories for advantage computation
+4. **Training Backend** (`verl` or `tinker`) handles the policy update
+
+## Get started
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install rLLM with pip, uv, or Docker in minutes
+  </Card>
+
+  <Card title="CLI quick start" icon="terminal" href="/quickstart-cli">
+    Evaluate and train from the command line in 5 minutes
+  </Card>
+
+  <Card title="Core concepts" icon="book" href="/core-concepts/episodes-trajectories-steps">
+    Learn about agents, environments, and the execution engine
+  </Card>
+
+  <Card title="Examples" icon="bolt" href="/examples/math-agent">
+    Build a math reasoning agent with tools
+  </Card>
+</CardGroup>
+
+## Community and support
+
+<CardGroup cols={2}>
+  <Card title="Slack" icon="slack" href="https://join.slack.com/t/rllmproject/shared_invite/zt-3pyblo6ef-m9kqAoInI8xSyUBkpuOyXA">
+    Join our community to ask questions and share your projects
+  </Card>
+  
+  <Card title="GitHub" icon="github" href="https://github.com/rllm-org/rllm">
+    Contribute to the project, report issues, or browse the source code
+  </Card>
+  
+  <Card title="Blog" icon="newspaper" href="https://rllm-project.com/blog">
+    Read about the latest releases, research, and use cases
+  </Card>
+  
+  <Card title="Twitter/X" icon="x-twitter" href="https://x.com/rllm_project">
+    Follow us for updates and announcements
+  </Card>
+</CardGroup>
+
+## Built by Berkeley Sky Computing Lab
+
+rLLM is developed as part of [Berkeley Sky Computing Lab](https://sky.cs.berkeley.edu/) and generously supported by grants from Laude Institute, AWS, Hyperbolic, Fireworks AI, and Modal, with special thanks to Together AI for research partnership and compute support. We also thank the [Mintlify OSS Program](https://www.mintlify.com/oss-program) for making this beautiful documentation website possible.

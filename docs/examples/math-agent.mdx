@@ -1,0 +1,184 @@
+---
+title: Math Agent with Python Tools
+description: Train an agent to solve math problems using Python code execution
+---
+
+This example demonstrates how to build and train a math reasoning agent that can use Python tools to solve complex mathematical problems. The agent learns to write and execute Python code to compute accurate solutions.
+
+## Overview
+
+The math tool agent demonstrates:
+- How to use rLLM's `ToolAgent` for tool-based reasoning
+- Integration with Python interpreter for code execution
+- Training on mathematical competition datasets (AIME 2024)
+- Evaluating performance with Pass@K metrics
+
+## Prerequisites
+
+- rLLM framework installed
+- vLLM or SGLang for model serving
+- Base model: `Qwen/Qwen3-4B` (or similar)
+
+## Setup
+
+<Steps>
+  <Step title="Prepare the dataset">
+    First, download and prepare the AIME 2024 and DeepScaleR math datasets:
+
+    ```bash
+    cd examples/math_tool
+    python prepare_math_data.py
+    ```
+
+    This will:
+    - Download AIME 2024 dataset from HuggingFace
+    - Download DeepScaleR math dataset for training
+    - Register both datasets with rLLM's DatasetRegistry
+  </Step>
+
+  <Step title="Start the model server">
+    Launch a vLLM server with OpenAI-compatible API:
+
+    ```bash
+    python -m vllm.entrypoints.openai.api_server \
+        --model Qwen/Qwen3-4B \
+        --host 0.0.0.0 \
+        --port 30000 \
+        --dtype bfloat16 \
+        --tensor-parallel-size 1
+    ```
+
+    Alternatively, use SGLang:
+
+    ```bash
+    python -m sglang_router.launch_server \
+        --model-path Qwen/Qwen3-4B \
+        --dp-size 1 \
+        --dtype bfloat16
+    ```
+
+    The server will be accessible at `http://localhost:30000/v1`
+  </Step>
+</Steps>
+
+## Running the Agent
+
+Once your model server is running and datasets are prepared, run inference:
+
+```bash
+cd examples/math_tool
+python run_math_with_tool.py
+```
+
+### Code Implementation
+
+Here's the core implementation from `run_math_with_tool.py`:
+
+```python
+import asyncio
+from transformers import AutoTokenizer
+from rllm.agents import ToolAgent
+from rllm.data.dataset import DatasetRegistry
+from rllm.engine.agent_execution_engine import AgentExecutionEngine
+from rllm.environments.tools.tool_env import ToolEnvironment
+from rllm.rewards.reward_fn import math_reward_fn
+from rllm.utils import compute_pass_at_k
+
+n_parallel_agents = 64
+model_name = "Qwen/Qwen3-4B"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+# Configure agent with Python tool
+agent_args = {
+    "tools": ["python"],
+    "parser_name": "qwen",
+    "system_prompt": "You are a math assistant that can write python to solve math problems."
+}
+
+# Configure environment with reward function
+env_args = {
+    "tools": ["python"],
+    "reward_fn": math_reward_fn,
+}
+
+sampling_params = {"temperature": 0.6, "top_p": 0.95, "model": model_name}
+
+# Create execution engine
+engine = AgentExecutionEngine(
+    agent_class=ToolAgent,
+    agent_args=agent_args,
+    env_class=ToolEnvironment,
+    env_args=env_args,
+    engine_name="openai",
+    rollout_engine_args={"base_url": "http://localhost:30000/v1", "api_key": "None"},
+    tokenizer=tokenizer,
+    sampling_params=sampling_params,
+    max_response_length=16384,
+    max_prompt_length=2048,
+    n_parallel_agents=n_parallel_agents,
+)
+
+# Load test dataset and evaluate
+test_dataset = DatasetRegistry.load_dataset("aime2024", "test")
+tasks = test_dataset.repeat(n=8)  # repeat to evaluate pass@k
+
+results = asyncio.run(engine.execute_tasks(tasks))
+compute_pass_at_k(results)
+```
+
+## Expected Output
+
+The script will:
+1. Load the AIME 2024 test dataset
+2. Repeat each problem 8 times for Pass@K evaluation
+3. Run parallel inference using the async agent execution engine
+4. Evaluate results and report accuracy metrics
+
+**Example output:**
+```
+Total unique problems: 30
+Average Pass@1 Accuracy: 0.42
+Average Pass@8 Accuracy: 0.65
+```
+
+## Training
+
+To train your own math reasoning agent with tool usage:
+
+```bash
+bash examples/math_tool/train_math_with_tool.sh
+```
+
+### Key Training Parameters
+
+- **Model**: Qwen/Qwen3-4B
+- **Algorithm**: GRPO (Group Relative Policy Optimization)
+- **Training Dataset**: DeepScaleR math dataset
+- **Evaluation Dataset**: AIME 2024
+- **Batch Size**: 64
+- **Learning Rate**: 1e-6
+- **Max Response Length**: 16,384 tokens
+
+## Configuration Options
+
+You can modify these parameters in the inference script:
+
+- `n_parallel_agents`: Number of parallel agents (default: 64)
+- `model_name`: Model to use (default: "Qwen/Qwen3-4B")
+- `base_url`: API server URL (default: "http://localhost:30000/v1")
+- `max_response_length`: Maximum response length (default: 16384)
+- `max_prompt_length`: Maximum prompt length (default: 2048)
+- `temperature`: Sampling temperature (default: 0.6)
+- `top_p`: Top-p sampling (default: 0.95)
+
+## Next Steps
+
+- Try the [FrozenLake example](/examples/frozen-lake) for classic RL environments
+- Explore [SDK examples](/examples/sdk-math) for simplified training workflows
+- Learn about [DeepScaleR](/examples/deep-scaler) for advanced math reasoning
+
+## Resources
+
+- [GitHub Example Directory](https://github.com/rllm-org/rllm/tree/main/examples/math_tool)
+- [ToolAgent API Reference](/api/agents#toolagent)
+- [Training Guide](/api/agents)

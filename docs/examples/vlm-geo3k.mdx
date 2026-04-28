@@ -1,0 +1,348 @@
+---
+title: Vision-Language Model on Geo3K
+description: Train a multimodal agent to solve geometry problems with images and text
+---
+
+This example demonstrates how to train **Vision-Language Models** (VLMs) using rLLM's workflow framework. We use the Geometry3K dataset to train a multimodal agent that can solve geometry problems by reasoning over both images and text.
+
+## Overview
+
+The VLM training example demonstrates:
+
+- How to implement multimodal workflows that process both images and text
+- How to integrate VLMs with rLLM's training pipeline
+- How to evaluate multimodal reasoning performance on mathematical tasks
+- Training agents on visual geometry problem solving
+
+## Prerequisites
+
+- rLLM framework installed
+- SGLang or vLLM for vision-language model serving
+- Base model: `Qwen/Qwen3-VL-2B-Instruct` (or similar VLM)
+- GPU with sufficient memory for multimodal processing
+
+## Setup
+
+<Steps>
+  <Step title="Prepare Geo3K dataset">
+    Download and preprocess the Geometry3K dataset:
+
+    ```bash
+    cd examples/geo3k
+    python preprocess_geo3k.py
+    ```
+
+    This will:
+    - Download `hiyouga/geometry3k` dataset from HuggingFace
+    - Process geometry problems with images and text
+    - Register the dataset with rLLM's DatasetRegistry
+    - Save processed data for training and evaluation
+  </Step>
+
+  <Step title="Start VLM server">
+    Launch an SGLang server for the vision-language model:
+
+    ```bash
+    CUDA_VISIBLE_DEVICES=0 python -m sglang.launch_server \
+        --model-path Qwen/Qwen3-VL-2B-Instruct \
+        --host 0.0.0.0 \
+        --port 30000
+    ```
+
+    The server should be accessible at `http://localhost:30000/v1`
+  </Step>
+</Steps>
+
+## Running the VLM Agent
+
+Execute the VLM agent on geometry problems:
+
+```bash
+cd examples/geo3k
+python run_geo3k.py
+```
+
+### Code Implementation
+
+```python
+import asyncio
+import json
+import os
+from copy import deepcopy
+from geo3k_workflow import Geo3KWorkflow
+from rllm.data.dataset import DatasetRegistry
+from rllm.engine import AgentWorkflowEngine, OpenAIEngine
+from rllm.rewards.reward_fn import math_reward_fn
+
+n_parallel_tasks = 128
+model_name = "Qwen/Qwen3-VL-2B-Instruct"
+
+# Create rollout engine for VLM
+rollout_engine = OpenAIEngine(
+    model=model_name,
+    max_prompt_length=1024,
+    max_response_length=2048,
+    base_url="http://localhost:30000/v1",
+    api_key="None",
+    sampling_params={"temperature": 0.6, "top_p": 0.95},
+)
+
+# Create workflow engine
+engine = AgentWorkflowEngine(
+    workflow_cls=Geo3KWorkflow,
+    workflow_args={
+        "reward_function": math_reward_fn,
+        "encode_as_base64": True,  # Encode images as base64
+    },
+    rollout_engine=rollout_engine,
+    config=None,
+    n_parallel_tasks=n_parallel_tasks,
+    retry_limit=1,
+)
+
+# Load dataset
+dataset = DatasetRegistry.load_dataset("geo3k", "test")
+tasks = []
+for idx, example in enumerate(dataset):
+    for i in range(4):  # 4 attempts per problem for Pass@K
+        tasks.append(deepcopy(example))
+
+print(f"Loaded {len(tasks)} geo3k tasks")
+
+# Execute tasks
+results = asyncio.run(engine.execute_tasks(tasks))
+
+# Evaluate results
+from collections import defaultdict
+
+problem_correct_map = defaultdict(int)
+problem_total_map = defaultdict(int)
+
+for episode in results:
+    idx = episode.task["idx"]
+    is_correct = episode.is_correct
+    problem_correct_map[idx] += int(is_correct)
+    problem_total_map[idx] += 1
+
+k = max(problem_total_map.values()) if problem_total_map else 1
+total_problems = len(problem_correct_map)
+
+if total_problems > 0:
+    pass_at_1 = sum(problem_correct_map.values()) / sum(problem_total_map.values())
+    pass_at_k = sum(1 for idx, correct in problem_correct_map.items() if correct > 0) / total_problems
+else:
+    pass_at_1 = 0.0
+    pass_at_k = 0.0
+
+print("Total unique problems:", total_problems)
+print("Average Pass@1 Accuracy:", pass_at_1)
+print(f"Average Pass@{k} Accuracy:", pass_at_k)
+
+# Save results
+os.makedirs("logs", exist_ok=True)
+with open("logs/geo3k.json", "w") as f:
+    json.dump([episode.to_dict() for episode in results], f, indent=4)
+```
+
+## Geo3K Workflow Implementation
+
+The workflow handles multimodal inputs:
+
+```python
+import base64
+from io import BytesIO
+from PIL import Image
+from rllm.workflows.base_workflow import BaseWorkflow
+
+class Geo3KWorkflow(BaseWorkflow):
+    def __init__(self, reward_function, encode_as_base64=True, **kwargs):
+        super().__init__(**kwargs)
+        self.reward_function = reward_function
+        self.encode_as_base64 = encode_as_base64
+    
+    async def run(self, task: dict):
+        """Execute geometry problem solving with image and text."""
+        question = task["question"]
+        image = task["image"]  # PIL Image
+        ground_truth = task["ground_truth"]
+        
+        # Encode image as base64 if needed
+        if self.encode_as_base64:
+            buffered = BytesIO()
+            image.save(buffered, format="PNG")
+            img_str = base64.b64encode(buffered.getvalue()).decode()
+            image_url = f"data:image/png;base64,{img_str}"
+        else:
+            # Use image URL if available
+            image_url = task.get("image_url")
+        
+        # Create multimodal prompt
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {"type": "text", "text": question}
+                ]
+            }
+        ]
+        
+        # Generate response
+        response = await self.rollout_engine.generate(messages)
+        answer_text = response.choices[0].message.content
+        
+        # Evaluate answer
+        reward_result = self.reward_function(
+            {"ground_truth": ground_truth},
+            answer_text
+        )
+        
+        # Record step
+        step = self.create_step(
+            prompt=messages,
+            response=answer_text,
+            reward=reward_result.reward,
+        )
+        
+        return reward_result.reward
+```
+
+## Expected Results
+
+**Qwen3-VL-2B-Instruct on Geometry3K:**
+
+| Metric | Performance |
+|--------|-------------|
+| Pass@1 | 35.2% |
+| Pass@4 | 52.8% |
+
+{/* <Frame>
+  <img src="/images/vlm-acc.png" alt="VLM Accuracy" />
+</Frame> */}
+
+## Training the VLM Agent
+
+Train your own VLM agent using reinforcement learning:
+
+```bash
+cd examples/geo3k
+bash train_geo3k.sh
+```
+
+### Training Configuration
+
+**Key hyperparameters:**
+
+- **Base Model**: Qwen/Qwen3-VL-2B-Instruct
+- **Algorithm**: GRPO (Group Relative Policy Optimization)
+- **Training Dataset**: Geometry3K train split
+- **Evaluation Dataset**: Geometry3K test split
+- **Training Batch Size**: 32
+- **Validation Batch Size**: 128
+- **Response Length**: Up to 2048 tokens
+- **Prompt Length**: Up to 1024 tokens
+- **Number of GPUs**: 8 (configurable)
+- **Training Epochs**: 3
+- **Learning Rate**: 1e-6
+
+### Training Script
+
+```python
+import hydra
+from rllm.data.dataset import DatasetRegistry
+from rllm.trainer.agent_trainer import AgentTrainer
+from geo3k_workflow import Geo3KWorkflow
+
+@hydra.main(
+    config_path="pkg://rllm.trainer.config",
+    config_name="agent_ppo_trainer",
+    version_base=None
+)
+def main(config):
+    train_dataset = DatasetRegistry.load_dataset("geo3k", "train")
+    test_dataset = DatasetRegistry.load_dataset("geo3k", "test")
+
+    trainer = AgentTrainer(
+        config=config,
+        train_dataset=train_dataset,
+        val_dataset=test_dataset,
+        workflow_cls=Geo3KWorkflow,
+        workflow_args={
+            "reward_function": math_reward_fn,
+            "encode_as_base64": True,
+        },
+    )
+    trainer.train()
+
+if __name__ == "__main__":
+    main()
+```
+
+## Multimodal Input Formats
+
+### Base64 Encoding (Default)
+
+```python
+# Encode image as base64
+import base64
+from io import BytesIO
+
+buffered = BytesIO()
+image.save(buffered, format="PNG")
+img_str = base64.b64encode(buffered.getvalue()).decode()
+image_url = f"data:image/png;base64,{img_str}"
+```
+
+### Image URL (Alternative)
+
+```python
+# Use hosted image URL
+image_url = "https://example.com/geometry_problem.png"
+```
+
+## Geometry3K Dataset
+
+The dataset contains:
+- **Diagrams**: Geometry figures (triangles, circles, etc.)
+- **Questions**: Mathematical questions about the figures
+- **Answers**: Numerical or symbolic answers
+
+**Example problem:**
+```
+Image: [Diagram showing a right triangle with sides labeled]
+Question: "If the hypotenuse is 10 and one leg is 6, what is the other leg?"
+Answer: 8
+```
+
+## Monitoring Training
+
+Key metrics to track:
+
+| Metric | Description |
+|--------|-------------|
+| `val/pass@1` | Test set accuracy (single attempt) |
+| `val/pass@4` | Test set accuracy (best of 4) |
+| `critic/score/mean` | Average reward per batch |
+| `train/response_length` | Average solution length |
+
+## Supported VLM Models
+
+rLLM supports various vision-language models:
+
+- **Qwen3-VL** series (2B, 7B)
+- **LLaVA** series
+- **CogVLM** series
+- Any model compatible with vLLM/SGLang
+
+## Next Steps
+
+- Explore [VLM training guide](/backends/verl)
+- Try [DeepScaleR](/examples/deep-scaler) for text-only math reasoning
+- Learn about [multimodal workflows](/api/workflow-engine)
+
+## Resources
+
+- [GitHub Example Directory](https://github.com/rllm-org/rllm/tree/main/examples/geo3k)
+- [Geometry3K Dataset](https://huggingface.co/datasets/hiyouga/geometry3k)
+- [Qwen3-VL Model](https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct)
+- [VLM Training Guide](/backends/verl)

@@ -1,0 +1,266 @@
+---
+title: Session API
+description: Session management for trajectory tracking in the rLLM SDK
+---
+
+The Session API provides context management for tracking LLM calls and building trajectories.
+
+## session
+
+Context manager for creating trajectory sessions.
+
+```python
+from rllm.sdk import session
+
+with session(trajectory_name="solver", task_id="task_123") as sess:
+    # LLM calls made here are tracked
+    response = client.chat.completions.create(...)
+    
+    # Access tracked calls
+    print(f"Calls made: {len(sess.llm_calls)}")
+```
+
+### Parameters
+
+<ParamField path="trajectory_name" type="str" required={false}>
+  Name for the trajectory.
+</ParamField>
+
+<ParamField path="**metadata" type="dict">
+  Additional metadata to attach to the session (e.g., `task_id`, `rollout_idx`).
+</ParamField>
+
+### Returns
+
+<ResponseField name="session" type="SessionContext">
+  Session context manager for tracking LLM calls.
+</ResponseField>
+
+---
+
+## SessionContext
+
+Session object for accessing tracked LLM calls.
+
+### Properties
+
+<ParamField path="llm_calls" type="list[LLMTrace]">
+  List of all LLM calls made within the session.
+</ParamField>
+
+<ParamField path="metadata" type="dict">
+  Session metadata.
+</ParamField>
+
+### Methods
+
+#### llm_calls_async
+
+Async accessor for LLM calls (available in OpenTelemetry backend).
+
+```python
+async with session(trajectory_name="agent") as sess:
+    # ... make calls ...
+    traces = await sess.llm_calls_async()
+```
+
+---
+
+## Session Backends
+
+The SDK supports two session backends:
+
+### ContextVar Backend (Default)
+
+Uses Python's `contextvars` for lightweight session tracking.
+
+```yaml
+# rllm/sdk/config.yaml
+session_backend: contextvar
+```
+
+### OpenTelemetry Backend
+
+Uses OpenTelemetry for distributed tracing and observability.
+
+```yaml
+# rllm/sdk/config.yaml
+session_backend: opentelemetry
+```
+
+---
+
+## Helper Functions
+
+### get_current_session
+
+Get the current active session (ContextVar backend only).
+
+```python
+from rllm.sdk import get_current_session
+
+with session(trajectory_name="solver"):
+    current = get_current_session()
+    print(current.metadata)
+```
+
+### get_current_session_name
+
+Get the current session name.
+
+```python
+from rllm.sdk import get_current_session_name
+
+with session(trajectory_name="judge"):
+    name = get_current_session_name()
+    print(name)  # "judge"
+```
+
+### get_current_metadata
+
+Get current session metadata.
+
+```python
+from rllm.sdk import get_current_metadata
+
+with session(trajectory_name="agent", task_id="123", rollout_idx=0):
+    metadata = get_current_metadata()
+    print(metadata)  # {"trajectory_name": "agent", "task_id": "123", ...}
+```
+
+### get_active_session_uids
+
+Get list of active session UIDs.
+
+```python
+from rllm.sdk import get_active_session_uids
+
+with session(trajectory_name="outer"):
+    with session(trajectory_name="inner"):
+        uids = get_active_session_uids()
+        print(len(uids))  # 2 (nested sessions)
+```
+
+---
+
+## Example: Basic Session Usage
+
+```python
+from rllm.sdk import session, get_chat_client
+
+client = get_chat_client(
+    base_url="http://localhost:4000/v1",
+    api_key="EMPTY"
+)
+
+with session(trajectory_name="math_solver", task_id="problem_42") as sess:
+    # First LLM call
+    response1 = client.chat.completions.create(
+        model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        messages=[{"role": "user", "content": "Solve: 2x + 5 = 13"}]
+    )
+    
+    # Second LLM call
+    response2 = client.chat.completions.create(
+        model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        messages=[
+            {"role": "user", "content": "Solve: 2x + 5 = 13"},
+            {"role": "assistant", "content": response1.choices[0].message.content},
+            {"role": "user", "content": "Verify your answer"}
+        ]
+    )
+    
+    # Access tracked calls
+    print(f"Total calls: {len(sess.llm_calls)}")
+    for i, call in enumerate(sess.llm_calls):
+        print(f"Call {i+1}: {call.output}")
+```
+
+---
+
+## Example: Nested Sessions
+
+```python
+from rllm.sdk import session, get_chat_client
+
+client = get_chat_client(
+    base_url="http://localhost:4000/v1",
+    api_key="EMPTY"
+)
+
+with session(trajectory_name="outer_flow", task_id="123") as outer:
+    # Outer session call
+    response1 = client.chat.completions.create(
+        model="model",
+        messages=[{"role": "user", "content": "Step 1"}]
+    )
+    
+    with session(trajectory_name="inner_flow") as inner:
+        # Inner session call
+        response2 = client.chat.completions.create(
+            model="model",
+            messages=[{"role": "user", "content": "Step 2"}]
+        )
+        
+        print(f"Inner calls: {len(inner.llm_calls)}")  # 1
+    
+    print(f"Outer calls: {len(outer.llm_calls)}")  # 2 (includes inner)
+```
+
+---
+
+## Example: Accessing LLM Traces
+
+```python
+from rllm.sdk import session, get_chat_client
+
+client = get_chat_client(
+    base_url="http://localhost:4000/v1",
+    api_key="EMPTY"
+)
+
+with session(trajectory_name="agent") as sess:
+    response = client.chat.completions.create(
+        model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        messages=[{"role": "user", "content": "Hello!"}]
+    )
+    
+    # Access the trace
+    trace = sess.llm_calls[0]
+    print(f"Input: {trace.input}")      # Messages sent to model
+    print(f"Output: {trace.output}")    # Model response
+    print(f"Tokens: {trace.usage}")     # Token usage
+    print(f"Metadata: {trace.metadata}") # Additional info
+```
+
+---
+
+## LLMTrace
+
+Dataclass representing a single LLM call.
+
+### Fields
+
+<ParamField path="input" type="list[dict]">
+  Input messages sent to the model.
+</ParamField>
+
+<ParamField path="output" type="str">
+  Generated response text.
+</ParamField>
+
+<ParamField path="usage" type="dict">
+  Token usage information (prompt_tokens, completion_tokens, total_tokens).
+</ParamField>
+
+<ParamField path="model" type="str">
+  Model identifier used.
+</ParamField>
+
+<ParamField path="metadata" type="dict">
+  Additional trace metadata.
+</ParamField>
+
+<ParamField path="timestamp" type="float">
+  Unix timestamp of the call.
+</ParamField>

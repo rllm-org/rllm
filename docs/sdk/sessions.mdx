@@ -1,0 +1,402 @@
+---
+title: Session Context and Management
+description: Track and manage LLM calls with session contexts
+---
+
+Sessions are the foundation of the rLLM SDK's trace collection system. They provide automatic tracking of all LLM calls within a context, along with metadata management and nested context support.
+
+## Session Basics
+
+### Creating a Session
+
+Use the `session()` context manager to create a session with auto-generated name:
+
+```python
+from rllm.sdk import session, get_chat_client
+
+llm = get_chat_client(api_key="sk-...")
+
+with session(experiment="v1") as sess:
+    response = llm.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": "Hello"}]
+    )
+    # Access collected traces
+    print(f"Collected {len(sess.llm_calls)} traces")
+    for trace in sess.llm_calls:
+        print(f"Model: {trace.model}, Tokens: {trace.tokens}")
+```
+
+The session name is automatically generated (e.g., `sess_abc123def456`). All metadata passed as keyword arguments is attached to every trace.
+
+### Accessing Session Data
+
+```python
+with session(experiment="v1", task="greeting") as sess:
+    llm.chat.completions.create(...)
+    
+    # Get all traces
+    traces = sess.llm_calls  # List[Trace]
+    
+    # Get traces as steps (with reward field)
+    steps = sess.steps  # List[StepView]
+    
+    # Session properties
+    print(sess.name)      # Session name
+    print(sess.metadata)  # {"experiment": "v1", "task": "greeting"}
+    print(len(sess))      # Number of traces
+```
+
+## Session Backends
+
+The SDK supports two session backends, configured via `rllm/sdk/config.yaml`:
+
+```yaml
+# config.yaml
+session_backend: "contextvar"  # or "opentelemetry"
+```
+
+### ContextVar Backend (Default)
+
+Uses Python's `contextvars` for in-process context tracking:
+
+```python
+from rllm.sdk import session, get_current_session
+
+# Create session
+with session(experiment="v1") as sess:
+    # Get current session from anywhere in call stack
+    current = get_current_session()
+    assert current is sess
+    
+    llm.chat.completions.create(...)
+```
+
+**Features:**
+- Thread-safe context propagation
+- Lightweight in-memory buffer
+- Works within a single process
+- Ideal for local development and testing
+
+### OpenTelemetry Backend
+
+Uses W3C baggage for distributed tracing across processes:
+
+```python
+from rllm.sdk.session import otel_session, configure_default_tracer
+
+# Configure tracer once per process
+configure_default_tracer(service_name="my-agent")
+
+# Sessions use W3C baggage for context propagation
+with otel_session(name="client") as client_session:
+    # HTTP calls automatically carry session context via baggage headers
+    httpx.post("http://server/api", ...)
+
+# On the server side:
+with otel_session(name="handler") as server_session:
+    llm.chat.completions.create(...)
+    # server_session automatically inherits client's UID chain
+```
+
+**Features:**
+- W3C baggage as single source of truth
+- Automatic context propagation across HTTP boundaries
+- Span-based session UIDs for distributed tracing
+- Compatible with OpenTelemetry observability tools
+
+**Installation:**
+
+```bash
+pip install rllm[otel]
+```
+
+## Metadata Management
+
+### Basic Metadata
+
+Attach metadata to all traces in a session:
+
+```python
+with session(
+    experiment="v1",
+    task="math_solver",
+    user_id="alice",
+    model_version="1.0"
+):
+    llm.chat.completions.create(...)
+    # All traces include the metadata
+```
+
+### Nested Sessions and Metadata Inheritance
+
+Nested sessions automatically merge metadata:
+
+```python
+with session(experiment="v1", environment="production"):
+    # Outer session metadata
+    
+    with session(task="math", user="alice"):
+        # Merged metadata: {
+        #   "experiment": "v1",
+        #   "environment": "production",
+        #   "task": "math",
+        #   "user": "alice"
+        # }
+        llm.chat.completions.create(...)
+    
+    with session(task="coding"):
+        # Merged metadata: {
+        #   "experiment": "v1",
+        #   "environment": "production",
+        #   "task": "coding"  # Overrides parent
+        # }
+        llm.chat.completions.create(...)
+```
+
+Inner sessions can override parent metadata by using the same key.
+
+### Accessing Current Metadata
+
+```python
+from rllm.sdk import get_current_metadata, get_current_session_name
+
+with session(experiment="v1", task="greeting"):
+    # Get current metadata from anywhere
+    metadata = get_current_metadata()
+    print(metadata)  # {"experiment": "v1", "task": "greeting"}
+    
+    # Get current session name
+    name = get_current_session_name()
+    print(name)  # "sess_abc123def456"
+```
+
+## Session Context API
+
+### ContextVarSession
+
+The default session implementation:
+
+```python
+from rllm.sdk import ContextVarSession
+
+sess = ContextVarSession(
+    name=None,                    # Auto-generated if None
+    formatter=None,               # Optional trace formatter (deprecated)
+    persistent_tracers=None,      # Optional persistent tracers
+    **metadata                    # Session metadata
+)
+
+with sess:
+    llm.chat.completions.create(...)
+    
+    # Properties
+    traces = sess.llm_calls       # List[Trace]
+    steps = sess.steps            # List[StepView]
+    uid = sess._uid               # Unique session ID
+    chain = sess._session_uid_chain  # UID hierarchy
+    
+    # Methods
+    sess.clear_calls()            # Clear all traces
+```
+
+**Key Properties:**
+- `name: str` - Session name (auto-generated or inherited)
+- `_uid: str` - Internal unique ID for this session instance
+- `_session_uid_chain: list[str]` - UID chain for hierarchy support
+- `metadata: dict` - Session metadata
+- `storage: SessionBuffer` - In-memory trace buffer
+- `llm_calls: list[Trace]` - All traces from this session and nested children
+- `steps: list[StepView]` - All traces converted to StepView format
+
+### OpenTelemetrySession
+
+Distributed session implementation:
+
+```python
+from rllm.sdk.session import otel_session, configure_default_tracer
+
+# Configure once per process
+configure_default_tracer(service_name="my-agent")
+
+# Create session
+with otel_session(
+    name="workflow",
+    experiment="v1",
+    task="search"
+) as sess:
+    # Properties read from baggage
+    name = sess.name              # From baggage
+    metadata = sess.metadata      # From baggage
+    uid_chain = sess._session_uid_chain  # From baggage
+    
+    # Async trace access
+    traces = await sess.llm_calls_async()
+```
+
+**Key Features:**
+- Baggage is the single source of truth for state
+- Session object manages baggage lifecycle
+- Properties read directly from baggage (works cross-process)
+- Span attributes are write-only copies for observability
+
+### Context Helpers
+
+```python
+from rllm.sdk import (
+    get_current_session,
+    get_current_session_name,
+    get_current_metadata,
+    get_active_session_uids,
+)
+
+with session(experiment="v1") as sess:
+    # Get current session instance (ContextVar backend only)
+    current = get_current_session()
+    
+    # Get session name (works with all backends)
+    name = get_current_session_name()
+    
+    # Get merged metadata
+    metadata = get_current_metadata()
+    
+    # Get active session UID chain
+    uids = get_active_session_uids()  # [outer_uid, ..., inner_uid]
+```
+
+<Note>
+`get_current_session()` only works with the ContextVar backend. For OpenTelemetry, use `get_current_metadata()`, `get_current_session_name()`, or `get_active_session_uids()` instead.
+</Note>
+
+## Session Buffers
+
+Sessions use lightweight in-memory buffers to store traces:
+
+```python
+from rllm.sdk import SessionBuffer
+
+buffer = SessionBuffer()
+
+# Add trace
+buffer.add_trace(trace, session_uid="ctx_abc", session_name="sess_123")
+
+# Get traces for a session
+traces = buffer.get_traces(session_uid="ctx_abc", session_name="sess_123")
+
+# Clear traces
+buffer.clear(session_uid="ctx_abc", session_name="sess_123")
+```
+
+**Key Features:**
+- Automatic parent-child hierarchy tracking
+- Parent sessions see traces from nested children
+- Ephemeral storage (in-memory only)
+- Thread-safe access
+
+## Advanced Usage
+
+### Runtime Session Wrapping
+
+Wrap agent functions with automatic session context:
+
+```python
+from rllm.sdk.session import wrap_with_session_context
+
+async def agent_func(input_data):
+    # Agent logic with LLM calls
+    result = await llm.chat.completions.create(...)
+    return result
+
+# Wrap with session context
+wrapped_fn = wrap_with_session_context(
+    agent_func,
+    tracer_service_name="my-agent"
+)
+
+# Call with metadata
+metadata = {"session_name": "sess_123", "experiment": "v1"}
+output, session_uid = await wrapped_fn(metadata, input_data)
+```
+
+This is useful for integrating with execution engines that manage metadata externally.
+
+### Custom Storage Backends
+
+Implement custom storage for persistent trace collection:
+
+```python
+from rllm.sdk import SqliteTracer
+
+tracer = SqliteTracer(db_path="./traces.db")
+
+# Traces are automatically persisted to SQLite
+with session(experiment="v1") as sess:
+    llm.chat.completions.create(...)
+    # Traces saved to database
+```
+
+## Configuration
+
+### Backend Selection
+
+Check or configure the session backend:
+
+```python
+from rllm.sdk.session import SESSION_BACKEND
+
+print(SESSION_BACKEND)  # "contextvar" or "opentelemetry"
+```
+
+To change the backend, edit `rllm/sdk/config.yaml`:
+
+```yaml
+session_backend: "opentelemetry"
+```
+
+### Session Protocol
+
+All session implementations follow the `SessionProtocol`:
+
+```python
+from rllm.sdk.session import SessionProtocol
+
+class CustomSession(SessionProtocol):
+    name: str
+    metadata: dict[str, Any]
+    
+    @property
+    def llm_calls(self) -> list[dict[str, Any]]:
+        # Implementation
+        pass
+    
+    def clear_calls(self) -> None:
+        # Implementation
+        pass
+    
+    def __enter__(self) -> SessionProtocol:
+        # Implementation
+        pass
+    
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+        # Implementation
+        pass
+```
+
+## Best Practices
+
+1. **Use metadata for experiment tracking**: Tag sessions with experiment names, versions, and configurations
+2. **Leverage nested sessions**: Organize complex workflows with hierarchical sessions
+3. **Choose the right backend**: Use ContextVar for local development, OpenTelemetry for distributed systems
+4. **Access metadata dynamically**: Use `get_current_metadata()` to access context from deep in the call stack
+5. **Clear sessions when appropriate**: For long-running processes, clear session buffers to manage memory
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Trajectories" icon="route" href="/sdk/trajectories">
+    Learn about trajectory tracking and rewards
+  </Card>
+  <Card title="Integrations" icon="plug" href="/sdk/integrations">
+    Integrate with LangGraph, SmolAgent, and more
+  </Card>
+</CardGroup>

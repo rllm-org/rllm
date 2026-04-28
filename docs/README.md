@@ -1,131 +1,55 @@
-# rLLM Documentation
+# Mintlify Starter Kit
 
-This directory contains the documentation for the rLLM library, built using [MkDocs](https://www.mkdocs.org/) with [Material theme](https://squidfunk.github.io/mkdocs-material/) and [mkdocstrings](https://mkdocstrings.github.io/) for API documentation.
+Use the starter kit to get your docs deployed and ready to customize.
 
-## 🚀 Quick Start
+Click the green **Use this template** button at the top of this repo to copy the Mintlify starter kit. The starter kit contains examples with
 
-### Building the Documentation
+- Guide pages
+- Navigation
+- Customizations
+- API reference pages
+- Use of popular components
 
-To build the documentation:
+**[Follow the full quickstart guide](https://starter.mintlify.com/quickstart)**
+
+## AI-assisted writing
+
+Set up your AI coding tool to work with Mintlify:
 
 ```bash
-./build_docs.sh
+npx skills add https://mintlify.com/docs
 ```
 
-### Serving the Documentation Locally
+This command installs Mintlify's documentation skill for your configured AI tools like Claude Code, Cursor, Windsurf, and others. The skill includes component reference, writing standards, and workflow guidance.
 
-To build and serve the documentation with live reload:
+See the [AI tools guides](/ai-tools) for tool-specific setup.
 
-```bash
-./build_docs.sh serve
-```
+## Development
 
-The documentation will be available at `http://localhost:8000`.
-
-## 📁 Structure
+Install the [Mintlify CLI](https://www.npmjs.com/package/mint) to preview your documentation changes locally. To install, use the following command:
 
 ```
-docs/
-├── mkdocs.yml          # MkDocs configuration
-├── build_docs.sh      # Build script
-├── docs/              # Documentation content
-│   ├── index.md       # Homepage
-│   ├── api/           # API documentation (generated)
-│   ├── examples/      # Example guides
-│   ├── getting-started/ # Getting started guides
-│   └── core-concepts/ # Core concept explanations
-|   └── experimental/  # Experimental features
-└── site/              # Generated static site (after build)
+npm i -g mint
 ```
 
-## 🔧 Features
+Run the following command at the root of your documentation, where your `docs.json` is located:
 
-### API Documentation
-- **Automatic API docs**: Generated from docstrings using mkdocstrings
-- **Google-style docstrings**: Supports Google-style docstring format
-- **Source code links**: Direct links to source code
-- **Type hints**: Shows function signatures and type annotations
-
-### Documentation Features
-- **Material Design**: Modern, responsive theme
-- **Code highlighting**: Syntax highlighting for multiple languages
-- **Navigation**: Automatic navigation generation
-- **Search**: Full-text search functionality
-- **Mobile-friendly**: Responsive design for all devices
-
-## ✍️ Writing Documentation
-
-### Adding New Pages
-1. Create a new `.md` file in the appropriate `docs/` subdirectory
-2. Add the page to the `nav` section in `mkdocs.yml`
-3. Use Markdown syntax for content
-
-### API Documentation
-API documentation is automatically generated from Python docstrings using mkdocstrings. To document a new module:
-
-1. Add a new file in `docs/api/`
-2. Use the mkdocstrings syntax: `::: module.name`
-3. Add the page to the navigation in `mkdocs.yml`
-
-Example:
-```markdown
-# My Module
-
-Brief description of the module.
-
-::: rllm.my_module
+```
+mint dev
 ```
 
-### Code Examples
-Use fenced code blocks with language specification:
+View your local preview at `http://localhost:3000`.
 
-```python
-from rllm.agents import Agent
+## Publishing changes
 
-agent = Agent()
-```
+Install our GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app) to propagate changes from your repo to your deployment. Changes are deployed to production automatically after pushing to the default branch.
 
-## 🛠️ Customization
+## Need help?
 
-### Theme Configuration
-The Material theme is configured in `mkdocs.yml`. You can customize:
-- Colors and palette
-- Navigation features
-- Extensions and agenthub
+### Troubleshooting
 
-### Extensions
-Currently enabled extensions:
-- `pymdownx.highlight`: Code highlighting
-- `pymdownx.superfences`: Enhanced code blocks
-- `admonition`: Call-out boxes
-- `pymdownx.details`: Collapsible sections
+- If your dev environment isn't running: Run `mint update` to ensure you have the most recent version of the CLI.
+- If a page loads as a 404: Make sure you are running in a folder with a valid `docs.json`.
 
-## 📝 Dependencies
-
-Documentation dependencies are automatically installed with the main package:
-- `mkdocs`: Static site generator
-- `mkdocs-material`: Material Design theme
-- `mkdocstrings[python]`: API documentation from docstrings
-- `mkdocs-autorefs`: Cross-references
-- `pymdown-extensions`: Enhanced Markdown extensions
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-**Import errors when building**:
-- Ensure the rLLM package is properly installed: `uv pip install -e ..`
-- Check that all dependencies are available
-
-**Missing API documentation**:
-- Verify the module path in the mkdocstrings directive
-- Check that the module has proper docstrings
-
-**Build fails**:
-- Check that all dependencies are installed: `uv pip install -e .`
-- Verify that the `mkdocs.yml` syntax is correct
-
-### Getting Help
-- Check the [MkDocs documentation](https://www.mkdocs.org/)
-- Review [mkdocstrings documentation](https://mkdocstrings.github.io/)
-- Open an issue in the rLLM repository 
+### Resources
+- [Mintlify documentation](https://mintlify.com/docs)

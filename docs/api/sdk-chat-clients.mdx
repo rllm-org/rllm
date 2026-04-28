@@ -1,0 +1,319 @@
+---
+title: Chat Clients
+description: Tracked chat clients for LLM interaction with automatic tracing
+---
+
+The SDK provides tracked chat clients that automatically log LLM calls to sessions for trajectory tracking.
+
+## get_chat_client
+
+Factory function to create a tracked chat client.
+
+```python
+from rllm.sdk import get_chat_client
+
+client = get_chat_client(
+    base_url="http://localhost:4000/v1",
+    api_key="EMPTY"
+)
+```
+
+### Parameters
+
+<ParamField path="base_url" type="str" required={false}>
+  Base URL for the OpenAI-compatible API.
+</ParamField>
+
+<ParamField path="api_key" type="str" required={false}>
+  API key for authentication.
+</ParamField>
+
+<ParamField path="use_proxy" type="bool" default="True">
+  Whether to inject session metadata into proxy URL.
+</ParamField>
+
+<ParamField path="enable_local_tracing" type="bool" default="True">
+  Whether to log calls to local tracer.
+</ParamField>
+
+<ParamField path="**kwargs" type="dict">
+  Additional arguments passed to the underlying OpenAI client.
+</ParamField>
+
+### Returns
+
+<ResponseField name="client" type="TrackedChatClient">
+  Tracked chat client with automatic session logging.
+</ResponseField>
+
+---
+
+## TrackedChatClient
+
+OpenAI-compatible client with automatic call tracking.
+
+```python
+from rllm.sdk.chat import TrackedChatClient
+
+client = TrackedChatClient(
+    base_url="http://localhost:4000/v1",
+    api_key="EMPTY"
+)
+```
+
+### Configuration
+
+<ParamField path="use_proxy" type="bool" default="True">
+  Inject metadata into proxy URL for distributed tracing.
+</ParamField>
+
+<ParamField path="enable_local_tracing" type="bool" default="True">
+  Log calls to in-memory tracer for session access.
+</ParamField>
+
+<ParamField path="tracer" type="Any | None">
+  Custom tracer instance. Uses shared in-memory tracer if None.
+</ParamField>
+
+### Methods
+
+The client provides the standard OpenAI API:
+
+```python
+response = client.chat.completions.create(
+    model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    messages=[{"role": "user", "content": "Hello!"}],
+    temperature=0.7,
+    max_tokens=2048
+)
+```
+
+---
+
+## TrackedAsyncChatClient
+
+Asynchronous version of TrackedChatClient.
+
+```python
+from rllm.sdk.chat import TrackedAsyncChatClient
+
+client = TrackedAsyncChatClient(
+    base_url="http://localhost:4000/v1",
+    api_key="EMPTY"
+)
+
+# Use with async/await
+response = await client.chat.completions.create(
+    model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+```
+
+---
+
+## Client Aliases
+
+### ProxyTrackedChatClient
+
+Alias for `TrackedChatClient` with default settings.
+
+```python
+from rllm.sdk.chat import ProxyTrackedChatClient
+
+client = ProxyTrackedChatClient(base_url="...", api_key="...")
+```
+
+### OpenTelemetryTrackedChatClient
+
+Client configured for OpenTelemetry-only tracing (no local tracing).
+
+```python
+from rllm.sdk.chat import OpenTelemetryTrackedChatClient
+
+client = OpenTelemetryTrackedChatClient(
+    base_url="...",
+    api_key="..."
+)
+# Equivalent to TrackedChatClient(enable_local_tracing=False)
+```
+
+---
+
+## Example: Basic Usage
+
+```python
+from rllm.sdk import get_chat_client, session
+
+client = get_chat_client(
+    base_url="http://localhost:4000/v1",
+    api_key="EMPTY"
+)
+
+with session(trajectory_name="agent") as sess:
+    response = client.chat.completions.create(
+        model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        messages=[{"role": "user", "content": "What is 2+2?"}]
+    )
+    
+    print(response.choices[0].message.content)
+    print(f"Tracked calls: {len(sess.llm_calls)}")
+```
+
+---
+
+## Example: Async Client
+
+```python
+import asyncio
+from rllm.sdk import get_chat_client, session
+
+async def main():
+    client = get_chat_client(
+        base_url="http://localhost:4000/v1",
+        api_key="EMPTY"
+    )
+    
+    with session(trajectory_name="async_agent") as sess:
+        response = await client.chat.completions.create(
+            model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+            messages=[{"role": "user", "content": "Hello!"}]
+        )
+        
+        print(response.choices[0].message.content)
+        print(f"Calls: {len(sess.llm_calls)}")
+
+asyncio.run(main())
+```
+
+---
+
+## Example: Multiple Models
+
+```python
+from rllm.sdk import get_chat_client, session
+
+# Different clients for different models
+solver_client = get_chat_client(
+    base_url="http://localhost:4000/v1",
+    api_key="EMPTY"
+)
+
+judge_client = get_chat_client(
+    base_url="http://localhost:5000/v1",
+    api_key="EMPTY"
+)
+
+with session(trajectory_name="solver_judge") as sess:
+    # Solver
+    solution = solver_client.chat.completions.create(
+        model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        messages=[{"role": "user", "content": "Solve: 2x + 5 = 13"}]
+    )
+    
+    # Judge
+    judgment = judge_client.chat.completions.create(
+        model="Qwen/Qwen3-4B",
+        messages=[
+            {"role": "user", "content": f"Is this correct? {solution.choices[0].message.content}"}
+        ]
+    )
+    
+    print(f"Total calls: {len(sess.llm_calls)}")  # 2
+```
+
+---
+
+## Example: Streaming Responses
+
+```python
+from rllm.sdk import get_chat_client, session
+
+client = get_chat_client(
+    base_url="http://localhost:4000/v1",
+    api_key="EMPTY"
+)
+
+with session(trajectory_name="stream_agent") as sess:
+    stream = client.chat.completions.create(
+        model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        messages=[{"role": "user", "content": "Tell me a story"}],
+        stream=True
+    )
+    
+    full_response = ""
+    for chunk in stream:
+        if chunk.choices[0].delta.content:
+            content = chunk.choices[0].delta.content
+            print(content, end="", flush=True)
+            full_response += content
+    
+    print(f"\n\nStreaming call tracked: {len(sess.llm_calls) > 0}")
+```
+
+---
+
+## Example: Custom Configuration
+
+```python
+from rllm.sdk.chat import TrackedChatClient
+
+# Client with custom settings
+client = TrackedChatClient(
+    base_url="http://localhost:4000/v1",
+    api_key="EMPTY",
+    use_proxy=False,              # Disable proxy injection
+    enable_local_tracing=True,    # Keep local tracing
+    timeout=30.0,                 # Custom timeout
+    max_retries=3                 # Custom retries
+)
+
+response = client.chat.completions.create(
+    model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+```
+
+---
+
+## Example: Training Data Collection
+
+```python
+from rllm.sdk import get_chat_client, session
+from rllm.rewards import math_reward_fn
+
+client = get_chat_client(
+    base_url="http://localhost:4000/v1",
+    api_key="EMPTY"
+)
+
+problems = [
+    {"question": "What is 2+2?", "answer": "4"},
+    {"question": "What is 10-3?", "answer": "7"},
+]
+
+trajectories = []
+
+for problem in problems:
+    with session(trajectory_name="solver") as sess:
+        response = client.chat.completions.create(
+            model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+            messages=[{"role": "user", "content": problem["question"]}]
+        )
+        
+        answer = response.choices[0].message.content
+        
+        # Compute reward
+        reward = math_reward_fn(problem, answer).reward
+        
+        # Store trajectory data
+        trajectories.append({
+            "problem": problem,
+            "response": answer,
+            "reward": reward,
+            "llm_calls": len(sess.llm_calls)
+        })
+
+print(f"Collected {len(trajectories)} trajectories")
+for traj in trajectories:
+    print(f"Q: {traj['problem']['question']} | R: {traj['reward']}")
+```

@@ -1,0 +1,244 @@
+---
+title: RolloutEngine
+description: Model inference engine for agent rollouts
+---
+
+The `RolloutEngine` provides an abstraction for model inference across different backends (OpenAI, Fireworks, vLLM, etc.).
+
+## RolloutEngine
+
+Base class for all rollout engines.
+
+```python
+from rllm.engine.rollout import RolloutEngine
+```
+
+### Methods
+
+#### get_model_response
+
+Generate a model response for the given messages.
+
+```python
+output = await engine.get_model_response(
+    messages=[{"role": "user", "content": "Hello"}],
+    application_id="task_0",
+    temperature=0.7,
+    max_tokens=2048
+)
+```
+
+<ParamField path="messages" type="list[dict]">
+  List of chat messages in OpenAI format.
+</ParamField>
+
+<ParamField path="application_id" type="str" required={false}>
+  Unique identifier for tracking requests.
+</ParamField>
+
+<ParamField path="**kwargs" type="dict">
+  Additional sampling parameters (temperature, top_p, max_tokens, etc.).
+</ParamField>
+
+<ResponseField name="output" type="ModelOutput">
+  Model output containing text, tokens, and metadata.
+</ResponseField>
+
+#### wake_up
+
+Initialize or warm up the engine (implementation-specific).
+
+```python
+await engine.wake_up()
+```
+
+#### sleep
+
+Shutdown or clean up the engine (implementation-specific).
+
+```python
+await engine.sleep()
+```
+
+---
+
+## ModelOutput
+
+Dataclass containing model generation output.
+
+```python
+from rllm.engine.rollout import ModelOutput
+```
+
+### Fields
+
+<ParamField path="text" type="str | None">
+  Complete generated text (may include reasoning).
+</ParamField>
+
+<ParamField path="content" type="str | None">
+  Content portion of the response (excluding reasoning).
+</ParamField>
+
+<ParamField path="reasoning" type="str | None">
+  Reasoning or thought process (if model supports it).
+</ParamField>
+
+<ParamField path="tool_calls" type="list[ToolCall] | None">
+  List of tool calls made by the model.
+</ParamField>
+
+<ParamField path="prompt_ids" type="list[int] | None">
+  Token IDs for the input prompt.
+</ParamField>
+
+<ParamField path="completion_ids" type="list[int] | None">
+  Token IDs for the completion.
+</ParamField>
+
+<ParamField path="multi_modal_inputs" type="dict[str, list] | None">
+  Multimodal inputs (e.g., images).
+</ParamField>
+
+<ParamField path="logprobs" type="list[float] | None">
+  Log probabilities for completion tokens.
+</ParamField>
+
+<ParamField path="prompt_logprobs" type="list[float] | None">
+  Log probabilities for prompt tokens (aligned to prompt_ids).
+</ParamField>
+
+<ParamField path="prompt_length" type="int" default="0">
+  Length of prompt in tokens.
+</ParamField>
+
+<ParamField path="completion_length" type="int" default="0">
+  Length of completion in tokens.
+</ParamField>
+
+<ParamField path="finish_reason" type="str | None">
+  Reason generation stopped ("stop", "length", etc.).
+</ParamField>
+
+### Methods
+
+```python
+# Serialize
+output_dict = model_output.to_dict()
+
+# Deserialize
+model_output = ModelOutput.from_dict(output_dict)
+```
+
+---
+
+## OpenAIEngine
+
+Rollout engine using OpenAI-compatible APIs.
+
+```python
+from rllm.engine.rollout import OpenAIEngine
+
+engine = OpenAIEngine(
+    base_url="http://localhost:8000/v1",
+    api_key="EMPTY",
+    model="Qwen/Qwen3-4B"
+)
+```
+
+### Constructor
+
+<ParamField path="base_url" type="str">
+  Base URL for the API endpoint.
+</ParamField>
+
+<ParamField path="api_key" type="str">
+  API key for authentication.
+</ParamField>
+
+<ParamField path="model" type="str">
+  Model identifier.
+</ParamField>
+
+---
+
+## FireworksEngine
+
+Rollout engine using Fireworks AI API.
+
+```python
+from rllm.engine.rollout import FireworksEngine
+
+engine = FireworksEngine(
+    api_key="your_fireworks_key",
+    model="accounts/fireworks/models/deepseek-r1"
+)
+```
+
+---
+
+## Example: Basic Usage
+
+```python
+import asyncio
+from rllm.engine.rollout import OpenAIEngine
+
+engine = OpenAIEngine(
+    base_url="http://localhost:4000/v1",
+    api_key="EMPTY",
+    model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+)
+
+async def generate():
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "What is the capital of France?"}
+    ]
+    
+    output = await engine.get_model_response(
+        messages,
+        temperature=0.7,
+        max_tokens=512
+    )
+    
+    print(f"Content: {output.content}")
+    print(f"Reasoning: {output.reasoning}")
+    print(f"Tokens: {output.completion_length}")
+    print(f"Finish reason: {output.finish_reason}")
+
+asyncio.run(generate())
+```
+
+---
+
+## Example: Batch Generation
+
+```python
+import asyncio
+from rllm.engine.rollout import OpenAIEngine
+
+engine = OpenAIEngine(
+    base_url="http://localhost:8000/v1",
+    api_key="EMPTY",
+    model="Qwen/Qwen3-4B"
+)
+
+async def generate_batch():
+    tasks = [
+        [{"role": "user", "content": "What is 2+2?"}],
+        [{"role": "user", "content": "What is the speed of light?"}],
+        [{"role": "user", "content": "Who wrote Romeo and Juliet?"}]
+    ]
+    
+    # Generate concurrently
+    results = await asyncio.gather(*[
+        engine.get_model_response(messages, application_id=f"task_{i}")
+        for i, messages in enumerate(tasks)
+    ])
+    
+    for i, output in enumerate(results):
+        print(f"\nTask {i}:")
+        print(f"Response: {output.content}")
+
+asyncio.run(generate_batch())
+```

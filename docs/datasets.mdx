@@ -1,0 +1,134 @@
+---
+title: Supported datasets
+description: All benchmark datasets available for evaluation and training with rllm eval
+---
+
+rLLM ships with a built-in catalog of 50+ benchmark datasets spanning math, code, question answering, instruction following, search, vision-language, translation, and agentic tasks. All datasets are auto-pulled from HuggingFace on first use.
+
+```bash
+rllm dataset list --all    # See all available datasets
+rllm eval gsm8k            # Auto-pulls and evaluates
+```
+
+## Math
+
+| Dataset | Description | Size | Source | Evaluator |
+|---------|-------------|------|--------|-----------|
+| `gsm8k` | Grade school math word problems | 8.5K train, 1.3K test | [openai/gsm8k](https://huggingface.co/datasets/openai/gsm8k) | `math_reward_fn` |
+| `math500` | MATH-500 competition math benchmark | 500 test | [HuggingFaceH4/MATH-500](https://huggingface.co/datasets/HuggingFaceH4/MATH-500) | `math_reward_fn` |
+| `countdown` | Countdown arithmetic puzzle | 1K train, 500 test | [predibase/countdown](https://huggingface.co/datasets/predibase/countdown) | `countdown_reward_fn` |
+| `hmmt` | HMMT Feb 2025: Harvard-MIT Mathematics Tournament | train | [MathArena/hmmt_feb_2025](https://huggingface.co/datasets/MathArena/hmmt_feb_2025) | `math_reward_fn` |
+| `hmmt_nov` | HMMT Nov 2025: Harvard-MIT Mathematics Tournament | 30 problems | [MathArena/hmmt_nov_2025](https://huggingface.co/datasets/MathArena/hmmt_nov_2025) | `math_reward_fn` |
+| `aime_2025` | AIME 2025: American Invitational Mathematics Exam | 30 problems | [MathArena/aime_2025](https://huggingface.co/datasets/MathArena/aime_2025) | `math_reward_fn` |
+| `aime_2026` | AIME 2026: American Invitational Mathematics Exam | 30 problems | [MathArena/aime_2026](https://huggingface.co/datasets/MathArena/aime_2026) | `math_reward_fn` |
+| `polymath` | PolyMATH: Multilingual math reasoning across 18 languages | 4 difficulty splits | [Qwen/PolyMath](https://huggingface.co/datasets/Qwen/PolyMath) | `math_reward_fn` |
+
+## Code
+
+| Dataset | Description | Size | Source | Evaluator |
+|---------|-------------|------|--------|-----------|
+| `humaneval` | HumanEval: Function-level code generation | 164 problems | [openai/openai_humaneval](https://huggingface.co/datasets/openai/openai_humaneval) | `code_reward_fn` |
+| `mbpp` | MBPP: Python programming benchmark | 974 problems | [google-research-datasets/mbpp](https://huggingface.co/datasets/google-research-datasets/mbpp) | `code_reward_fn` |
+| `livecodebench` | LiveCodeBench: Contamination-free competitive programming | test | [livecodebench/code_generation](https://huggingface.co/datasets/livecodebench/code_generation) | `code_reward_fn` |
+| `swebench_verified` | SWE-bench Verified: Real-world GitHub issues for SWE agents | 500 test | [princeton-nlp/SWE-bench_Verified](https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified) | `swebench_reward_fn` |
+
+## Multiple choice (MCQ)
+
+| Dataset | Description | Size | Source | Evaluator |
+|---------|-------------|------|--------|-----------|
+| `mmlu_pro` | MMLU-Pro: Expert-level MCQ with 10 options | 12K test | [TIGER-Lab/MMLU-Pro](https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro) | `mcq_reward_fn` |
+| `mmlu_redux` | MMLU-Redux: Curated MMLU subset with error fixes | 3K test | [edinburgh-dawg/mmlu-redux](https://huggingface.co/datasets/edinburgh-dawg/mmlu-redux) | `mcq_reward_fn` |
+| `gpqa_diamond` | GPQA: Expert-level graduate science QA | 448 questions | [ankner/gpqa](https://huggingface.co/datasets/ankner/gpqa) | `mcq_reward_fn` |
+| `supergpqa` | SuperGPQA: Graduate-level QA across 285 disciplines | 26.5K | [m-a-p/SuperGPQA](https://huggingface.co/datasets/m-a-p/SuperGPQA) | `mcq_reward_fn` |
+| `ceval` | C-Eval: Chinese evaluation across 52 disciplines | 13.9K | [ceval/ceval-exam](https://huggingface.co/datasets/ceval/ceval-exam) | `mcq_reward_fn` |
+| `mmmlu` | MMMLU: Multilingual MMLU across 14 languages | 15.9K/lang | [openai/MMMLU](https://huggingface.co/datasets/openai/MMMLU) | `mcq_reward_fn` |
+| `mmlu_prox` | MMLU-ProX: Multilingual MMLU-Pro across 29 languages | 11.8K/lang | [li-lab/MMLU-ProX](https://huggingface.co/datasets/li-lab/MMLU-ProX) | `mcq_reward_fn` |
+| `include` | INCLUDE: Multilingual knowledge from local exams, 44 languages | test | [CohereLabs/include-base-44](https://huggingface.co/datasets/CohereLabs/include-base-44) | `mcq_reward_fn` |
+| `global_piqa` | Global PIQA: Physical commonsense reasoning, 100+ languages | test | [mrlbenchmarks/global-piqa-nonparallel](https://huggingface.co/datasets/mrlbenchmarks/global-piqa-nonparallel) | `mcq_reward_fn` |
+| `longbench_v2` | LongBench v2: Long-context understanding MCQ | test | [THUDM/LongBench-v2](https://huggingface.co/datasets/THUDM/LongBench-v2) | `mcq_reward_fn` |
+
+## Question answering
+
+| Dataset | Description | Size | Source | Evaluator |
+|---------|-------------|------|--------|-----------|
+| `hotpotqa` | HotpotQA: Multi-hop question answering | 7.4K validation | [hotpotqa/hotpot_qa](https://huggingface.co/datasets/hotpotqa/hotpot_qa) | `f1_reward_fn` |
+| `aa_lcr` | AA-LCR: Long-context reasoning over ~100K-token documents | 100 questions | [ArtificialAnalysis/AA-LCR](https://huggingface.co/datasets/ArtificialAnalysis/AA-LCR) | `llm_equality_reward_fn` |
+| `hle` | HLE: Humanity's Last Exam — expert-level questions | 2,500 test | [cais/hle](https://huggingface.co/datasets/cais/hle) | `llm_equality_reward_fn` |
+
+<Warning>
+`hle` and `hle_search` are gated datasets on HuggingFace. Run `huggingface-cli login` before pulling them.
+</Warning>
+
+## Instruction following
+
+| Dataset | Description | Size | Source | Evaluator |
+|---------|-------------|------|--------|-----------|
+| `ifeval` | IFEval: Instruction following with verifiable constraints | 541 | [google/IFEval](https://huggingface.co/datasets/google/IFEval) | `ifeval_reward_fn` |
+| `ifbench` | IFBench: Out-of-distribution instruction following | test | [allenai/IFBench_test](https://huggingface.co/datasets/allenai/IFBench_test) | `ifeval_reward_fn` |
+
+## Search
+
+Datasets in this category use the `search` agent, which requires a search backend. Set one with `--search-backend serper` or `--search-backend brave`.
+
+| Dataset | Description | Size | Source | Evaluator |
+|---------|-------------|------|--------|-----------|
+| `browsecomp` | BrowseComp: Web browsing comprehension | 200 test | [Tevatron/browsecomp-plus](https://huggingface.co/datasets/Tevatron/browsecomp-plus) | `llm_equality_reward_fn` |
+| `seal0` | Seal-0: Search-augmented QA with freshness metadata | test | [vtllms/sealqa](https://huggingface.co/datasets/vtllms/sealqa) | `llm_equality_reward_fn` |
+| `widesearch` | WideSearch: Broad web search with structured table output | 200 | [ByteDance-Seed/WideSearch](https://huggingface.co/datasets/ByteDance-Seed/WideSearch) | `widesearch_reward_fn` |
+| `hle_search` | HLE + Search: Humanity's Last Exam with web search tools | test | [cais/hle](https://huggingface.co/datasets/cais/hle) | `llm_equality_reward_fn` |
+
+## Agentic
+
+| Dataset | Description | Size | Source | Evaluator |
+|---------|-------------|------|--------|-----------|
+| `bfcl` | BFCL: Berkeley Function Calling Leaderboard (exec_simple) | test | [gorilla-llm/Berkeley-Function-Calling-Leaderboard](https://huggingface.co/datasets/gorilla-llm/Berkeley-Function-Calling-Leaderboard) | `bfcl_reward_fn` |
+| `multichallenge` | MultiChallenge: Multi-turn conversation evaluation | test | [nmayorga7/multichallenge](https://huggingface.co/datasets/nmayorga7/multichallenge) | `llm_judge_reward_fn` |
+| `frozenlake` | FrozenLake: Grid navigation (procedurally generated) | train, test | Generated | `frozenlake_reward_fn` |
+
+## Translation
+
+| Dataset | Description | Size | Source | Evaluator |
+|---------|-------------|------|--------|-----------|
+| `wmt24pp` | WMT24++: Machine translation across 55 languages (ChrF) | train | [google/wmt24pp](https://huggingface.co/datasets/google/wmt24pp) | `translation_reward_fn` |
+
+## Vision-language (VLM)
+
+These datasets contain images and require a vision-capable model.
+
+| Dataset | Description | Size | Source | Evaluator |
+|---------|-------------|------|--------|-----------|
+| `mmmu` | MMMU: Multi-discipline multimodal understanding | 900 validation | [MMMU/MMMU](https://huggingface.co/datasets/MMMU/MMMU) | `mcq_reward_fn` |
+| `mmmu_pro` | MMMU-Pro: Harder multimodal understanding, 10 options | 1,730 test | [MMMU/MMMU_Pro](https://huggingface.co/datasets/MMMU/MMMU_Pro) | `mcq_reward_fn` |
+| `mathvision` | MathVision: Visual math reasoning | 304 testmini | [MathLLMs/MathVision](https://huggingface.co/datasets/MathLLMs/MathVision) | `math_reward_fn` |
+| `mathvista` | MathVista: Visual math across diverse tasks | 1,000 testmini | [AI4Math/MathVista](https://huggingface.co/datasets/AI4Math/MathVista) | `math_reward_fn` |
+| `dynamath` | DynaMath: Dynamic visual math with 10 variants | 5,010 | [DynaMath/DynaMath_Sample](https://huggingface.co/datasets/DynaMath/DynaMath_Sample) | `math_reward_fn` |
+| `zerobench` | ZEROBench: Zero-shot visual reasoning | 100 questions | [jonathan-roberts1/zerobench](https://huggingface.co/datasets/jonathan-roberts1/zerobench) | `llm_equality_reward_fn` |
+| `zerobench_sub` | ZEROBench Subquestions: Decomposed visual reasoning | 334 subquestions | [jonathan-roberts1/zerobench](https://huggingface.co/datasets/jonathan-roberts1/zerobench) | `llm_equality_reward_fn` |
+| `vlmsareblind` | VLMs Are Blind: Visual perception benchmark | 8,020 valid | [XAI/vlmsareblind](https://huggingface.co/datasets/XAI/vlmsareblind) | `f1_reward_fn` |
+| `babyvision` | BabyVision: Early visual understanding MCQ | 388 questions | [UnipatAI/BabyVision](https://huggingface.co/datasets/UnipatAI/BabyVision) | `llm_equality_reward_fn` |
+| `ai2d` | AI2D: Science diagram understanding MCQ | 3,088 test | [lmms-lab/ai2d](https://huggingface.co/datasets/lmms-lab/ai2d) | `mcq_reward_fn` |
+| `ocrbench` | OCRBench: OCR and text recognition | 1,000 test | [echo840/OCRBench](https://huggingface.co/datasets/echo840/OCRBench) | `f1_reward_fn` |
+| `charxiv` | CharXiv: Chart understanding reasoning | 1,000 validation | [princeton-nlp/CharXiv](https://huggingface.co/datasets/princeton-nlp/CharXiv) | `llm_equality_reward_fn` |
+| `cc_ocr` | CC-OCR: Multi-scene OCR with 4 sub-tasks | 7,058 test | [wulipc/CC-OCR](https://huggingface.co/datasets/wulipc/CC-OCR) | `f1_reward_fn` |
+| `countbenchqa` | CountBenchQA: Visual object counting QA | 491 test | [vikhyatk/CountBenchQA](https://huggingface.co/datasets/vikhyatk/CountBenchQA) | `f1_reward_fn` |
+| `erqa` | ERQA: Entity recognition QA with multi-image support | 400 test | [FlagEval/ERQA](https://huggingface.co/datasets/FlagEval/ERQA) | `mcq_reward_fn` |
+| `geo3k` | Geometry3K: Geometry problems with diagrams | 2.4K train, 601 test | [hiyouga/geometry3k](https://huggingface.co/datasets/hiyouga/geometry3k) | `math_reward_fn` |
+| `omnidocbench` | OmniDocBench: Comprehensive document understanding | test | [rwood-97/english_OmniDocBench_with_eval](https://huggingface.co/datasets/rwood-97/english_OmniDocBench_with_eval) | `f1_reward_fn` |
+| `docvqa` | DocVQA: Single-page document visual QA | 5,188 validation | [lmms-lab/DocVQA](https://huggingface.co/datasets/lmms-lab/DocVQA) | `f1_reward_fn` |
+| `refcoco` | RefCOCO: Referring expression comprehension (bounding box) | test | [lmms-lab/RefCOCO](https://huggingface.co/datasets/lmms-lab/RefCOCO) | `iou_reward_fn` |
+| `refspatial` | RefSpatial-Bench: Spatial reasoning with point prediction | test | [BAAI/RefSpatial-Bench](https://huggingface.co/datasets/BAAI/RefSpatial-Bench) | `point_in_mask_reward_fn` |
+| `lingoqa` | LingoQA: Language-grounded QA for autonomous driving | test | [runoob1/lingoqa](https://huggingface.co/datasets/runoob1/lingoqa) | `f1_reward_fn` |
+| `sunrgbd` | SUN RGB-D: Depth estimation and scene understanding | test | [wyrx/SUNRGBD_seg](https://huggingface.co/datasets/wyrx/SUNRGBD_seg) | `depth_reward_fn` |
+
+## Using custom datasets
+
+You can register your own datasets for use with `rllm eval` and `rllm train`:
+
+```bash
+rllm dataset register my-dataset --file data.jsonl --category math
+rllm eval my-dataset --agent react --evaluator math_reward_fn
+```
+
+Your data file should contain `question` and `ground_truth` fields. Supported formats: JSON, JSONL, CSV, and Parquet.
+
+For more details, see [rllm dataset](/core-concepts/cli-and-ui).

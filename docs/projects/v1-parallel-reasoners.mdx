@@ -1,0 +1,10 @@
+---
+title: 'V1: Parallel Self-Verification'
+description: 'Unifying generation and pairwise self-verification for parallel reasoners'
+---
+
+<Card title="Paper" icon="file-lines" href="https://arxiv.org/abs/2603.04304">
+  arXiv:2603.04304
+</Card>
+
+V1 is a framework that improves how models verify multiple solution candidates during inference. Instead of scoring solutions individually, V1 leverages pairwise self-verification — where models compare two candidates head-to-head — combined with a tournament-based ranking algorithm to efficiently allocate verification compute. The training method jointly develops generation and verification capabilities, achieving improvements of up to 10% on code generation and math reasoning benchmarks.

@@ -1,0 +1,259 @@
+---
+title: AgentExecutionEngine
+description: High-performance engine for executing agent-environment interactions
+---
+
+The `AgentExecutionEngine` provides an asynchronous execution system for running agents in environments with efficient batching and parallelization.
+
+## AgentExecutionEngine
+
+```python
+from rllm.engine import AgentExecutionEngine
+```
+
+### Constructor
+
+```python
+def __init__(
+    engine_name: str = "openai",
+    tokenizer = None,
+    rollout_engine = None,
+    chat_parser = None,
+    n_parallel_agents: int = 128,
+    trajectory_timeout: int | None = None,
+    gamma: float = 0.2,
+    api_retries: int = 3,
+    retry_limit: int = 3,
+    max_steps: int = 5,
+    max_response_length: int = 8192,
+    max_prompt_length: int = 1024,
+    config = None,
+    agent_class: type | None = None,
+    env_class: type | None = None,
+    agent_args: dict | None = None,
+    rollout_engine_args: dict | None = None,
+    env_args: dict | None = None,
+    max_workers: int = 64,
+    enforce_max_prompt_length: bool = False,
+    overlong_filter: bool = False,
+    **kwargs
+)
+```
+
+<ParamField path="engine_name" type="str" default="openai">
+  Rollout engine backend: "openai", "verl", or "tinker".
+</ParamField>
+
+<ParamField path="tokenizer" type="PreTrainedTokenizer | None">
+  Tokenizer for encoding/decoding text.
+</ParamField>
+
+<ParamField path="rollout_engine" type="RolloutEngine | None">
+  Pre-initialized rollout engine. If None, creates one based on `engine_name`.
+</ParamField>
+
+<ParamField path="chat_parser" type="ChatParser | None">
+  Parser for converting between chat format and tokens. Auto-detected if None.
+</ParamField>
+
+<ParamField path="n_parallel_agents" type="int" default="128">
+  Number of active agents to run in parallel.
+</ParamField>
+
+<ParamField path="trajectory_timeout" type="int | None">
+  Timeout in seconds for a single trajectory. Defaults to 1e9 if None.
+</ParamField>
+
+<ParamField path="gamma" type="float" default="0.2">
+  Discount factor for computing Monte Carlo returns.
+</ParamField>
+
+<ParamField path="api_retries" type="int" default="3">
+  Number of API call retries on failure.
+</ParamField>
+
+<ParamField path="retry_limit" type="int" default="3">
+  Maximum retry attempts for failed trajectories.
+</ParamField>
+
+<ParamField path="max_steps" type="int" default="5">
+  Maximum steps per episode before termination.
+</ParamField>
+
+<ParamField path="max_response_length" type="int" default="8192">
+  Maximum response length in tokens.
+</ParamField>
+
+<ParamField path="max_prompt_length" type="int" default="1024">
+  Maximum prompt length in tokens.
+</ParamField>
+
+<ParamField path="config" type="dict | None">
+  Configuration dictionary for additional settings.
+</ParamField>
+
+<ParamField path="agent_class" type="type | None">
+  Agent class to instantiate.
+</ParamField>
+
+<ParamField path="env_class" type="type | None">
+  Environment class to instantiate.
+</ParamField>
+
+<ParamField path="agent_args" type="dict | None">
+  Arguments passed to agent constructor.
+</ParamField>
+
+<ParamField path="rollout_engine_args" type="dict | None">
+  Arguments for rollout engine initialization (e.g., `base_url`, `api_key`).
+</ParamField>
+
+<ParamField path="env_args" type="dict | None">
+  Arguments passed to environment constructor.
+</ParamField>
+
+<ParamField path="max_workers" type="int" default="64">
+  Number of concurrent environment operations.
+</ParamField>
+
+<ParamField path="enforce_max_prompt_length" type="bool" default="False">
+  If True, applies max prompt check at every step.
+</ParamField>
+
+<ParamField path="overlong_filter" type="bool" default="False">
+  If True, filters out trajectories with termination reasons: TRUNCATION, MAX_STEPS, TIMEOUT.
+</ParamField>
+
+### Methods
+
+#### execute_tasks
+
+Execute agent-environment interactions on a batch of tasks.
+
+```python
+results = await engine.execute_tasks(
+    tasks=task_list,
+    num_rollouts_per_task=1,
+    **sampling_params
+)
+```
+
+<ParamField path="tasks" type="list[dict]">
+  List of task dictionaries.
+</ParamField>
+
+<ParamField path="num_rollouts_per_task" type="int" default="1">
+  Number of rollouts to generate per task.
+</ParamField>
+
+<ParamField path="**sampling_params" type="dict">
+  Additional sampling parameters (temperature, top_p, etc.).
+</ParamField>
+
+<ResponseField name="results" type="list[Trajectory]">
+  List of completed trajectories.
+</ResponseField>
+
+---
+
+## Example: Search Agent Execution
+
+```python
+import asyncio
+from transformers import AutoTokenizer
+from rllm.engine import AgentExecutionEngine
+from rllm.agents import ToolAgent
+from rllm.environments import ToolEnvironment
+from rllm.rewards import search_reward_fn
+
+# Initialize tokenizer
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
+
+# Define tools
+tool_map = {"search": MySearchTool}
+
+# Create engine
+engine = AgentExecutionEngine(
+    agent_class=ToolAgent,
+    agent_args={
+        "tool_map": tool_map,
+        "system_prompt": "You are a helpful search assistant."
+    },
+    env_class=ToolEnvironment,
+    env_args={
+        "tool_map": tool_map,
+        "reward_fn": search_reward_fn
+    },
+    engine_name="openai",
+    rollout_engine_args={
+        "base_url": "http://localhost:8000/v1",
+        "api_key": "EMPTY"
+    },
+    tokenizer=tokenizer,
+    n_parallel_agents=64,
+    max_steps=5,
+    max_response_length=4096
+)
+
+# Define tasks
+tasks = [
+    {"question": "What is the capital of France?", "answer": "Paris"},
+    {"question": "Who wrote Hamlet?", "answer": "William Shakespeare"}
+]
+
+# Execute
+results = asyncio.run(engine.execute_tasks(
+    tasks,
+    num_rollouts_per_task=2,
+    temperature=0.7,
+    top_p=0.95
+))
+
+print(f"Generated {len(results)} trajectories")
+for traj in results:
+    print(f"Task: {traj.task}")
+    print(f"Reward: {traj.reward}")
+    print(f"Steps: {len(traj.steps)}")
+```
+
+---
+
+## Example: Math Problem Solving
+
+```python
+import asyncio
+from transformers import AutoTokenizer
+from rllm.engine import AgentExecutionEngine
+from rllm.agents import MathAgent
+from rllm.environments import SingleTurnEnvironment
+from rllm.rewards import math_reward_fn
+
+tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
+
+engine = AgentExecutionEngine(
+    agent_class=MathAgent,
+    env_class=SingleTurnEnvironment,
+    env_args={"reward_fn": math_reward_fn},
+    engine_name="openai",
+    rollout_engine_args={
+        "base_url": "http://localhost:4000/v1",
+        "api_key": "EMPTY"
+    },
+    tokenizer=tokenizer,
+    n_parallel_agents=128,
+    max_steps=1,
+    max_response_length=2048
+)
+
+tasks = [
+    {"question": "Solve 2x + 5 = 13", "answer": "4"},
+    {"question": "What is 15% of 80?", "answer": "12"}
+]
+
+results = asyncio.run(engine.execute_tasks(tasks, temperature=0.6))
+
+for traj in results:
+    print(f"Question: {traj.task['question']}")
+    print(f"Answer: {traj.steps[-1].action}")
+    print(f"Reward: {traj.reward}")
+```

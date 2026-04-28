@@ -1,0 +1,489 @@
+---
+title: Environments
+description: Environment classes for agent interaction and task evaluation
+---
+
+The environments module provides standardized interfaces for agents to interact with tasks, including single-turn and multi-turn scenarios.
+
+## BaseEnv
+
+Abstract base class for all environments following the Gym interface.
+
+```python
+from rllm.environments import BaseEnv
+```
+
+### Properties
+
+<ParamField path="idx" type="Any">
+  The index or identifier of the environment, often used within a batch.
+</ParamField>
+
+### Methods
+
+#### reset
+
+Resets the environment to an initial state.
+
+```python
+def reset() -> tuple[dict, dict]
+```
+
+<ResponseField name="observation" type="dict">
+  The initial observation.
+</ResponseField>
+
+<ResponseField name="info" type="dict">
+  Auxiliary information.
+</ResponseField>
+
+#### step
+
+Executes one time step within the environment.
+
+```python
+def step(action: Any) -> tuple[Any, float, bool, dict]
+```
+
+<ParamField path="action" type="Any">
+  An action provided by the agent.
+</ParamField>
+
+<ResponseField name="observation" type="Any">
+  The next observation.
+</ResponseField>
+
+<ResponseField name="reward" type="float">
+  The reward for this step.
+</ResponseField>
+
+<ResponseField name="done" type="bool">
+  Whether the episode has ended.
+</ResponseField>
+
+<ResponseField name="info" type="dict">
+  Additional information.
+</ResponseField>
+
+#### close
+
+Performs any necessary cleanup.
+
+```python
+def close() -> None
+```
+
+#### from_dict
+
+Static factory method to create an environment from a dictionary.
+
+```python
+@staticmethod
+def from_dict(info: dict) -> BaseEnv
+```
+
+<ParamField path="info" type="dict">
+  Dictionary containing environment initialization data.
+</ParamField>
+
+#### is_multithread_safe
+
+Check if the environment can be used safely across multiple threads.
+
+```python
+@staticmethod
+def is_multithread_safe() -> bool
+```
+
+<ResponseField name="safe" type="bool" default="True">
+  Whether the environment is thread-safe.
+</ResponseField>
+
+---
+
+## MultiTurnEnvironment
+
+Environment for multi-turn interactions with language models.
+
+```python
+from rllm.environments import MultiTurnEnvironment
+
+class MyEnv(MultiTurnEnvironment):
+    def get_reward_and_next_obs(self, task, action):
+        # Compute reward logic here
+        return reward, next_observation
+```
+
+### Constructor
+
+```python
+def __init__(
+    task: dict | None = None,
+    max_turns: int = 3,
+    **kwargs
+)
+```
+
+<ParamField path="task" type="dict | None">
+  Dictionary containing task information. Should include relevant fields for your specific task.
+</ParamField>
+
+<ParamField path="max_turns" type="int" default="3">
+  Maximum number of turns before terminating the interaction.
+</ParamField>
+
+### Methods
+
+#### reset
+
+Reset the environment with a new task.
+
+```python
+obs, info = env.reset(task=new_task)
+```
+
+<ParamField path="task" type="dict | None">
+  Optional task to set. If None, uses the current task.
+</ParamField>
+
+#### step
+
+Take a step in the environment.
+
+```python
+next_obs, reward, done, info = env.step(action)
+```
+
+<ParamField path="action" type="Any">
+  Response string from the LLM or action object.
+</ParamField>
+
+#### get_reward_and_next_obs
+
+Abstract method to compute reward and next observation. **Must be implemented by subclasses.**
+
+```python
+def get_reward_and_next_obs(
+    task: dict,
+    action: Any
+) -> tuple[float, dict]
+```
+
+<ParamField path="task" type="dict">
+  The task dictionary containing relevant information.
+</ParamField>
+
+<ParamField path="action" type="Any">
+  The action taken by the agent.
+</ParamField>
+
+<ResponseField name="reward" type="float">
+  The computed reward.
+</ResponseField>
+
+<ResponseField name="next_obs" type="dict">
+  The next observation dictionary.
+</ResponseField>
+
+---
+
+## SingleTurnEnvironment
+
+Simplified environment for single-turn interactions. This is a special case of `MultiTurnEnvironment` where `max_turns=1`.
+
+```python
+from rllm.environments import SingleTurnEnvironment
+from rllm.rewards import math_reward_fn
+
+env = SingleTurnEnvironment(
+    task={"question": "What is 2+2?", "answer": "4"},
+    reward_fn=math_reward_fn
+)
+```
+
+### Constructor
+
+```python
+def __init__(
+    task: dict | None = None,
+    reward_fn: RewardFunction | None = None,
+    **kwargs
+)
+```
+
+<ParamField path="task" type="dict | None">
+  Dictionary containing the task information, including at least a "question" field.
+</ParamField>
+
+<ParamField path="reward_fn" type="RewardFunction | None">
+  Custom reward function to evaluate agent responses. If None, uses zero reward with a warning.
+</ParamField>
+
+### Methods
+
+#### get_reward_and_next_obs
+
+Compute the reward based on the task and action.
+
+```python
+reward, next_obs = env.get_reward_and_next_obs(task, action)
+```
+
+#### from_dict
+
+Create environment from dictionary.
+
+```python
+env = SingleTurnEnvironment.from_dict({
+    "task": {"question": "...", "answer": "..."},
+    "reward_fn": my_reward_fn
+})
+```
+
+---
+
+## Example: Custom Multi-Turn Environment
+
+```python
+from rllm.environments import MultiTurnEnvironment
+from rllm.rewards import RewardOutput
+
+class ConversationEnv(MultiTurnEnvironment):
+    def __init__(self, task=None, max_turns=5):
+        super().__init__(task=task, max_turns=max_turns)
+    
+    def get_reward_and_next_obs(self, task, action):
+        # Custom reward logic
+        if "correct keyword" in action.lower():
+            reward = 1.0
+        else:
+            reward = 0.0
+        
+        # Prepare next observation
+        next_obs = {
+            "turn": self.current_turn,
+            "previous_action": action
+        }
+        
+        return reward, next_obs
+    
+    @staticmethod
+    def from_dict(env_args: dict):
+        return ConversationEnv(
+            task=env_args.get("task"),
+            max_turns=env_args.get("max_turns", 5)
+        )
+
+# Usage
+env = ConversationEnv(
+    task={"goal": "Find the keyword"},
+    max_turns=3
+)
+
+obs, info = env.reset()
+for turn in range(3):
+    action = "My response with correct keyword"
+    next_obs, reward, done, info = env.step(action)
+    print(f"Turn {turn}: reward={reward}, done={done}")
+```
+
+---
+
+## Example: Using SingleTurnEnvironment
+
+```python
+from rllm.environments import SingleTurnEnvironment
+from rllm.rewards import math_reward_fn
+
+# Create environment with math reward function
+env = SingleTurnEnvironment(
+    task={
+        "question": "Solve: 2x + 5 = 13",
+        "answer": "x = 4"
+    },
+    reward_fn=math_reward_fn
+)
+
+# Reset and step
+obs, info = env.reset()
+action = "x = 4"  # Agent's response
+next_obs, reward, done, info = env.step(action)
+
+print(f"Reward: {reward}")  # 1.0 if correct
+print(f"Done: {done}")      # True (single turn)
+```
+
+---
+
+## ToolEnvironment
+
+Environment for agents that use tools, handling tool execution and response evaluation.
+
+```python
+from rllm.environments import ToolEnvironment
+```
+
+**Source**: `rllm/environments/tools/tool_env.py`
+
+### Constructor
+
+```python
+def __init__(
+    task: dict | None = None,
+    tools: list[str] | None = None,
+    tool_map: dict[str, type[Tool]] | None = None,
+    reward_fn: RewardFunction | None = None,
+    max_steps: int = 10
+)
+```
+
+<ParamField path="task" type="dict | None">
+  Task information dictionary. Typically includes "question" and "ground_truth" or "answer" fields.
+</ParamField>
+
+<ParamField path="tools" type="list[str] | None">
+  List of tool names to load from the registry (e.g., `["python", "google_search"]`). Mutually exclusive with `tool_map`.
+</ParamField>
+
+<ParamField path="tool_map" type="dict[str, type[Tool]] | None">
+  Dictionary mapping tool names to Tool classes for custom tools. Mutually exclusive with `tools`.
+</ParamField>
+
+<ParamField path="reward_fn" type="RewardFunction | None">
+  Reward function for evaluating agent responses. If None, returns 0 reward with a warning.
+</ParamField>
+
+<ParamField path="max_steps" type="int" default="10">
+  Maximum number of steps before terminating the episode.
+</ParamField>
+
+### Properties
+
+<ResponseField name="tools" type="MultiTool">
+  MultiTool instance managing available tools.
+</ResponseField>
+
+<ResponseField name="step_count" type="int">
+  Current step number in the episode.
+</ResponseField>
+
+### Methods
+
+#### reset
+
+Reset the environment to the initial state.
+
+```python
+obs, info = env.reset()
+```
+
+<ResponseField name="obs" type="dict">
+  The task dictionary.
+</ResponseField>
+
+<ResponseField name="info" type="dict">
+  Empty dictionary (for compatibility).
+</ResponseField>
+
+#### step
+
+Execute tools based on agent action and return results.
+
+```python
+next_obs, reward, done, info = env.step(action)
+```
+
+<ParamField path="action" type="list[dict] | str | dict">
+  Agent action. Can be:
+  - `list[dict]`: Tool calls to execute
+  - `str`: Final answer (triggers termination and reward computation)
+  - `dict`: Single tool call
+</ParamField>
+
+**Termination conditions**:
+- Agent provides a string response (final answer)
+- Agent calls "finish" tool
+- `max_steps` reached
+
+<ResponseField name="next_obs" type="dict">
+  Dictionary with "tool_outputs" mapping call IDs to results, or None if done.
+</ResponseField>
+
+<ResponseField name="reward" type="float">
+  Reward from reward function (only computed on final step).
+</ResponseField>
+
+<ResponseField name="done" type="bool">
+  Whether the episode has terminated.
+</ResponseField>
+
+<ResponseField name="info" type="dict">
+  Additional information from the environment.
+</ResponseField>
+
+### Example
+
+```python
+from rllm.environments import ToolEnvironment
+from rllm.rewards import math_reward_fn
+
+# Create environment with Python tool
+env = ToolEnvironment(
+    task={
+        "question": "What is 10 factorial?",
+        "answer": "3628800"
+    },
+    tools=["python"],
+    reward_fn=math_reward_fn,
+    max_steps=5
+)
+
+# Reset
+obs, info = env.reset()
+print(obs)  # {"question": "What is 10 factorial?", "answer": "3628800"}
+
+# Agent calls Python tool
+tool_calls = [{
+    "id": "call_123",
+    "function": {
+        "name": "python",
+        "arguments": {"code": "import math; math.factorial(10)"}
+    }
+}]
+
+next_obs, reward, done, info = env.step(tool_calls)
+print(next_obs)  # {"tool_outputs": {"call_123": "3628800"}}
+print(done)      # False
+
+# Agent provides final answer
+final_answer = "3628800"
+next_obs, reward, done, info = env.step(final_answer)
+print(reward)    # 1.0 (correct answer)
+print(done)      # True
+```
+
+### Tool Call Format
+
+Tool calls should be dictionaries with this structure:
+
+```python
+{
+    "id": "unique_call_id",
+    "function": {
+        "name": "tool_name",
+        "arguments": {"param": "value"}
+    }
+}
+```
+
+Special tool: `finish` - Signals completion and provides final answer:
+
+```python
+{
+    "id": "call_finish",
+    "function": {
+        "name": "finish",
+        "arguments": {"response": "Final answer here"}
+    }
+}
+```

@@ -1,0 +1,482 @@
+---
+title: Tools
+description: Tool system for enabling agent capabilities
+---
+
+The tools module provides a framework for creating and managing tools that agents can use to interact with external systems.
+
+## Tool
+
+Base class for all tools.
+
+```python
+from rllm.tools import Tool
+```
+
+### Constructor
+
+```python
+def __init__(
+    name: str | None = None,
+    description: str | None = None,
+    function: Callable | None = None
+)
+```
+
+<ParamField path="name" type="str | None">
+  Name of the tool. Required if `function` is not provided.
+</ParamField>
+
+<ParamField path="description" type="str | None">
+  Description of the tool's purpose. Required if `function` is not provided.
+</ParamField>
+
+<ParamField path="function" type="Callable | None">
+  Function to convert to tool format. If provided, name and description are auto-extracted from docstring.
+</ParamField>
+
+### Properties
+
+<ParamField path="json" type="dict">
+  Tool schema in OpenAI function calling format.
+</ParamField>
+
+### Methods
+
+#### forward
+
+Synchronous implementation of tool functionality.
+
+```python
+def forward(*args, **kwargs) -> ToolOutput
+```
+
+<ResponseField name="output" type="ToolOutput">
+  Tool execution result.
+</ResponseField>
+
+#### async_forward
+
+Asynchronous implementation of tool functionality.
+
+```python
+async def async_forward(*args, **kwargs) -> ToolOutput
+```
+
+#### __call__
+
+Make the tool callable.
+
+```python
+result = tool(arg1, arg2, use_async=False)
+```
+
+<ParamField path="use_async" type="bool | None">
+  Whether to use async implementation. Auto-detects if None.
+</ParamField>
+
+---
+
+## ToolOutput
+
+Dataclass for tool execution results.
+
+```python
+from rllm.tools import ToolOutput
+
+output = ToolOutput(
+    name="search",
+    output={"results": [...]},
+    error=None,
+    metadata={"query_time": 0.5}
+)
+```
+
+### Fields
+
+<ParamField path="name" type="str">
+  Name of the tool that produced this output.
+</ParamField>
+
+<ParamField path="output" type="str | list | dict | None">
+  The tool's output data.
+</ParamField>
+
+<ParamField path="error" type="str | None">
+  Error message if execution failed.
+</ParamField>
+
+<ParamField path="metadata" type="dict | None">
+  Additional metadata about the execution.
+</ParamField>
+
+### Methods
+
+#### to_string
+
+Convert output to string representation.
+
+```python
+result_str = output.to_string()
+```
+
+---
+
+## ToolCall
+
+Dataclass representing a tool call.
+
+```python
+from rllm.tools import ToolCall
+
+call = ToolCall(
+    name="calculator",
+    arguments={"a": 5, "b": 3, "operation": "add"}
+)
+```
+
+### Fields
+
+<ParamField path="name" type="str">
+  Name of the tool to call.
+</ParamField>
+
+<ParamField path="arguments" type="dict[str, Any]">
+  Arguments to pass to the tool.
+</ParamField>
+
+---
+
+## ToolRegistry
+
+Singleton registry for managing tools.
+
+```python
+from rllm.tools import ToolRegistry
+
+registry = ToolRegistry()
+```
+
+### Methods
+
+#### register
+
+Register a tool class.
+
+```python
+registry.register("search", SearchTool)
+```
+
+<ParamField path="name" type="str">
+  Name to register the tool under.
+</ParamField>
+
+<ParamField path="tool_cls" type="type[Tool]">
+  Tool class to register.
+</ParamField>
+
+#### register_all
+
+Register multiple tools at once.
+
+```python
+registry.register_all({
+    "search": SearchTool,
+    "calculator": CalculatorTool
+})
+```
+
+#### get
+
+Get a tool class by name.
+
+```python
+tool_cls = registry.get("search")
+```
+
+<ResponseField name="tool_cls" type="type[Tool] | None">
+  Tool class if found, None otherwise.
+</ResponseField>
+
+#### instantiate
+
+Instantiate a tool by name.
+
+```python
+tool = registry.instantiate("search", api_key="...")
+```
+
+<ParamField path="name" type="str">
+  Name of the tool to instantiate.
+</ParamField>
+
+<ParamField path="*args, **kwargs" type="Any">
+  Arguments to pass to tool constructor.
+</ParamField>
+
+#### list_tools
+
+List all registered tool names.
+
+```python
+tool_names = registry.list_tools()
+```
+
+#### clear
+
+Clear all registered tools.
+
+```python
+registry.clear()
+```
+
+#### unregister
+
+Unregister a tool by name.
+
+```python
+success = registry.unregister("search")
+```
+
+---
+
+## Example: Creating a Tool from Function
+
+```python
+from rllm.tools import Tool
+
+def add(a: int, b: int) -> int:
+    """Adds two numbers.
+    
+    Args:
+        a (int): The first number to be added.
+        b (int): The second number to be added.
+    
+    Returns:
+        int: The sum of the two numbers.
+    """
+    return a + b
+
+# Auto-generate tool from function
+add_tool = Tool(function=add)
+
+print(add_tool.json)  # OpenAI function schema
+print(add_tool(5, 3))  # ToolOutput(name="add", output=8)
+```
+
+---
+
+## Example: Creating a Custom Tool Class
+
+```python
+from rllm.tools import Tool, ToolOutput
+import requests
+
+class WeatherTool(Tool):
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        super().__init__(
+            name="get_weather",
+            description="Get current weather for a location"
+        )
+    
+    @property
+    def json(self) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "City name"
+                        }
+                    },
+                    "required": ["location"]
+                }
+            }
+        }
+    
+    def forward(self, location: str) -> ToolOutput:
+        try:
+            # Call weather API
+            response = requests.get(
+                f"https://api.weather.com/v1/current",
+                params={"location": location, "key": self.api_key}
+            )
+            data = response.json()
+            
+            return ToolOutput(
+                name=self.name,
+                output=data,
+                metadata={"location": location}
+            )
+        except Exception as e:
+            return ToolOutput(
+                name=self.name,
+                error=str(e)
+            )
+
+# Use the tool
+tool = WeatherTool(api_key="your_key")
+result = tool(location="San Francisco")
+print(result.output)
+```
+
+---
+
+## Example: Async Tool
+
+```python
+from rllm.tools import Tool, ToolOutput
+import httpx
+
+class AsyncSearchTool(Tool):
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        super().__init__(
+            name="search",
+            description="Search the web for information"
+        )
+    
+    @property
+    def json(self) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        }
+    
+    async def async_forward(self, query: str) -> ToolOutput:
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(
+                    "https://api.search.com/v1/search",
+                    params={"q": query, "key": self.api_key}
+                )
+                results = response.json()
+                
+                return ToolOutput(
+                    name=self.name,
+                    output=results,
+                    metadata={"query": query}
+                )
+            except Exception as e:
+                return ToolOutput(
+                    name=self.name,
+                    error=str(e)
+                )
+
+# Use async tool
+import asyncio
+
+tool = AsyncSearchTool(api_key="your_key")
+result = asyncio.run(tool(query="rLLM framework", use_async=True))
+print(result.output)
+```
+
+---
+
+## Example: Tool Registry
+
+```python
+from rllm.tools import Tool, ToolRegistry, ToolOutput
+
+class CalculatorTool(Tool):
+    def __init__(self):
+        super().__init__(
+            name="calculator",
+            description="Perform arithmetic operations"
+        )
+    
+    @property
+    def json(self) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "number"},
+                        "b": {"type": "number"},
+                        "operation": {
+                            "type": "string",
+                            "enum": ["add", "subtract", "multiply", "divide"]
+                        }
+                    },
+                    "required": ["a", "b", "operation"]
+                }
+            }
+        }
+    
+    def forward(self, a: float, b: float, operation: str) -> ToolOutput:
+        ops = {
+            "add": a + b,
+            "subtract": a - b,
+            "multiply": a * b,
+            "divide": a / b if b != 0 else None
+        }
+        result = ops.get(operation)
+        
+        if result is None:
+            return ToolOutput(name=self.name, error="Invalid operation or division by zero")
+        
+        return ToolOutput(name=self.name, output=result)
+
+# Register tool
+registry = ToolRegistry()
+registry.register("calculator", CalculatorTool)
+
+# Instantiate and use
+calc = registry.instantiate("calculator")
+result = calc(a=10, b=5, operation="multiply")
+print(result.output)  # 50
+
+# List all tools
+print(registry.list_tools())  # ["calculator"]
+```
+
+---
+
+## Example: Using Tools with Agents
+
+```python
+from rllm.agents import ToolAgent
+from rllm.environments import ToolEnvironment
+from rllm.tools import Tool, ToolOutput
+
+class MySearchTool(Tool):
+    # ... implementation ...
+    pass
+
+tool_map = {"search": MySearchTool}
+
+# Agent with tools
+agent = ToolAgent(
+    tool_map=tool_map,
+    system_prompt="You are a helpful assistant with search capabilities."
+)
+
+# Environment with tools
+env = ToolEnvironment(
+    tool_map=tool_map,
+    reward_fn=my_reward_fn
+)
+```

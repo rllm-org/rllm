@@ -1,0 +1,329 @@
+---
+title: Decorators
+description: Decorators for trajectory tracking and reward assignment
+---
+
+The `@trajectory` decorator simplifies trajectory creation by automatically tracking LLM calls and converting them into steps.
+
+## @trajectory
+
+Decorator to mark a function as a trajectory. Automatically converts LLM calls into steps.
+
+```python
+from rllm.sdk import trajectory
+
+@trajectory(name="solver")
+async def solve_problem(question: str):
+    # Each LLM call becomes a step
+    response = await client.chat.completions.create(...)
+    return response
+```
+
+### Parameters
+
+<ParamField path="name" type="str" default="agent">
+  Name of the trajectory.
+</ParamField>
+
+<ParamField path="**traj_metadata" type="dict">
+  Additional metadata for the trajectory (e.g., `agent_type`, `strategy`).
+</ParamField>
+
+### Returns
+
+<ResponseField name="trajectory" type="TrajectoryView">
+  The decorator **changes the return value** - functions return `TrajectoryView` instead of their original return value.
+</ResponseField>
+
+---
+
+## TrajectoryView
+
+Dataclass representing a trajectory with steps.
+
+### Fields
+
+<ParamField path="name" type="str">
+  Trajectory name.
+</ParamField>
+
+<ParamField path="steps" type="list[StepView]">
+  List of steps (one per LLM call).
+</ParamField>
+
+<ParamField path="reward" type="float" default="0.0">
+  Trajectory-level reward. **Must be set manually by the user.**
+</ParamField>
+
+<ParamField path="input" type="dict">
+  Function input arguments (automatically captured).
+</ParamField>
+
+<ParamField path="output" type="Any">
+  Original function return value (before decorator wrapping).
+</ParamField>
+
+<ParamField path="metadata" type="dict | None">
+  Additional trajectory metadata.
+</ParamField>
+
+---
+
+## StepView
+
+Dataclass representing a single step in a trajectory.
+
+### Fields
+
+<ParamField path="input" type="list[dict]">
+  Input messages sent to the LLM.
+</ParamField>
+
+<ParamField path="output" type="str">
+  Generated response text.
+</ParamField>
+
+<ParamField path="reward" type="float" default="0.0">
+  Step-level reward. **Must be set manually.**
+</ParamField>
+
+<ParamField path="usage" type="dict">
+  Token usage information.
+</ParamField>
+
+<ParamField path="metadata" type="dict">
+  Additional step metadata.
+</ParamField>
+
+---
+
+## Example: Basic Usage
+
+```python
+from rllm.sdk import trajectory, get_chat_client
+
+client = get_chat_client(
+    base_url="http://localhost:4000/v1",
+    api_key="EMPTY"
+)
+
+@trajectory(name="math_solver")
+async def solve_math_problem(question: str, answer: str):
+    response = await client.chat.completions.create(
+        model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        messages=[{"role": "user", "content": question}]
+    )
+    return response.choices[0].message.content
+
+# Call the function
+import asyncio
+traj = asyncio.run(solve_math_problem(
+    question="What is 2+2?",
+    answer="4"
+))
+
+# traj is now a TrajectoryView
+print(f"Name: {traj.name}")           # "math_solver"
+print(f"Steps: {len(traj.steps)}")    # 1
+print(f"Input: {traj.input}")         # {"question": "What is 2+2?", "answer": "4"}
+print(f"Output: {traj.output}")       # Original return value
+
+# Set reward manually
+if traj.output == "4":
+    traj.reward = 1.0
+    traj.steps[0].reward = 1.0
+else:
+    traj.reward = 0.0
+    traj.steps[0].reward = 0.0
+
+print(f"Reward: {traj.reward}")
+```
+
+---
+
+## Example: Multi-Step Trajectory
+
+```python
+from rllm.sdk import trajectory, get_chat_client
+
+client = get_chat_client(
+    base_url="http://localhost:4000/v1",
+    api_key="EMPTY"
+)
+
+@trajectory(name="solver")
+async def solve_with_verification(problem: str):
+    # Step 1: Initial solution
+    solution = await client.chat.completions.create(
+        model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        messages=[{"role": "user", "content": f"Solve: {problem}"}]
+    )
+    solution_text = solution.choices[0].message.content
+    
+    # Step 2: Verification
+    verification = await client.chat.completions.create(
+        model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        messages=[
+            {"role": "user", "content": f"Solve: {problem}"},
+            {"role": "assistant", "content": solution_text},
+            {"role": "user", "content": "Verify your answer"}
+        ]
+    )
+    
+    return solution_text
+
+# Execute
+import asyncio
+traj = asyncio.run(solve_with_verification("2x + 5 = 13"))
+
+print(f"Steps: {len(traj.steps)}")  # 2
+
+# Assign rewards to each step
+traj.steps[0].reward = 0.5  # Partial credit for solution
+traj.steps[1].reward = 1.0  # Full credit for verification
+
+# Compute trajectory reward
+traj.reward = sum(step.reward for step in traj.steps) / len(traj.steps)
+print(f"Total reward: {traj.reward}")  # 0.75
+```
+
+---
+
+## Example: With Metadata
+
+```python
+from rllm.sdk import trajectory, get_chat_client
+
+client = get_chat_client(
+    base_url="http://localhost:4000/v1",
+    api_key="EMPTY"
+)
+
+@trajectory(name="agent", agent_type="search", version="v2")
+async def search_agent(query: str):
+    response = await client.chat.completions.create(
+        model="Qwen/Qwen3-4B",
+        messages=[{"role": "user", "content": query}]
+    )
+    return response.choices[0].message.content
+
+import asyncio
+traj = asyncio.run(search_agent("What is the capital of France?"))
+
+print(traj.metadata)  # {"agent_type": "search", "version": "v2"}
+```
+
+---
+
+## Example: Synchronous Function
+
+```python
+from rllm.sdk import trajectory, get_chat_client
+
+client = get_chat_client(
+    base_url="http://localhost:4000/v1",
+    api_key="EMPTY"
+)
+
+@trajectory(name="sync_agent")
+def sync_solve(question: str):
+    # Works with synchronous clients too
+    response = client.chat.completions.create(
+        model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        messages=[{"role": "user", "content": question}]
+    )
+    return response.choices[0].message.content
+
+# Call directly (no asyncio needed)
+traj = sync_solve("What is 5 * 7?")
+
+print(f"Steps: {len(traj.steps)}")  # 1
+print(f"Output: {traj.output}")      # "35"
+
+# Set reward
+traj.reward = 1.0 if "35" in traj.output else 0.0
+```
+
+---
+
+## Example: Solver-Judge Pattern
+
+```python
+from rllm.sdk import trajectory, get_chat_client
+
+client = get_chat_client(
+    base_url="http://localhost:4000/v1",
+    api_key="EMPTY"
+)
+
+@trajectory(name="solver")
+async def solver(problem: str):
+    response = await client.chat.completions.create(
+        model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        messages=[{"role": "user", "content": f"Solve: {problem}"}]
+    )
+    return response.choices[0].message.content
+
+@trajectory(name="judge")
+async def judge(problem: str, solution: str, ground_truth: str):
+    prompt = f"""
+Problem: {problem}
+Solution: {solution}
+Ground Truth: {ground_truth}
+
+Is the solution correct? Answer YES or NO.
+"""
+    response = await client.chat.completions.create(
+        model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.choices[0].message.content
+
+# Execute workflow
+import asyncio
+
+async def solve_and_judge(problem: str, ground_truth: str):
+    # Get solver trajectory
+    solver_traj = await solver(problem)
+    
+    # Get judge trajectory
+    judge_traj = await judge(problem, solver_traj.output, ground_truth)
+    
+    # Assign rewards based on judge
+    if "YES" in judge_traj.output.upper():
+        solver_traj.reward = 1.0
+        solver_traj.steps[0].reward = 1.0
+    else:
+        solver_traj.reward = 0.0
+        solver_traj.steps[0].reward = 0.0
+    
+    return solver_traj, judge_traj
+
+# Run
+solver_traj, judge_traj = asyncio.run(
+    solve_and_judge("What is 2+2?", "4")
+)
+
+print(f"Solver reward: {solver_traj.reward}")
+print(f"Judge output: {judge_traj.output}")
+```
+
+---
+
+## Important Notes
+
+<Warning>
+The `@trajectory` decorator **changes the return value** of your function. Instead of returning the original value, it returns a `TrajectoryView` object.
+
+- **Original return value** is stored in `trajectory.output`
+- **Rewards must be set manually** on `trajectory.reward` and `step.reward`
+- Each LLM call becomes a **separate step** in `trajectory.steps`
+</Warning>
+
+<Tip>
+Use the decorator when:
+- You want automatic LLM call tracking
+- You need to assign rewards per-step or per-trajectory
+- You're building multi-agent workflows (solver-judge, refinement, etc.)
+- You're using the SDK for training data collection
+</Tip>

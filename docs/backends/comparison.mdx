@@ -1,0 +1,715 @@
+---
+title: Backend Comparison
+description: Compare verl and tinker backends to choose the right one for your use case
+---
+
+rLLM supports two training backends: **verl** and **tinker**. This guide helps you choose the right backend for your project.
+
+## Quick Comparison
+
+<CardGroup cols={2}>
+  <Card title="verl" icon="server">
+    Distributed, production-ready backend for large-scale training
+  </Card>
+  <Card title="tinker" icon="cube">
+    Async-first backend for flexible and rapid development
+  </Card>
+</CardGroup>
+
+## Feature Comparison
+
+| Feature | verl | tinker |
+|---------|------|--------|
+| **Python Version** | >= 3.10 | >= 3.11 |
+| **Architecture** | Ray-based distributed | Async-first service-based |
+| **Multi-GPU** | ✅ Full support | ⚠️ Limited |
+| **Multi-Node** | ✅ Full support | ❌ Not supported |
+| **LoRA** | ✅ Via configuration | ✅ Native support |
+| **VLM Support** | ✅ Qwen2-VL, Qwen3-VL | ⚠️ Limited |
+| **Distributed Training** | ✅ FSDP, tensor parallel | ⚠️ Single node |
+| **Inference Engine** | vLLM, SGLang | tinker service |
+| **Configuration** | Complex (Hydra + verl) | Simple (Hydra) |
+| **Learning Curve** | Steeper | Gentler |
+| **Async Support** | Built-in | Native |
+| **Checkpointing** | Advanced (Ray) | Standard |
+| **Resource Management** | Ray resource pools | Service-based |
+| **Production Ready** | ✅ Yes | ⚠️ Development |
+
+## Detailed Comparison
+
+### Architecture
+
+<Tabs>
+  <Tab title="verl">
+    **Ray-Based Distributed System**
+
+    verl uses Ray for orchestrating distributed worker groups:
+
+    ```
+    ┌─────────────────────────────────────────┐
+    │          Ray Cluster                    │
+    │                                         │
+    │  ┌──────────────┐  ┌──────────────┐   │
+    │  │ Actor-Rollout│  │    Critic    │   │
+    │  │   Workers    │  │   Workers    │   │
+    │  └──────────────┘  └──────────────┘   │
+    │                                         │
+    │  ┌──────────────┐  ┌──────────────┐   │
+    │  │  Reference   │  │    vLLM/     │   │
+    │  │   Policy     │  │   SGLang     │   │
+    │  └──────────────┘  └──────────────┘   │
+    └─────────────────────────────────────────┘
+    ```
+
+    **Key Components**:
+    - **Actor-Rollout Workers**: Combined training and generation
+    - **Critic Workers**: Value function estimation
+    - **Reference Policy**: Frozen policy for KL divergence
+    - **Hybrid Engine**: Efficient async trajectory generation
+
+    **Use Cases**:
+    - Large-scale distributed training
+    - Multi-node GPU clusters
+    - Production deployments
+    - Vision-language models
+  </Tab>
+
+  <Tab title="tinker">
+    **Service-Based Async Architecture**
+
+    tinker uses a service-based model with native async:
+
+    ```
+    ┌─────────────────────────────────────────┐
+    │       Tinker Service                    │
+    │                                         │
+    │  ┌──────────────┐  ┌──────────────┐   │
+    │  │   Training   │  │   Sampling   │   │
+    │  │    Client    │  │    Client    │   │
+    │  └──────────────┘  └──────────────┘   │
+    │                                         │
+    │  ┌──────────────────────────────────┐  │
+    │  │      Policy Trainer               │  │
+    │  │  (Forward-Backward + Optimizer)   │  │
+    │  └──────────────────────────────────┘  │
+    └─────────────────────────────────────────┘
+    ```
+
+    **Key Components**:
+    - **Training Client**: Handles forward-backward passes
+    - **Sampling Client**: Generates trajectories
+    - **Policy Trainer**: Manages training loop
+    - **Unified Backend**: Single interface for agents/workflows
+
+    **Use Cases**:
+    - Rapid prototyping
+    - Single-node training
+    - LoRA fine-tuning
+    - Workflow development
+  </Tab>
+</Tabs>
+
+### Installation & Dependencies
+
+<CodeGroup>
+```bash verl
+# Python >= 3.10
+uv pip install "rllm[verl] @ git+https://github.com/rllm-org/rllm.git"
+
+# Dependencies:
+# - verl==0.6.1
+# - vllm>=0.10.2,<=0.11.0
+# - torch>=2.8.0
+# - flash-attn>=2.8.1
+# - qwen-vl-utils (for VLM)
+```
+
+```bash tinker
+# Python >= 3.11 (required)
+uv pip install "rllm[tinker] @ git+https://github.com/rllm-org/rllm.git"
+
+# Dependencies:
+# - tinker (Python 3.11+ only)
+# - tinker-cookbook
+```
+</CodeGroup>
+
+### Configuration Complexity
+
+<Tabs>
+  <Tab title="verl">
+    **More Complex Configuration**
+
+    verl requires configuring Ray resources, worker groups, and FSDP:
+
+    ```yaml
+    actor_rollout_ref:
+      model:
+        path: Qwen/Qwen2.5-Math-7B-Instruct
+        lora:
+          rank: 64
+          alpha: 128
+      actor:
+        fsdp_config:
+          param_offload: false
+          grad_offload: false
+      rollout:
+        mode: async  # Required
+        n: 16
+      
+    resource_pool_config:
+      actor_rollout_gpu: 4
+      critic_gpu: 2
+      ref_policy_gpu: 2
+
+    data:
+      train_batch_size: 32
+      max_prompt_length: 2048
+      max_response_length: 2048
+
+    algorithm:
+      adv_estimator: grpo
+      gamma: 1.0
+
+    trainer:
+      total_epochs: 3
+      save_freq: 100
+    ```
+
+    **Pros**:
+    - Fine-grained control over resources
+    - Advanced features (FSDP, tensor parallel)
+    - Production-tested configurations
+
+    **Cons**:
+    - Steeper learning curve
+    - More configuration options
+    - Requires Ray knowledge
+  </Tab>
+
+  <Tab title="tinker">
+    **Simpler Configuration**
+
+    tinker has a cleaner, more intuitive configuration:
+
+    ```yaml
+    model:
+      name: "Qwen/Qwen2.5-Math-7B-Instruct"
+      lora_rank: 32
+      train_unembed: true
+      train_attn: true
+      train_mlp: true
+
+    training:
+      group_size: 16
+      learning_rate: 2e-5
+      max_length: 32768
+
+    data:
+      train_batch_size: 64
+      max_prompt_length: 2048
+      max_response_length: 2048
+
+    algorithm:
+      adv_estimator: grpo
+      gamma: 1.0
+
+    trainer:
+      total_epochs: 10
+      save_freq: 20
+    ```
+
+    **Pros**:
+    - Easier to understand
+    - Fewer configuration options
+    - Faster setup
+
+    **Cons**:
+    - Less control over resources
+    - Limited to single-node training
+    - Fewer advanced features
+  </Tab>
+</Tabs>
+
+### LoRA Support
+
+<Tabs>
+  <Tab title="verl">
+    **Configuration-Based LoRA**
+
+    ```yaml
+    actor_rollout_ref:
+      model:
+        path: Qwen/Qwen2.5-Math-7B-Instruct
+        lora:
+          rank: 64
+          alpha: 128
+          target_modules:
+            - q_proj
+            - k_proj
+            - v_proj
+            - o_proj
+            - gate_proj
+            - up_proj
+            - down_proj
+    ```
+
+    ```bash
+    python train_agent.py \
+      actor_rollout_ref.model.lora.rank=64 \
+      actor_rollout_ref.model.lora.alpha=128
+    ```
+
+    **Features**:
+    - Full control over target modules
+    - Integrated with FSDP
+    - Reference policy without LoRA
+  </Tab>
+
+  <Tab title="tinker">
+    **Native LoRA Support**
+
+    ```yaml
+    model:
+      name: "Qwen/Qwen2.5-Math-7B-Instruct"
+      lora_rank: 32
+      train_unembed: true  # Train output layer
+      train_attn: true     # Train attention
+      train_mlp: true      # Train MLP
+    ```
+
+    ```bash
+    python train_agent.py \
+      model.lora_rank=64 \
+      model.train_unembed=true
+    ```
+
+    **Features**:
+    - Simpler configuration
+    - Built-in by default (rank=32)
+    - Easy layer selection
+    - Fireworks AI compatibility option
+  </Tab>
+</Tabs>
+
+### Vision-Language Models (VLM)
+
+<Tabs>
+  <Tab title="verl">
+    **Full VLM Support**
+
+    verl supports Qwen2-VL and Qwen3-VL with multimodal processing:
+
+    ```python
+    import hydra
+    from rllm.trainer.agent_trainer import AgentTrainer
+
+    @hydra.main(
+        config_path="pkg://rllm.trainer.config",
+        config_name="agent_ppo_trainer",
+        version_base=None
+    )
+    def main(config):
+        trainer = AgentTrainer(
+            workflow_class=Geo3KWorkflow,
+            workflow_args={"reward_function": f1_reward_fn},
+            config=config,
+            train_dataset=train_dataset,
+            val_dataset=test_dataset,
+        )
+        trainer.train()
+    ```
+
+    ```bash
+    python train_vlm.py \
+      actor_rollout_ref.model.path=Qwen/Qwen2-VL-7B-Instruct \
+      data.return_multi_modal_inputs=true
+    ```
+
+    **Supported Models**:
+    - Qwen2-VL-7B-Instruct
+    - Qwen2-VL-72B-Instruct
+    - Qwen3-VL models
+
+    **Features**:
+    - Image grid position IDs
+    - Multimodal processors
+    - Vision-aware tokenization
+  </Tab>
+
+  <Tab title="tinker">
+    **Limited VLM Support**
+
+    tinker has basic VLM support but less tested:
+
+    ```python
+    # Image processor loading
+    from transformers import AutoProcessor
+
+    model_name = "Qwen/Qwen2-VL-7B-Instruct"
+    processor = AutoProcessor.from_pretrained(model_name)
+    image_processor = processor.image_processor
+    ```
+
+    **Status**:
+    - ⚠️ Experimental
+    - Limited documentation
+    - Best for text-only models
+
+    **Recommendation**: Use verl for VLM training
+  </Tab>
+</Tabs>
+
+### Distributed Training
+
+<Tabs>
+  <Tab title="verl">
+    **Full Distributed Support**
+
+    verl supports multi-GPU and multi-node training:
+
+    ```bash
+    # Multi-GPU on single node
+    python train_agent.py \
+      resource_pool_config.actor_rollout_gpu=8 \
+      actor_rollout_ref.actor.fsdp_config.param_offload=false
+
+    # Multi-node cluster
+    ray start --head --port=6379
+    # On other nodes:
+    ray start --address=head-node-ip:6379
+
+    python train_agent.py \
+      resource_pool_config.actor_rollout_gpu=32
+    ```
+
+    **Features**:
+    - FSDP (Fully Sharded Data Parallel)
+    - Tensor parallelism via vLLM
+    - Resource pool management
+    - Ray cluster orchestration
+
+    **Resource Configuration**:
+    ```yaml
+    resource_pool_config:
+      actor_rollout_gpu: 8  # Actor-rollout workers
+      critic_gpu: 2         # Critic workers
+      ref_policy_gpu: 2     # Reference policy workers
+    ```
+  </Tab>
+
+  <Tab title="tinker">
+    **Single-Node Only**
+
+    tinker is designed for single-node training:
+
+    ```bash
+    # Single GPU
+    python train_agent.py \
+      data.train_batch_size=32
+
+    # Multiple GPUs (limited)
+    # Not officially supported for distributed
+    ```
+
+    **Limitations**:
+    - No multi-node support
+    - No FSDP integration
+    - Limited resource management
+
+    **Best For**:
+    - Single GPU training
+    - LoRA fine-tuning (low memory)
+    - Development and prototyping
+
+    **Recommendation**: Use verl for distributed training
+  </Tab>
+</Tabs>
+
+## When to Use Each Backend
+
+### Use verl When:
+
+<AccordionGroup>
+  <Accordion title="Large-Scale Production Training" icon="factory">
+    - Training on multiple GPUs or nodes
+    - Production deployments requiring reliability
+    - Large models (> 7B parameters) needing FSDP
+    - High-throughput training pipelines
+  </Accordion>
+
+  <Accordion title="Vision-Language Models" icon="image">
+    - Training Qwen2-VL or Qwen3-VL models
+    - Multimodal agent training
+    - Image-based reasoning tasks
+    - OCR and visual question answering
+  </Accordion>
+
+  <Accordion title="Advanced RL Features" icon="brain">
+    - Custom advantage estimators
+    - Critic network training
+    - Reference policy with KL divergence
+    - Complex reward shaping
+  </Accordion>
+
+  <Accordion title="Resource-Intensive Workloads" icon="server">
+    - Multi-node GPU clusters
+    - Tensor parallel inference
+    - Memory-constrained large models
+    - High-throughput rollout generation
+  </Accordion>
+</AccordionGroup>
+
+### Use tinker When:
+
+<AccordionGroup>
+  <Accordion title="Rapid Prototyping" icon="flask">
+    - Quick experiments and iteration
+    - Testing new agent architectures
+    - Developing custom workflows
+    - Learning rLLM framework
+  </Accordion>
+
+  <Accordion title="LoRA Fine-Tuning" icon="layer-group">
+    - Parameter-efficient fine-tuning
+    - Limited GPU memory (single GPU)
+    - Fast adaptation of pretrained models
+    - Deployment to Fireworks AI
+  </Accordion>
+
+  <Accordion title="Single-Node Training" icon="desktop">
+    - Training on a single machine
+    - Small to medium models (< 7B)
+    - Development environments
+    - Limited computational resources
+  </Accordion>
+
+  <Accordion title="Workflow Development" icon="diagram-project">
+    - Building custom agent workflows
+    - Multi-step reasoning tasks
+    - Tool-using agents
+    - Async-first architectures
+  </Accordion>
+</AccordionGroup>
+
+## Performance Characteristics
+
+### Training Speed
+
+| Metric | verl | tinker |
+|--------|------|--------|
+| **Single GPU** | Fast | Fast |
+| **Multi-GPU** | Very Fast (scaling) | Not supported |
+| **Startup Time** | Slower (Ray init) | Faster |
+| **Throughput** | High (distributed) | Medium (single node) |
+| **Memory Efficiency** | High (FSDP) | Medium |
+
+### Resource Requirements
+
+<Tabs>
+  <Tab title="verl">
+    **Minimum Requirements**:
+    - 1 GPU with 24GB+ VRAM (for 7B models)
+    - 32GB+ system RAM
+    - Python >= 3.10
+    - CUDA 11.8+ or 12.1+
+
+    **Recommended for Production**:
+    - 4-8 GPUs (A100 or H100)
+    - 128GB+ system RAM
+    - NVMe storage for checkpoints
+    - Multi-node Ray cluster
+
+    **Memory Usage** (7B model, batch_size=32):
+    - Full fine-tuning: ~40GB VRAM
+    - LoRA (rank=64): ~28GB VRAM
+    - With FSDP: ~20GB per GPU (4 GPUs)
+  </Tab>
+
+  <Tab title="tinker">
+    **Minimum Requirements**:
+    - 1 GPU with 16GB+ VRAM (for 7B models)
+    - 16GB+ system RAM
+    - Python >= 3.11
+    - CUDA 11.8+ or 12.1+
+
+    **Recommended**:
+    - 1-2 GPUs (RTX 4090, A100)
+    - 32GB+ system RAM
+    - SSD storage
+
+    **Memory Usage** (7B model, batch_size=16):
+    - LoRA (rank=32): ~18GB VRAM
+    - LoRA (rank=64): ~22GB VRAM
+  </Tab>
+</Tabs>
+
+## Migration Between Backends
+
+### From tinker to verl
+
+<Steps>
+  <Step title="Update Configuration">
+    Convert tinker config to verl format:
+
+    ```diff
+    - model:
+    -   name: "Qwen/Qwen2.5-Math-7B-Instruct"
+    -   lora_rank: 32
+    + actor_rollout_ref:
+    +   model:
+    +     path: "Qwen/Qwen2.5-Math-7B-Instruct"
+    +     lora:
+    +       rank: 32
+    ```
+  </Step>
+
+  <Step title="Update Training Script">
+    Change backend parameter:
+
+    ```python
+    trainer = AgentTrainer(
+        config=config,
+        agent_class=MathAgent,
+        env_class=SingleTurnEnvironment,
+        backend="verl",  # Changed from "tinker"
+        # ...
+    )
+    ```
+  </Step>
+
+  <Step title="Install verl Backend">
+    ```bash
+    uv pip install -e .[verl]
+    ```
+  </Step>
+
+  <Step title="Update Hydra Config">
+    Use verl config file:
+
+    ```python
+    @hydra.main(
+        config_path="pkg://rllm.trainer.config",
+        config_name="agent_ppo_trainer",  # verl config
+        version_base=None
+    )
+    ```
+  </Step>
+</Steps>
+
+### From verl to tinker
+
+<Steps>
+  <Step title="Check Python Version">
+    Ensure Python >= 3.11:
+
+    ```bash
+    python --version  # Must be 3.11+
+    uv venv --python 3.11
+    ```
+  </Step>
+
+  <Step title="Simplify Configuration">
+    Convert verl config to tinker format:
+
+    ```diff
+    - actor_rollout_ref:
+    -   model:
+    -     path: "Qwen/Qwen2.5-Math-7B-Instruct"
+    -     lora:
+    -       rank: 32
+    + model:
+    +   name: "Qwen/Qwen2.5-Math-7B-Instruct"
+    +   lora_rank: 32
+    ```
+  </Step>
+
+  <Step title="Update Training Script">
+    ```python
+    trainer = AgentTrainer(
+        config=config,
+        agent_class=MathAgent,
+        env_class=SingleTurnEnvironment,
+        backend="tinker",  # Changed from default/verl
+        # ...
+    )
+    ```
+  </Step>
+
+  <Step title="Install tinker Backend">
+    ```bash
+    uv pip install -e .[tinker]
+    ```
+  </Step>
+</Steps>
+
+## Recommendations by Use Case
+
+### Research & Experimentation
+
+**Recommendation**: Start with **tinker**, scale to **verl** if needed
+
+- Begin with tinker for rapid iteration
+- Switch to verl when:
+  - Need multi-GPU training
+  - Training VLM models
+  - Scaling to larger datasets
+
+### Production Deployment
+
+**Recommendation**: Use **verl**
+
+- Production-tested infrastructure
+- Scalable to multi-node clusters
+- Better resource management
+- Advanced checkpointing
+
+### LoRA Fine-Tuning
+
+**Recommendation**: **tinker** or **verl** (equal)
+
+- tinker: Simpler configuration
+- verl: Better for distributed LoRA
+
+### Vision-Language Tasks
+
+**Recommendation**: Use **verl**
+
+- Full Qwen-VL support
+- Multimodal processors
+- Tested on vision datasets
+
+## Summary
+
+<CardGroup cols={2}>
+  <Card title="Choose verl for:" icon="server">
+    - Production deployments
+    - Multi-GPU/multi-node training
+    - Vision-language models
+    - Large-scale experiments
+  </Card>
+  <Card title="Choose tinker for:" icon="cube">
+    - Rapid prototyping
+    - Single-node training
+    - LoRA fine-tuning
+    - Workflow development
+  </Card>
+</CardGroup>
+
+<Note>
+  **Both backends are actively maintained** and share the same core rLLM framework. Your choice depends on scale and requirements, not quality.
+</Note>
+
+## See Also
+
+<CardGroup cols={3}>
+  <Card title="verl Backend" icon="server" href="/backends/verl">
+    Detailed verl documentation
+  </Card>
+  <Card title="tinker Backend" icon="cube" href="/backends/tinker">
+    Detailed tinker documentation
+  </Card>
+  <Card title="Agent Trainer" icon="robot" href="/api/trainer">
+    AgentTrainer API guide
+  </Card>
+</CardGroup>
