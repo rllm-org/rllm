@@ -1,0 +1,284 @@
+---
+title: DeepSWE Software Engineering Agent
+description: Train a state-of-the-art SWE agent that achieves 59% on SWE-Bench-Verified
+---
+
+This example demonstrates training and running [DeepSWE](https://pretty-radio-b75.notion.site/DeepSWE-Training-a-Fully-Open-sourced-State-of-the-Art-by-Scaling-RL-22281902c1468193aabbe9a8c59bbe33), a software engineering agent trained on top of Qwen3-32B to search, view, and navigate codebases. The model achieves an impressive **59.0%** on SWE-Bench-Verified, currently **#1 in the open-weights category**.
+
+## Overview
+
+The DeepSWE example demonstrates:
+
+- How to use rLLM's `SWEAgent` for software engineering tasks
+- How to train agents with compact filtering for efficiency
+- How to evaluate on SWE-Bench-Verified
+- Scaling RL with Kubernetes and Docker environments
+
+## Prerequisites
+
+- rLLM framework installed
+- vLLM for model serving (8 GPUs recommended)
+- Pre-trained model: `agentica-org/DeepSWE-Preview`
+- Kubernetes cluster (for training)
+- Docker (for environment isolation)
+- R2E-Gym for SWE environments
+
+## Setup
+
+<Steps>
+  <Step title="Install R2E-Gym">
+    Install the R2E-Gym framework for high-quality SWE environments:
+
+    ```bash
+    git clone https://github.com/agentica-project/R2E-Gym.git
+    cd R2E-Gym
+    pip install -e .
+    ```
+  </Step>
+
+  <Step title="Prepare SWE datasets">
+    Download and prepare SWE-Bench datasets:
+
+    ```bash
+    cd examples/swe
+    python prepare_swe_data.py
+    ```
+
+    This registers SWE-Bench-Verified with rLLM's DatasetRegistry.
+  </Step>
+
+  <Step title="Start model server">
+    Launch a vLLM server with tensor parallelism across 8 GPUs:
+
+    ```bash
+    export MAX_CONTEXT_LEN=65536
+    export TENSOR_PARALLEL_SIZE=8
+    VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 vllm serve agentica-org/DeepSWE-Preview \
+        --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
+        --max-model-len $MAX_CONTEXT_LEN \
+        --hf-overrides '{"max_position_embeddings": '$MAX_CONTEXT_LEN'}' \
+        --enable_prefix_caching
+    ```
+
+    Wait for the server to fully load before proceeding.
+  </Step>
+</Steps>
+
+## Running DeepSWE
+
+Evaluate the DeepSWE agent on SWE-Bench-Verified:
+
+```bash
+cd examples/swe
+python run_deepswe.py
+```
+
+### Code Implementation
+
+```python
+import asyncio
+from transformers import AutoTokenizer
+from rllm.agents.swe_agent import SWEAgent
+from rllm.data.dataset import DatasetRegistry
+from rllm.engine.agent_execution_engine import AgentExecutionEngine
+from rllm.environments.swe.swe import SWEEnv
+from rllm.utils import compute_pass_at_k
+
+model_name = "agentica-org/DeepSWE-Preview"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+sampling_params = {"temperature": 1, "model": model_name}
+
+engine = AgentExecutionEngine(
+    agent_class=SWEAgent,
+    env_class=SWEEnv,
+    agent_args={},
+    env_args={},
+    engine_name="openai",
+    tokenizer=tokenizer,
+    sampling_params=sampling_params,
+    rollout_engine_args={
+        "base_url": "http://localhost:30000/v1",
+        "api_key": "None",
+    },
+    n_parallel_agents=48,
+    max_response_length=65536,
+    max_prompt_length=4096,
+)
+
+test_dataset = DatasetRegistry.load_dataset("SWE_Bench_Verified", "test")
+tasks = test_dataset.get_data()
+
+results = asyncio.run(engine.execute_tasks(tasks))
+compute_pass_at_k(results)
+```
+
+## Expected Results
+
+**DeepSWE-Preview on SWE-Bench-Verified:**
+
+| Metric | Performance |
+|--------|-------------|
+| Pass@1 | 42.2% |
+| Pass@16 | 71.0% |
+| Test-time scaled | 59.2% |
+
+This is **#1 among open-weight models** on SWE-Bench-Verified.
+
+## Full Evaluation with R2E-Gym
+
+For complete evaluation replicating published results:
+
+```bash
+export EXP_NAME="deepswe-run"
+export TEMP=1.0
+
+# Run the DeepSWE agent on SWE-Bench Verified
+time python src/r2egym/agenthub/run/edit.py runagent_multiple \
+    --traj_dir "./traj" \
+    --max_workers 48 \
+    --start_idx 0 \
+    --k 500 \
+    --dataset "R2E-Gym/SWE-Bench-Verified" \
+    --split "test" \
+    --llm_name "openai/agentica-org/DeepSWE-Preview" \
+    --scaffold "r2egym" \
+    --use_fn_calling False \
+    --exp_name "$EXP_NAME" \
+    --temperature "$TEMP" \
+    --max_steps_absolute 100 \
+    --backend "docker" \
+    --condense_history False \
+    --max_reward_calc_time 1200 \
+    --max_tokens 65536
+```
+
+**Parameter explanation:**
+- `--max_workers 48`: Parallel workers (reduce if hitting timeouts)
+- `--k 500`: Number of instances to evaluate (max 500 for SWE-Bench Verified)
+- `--max_steps_absolute 100`: Hard limit on trajectory steps
+- `--backend "docker"`: Use Docker for environment isolation
+
+## Training DeepSWE
+
+<Warning>
+  Training DeepSWE requires significant infrastructure:
+  - Kubernetes cluster on AWS/GCP/Azure
+  - Each node: 200 CPUs, 6TB+ disk space
+  - 64+ GPUs recommended
+  - 512 parallel Docker containers
+</Warning>
+
+### Local Testing with Kind
+
+For local experimentation (not full training):
+
+```bash
+# Install kind
+curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+chmod +x ./kind
+sudo mv ./kind /usr/local/bin/kind
+
+# Create cluster
+kind create cluster
+```
+
+### Production Training
+
+On a proper Kubernetes cluster:
+
+```bash
+cd rllm/examples/swe
+bash train_deepswe_32b.sh
+```
+
+### Training Configuration
+
+**Key hyperparameters:**
+
+- **Base Model**: Qwen3-32B
+- **Algorithm**: GRPO with compact filtering
+- **Training Dataset**: R2E-Gym subset
+- **Evaluation Dataset**: SWE-Bench-Verified
+- **Batch Size**: 64
+- **Learning Rate**: 1e-6
+- **Max Context**: 65,536 tokens
+- **Parallel Environments**: 512 Docker containers
+- **GPUs**: 64 (8 nodes × 8 GPUs)
+
+### Compact Filtering
+
+DeepSWE uses compact filtering to improve training efficiency:
+
+- Filters out failed trajectories before training
+- Masks trajectories exceeding length limits
+- Masks timeout trajectories
+- Significantly reduces wasted compute
+
+## SWEEnv Integration
+
+rLLM's `SWEEnv` provides a clean wrapper over R2E-Gym:
+
+```python
+from rllm.environments.swe.swe import SWEEnv
+from datasets import load_dataset
+
+# Load gym dataset
+ds = load_dataset("R2E-Gym/R2E-Gym-Subset", split="train")
+idx = 0
+
+env = SWEEnv(entry=ds[idx], backend='kubernetes', scaffold='r2egym')
+env.reset()
+# Agent interacts with environment
+env.close()
+```
+
+## Agent Actions
+
+The SWEAgent can perform:
+- **Search**: Find relevant code locations
+- **View**: Read file contents
+- **Edit**: Modify code
+- **Create**: Add new files
+- **Execute**: Run commands and tests
+
+## Monitoring Training
+
+Training logs to WandB. Key metrics:
+
+| Metric | Description |
+|--------|-------------|
+| `critic/score/mean` | Average success rate per batch |
+| `val/pass@1` | SWE-Bench-Verified Pass@1 |
+| `train/avg_steps` | Average trajectory length |
+| `train/timeout_rate` | Fraction of timeouts |
+
+## Trajectory Visualization
+
+Visualize generated trajectories using R2E-Gym's visualization tool:
+
+```bash
+cd R2E-Gym
+python app/app.py --traj_dir "./traj"
+```
+
+## Reproduction Guide
+
+For detailed reproduction instructions:
+
+- [DeepSWE Reproduction Guide](https://github.com/agentica-project/R2E-Gym/blob/master/reproduction/DEEPSWE_REPRODUCTION.MD)
+- [DeepSWE with Test-time Scaling](https://github.com/agentica-project/R2E-Gym/blob/master/reproduction/DEEPSWE_TTS_REPRODUCTION.MD)
+
+## Next Steps
+
+- Explore [DeepCoder](/examples/deep-coder) for competitive programming
+- Try [DeepScaleR](/examples/deep-scaler) for mathematical reasoning
+- Learn about [distributed training](/guides/distributed-training)
+
+## Resources
+
+- [DeepSWE Blog Post](https://pretty-radio-b75.notion.site/DeepSWE-Training-a-Fully-Open-sourced-State-of-the-Art-by-Scaling-RL-22281902c1468193aabbe9a8c59bbe33)
+- [GitHub Example Directory](https://github.com/rllm-org/rllm/tree/main/examples/swe)
+- [Model on HuggingFace](https://huggingface.co/agentica-org/DeepSWE-Preview)
+- [R2E-Gym Repository](https://github.com/agentica-project/R2E-Gym)
+- [WandB Training Logs](https://wandb.ai/mluo/deepswe)
+- [Evaluation Logs](https://drive.google.com/file/d/10LIwpJeaFuiX6Y-qEG2a4a335PEuQJeS/view)

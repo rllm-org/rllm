@@ -1,0 +1,24 @@
+---
+title: DeepSWE
+description: A 32B software engineering agent achieving 59% on SWE-Bench-Verified
+---
+
+<Card title="Read the full write-up" icon="arrow-up-right-from-square" href="https://pretty-radio-b75.notion.site/DeepSWE-Training-a-Fully-Open-sourced-State-of-the-Art-by-Scaling-RL-22281902c1468193aabbe9a8c59bbe33">
+  Notion blog post with full details
+</Card>
+
+DeepSWE is a 32B software engineering agent that achieves **59% on SWE-Bench-Verified** with test-time scaling (42.2% Pass@1). It tops the SWE-Bench leaderboard for open-weight models.
+
+## Results
+
+| Model | Parameters | SWE-Bench-Verified |
+|-------|-----------|-------------------|
+| **DeepSWE** | **32B** | **59.0%** |
+
+## Approach
+
+Trained on top of Qwen3-32B to search, view, and navigate codebases, using RL to improve software engineering task completion.
+
+See the [DeepSWE example](/examples/deep-swe) for instructions on reproducing this with rLLM.
+
+**Released**: July 2025

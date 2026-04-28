@@ -1,0 +1,194 @@
+---
+title: 'FinQA Financial Agent'
+description: 'Train a 4B financial analysis agent that outperforms 235B models using reinforcement learning'
+---
+
+This project demonstrates training and deploying [rLLM-FinQA-4B](https://huggingface.co/rLLM/rLLM-FinQA-4B), a specialized financial question-answering agent fine-tuned from Qwen3-4B-Instruct-2507 using rLLM. The agent uses specialized tools (SQL queries, table lookup, calculators) to perform multi-step reasoning over SEC 10-K financial statements.
+
+<CardGroup cols={3}>
+  <Card title="Model" icon="brain" href="https://huggingface.co/rLLM/rLLM-FinQA-4B">
+    rLLM-FinQA-4B on HuggingFace
+  </Card>
+  <Card title="Dataset" icon="database" href="https://huggingface.co/datasets/rLLM/finqa">
+    5,110 Q&A pairs across 207 companies
+  </Card>
+  <Card title="Blog" icon="newspaper" href="https://rllm-project.com/blog">
+    Read the full announcement
+  </Card>
+</CardGroup>
+
+## Performance
+
+rLLM-FinQA-4B achieves **59.7%** accuracy on Snorkel Finance Benchmark, demonstrating that small models trained with RL can outperform much larger models:
+
+| Model | Parameters | Accuracy |
+|-------|-----------|----------|
+| **rLLM-FinQA-4B** | 4B | **59.7%** |
+| Gemini 2.5 Pro | Unknown | 60.6% |
+| Qwen3-235B | 235B | 51.4% |
+
+<Note>
+The 4B agent outperforms Qwen3-235B by **8.3 percentage points** and rivals Gemini 2.5 Pro on Snorkel AI's expert-curated agentic financial benchmark.
+</Note>
+
+## Overview
+
+The FinQA project demonstrates:
+
+- How to use rLLM's `ToolAgent` and `ToolEnvironment` for multi-step financial reasoning
+- How to build domain-specific tools in rLLM
+- How to train agents with GRPO using LLM-as-judge rewards
+- How to achieve state-of-the-art performance with small models using RL
+
+## Agent Architecture
+
+The FinQA agent is a ReAct-style tool agent that answers financial questions by querying structured tables extracted from SEC 10-K filings. The agent has access to 4 specialized tools:
+
+| Tool | Description |
+|------|-------------|
+| `get_table_names` | List available tables for a given company |
+| `get_table_info` | Get table metadata, columns, dtypes, and sample values |
+| `sql_query` | Execute SQL queries on in-memory SQLite tables |
+| `calculator` | Evaluate mathematical expressions |
+
+All table data is preloaded into in-memory SQLite for low latency runtime access.
+
+## Quick Start
+
+### Installation
+
+Follow the [installation guide](/installation), then install FinQA dependencies:
+
+```bash
+uv pip install -r projects/finqa/requirements.txt
+```
+
+### Dataset Preparation
+
+Download the [rLLM/finqa](https://huggingface.co/datasets/rLLM/finqa) dataset and prepare it for training and evaluation:
+
+```bash
+python -m projects.finqa.prepare_finqa_data
+```
+
+This will:
+- Download the dataset from HuggingFace (5,110 Q&A pairs)
+- Extract company tables to `projects/finqa/data/company_tables/` (207 companies, 6,923 tables)
+- Create train/val/test splits (4,030 / 522 / 558 examples)
+- Register all splits with the rLLM DatasetRegistry
+
+### Inference
+
+Start a vLLM server and run the agent:
+
+```bash
+python -m vllm.entrypoints.openai.api_server \
+    --model rLLM/rLLM-FinQA-4B \
+    --host 0.0.0.0 \
+    --port 30000 \
+    --dtype bfloat16
+
+python -m projects.finqa.run_finqa
+```
+
+## Training
+
+Set the required environment variables before training:
+
+| Variable | Description |
+|----------|-------------|
+| `OPENAI_API_KEY` | OpenAI API key for the reward judge |
+| `PORTKEY_API_KEY` | Portkey gateway key for reward judge caching |
+
+### Training with verl Backend
+
+Train the 4B model with the verl backend:
+
+```bash
+bash projects/finqa/train_finqa.sh
+```
+
+### Training with tinker Backend
+
+Train with LoRA on the 30B model using the tinker backend:
+
+```bash
+bash projects/finqa/train_finqa_tinker.sh
+```
+
+<Tip>
+The training uses GPT-5-nano as a reward judge with Portkey gateway for caching to reduce API costs.
+</Tip>
+
+## Implementation Details
+
+### Base Model
+
+- [Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507)
+- Alternative: [Qwen3-30B-A3B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507) with LoRA
+
+### Dataset
+
+- **Source**: [rLLM/finqa](https://huggingface.co/datasets/rLLM/finqa) on HuggingFace
+- **Size**: 5,110 Q&A pairs across 207 companies
+- **Tables**: 6,923 tables extracted from SEC 10-K filings
+- **Splits**: 4,030 train / 522 validation / 558 test examples
+
+### Training Configuration
+
+- **Algorithm**: GRPO (Group Relative Policy Optimization)
+- **Reward**: LLM-as-judge using GPT-5-nano
+- **Caching**: Portkey gateway for reward caching
+- **Backend**: verl (default) or tinker (for LoRA)
+
+## Code Reference
+
+### Financial Agent Runner
+
+Main script for running financial reasoning:
+
+```python title="projects/finqa/run_finqa.py"
+--8<-- "projects/finqa/run_finqa.py"
+```
+
+### Training Script
+
+FinQA training configuration:
+
+```python title="projects/finqa/train_finqa.py"
+--8<-- "projects/finqa/train_finqa.py"
+```
+
+## Resources
+
+<CardGroup cols={2}>
+  <Card title="Model on HuggingFace" icon="huggingface" href="https://huggingface.co/rLLM/rLLM-FinQA-4B">
+    Download rLLM-FinQA-4B weights
+  </Card>
+  <Card title="Dataset on HuggingFace" icon="database" href="https://huggingface.co/datasets/rLLM/finqa">
+    Access the FinQA dataset
+  </Card>
+  <Card title="Blog Post" icon="newspaper" href="https://rllm-project.com/blog">
+    Read the announcement blog
+  </Card>
+  <Card title="GitHub Project" icon="github" href="https://github.com/rllm-org/rllm/tree/main/projects/finqa">
+    View complete source code
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Tool Agents" icon="tools" href="/core-concepts/agentflow-evaluator">
+    Learn more about building tool agents
+  </Card>
+  <Card title="Training" icon="graduation-cap" href="/core-concepts/training">
+    Explore training configurations
+  </Card>
+  <Card title="Community Projects" icon="users" href="https://github.com/rllm-org/rllm">
+    See more projects built with rLLM
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/agents">
+    Browse the API documentation
+  </Card>
+</CardGroup>

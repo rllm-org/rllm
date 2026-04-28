@@ -1,0 +1,105 @@
+---
+title: rLLM CLI
+description: Evaluate, train, and monitor agents from the command line and web dashboard
+---
+
+rLLM provides two interfaces for working with agents: a **CLI** for running evaluations and training from the terminal, and a **web UI** for monitoring runs and exploring results.
+
+## CLI
+
+<Frame caption="The rLLM CLI help screen">
+  <img src="/assets/rllm-cli.png" alt="rLLM CLI showing the banner, available commands including agent, dataset, eval, init, login, model, and train, along with global options" />
+</Frame>
+
+The `rllm` CLI is the primary way to evaluate and train agents. Datasets are auto-pulled from HuggingFace, agents and evaluators are resolved from the built-in catalog, and a local LiteLLM proxy handles API routing.
+
+### First-time setup
+
+Configure your model provider before running evaluations or training:
+
+```bash
+rllm model setup
+```
+
+This walks you through selecting a provider (OpenAI, Anthropic, etc.), entering your API key, and choosing a default model. Configuration is saved to `~/.rllm/config.json`.
+
+### Core commands
+
+```bash
+rllm eval gsm8k                          # Evaluate on a benchmark
+rllm train gsm8k --model Qwen/Qwen3-8B  # Train with RL
+rllm init my-agent                       # Scaffold a new agent project
+rllm dataset list --all                  # Browse available datasets
+rllm model setup                         # Configure model providers
+```
+
+### Typical workflow
+
+<Steps>
+  <Step title="Configure your model">
+    ```bash
+    rllm model setup
+    ```
+  </Step>
+
+  <Step title="Explore available datasets">
+    ```bash
+    rllm dataset list --all
+    ```
+  </Step>
+
+  <Step title="Evaluate on a benchmark">
+    ```bash
+    rllm eval gsm8k
+    ```
+  </Step>
+
+  <Step title="Train with RL">
+    ```bash
+    rllm train gsm8k --model Qwen/Qwen3-8B
+    ```
+  </Step>
+</Steps>
+
+### Global behavior
+
+- **Auto-pull**: Datasets are automatically downloaded from HuggingFace when first referenced by `eval` or `train`.
+- **LiteLLM proxy**: When no `--base-url` is provided, `eval` and `train` start a local LiteLLM proxy automatically, routing requests to your configured provider.
+- **Lazy loading**: Commands are loaded on-demand, so `rllm --help` starts instantly regardless of installed extras.
+
+## Web UI
+
+The rLLM web UI at `ui.rllm-project.com` provides a dashboard for monitoring training runs and exploring evaluation results.
+
+### Logging in
+
+Authenticate with the hosted UI from the CLI:
+
+```bash
+rllm login
+```
+
+This opens a browser for authentication and stores your API key locally in `~/.rllm/config.json`. You can also set the `RLLM_API_KEY` environment variable directly.
+
+### Enabling UI logging
+
+Add the `--ui` flag to `eval` or `train` to stream live data to the dashboard:
+
+```bash
+rllm eval gsm8k --ui
+rllm train gsm8k --model Qwen/Qwen3-8B --ui
+```
+
+When enabled, the CLI sends metrics, episode data, and step-by-step execution traces to the UI backend in real time.
+
+### What you can see
+
+The UI provides:
+
+- **Episode explorer**: Browse individual episodes with full trajectory and step-level detail
+- **Metrics dashboard**: Track rewards, success rates, and custom signals across training runs
+- **Trajectory viewer**: Inspect agent reasoning chains and tool calls step by step
+
+<Info>
+To use a self-hosted UI instance, set the `RLLM_UI_URL` environment variable to your instance URL.
+</Info>

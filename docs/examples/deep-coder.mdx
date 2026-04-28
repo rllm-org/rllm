@@ -1,0 +1,277 @@
+---
+title: DeepCoder Programming Agent
+description: Train a code reasoning model that reaches o3-mini level on competitive programming
+---
+
+This example demonstrates training and running [DeepCoder](https://pretty-radio-b75.notion.site/DeepCoder-A-Fully-Open-Source-14B-Coder-at-O3-mini-Level-1cf81902c14680b3bee5eb349a512a51), a code reasoning LLM fine-tuned from DeepSeek-R1-Distill-Qwen-14B on coding competition problems with RL. The model achieves **60.6% Pass@1 on LiveCodeBench v5**, representing an 8% improvement over the base model.
+
+## Overview
+
+The DeepCoder example demonstrates:
+
+- How to use rLLM's `CompetitionCodingAgent` for programming tasks
+- How to train agents with iterative context lengthening (16K → 32K)
+- How to evaluate coding performance on LiveCodeBench
+- Scaling RL for competitive programming
+
+## Prerequisites
+
+- rLLM framework installed
+- vLLM or SGLang for model serving
+- Pre-trained model: `agentica-org/DeepCoder-14B-Preview`
+- GPU with sufficient memory for 16K-32K context lengths
+
+## Setup
+
+<Steps>
+  <Step title="Prepare coding datasets">
+    Download and prepare coding competition datasets:
+
+    ```bash
+    cd examples/deepcoder
+    python prepare_deepcoder_data.py
+    ```
+
+    This will download:
+    - LiveCodeBench (evaluation)
+    - Competitive programming problems (training)
+  </Step>
+
+  <Step title="Start model server">
+    Launch a vLLM server:
+
+    ```bash
+    python -m vllm.entrypoints.openai.api_server \
+        --model agentica-org/DeepCoder-14B-Preview \
+        --host 0.0.0.0 \
+        --port 30000 \
+        --dtype bfloat16 \
+        --max-model-len 32768
+    ```
+
+    Or use SGLang:
+
+    ```bash
+    python -m sglang_router.launch_server \
+        --model-path agentica-org/DeepCoder-14B-Preview \
+        --dp-size 1 \
+        --dtype bfloat16
+    ```
+
+    The server will be accessible at `http://localhost:30000/v1`
+  </Step>
+</Steps>
+
+## Running DeepCoder
+
+Execute the coding agent for evaluation:
+
+```bash
+cd examples/deepcoder
+python run_deepcoder.py
+```
+
+### Code Implementation
+
+```python
+import asyncio
+import os
+from datetime import datetime
+from transformers import AutoTokenizer
+from rllm.agents.code_agent import CompetitionCodingAgent
+from rllm.data.dataset import DatasetRegistry
+from rllm.engine.agent_execution_engine import AgentExecutionEngine
+from rllm.environments.base.single_turn_env import SingleTurnEnvironment
+from rllm.rewards.reward_fn import code_reward_fn
+from rllm.utils import save_trajectories
+
+n_parallel_agents = 64
+model_name = "agentica-org/DeepCoder-14B-Preview"
+
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+env_args = {
+    "reward_fn": code_reward_fn,
+}
+
+sampling_params = {"temperature": 0.6, "top_p": 0.95, "model": model_name}
+
+engine = AgentExecutionEngine(
+    agent_class=CompetitionCodingAgent,
+    env_class=SingleTurnEnvironment,
+    agent_args={},
+    env_args=env_args,
+    engine_name="openai",
+    tokenizer=tokenizer,
+    sampling_params=sampling_params,
+    rollout_engine_args={
+        "base_url": "http://localhost:30000/v1",
+        "api_key": "None",
+    },
+    max_response_length=65536,
+    max_prompt_length=4096,
+    n_parallel_agents=n_parallel_agents,
+)
+
+test_dataset = DatasetRegistry.load_dataset("deepcoder", "test")
+tasks = test_dataset.get_data()
+
+results = asyncio.run(engine.execute_tasks(tasks))
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+save_trajectories(results, filename=f"deepcoder_trajectories_{len(tasks)}_{timestamp}.pt")
+```
+
+## Expected Results
+
+**DeepCoder-14B-Preview on LiveCodeBench v5:**
+
+| Metric | Performance |
+|--------|-------------|
+| Pass@1 | 60.6% |
+| Improvement over base | +8.0% |
+
+This reaches o3-mini level performance on competitive programming benchmarks.
+
+## Training DeepCoder
+
+Train your own DeepCoder agent with iterative context lengthening:
+
+### Step 1: Train with 16K context
+
+```bash
+bash examples/deepcoder/train_deepcoder_16k.sh
+```
+
+### Step 2: Train with 32K context
+
+Modify `MODEL_PATH` in the script to point to your 16K checkpoint:
+
+```bash
+bash examples/deepcoder/train_deepcoder_32k.sh
+```
+
+### Training Configuration
+
+**Key hyperparameters:**
+
+- **Base Model**: DeepSeek-R1-Distill-Qwen-14B
+- **Algorithm**: GRPO (Group Relative Policy Optimization)
+- **Training Dataset**: Competitive programming problems
+- **Evaluation Dataset**: LiveCodeBench v5
+- **Batch Size**: 32
+- **Learning Rate**: 1e-6
+- **Context Progression**: 16K → 32K
+- **Sampling**: n=8 candidates per problem
+- **Temperature**: 0.6
+
+### Training Script Structure
+
+```python
+import hydra
+from rllm.data.dataset import DatasetRegistry
+from rllm.trainer.agent_trainer import AgentTrainer
+from rllm.agents.code_agent import CompetitionCodingAgent
+from rllm.environments.base.single_turn_env import SingleTurnEnvironment
+
+@hydra.main(
+    config_path="pkg://rllm.trainer.config",
+    config_name="agent_ppo_trainer",
+    version_base=None
+)
+def main(config):
+    train_dataset = DatasetRegistry.load_dataset("competitive_coding", "train")
+    test_dataset = DatasetRegistry.load_dataset("livecodebench", "test")
+
+    trainer = AgentTrainer(
+        config=config,
+        train_dataset=train_dataset,
+        val_dataset=test_dataset,
+        agent_class=CompetitionCodingAgent,
+        env_class=SingleTurnEnvironment,
+    )
+    trainer.train()
+
+if __name__ == "__main__":
+    main()
+```
+
+## Iterative Context Lengthening
+
+DeepCoder uses curriculum learning:
+
+1. **16K Phase**: Learn basic problem-solving patterns
+2. **32K Phase**: Handle complex multi-function implementations
+
+Each phase builds on the previous checkpoint, enabling the model to write longer, more complex code solutions.
+
+## Key Features
+
+### Long-Form Code Generation
+
+The model generates complete, executable solutions:
+
+```python
+<think>
+Let me analyze this problem...
+1. I need to implement a data structure that...
+2. The time complexity should be O(n log n)...
+3. I'll use a segment tree for efficient queries...
+</think>
+
+def solution():
+    # [100+ lines of well-structured code]
+    pass
+```
+
+### Test-Time Scaling
+
+DeepCoder improves with more samples:
+
+```python
+# Sample multiple solutions and execute tests
+tasks = test_dataset.repeat(n=8)
+results = asyncio.run(engine.execute_tasks(tasks))
+```
+
+### Code Execution and Validation
+
+The `code_reward_fn` automatically:
+- Extracts code from the response
+- Executes against test cases
+- Returns pass/fail reward signal
+
+## Monitoring Training
+
+Training logs to WandB. Key metrics:
+
+| Metric | Description |
+|--------|-------------|
+| `critic/score/mean` | Average pass rate per batch |
+| `val/pass@1` | LiveCodeBench Pass@1 accuracy |
+| `train/response_length` | Average code length |
+| `train/compilation_rate` | Fraction of syntactically valid code |
+
+## Evaluation on LiveCodeBench
+
+For comprehensive evaluation:
+
+1. Run the agent on full LiveCodeBench
+2. Execute generated code against test cases
+3. Compute Pass@1 and Pass@K metrics
+
+```bash
+python run_deepcoder.py --dataset livecodebench --n_samples 1
+```
+
+## Next Steps
+
+- Explore [DeepSWE](/examples/deep-swe) for software engineering tasks
+- Try [DeepScaleR](/examples/deep-scaler) for mathematical reasoning
+- Learn about [RL algorithms](/core-concepts/rl-algorithms)
+
+## Resources
+
+- [DeepCoder Blog Post](https://pretty-radio-b75.notion.site/DeepCoder-A-Fully-Open-Source-14B-Coder-at-O3-mini-Level-1cf81902c14680b3bee5eb349a512a51)
+- [GitHub Example Directory](https://github.com/rllm-org/rllm/tree/main/examples/deepcoder)
+- [Model on HuggingFace](https://huggingface.co/agentica-org/DeepCoder-14B-Preview)
+- [LiveCodeBench Leaderboard](https://livecodebench.github.io/)

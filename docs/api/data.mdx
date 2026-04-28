@@ -1,0 +1,410 @@
+---
+title: Data
+description: Dataset management and preprocessing utilities
+---
+
+The data module provides dataset loading, processing, and registry management for training and evaluation.
+
+## Dataset
+
+PyTorch-compatible dataset class for rLLM.
+
+```python
+from rllm.data import Dataset
+
+dataset = Dataset(
+    data=[{"question": "...", "answer": "..."}],
+    name="my_dataset",
+    split="train"
+)
+```
+
+### Constructor
+
+<ParamField path="data" type="list[dict[str, Any]]">
+  List of dictionaries containing dataset examples.
+</ParamField>
+
+<ParamField path="name" type="str | None">
+  Optional name for the dataset.
+</ParamField>
+
+<ParamField path="split" type="str | None">
+  Optional split name (e.g., "train", "test", "val").
+</ParamField>
+
+### Methods
+
+#### __len__
+
+Get the number of examples.
+
+```python
+num_examples = len(dataset)
+```
+
+#### __getitem__
+
+Get an item by index.
+
+```python
+example = dataset[0]
+```
+
+#### get_data
+
+Get the raw dataset list.
+
+```python
+data = dataset.get_data()
+```
+
+#### repeat
+
+Repeat the dataset n times.
+
+```python
+repeated = dataset.repeat(n=4)
+```
+
+<ParamField path="n" type="int">
+  Number of times to repeat the dataset.
+</ParamField>
+
+#### shuffle
+
+Shuffle the dataset.
+
+```python
+shuffled = dataset.shuffle(seed=42)
+```
+
+<ParamField path="seed" type="int | None">
+  Random seed for reproducibility.
+</ParamField>
+
+#### select
+
+Select a subset of the dataset.
+
+```python
+subset = dataset.select(range(100))
+```
+
+<ParamField path="indices" type="list[int] | range">
+  Indices to select.
+</ParamField>
+
+#### load_data
+
+Load dataset from a file.
+
+```python
+dataset = Dataset.load_data("path/to/data.parquet")
+```
+
+<ParamField path="path" type="str">
+  Path to dataset file (.json, .jsonl, .parquet).
+</ParamField>
+
+---
+
+## DatasetRegistry
+
+Global registry for managing datasets.
+
+```python
+from rllm.data import DatasetRegistry
+```
+
+### Methods
+
+#### register_dataset
+
+Register a dataset.
+
+```python
+DatasetRegistry.register_dataset(
+    name="hendrycks_math",
+    split="train",
+    path="/path/to/hendrycks_math_train.parquet"
+)
+```
+
+<ParamField path="name" type="str">
+  Dataset name.
+</ParamField>
+
+<ParamField path="split" type="str">
+  Split name ("train", "test", "val").
+</ParamField>
+
+<ParamField path="path" type="str">
+  Absolute path to dataset file.
+</ParamField>
+
+#### load_dataset
+
+Load a registered dataset.
+
+```python
+dataset = DatasetRegistry.load_dataset("hendrycks_math", "train")
+```
+
+<ParamField path="name" type="str">
+  Dataset name.
+</ParamField>
+
+<ParamField path="split" type="str">
+  Split name.
+</ParamField>
+
+<ResponseField name="dataset" type="Dataset | None">
+  Loaded dataset, or None if not found.
+</ResponseField>
+
+#### list_datasets
+
+List all registered datasets.
+
+```python
+datasets = DatasetRegistry.list_datasets()
+```
+
+<ResponseField name="datasets" type="dict">
+  Dictionary mapping dataset names to splits and paths.
+</ResponseField>
+
+---
+
+## Example: Creating a Dataset
+
+```python
+from rllm.data import Dataset
+
+# Create from list
+data = [
+    {"question": "What is 2+2?", "answer": "4"},
+    {"question": "What is 3*3?", "answer": "9"},
+    {"question": "What is 10-5?", "answer": "5"}
+]
+
+dataset = Dataset(data=data, name="simple_math", split="train")
+
+print(f"Size: {len(dataset)}")
+print(f"First item: {dataset[0]}")
+```
+
+---
+
+## Example: Loading from File
+
+```python
+from rllm.data import Dataset
+
+# Load from parquet
+dataset = Dataset.load_data("data/hendrycks_math_train.parquet")
+
+print(f"Loaded {len(dataset)} examples")
+print(f"First example: {dataset[0]}")
+```
+
+---
+
+## Example: Dataset Operations
+
+```python
+from rllm.data import Dataset
+
+dataset = Dataset.load_data("data/my_data.parquet")
+
+# Shuffle
+shuffled = dataset.shuffle(seed=42)
+
+# Select subset
+subset = shuffled.select(range(100))
+
+# Repeat for oversampling
+repeated = subset.repeat(n=4)
+
+print(f"Original: {len(dataset)}")
+print(f"Subset: {len(subset)}")
+print(f"Repeated: {len(repeated)}")
+```
+
+---
+
+## Example: Registering Datasets
+
+```python
+from rllm.data import Dataset, DatasetRegistry
+import os
+
+# Register datasets
+base_path = "/data/math"
+
+DatasetRegistry.register_dataset(
+    name="hendrycks_math",
+    split="train",
+    path=os.path.join(base_path, "train.parquet")
+)
+
+DatasetRegistry.register_dataset(
+    name="hendrycks_math",
+    split="test",
+    path=os.path.join(base_path, "test.parquet")
+)
+
+DatasetRegistry.register_dataset(
+    name="math500",
+    split="test",
+    path=os.path.join(base_path, "math500.parquet")
+)
+
+# List registered datasets
+print(DatasetRegistry.list_datasets())
+```
+
+---
+
+## Example: Loading Registered Datasets
+
+```python
+from rllm.data import DatasetRegistry
+
+# Load datasets
+train_dataset = DatasetRegistry.load_dataset("hendrycks_math", "train")
+test_dataset = DatasetRegistry.load_dataset("hendrycks_math", "test")
+
+if train_dataset:
+    print(f"Train size: {len(train_dataset)}")
+    print(f"Train example: {train_dataset[0]}")
+
+if test_dataset:
+    print(f"Test size: {len(test_dataset)}")
+```
+
+---
+
+## Example: Preparing Data for Training
+
+```python
+from rllm.data import Dataset, DatasetRegistry
+import polars as pl
+import os
+
+def prepare_math_data(train_size=1000, test_size=100):
+    """Prepare and register math datasets."""
+    
+    # Load raw data
+    raw_data = pl.read_json("raw_data/hendrycks_math.jsonl")
+    
+    # Process data
+    train_data = raw_data.head(train_size).to_dicts()
+    test_data = raw_data.tail(test_size).to_dicts()
+    
+    # Create datasets
+    train_dataset = Dataset(data=train_data, name="hendrycks_math", split="train")
+    test_dataset = Dataset(data=test_data, name="hendrycks_math", split="test")
+    
+    # Save to parquet
+    os.makedirs("data", exist_ok=True)
+    train_path = "data/hendrycks_math_train.parquet"
+    test_path = "data/hendrycks_math_test.parquet"
+    
+    pl.DataFrame(train_data).write_parquet(train_path)
+    pl.DataFrame(test_data).write_parquet(test_path)
+    
+    # Register
+    DatasetRegistry.register_dataset("hendrycks_math", "train", os.path.abspath(train_path))
+    DatasetRegistry.register_dataset("hendrycks_math", "test", os.path.abspath(test_path))
+    
+    return train_dataset, test_dataset
+
+# Prepare data
+train_ds, test_ds = prepare_math_data()
+```
+
+---
+
+## Example: Using with Trainer
+
+```python
+import hydra
+from rllm.trainer import AgentTrainer
+from rllm.data import DatasetRegistry
+from rllm.workflows import SimpleWorkflow
+from rllm.rewards import math_reward_fn
+
+@hydra.main(
+    config_path="pkg://rllm.trainer.config",
+    config_name="agent_ppo_trainer",
+    version_base=None
+)
+def main(config):
+    # Load registered datasets
+    train_dataset = DatasetRegistry.load_dataset("hendrycks_math", "train")
+    val_dataset = DatasetRegistry.load_dataset("math500", "test")
+    
+    assert train_dataset, "Train dataset not found"
+    assert val_dataset, "Validation dataset not found"
+    
+    # Create trainer
+    trainer = AgentTrainer(
+        workflow_class=SimpleWorkflow,
+        workflow_args={"reward_function": math_reward_fn},
+        config=config,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset
+    )
+    
+    trainer.train()
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+## Dataset File Formats
+
+Supported formats:
+
+### Parquet (Recommended)
+
+```python
+import polars as pl
+
+# Write
+pl.DataFrame(data).write_parquet("data.parquet")
+
+# Read
+dataset = Dataset.load_data("data.parquet")
+```
+
+### JSON
+
+```python
+import json
+
+# Write
+with open("data.json", "w") as f:
+    json.dump(data, f)
+
+# Read
+dataset = Dataset.load_data("data.json")
+```
+
+### JSONL
+
+```python
+import json
+
+# Write
+with open("data.jsonl", "w") as f:
+    for item in data:
+        f.write(json.dumps(item) + "\n")
+
+# Read
+dataset = Dataset.load_data("data.jsonl")
+```

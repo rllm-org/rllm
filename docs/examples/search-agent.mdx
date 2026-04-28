@@ -1,0 +1,306 @@
+---
+title: Search Agent Example
+description: Train an agent to perform interleaved reasoning and search for multi-hop QA
+---
+
+This example follows the setup from [Search-R1](https://github.com/PeterGriffinJin/Search-R1) to train an agent that can perform interleaved reasoning and search to answer multi-hop question answering tasks.
+
+## Overview
+
+The search agent example demonstrates:
+- How to use rLLM's `ToolAgent` with search capabilities
+- How to write custom retrieval tools in rLLM
+- Training agents on multi-hop question answering (HotpotQA)
+- Combining reasoning with information retrieval
+
+## Prerequisites
+
+- rLLM framework installed
+- vLLM or SGLang for model serving
+- Base model: `Qwen/Qwen3-4B` (or similar)
+- Retrieval server for document search
+- FAISS indices for Wikipedia corpus
+
+## Setup
+
+<Steps>
+  <Step title="Prepare search datasets">
+    Download and prepare the HotpotQA dataset:
+
+    ```bash
+    cd examples/search
+    python prepare_search_data.py
+    ```
+
+    This will:
+    - Download HotpotQA dataset from HuggingFace
+    - Process multi-hop QA pairs
+    - Register dataset with rLLM's DatasetRegistry
+  </Step>
+
+  <Step title="Download search indices">
+    Download pre-built FAISS indices and Wikipedia corpus:
+
+    ```bash
+    cd examples/search
+    python download_search_data.py --data_dir ./search_data
+    ```
+
+    This downloads:
+    - Pre-built FAISS indices for E5 embeddings
+    - Wikipedia corpus (wiki-18.jsonl)
+    - Embedding model files
+  </Step>
+
+  <Step title="Start retrieval server">
+    Install dependencies for the retrieval server:
+
+    ```bash
+    conda create -n search-server python=3.10 pip -y
+    conda activate search-server
+    pip install faiss-gpu Flask numpy sentence-transformers torch
+    ```
+
+    Start the retrieval server:
+
+    ```bash
+    cd examples/search
+    bash launch_retrieval_server.sh ./search_data 8000
+    ```
+
+    The server will be accessible at `http://127.0.0.1:8000`
+  </Step>
+
+  <Step title="Start model server">
+    Launch a vLLM server:
+
+    ```bash
+    python -m vllm.entrypoints.openai.api_server \
+        --model Qwen/Qwen3-4B \
+        --host 0.0.0.0 \
+        --port 30000 \
+        --dtype bfloat16
+    ```
+  </Step>
+</Steps>
+
+## Running the Search Agent
+
+Once all servers are running:
+
+```bash
+cd examples/search
+python run_search_agent.py
+```
+
+### Code Implementation
+
+```python
+import asyncio
+import os
+from dotenv import load_dotenv
+from local_retrieval_tool import LocalRetrievalTool
+from transformers import AutoTokenizer
+from rllm.agents.system_prompts import SEARCH_SYSTEM_PROMPT
+from rllm.agents.tool_agent import ToolAgent
+from rllm.data.dataset import DatasetRegistry
+from rllm.engine.agent_execution_engine import AgentExecutionEngine
+from rllm.environments.tools.tool_env import ToolEnvironment
+from rllm.rewards.reward_fn import search_reward_fn
+from rllm.utils import save_trajectories
+
+os.environ["TOKENIZERS_PARALLELISM"] = "true"
+if "RETRIEVAL_SERVER_URL" not in os.environ:
+    os.environ["RETRIEVAL_SERVER_URL"] = "http://127.0.0.1:8000"
+
+load_dotenv()
+
+n_parallel_agents = 64
+model_name = "Qwen/Qwen3-4B"
+
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+sampling_params = {"temperature": 0.6, "top_p": 0.95, "model": model_name}
+
+# Configure custom search tool
+tool_map = {"local_search": LocalRetrievalTool}
+
+engine = AgentExecutionEngine(
+    agent_class=ToolAgent,
+    agent_args={
+        "tool_map": tool_map,
+        "system_prompt": SEARCH_SYSTEM_PROMPT,
+        "parser_name": "qwen"
+    },
+    env_class=ToolEnvironment,
+    env_args={
+        "tool_map": tool_map,
+        "reward_fn": search_reward_fn
+    },
+    rollout_engine=None,
+    engine_name="openai",
+    tokenizer=tokenizer,
+    sampling_params=sampling_params,
+    rollout_engine_args={
+        "base_url": "http://localhost:30000/v1",
+        "api_key": "None",
+    },
+    max_response_length=16384,
+    max_prompt_length=4096,
+    config=None,
+    n_parallel_agents=n_parallel_agents,
+)
+
+test_dataset = DatasetRegistry.load_dataset("hotpotqa", "test")
+tasks = test_dataset.get_data()
+
+results = asyncio.run(engine.execute_tasks(tasks))
+save_trajectories(results, filename="search_trajectories.pt")
+```
+
+## Custom Retrieval Tool
+
+The `LocalRetrievalTool` provides document search functionality:
+
+```python
+from rllm.environments.tools.base_tool import BaseTool
+import requests
+
+class LocalRetrievalTool(BaseTool):
+    """Tool for searching local Wikipedia corpus."""
+    
+    def __init__(self, server_url: str = "http://127.0.0.1:8000", max_results: int = 5):
+        self.server_url = server_url
+        self.max_results = max_results
+    
+    def __call__(self, query: str) -> str:
+        """Search for documents matching the query."""
+        response = requests.post(
+            f"{self.server_url}/search",
+            json={"query": query, "k": self.max_results},
+            timeout=30
+        )
+        results = response.json()["results"]
+        
+        # Format results for the agent
+        formatted = ""
+        for i, doc in enumerate(results, 1):
+            formatted += f"\n[Document {i}]\n{doc['text']}\n"
+        return formatted
+    
+    @property
+    def name(self) -> str:
+        return "local_search"
+    
+    @property
+    def description(self) -> str:
+        return "Search Wikipedia for information. Input: search query string."
+```
+
+## Expected Behavior
+
+The agent will:
+
+1. **Receive question**: "What is the capital of the country where the Eiffel Tower is located?"
+2. **First search**: "Eiffel Tower location"
+3. **Process results**: Extract "France" from documents
+4. **Second search**: "capital of France"
+5. **Process results**: Extract "Paris" from documents
+6. **Generate answer**: "\\boxed{Paris}"
+
+This demonstrates **multi-hop reasoning** with interleaved search.
+
+## Training the Search Agent
+
+Train your own search agent:
+
+```bash
+bash examples/search/train_search_agent.sh
+```
+
+### Training Configuration
+
+- **Model**: Qwen/Qwen3-4B
+- **Algorithm**: RLOO (Reinforcement Learning with Offline Optimization)
+- **Training Dataset**: HotpotQA train split (3000 examples)
+- **Evaluation Dataset**: HotpotQA test split (100 examples)
+- **Batch Size**: 64
+- **Learning Rate**: 1e-6
+- **Max Steps**: 10 per episode
+
+### Search System Prompt
+
+The agent uses a specialized prompt:
+
+```python
+SEARCH_SYSTEM_PROMPT = """You are a helpful AI assistant with access to a search tool.
+
+When answering questions:
+1. Use the search tool to find relevant information
+2. You can search multiple times to gather information
+3. Reason step-by-step based on the search results
+4. Put your final answer in \\boxed{} format
+
+Example:
+Question: What is the capital of France?
+
+You should:
+1. Search for "capital of France"
+2. Review the results
+3. Provide answer: \\boxed{Paris}
+"""
+```
+
+## Multi-Hop Question Answering
+
+HotpotQA requires **multi-hop reasoning**:
+
+```
+Question: "In what year was the director of Pulp Fiction born?"
+
+Agent trajectory:
+1. Search: "director of Pulp Fiction"
+   → Result: "Quentin Tarantino"
+2. Search: "Quentin Tarantino birth year"
+   → Result: "1963"
+3. Answer: \boxed{1963}
+```
+
+## Monitoring Training
+
+Key metrics:
+
+| Metric | Description |
+|--------|-------------|
+| `val/pass@1` | Answer accuracy on test set |
+| `train/avg_searches` | Average searches per question |
+| `train/avg_steps` | Average reasoning steps |
+| `critic/score/mean` | Average reward per batch |
+
+## Advanced Features
+
+### Custom Reward Function
+
+The `search_reward_fn` checks:
+- Exact string match (case-insensitive)
+- Fuzzy string matching
+- Alias matching for entities
+
+### Tool Use Patterns
+
+The agent learns:
+- When to search vs. when to answer
+- How to formulate effective search queries
+- How to synthesize information from multiple sources
+
+## Next Steps
+
+- Try the [LangGraph RAG example](/examples/sdk-langgraph) for SDK-based search
+- Explore [ToolAgent documentation](/api/agents#toolagent)
+- Learn about [custom tools](/api/tools)
+
+## Resources
+
+- [GitHub Example Directory](https://github.com/rllm-org/rllm/tree/main/examples/search)
+- [Search-R1 Project](https://github.com/PeterGriffinJin/Search-R1)
+- [HotpotQA Dataset](https://hotpotqa.github.io/)
+- [ToolAgent API Reference](/api/agents#toolagent)
