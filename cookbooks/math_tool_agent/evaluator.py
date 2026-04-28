@@ -9,13 +9,13 @@ from __future__ import annotations
 import rllm
 from rllm.eval.types import EvalOutput, Signal
 from rllm.rewards.math_utils.utils import grade_answer_mathd, grade_answer_sympy
-from rllm.types import Episode, _extract_agent_answer
+from rllm.types import Episode
 
 
 @rllm.evaluator
 def math_tool_evaluator(task: dict, episode: Episode) -> EvalOutput:
     """Grade the agent's answer against ground truth using symbolic math comparison."""
-    answer_text = _extract_agent_answer(episode)
+    answer_text = str(episode.artifacts.get("answer", ""))
     ground_truth = str(task.get("ground_truth", ""))
 
     is_correct = grade_answer_mathd(answer_text, ground_truth) or grade_answer_sympy(answer_text, ground_truth)

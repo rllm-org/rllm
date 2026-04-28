@@ -189,20 +189,3 @@ async def run_agent_flow(
 
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(executor, agent.run, task, config)
-
-
-def _extract_agent_answer(episode: Episode) -> str:
-    """Extract the final textual answer from an :class:`Episode`.
-
-    Checks ``episode.artifacts["answer"]`` first (preferred), then falls
-    back to the last trajectory's ``output`` or last step's ``output``.
-    """
-    if "answer" in episode.artifacts:
-        return str(episode.artifacts["answer"])
-    if episode.trajectories:
-        traj = episode.trajectories[-1]
-        if traj.output:
-            return str(traj.output)
-        if traj.steps:
-            return str(traj.steps[-1].output or "")
-    return ""

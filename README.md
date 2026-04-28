@@ -89,11 +89,11 @@ def solve(task: Task, config: AgentConfig) -> Episode:
 # my_evaluator.py
 import rllm
 from rllm.eval.types import EvalOutput, Signal
-from rllm.types import Episode, _extract_agent_answer
+from rllm.types import Episode
 
 @rllm.evaluator
 def score(task: dict, episode: Episode) -> EvalOutput:
-    answer = _extract_agent_answer(episode)
+    answer = str(episode.artifacts.get("answer", ""))
     is_correct = answer.strip() == task["ground_truth"].strip()
     reward = 1.0 if is_correct else 0.0
     return EvalOutput(reward=reward, is_correct=is_correct,

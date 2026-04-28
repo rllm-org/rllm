@@ -5,7 +5,7 @@ Usage:
 """
 
 from rllm.eval.types import EvalOutput, Signal
-from rllm.types import Episode, _extract_agent_answer
+from rllm.types import Episode
 
 
 class {{evaluator_class}}:
@@ -16,8 +16,10 @@ class {{evaluator_class}}:
     """
 
     def evaluate(self, task: dict, episode: Episode) -> EvalOutput:
-        # Extract the agent's answer from the episode artifacts
-        answer = _extract_agent_answer(episode)
+        # Extract the agent's answer from the episode artifacts.
+        # Your AgentFlow is responsible for putting the final answer in
+        # episode.artifacts["answer"] (or wherever you choose).
+        answer = str(episode.artifacts.get("answer", ""))
         expected = str(task.get("ground_truth", ""))
 
         # --- Replace with your scoring logic ---

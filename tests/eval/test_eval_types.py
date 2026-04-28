@@ -19,10 +19,8 @@ from rllm.types import (
     AgentFlow,
     Episode,
     Evaluator,
-    Step,
     Task,
     Trajectory,
-    _extract_agent_answer,
 )
 
 # ---------------------------------------------------------------------------
@@ -60,34 +58,6 @@ def test_builtin_evaluators_are_evaluators():
     for name in ("math_reward_fn", "countdown_reward_fn", "code_reward_fn", "f1_reward_fn"):
         evaluator = load_evaluator(name)
         assert isinstance(evaluator, Evaluator), f"{name} is not an Evaluator"
-
-
-# ---------------------------------------------------------------------------
-# _extract_agent_answer
-# ---------------------------------------------------------------------------
-
-
-def test_extract_answer_from_artifacts():
-    ep = Episode(artifacts={"answer": "42"})
-    assert _extract_agent_answer(ep) == "42"
-
-
-def test_extract_answer_from_trajectory_output():
-    traj = Trajectory(name="t", output="hello")
-    ep = Episode(trajectories=[traj])
-    assert _extract_agent_answer(ep) == "hello"
-
-
-def test_extract_answer_from_last_step():
-    step = Step(output="step_answer")
-    traj = Trajectory(name="t", steps=[step])
-    ep = Episode(trajectories=[traj])
-    assert _extract_agent_answer(ep) == "step_answer"
-
-
-def test_extract_answer_empty_episode():
-    ep = Episode()
-    assert _extract_agent_answer(ep) == ""
 
 
 # ---------------------------------------------------------------------------
