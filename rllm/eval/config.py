@@ -20,6 +20,10 @@ class ProviderInfo:
     env_key: str  # Environment variable for API key, e.g. "OPENAI_API_KEY"
     default_model: str  # Default model name
     models: list[str] = field(default_factory=list)  # Curated model list
+    # OpenAI-compatible base URL the gateway forwards to. Empty means the
+    # provider doesn't expose an OpenAI-compatible endpoint and must be
+    # configured via the "custom" provider with a user-supplied base_url.
+    backend_url: str = ""
 
 
 PROVIDER_REGISTRY: list[ProviderInfo] = [
@@ -30,6 +34,7 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         litellm_prefix="openai",
         env_key="OPENAI_API_KEY",
         default_model="gpt-5-mini",
+        backend_url="https://api.openai.com/v1",
         models=[
             # GPT-5 family
             "gpt-5-nano",
@@ -56,6 +61,7 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         litellm_prefix="anthropic",
         env_key="ANTHROPIC_API_KEY",
         default_model="claude-sonnet-4-6",
+        backend_url="https://api.anthropic.com/v1",
         models=[
             "claude-sonnet-4-6",
             "claude-haiku-4-5-20251001",
@@ -68,6 +74,7 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         litellm_prefix="gemini",
         env_key="GEMINI_API_KEY",
         default_model="gemini-2.5-flash",
+        backend_url="https://generativelanguage.googleapis.com/v1beta/openai",
         models=[
             # Gemini 3 family
             "gemini-3-flash-preview",
@@ -88,6 +95,7 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         litellm_prefix="openrouter",
         env_key="OPENROUTER_API_KEY",
         default_model="anthropic/claude-sonnet-4-6",
+        backend_url="https://openrouter.ai/api/v1",
         models=[
             "anthropic/claude-sonnet-4-6",
             "openai/gpt-5-mini",
@@ -102,6 +110,7 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         litellm_prefix="deepseek",
         env_key="DEEPSEEK_API_KEY",
         default_model="deepseek-chat",
+        backend_url="https://api.deepseek.com/v1",
         models=[
             "deepseek-chat",
             "deepseek-reasoner",
@@ -113,6 +122,7 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         litellm_prefix="together_ai",
         env_key="TOGETHER_API_KEY",
         default_model="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+        backend_url="https://api.together.xyz/v1",
         models=[
             "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
             "meta-llama/Llama-3.3-70B-Instruct-Turbo",
@@ -126,6 +136,7 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         litellm_prefix="fireworks_ai",
         env_key="FIREWORKS_API_KEY",
         default_model="accounts/fireworks/models/llama4-maverick-instruct-basic",
+        backend_url="https://api.fireworks.ai/inference/v1",
         models=[
             "accounts/fireworks/models/llama4-maverick-instruct-basic",
             "accounts/fireworks/models/deepseek-r1",
@@ -138,6 +149,7 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         litellm_prefix="groq",
         env_key="GROQ_API_KEY",
         default_model="llama-3.3-70b-versatile",
+        backend_url="https://api.groq.com/openai/v1",
         models=[
             "llama-3.3-70b-versatile",
             "llama-3.1-8b-instant",
@@ -151,6 +163,7 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         litellm_prefix="cerebras",
         env_key="CEREBRAS_API_KEY",
         default_model="llama-3.3-70b",
+        backend_url="https://api.cerebras.ai/v1",
         models=[
             "llama-3.3-70b",
             "llama-3.1-8b",
@@ -163,6 +176,7 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         litellm_prefix="xai",
         env_key="XAI_API_KEY",
         default_model="grok-3-mini",
+        backend_url="https://api.x.ai/v1",
         models=[
             "grok-3-mini",
             "grok-3",
@@ -175,6 +189,7 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         litellm_prefix="zai",
         env_key="ZAI_API_KEY",
         default_model="glm-4.5",
+        backend_url="https://api.z.ai/api/paas/v4",
         models=[
             "glm-5",
             "glm-4.7",
@@ -188,6 +203,7 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         litellm_prefix="moonshot",
         env_key="MOONSHOT_API_KEY",
         default_model="kimi-k2.5",
+        backend_url="https://api.moonshot.ai/v1",
         models=[
             "kimi-k2.5",
             "kimi-k2-thinking",
@@ -199,6 +215,7 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         litellm_prefix="minimax",
         env_key="MINIMAX_API_KEY",
         default_model="MiniMax-M2.7",
+        backend_url="https://api.minimaxi.chat/v1",
         models=[
             "MiniMax-M2.7",
             "MiniMax-M2.7-highspeed",
@@ -222,6 +239,7 @@ SUPPORTED_PROVIDERS = [p.id for p in PROVIDER_REGISTRY]
 DEFAULT_MODELS: dict[str, str] = {p.id: p.default_model for p in PROVIDER_REGISTRY if p.default_model}
 PROVIDER_MODELS: dict[str, list[str]] = {p.id: p.models for p in PROVIDER_REGISTRY if p.models}
 PROVIDER_ENV_KEYS: dict[str, str] = {p.id: p.env_key for p in PROVIDER_REGISTRY if p.env_key}
+PROVIDER_BACKEND_URLS: dict[str, str] = {p.id: p.backend_url for p in PROVIDER_REGISTRY if p.backend_url}
 
 # Index for fast lookup
 _PROVIDER_INDEX: dict[str, ProviderInfo] = {p.id: p for p in PROVIDER_REGISTRY}
