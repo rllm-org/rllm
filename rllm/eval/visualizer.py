@@ -340,11 +340,11 @@ _PAGE_HTML = r"""<!doctype html>
   @keyframes ping { 75%,100% { transform: scale(2.4); opacity:0; } }
 </style>
 </head>
-<body>
+<body class="bg-layer-1">
 
 <!-- ─────────────────────────────  Header  ───────────────────────────── -->
 <header class="bg-white border-b border-gray-200 sticky top-0 z-30">
-  <div class="max-w-7xl mx-auto px-6 h-14 flex items-center gap-4">
+  <div class="px-6 h-14 flex items-center gap-4">
     <a href="#/" class="flex items-center gap-2 group">
       <span class="inline-flex items-center justify-center w-7 h-7 rounded-md bg-accent-500 text-white font-semibold text-[12px] tracking-tight group-hover:bg-accent-600 transition-colors">rL</span>
       <span class="font-semibold text-gray-900 tracking-tight">rLLM<span class="text-gray-400 font-normal"> · viewer</span></span>
@@ -356,7 +356,28 @@ _PAGE_HTML = r"""<!doctype html>
   </div>
 </header>
 
-<main id="root" class="max-w-7xl mx-auto px-6 py-6"></main>
+<!-- ─────────────────────────────  Sidebar + main  ───────────────────── -->
+<div class="flex">
+  <aside class="w-56 shrink-0 bg-white border-r border-gray-200 min-h-[calc(100vh-3.5rem)]">
+    <nav class="py-4 px-2 space-y-0.5 sticky top-14">
+      <a id="nav-runs" href="#/" data-section="runs"
+         class="flex items-center gap-2 px-3 py-2 rounded-md text-sm text-gray-700 hover:bg-layer-1 transition-colors">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M4 6h16M4 12h16M4 18h7"/></svg>
+        <span>Runs</span>
+      </a>
+      <a id="nav-gateway" href="#/gateway" data-section="gateway"
+         class="flex items-center gap-2 px-3 py-2 rounded-md text-sm text-gray-700 hover:bg-layer-1 transition-colors">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+        <span>Gateway</span>
+        <span id="nav-gateway-active" class="ml-auto hidden inline-flex items-center gap-1 text-[10px] text-amber-700 font-medium">
+          <span class="pulse-dot inline-block w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+          <span id="nav-gateway-active-count">0</span>
+        </span>
+      </a>
+    </nav>
+  </aside>
+  <main id="root" class="flex-1 px-6 py-6 min-w-0"></main>
+</div>
 
 <!-- ─────────────────────────────  Templates  ──────────────────────────── -->
 
@@ -429,15 +450,6 @@ _PAGE_HTML = r"""<!doctype html>
           </div>
         </div>
       </div>
-    </div>
-
-    <!-- View tabs: Episodes (this page) | Gateway (cross-run viewer) -->
-    <div class="flex items-center gap-1 mb-3 border-b border-gray-200">
-      <span class="px-3 py-2 text-xs font-medium text-accent-700 border-b-2 border-accent-500">Episodes</span>
-      <a id="run-gateway-link" class="px-3 py-2 text-xs font-medium text-gray-500 hover:text-gray-700 transition-colors" href="#">
-        Gateway
-        <span class="ml-1 text-[10px] text-gray-400">→</span>
-      </a>
     </div>
 
     <!-- Episode toolbar -->
@@ -1578,20 +1590,37 @@ function renderGatewayView(runFilter) {
   gwState.traceTimer = setInterval(_gwRefreshTraceTail, 500);
 }
 
+function _paintSidebar(activeSection) {
+  // ``activeSection`` is "runs" or "gateway"; highlight the matching nav
+  // entry. Reads the current hash so deep-links from the gateway view
+  // (with ?run=) still highlight Gateway, not Runs.
+  const items = document.querySelectorAll("aside nav a[data-section]");
+  for (const a of items) {
+    const isActive = a.getAttribute("data-section") === activeSection;
+    if (isActive) {
+      a.classList.add("bg-accent-50", "text-accent-700", "font-medium");
+      a.classList.remove("text-gray-700");
+    } else {
+      a.classList.remove("bg-accent-50", "text-accent-700", "font-medium");
+      a.classList.add("text-gray-700");
+    }
+  }
+}
+
 // ─── Boot ───────────────────────────────────────────────────────────────
 function route() {
   _stopLivePolling();
   _gwStop();
   const r = parseHash();
   if (r.view === "run") {
+    _paintSidebar("runs");  // Drilling into a run is still under Runs.
     renderRunView(r.id);
     _startLivePolling(r.id);
-    // Wire the Episodes/Gateway tab link with the current run id baked in.
-    const link = document.getElementById("run-gateway-link");
-    if (link) link.href = `#/gateway?run=${encodeURIComponent(r.id)}`;
   } else if (r.view === "gateway") {
+    _paintSidebar("gateway");
     renderGatewayView(r.query.run || null);
   } else {
+    _paintSidebar("runs");
     renderListView();
   }
 }
