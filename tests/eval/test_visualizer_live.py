@@ -184,3 +184,143 @@ class TestLiveEndpoint:
     def test_unknown_run_returns_404(self, server):
         resp = httpx.get(f"{server}/api/runs/no-such-run/live")
         assert resp.status_code == 404
+
+
+class TestGatewayEndpoints:
+    """Cross-run endpoints powering the Gateway tab.
+
+    These read the shared sqlite directly (no run-dir join) so any
+    gateway client is visible — eval, training, harness shims.
+    """
+
+    @pytest.fixture
+    def cross_run_server(self, tmp_path, monkeypatch):
+        # Seed a shared db with two runs and one orphan registered run.
+        shared_db = tmp_path / "gateway" / "traces.db"
+        shared_db.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(shared_db))
+        try:
+            conn.execute("CREATE TABLE traces (trace_id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at REAL NOT NULL)")
+            conn.execute(
+                "CREATE TABLE trace_sessions (trace_id TEXT NOT NULL, session_id TEXT NOT NULL, run_id TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL, PRIMARY KEY (trace_id, session_id))"
+            )
+            conn.execute("CREATE TABLE runs (run_id TEXT PRIMARY KEY, started_at REAL NOT NULL, ended_at REAL, metadata TEXT NOT NULL DEFAULT '{}')")
+            # run-A: 2 traces, finished
+            conn.execute(
+                "INSERT INTO runs VALUES (?, ?, ?, ?)",
+                ("run-A", 100.0, 110.0, json.dumps({"benchmark": "gsm8k"})),
+            )
+            for trace_id, ts in [("a1", 101.0), ("a2", 102.0)]:
+                conn.execute(
+                    "INSERT INTO traces VALUES (?, ?, ?)",
+                    (trace_id, json.dumps({"trace_id": trace_id}), ts),
+                )
+                conn.execute(
+                    "INSERT INTO trace_sessions VALUES (?, ?, ?, ?)",
+                    (trace_id, "eval-0", "run-A", ts),
+                )
+            # run-B: 3 traces, still running (ended_at NULL)
+            conn.execute(
+                "INSERT INTO runs VALUES (?, ?, ?, ?)",
+                ("run-B", 200.0, None, json.dumps({"benchmark": "math500"})),
+            )
+            for trace_id, ts in [("b1", 201.0), ("b2", 202.0), ("b3", 203.0)]:
+                conn.execute(
+                    "INSERT INTO traces VALUES (?, ?, ?)",
+                    (trace_id, json.dumps({"trace_id": trace_id}), ts),
+                )
+                conn.execute(
+                    "INSERT INTO trace_sessions VALUES (?, ?, ?, ?)",
+                    (trace_id, "eval-0", "run-B", ts),
+                )
+            # Orphan registered run (no traces yet)
+            conn.execute(
+                "INSERT INTO runs VALUES (?, ?, ?, ?)",
+                ("run-C", 250.0, None, json.dumps({"benchmark": "aime"})),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        monkeypatch.setenv("RLLM_GATEWAY_DB", str(shared_db))
+
+        # Empty root — gateway endpoints don't read the run dirs.
+        root = tmp_path / "eval_results"
+        root.mkdir()
+
+        def html_factory():
+            return "<html></html>"
+
+        handler_cls = visualizer._make_handler(root, html_factory)
+        srv = visualizer._ThreadingServer(("127.0.0.1", 0), handler_cls)
+        port = srv.server_address[1]
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://127.0.0.1:{port}"
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_runs_lists_with_session_and_trace_counts(self, cross_run_server):
+        resp = httpx.get(f"{cross_run_server}/api/gateway/runs")
+        assert resp.status_code == 200
+        rows = resp.json()
+        by_id = {r["run_id"]: r for r in rows}
+        assert by_id["run-A"]["session_count"] == 1
+        assert by_id["run-A"]["trace_count"] == 2
+        assert by_id["run-A"]["ended_at"] == 110.0
+        assert by_id["run-B"]["session_count"] == 1
+        assert by_id["run-B"]["trace_count"] == 3
+        assert by_id["run-B"]["ended_at"] is None
+        # Orphan run — no traces but registered.
+        assert by_id["run-C"]["session_count"] == 0
+        assert by_id["run-C"]["trace_count"] == 0
+
+    def test_runs_ordered_by_recent_activity(self, cross_run_server):
+        rows = httpx.get(f"{cross_run_server}/api/gateway/runs").json()
+        # Order: most recently active first. run-C (orphan, registered at
+        # 250 with no traces yet) ranks above run-B (last trace 203) which
+        # ranks above run-A (last trace 102). A just-registered gateway
+        # showing up immediately is intentional — that's the value of the
+        # ``runs`` table being separate from trace_sessions.
+        assert [r["run_id"] for r in rows] == ["run-C", "run-B", "run-A"]
+
+    def test_sessions_cross_run(self, cross_run_server):
+        rows = httpx.get(f"{cross_run_server}/api/gateway/sessions").json()
+        keys = {(r["session_id"], r["run_id"]) for r in rows}
+        assert keys == {("eval-0", "run-A"), ("eval-0", "run-B")}
+
+    def test_sessions_filtered_by_run(self, cross_run_server):
+        rows = httpx.get(
+            f"{cross_run_server}/api/gateway/sessions",
+            params={"run_id": "run-B"},
+        ).json()
+        assert len(rows) == 1
+        assert rows[0]["run_id"] == "run-B"
+        assert rows[0]["trace_count"] == 3
+
+    def test_traces_filtered_by_run(self, cross_run_server):
+        rows = httpx.get(
+            f"{cross_run_server}/api/gateway/traces",
+            params={"session_id": "eval-0", "run_id": "run-B"},
+        ).json()
+        assert [r["trace_id"] for r in rows] == ["b1", "b2", "b3"]
+
+    def test_traces_cross_run_when_no_run_id(self, cross_run_server):
+        rows = httpx.get(
+            f"{cross_run_server}/api/gateway/traces",
+            params={"session_id": "eval-0"},
+        ).json()
+        # All five traces (run-A's 2 + run-B's 3) come back.
+        assert {r["trace_id"] for r in rows} == {"a1", "a2", "b1", "b2", "b3"}
+
+    def test_traces_since_cursor(self, cross_run_server):
+        rows = httpx.get(
+            f"{cross_run_server}/api/gateway/traces",
+            params={"session_id": "eval-0", "run_id": "run-B", "since": "201.0"},
+        ).json()
+        assert [r["trace_id"] for r in rows] == ["b2", "b3"]
+
+    def test_traces_session_id_required(self, cross_run_server):
+        resp = httpx.get(f"{cross_run_server}/api/gateway/traces")
+        assert resp.status_code == 400
