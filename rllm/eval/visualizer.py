@@ -431,6 +431,15 @@ _PAGE_HTML = r"""<!doctype html>
       </div>
     </div>
 
+    <!-- View tabs: Episodes (this page) | Gateway (cross-run viewer) -->
+    <div class="flex items-center gap-1 mb-3 border-b border-gray-200">
+      <span class="px-3 py-2 text-xs font-medium text-accent-700 border-b-2 border-accent-500">Episodes</span>
+      <a id="run-gateway-link" class="px-3 py-2 text-xs font-medium text-gray-500 hover:text-gray-700 transition-colors" href="#">
+        Gateway
+        <span class="ml-1 text-[10px] text-gray-400">→</span>
+      </a>
+    </div>
+
     <!-- Episode toolbar -->
     <div class="flex items-center gap-3 mb-3">
       <div class="inline-flex rounded-md border border-gray-200 bg-white overflow-hidden text-xs shadow-subtle">
@@ -447,6 +456,50 @@ _PAGE_HTML = r"""<!doctype html>
 
     <div id="ep-inflight" class="space-y-2"></div>
     <div id="ep-list" class="space-y-2"></div>
+  </section>
+</template>
+
+<template id="tpl-gateway">
+  <section>
+    <!-- Header strip: gateway-level summary -->
+    <div class="bg-white border border-gray-200 rounded-xl p-4 mb-4 shadow-subtle">
+      <div class="flex items-center justify-between gap-4">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2 text-xs text-gray-500">
+            <a href="#/" class="hover:text-accent-600 transition-colors">All runs</a>
+            <span class="text-gray-300">/</span>
+            <span class="text-gray-700 font-medium">Gateway</span>
+            <span id="gw-run-crumb" class="text-gray-400 mono"></span>
+          </div>
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 text-xs">
+            <span><span class="text-gray-400">runs</span> <span id="gw-run-count" class="text-gray-700 font-medium">—</span></span>
+            <span><span class="text-gray-400">sessions</span> <span id="gw-sess-count" class="text-gray-700 font-medium">—</span></span>
+            <span><span class="text-gray-400">traces</span> <span id="gw-trace-count" class="text-gray-700 font-medium tabular-nums">—</span></span>
+            <span id="gw-active-badge" class="hidden inline-flex items-center gap-1.5 text-amber-700 font-medium"><span class="pulse-dot inline-block w-1.5 h-1.5 rounded-full bg-amber-500"></span><span id="gw-active-count">—</span> active</span>
+          </div>
+        </div>
+        <div class="shrink-0">
+          <label class="text-[11px] text-gray-400 uppercase tracking-wider mr-1">Run</label>
+          <select id="gw-run-filter" class="px-3 py-1.5 border border-gray-200 rounded-md text-xs bg-white focus:outline-none focus:border-accent-400">
+            <option value="">All runs</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Two-pane: sessions list left, selected session traces right -->
+    <div class="grid grid-cols-12 gap-4">
+      <aside class="col-span-4 lg:col-span-3 bg-white border border-gray-200 rounded-xl shadow-subtle overflow-hidden">
+        <div class="px-3 py-2 border-b border-gray-100 flex items-center justify-between">
+          <span class="text-[11px] uppercase tracking-wider font-semibold text-gray-500">Sessions</span>
+          <span id="gw-sess-shown" class="text-[11px] text-gray-400 tabular-nums"></span>
+        </div>
+        <div id="gw-sess-list" class="divide-y divide-gray-100 max-h-[calc(100vh-260px)] overflow-y-auto"></div>
+      </aside>
+      <main class="col-span-8 lg:col-span-9 bg-white border border-gray-200 rounded-xl shadow-subtle overflow-hidden">
+        <div id="gw-trace-pane" class="min-h-[20rem]"></div>
+      </main>
+    </div>
   </section>
 </template>
 
@@ -519,10 +572,25 @@ function statusBadge(status) {
 
 // ─── Router ─────────────────────────────────────────────────────────────
 function parseHash() {
-  const h = location.hash.replace(/^#/, "") || "/";
-  const m = h.match(/^\/run\/(.+)$/);
-  if (m) return { view:"run", id: decodeURIComponent(m[1]) };
-  return { view:"list" };
+  const raw = location.hash.replace(/^#/, "") || "/";
+  // Split path and optional query string (we hand-roll this since
+  // ``URL`` doesn't parse fragment-only inputs cleanly).
+  const qIdx = raw.indexOf("?");
+  const path = qIdx >= 0 ? raw.slice(0, qIdx) : raw;
+  const queryStr = qIdx >= 0 ? raw.slice(qIdx + 1) : "";
+  const query = {};
+  if (queryStr) {
+    for (const part of queryStr.split("&")) {
+      if (!part) continue;
+      const eq = part.indexOf("=");
+      if (eq < 0) { query[decodeURIComponent(part)] = ""; continue; }
+      query[decodeURIComponent(part.slice(0, eq))] = decodeURIComponent(part.slice(eq + 1));
+    }
+  }
+  const m = path.match(/^\/run\/(.+)$/);
+  if (m) return { view:"run", id: decodeURIComponent(m[1]), query };
+  if (path === "/gateway") return { view:"gateway", query };
+  return { view:"list", query };
 }
 function navigate(hash) { location.hash = hash; }
 window.addEventListener("hashchange", route);
@@ -1218,13 +1286,311 @@ function _startLivePolling(runId) {
   liveState.liveTimer = setInterval(_tickLive, 2000);
 }
 
+// ─── Gateway view ───────────────────────────────────────────────────────
+// Cross-run viewer over the shared gateway sqlite. Two-pane: sessions
+// list left, selected session's trace stream right. Polls
+// /api/gateway/sessions every 2s for the left pane and
+// /api/gateway/traces?since=<cursor> every 500ms for the active stream.
+const gwState = {
+  // Filter applied to the runs dropdown — null means "all runs".
+  runFilter: null,
+  // Currently selected session, keyed as "<run_id>::<session_id>"
+  selected: null,
+  sessions: [],         // most recent /api/gateway/sessions response
+  runs: [],             // most recent /api/gateway/runs response
+  pollTimer: null,
+  traceTimer: null,
+  traceCursor: null,    // last seen _created_at for active stream
+  knownTraceIds: new Set(),  // dedupe across delta polls
+};
+
+function _gwStop() {
+  if (gwState.pollTimer) { clearInterval(gwState.pollTimer); gwState.pollTimer = null; }
+  if (gwState.traceTimer) { clearInterval(gwState.traceTimer); gwState.traceTimer = null; }
+  gwState.runFilter = null;
+  gwState.selected = null;
+  gwState.sessions = [];
+  gwState.runs = [];
+  gwState.traceCursor = null;
+  gwState.knownTraceIds = new Set();
+}
+
+function _gwSessionKey(s) { return `${s.run_id || ""}::${s.session_id}`; }
+
+function _gwRunsByRid() {
+  const map = new Map();
+  for (const r of gwState.runs) map.set(r.run_id, r);
+  return map;
+}
+
+function _gwRunStatus(r) {
+  if (!r) return "unknown";
+  if (r.ended_at == null && r.started_at != null) return "running";
+  if (r.ended_at != null) return "finished";
+  return "unknown";
+}
+
+function _gwIsActive(s) {
+  // A session is "active" if its run is still running (no ended_at).
+  const r = _gwRunsByRid().get(s.run_id);
+  return _gwRunStatus(r) === "running";
+}
+
+function paintGwHeader() {
+  const runs = gwState.runs;
+  const sessions = gwState.sessions;
+  const totalTraces = sessions.reduce((acc, s) => acc + (s.trace_count || 0), 0);
+  const activeRuns = runs.filter(r => _gwRunStatus(r) === "running").length;
+  document.getElementById("gw-run-count").textContent = String(runs.length);
+  document.getElementById("gw-sess-count").textContent = String(sessions.length);
+  document.getElementById("gw-trace-count").textContent = totalTraces.toLocaleString();
+  const activeBadge = document.getElementById("gw-active-badge");
+  if (activeRuns > 0) {
+    activeBadge.classList.remove("hidden");
+    document.getElementById("gw-active-count").textContent = String(activeRuns);
+  } else {
+    activeBadge.classList.add("hidden");
+  }
+  const crumb = document.getElementById("gw-run-crumb");
+  if (gwState.runFilter) {
+    crumb.innerHTML = `<span class="text-gray-300">/</span> <span class="text-gray-700 mono">${escapeHtml(gwState.runFilter)}</span>`;
+  } else {
+    crumb.innerHTML = "";
+  }
+}
+
+function paintGwRunFilter() {
+  const sel = document.getElementById("gw-run-filter");
+  if (!sel) return;
+  const prev = sel.value;
+  // Build options from current runs list.
+  const opts = ['<option value="">All runs</option>'];
+  for (const r of gwState.runs) {
+    const meta = r.metadata || {};
+    const label = `${r.run_id} · ${meta.benchmark || ""} ${meta.model ? "· " + meta.model : ""}`.trim();
+    const status = _gwRunStatus(r);
+    const mark = status === "running" ? " ●" : "";
+    opts.push(`<option value="${escapeHtml(r.run_id)}">${escapeHtml(label)}${mark}</option>`);
+  }
+  sel.innerHTML = opts.join("");
+  sel.value = gwState.runFilter || "";
+  if (sel.value !== (gwState.runFilter || "") && prev) {
+    // Selected run no longer in the list (e.g. deleted) — fall back to all.
+    sel.value = "";
+    gwState.runFilter = null;
+  }
+}
+
+function _gwSessionRow(s) {
+  const key = _gwSessionKey(s);
+  const isSelected = gwState.selected === key;
+  const active = _gwIsActive(s);
+  const dot = active
+    ? `<span class="pulse-dot inline-block w-1.5 h-1.5 rounded-full bg-amber-500"></span>`
+    : `<span class="inline-block w-1.5 h-1.5 rounded-full bg-gray-300"></span>`;
+  const runBadge = !gwState.runFilter && s.run_id
+    ? `<code class="text-[10px] text-gray-400 mono truncate max-w-[14ch]">${escapeHtml(s.run_id)}</code>`
+    : "";
+  return `
+    <button type="button" data-session-key="${escapeHtml(key)}"
+            class="w-full text-left px-3 py-2 hover:bg-layer-1 transition-colors ${isSelected ? "bg-accent-50" : ""}">
+      <div class="flex items-center gap-2 mb-0.5">
+        ${dot}
+        <span class="text-xs font-semibold text-gray-700 mono truncate">${escapeHtml(s.session_id)}</span>
+        <span class="ml-auto text-[11px] text-gray-500 tabular-nums">${s.trace_count || 0}</span>
+      </div>
+      <div class="flex items-center gap-2 pl-3.5">${runBadge}</div>
+    </button>`;
+}
+
+function paintGwSessionsList() {
+  const list = document.getElementById("gw-sess-list");
+  if (!list) return;
+  const sessions = gwState.sessions;
+  document.getElementById("gw-sess-shown").textContent = `${sessions.length} session${sessions.length === 1 ? "" : "s"}`;
+  if (sessions.length === 0) {
+    list.innerHTML = `<div class="px-3 py-12 text-[12px] text-gray-400 text-center">No sessions yet.${gwState.runFilter ? "" : " Run an eval to populate the gateway."}</div>`;
+    return;
+  }
+  list.innerHTML = sessions.map(_gwSessionRow).join("");
+  list.querySelectorAll("button[data-session-key]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const key = btn.getAttribute("data-session-key");
+      _gwSelectSession(key);
+    });
+  });
+}
+
+function paintGwTracePane() {
+  const pane = document.getElementById("gw-trace-pane");
+  if (!pane) return;
+  const key = gwState.selected;
+  if (!key) {
+    pane.innerHTML = `<div class="px-6 py-12 text-sm text-gray-400 text-center">Select a session on the left to see its trace stream.</div>`;
+    return;
+  }
+  const sess = gwState.sessions.find(s => _gwSessionKey(s) === key);
+  if (!sess) {
+    pane.innerHTML = `<div class="px-6 py-12 text-sm text-gray-400 text-center">Session is no longer present in the latest poll.</div>`;
+    return;
+  }
+  const active = _gwIsActive(sess);
+  const liveBadge = active
+    ? `<span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-700"><span class="pulse-dot inline-block w-1.5 h-1.5 rounded-full bg-amber-500"></span>running</span>`
+    : `<span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-gray-100 text-gray-600">finished</span>`;
+  const runMeta = _gwRunsByRid().get(sess.run_id);
+  const benchMeta = runMeta && runMeta.metadata && runMeta.metadata.benchmark
+    ? `<span class="text-[11px] text-gray-500">benchmark: <span class="text-gray-700">${escapeHtml(runMeta.metadata.benchmark)}</span></span>`
+    : "";
+  const modelMeta = runMeta && runMeta.metadata && runMeta.metadata.model
+    ? `<span class="text-[11px] text-gray-500">model: <span class="text-gray-700 mono">${escapeHtml(runMeta.metadata.model)}</span></span>`
+    : "";
+  pane.innerHTML = `
+    <div class="px-4 py-3 border-b border-gray-100">
+      <div class="flex items-center gap-2 mb-1">
+        ${liveBadge}
+        <span class="text-sm font-semibold text-gray-800 mono">${escapeHtml(sess.session_id)}</span>
+        <code class="text-[11px] text-gray-500 mono truncate">${escapeHtml(sess.run_id || "(unstamped)")}</code>
+      </div>
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
+        <span><span class="text-gray-400">traces</span> <span class="text-gray-700 font-medium tabular-nums" data-gw-trace-count>${sess.trace_count || 0}</span></span>
+        ${benchMeta}
+        ${modelMeta}
+      </div>
+    </div>
+    <div class="px-3 py-3 space-y-2 max-h-[calc(100vh-300px)] overflow-y-auto" data-gw-trace-list></div>
+    <div class="px-4 py-2 text-[11px] text-gray-400 border-t border-gray-100" data-gw-trace-status>loading…</div>
+  `;
+}
+
+function _gwSelectSession(key) {
+  gwState.selected = key;
+  // Reset cursor / dedupe; the next refresh will repaint full history.
+  gwState.traceCursor = null;
+  gwState.knownTraceIds = new Set();
+  paintGwSessionsList();
+  paintGwTracePane();
+  _gwRefreshTraceTail();
+}
+
+async function _gwRefreshTraceTail() {
+  if (!gwState.selected) return;
+  const [runId, sessionId] = gwState.selected.split("::", 2);
+  const params = new URLSearchParams({ session_id: sessionId });
+  if (runId) params.set("run_id", runId);
+  if (gwState.traceCursor != null) params.set("since", String(gwState.traceCursor));
+  let traces;
+  try {
+    const resp = await fetch(`/api/gateway/traces?${params}`);
+    if (!resp.ok) return;
+    traces = await resp.json();
+  } catch (e) { return; }
+  // Filter out duplicates (since-cursor uses strict ``>``, but be defensive).
+  traces = traces.filter(t => !gwState.knownTraceIds.has(t.trace_id));
+  for (const t of traces) {
+    if (t.trace_id) gwState.knownTraceIds.add(t.trace_id);
+    if (typeof t._created_at === "number") {
+      if (gwState.traceCursor == null || t._created_at > gwState.traceCursor) {
+        gwState.traceCursor = t._created_at;
+      }
+    }
+  }
+  const list = document.querySelector("[data-gw-trace-list]");
+  if (!list) return;
+  if (traces.length === 0 && list.children.length === 0) {
+    list.innerHTML = `<div class="px-3 py-8 text-[12px] text-gray-400 text-center">no traces yet</div>`;
+    return;
+  }
+  // Append new cards (or replace placeholder on first batch).
+  if (list.children.length === 1 && list.children[0].tagName === "DIV" && list.children[0].textContent.includes("no traces")) {
+    list.innerHTML = "";
+  }
+  const before = list.querySelectorAll("details").length;
+  const html = traces.map((t, i) => renderTraceCard(t, before + i + 1)).join("");
+  list.insertAdjacentHTML("beforeend", html);
+  // Update the trace count in the header from the size of our list.
+  const counter = document.querySelector("[data-gw-trace-count]");
+  if (counter) counter.textContent = String(list.querySelectorAll("details").length);
+  // Auto-scroll to bottom for active sessions.
+  const sess = gwState.sessions.find(s => _gwSessionKey(s) === gwState.selected);
+  if (sess && _gwIsActive(sess)) list.scrollTop = list.scrollHeight;
+  const status = document.querySelector("[data-gw-trace-status]");
+  if (status) {
+    status.textContent = sess && _gwIsActive(sess)
+      ? `polling every 500ms · last update ${new Date().toLocaleTimeString()}`
+      : `done · ${list.querySelectorAll("details").length} call${list.querySelectorAll("details").length === 1 ? "" : "s"}`;
+  }
+}
+
+async function _gwTickSessions() {
+  const params = new URLSearchParams();
+  if (gwState.runFilter) params.set("run_id", gwState.runFilter);
+  try {
+    const [sessResp, runsResp] = await Promise.all([
+      fetch(`/api/gateway/sessions?${params}`),
+      fetch(`/api/gateway/runs`),
+    ]);
+    if (sessResp.ok) gwState.sessions = await sessResp.json();
+    if (runsResp.ok) gwState.runs = await runsResp.json();
+  } catch (e) { return; }
+  paintGwHeader();
+  paintGwRunFilter();
+  paintGwSessionsList();
+}
+
+function renderGatewayView(runFilter) {
+  setBreadcrumb([{ label: "Evaluation runs", href: "#/" }, { label: "Gateway" }]);
+  root.innerHTML = "";
+  root.appendChild(document.getElementById("tpl-gateway").content.cloneNode(true));
+
+  gwState.runFilter = runFilter || null;
+  gwState.selected = null;
+  gwState.sessions = [];
+  gwState.runs = [];
+  gwState.traceCursor = null;
+  gwState.knownTraceIds = new Set();
+
+  const sel = document.getElementById("gw-run-filter");
+  sel.addEventListener("change", () => {
+    const v = sel.value || null;
+    gwState.runFilter = v;
+    // Update URL so refreshes preserve the filter.
+    location.hash = v ? `#/gateway?run=${encodeURIComponent(v)}` : "#/gateway";
+    // Hashchange handler will re-render; force an immediate refresh too.
+    _gwTickSessions();
+  });
+
+  // Field-box expand/collapse delegation (reused from run view).
+  document.getElementById("root").addEventListener("click", e => {
+    const btn = e.target.closest(".toggle-expand");
+    if (!btn) return;
+    const wrapper = btn.closest("[data-field-wrap]");
+    if (!wrapper) return;
+    const box = wrapper.querySelector(".field-box");
+    if (!box) return;
+    box.classList.toggle("expanded");
+    btn.textContent = box.classList.contains("expanded") ? "collapse" : "expand";
+  });
+
+  // Initial paint + polling start.
+  _gwTickSessions();
+  gwState.pollTimer = setInterval(_gwTickSessions, 2000);
+  gwState.traceTimer = setInterval(_gwRefreshTraceTail, 500);
+}
+
 // ─── Boot ───────────────────────────────────────────────────────────────
 function route() {
   _stopLivePolling();
+  _gwStop();
   const r = parseHash();
   if (r.view === "run") {
     renderRunView(r.id);
     _startLivePolling(r.id);
+    // Wire the Episodes/Gateway tab link with the current run id baked in.
+    const link = document.getElementById("run-gateway-link");
+    if (link) link.href = `#/gateway?run=${encodeURIComponent(r.id)}`;
+  } else if (r.view === "gateway") {
+    renderGatewayView(r.query.run || null);
   } else {
     renderListView();
   }
@@ -1403,6 +1769,110 @@ def _make_handler(root_path: Path, html_factory):
                 if not run_dir.is_dir():
                     return self.send_error(404, "Run not found")
                 return self._send_json(200, _build_live_payload(run_dir))
+
+            # ─── Cross-run gateway endpoints ────────────────────────
+            # These read the shared sqlite directly (not joined with
+            # tasks.jsonl / episodes/), so any gateway client — eval,
+            # training, sandbox harnesses — is visible regardless of
+            # whether it has a corresponding ``<run_dir>``.
+
+            if path == "/api/gateway/runs":
+                # Augment each run with its observed session count.
+                runs = trace_loader.list_runs(trace_loader.default_db_path())
+                # session counts per run, derived from trace_sessions.
+                summaries_by_run = trace_loader.session_summaries_by_run(trace_loader.default_db_path())
+                counts: dict[str, int] = {}
+                trace_counts: dict[str, int] = {}
+                last_at: dict[str, float] = {}
+                for s in summaries_by_run:
+                    rid = s["run_id"]
+                    counts[rid] = counts.get(rid, 0) + 1
+                    trace_counts[rid] = trace_counts.get(rid, 0) + int(s.get("trace_count") or 0)
+                    if s.get("last_at") is not None:
+                        last_at[rid] = max(last_at.get(rid, 0.0), float(s["last_at"]))
+                # Include orphan runs (registered but no traces yet) and
+                # also sessions whose runs were never registered.
+                seen_run_ids = {r["run_id"] for r in runs}
+                for rid in counts.keys() - seen_run_ids:
+                    runs.append(
+                        {
+                            "run_id": rid,
+                            "started_at": None,
+                            "ended_at": None,
+                            "metadata": {},
+                        }
+                    )
+                out = []
+                for r in runs:
+                    rid = r["run_id"]
+                    out.append(
+                        {
+                            **r,
+                            "session_count": counts.get(rid, 0),
+                            "trace_count": trace_counts.get(rid, 0),
+                            "last_trace_at": last_at.get(rid),
+                        }
+                    )
+                # Order: most recently active first (last_trace_at), then
+                # by started_at desc.
+                out.sort(key=lambda r: (-(r.get("last_trace_at") or r.get("started_at") or 0.0),))
+                return self._send_json(200, out)
+
+            if path == "/api/gateway/sessions":
+                # Optional ``run_id`` narrows; without it returns every
+                # (run_id, session_id) pair.
+                rid_filter = (query.get("run_id") or [None])[0]
+                if rid_filter is not None and not rid_filter:
+                    rid_filter = None
+                if rid_filter is not None:
+                    summaries = trace_loader.session_summaries(
+                        trace_loader.default_db_path(),
+                        run_id=rid_filter,
+                    )
+                    rows = [
+                        {
+                            "session_id": sid,
+                            "run_id": rid_filter,
+                            "trace_count": s["trace_count"],
+                            "first_at": s["first_at"],
+                            "last_at": s["last_at"],
+                        }
+                        for sid, s in summaries.items()
+                    ]
+                else:
+                    rows = trace_loader.session_summaries_by_run(trace_loader.default_db_path())
+                rows.sort(key=lambda r: -(r.get("last_at") or 0.0))
+                return self._send_json(200, rows)
+
+            if path == "/api/gateway/traces":
+                session_id = (query.get("session_id") or [""])[0]
+                if not session_id:
+                    return self.send_error(400, "session_id required")
+                rid_filter = (query.get("run_id") or [None])[0]
+                if rid_filter is not None and not rid_filter:
+                    rid_filter = None
+                since: float | None = None
+                since_raw = (query.get("since") or [""])[0]
+                if since_raw:
+                    try:
+                        since = float(since_raw)
+                    except ValueError:
+                        return self.send_error(400, "Bad since")
+                limit_raw = (query.get("limit") or [""])[0]
+                limit: int | None = None
+                if limit_raw:
+                    try:
+                        limit = int(limit_raw)
+                    except ValueError:
+                        return self.send_error(400, "Bad limit")
+                traces = trace_loader.get_traces(
+                    trace_loader.default_db_path(),
+                    session_id,
+                    since=since,
+                    limit=limit,
+                    run_id=rid_filter,
+                )
+                return self._send_json(200, traces)
 
             return self.send_error(404, "Not Found")
 
