@@ -63,9 +63,9 @@ algorithm:
   eps_clip_high: null     # Asymmetric upper clip bound (null = symmetric)
   router_replay: false    # Router Replay (R3): replay MoE expert routing from inference during training
   rollout_correction:
-    bypass_mode: true     # true = use rollout logprobs as pi_old (2-policy), false = proximal forward (3-policy)
+    bypass_mode: null     # true = pi_old = pi_rollout, false = pi_old is computed (null = backend default)
     tis_mode: null        # null = disabled, "token" or "sequence" = TIS importance sampling level
-    tis_cap: 5.0          # Upper clamp on TIS importance weight
+    tis_cap: 2.0          # Upper clamp on TIS importance weight
 
 # Stepwise advantage
 # TODO(listar2000): deprecate the `per_step` mode and refactor this config.
@@ -176,11 +176,11 @@ gateway:
 # Async Training Configuration
 async_training:
   enable: false
-  mini_batch_size: 1
+  mini_batch_size: 64
   fwd_bwd_group_size: null  # task batches per forward-backward pass (default: mini_batch_size)
   staleness_threshold: 0.0
   trigger_parameter_sync_step: 1
-  partial_rollout: true
+  partial_rollout: false
   episode_offload_dir: null       # NVMe offload dir for pending episodes (null = disabled)
   trajectory_group_offload_dir: null  # NVMe offload dir for queued task batches (null = disabled)
 
