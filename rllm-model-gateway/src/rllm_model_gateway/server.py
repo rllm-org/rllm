@@ -123,8 +123,7 @@ def create_app(
 
     if config.multi_turn_extension and local_handler is not None:
         logger.warning(
-            "rllm.multi_turn_extension=true was set, but gateway parser transport is disabled because local_handler is in use. "
-            "The local handler must preserve multi-turn prefix extension itself."
+            "rllm.multi_turn_extension=true was set, but gateway parser transport is disabled because local_handler is in use. The local handler must preserve multi-turn prefix extension itself."
         )
     elif config.multi_turn_extension:
         _validate_parser_transport_config(config)
