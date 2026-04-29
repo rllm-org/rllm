@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 
 import click
 from rich.console import Console
@@ -80,6 +81,9 @@ def _run_eval(
     enable_ui: bool = False,
     save_episodes: bool = True,
     episodes_dir: str | None = None,
+    run_dir: str | None = None,
+    timestamp: str | None = None,
+    stamp_session_in_url: bool = False,
 ):
     """Core eval logic, extracted for clean proxy lifecycle management."""
     from rllm.data import DatasetRegistry
@@ -360,25 +364,32 @@ def _run_eval(
     console.print(Panel(table, border_style="cyan", expand=False))
     console.print()
 
-    # Single timestamp shared by UI session, results.json, and episodes dir.
+    # ``run_dir`` and ``timestamp`` are passed from ``eval_cmd`` so they're
+    # locked in before the gateway boots (the gateway points its sqlite at
+    # <run_dir>/traces.db). Recompute defensively if a caller invokes
+    # ``_run_eval`` directly without them.
     from datetime import datetime, timezone
 
-    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+    if timestamp is None:
+        timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
 
     # Set up the run directory. Layout:
     #   <run_dir>/
     #     meta.json        — always
     #     results.json     — written below, after the run completes
+    #     traces.db        — populated by the rLLM gateway (when used)
+    #     tasks.jsonl      — append-only task lifecycle stream
     #     episodes/        — populated only when save_episodes is True
     from rllm.eval.episode_store import EvalEpisodeStore
 
-    if episodes_dir is not None:
-        run_dir = os.path.expanduser(episodes_dir)
-    else:
-        rllm_home = os.path.expanduser(os.environ.get("RLLM_HOME", "~/.rllm"))
-        model_safe = model.replace("/", "_").replace("\\", "_")
-        bench_safe = benchmark.replace("/", "_").replace("\\", "_")
-        run_dir = os.path.join(rllm_home, "eval_results", f"{bench_safe}_{model_safe}_{timestamp}")
+    if run_dir is None:
+        if episodes_dir is not None:
+            run_dir = os.path.expanduser(episodes_dir)
+        else:
+            rllm_home = os.path.expanduser(os.environ.get("RLLM_HOME", "~/.rllm"))
+            model_safe = re.sub(r"[^A-Za-z0-9._-]", "_", model)
+            bench_safe = re.sub(r"[^A-Za-z0-9._-]", "_", benchmark)
+            run_dir = os.path.join(rllm_home, "eval_results", f"{bench_safe}_{model_safe}_{timestamp}")
     run_store = EvalEpisodeStore(run_dir)
     run_store.write_meta(
         {
@@ -459,6 +470,8 @@ def _run_eval(
             dataset_name=getattr(dataset, "name", benchmark) or benchmark,
             on_episode_complete=on_episode_complete,
             evaluator_override=evaluator,
+            stamp_session_in_url=stamp_session_in_url,
+            run_dir=run_dir,
         )
     )
 
@@ -566,8 +579,6 @@ def eval_cmd(
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
     _ui_explicit = enable_ui is not None
     if enable_ui is None:
-        import os
-
         from rllm.eval.config import load_ui_config
 
         ui_config = load_ui_config()
@@ -578,43 +589,62 @@ def eval_cmd(
 
     gateway_manager = None
 
-    if base_url is not None:
-        # Direct mode: user provided --base-url, require --model too
-        if model is None:
-            console.print("  [error]--model is required when --base-url is provided.[/]")
-            raise SystemExit(1)
-    else:
-        # Gateway mode: auto-start rLLM model gateway from config
+    # Resolve model + (optionally) the rllm config first so we can compute
+    # run_dir before booting the gateway — the gateway needs to know
+    # <run_dir>/traces.db to land traces in the run-scoped sqlite.
+    rllm_cfg = None
+    if base_url is None:
         from rllm.eval.config import load_config
 
-        config = load_config()
-        if not config.is_configured():
+        rllm_cfg = load_config()
+        if not rllm_cfg.is_configured():
             console.print()
             console.print("  [error]No configuration found.[/] Run [bold]rllm setup[/] first to configure your provider and API key.")
             console.print()
             raise SystemExit(1)
-
-        # --model overrides configured model
         if model is None:
-            model = config.model
+            model = rllm_cfg.model
 
-        if config.provider == "custom":
+    if model is None:
+        console.print("  [error]--model is required when --base-url is provided.[/]")
+        raise SystemExit(1)
+
+    # Decide run_dir up front: <RLLM_HOME>/eval_results/<bench>_<model>_<ts>/.
+    # Used both as the gateway's traces.db parent and as the EvalEpisodeStore
+    # root inside _run_eval.
+    from datetime import datetime, timezone
+
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+    if episodes_dir is not None:
+        run_dir = os.path.expanduser(episodes_dir)
+    else:
+        rllm_home = os.path.expanduser(os.environ.get("RLLM_HOME", "~/.rllm"))
+        # Coerce to characters the local viewer's safe_id regex permits
+        # (`^[A-Za-z0-9._-]+$`). Without this, prefixes like ``harbor:``
+        # and slashes from model names would land in the directory name
+        # and the viewer's /api/runs/<id>/* endpoints would 400.
+        model_safe = re.sub(r"[^A-Za-z0-9._-]", "_", model)
+        bench_safe = re.sub(r"[^A-Za-z0-9._-]", "_", benchmark)
+        run_dir = os.path.join(rllm_home, "eval_results", f"{bench_safe}_{model_safe}_{timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
+
+    if base_url is None:
+        if rllm_cfg.provider == "custom":
             # Custom provider: skip the gateway, use base_url directly
-            import os as _os
-
-            base_url = config.base_url
-            if config.api_key:
-                _os.environ.setdefault("OPENAI_API_KEY", config.api_key)
+            base_url = rllm_cfg.base_url
+            if rllm_cfg.api_key:
+                os.environ.setdefault("OPENAI_API_KEY", rllm_cfg.api_key)
             console.print(f"  [success]Using custom endpoint[/] at [dim]{base_url}[/]")
         else:
             from rllm.eval.gateway import EvalGatewayManager
 
             gateway_manager = EvalGatewayManager(
-                provider=config.provider,
+                provider=rllm_cfg.provider,
                 model_name=model,
-                api_key=config.api_key,
+                api_key=rllm_cfg.api_key,
+                db_path=os.path.join(run_dir, "traces.db"),
             )
-            with Status(f"[dim]Starting rLLM gateway for [bold]{config.provider}/{model}[/bold]...[/]", console=console):
+            with Status(f"[dim]Starting rLLM gateway for [bold]{rllm_cfg.provider}/{model}[/bold]...[/]", console=console):
                 try:
                     gateway_manager.start()
                 except (RuntimeError, TimeoutError, ValueError) as e:
@@ -661,6 +691,9 @@ def eval_cmd(
             enable_ui=enable_ui,
             save_episodes=save_episodes,
             episodes_dir=episodes_dir,
+            run_dir=run_dir,
+            timestamp=timestamp,
+            stamp_session_in_url=gateway_manager is not None,
         )
     finally:
         if gateway_manager is not None:

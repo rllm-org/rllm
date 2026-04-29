@@ -28,6 +28,9 @@ import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
+
+from rllm.eval import trace_loader
 
 # --------------------------------------------------------------------------- #
 # Filesystem layer                                                            #
@@ -136,6 +139,86 @@ def _scan_runs(root: Path) -> list[dict[str, Any]]:
     # Most-recent first.
     out.sort(key=lambda r: r.get("created_at") or "", reverse=True)
     return out
+
+
+def _load_tasks_jsonl(run_dir: Path) -> list[dict[str, Any]]:
+    """Read every line of ``<run_dir>/tasks.jsonl`` (best-effort)."""
+    path = run_dir / "tasks.jsonl"
+    if not path.is_file():
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return []
+    return out
+
+
+def _finished_eval_idxs(episodes_dir: Path) -> set[int]:
+    """Return the set of ``eval_idx`` values for which an episode JSON exists."""
+    if not episodes_dir.is_dir():
+        return set()
+    out: set[int] = set()
+    for path in episodes_dir.glob("episode_*.json"):
+        m = re.match(r"^episode_(\d+)_", path.name)
+        if m:
+            try:
+                out.add(int(m.group(1)))
+            except ValueError:
+                continue
+    return out
+
+
+def _build_live_payload(run_dir: Path) -> dict[str, Any]:
+    """Compute the ``/live`` snapshot — in-flight tasks + completion counts.
+
+    A task is *in-flight* iff ``tasks.jsonl`` recorded its start but no
+    matching ``episodes/episode_NNNNNN_*.json`` exists yet. Trace counts
+    come from ``traces.db`` so we can show "N calls so far" while the
+    task is mid-run.
+    """
+    tasks = _load_tasks_jsonl(run_dir)
+    finished_idx = _finished_eval_idxs(_resolve_episodes_dir(run_dir))
+    summaries = trace_loader.session_summaries(run_dir / "traces.db")
+    now = datetime.now(tz=timezone.utc).timestamp()
+
+    in_flight: list[dict[str, Any]] = []
+    for t in tasks:
+        idx = t.get("idx")
+        if not isinstance(idx, int) or idx in finished_idx:
+            continue
+        sid = t.get("session_id") or ""
+        s = summaries.get(sid, {})
+        started_at = float(t.get("started_at") or 0.0)
+        in_flight.append(
+            {
+                "idx": idx,
+                "session_id": sid,
+                "task_id": t.get("task_id"),
+                "instruction": t.get("instruction") or "",
+                "started_at": started_at,
+                "elapsed_s": max(0.0, now - started_at) if started_at else None,
+                "trace_count": int(s.get("trace_count") or 0),
+                "last_trace_at": s.get("last_at"),
+            }
+        )
+    in_flight.sort(key=lambda r: r["idx"])
+
+    return {
+        "in_flight": in_flight,
+        "finished_count": len(finished_idx),
+        "started_count": len(tasks),
+        # ``total_count`` is unknown to the viewer (eval may still be enumerating
+        # the dataset). Surface what we can; the SPA falls back to started_count.
+    }
 
 
 def _build_episode_index(episodes_dir: Path) -> list[dict[str, Any]]:
@@ -348,6 +431,7 @@ _PAGE_HTML = r"""<!doctype html>
       <button id="collapse-all" class="text-xs px-2 py-1 rounded hover:bg-gray-100 text-gray-600 transition-colors">Collapse all</button>
     </div>
 
+    <div id="ep-inflight" class="space-y-2"></div>
     <div id="ep-list" class="space-y-2"></div>
   </section>
 </template>
@@ -732,13 +816,137 @@ function renderTaskPanel(task) {
       ${metadata ? fieldBox("task metadata", metadata) : ""}
     </div>`;
 }
+
+// ─── LLM call traces ─────────────────────────────────────────────────────
+// Each trace is a TraceRecord persisted by the gateway. We render them as
+// cards under the episode body, keyed off `Trajectory.session_id`. In live
+// mode the cards stream in as the agent makes calls.
+function _fmtTokens(tc) {
+  if (!tc) return "";
+  const p = tc.prompt, c = tc.completion;
+  if (p == null && c == null) return "";
+  const parts = [];
+  if (p != null) parts.push(`↓${p}`);
+  if (c != null) parts.push(`↑${c}`);
+  return `<span class="mono text-[11px] text-gray-500">${parts.join(" ")}</span>`;
+}
+function _fmtLatency(ms) {
+  if (ms == null) return "";
+  const v = Number(ms);
+  if (!isFinite(v)) return "";
+  return `<span class="mono text-[11px] text-gray-500">${v < 1000 ? v.toFixed(0) + "ms" : (v / 1000).toFixed(2) + "s"}</span>`;
+}
+function _traceMessages(t) {
+  return Array.isArray(t.messages) ? t.messages : [];
+}
+function _traceResponseMessage(t) {
+  return t.response_message && typeof t.response_message === "object" ? t.response_message : null;
+}
+function _tracePreview(t) {
+  const rm = _traceResponseMessage(t);
+  if (rm) {
+    if (typeof rm.content === "string" && rm.content) return rm.content;
+    if (Array.isArray(rm.tool_calls) && rm.tool_calls.length) {
+      const first = rm.tool_calls[0];
+      const fn = first && first.function ? first.function.name : first && first.name;
+      return fn ? `tool: ${fn}` : "tool call";
+    }
+  }
+  return "";
+}
+function renderTraceCard(t, n) {
+  const model = t.model || "?";
+  const finish = t.finish_reason
+    ? `<span class="px-1.5 py-0.5 rounded bg-layer-2 text-gray-600 text-[10px] font-medium uppercase tracking-wider">${escapeHtml(t.finish_reason)}</span>`
+    : "";
+  const tokens = _fmtTokens(t.token_counts);
+  const latency = _fmtLatency(t.latency_ms);
+  const harness = t.harness ? `<span class="text-[10px] text-gray-400 mono">${escapeHtml(t.harness)}</span>` : "";
+  const stepBadge = t.step_id != null
+    ? `<span class="text-[10px] text-gray-400 mono">step ${escapeHtml(String(t.step_id))}</span>` : "";
+  const preview = _tracePreview(t);
+  const messages = _traceMessages(t);
+  const responseMsg = _traceResponseMessage(t);
+  const allMessages = responseMsg ? messages.concat([responseMsg]) : messages;
+  return `
+    <details class="border border-gray-200 rounded-md bg-white">
+      <summary class="px-3 py-2 flex items-center gap-2 hover:bg-layer-1">
+        ${chevron()}
+        <span class="text-[11px] mono text-gray-400 tabular-nums w-10 text-right">#${String(n).padStart(3, " ")}</span>
+        <code class="text-[11px] text-gray-700 mono">${escapeHtml(model)}</code>
+        ${tokens}
+        ${latency}
+        ${finish}
+        ${stepBadge}
+        ${harness}
+        <span class="ml-auto text-[11px] text-gray-400 truncate max-w-[40ch]">${escapeHtml(preview.slice(0, 200))}</span>
+      </summary>
+      <div class="px-3 pb-3">
+        ${renderChatCompletions(allMessages)}
+        ${t.metadata && Object.keys(t.metadata).length ? fieldBox("metadata", t.metadata) : ""}
+      </div>
+    </details>`;
+}
+function renderLLMCalls(traces, opts) {
+  opts = opts || {};
+  const live = !!opts.live;
+  const count = traces.length;
+  const heading = live
+    ? `LLM Calls <span class="ml-2 inline-flex items-center gap-1 text-[10px] font-medium text-green-700"><span class="pulse-dot inline-block w-1.5 h-1.5 rounded-full bg-green-500"></span>live</span>`
+    : `LLM Calls`;
+  const body = count
+    ? traces.map((t, i) => renderTraceCard(t, i + 1)).join("")
+    : `<div class="px-3 py-6 text-[12px] text-gray-400 text-center">${live ? "waiting for first call…" : "no traces recorded for this session"}</div>`;
+  return `
+    <details class="border border-gray-200 rounded-md bg-layer-1" data-trace-block ${count ? "open" : ""}>
+      <summary class="px-3 py-2 flex items-center gap-2 hover:bg-layer-2 rounded-md">
+        ${chevron()}
+        <span class="text-xs font-semibold text-gray-700">${heading}</span>
+        <span class="text-[11px] text-gray-500" data-trace-count>${count} call${count === 1 ? "" : "s"}</span>
+      </summary>
+      <div class="px-3 pb-3 space-y-2" data-trace-list>${body}</div>
+    </details>`;
+}
+
+async function fetchTraces(runId, sessionId, since) {
+  const params = new URLSearchParams({ session_id: sessionId });
+  if (since != null) params.set("since", String(since));
+  const resp = await fetch(`/api/runs/${encodeURIComponent(runId)}/traces?${params}`);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return await resp.json();
+}
+
 function renderEpisodeBody(ep) {
   const parts = [renderTaskPanel(ep.task)];
   for (const [ti, traj] of (ep.trajectories || []).entries()) parts.push(renderTrajectory(traj, ti));
   if (ep.artifacts && Object.keys(ep.artifacts).length) parts.push(fieldBox("artifacts", ep.artifacts));
   if (ep.metrics   && Object.keys(ep.metrics).length)   parts.push(fieldBox("metrics",   ep.metrics));
   if (ep.metadata  && Object.keys(ep.metadata).length)  parts.push(fieldBox("metadata",  ep.metadata));
+  // Trace placeholder — populated asynchronously after the body mounts.
+  // Uses the first trajectory's session_id (set by Runner.run) as the join
+  // key into <run_dir>/traces.db. ``data-session-id`` lets the click
+  // handler discover what to fetch.
+  const sessionId = (ep.trajectories || []).map(t => t && t.session_id).find(Boolean) || "";
+  if (sessionId) {
+    parts.push(`<div data-trace-mount data-session-id="${escapeHtml(sessionId)}"></div>`);
+  }
   return `<div class="px-4 pb-4 space-y-3">${parts.join("")}</div>`;
+}
+
+async function hydrateTraces(rootEl, runId) {
+  const mounts = rootEl.querySelectorAll("[data-trace-mount]");
+  for (const m of mounts) {
+    if (m.dataset.hydrated) continue;
+    m.dataset.hydrated = "1";
+    const sid = m.getAttribute("data-session-id");
+    if (!sid) continue;
+    try {
+      const traces = await fetchTraces(runId, sid);
+      m.outerHTML = renderLLMCalls(traces, { live: false });
+    } catch (e) {
+      m.outerHTML = `<div class="text-[11px] text-red-600">Failed to load traces: ${escapeHtml(String(e))}</div>`;
+    }
+  }
 }
 function renderEpisodeHeader(item) {
   const idx = item.eval_idx != null
@@ -803,6 +1011,7 @@ function paintEpisodeList() {
       loadEpisode(runState.id, fname).then(ep => {
         body.removeAttribute("data-pending");
         body.outerHTML = renderEpisodeBody(ep);
+        hydrateTraces(det, runState.id);
       }).catch(err => {
         body.textContent = "Failed to load: " + err;
       });
@@ -810,11 +1019,200 @@ function paintEpisodeList() {
   });
 }
 
+// ─── Live mode ──────────────────────────────────────────────────────────
+// Polls /api/runs/{id}/live every 2s while a run view is open and renders
+// in-flight tasks (started in tasks.jsonl, no episode JSON yet) above the
+// episode list. Each in-flight row, when expanded, opens a 500ms trace
+// tail polling /api/runs/{id}/traces?since=<cursor>.
+const liveState = {
+  runId: null,
+  liveTimer: null,
+  traceTimers: new Map(),    // session_id -> interval id
+  traceCursors: new Map(),   // session_id -> last seen _created_at
+};
+
+function _stopLivePolling() {
+  if (liveState.liveTimer) { clearInterval(liveState.liveTimer); liveState.liveTimer = null; }
+  for (const t of liveState.traceTimers.values()) clearInterval(t);
+  liveState.traceTimers.clear();
+  liveState.traceCursors.clear();
+  liveState.runId = null;
+}
+
+function _fmtElapsed(s) {
+  if (s == null) return "";
+  const n = Number(s);
+  if (!isFinite(n) || n < 0) return "";
+  if (n < 60) return `${n.toFixed(0)}s`;
+  if (n < 3600) return `${Math.floor(n/60)}m ${(n%60).toFixed(0)}s`;
+  return `${Math.floor(n/3600)}h ${Math.floor((n%3600)/60)}m`;
+}
+
+function renderInflightRow(item) {
+  const sid = item.session_id || "";
+  const idx = item.idx != null
+    ? `<span class="text-[11px] mono text-gray-400 tabular-nums w-10 text-right">#${String(item.idx).padStart(4, "0")}</span>` : "";
+  const tid = item.task_id ? `<code class="text-[12px] text-gray-700 mono">${escapeHtml(item.task_id)}</code>` : "";
+  return `
+    <details class="bg-white border border-amber-200 rounded-md shadow-subtle"
+             data-inflight-session="${escapeHtml(sid)}">
+      <summary class="px-3 py-2 flex items-center gap-2 hover:bg-layer-1 rounded-md">
+        ${chevron()}
+        ${idx}
+        <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-100 text-amber-700">
+          <span class="pulse-dot inline-block w-1.5 h-1.5 rounded-full bg-amber-500"></span>running
+        </span>
+        ${tid}
+        <span class="text-[11px] text-gray-500 mono" data-trace-counter>${item.trace_count} call${item.trace_count === 1 ? "" : "s"}</span>
+        <span class="text-[11px] text-gray-400 mono" data-elapsed>${_fmtElapsed(item.elapsed_s)}</span>
+        <span class="ml-2 text-[11px] text-gray-400 truncate flex-1">${escapeHtml(item.instruction || "")}</span>
+      </summary>
+      <div class="border-t border-gray-100" data-trace-mount data-session-id="${escapeHtml(sid)}" data-live="1">
+        <div class="px-3 py-6 text-[12px] text-gray-400 text-center">opening live trace tail…</div>
+      </div>
+    </details>`;
+}
+
+async function _refreshTraceTail(det) {
+  const sid = det.getAttribute("data-inflight-session");
+  if (!sid) return;
+  const since = liveState.traceCursors.get(sid);
+  let traces;
+  try {
+    traces = await fetchTraces(liveState.runId, sid, since);
+  } catch (e) {
+    return;
+  }
+  if (!traces.length && since != null) return;
+  // Track running cursor to the max observed _created_at.
+  for (const t of traces) {
+    const ts = t._created_at;
+    if (typeof ts === "number") {
+      const cur = liveState.traceCursors.get(sid);
+      if (cur == null || ts > cur) liveState.traceCursors.set(sid, ts);
+    }
+  }
+  // Update the trace counter on the summary.
+  const counter = det.querySelector("[data-trace-counter]");
+  // We don't have the absolute count from this delta alone, so we re-poll
+  // the count via /live's `trace_count` field — it ticks every 2s already.
+  // Repaint the body fully on each delta when it's the first batch; otherwise
+  // append.
+  const body = det.querySelector("[data-trace-mount]");
+  if (!body) return;
+  if (since == null) {
+    body.innerHTML = renderLLMCalls(traces, { live: true });
+    body.removeAttribute("data-session-id");
+    body.removeAttribute("data-live");
+  } else if (traces.length) {
+    const list = body.querySelector("[data-trace-list]");
+    if (list) {
+      const before = list.querySelectorAll("details").length;
+      const html = traces.map((t, i) => renderTraceCard(t, before + i + 1)).join("");
+      list.insertAdjacentHTML("beforeend", html);
+    }
+    const trc = body.querySelector("[data-trace-count]");
+    if (trc) {
+      const total = body.querySelectorAll("[data-trace-list] > details").length;
+      trc.textContent = `${total} call${total === 1 ? "" : "s"}`;
+    }
+  }
+}
+
+function _wireInflightExpand(scopeEl) {
+  scopeEl.querySelectorAll("details[data-inflight-session]").forEach(det => {
+    if (det.dataset.wired) return;
+    det.dataset.wired = "1";
+    det.addEventListener("toggle", () => {
+      const sid = det.getAttribute("data-inflight-session");
+      if (!sid) return;
+      if (det.open) {
+        _refreshTraceTail(det);
+        if (!liveState.traceTimers.has(sid)) {
+          const id = setInterval(() => _refreshTraceTail(det), 500);
+          liveState.traceTimers.set(sid, id);
+        }
+      } else {
+        const id = liveState.traceTimers.get(sid);
+        if (id) { clearInterval(id); liveState.traceTimers.delete(sid); }
+      }
+    });
+  });
+}
+
+function _renderLivePanel(payload) {
+  const wrap = document.getElementById("ep-inflight");
+  if (!wrap) return;
+  const items = payload.in_flight || [];
+  if (!items.length) {
+    wrap.innerHTML = "";
+    return;
+  }
+  // Diff-friendly repaint: keep open <details> for sessions that are still
+  // in_flight by reusing their DOM nodes when possible.
+  const openSids = new Set();
+  wrap.querySelectorAll("details[data-inflight-session][open]").forEach(d => {
+    openSids.add(d.getAttribute("data-inflight-session"));
+  });
+  wrap.innerHTML = `
+    <div class="flex items-center gap-2 px-1 pt-2">
+      <span class="text-[11px] uppercase tracking-wider font-semibold text-gray-500">In flight</span>
+      <span class="inline-flex items-center gap-1.5 text-[11px] text-amber-700 font-medium">
+        <span class="pulse-dot inline-block w-1.5 h-1.5 rounded-full bg-amber-500"></span>${items.length} running
+      </span>
+    </div>` + items.map(renderInflightRow).join("");
+  // Re-open the rows that were open before the repaint.
+  wrap.querySelectorAll("details[data-inflight-session]").forEach(d => {
+    if (openSids.has(d.getAttribute("data-inflight-session"))) d.open = true;
+  });
+  _wireInflightExpand(wrap);
+}
+
+async function _tickLive() {
+  if (!liveState.runId) return;
+  let payload;
+  try {
+    const resp = await fetch(`/api/runs/${encodeURIComponent(liveState.runId)}/live`);
+    if (!resp.ok) return;
+    payload = await resp.json();
+  } catch (e) { return; }
+  _renderLivePanel(payload);
+  // If no in-flight tasks remain, also re-fetch the episode index since
+  // the just-completed tasks now have episode JSONs to render.
+  if (!(payload.in_flight || []).length && liveState.runId === runState.id) {
+    try {
+      const resp = await fetch(`/api/runs/${encodeURIComponent(liveState.runId)}/index`);
+      if (resp.ok) {
+        const idx = await resp.json();
+        if (idx.length !== runState.index.length) {
+          runState.index = idx;
+          paintEpisodeList();
+        }
+      }
+    } catch (e) { /* ignore */ }
+    // No more in-flight: stop the live timer to save cycles. The user can
+    // still re-trigger by reloading.
+    if (liveState.liveTimer) { clearInterval(liveState.liveTimer); liveState.liveTimer = null; }
+  }
+}
+
+function _startLivePolling(runId) {
+  _stopLivePolling();
+  liveState.runId = runId;
+  _tickLive();
+  liveState.liveTimer = setInterval(_tickLive, 2000);
+}
+
 // ─── Boot ───────────────────────────────────────────────────────────────
 function route() {
+  _stopLivePolling();
   const r = parseHash();
-  if (r.view === "run") renderRunView(r.id);
-  else renderListView();
+  if (r.view === "run") {
+    renderRunView(r.id);
+    _startLivePolling(r.id);
+  } else {
+    renderListView();
+  }
 }
 
 if (PRESELECT_RUN && !location.hash) {
@@ -910,7 +1308,9 @@ def _make_handler(root_path: Path, html_factory):
             self.wfile.write(data)
 
         def do_GET(self):  # noqa: N802
-            path = self.path.split("?", 1)[0]
+            parts = urlsplit(self.path)
+            path = parts.path
+            query = parse_qs(parts.query)
 
             if path in ("/", "/index.html"):
                 return self._send_html(html_factory())
@@ -942,6 +1342,51 @@ def _make_handler(root_path: Path, html_factory):
                 if not target.is_file():
                     return self.send_error(404, "Episode not found")
                 return self._send_file_bytes(target)
+
+            m = re.match(r"^/api/runs/([^/]+)/traces$", path)
+            if m:
+                run_id = m.group(1)
+                if not _is_safe_run_id(run_id):
+                    return self.send_error(400, "Bad run id")
+                run_dir = (root_path / run_id).resolve()
+                if not _under_root(run_dir):
+                    return self.send_error(400, "Bad run id")
+                session_id = (query.get("session_id") or [""])[0]
+                if not session_id:
+                    return self.send_error(400, "session_id required")
+                since: float | None = None
+                since_raw = (query.get("since") or [""])[0]
+                if since_raw:
+                    try:
+                        since = float(since_raw)
+                    except ValueError:
+                        return self.send_error(400, "Bad since")
+                limit_raw = (query.get("limit") or [""])[0]
+                limit: int | None = None
+                if limit_raw:
+                    try:
+                        limit = int(limit_raw)
+                    except ValueError:
+                        return self.send_error(400, "Bad limit")
+                traces = trace_loader.get_traces(
+                    run_dir / "traces.db",
+                    session_id,
+                    since=since,
+                    limit=limit,
+                )
+                return self._send_json(200, traces)
+
+            m = re.match(r"^/api/runs/([^/]+)/live$", path)
+            if m:
+                run_id = m.group(1)
+                if not _is_safe_run_id(run_id):
+                    return self.send_error(400, "Bad run id")
+                run_dir = (root_path / run_id).resolve()
+                if not _under_root(run_dir):
+                    return self.send_error(400, "Bad run id")
+                if not run_dir.is_dir():
+                    return self.send_error(404, "Run not found")
+                return self._send_json(200, _build_live_payload(run_dir))
 
             return self.send_error(404, "Not Found")
 

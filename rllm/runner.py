@@ -88,6 +88,14 @@ class Runner:
             # AgentFlow runs the agent → Episode
             episode = await _run_agent_flow(self.agent_flow, task, config)
 
+            # Stamp session_uid onto every trajectory so the UI can join
+            # back to gateway traces (`<run_dir>/traces.db`). Harnesses
+            # may pre-set this; we only fill in blanks.
+            if config.session_uid:
+                for traj in episode.trajectories:
+                    if traj.session_id is None:
+                        traj.session_id = config.session_uid
+
             # Evaluator: explicit override > per-task resolution
             if self.evaluator_override is not None:
                 evaluator = _adapt_legacy_evaluator(self.evaluator_override)
