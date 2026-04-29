@@ -20,7 +20,9 @@ from rllm_model_gateway.data_process import (
     build_trace_record_from_chunks,
     strip_vllm_fields,
 )
-from rllm_model_gateway.models import TraceRecord
+from rllm_model_gateway.metadata import RllmMetadata
+from rllm_model_gateway.models import ProviderRoute, TraceRecord
+from rllm_model_gateway.providers import ProviderRouter, apply_route
 from rllm_model_gateway.session_router import SessionRouter
 from rllm_model_gateway.store.base import TraceStore
 
@@ -38,6 +40,23 @@ _HOP_BY_HOP = frozenset(
         "content-length",
         "content-encoding",
         "host",
+    }
+)
+
+# Headers stripped before forwarding to a provider backend. The client's
+# Authorization header is replaced with one derived from the provider's
+# api_key_env. X-RLLM-* headers are gateway-internal metadata and should
+# not leak to providers.
+_PROVIDER_FORWARD_STRIP = frozenset(
+    {
+        "authorization",
+        "x-rllm-session-id",
+        "x-rllm-run-id",
+        "x-rllm-harness",
+        "x-rllm-step-id",
+        "x-rllm-parent-span-id",
+        "x-rllm-project",
+        "x-rllm-experiment",
     }
 )
 
@@ -79,6 +98,8 @@ class ReverseProxy:
         sync_traces: bool = False,
         max_retries: int = 2,
         local_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+        provider_router: ProviderRouter | None = None,
+        global_drop_params: list[str] | None = None,
     ) -> None:
         self.router = router
         self.store = store
@@ -86,6 +107,12 @@ class ReverseProxy:
         self.sync_traces = sync_traces
         self.max_retries = max_retries
         self.local_handler = local_handler
+        self.provider_router = provider_router
+        # Params stripped from every request body before forwarding to a
+        # provider backend, in addition to per-route ``drop_params``.
+        # ``return_token_ids`` is always stripped because it's a vLLM
+        # extension that real providers will reject.
+        self._provider_drop_params = list(global_drop_params or []) + ["return_token_ids"]
         self._http: httpx.AsyncClient | None = None
         self._pending_traces: set[asyncio.Task[None]] = set()
 
@@ -145,13 +172,38 @@ class ReverseProxy:
         originally_requested_logprobs: bool = False,
     ) -> Response:
         t0 = time.perf_counter()
+        rllm_metadata: RllmMetadata | None = getattr(request.state, "rllm_metadata", None)
+        provider_route = self._lookup_provider_route(request_body)
 
-        if self.local_handler is not None:
+        if provider_route is not None:
+            forward_url, route_headers, mutated_body = apply_route(
+                request_body=request_body,
+                route=provider_route,
+                request_path=request.url.path,
+                global_drop_params=self._provider_drop_params,
+            )
+            forward_body = json.dumps(mutated_body).encode("utf-8")
+            url = self._append_query(forward_url, str(request.url.query))
+            headers = self._forward_headers(request, extra_strip=_PROVIDER_FORWARD_STRIP)
+            headers.update(route_headers)
+            resp = await self._send_with_retry(
+                method=request.method,
+                url=url,
+                content=forward_body,
+                headers=headers,
+            )
+            content = resp.content
+            status_code = resp.status_code
+            try:
+                response_body = json.loads(content)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                response_body = {}
+        elif self.local_handler is not None:
             # In-process path: call handler directly, no HTTP
             response_body = await self.local_handler(request_body)
             status_code = 200
         else:
-            # HTTP proxy path
+            # HTTP proxy path (worker pool — training)
             worker = self.router.route(session_id)
             url = self._build_url(worker.api_url, request.url.path, str(request.url.query))
             headers = self._forward_headers(request)
@@ -177,7 +229,13 @@ class ReverseProxy:
 
         # Persist trace
         if session_id and response_body:
-            trace = build_trace_record(session_id, request_body, response_body, latency_ms)
+            trace = build_trace_record(
+                session_id,
+                request_body,
+                response_body,
+                latency_ms,
+                rllm_metadata=rllm_metadata,
+            )
             await self._persist(trace)
 
         # Sanitise response
@@ -209,6 +267,19 @@ class ReverseProxy:
         session_id: str | None,
         originally_requested_logprobs: bool = False,
     ) -> StreamingResponse:
+        rllm_metadata: RllmMetadata | None = getattr(request.state, "rllm_metadata", None)
+        provider_route = self._lookup_provider_route(request_body)
+
+        if provider_route is not None:
+            return await self._handle_streaming_provider(
+                request,
+                request_body,
+                session_id,
+                originally_requested_logprobs,
+                provider_route,
+                rllm_metadata,
+            )
+
         if self.local_handler is not None:
             return await self._handle_streaming_local(request_body, session_id, originally_requested_logprobs)
 
@@ -306,7 +377,103 @@ class ReverseProxy:
                 # finally block may run during GeneratorExit, where await
                 # on real async I/O (e.g. aiosqlite) is not reliable.
                 if session_id and chunks:
-                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms)
+                    trace = build_trace_record_from_chunks(
+                        session_id,
+                        request_body,
+                        chunks,
+                        latency_ms,
+                        rllm_metadata=rllm_metadata,
+                    )
+                    task = asyncio.create_task(
+                        self._safe_store(
+                            trace.trace_id,
+                            trace.session_id,
+                            trace.model_dump(),
+                        )
+                    )
+                    self._pending_traces.add(task)
+                    task.add_done_callback(self._pending_traces.discard)
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            status_code=resp.status_code,
+        )
+
+    async def _handle_streaming_provider(
+        self,
+        request: Request,
+        request_body: dict[str, Any],
+        session_id: str | None,
+        originally_requested_logprobs: bool,
+        route: ProviderRoute,
+        rllm_metadata: RllmMetadata | None,
+    ) -> StreamingResponse:
+        """Stream a chat-completions response from a configured provider backend.
+
+        Same shape as the worker-pool streaming path but skips ``SessionRouter``
+        and uses the provider's URL + API key instead.
+        """
+        forward_url, route_headers, mutated_body = apply_route(
+            request_body=request_body,
+            route=route,
+            request_path=request.url.path,
+            global_drop_params=self._provider_drop_params,
+        )
+        forward_body = json.dumps(mutated_body).encode("utf-8")
+        url = self._append_query(forward_url, str(request.url.query))
+        headers = self._forward_headers(request, extra_strip=_PROVIDER_FORWARD_STRIP)
+        headers.update(route_headers)
+
+        assert self._http is not None
+        upstream = self._http.stream(
+            method=request.method,
+            url=url,
+            content=forward_body,
+            headers=headers,
+        )
+        resp = await upstream.__aenter__()
+
+        t0 = time.perf_counter()
+        chunks: list[dict[str, Any]] = []
+        needs_strip_vllm = self.strip_vllm
+        needs_strip_logprobs = not originally_requested_logprobs
+
+        async def event_generator():
+            try:
+                async for line in resp.aiter_lines():
+                    if line.startswith("data: "):
+                        data_str = line[6:].strip()
+                        if data_str == "[DONE]":
+                            yield "data: [DONE]\n\n"
+                            continue
+                        try:
+                            chunk = json.loads(data_str)
+                            chunks.append(chunk)
+                            if not needs_strip_vllm and not needs_strip_logprobs:
+                                yield f"data: {data_str}\n\n"
+                            else:
+                                sanitized = strip_vllm_fields(chunk) if needs_strip_vllm else chunk
+                                if needs_strip_logprobs:
+                                    sanitized = _strip_logprobs(sanitized)
+                                yield f"data: {json.dumps(sanitized)}\n\n"
+                            continue
+                        except json.JSONDecodeError:
+                            pass
+                    if not line:
+                        continue
+                    yield line + "\n"
+            finally:
+                await upstream.__aexit__(None, None, None)
+                latency_ms = (time.perf_counter() - t0) * 1000
+                if session_id and chunks:
+                    trace = build_trace_record_from_chunks(
+                        session_id,
+                        request_body,
+                        chunks,
+                        latency_ms,
+                        rllm_metadata=rllm_metadata,
+                    )
                     task = asyncio.create_task(
                         self._safe_store(
                             trace.trace_id,
@@ -484,5 +651,25 @@ class ReverseProxy:
         return url
 
     @staticmethod
-    def _forward_headers(request: Request) -> dict[str, str]:
-        return {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
+    def _forward_headers(
+        request: Request,
+        *,
+        extra_strip: frozenset[str] = frozenset(),
+    ) -> dict[str, str]:
+        skip = _HOP_BY_HOP | extra_strip
+        return {k: v for k, v in request.headers.items() if k.lower() not in skip}
+
+    @staticmethod
+    def _append_query(url: str, query: str) -> str:
+        if not query:
+            return url
+        joiner = "&" if "?" in url else "?"
+        return f"{url}{joiner}{query}"
+
+    def _lookup_provider_route(self, request_body: dict[str, Any]) -> ProviderRoute | None:
+        if self.provider_router is None:
+            return None
+        model = request_body.get("model") if isinstance(request_body, dict) else None
+        if not isinstance(model, str):
+            return None
+        return self.provider_router.lookup(model)

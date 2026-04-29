@@ -12,6 +12,14 @@ class TraceRecord(BaseModel):
     trace_id: str
     session_id: str
     model: str = ""
+    # rLLM session metadata — populated by middleware from headers/body/URL.
+    # All optional so existing training writers (which only stamp session_id)
+    # remain valid; eval and harness-stamped requests fill these in.
+    run_id: str | None = None
+    harness: str | None = None
+    step_id: int | None = None
+    parent_span_id: str | None = None
+    span_type: str = "llm.call"
     # Input
     messages: list[dict[str, Any]] = Field(default_factory=list)
     prompt_token_ids: list[int] = Field(default_factory=list)
@@ -104,12 +112,40 @@ class SessionInfo(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ProviderRoute(BaseModel):
+    """Map a model name to an external provider backend.
+
+    Provider routing serves the eval path: the gateway forwards requests
+    whose ``model`` matches ``model_name`` (or its ``provider/model``
+    prefix form) to ``backend_url``, rewriting ``model`` to
+    ``backend_model`` and injecting an ``Authorization: Bearer <key>``
+    header from ``api_key_env``.
+
+    Worker-pool routing (training/vLLM workers) takes a separate code
+    path and is unaffected.
+    """
+
+    model_name: str  # what the client sends, e.g. "gpt-5-mini" or "openai/gpt-5-mini"
+    backend_url: str  # e.g. "https://api.openai.com/v1"
+    # What to forward as ``model``. If None, defaults to ``model_name``
+    # with any leading ``provider/`` prefix stripped.
+    backend_model: str | None = None
+    # Env var holding the API key. None means the gateway does not inject
+    # an Authorization header (rely on extra_headers or none).
+    api_key_env: str | None = None
+    extra_headers: dict[str, str] = Field(default_factory=dict)
+    # Sampling/request params to strip before forwarding (e.g. "logprobs"
+    # for providers that reject it). Stripped at the proxy layer.
+    drop_params: list[str] = Field(default_factory=list)
+
+
 class GatewayConfig(BaseModel):
     """Top-level gateway configuration."""
 
     host: str = "0.0.0.0"
     port: int = 9090
     workers: list[WorkerConfig] = Field(default_factory=list)
+    providers: list[ProviderRoute] = Field(default_factory=list)
     db_path: str | None = None
     store_worker: str = "sqlite"
     add_logprobs: bool = True
@@ -121,3 +157,7 @@ class GatewayConfig(BaseModel):
     sync_traces: bool = False
     sampling_params_priority: str = "client"
     model: str | None = None  # When set, overrides ``body.model``
+    # Params stripped from every request body before forwarding to a
+    # provider backend (in addition to per-route ``drop_params``).
+    # Mirrors litellm's ``drop_params: true`` global behaviour.
+    global_drop_params: list[str] = Field(default_factory=list)

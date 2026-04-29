@@ -18,6 +18,7 @@ from rllm_model_gateway.models import (
     GatewayConfig,
     WorkerInfo,
 )
+from rllm_model_gateway.providers import ProviderRouter
 from rllm_model_gateway.proxy import ReverseProxy
 from rllm_model_gateway.session_manager import SessionManager
 from rllm_model_gateway.session_router import SessionRouter
@@ -148,12 +149,16 @@ def create_app(
             )
         )
 
+    provider_router = ProviderRouter(config.providers)
+
     proxy = ReverseProxy(
         router=router,
         store=store,
         strip_vllm=config.strip_vllm_fields,
         sync_traces=config.sync_traces,
         local_handler=local_handler,
+        provider_router=provider_router,
+        global_drop_params=config.global_drop_params,
     )
     sessions = SessionManager(store)
 
@@ -354,6 +359,7 @@ def create_app(
     # Store references on app for external access
     app.state.config = config  # type: ignore[attr-defined]
     app.state.router = router  # type: ignore[attr-defined]
+    app.state.provider_router = provider_router  # type: ignore[attr-defined]
     app.state.proxy = proxy  # type: ignore[attr-defined]
     app.state.sessions = sessions  # type: ignore[attr-defined]
     app.state.store = store  # type: ignore[attr-defined]
