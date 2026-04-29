@@ -365,13 +365,13 @@ _PAGE_HTML = r"""<!doctype html>
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M4 6h16M4 12h16M4 18h7"/></svg>
         <span>Runs</span>
       </a>
-      <a id="nav-gateway" href="#/gateway" data-section="gateway"
+      <a id="nav-sessions" href="#/sessions" data-section="sessions"
          class="flex items-center gap-2 px-3 py-2 rounded-md text-sm text-gray-700 hover:bg-layer-1 transition-colors">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
-        <span>Gateway</span>
-        <span id="nav-gateway-active" class="ml-auto hidden inline-flex items-center gap-1 text-[10px] text-amber-700 font-medium">
+        <span>Sessions</span>
+        <span id="nav-sessions-active" class="ml-auto hidden inline-flex items-center gap-1 text-[10px] text-amber-700 font-medium">
           <span class="pulse-dot inline-block w-1.5 h-1.5 rounded-full bg-amber-500"></span>
-          <span id="nav-gateway-active-count">0</span>
+          <span id="nav-sessions-active-count">0</span>
         </span>
       </a>
     </nav>
@@ -471,16 +471,14 @@ _PAGE_HTML = r"""<!doctype html>
   </section>
 </template>
 
-<template id="tpl-gateway">
+<template id="tpl-sessions">
   <section>
     <!-- Header strip: gateway-level summary -->
     <div class="bg-white border border-gray-200 rounded-xl p-4 mb-4 shadow-subtle">
       <div class="flex items-center justify-between gap-4">
         <div class="min-w-0 flex-1">
           <div class="flex items-center gap-2 text-xs text-gray-500">
-            <a href="#/" class="hover:text-accent-600 transition-colors">All runs</a>
-            <span class="text-gray-300">/</span>
-            <span class="text-gray-700 font-medium">Gateway</span>
+            <span class="text-gray-700 font-medium">Sessions</span>
             <span id="gw-run-crumb" class="text-gray-400 mono"></span>
           </div>
           <div class="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 text-xs">
@@ -601,7 +599,10 @@ function parseHash() {
   }
   const m = path.match(/^\/run\/(.+)$/);
   if (m) return { view:"run", id: decodeURIComponent(m[1]), query };
-  if (path === "/gateway") return { view:"gateway", query };
+  if (path === "/sessions") return { view:"sessions", query };
+  // Back-compat for the previous ``#/gateway`` URL: still honour it but
+  // route into the same view.
+  if (path === "/gateway") return { view:"sessions", query };
   return { view:"list", query };
 }
 function navigate(hash) { location.hash = hash; }
@@ -1550,10 +1551,10 @@ async function _gwTickSessions() {
   paintGwSessionsList();
 }
 
-function renderGatewayView(runFilter) {
-  setBreadcrumb([{ label: "Evaluation runs", href: "#/" }, { label: "Gateway" }]);
+function renderSessionsView(runFilter) {
+  setBreadcrumb([{ label: "Sessions" }]);
   root.innerHTML = "";
-  root.appendChild(document.getElementById("tpl-gateway").content.cloneNode(true));
+  root.appendChild(document.getElementById("tpl-sessions").content.cloneNode(true));
 
   gwState.runFilter = runFilter || null;
   gwState.selected = null;
@@ -1567,7 +1568,7 @@ function renderGatewayView(runFilter) {
     const v = sel.value || null;
     gwState.runFilter = v;
     // Update URL so refreshes preserve the filter.
-    location.hash = v ? `#/gateway?run=${encodeURIComponent(v)}` : "#/gateway";
+    location.hash = v ? `#/sessions?run=${encodeURIComponent(v)}` : "#/sessions";
     // Hashchange handler will re-render; force an immediate refresh too.
     _gwTickSessions();
   });
@@ -1591,9 +1592,8 @@ function renderGatewayView(runFilter) {
 }
 
 function _paintSidebar(activeSection) {
-  // ``activeSection`` is "runs" or "gateway"; highlight the matching nav
-  // entry. Reads the current hash so deep-links from the gateway view
-  // (with ?run=) still highlight Gateway, not Runs.
+  // ``activeSection`` is "runs" or "sessions"; highlight the matching
+  // nav entry.
   const items = document.querySelectorAll("aside nav a[data-section]");
   for (const a of items) {
     const isActive = a.getAttribute("data-section") === activeSection;
@@ -1616,9 +1616,9 @@ function route() {
     _paintSidebar("runs");  // Drilling into a run is still under Runs.
     renderRunView(r.id);
     _startLivePolling(r.id);
-  } else if (r.view === "gateway") {
-    _paintSidebar("gateway");
-    renderGatewayView(r.query.run || null);
+  } else if (r.view === "sessions") {
+    _paintSidebar("sessions");
+    renderSessionsView(r.query.run || null);
   } else {
     _paintSidebar("runs");
     renderListView();
