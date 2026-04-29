@@ -159,17 +159,28 @@ def create_app(
         local_handler=local_handler,
         provider_router=provider_router,
         global_drop_params=config.global_drop_params,
+        run_id=config.run_id,
     )
     sessions = SessionManager(store)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await proxy.start()
+        if config.run_id:
+            try:
+                await store.register_run(config.run_id, config.run_metadata)
+            except Exception:
+                logger.exception("register_run failed for run_id=%r", config.run_id)
         if router.workers:
             await router.start_health_checks()
         yield
         await router.stop_health_checks()
         await proxy.stop()
+        if config.run_id:
+            try:
+                await store.end_run(config.run_id)
+            except Exception:
+                logger.exception("end_run failed for run_id=%r", config.run_id)
         await store.close()
 
     app = FastAPI(title="rllm-model-gateway", version="0.1.0", lifespan=lifespan)

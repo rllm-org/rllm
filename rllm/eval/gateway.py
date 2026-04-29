@@ -4,6 +4,12 @@ Replaces the legacy LiteLLM-based ``EvalProxyManager``. The gateway runs
 as a uvicorn server in a daemon thread, so the eval CLI stays a single
 process — no subprocess management, no temp YAML files.
 
+All gateway runs share a single sqlite trace store at
+``~/.rllm/gateway/traces.db`` (override via ``RLLM_GATEWAY_DB``). Each
+run is tagged with its own ``run_id`` (typically the eval run dir
+basename) so concurrent invocations don't collide on session ids and
+the cross-run viewer can group activity by run.
+
 Lifecycle mirrors the old class (``start`` / ``shutdown`` / ``get_url``)
 so the CLI swap is mechanical.
 """
@@ -15,6 +21,7 @@ import os
 import socket
 import threading
 import time
+from typing import Any
 
 import uvicorn
 from rllm_model_gateway import GatewayConfig, ProviderRoute, create_app
@@ -22,6 +29,16 @@ from rllm_model_gateway import GatewayConfig, ProviderRoute, create_app
 from rllm.eval.config import get_provider_info
 
 logger = logging.getLogger(__name__)
+
+# Single shared sqlite for every gateway invocation. Concurrent writers
+# are serialised by sqlite's WAL + busy_timeout, no extra locking needed
+# (LLM call rates are well below sqlite's contention threshold).
+_DEFAULT_GATEWAY_DB = "~/.rllm/gateway/traces.db"
+
+
+def _default_gateway_db_path() -> str:
+    """Resolve the shared db path: env var → default."""
+    return os.path.expanduser(os.environ.get("RLLM_GATEWAY_DB", _DEFAULT_GATEWAY_DB))
 
 
 def _reserve_local_port(host: str) -> int:
@@ -35,7 +52,8 @@ class EvalGatewayManager:
     """Manages an in-process rLLM gateway routing to a single provider.
 
     Same constructor signature as the legacy ``EvalProxyManager`` so the
-    CLI swap is a one-line change.
+    CLI swap is a one-line change. Adds ``run_id`` + ``run_metadata`` so
+    the gateway can tag every persisted trace with the run identity.
     """
 
     def __init__(
@@ -46,13 +64,20 @@ class EvalGatewayManager:
         host: str = "127.0.0.1",
         port: int = 0,
         db_path: str | None = None,
+        run_id: str | None = None,
+        run_metadata: dict[str, Any] | None = None,
     ) -> None:
         self.provider = provider
         self.model_name = model_name
         self.api_key = api_key
         self.host = host
         self.port = port
-        self.db_path = db_path
+        # Default to the shared per-user gateway db so traces from
+        # multiple eval runs land in one place — matches the cross-run
+        # viewer's data model.
+        self.db_path = db_path or _default_gateway_db_path()
+        self.run_id = run_id
+        self.run_metadata: dict[str, Any] = dict(run_metadata or {})
         self._server: uvicorn.Server | None = None
         self._thread: threading.Thread | None = None
         self._url: str = ""
@@ -82,7 +107,7 @@ class EvalGatewayManager:
             host=self.host,
             port=self.port,
             db_path=self.db_path,
-            store_worker="sqlite" if self.db_path else "memory",
+            store_worker="sqlite",
             sync_traces=False,
             add_logprobs=False,
             add_return_token_ids=False,
@@ -95,6 +120,8 @@ class EvalGatewayManager:
                     api_key_env=env_key,
                 )
             ],
+            run_id=self.run_id,
+            run_metadata=self.run_metadata,
         )
 
     def start(self, *, startup_timeout: float = 10.0) -> str:

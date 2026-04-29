@@ -177,17 +177,31 @@ def _finished_eval_idxs(episodes_dir: Path) -> set[int]:
     return out
 
 
+def _gateway_run_id(run_dir: Path) -> str:
+    """Resolve the run's gateway ``run_id``.
+
+    Reads ``meta.json``'s ``gateway_run_id`` when present so future
+    layouts can decouple the dir name from the run_id; falls back to the
+    dir basename otherwise (which is what eval_cmd writes today).
+    """
+    meta = _load_meta(run_dir)
+    rid = meta.get("gateway_run_id")
+    if isinstance(rid, str) and rid:
+        return rid
+    return run_dir.name
+
+
 def _build_live_payload(run_dir: Path) -> dict[str, Any]:
     """Compute the ``/live`` snapshot — in-flight tasks + completion counts.
 
     A task is *in-flight* iff ``tasks.jsonl`` recorded its start but no
     matching ``episodes/episode_NNNNNN_*.json`` exists yet. Trace counts
-    come from ``traces.db`` so we can show "N calls so far" while the
-    task is mid-run.
+    come from the shared gateway db filtered by this run's ``run_id``.
     """
     tasks = _load_tasks_jsonl(run_dir)
     finished_idx = _finished_eval_idxs(_resolve_episodes_dir(run_dir))
-    summaries = trace_loader.session_summaries(run_dir / "traces.db")
+    run_id = _gateway_run_id(run_dir)
+    summaries = trace_loader.session_summaries(trace_loader.default_db_path(), run_id=run_id)
     now = datetime.now(tz=timezone.utc).timestamp()
 
     in_flight: list[dict[str, Any]] = []
@@ -924,7 +938,8 @@ function renderEpisodeBody(ep) {
   if (ep.metadata  && Object.keys(ep.metadata).length)  parts.push(fieldBox("metadata",  ep.metadata));
   // Trace placeholder — populated asynchronously after the body mounts.
   // Uses the first trajectory's session_id (set by Runner.run) as the join
-  // key into <run_dir>/traces.db. ``data-session-id`` lets the click
+  // key into the shared gateway db (filtered by this run's run_id).
+  // ``data-session-id`` lets the click
   // handler discover what to fetch.
   const sessionId = (ep.trajectories || []).map(t => t && t.session_id).find(Boolean) || "";
   if (sessionId) {
@@ -1369,10 +1384,11 @@ def _make_handler(root_path: Path, html_factory):
                     except ValueError:
                         return self.send_error(400, "Bad limit")
                 traces = trace_loader.get_traces(
-                    run_dir / "traces.db",
+                    trace_loader.default_db_path(),
                     session_id,
                     since=since,
                     limit=limit,
+                    run_id=_gateway_run_id(run_dir),
                 )
                 return self._send_json(200, traces)
 

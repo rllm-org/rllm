@@ -365,9 +365,9 @@ def _run_eval(
     console.print()
 
     # ``run_dir`` and ``timestamp`` are passed from ``eval_cmd`` so they're
-    # locked in before the gateway boots (the gateway points its sqlite at
-    # <run_dir>/traces.db). Recompute defensively if a caller invokes
-    # ``_run_eval`` directly without them.
+    # locked in before the gateway boots (the gateway tags its traces with
+    # ``run_id = basename(run_dir)`` in the shared ``~/.rllm/gateway/traces.db``).
+    # Recompute defensively if a caller invokes ``_run_eval`` directly.
     from datetime import datetime, timezone
 
     if timestamp is None:
@@ -398,6 +398,12 @@ def _run_eval(
             "agent": agent_name,
             "split": split,
             "timestamp": timestamp,
+            # ``gateway_run_id`` is the join key into the shared
+            # ``~/.rllm/gateway/traces.db`` — the cross-run viewer uses
+            # it to scope a run's traces. Equals the run dir basename
+            # by construction (eval_cmd computes both from the same
+            # template).
+            "gateway_run_id": os.path.basename(os.path.normpath(run_dir)),
         }
     )
     episode_store = run_store if save_episodes else None
@@ -590,8 +596,8 @@ def eval_cmd(
     gateway_manager = None
 
     # Resolve model + (optionally) the rllm config first so we can compute
-    # run_dir before booting the gateway — the gateway needs to know
-    # <run_dir>/traces.db to land traces in the run-scoped sqlite.
+    # run_dir before booting the gateway — ``basename(run_dir)`` becomes
+    # the gateway's ``run_id`` for tagging traces in the shared db.
     rllm_cfg = None
     if base_url is None:
         from rllm.eval.config import load_config
@@ -638,11 +644,24 @@ def eval_cmd(
         else:
             from rllm.eval.gateway import EvalGatewayManager
 
+            # ``run_id`` matches the run dir basename so the cross-run
+            # gateway viewer can join shared-db traces back to the
+            # episode JSONs in this folder.
+            run_id = os.path.basename(os.path.normpath(run_dir))
             gateway_manager = EvalGatewayManager(
                 provider=rllm_cfg.provider,
                 model_name=model,
                 api_key=rllm_cfg.api_key,
-                db_path=os.path.join(run_dir, "traces.db"),
+                run_id=run_id,
+                run_metadata={
+                    "benchmark": benchmark,
+                    "model": model,
+                    "agent": agent_name,
+                    "provider": rllm_cfg.provider,
+                    "source": "eval",
+                    "run_dir": run_dir,
+                    "timestamp": timestamp,
+                },
             )
             with Status(f"[dim]Starting rLLM gateway for [bold]{rllm_cfg.provider}/{model}[/bold]...[/]", console=console):
                 try:

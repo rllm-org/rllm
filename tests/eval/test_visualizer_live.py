@@ -3,6 +3,11 @@
 Covers ``GET /api/runs/{id}/traces`` (delta-fetch with ``since`` cursor)
 and ``GET /api/runs/{id}/live`` (in-flight derivation from
 ``tasks.jsonl`` minus already-written ``episodes/``).
+
+The viewer reads traces from the shared gateway db
+(``RLLM_GATEWAY_DB``); each test seeds that db with rows tagged by
+``run_id`` matching the run-dir basename so the run-scoped endpoints
+filter correctly.
 """
 
 from __future__ import annotations
@@ -19,19 +24,28 @@ import pytest
 from rllm.eval import visualizer
 
 
-def _seed_traces_db(db_path: Path, rows: list[tuple[str, str, dict, float]]) -> None:
+def _seed_shared_db(
+    db_path: Path,
+    rows: list[tuple[str, str, str, dict, float]],
+) -> None:
+    """Seed a shared gateway db with rows tagged by ``run_id``.
+
+    Each row is ``(trace_id, session_id, run_id, data_dict, created_at)``.
+    Mirrors the schema written by the live gateway.
+    """
     conn = sqlite3.connect(str(db_path))
     try:
         conn.execute("CREATE TABLE traces (trace_id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at REAL NOT NULL)")
-        conn.execute("CREATE TABLE trace_sessions (trace_id TEXT NOT NULL, session_id TEXT NOT NULL, created_at REAL NOT NULL, PRIMARY KEY (trace_id, session_id))")
-        for trace_id, session_id, data, ts in rows:
+        conn.execute("CREATE TABLE trace_sessions (trace_id TEXT NOT NULL, session_id TEXT NOT NULL, run_id TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL, PRIMARY KEY (trace_id, session_id))")
+        conn.execute("CREATE TABLE runs (run_id TEXT PRIMARY KEY, started_at REAL NOT NULL, ended_at REAL, metadata TEXT NOT NULL DEFAULT '{}')")
+        for trace_id, session_id, run_id, data, ts in rows:
             conn.execute(
                 "INSERT INTO traces (trace_id, data, created_at) VALUES (?, ?, ?)",
                 (trace_id, json.dumps(data), ts),
             )
             conn.execute(
-                "INSERT INTO trace_sessions (trace_id, session_id, created_at) VALUES (?, ?, ?)",
-                (trace_id, session_id, ts),
+                "INSERT INTO trace_sessions (trace_id, session_id, run_id, created_at) VALUES (?, ?, ?, ?)",
+                (trace_id, session_id, run_id, ts),
             )
         conn.commit()
     finally:
@@ -51,13 +65,19 @@ def _write_tasks_jsonl(run_dir: Path, lines: list[dict]) -> None:
             f.write(json.dumps(line) + "\n")
 
 
+def _write_meta(run_dir: Path, gateway_run_id: str) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "meta.json").write_text(json.dumps({"gateway_run_id": gateway_run_id}))
+
+
 @pytest.fixture
-def root_with_run(tmp_path):
-    """Create ``<root>/<run_id>/`` populated with tasks.jsonl, episodes/, traces.db."""
+def root_with_run(tmp_path, monkeypatch):
+    """Create a run dir + a shared gateway db seeded with per-run traces."""
     root = tmp_path / "eval_results"
     run_id = "demo-run"
     run_dir = root / run_id
     run_dir.mkdir(parents=True)
+    _write_meta(run_dir, gateway_run_id=run_id)
 
     # tasks.jsonl: 3 tasks started.
     now = time.time()
@@ -73,17 +93,21 @@ def root_with_run(tmp_path):
     # Only idx=0 has a written episode → idx=1, 2 are in-flight.
     _write_episode(run_dir / "episodes", 0, "t-zero")
 
-    # Traces: 2 for eval-0 (finished), 3 for eval-1 (in-flight), 0 for eval-2.
-    _seed_traces_db(
-        run_dir / "traces.db",
+    # Shared gateway db at a tmp path. Traces: 2 for eval-0, 3 for
+    # eval-1, 0 for eval-2 — all tagged with this run's run_id.
+    shared_db = tmp_path / "gateway" / "traces.db"
+    shared_db.parent.mkdir(parents=True, exist_ok=True)
+    _seed_shared_db(
+        shared_db,
         [
-            ("a1", "eval-0", {"trace_id": "a1", "session_id": "eval-0"}, 1000.0),
-            ("a2", "eval-0", {"trace_id": "a2", "session_id": "eval-0"}, 1001.0),
-            ("b1", "eval-1", {"trace_id": "b1", "session_id": "eval-1"}, 1002.0),
-            ("b2", "eval-1", {"trace_id": "b2", "session_id": "eval-1"}, 1003.0),
-            ("b3", "eval-1", {"trace_id": "b3", "session_id": "eval-1"}, 1004.0),
+            ("a1", "eval-0", run_id, {"trace_id": "a1", "session_id": "eval-0"}, 1000.0),
+            ("a2", "eval-0", run_id, {"trace_id": "a2", "session_id": "eval-0"}, 1001.0),
+            ("b1", "eval-1", run_id, {"trace_id": "b1", "session_id": "eval-1"}, 1002.0),
+            ("b2", "eval-1", run_id, {"trace_id": "b2", "session_id": "eval-1"}, 1003.0),
+            ("b3", "eval-1", run_id, {"trace_id": "b3", "session_id": "eval-1"}, 1004.0),
         ],
     )
+    monkeypatch.setenv("RLLM_GATEWAY_DB", str(shared_db))
 
     return root, run_id
 

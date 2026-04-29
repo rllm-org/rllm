@@ -161,3 +161,11 @@ class GatewayConfig(BaseModel):
     # provider backend (in addition to per-route ``drop_params``).
     # Mirrors litellm's ``drop_params: true`` global behaviour.
     global_drop_params: list[str] = Field(default_factory=list)
+    # Identifier of the gateway run — eval CLI sets this to the run dir
+    # basename, training/harness shims pick something globally unique.
+    # When set, every trace persisted by this gateway is tagged with it
+    # and a row is registered in the ``runs`` table on startup.
+    run_id: str | None = None
+    # Free-form metadata for the run (benchmark, model, agent, source,
+    # …). Surfaced by the cross-run viewer.
+    run_metadata: dict[str, Any] = Field(default_factory=dict)

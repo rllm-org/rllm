@@ -70,8 +70,8 @@ def _stamp_session_in_url(base_url: str, session_uid: str) -> str:
     ``/sessions/{sid}/v1/...`` path. We rewrite the per-task base URL
     so the harness's stock OpenAI client (which knows nothing about
     session metadata) automatically tags every call with the right
-    session, and traces land in ``<run_dir>/traces.db`` correctly
-    grouped. Examples::
+    session, and traces land in the shared gateway db with the
+    correct ``(run_id, session_id)`` tuple. Examples::
 
         http://h:p/v1            -> http://h:p/sessions/eval-0/v1
         http://h:p               -> http://h:p/sessions/eval-0/v1

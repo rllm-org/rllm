@@ -89,8 +89,9 @@ class Runner:
             episode = await _run_agent_flow(self.agent_flow, task, config)
 
             # Stamp session_uid onto every trajectory so the UI can join
-            # back to gateway traces (`<run_dir>/traces.db`). Harnesses
-            # may pre-set this; we only fill in blanks.
+            # back to traces in the shared gateway db
+            # (filtered by run_id). Harnesses may pre-set this; we only
+            # fill in blanks.
             if config.session_uid:
                 for traj in episode.trajectories:
                     if traj.session_id is None:
