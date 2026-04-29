@@ -48,6 +48,8 @@ rllm:
     gamma: ${oc.select:algorithm.gamma, 1.0}
     lam: ${oc.select:algorithm.lam, 0.95}
     norm_adv_by_std_in_grpo: ${oc.select:algorithm.norm_adv_by_std_in_grpo, true}
+    rollout_correction:
+      bypass_mode: False
 
   rollout:
     n: ${oc.select:actor_rollout_ref.rollout.n, 8}

@@ -88,3 +88,6 @@ rllm:
   rollout:
     n: ${oc.select:training.group_size, 8}
     n_val: ${oc.select:validation.group_size, 1}
+  algorithm:
+    rollout_correction:
+      bypass_mode: True
