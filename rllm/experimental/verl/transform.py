@@ -37,17 +37,25 @@ def _pad_sequence_batch(sequences: list[torch.Tensor], pad_token_id: int, max_le
     return batch
 
 
-def _retrieve_batch_attention_masks(batch: torch.Tensor, pad_token_id: int, max_length: int) -> torch.Tensor:
-    """Retrieves the attention masks for a batch of prompts/responses.
+def _build_attention_masks_from_lengths(sequences: list[torch.Tensor], max_length: int, left_pad: bool) -> torch.Tensor:
+    """Builds attention masks from sequence lengths, not token values.
 
-    Note that in original implementation, this operation is padding-aware, i.e. it has DIFFERENT behavior for left-pad (prompts)
-    and right-pad (responses) sequences. This is to ensure compatibility with the `input_ids` constructed with results from function `_pad_sequence_batch`.
-
-    The current version simply uses the constructed `promits_batch` (`responses_batch`) instead of the original `prompts` (`responses`) lengths.
+    Args:
+        sequences: List of unpadded sequences.
+        max_length: The maximum length to pad to.
+        left_pad: Whether the corresponding padded batch is left-padded.
+    Returns:
+        torch.Tensor: The attention masks matching the padded sequences.
     """
-    assert len(batch.shape) == 2, f"batch must be a 2D tensor, but got {batch.shape}"
-    assert batch.shape[1] == max_length, f"input batch must have been padded to {max_length}, but got {batch.shape[1]}"
-    return batch != pad_token_id
+    device = sequences[0].device if sequences else torch.device("cpu")
+    mask = torch.zeros((len(sequences), max_length), dtype=torch.bool, device=device)
+    for i, sequence in enumerate(sequences):
+        seq_len = min(len(sequence), max_length)
+        if left_pad:
+            mask[i, max_length - seq_len :] = True
+        else:
+            mask[i, :seq_len] = True
+    return mask
 
 
 def _build_step_and_trajectory_rewards(step_rewards: list[float], trajectory_rewards: list[float], responses_batch: torch.Tensor, responses: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -147,8 +155,8 @@ def _batch_tensors_and_build_data_proto(accumulated: AccumulatedData, pad_token_
     responses_batch = _pad_sequence_batch(accumulated.responses, pad_token_id, max_response_length, left_pad=False)  # shape: [bs, max_response_length]
     input_ids = torch.concat([prompts_batch, responses_batch], dim=1)  # shape: [bs, max_prompt_length + max_response_length]
 
-    prompts_mask = _retrieve_batch_attention_masks(prompts_batch, pad_token_id, max_prompt_length)
-    responses_mask = _retrieve_batch_attention_masks(responses_batch, pad_token_id, max_response_length)
+    prompts_mask = _build_attention_masks_from_lengths(accumulated.prompts, max_prompt_length, left_pad=True)
+    responses_mask = _build_attention_masks_from_lengths(accumulated.responses, max_response_length, left_pad=False)
     attention_mask = torch.concat([prompts_mask, responses_mask], dim=1)  # shape: [bs, max_prompt_length + max_response_length]
 
     # Handle position_ids: use multimodal handler if processor is available
