@@ -118,13 +118,15 @@ class HarborRuntime:
         Satisfies the ``AgentFlow`` protocol for :func:`rllm.eval.runner.run_dataset`.
 
         Args:
-            task: :class:`rllm.types.Task` whose ``metadata`` carries a ``task_path`` field.
+            task: :class:`rllm.types.Task`. The Harbor task directory is taken from
+                ``task.metadata['task_path']`` if present (catalog/registry rows),
+                otherwise from ``task.task_dir`` (local benchmark loader).
             config: AgentConfig with ``base_url`` and ``model``.
 
         Returns:
             Episode with harbor_reward and harbor_is_correct in artifacts.
         """
-        task_path = task.metadata.get("task_path")
+        task_path = task.metadata.get("task_path") or (str(task.task_dir) if task.task_dir else None)
         if not task_path:
             raise ValueError(f"Harbor task missing 'task_path' field in task data: {list(task.metadata.keys())}")
 
