@@ -100,6 +100,7 @@ class ReverseProxy:
         local_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
         provider_router: ProviderRouter | None = None,
         global_drop_params: list[str] | None = None,
+        run_id: str | None = None,
     ) -> None:
         self.router = router
         self.store = store
@@ -113,6 +114,10 @@ class ReverseProxy:
         # ``return_token_ids`` is always stripped because it's a vLLM
         # extension that real providers will reject.
         self._provider_drop_params = list(global_drop_params or []) + ["return_token_ids"]
+        # Tag every persisted trace with this run_id so the cross-run
+        # viewer can group by gateway lifetime. Empty string is the
+        # "unstamped" bucket for callers that don't pass a run_id.
+        self._run_id = run_id or ""
         self._http: httpx.AsyncClient | None = None
         self._pending_traces: set[asyncio.Task[None]] = set()
 
@@ -623,7 +628,7 @@ class ReverseProxy:
         try:
             data = trace.model_dump()
             if self.sync_traces:
-                await self.store.store_trace(trace.trace_id, trace.session_id, data)
+                await self.store.store_trace(trace.trace_id, trace.session_id, data, self._run_id)
             else:
                 task = asyncio.create_task(self._safe_store(trace.trace_id, trace.session_id, data))
                 self._pending_traces.add(task)
@@ -633,7 +638,7 @@ class ReverseProxy:
 
     async def _safe_store(self, trace_id: str, session_id: str, data: dict[str, Any]) -> None:
         try:
-            await self.store.store_trace(trace_id, session_id, data)
+            await self.store.store_trace(trace_id, session_id, data, self._run_id)
         except Exception:
             logger.exception("Failed to persist trace %s", trace_id)
 
