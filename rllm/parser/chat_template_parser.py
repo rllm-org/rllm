@@ -47,6 +47,9 @@ class ChatTemplateParser:
     def parse_completion(self, completion_ids: list[int]):
         raise NotImplementedError("ChatTemplateParser does not support parse_completion")
 
+    def parse_completion_text(self, completion_text: str):
+        raise NotImplementedError("ChatTemplateParser does not support parse_completion_text")
+
     def verify_equivalence(self, messages, verbose=True):
         """Verify that parsing messages together is equivalent to parsing them individually.
 
@@ -84,13 +87,16 @@ class ChatTemplateParser:
         return is_equivalent
 
     @classmethod
-    def get_parser(cls, tokenizer, processor=None, disable_thinking=False) -> "ChatTemplateParser":
+    def get_parser(cls, tokenizer, processor=None, disable_thinking=False, multi_turn_extension=False) -> "ChatTemplateParser":
         """Factory method to get the appropriate parser based on a string identifier.
 
         Args:
             parser_type (str): String identifier for the parser type
             tokenizer: The tokenizer to use with the parser
             disable_thinking: Whether generation prompt will disable thinking.
+            multi_turn_extension: Whether Qwen-style parsers should preserve
+                assistant content whitespace around tool calls so multi-turn
+                prompts re-render as a byte-identical extension of prior turns.
 
         Returns:
             ChatTemplateParser: An instance of the requested parser
@@ -109,10 +115,10 @@ class ChatTemplateParser:
                     return DeepSeekV32ExpChatTemplateParser(tokenizer, disable_thinking=disable_thinking)
                 else:
                     logger.info(f"Using DeepseekQwenChatTemplateParser for {tokenizer.name_or_path}")
-                    return DeepseekQwenChatTemplateParser(tokenizer, disable_thinking=disable_thinking)
+                    return DeepseekQwenChatTemplateParser(tokenizer, disable_thinking=disable_thinking, multi_turn_extension=multi_turn_extension)
             elif "qwen" in model_name or "r2e" in model_name or "deepswe" in model_name or "qwen" in tokenizer_cls:
                 logger.info(f"Using QwenChatTemplateParser for {tokenizer.name_or_path}")
-                return QwenChatTemplateParser(tokenizer, processor=processor, disable_thinking=disable_thinking)
+                return QwenChatTemplateParser(tokenizer, processor=processor, disable_thinking=disable_thinking, multi_turn_extension=multi_turn_extension)
             elif "llama" in model_name:
                 logger.info(f"Using LlamaChatTemplateParser for {tokenizer.name_or_path}")
                 return LlamaChatTemplateParser(tokenizer)
@@ -185,10 +191,11 @@ class ChatTemplateParser:
 
 
 class DeepseekQwenChatTemplateParser(ChatTemplateParser):
-    def __init__(self, tokenizer, disable_thinking=False):
+    def __init__(self, tokenizer, disable_thinking=False, multi_turn_extension=False):
         super().__init__(tokenizer)
 
         self.disable_thinking = disable_thinking
+        self.multi_turn_extension = multi_turn_extension
         self.bos_token = tokenizer.bos_token
         self.eos_token = tokenizer.eos_token
         self.system_token = ""
@@ -261,7 +268,8 @@ class DeepseekQwenChatTemplateParser(ChatTemplateParser):
         return self.user_token + message["content"]
 
     def parse_assistant(self, message, accumulate_reasoning=False):
-        content = (message.get("content", None) or "").strip()
+        raw_content = message.get("content", None) or ""
+        content = raw_content if self.multi_turn_extension else raw_content.strip()
         reasoning = (message.get("reasoning", None) or "").strip()
         tool_calls = message.get("tool_calls", None) or []
 
@@ -279,7 +287,7 @@ class DeepseekQwenChatTemplateParser(ChatTemplateParser):
 
             if content:
                 result += content
-                if tool_calls:
+                if tool_calls and not self.multi_turn_extension:
                     result += "\n"
 
             if tool_calls:
@@ -337,15 +345,14 @@ class DeepseekQwenChatTemplateParser(ChatTemplateParser):
 
             return self.user_token + tool_outputs_str
 
-    def parse_completion(self, completion_ids):
-        completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=False)
-
+    def parse_completion_text(self, completion_text: str):
         if completion_text.count("</think>") == 1:
             reasoning, _, content = completion_text.partition("</think>")
             if content.endswith(self.eos_token):
                 content = content[: -len(self.eos_token)]
             reasoning = reasoning.strip()
-            content = content.strip()
+            if not self.multi_turn_extension:
+                content = content.strip()
         else:
             # DeepSeekQwen should always have reasoning
             reasoning = completion_text.strip()
@@ -360,7 +367,8 @@ class DeepseekQwenChatTemplateParser(ChatTemplateParser):
             wrapper_end_pattern = re.escape(self.tool_parser.tool_calls_end)
             content = re.sub(f"{begin_pattern}.*?{end_pattern}", "", content, flags=re.DOTALL)
             content = re.sub(f"{wrapper_begin_pattern}.*?{wrapper_end_pattern}", "", content, flags=re.DOTALL)
-            content = content.strip()
+            if not self.multi_turn_extension:
+                content = content.strip()
         else:
             tool_calls = []
 
@@ -370,11 +378,16 @@ class DeepseekQwenChatTemplateParser(ChatTemplateParser):
             "tool_calls": tool_calls,
         }
 
+    def parse_completion(self, completion_ids):
+        completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=False)
+        return self.parse_completion_text(completion_text)
+
 
 class QwenChatTemplateParser(ChatTemplateParser):
-    def __init__(self, tokenizer, processor=None, disable_thinking=False):
+    def __init__(self, tokenizer, processor=None, disable_thinking=False, multi_turn_extension=False):
         super().__init__(tokenizer, processor=processor)
         self.disable_thinking = disable_thinking
+        self.multi_turn_extension = multi_turn_extension
         self.bos_token = tokenizer.bos_token
         self.eos_token = tokenizer.eos_token
         self.eot_token = "<|im_end|>\n"
@@ -455,7 +468,8 @@ class QwenChatTemplateParser(ChatTemplateParser):
         return self.user_token + message["content"] + self.eot_token
 
     def parse_assistant(self, message, accumulate_reasoning=False):
-        content = (message.get("content", None) or "").strip()
+        raw_content = message.get("content", None) or ""
+        content = raw_content if self.multi_turn_extension else raw_content.strip()
         reasoning = (message.get("reasoning", None) or "").strip()
         tool_calls = message.get("tool_calls", None) or []
 
@@ -471,7 +485,7 @@ class QwenChatTemplateParser(ChatTemplateParser):
 
             if content:
                 result += content
-                if tool_calls:
+                if tool_calls and not self.multi_turn_extension:
                     result += "\n"
 
             if tool_calls:
@@ -531,10 +545,9 @@ class QwenChatTemplateParser(ChatTemplateParser):
             text = text[: -len(self.eos_token)]
         if text.endswith(self.eot_token):
             text = text[: -len(self.eot_token)]
-        return text.strip()
+        return text if self.multi_turn_extension else text.strip()
 
-    def parse_completion(self, completion_ids):
-        completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=False)
+    def parse_completion_text(self, completion_text: str):
         if completion_text.count("</think>") == 1:
             reasoning, _, content = completion_text.partition("</think>")
             if reasoning.startswith("<think>"):
@@ -565,7 +578,8 @@ class QwenChatTemplateParser(ChatTemplateParser):
             begin_pattern = re.escape(self.tool_parser.tool_call_begin)
             end_pattern = re.escape(self.tool_parser.tool_call_end)
             content = re.sub(f"{begin_pattern}.*?{end_pattern}", "", content, flags=re.DOTALL)
-            content = content.strip()
+            if not self.multi_turn_extension:
+                content = content.strip()
         else:
             tool_calls = []
 
@@ -574,6 +588,10 @@ class QwenChatTemplateParser(ChatTemplateParser):
             "reasoning": reasoning,
             "tool_calls": tool_calls,
         }
+
+    def parse_completion(self, completion_ids):
+        completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=False)
+        return self.parse_completion_text(completion_text)
 
     def process_image_data(self, messages):
         from qwen_vl_utils import fetch_image

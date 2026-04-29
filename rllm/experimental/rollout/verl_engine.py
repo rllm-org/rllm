@@ -28,11 +28,21 @@ class VerlEngine(RolloutEngine):
 
         self.tokenizer = tokenizer
         self.processor = processor
-        self.chat_parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=config.get("rllm", {}).get("disable_thinking", False))
+        rllm_config = config.get("rllm", {})
+        self.disable_thinking = rllm_config.get("disable_thinking", False)
+        self.accumulate_reasoning = rllm_config.get("accumulate_reasoning", False)
+        self.multi_turn_extension = rllm_config.get("multi_turn_extension", False)
+        if self.multi_turn_extension and not self.disable_thinking and not self.accumulate_reasoning:
+            raise ValueError("rllm.multi_turn_extension=true requires either rllm.disable_thinking=true or rllm.accumulate_reasoning=true")
+        self.chat_parser = ChatTemplateParser.get_parser(
+            tokenizer,
+            processor=processor,
+            disable_thinking=self.disable_thinking,
+            multi_turn_extension=self.multi_turn_extension,
+        )
 
         self.max_prompt_length = config.data.max_prompt_length
         self.max_response_length = config.data.max_response_length
-        self.accumulate_reasoning = config.get("rllm", {}).get("accumulate_reasoning", False)
 
         self.train_sampling_params = dict(
             temperature=0.0 if config.actor_rollout_ref.rollout.do_sample is False else config.actor_rollout_ref.rollout.temperature,

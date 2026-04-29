@@ -74,6 +74,7 @@ class AgentExecutionEngine:
         self.max_prompt_length = max_prompt_length
         self.enforce_max_prompt_length = enforce_max_prompt_length
         self.disable_thinking = self.config.get("rllm", {}).get("disable_thinking", False) if self.config is not None else False
+        self.multi_turn_extension = self.config.get("rllm", {}).get("multi_turn_extension", False) if self.config is not None else False
 
         self.agent_class = agent_class
         self.agent_args = agent_args
@@ -91,7 +92,7 @@ class AgentExecutionEngine:
             assert env_class.is_multithread_safe(), "Environment must be multithread safe for async engine"
 
         if chat_parser is None:
-            self.chat_parser = ChatTemplateParser.get_parser(self.tokenizer, disable_thinking=self.disable_thinking)
+            self.chat_parser = ChatTemplateParser.get_parser(self.tokenizer, disable_thinking=self.disable_thinking, multi_turn_extension=self.multi_turn_extension)
         else:
             self.chat_parser = chat_parser
 

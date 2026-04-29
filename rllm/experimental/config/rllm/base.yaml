@@ -80,6 +80,9 @@ disable_thinking: False
 # Accumulate reasoning
 accumulate_reasoning: False
 
+# Preserve raw assistant whitespace when re-rendering multi-turn tool calls
+multi_turn_extension: False
+
 # Mask truncated samples
 mask_truncated_samples: False
 filter_token_mismatch: True
