@@ -2,8 +2,9 @@
 
 ``rllm eval <benchmark> --agent <name> [--evaluator <name>] [--base-url <url>] [--model <name>]``
 
-When ``--base-url`` is omitted, a LiteLLM proxy is auto-started using the
-configuration from ``rllm setup`` (stored in ``~/.rllm/config.json``).
+When ``--base-url`` is omitted, the rLLM model gateway is auto-started
+in-process using the configuration from ``rllm setup`` (stored in
+``~/.rllm/config.json``).
 """
 
 from __future__ import annotations
@@ -575,7 +576,7 @@ def eval_cmd(
     if not enable_ui and not _ui_explicit:
         console.print("  [blue]Tip: Try rllm UI for live monitoring! Run [bold]rllm login[/bold] to get started.[/]")
 
-    proxy_manager = None
+    gateway_manager = None
 
     if base_url is not None:
         # Direct mode: user provided --base-url, require --model too
@@ -583,7 +584,7 @@ def eval_cmd(
             console.print("  [error]--model is required when --base-url is provided.[/]")
             raise SystemExit(1)
     else:
-        # Proxy mode: auto-start LiteLLM proxy from config
+        # Gateway mode: auto-start rLLM model gateway from config
         from rllm.eval.config import load_config
 
         config = load_config()
@@ -598,7 +599,7 @@ def eval_cmd(
             model = config.model
 
         if config.provider == "custom":
-            # Custom provider: skip LiteLLM proxy, use base_url directly
+            # Custom provider: skip the gateway, use base_url directly
             import os as _os
 
             base_url = config.base_url
@@ -606,23 +607,22 @@ def eval_cmd(
                 _os.environ.setdefault("OPENAI_API_KEY", config.api_key)
             console.print(f"  [success]Using custom endpoint[/] at [dim]{base_url}[/]")
         else:
-            from rllm.eval.proxy import EvalProxyManager
+            from rllm.eval.gateway import EvalGatewayManager
 
-            proxy_manager = EvalProxyManager(
+            gateway_manager = EvalGatewayManager(
                 provider=config.provider,
                 model_name=model,
                 api_key=config.api_key,
             )
-            with Status(f"[dim]Starting LiteLLM proxy for [bold]{config.provider}/{model}[/bold]...[/]", console=console):
+            with Status(f"[dim]Starting rLLM gateway for [bold]{config.provider}/{model}[/bold]...[/]", console=console):
                 try:
-                    proxy_manager.start_proxy_subprocess(proxy_manager.build_proxy_config())
-                except (RuntimeError, TimeoutError) as e:
-                    console.print(f"\n  [error]Failed to start LiteLLM proxy.[/]\n\n  {e}")
-                    console.print("\n  [dim]Make sure litellm is installed:[/] [bold]pip install litellm\\[proxy][/]")
+                    gateway_manager.start()
+                except (RuntimeError, TimeoutError, ValueError) as e:
+                    console.print(f"\n  [error]Failed to start rLLM gateway.[/]\n\n  {e}")
                     console.print()
                     raise SystemExit(1) from None
-            base_url = proxy_manager.get_proxy_url()
-            console.print(f"  [success]Proxy ready[/] at [dim]{base_url}[/]")
+            base_url = gateway_manager.get_url()
+            console.print(f"  [success]Gateway ready[/] at [dim]{base_url}[/]")
 
     # Build agent metadata from CLI options
     agent_metadata = {}
@@ -663,5 +663,5 @@ def eval_cmd(
             episodes_dir=episodes_dir,
         )
     finally:
-        if proxy_manager is not None:
-            proxy_manager.shutdown_proxy()
+        if gateway_manager is not None:
+            gateway_manager.shutdown()

@@ -80,15 +80,14 @@ def test_eval_base_url_requires_model(runner, tmp_rllm_home):
 
 
 def test_eval_with_proxy_mode(runner, tmp_rllm_home, mock_dataset):
-    """Eval without --base-url should auto-start proxy from config."""
+    """Eval without --base-url should auto-start the gateway from config."""
     config = RllmConfig(provider="openai", model="gpt-5-mini", api_keys={"openai": "sk-test"})
-    mock_pm = MagicMock()
-    mock_pm.get_proxy_url.return_value = "http://127.0.0.1:4000/v1"
-    mock_pm.build_proxy_config.return_value = {"model_list": []}
+    mock_gm = MagicMock()
+    mock_gm.get_url.return_value = "http://127.0.0.1:4000/v1"
 
     with (
         patch("rllm.eval.config.load_config", return_value=config),
-        patch("rllm.eval.proxy.EvalProxyManager", return_value=mock_pm),
+        patch("rllm.eval.gateway.EvalGatewayManager", return_value=mock_gm),
         patch("rllm.cli.eval._run_eval"),
     ):
         result = runner.invoke(
@@ -102,16 +101,16 @@ def test_eval_with_proxy_mode(runner, tmp_rllm_home, mock_dataset):
         )
 
     assert result.exit_code == 0
-    mock_pm.start_proxy_subprocess.assert_called_once()
-    mock_pm.shutdown_proxy.assert_called_once()
+    mock_gm.start.assert_called_once()
+    mock_gm.shutdown.assert_called_once()
 
 
 def test_eval_base_url_skips_proxy(runner, tmp_rllm_home, mock_dataset):
-    """Eval with --base-url should not create a proxy."""
+    """Eval with --base-url should not create a gateway."""
     mock_agent = _MockAgentFlow()
 
     with (
-        patch("rllm.eval.proxy.EvalProxyManager") as mock_pm_cls,
+        patch("rllm.eval.gateway.EvalGatewayManager") as mock_gm_cls,
         patch("rllm.eval.agent_loader.load_agent", return_value=mock_agent),
         patch("rllm.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=_MockEvaluator()),
     ):
@@ -130,7 +129,7 @@ def test_eval_base_url_skips_proxy(runner, tmp_rllm_home, mock_dataset):
         )
 
     assert result.exit_code == 0
-    mock_pm_cls.assert_not_called()
+    mock_gm_cls.assert_not_called()
 
 
 def test_eval_with_mock_agent(runner, tmp_rllm_home, mock_dataset):
