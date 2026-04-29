@@ -74,7 +74,29 @@ class TestApplyRouteHeaders:
         )
         assert headers["authorization"] == "Bearer sk-test-123"
 
-    def test_missing_env_omits_authorization(self, monkeypatch):
+    def test_x_api_key_injected_alongside_bearer(self, monkeypatch):
+        """Anthropic's native API uses ``x-api-key``, not ``Authorization: Bearer``.
+
+        Without ``x-api-key`` the gateway-forwarded request to
+        ``/v1/messages`` 404s and Harbor / mini-swe-agent crashes on first
+        call. We always inject both — providers that don't recognize one
+        ignore it.
+        """
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-abc")
+        route = ProviderRoute(
+            model_name="claude-sonnet-4-6",
+            backend_url="https://api.anthropic.com/v1",
+            api_key_env="ANTHROPIC_API_KEY",
+        )
+        _, headers, _ = apply_route(
+            request_body={"model": "claude-sonnet-4-6"},
+            route=route,
+            request_path="/v1/messages",
+        )
+        assert headers["authorization"] == "Bearer sk-ant-abc"
+        assert headers["x-api-key"] == "sk-ant-abc"
+
+    def test_missing_env_omits_both_auth_headers(self, monkeypatch):
         monkeypatch.delenv("MISSING_KEY", raising=False)
         route = ProviderRoute(
             model_name="m",
@@ -87,6 +109,7 @@ class TestApplyRouteHeaders:
             request_path="/v1/chat/completions",
         )
         assert "authorization" not in headers
+        assert "x-api-key" not in headers
 
     def test_extra_headers_included(self, monkeypatch):
         monkeypatch.setenv("KEY", "k")
@@ -103,14 +126,15 @@ class TestApplyRouteHeaders:
         )
         assert headers["x-custom"] == "yes"
         assert headers["authorization"] == "Bearer k"
+        assert headers["x-api-key"] == "k"
 
-    def test_extra_headers_override_authorization(self, monkeypatch):
+    def test_extra_headers_override_both_auth_schemes(self, monkeypatch):
         monkeypatch.setenv("KEY", "from-env")
         route = ProviderRoute(
             model_name="m",
             backend_url="https://x",
             api_key_env="KEY",
-            extra_headers={"Authorization": "Bearer from-extra"},
+            extra_headers={"Authorization": "Bearer from-extra", "x-api-key": "from-extra"},
         )
         _, headers, _ = apply_route(
             request_body={"model": "m"},
@@ -120,6 +144,7 @@ class TestApplyRouteHeaders:
         # extra_headers wins via setdefault: env-derived auth is only set if
         # not already present.
         assert headers["authorization"] == "Bearer from-extra"
+        assert headers["x-api-key"] == "from-extra"
 
 
 class TestApplyRouteBody:
@@ -202,5 +227,5 @@ class TestProviderRouterDuplicates:
 @pytest.fixture(autouse=True)
 def _clear_test_keys(monkeypatch):
     """Ensure provider env vars don't leak between tests."""
-    for key in ("OPENAI_API_KEY", "KEY", "MISSING_KEY"):
+    for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "KEY", "MISSING_KEY"):
         monkeypatch.delenv(key, raising=False)
