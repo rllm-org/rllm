@@ -165,11 +165,16 @@ def build_harbor_trial_config(
         #   OPENAI_API_BASE   — mini-swe-agent (also openhands fallback)
         #   OPENAI_BASE_URL   — codex, hermes, qwen-coder, swe-agent
         #   LLM_BASE_URL      — openhands, openhands-sdk
-        #   ANTHROPIC_BASE_URL — claude-code
+        #   ANTHROPIC_BASE_URL — claude-code, mini-swe-agent (anthropic models)
         env["OPENAI_API_BASE"] = container_url
         env["OPENAI_BASE_URL"] = container_url
         env["LLM_BASE_URL"] = container_url
-        env["ANTHROPIC_BASE_URL"] = container_url
+        # Anthropic's litellm client (used by mini-swe-agent et al.) appends
+        # "/v1/messages" itself, so this env var must NOT end in "/v1" or
+        # requests double up to "/v1/v1/messages" and Anthropic 404s with
+        # `not_found_error`. The other three vars keep /v1 because OpenAI-
+        # shaped clients don't re-add the version segment.
+        env["ANTHROPIC_BASE_URL"] = container_url.rstrip("/").removesuffix("/v1") or container_url
 
     env_type = None
     if environment_type:

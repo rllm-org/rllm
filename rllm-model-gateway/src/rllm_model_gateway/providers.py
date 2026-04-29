@@ -77,10 +77,20 @@ def apply_route(
     if route.api_key_env:
         key = os.environ.get(route.api_key_env, "").strip()
         if key:
+            # Most providers accept ``Authorization: Bearer <key>`` (OpenAI,
+            # OpenRouter, DeepSeek, Together, Fireworks, Groq, Cerebras,
+            # xAI, and Anthropic's OpenAI-compat endpoint at
+            # ``/v1/chat/completions``). Anthropic's native API at
+            # ``/v1/messages`` requires ``x-api-key: <key>`` and returns
+            # 404 on Bearer auth, so we always send both — providers that
+            # don't recognize one simply ignore it. Without this, Harbor /
+            # mini-swe-agent calls (which use Anthropic native via litellm)
+            # 404 on first call and the agent crashes.
             headers.setdefault("authorization", f"Bearer {key}")
+            headers.setdefault("x-api-key", key)
         else:
             logger.warning(
-                "Provider route %r references api_key_env=%r but the env var is empty — no Authorization header will be injected.",
+                "Provider route %r references api_key_env=%r but the env var is empty — no auth headers will be injected.",
                 route.model_name,
                 route.api_key_env,
             )
