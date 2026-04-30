@@ -1,7 +1,10 @@
+import json
 import os
 from unittest.mock import patch
 
-from rllm.trainer.verl.ray_runtime_env import _get_forwarded_env_vars
+from ray._private.runtime_env.constants import RAY_JOB_CONFIG_JSON_ENV_VAR
+
+from rllm.trainer.verl.ray_runtime_env import _get_forwarded_env_vars, get_ppo_ray_runtime_env
 
 
 def test_forward_basic_env_vars():
@@ -237,3 +240,58 @@ def test_edge_case_exact_prefix():
     # Variables with suffixes should be forwarded
     assert "VLLM_WITH_SUFFIX" in forwarded
     assert "NCCL_DEBUG" in forwarded
+
+
+# ---------------------------------------------------------------------------
+# get_ppo_ray_runtime_env: job-config merge behavior
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_env_no_job_config():
+    """No `ray job submit` context → returns rllm defaults + working_dir=None."""
+    with patch.dict(os.environ, {}, clear=True):
+        runtime_env = get_ppo_ray_runtime_env()
+
+    assert "env_vars" in runtime_env
+    assert runtime_env["env_vars"]["TOKENIZERS_PARALLELISM"] == "true"
+    assert runtime_env["env_vars"]["NCCL_DEBUG"] == "WARN"
+    assert runtime_env["working_dir"] is None
+
+
+def test_runtime_env_pops_keys_from_job_config():
+    """Keys present in the job config's env_vars are popped from rllm's defaults."""
+    job_config = {
+        "runtime_env": {
+            "env_vars": {
+                "NCCL_DEBUG": "INFO",  # overrides rllm default WARN
+                "VLLM_LOGGING_LEVEL": "DEBUG",
+            }
+        }
+    }
+    with patch.dict(os.environ, {RAY_JOB_CONFIG_JSON_ENV_VAR: json.dumps(job_config)}, clear=True):
+        runtime_env = get_ppo_ray_runtime_env()
+
+    # Job-config-set keys are popped from our returned dict (so the job config wins during ray.init merge)
+    assert "NCCL_DEBUG" not in runtime_env["env_vars"]
+    assert "VLLM_LOGGING_LEVEL" not in runtime_env["env_vars"]
+    # Other rllm defaults remain
+    assert runtime_env["env_vars"]["TOKENIZERS_PARALLELISM"] == "true"
+    assert runtime_env["env_vars"]["CUDA_DEVICE_MAX_CONNECTIONS"] == "1"
+
+
+def test_runtime_env_skips_working_dir_when_job_sets_one():
+    """working_dir=None is only added when the job config doesn't specify one."""
+    job_config = {"runtime_env": {"working_dir": "/some/path"}}
+    with patch.dict(os.environ, {RAY_JOB_CONFIG_JSON_ENV_VAR: json.dumps(job_config)}, clear=True):
+        runtime_env = get_ppo_ray_runtime_env()
+
+    assert "working_dir" not in runtime_env
+
+
+def test_runtime_env_handles_invalid_job_config_json():
+    """Malformed job-config JSON is silently ignored — falls back to rllm defaults."""
+    with patch.dict(os.environ, {RAY_JOB_CONFIG_JSON_ENV_VAR: "not-json"}, clear=True):
+        runtime_env = get_ppo_ray_runtime_env()
+
+    assert runtime_env["env_vars"]["TOKENIZERS_PARALLELISM"] == "true"
+    assert runtime_env["working_dir"] is None
