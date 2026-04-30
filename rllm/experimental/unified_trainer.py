@@ -248,32 +248,16 @@ class UnifiedTrainer:
         # validate backend-specific configs
         self.backend.validate_config()
 
-        # compact filtering config (used for filtering out episodes that are not valid)
         self.cf_config = CompactFilteringConfig.from_config(self.rllm_config.compact_filtering)
-
-        # transform config (used for transforming episodes to trajectory groups)
-        self.transform_config = TransformConfig(broadcast=self.rllm_config.stepwise_advantage.mode == "broadcast")
-
-        # rejection sampling config (used for rejection sampling)
-        rs_mode = "episode" if self.rllm_config.rejection_sample.enable else "none"
-
-        self.rs_config = RejectionSamplingConfig(
-            mode=rs_mode,
-            min_partial_solve_tasks=self.rllm_config.rejection_sample.min_partial_solve_tasks,
-            min_trajs_per_group=self.rllm_config.rejection_sample.min_trajs_per_group,
-            filter_uniform_groups=self.rllm_config.rejection_sample.get("filter_uniform_groups", False),
+        self.transform_config = TransformConfig.from_config(
+            self.rllm_config.get("transform", {}),
+            broadcast=self.rllm_config.stepwise_advantage.mode == "broadcast",
         )
-
-        # algorithm config (used for rLLM-native advantage computation)
-        self.algorithm_config = AlgorithmConfig(
-            estimator=self.rllm_config.algorithm.adv_estimator,
-            estimator_map=self.traj_group_adv_estimator_map,  # TODO(listar2000): see if we can make this configurable in config as well
+        self.rs_config = RejectionSamplingConfig.from_config(self.rllm_config.rejection_sample)
+        self.algorithm_config = AlgorithmConfig.from_config(
+            self.rllm_config.algorithm,
             stepwise_advantage_mode=self.rllm_config.stepwise_advantage.mode,
-            norm_adv_by_std_in_grpo=self.rllm_config.algorithm.get("norm_adv_by_std_in_grpo", True),
-            use_precomputed_advantage=self.rllm_config.algorithm.get("use_precomputed_advantage", False),
-            loss_fn=self.rllm_config.algorithm.get("loss_fn", None),
-            lr_schedule=self.rllm_config.algorithm.get("lr_schedule", "constant"),
-            warmup_steps_ratio=self.rllm_config.algorithm.get("warmup_steps_ratio", 0.0),
+            estimator_map=self.traj_group_adv_estimator_map,
         )
 
     def _setup_logging(self):
@@ -414,6 +398,12 @@ class UnifiedTrainer:
             return
 
         workflow_metrics, termination_counts = self._collect_workflow_metrics_from_episodes(trainer_state.episodes)
+        for key, value in workflow_metrics.items():
+            trainer_state.metrics[f"batch/{key}"] = np.mean(value)
+
+        total_counts = max(sum(termination_counts.values()), 1)
+        for r in TerminationReason:
+            trainer_state.metrics[f"batch/termination_reason/{r.value}"] = termination_counts[r.value] / total_counts
 
         # stage 2: transform episodes to trajectory groups (sync)
         trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(trainer_state.episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook)
@@ -456,13 +446,6 @@ class UnifiedTrainer:
                 max_steps_to_visualize=2,
                 show_workflow_metadata=True,
             )
-
-        for key, value in workflow_metrics.items():
-            trainer_state.metrics[f"batch/{key}"] = np.mean(value)
-
-        total_counts = max(sum(termination_counts.values()), 1)
-        for r in TerminationReason:
-            trainer_state.metrics[f"batch/termination_reason/{r.value}"] = termination_counts[r.value] / total_counts
 
     # =========================================================================
     # Fully-asynchronous training pipeline
@@ -809,14 +792,15 @@ class UnifiedTrainer:
     # =========================================================================
     # Helper functions
     # =========================================================================
-    def _collect_workflow_metrics_from_episodes(self, episodes: list[Episode]) -> tuple[dict, Counter]:
+    @staticmethod
+    def _collect_workflow_metrics_from_episodes(episodes: list[Episode]) -> tuple[dict, Counter]:
         workflow_metrics = defaultdict(list)
         termination_counts = Counter()
         for episode in episodes:
             for k, v in episode.metrics.items():
                 workflow_metrics[k].append(v)
-            if episode.termination_reason is not None:
-                termination_counts[episode.termination_reason.value] += 1
+            reason = episode.termination_reason or TerminationReason.UNKNOWN
+            termination_counts[getattr(reason, "value", reason)] += 1
         # reduce the metrics to a scalar value, with error handling
         reduced_workflow_metrics = {}
         for k, v in workflow_metrics.items():

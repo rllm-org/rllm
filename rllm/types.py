@@ -144,6 +144,7 @@ class AgentConfig:
     model: str
     session_uid: str
     metadata: dict = field(default_factory=dict)
+    is_validation: bool = False
 
 
 @runtime_checkable

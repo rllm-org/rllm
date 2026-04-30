@@ -47,12 +47,12 @@ def _make_config(norm_adv_by_std_in_grpo: bool = True):
 def test_norm_adv_by_std_in_grpo_true_from_algorithm():
     """norm_adv_by_std_in_grpo=True is read from rllm.algorithm, not stepwise_advantage."""
     config = _make_config(norm_adv_by_std_in_grpo=True)
-    algo_config = AlgorithmConfig.from_config(config)
+    algo_config = AlgorithmConfig.from_config(config.rllm.algorithm, stepwise_advantage_mode=config.rllm.stepwise_advantage.mode)
     assert algo_config.norm_adv_by_std_in_grpo is True
 
 
 def test_norm_adv_by_std_in_grpo_false_from_algorithm():
     """norm_adv_by_std_in_grpo=False is read from rllm.algorithm, not stepwise_advantage."""
     config = _make_config(norm_adv_by_std_in_grpo=False)
-    algo_config = AlgorithmConfig.from_config(config)
+    algo_config = AlgorithmConfig.from_config(config.rllm.algorithm, stepwise_advantage_mode=config.rllm.stepwise_advantage.mode)
     assert algo_config.norm_adv_by_std_in_grpo is False
