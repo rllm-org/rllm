@@ -82,10 +82,11 @@ class OpenCodeHarness(BaseCliHarness):
             "OPENCODE_FAKE_VCS": "git",
         }
 
-        # Forward the user's actual provider key (or a placeholder — the
-        # gateway re-stamps auth when forwarding to the provider).
+        # Forward the gateway bearer token (when public URL → public auth)
+        # or the user's actual provider key, or a placeholder. The gateway
+        # re-stamps auth with the real upstream key before forwarding.
         api_key_var = _PROVIDER_AUTH.get(provider, "OPENAI_API_KEY")
-        env[api_key_var] = os.environ.get(api_key_var, "sk-rllm-gateway")
+        env[api_key_var] = self.gateway_api_key(config, api_key_var)
         return env
 
     # Provider name we register the gateway under inside opencode.json.
@@ -107,7 +108,10 @@ class OpenCodeHarness(BaseCliHarness):
         _, model_id, _ = self._split_provider(config.model)
         gateway_url = self._container_url(config.base_url)
         api_key_var = _PROVIDER_AUTH.get(self._split_provider(config.model)[0], "OPENAI_API_KEY")
-        api_key = env.get(api_key_var, "sk-rllm-gateway")
+        # Same key build_env injected — bearer token when gateway is
+        # exposed, else the user's real provider key. Reads from env
+        # (already populated by build_env) for consistency.
+        api_key = env.get(api_key_var, self.gateway_api_key(config, api_key_var))
 
         # ``npm: "@ai-sdk/openai-compatible"`` tells opencode to treat this
         # as a generic OpenAI-shaped endpoint. Model ids under this provider

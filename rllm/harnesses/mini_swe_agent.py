@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import shlex
 
 from rllm.harnesses.cli_harness import BaseCliHarness
@@ -83,11 +82,11 @@ class MiniSweAgentHarness(BaseCliHarness):
             "ANTHROPIC_BASE_URL": gateway_url.rstrip("/").removesuffix("/v1") or gateway_url,
         }
 
-        # Forward the provider key litellm will look up. The gateway
-        # re-stamps auth before forwarding to the real provider, so
-        # placeholders work too.
+        # Forward the provider key litellm will look up. When the
+        # gateway requires inbound auth, this becomes the bearer token
+        # (gateway re-stamps with the real upstream key).
         api_var = _provider_key_var(config.model)
-        env[api_var] = os.environ.get(api_var, "sk-rllm-gateway")
+        env[api_var] = self.gateway_api_key(config, api_var)
         return env
 
     def write_configs(
@@ -105,7 +104,7 @@ class MiniSweAgentHarness(BaseCliHarness):
         """
         _, _, qualified = self.ensure_provider_prefix(config.model)
         api_var = _provider_key_var(config.model)
-        api_key = env.get(api_var, "sk-rllm-gateway")
+        api_key = env.get(api_var, self.gateway_api_key(config, api_var))
 
         # Dotenv lines mini-swe-agent v2 reads on startup. The base
         # URL must live HERE (not just in process env) because v2 loads

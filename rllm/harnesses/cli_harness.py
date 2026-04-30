@@ -112,6 +112,29 @@ class BaseCliHarness(SandboxedAgentFlow):
             return "openai"  # Qwen via OpenAI-compatible endpoints
         return "openai"
 
+    @staticmethod
+    def gateway_api_key(config: AgentConfig, fallback_env_var: str) -> str:
+        """Return the API key to inject into the sandbox for *fallback_env_var*.
+
+        When the eval gateway is exposed publicly it generates an
+        ``inbound_auth_token`` and stamps it on
+        ``config.metadata["gateway_auth_token"]``. Every provider key
+        the harness writes into the sandbox env (``OPENAI_API_KEY``,
+        ``ANTHROPIC_API_KEY``, …) must be that bearer token, because
+        that's what the gateway's middleware checks. ``apply_route``
+        replaces the auth header with the real upstream key (read from
+        a server-side env var) before forwarding.
+
+        Loopback gateways (no token) keep the current behaviour: pass
+        the user's real key through, or a placeholder if unset.
+        """
+        token = config.metadata.get("gateway_auth_token")
+        if token:
+            return token
+        import os as _os
+
+        return _os.environ.get(fallback_env_var, "sk-rllm-gateway")
+
     @classmethod
     def ensure_provider_prefix(cls, model_name: str) -> tuple[str, str, str]:
         """Return ``(provider, model_id, qualified_name)`` for *model_name*.

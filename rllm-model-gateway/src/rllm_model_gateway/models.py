@@ -169,3 +169,7 @@ class GatewayConfig(BaseModel):
     # Free-form metadata for the run (benchmark, model, agent, source,
     # …). Surfaced by the cross-run viewer.
     run_metadata: dict[str, Any] = Field(default_factory=dict)
+    # When set, every inbound request must carry
+    # ``Authorization: Bearer <inbound_auth_token>``. Generated per-run
+    # by the eval gateway when a public URL is exposed; never persisted.
+    inbound_auth_token: str | None = None

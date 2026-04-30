@@ -63,7 +63,18 @@ class Runner:
         self.evaluator_override = evaluator_override
 
     async def run(self, task: Task, config: AgentConfig) -> Episode:
+        import asyncio
+
         from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
+
+        # Every sandbox lifecycle call below is sync and can do real I/O
+        # (Modal API roundtrips, docker exec, file uploads, verifier
+        # script execution). Running them directly inside this async
+        # method blocks the event loop — Modal's SDK even surfaces this
+        # as ``AsyncUsageWarning`` — and serialises every concurrent
+        # task on the slowest setup. ``asyncio.to_thread`` offloads to
+        # a worker thread where Modal's "in async context" check fails
+        # cleanly and other in-flight tasks keep making progress.
 
         # Skip per-task verifier detection when an override is provided —
         # the override fully dictates scoring, so we shouldn't probe the
@@ -79,17 +90,33 @@ class Runner:
         sandbox: Sandbox | None = None
         try:
             if needs_sandbox:
-                sandbox, base_image, backend = _create_sandbox_for_task(task, self.sandbox_backend, agent_flow=self.agent_flow)
+                sandbox, base_image, backend = await asyncio.to_thread(
+                    _create_sandbox_for_task,
+                    task,
+                    self.sandbox_backend,
+                    self.agent_flow,
+                )
                 if isinstance(self.agent_flow, SandboxedAgentFlow):
-                    self.agent_flow.set_sandbox(sandbox)
+                    self.agent_flow.set_sandbox(sandbox)  # local assignment, no I/O
                     # Install + (on docker) commit *before* per-task setup
                     # so the cached image stays free of task-specific files.
-                    self.agent_flow.pre_setup(sandbox, base_image, backend)
-                _setup_task_environment(task, sandbox)
+                    await asyncio.to_thread(
+                        self.agent_flow.pre_setup,
+                        sandbox,
+                        base_image,
+                        backend,
+                    )
+                await asyncio.to_thread(_setup_task_environment, task, sandbox)
                 if isinstance(self.agent_flow, SandboxedAgentFlow):
-                    self.agent_flow.on_sandbox_ready({"task_path": str(task.task_dir)}, config)
+                    await asyncio.to_thread(
+                        self.agent_flow.on_sandbox_ready,
+                        {"task_path": str(task.task_dir)},
+                        config,
+                    )
 
-            # AgentFlow runs the agent → Episode
+            # AgentFlow runs the agent → Episode (already runs ``run`` in
+            # a thread pool via ``_run_agent_flow``, so its sandbox.exec
+            # calls don't block the event loop either).
             episode = await _run_agent_flow(self.agent_flow, task, config)
 
             # Stamp session_uid onto every trajectory so the UI can join
@@ -106,7 +133,7 @@ class Runner:
                 evaluator = _adapt_legacy_evaluator(self.evaluator_override)
             else:
                 evaluator = _resolve_evaluator(task, sandbox, verifier_kind, verifier_config)
-            eval_output = evaluator.evaluate(task, episode)
+            eval_output = await asyncio.to_thread(evaluator.evaluate, task, episode)
 
             # Write rewards back
             for traj in episode.trajectories:
@@ -116,16 +143,20 @@ class Runner:
             return episode
         finally:
             if sandbox is not None:
+                from rllm.sandbox.cleanup import deregister
+
                 if isinstance(self.agent_flow, SandboxedAgentFlow):
                     try:
-                        self.agent_flow.teardown_sandbox()
+                        await asyncio.to_thread(self.agent_flow.teardown_sandbox)
                     except Exception:
                         logger.exception("teardown_sandbox failed")
                 else:
                     try:
-                        sandbox.close()
+                        await asyncio.to_thread(sandbox.close)
                     except Exception:
                         logger.exception("sandbox close failed")
+                    finally:
+                        deregister(sandbox)
 
 
 # ---------------------------------------------------------------------------

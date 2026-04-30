@@ -84,6 +84,7 @@ def _run_eval(
     run_dir: str | None = None,
     timestamp: str | None = None,
     stamp_session_in_url: bool = False,
+    gateway_auth_token: str | None = None,
 ):
     """Core eval logic, extracted for clean proxy lifecycle management."""
     from rllm.data import DatasetRegistry
@@ -478,6 +479,7 @@ def _run_eval(
             evaluator_override=evaluator,
             stamp_session_in_url=stamp_session_in_url,
             run_dir=run_dir,
+            gateway_auth_token=gateway_auth_token,
         )
     )
 
@@ -563,6 +565,29 @@ def _run_eval(
 @click.option("--ui/--no-ui", "enable_ui", default=None, help="Enable/disable live UI logging. Default: auto-enabled when logged in (see 'rllm login').")
 @click.option("--save-episodes/--no-save-episodes", "save_episodes", default=True, help="Save each Episode as its own JSON file for later visualization (default: enabled).")
 @click.option("--episodes-dir", "episodes_dir", default=None, help="Directory to write the episode JSONs into. Default: ~/.rllm/eval_results/<bench>_<model>_<timestamp>/.")
+@click.option(
+    "--gateway-public-url",
+    "gateway_public_url",
+    default=None,
+    envvar="RLLM_GATEWAY_PUBLIC_URL",
+    help=(
+        "Publicly-reachable URL for the gateway (tunnel or public IP). Required for "
+        "remote sandbox backends (modal, daytona, e2b, runloop) since they cannot reach "
+        "the host's loopback. The gateway binds 0.0.0.0 automatically when this is set. "
+        "Mutually exclusive with --tunnel."
+    ),
+)
+@click.option(
+    "--tunnel/--no-tunnel",
+    "auto_tunnel",
+    default=None,
+    help=(
+        "Auto-spawn a Cloudflare quick tunnel (`cloudflared tunnel --url …`) and "
+        "expose the gateway through it. Auto-enabled when --sandbox-backend is one "
+        "of {modal, daytona, e2b, runloop, gke} unless --gateway-public-url is set; "
+        "off otherwise. Requires `cloudflared` on PATH."
+    ),
+)
 def eval_cmd(
     benchmark: str,
     agent_name: str | None,
@@ -580,6 +605,8 @@ def eval_cmd(
     enable_ui: bool | None,
     save_episodes: bool,
     episodes_dir: str | None,
+    gateway_public_url: str | None,
+    auto_tunnel: bool | None,
 ):
     """Evaluate a model on a benchmark dataset."""
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
@@ -648,6 +675,27 @@ def eval_cmd(
             # gateway viewer can join shared-db traces back to the
             # episode JSONs in this folder.
             run_id = os.path.basename(os.path.normpath(run_dir))
+            # Remote sandbox backends (modal, daytona, e2b, …) cannot
+            # reach host loopback. The manager exposes the gateway via
+            # one of:
+            #   1. --gateway-public-url <url>      (user-managed tunnel/IP)
+            #   2. --tunnel  → auto-spawn cloudflared quick tunnel
+            #   3. neither   → loopback only; remote sandboxes will 404
+            _remote_backends = {"modal", "daytona", "e2b", "runloop", "gke"}
+            backend_is_remote = (sandbox_backend or "").lower() in _remote_backends
+            # Default tunnel-on for remote backends unless the user
+            # supplied their own public URL.
+            if auto_tunnel is None:
+                auto_tunnel = backend_is_remote and not gateway_public_url
+            if auto_tunnel and gateway_public_url:
+                console.print("  [error]--tunnel and --gateway-public-url are mutually exclusive.[/]")
+                raise SystemExit(1)
+            if backend_is_remote and not (gateway_public_url or auto_tunnel):
+                console.print(
+                    f"  [warning]Sandbox backend '{sandbox_backend}' is remote but no public "
+                    "exposure configured.[/] Cloud sandboxes cannot reach 127.0.0.1; LLM calls "
+                    "will fail.\n  Pass --tunnel (requires cloudflared) or --gateway-public-url."
+                )
             gateway_manager = EvalGatewayManager(
                 provider=rllm_cfg.provider,
                 model_name=model,
@@ -662,6 +710,8 @@ def eval_cmd(
                     "run_dir": run_dir,
                     "timestamp": timestamp,
                 },
+                public_url=gateway_public_url,
+                auto_tunnel=auto_tunnel,
             )
             with Status(f"[dim]Starting rLLM gateway for [bold]{rllm_cfg.provider}/{model}[/bold]...[/]", console=console):
                 try:
@@ -713,6 +763,7 @@ def eval_cmd(
             run_dir=run_dir,
             timestamp=timestamp,
             stamp_session_in_url=gateway_manager is not None,
+            gateway_auth_token=(gateway_manager.inbound_auth_token if gateway_manager else None),
         )
     finally:
         if gateway_manager is not None:

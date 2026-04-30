@@ -102,6 +102,7 @@ async def run_dataset(
     evaluator_override: Evaluator | None = None,
     stamp_session_in_url: bool = False,
     run_dir: str | None = None,
+    gateway_auth_token: str | None = None,
 ) -> tuple[EvalResult, list]:
     """Run a list of :class:`rllm.types.Task` objects through :class:`rllm.runner.Runner`.
 
@@ -134,10 +135,18 @@ async def run_dataset(
             )
             session_uid = f"eval-{idx}"
             task_base_url = _stamp_session_in_url(base_url, session_uid) if stamp_session_in_url else base_url
+            metadata: dict = {}
+            if gateway_auth_token:
+                # Harnesses read this and overload provider key vars
+                # (OPENAI_API_KEY, ANTHROPIC_API_KEY, …) to the bearer
+                # token. The gateway re-stamps with the real upstream
+                # key from server-side env before forwarding.
+                metadata["gateway_auth_token"] = gateway_auth_token
             config = AgentConfig(
                 base_url=task_base_url,
                 model=model,
                 session_uid=session_uid,
+                metadata=metadata,
             )
             task_log.task_started(idx, session_uid, task)
             try:

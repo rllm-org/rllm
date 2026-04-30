@@ -187,11 +187,6 @@ def create_app(
 
     # -- Middleware ---------------------------------------------------------
 
-    # TODO: Add API key auth middleware here for securing gateway access
-    # from cloud containers. Validate an API key from the Authorization
-    # header before allowing access to admin and proxy endpoints.
-    # Add corresponding `api_key` field to GatewayConfig and client classes.
-
     app.add_middleware(
         SessionRoutingMiddleware,
         add_logprobs=config.add_logprobs,
@@ -199,6 +194,7 @@ def create_app(
         sessions=sessions,
         sampling_params_priority=config.sampling_params_priority,
         model=config.model,
+        inbound_auth_token=config.inbound_auth_token,
     )
 
     # -- Health endpoints --------------------------------------------------

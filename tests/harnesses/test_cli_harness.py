@@ -367,6 +367,66 @@ def test_mini_swe_agent_parse_episode_falls_back_when_trajectory_missing():
 
 
 # ---------------------------------------------------------------------------
+# Gateway bearer-token overload (cloud sandbox auth)
+# ---------------------------------------------------------------------------
+
+
+def test_opencode_overloads_provider_key_with_gateway_bearer_token():
+    """When the gateway is publicly exposed, every provider key in the sandbox
+    must be the bearer token. The gateway re-stamps with the real upstream key
+    server-side. Without this, a tunnel URL is wide open to anyone."""
+    h = OpenCodeHarness()
+    config = AgentConfig(
+        base_url="https://x.trycloudflare.com/sessions/eval-0/v1",
+        model="openai/gpt-4o",
+        session_uid="eval-0",
+        metadata={"gateway_auth_token": "tok_abc123"},
+    )
+    env = h.build_env(_make_task(), config)
+    assert env["OPENAI_API_KEY"] == "tok_abc123"
+
+
+def test_mini_swe_agent_overloads_provider_key_with_gateway_bearer_token():
+    h = MiniSweAgentHarness()
+    config = AgentConfig(
+        base_url="https://x.trycloudflare.com/sessions/eval-0/v1",
+        model="anthropic/claude-opus-4-1",
+        session_uid="eval-0",
+        metadata={"gateway_auth_token": "tok_abc123"},
+    )
+    env = h.build_env(_make_task(), config)
+    assert env["ANTHROPIC_API_KEY"] == "tok_abc123"
+
+
+def test_mini_swe_agent_dotenv_carries_bearer_token():
+    """v2 reads OPENAI_API_KEY from ~/.config/mini-swe-agent/.env (override=True),
+    so the bearer token must land THERE — not just in process env."""
+    h = MiniSweAgentHarness()
+    sandbox = FakeSandbox()
+    h.set_sandbox(sandbox)
+    config = AgentConfig(
+        base_url="https://x.trycloudflare.com/sessions/eval-0/v1",
+        model="openai/gpt-4o",
+        session_uid="eval-0",
+        metadata={"gateway_auth_token": "tok_abc123"},
+    )
+    env = h.build_env(_make_task(), config)
+    h.write_configs(_make_task(), config, env)
+
+    write_call = next(c for c in sandbox.calls if "mini-swe-agent/.env" in c.command)
+    assert "OPENAI_API_KEY=tok_abc123" in write_call.command
+
+
+def test_no_gateway_token_falls_back_to_real_provider_key(monkeypatch):
+    """Loopback gateway (no token) keeps the legacy behaviour — pass the user's real key."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-real-user-key")
+    h = OpenCodeHarness()
+    config = _make_config(model="openai/gpt-4o")  # no gateway_auth_token in metadata
+    env = h.build_env(_make_task(), config)
+    assert env["OPENAI_API_KEY"] == "sk-real-user-key"
+
+
+# ---------------------------------------------------------------------------
 # Container URL rewrite — host loopback → host.docker.internal
 # ---------------------------------------------------------------------------
 
@@ -457,6 +517,38 @@ def test_maybe_use_cached_image_returns_cached_tag_when_present(monkeypatch):
     chosen = h.maybe_use_cached_image("ubuntu:24.04", "docker")
     assert chosen.startswith("rllm-cli-opencode-")
     assert chosen.endswith(":installed")
+
+
+@pytest.mark.parametrize("backend", ["modal", "local", "agentcore"])
+def test_pre_setup_skips_commit_for_remote_backends(backend, monkeypatch):
+    """Modal/local/agentcore have no docker-commit equivalent. Image caching
+    must short-circuit so we don't crash, and so cold-install runs every task
+    (acceptable for MVP; future Phase 6 lifts install into Modal Image)."""
+    h = OpenCodeHarness()
+    sandbox = FakeSandbox()
+    monkeypatch.setattr(h, "_docker_image_exists", lambda _tag: False)
+
+    h.pre_setup(sandbox, "python:3.11-slim", backend)
+
+    # Install still ran (we still need the CLI in the live container)…
+    assert any("opencode-ai" in c.command for c in sandbox.calls)
+    # …but no commit attempt.
+    assert sandbox.commits == []
+
+
+def test_container_url_passes_through_for_modal_backend():
+    """Modal sandboxes can't reach host loopback by any name. The harness
+    must hand back the URL it was given — the eval CLI's --gateway-public-url
+    is responsible for making it reachable."""
+    h = OpenCodeHarness()
+    h.sandbox_backend = "modal"
+    public = "https://abc-def.trycloudflare.com/sessions/eval-0/v1"
+    assert h._container_url(public) == public  # no rewrite, no mangling
+    # Loopback URLs in modal mode are also passed through unchanged —
+    # rewriting them would still leave them unreachable. Caller must supply
+    # a public URL.
+    local = "http://127.0.0.1:8000/v1"
+    assert h._container_url(local) == local
 
 
 def test_maybe_use_cached_image_passes_through_for_non_docker_backend(monkeypatch):

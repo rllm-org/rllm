@@ -36,6 +36,24 @@ logger = logging.getLogger(__name__)
 
 _SESSION_PATH_RE = re.compile(r"/sessions/([^/]+)(/v1(?:/.*)?)$")
 
+_BEARER_PREFIX = "bearer "
+
+
+async def _send_401(send: Send) -> None:
+    """Send a minimal 401 Unauthorized so callers get a clean failure mode."""
+    body = b'{"error": {"message": "missing or invalid bearer token", "type": "auth_error"}}'
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"www-authenticate", b'Bearer realm="rllm-gateway"'),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body, "more_body": False})
+
 
 class SessionRoutingMiddleware:
     """Pure-ASGI middleware that rewrites paths and injects sampling parameters."""
@@ -49,6 +67,7 @@ class SessionRoutingMiddleware:
         sessions: Any | None = None,
         sampling_params_priority: str = "client",
         model: str | None = None,
+        inbound_auth_token: str | None = None,
     ) -> None:
         if sampling_params_priority not in ("client", "session"):
             raise ValueError(f"sampling_params_priority must be 'client' or 'session', got {sampling_params_priority!r}")
@@ -58,6 +77,11 @@ class SessionRoutingMiddleware:
         self.sessions = sessions  # SessionManager — for per-session sampling params
         self.sampling_params_priority = sampling_params_priority
         self.model = model
+        # When set, every inbound HTTP request must carry
+        # ``Authorization: Bearer <inbound_auth_token>``. Used by the
+        # eval gateway when exposed via a public tunnel — without this,
+        # anyone who guesses the tunnel URL can burn provider credits.
+        self.inbound_auth_token = inbound_auth_token
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -66,6 +90,11 @@ class SessionRoutingMiddleware:
 
         headers = headers_from_scope(scope)
         original_path: str = scope["path"]
+
+        # Inbound auth check — runs before any body parsing or routing.
+        if self.inbound_auth_token is not None and not self._auth_ok(headers):
+            await _send_401(send)
+            return
 
         # Strip /sessions/{sid}/v1 prefix so downstream routes see /v1/...
         new_path = original_path
@@ -87,6 +116,17 @@ class SessionRoutingMiddleware:
             metadata = extract_metadata(headers=headers, path=original_path)
             self._populate_state(state, metadata)
             await self.app(scope, receive, send)
+
+    def _auth_ok(self, headers: dict[str, str]) -> bool:
+        """Constant-time check that the request carries our bearer token."""
+        import hmac
+
+        auth = headers.get("authorization", "")
+        if not auth.lower().startswith(_BEARER_PREFIX):
+            return False
+        presented = auth[len(_BEARER_PREFIX) :].strip()
+        # ``compare_digest`` to avoid leaking the token via timing.
+        return hmac.compare_digest(presented, self.inbound_auth_token or "")
 
     @staticmethod
     def _populate_state(state: dict[str, Any], metadata: RllmMetadata) -> None:

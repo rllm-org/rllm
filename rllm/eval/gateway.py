@@ -66,10 +66,23 @@ class EvalGatewayManager:
         db_path: str | None = None,
         run_id: str | None = None,
         run_metadata: dict[str, Any] | None = None,
+        public_url: str | None = None,
+        auto_tunnel: bool = False,
     ) -> None:
+        import secrets
+
+        if public_url and auto_tunnel:
+            raise ValueError("public_url and auto_tunnel are mutually exclusive")
+
         self.provider = provider
         self.model_name = model_name
         self.api_key = api_key
+        # ``publicly_exposed`` covers both "user supplied a public URL"
+        # and "we're going to spawn a tunnel after gateway start" — the
+        # bind interface and inbound-auth requirement are the same.
+        publicly_exposed = bool(public_url) or auto_tunnel
+        if publicly_exposed and host == "127.0.0.1":
+            host = "0.0.0.0"
         self.host = host
         self.port = port
         # Default to the shared per-user gateway db so traces from
@@ -78,16 +91,40 @@ class EvalGatewayManager:
         self.db_path = db_path or _default_gateway_db_path()
         self.run_id = run_id
         self.run_metadata: dict[str, Any] = dict(run_metadata or {})
+        self.public_url = public_url  # may be set later by ``start()`` when auto_tunnel
+        self._auto_tunnel = auto_tunnel
+        # Inbound auth: required whenever the gateway is exposed beyond
+        # the local host. Loopback-only deployments (in-process eval
+        # against docker/local) skip the auth check for backwards
+        # compatibility — there's no attack surface there.
+        self.inbound_auth_token: str | None = secrets.token_urlsafe(32) if publicly_exposed else None
         self._server: uvicorn.Server | None = None
         self._thread: threading.Thread | None = None
         self._url: str = ""
+        self._tunnel_proc = None  # subprocess.Popen, set when auto_tunnel=True
 
     @property
     def base_url(self) -> str:
+        # When the user supplied a public URL (tunnel, public IP, …) hand
+        # *that* to harnesses so cloud sandboxes can reach the gateway.
+        # The locally-bound URL is still used for in-process readiness.
+        if self.public_url:
+            return self._normalize_v1(self.public_url)
         return self._url or f"http://{self.host}:{self.port}/v1"
 
+    @property
+    def local_url(self) -> str:
+        """The URL the gateway is bound to on this host (no public override)."""
+        return self._url or f"http://{self.host}:{self.port}/v1"
+
+    @staticmethod
+    def _normalize_v1(url: str) -> str:
+        """Ensure the URL ends in ``/v1`` so eval runner's session stamping aligns."""
+        u = url.rstrip("/")
+        return u if u.endswith("/v1") else f"{u}/v1"
+
     def get_url(self) -> str:
-        """Return the gateway's OpenAI-compatible base URL."""
+        """Return the gateway's OpenAI-compatible base URL (public if set)."""
         return self.base_url
 
     def build_config(self) -> GatewayConfig:
@@ -131,6 +168,7 @@ class EvalGatewayManager:
             ],
             run_id=self.run_id,
             run_metadata=self.run_metadata,
+            inbound_auth_token=self.inbound_auth_token,
         )
 
     def start(self, *, startup_timeout: float = 10.0) -> str:
@@ -159,16 +197,45 @@ class EvalGatewayManager:
         deadline = time.time() + startup_timeout
         while time.time() < deadline:
             if self._server.started:
+                # Local URL is what readiness probes reach; if a public URL
+                # was supplied (or auto-tunneled below), ``base_url`` will
+                # return that instead so harnesses pass it to in-sandbox CLIs.
                 self._url = f"http://{self.host}:{self.port}/v1"
-                logger.info("rLLM gateway ready at %s", self._url)
-                return self._url
+                if self._auto_tunnel and self.public_url is None:
+                    self._spawn_tunnel()
+                if self.public_url:
+                    logger.info("rLLM gateway bound at %s, exposed via %s", self._url, self.public_url)
+                else:
+                    logger.info("rLLM gateway ready at %s", self._url)
+                return self.base_url
             time.sleep(0.05)
 
         # Boot failed — clean up before raising.
         self.shutdown()
         raise RuntimeError(f"rLLM gateway did not start within {startup_timeout}s")
 
+    def _spawn_tunnel(self) -> None:
+        """Spawn cloudflared and pin the resulting public URL onto self.
+
+        Called from :meth:`start` after the gateway is bound, so the
+        tunnel has a port to forward to. Failures here propagate so
+        callers see the misconfiguration immediately rather than
+        learning about it via mysterious 404s from the sandbox.
+        """
+        from rllm.eval.tunnel import start_cloudflared_tunnel
+
+        url, proc = start_cloudflared_tunnel(self.port)
+        self.public_url = url
+        self._tunnel_proc = proc
+
     def shutdown(self) -> None:
+        # Tunnel first: keeping it alive after the gateway is gone
+        # leaves a public URL pointing at a dead port.
+        if self._tunnel_proc is not None:
+            from rllm.eval.tunnel import stop_tunnel
+
+            stop_tunnel(self._tunnel_proc)
+            self._tunnel_proc = None
         if self._server is not None:
             self._server.should_exit = True
         if self._thread is not None:

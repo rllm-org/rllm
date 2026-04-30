@@ -125,10 +125,13 @@ class SandboxedAgentFlow(ABC):
         if self._sandbox_externally_managed:
             self._sandbox = None
             return
+        from rllm.sandbox.cleanup import deregister
+
         try:
             self._sandbox.close()
         except Exception:
             logger.exception("Sandbox teardown error")
+        deregister(self._sandbox)
         self._sandbox = None
 
     def get_image(self, task: dict) -> str:
@@ -140,18 +143,27 @@ class SandboxedAgentFlow(ABC):
 
 
 def create_sandbox(backend: str, name: str, image: str, **kwargs) -> Sandbox:
-    """Factory: create a Sandbox from a backend name. Lazy imports."""
+    """Factory: create a Sandbox from a backend name. Lazy imports.
+
+    Every sandbox is registered with :mod:`rllm.sandbox.cleanup` so that
+    process-death (atexit + SIGTERM) tears it down — critical for cloud
+    backends (modal, daytona) that meter by duration.
+    """
+    from rllm.sandbox.cleanup import register
+
     if backend == "docker":
         from rllm.sandbox.backends.docker import DockerSandbox
 
-        return DockerSandbox(name=name, image=image, **kwargs)
+        sandbox: Sandbox = DockerSandbox(name=name, image=image, **kwargs)
     elif backend == "local":
         from rllm.sandbox.backends.local import LocalSandbox
 
-        return LocalSandbox(name=name, **kwargs)
+        sandbox = LocalSandbox(name=name, **kwargs)
     elif backend == "modal":
         from rllm.sandbox.backends.modal_backend import ModalSandbox
 
-        return ModalSandbox(name=name, **kwargs)
+        sandbox = ModalSandbox(name=name, image=image, **kwargs)
     else:
         raise ValueError(f"Unknown sandbox backend: {backend}. Available: docker, local, modal")
+    register(sandbox)
+    return sandbox
