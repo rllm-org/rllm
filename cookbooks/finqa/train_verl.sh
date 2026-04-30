@@ -5,7 +5,7 @@
 #   1. Install rllm with verl extras:      uv pip install -e ".[verl]"
 #   2. Install this cookbook:               uv pip install --no-deps -e cookbooks/finqa
 #   3. Prepare the dataset:                 python cookbooks/finqa/prepare_data.py
-#   4. Set judge keys:                      OPENAI_API_KEY=… PORTKEY_API_KEY=…
+#   4. Set the judge key:                   OPENAI_API_KEY=…
 
 set -euo pipefail
 

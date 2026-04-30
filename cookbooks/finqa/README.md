@@ -15,7 +15,7 @@ The agent answers questions about SEC 10-K financial statements by querying stru
 
 All ~6,900 tables across 207 companies are pre-loaded into a process-wide `:memory:` SQLite at module import; the tools just look up cached metadata or run a read-only query under a thread lock.
 
-The agent's final reply ends with a `FINAL ANSWER: …` block. The evaluator extracts it and grades against ground truth via a judge LLM (gpt-5-nano for single-table, gpt-5-mini with a structured rubric for multi-table), routed through Portkey for caching/retry. A small bonus is awarded when the agent inspects the *expected* tables via `get_table_info` (the `right_table_access_reward`).
+The agent's final reply ends with a `FINAL ANSWER: …` block. The evaluator extracts it and grades against ground truth via a judge LLM (gpt-5-nano for single-table, gpt-5-mini with a structured rubric for multi-table), called directly through the OpenAI API. A small bonus is awarded when the agent inspects the *expected* tables via `get_table_info` (the `right_table_access_reward`).
 
 [Model Weights](https://huggingface.co/rLLM/rLLM-FinQA-4B) | [Dataset](https://huggingface.co/datasets/rLLM/finqa)
 
@@ -68,11 +68,10 @@ This will:
 
 ## Eval (rllm CLI)
 
-Set the judge keys (used by the evaluator), then run:
+Set the judge key (used by the evaluator), then run:
 
 ```bash
 export OPENAI_API_KEY=sk-…
-export PORTKEY_API_KEY=pk-…
 
 rllm eval finqa \
     --agent finqa \
@@ -83,13 +82,12 @@ rllm eval finqa \
     --max-examples 20
 ```
 
-Episode JSONs land under `~/.rllm/eval_results/`. If `OPENAI_API_KEY` or `PORTKEY_API_KEY` is missing, the evaluator silently returns `reward=0` rather than crashing.
+Episode JSONs land under `~/.rllm/eval_results/`. If `OPENAI_API_KEY` is missing, the evaluator silently returns `reward=0` rather than crashing.
 
 ## Training (rllm CLI)
 
 ```bash
 export OPENAI_API_KEY=sk-…
-export PORTKEY_API_KEY=pk-…
 
 rllm train finqa \
     --agent finqa \

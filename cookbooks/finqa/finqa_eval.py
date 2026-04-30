@@ -1,17 +1,13 @@
 """FinQA evaluator: judge LLM correctness + table-access bonus.
 
-Wraps the original :func:`projects.finqa.fin_qa_reward.fin_qa_reward_function`
-logic — ports the judge call, single-table vs multi-table rubric, and
-table-access scoring into a self-contained module so the cookbook does not
-depend on ``projects/finqa``.
+Ports the judge call, single-table vs multi-table rubric, and table-access
+scoring from the legacy :func:`projects.finqa.fin_qa_reward.fin_qa_reward_function`
+into a self-contained module so the cookbook does not depend on
+``projects/finqa``.
 
-The judge calls require:
-
-* ``OPENAI_API_KEY``  — backing OpenAI key
-* ``PORTKEY_API_KEY`` — Portkey gateway key (for caching/retry)
-
-If either is missing the evaluator falls back to ``reward=0`` rather than
-raising — useful for smoke tests without the gateway.
+The judge calls require ``OPENAI_API_KEY``. If it's missing the evaluator
+falls back to ``reward=0`` rather than raising — useful for smoke tests
+without a real key.
 """
 
 from __future__ import annotations
@@ -20,7 +16,6 @@ import json
 import os
 import re
 
-import httpx
 import openai
 from finqa_constants import CORRECTNESS_PROMPT_PATH, MULTI_TABLE_CORRECTNESS_PROMPT_PATH
 
@@ -38,15 +33,9 @@ with open(CORRECTNESS_PROMPT_PATH, encoding="utf-8") as f:
 with open(MULTI_TABLE_CORRECTNESS_PROMPT_PATH, encoding="utf-8") as f:
     MULTI_TABLE_CORRECTNESS_PROMPT = f.read()
 
-PORTKEY_API_KEY = os.environ.get("PORTKEY_API_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 JUDGE_MODEL = "gpt-5-nano"
 MULTI_TABLE_JUDGE_MODEL = "gpt-5-mini"
-
-GATEWAY_CONFIG = {
-    "retry": {"attempts": 5},
-    "cache": {"mode": "simple", "max_age": 1209600},  # 14 days
-}
 
 CORRECTNESS_WEIGHTS = {
     "primary_data_score": 0.30,
@@ -63,26 +52,11 @@ _FINAL_ANSWER_TAIL_RE = re.compile(r"FINAL ANSWER:\s*(.*)$", re.DOTALL | re.IGNO
 
 
 def _make_judge_client():
-    """Build a Portkey-fronted OpenAI client. Returns None if either key is missing."""
-    if not OPENAI_API_KEY or not PORTKEY_API_KEY:
+    """Build a plain OpenAI client. Returns None if OPENAI_API_KEY is missing."""
+    if not OPENAI_API_KEY:
         return None
     try:
-        from portkey_ai import PORTKEY_GATEWAY_URL, createHeaders
-    except ImportError:
-        return None
-    http_client = httpx.Client(
-        http2=True,
-        limits=httpx.Limits(max_connections=5000, max_keepalive_connections=2000),
-        timeout=75.0,
-        trust_env=False,
-    )
-    try:
-        return openai.OpenAI(
-            base_url=PORTKEY_GATEWAY_URL,
-            api_key=OPENAI_API_KEY,
-            http_client=http_client,
-            default_headers=createHeaders(api_key=PORTKEY_API_KEY, provider="openai", config=GATEWAY_CONFIG),
-        )
+        return openai.OpenAI(api_key=OPENAI_API_KEY)
     except Exception:
         return None
 

@@ -13,9 +13,6 @@ dependencies = [
     "pandas",
     "asteval>=1.0.6",
     "huggingface-hub",
-    # judge-LLM client; falls back to reward=0 if either key is missing
-    "portkey-ai>=0.1",
-    "httpx[http2]>=0.24",
 ]
 
 [tool.setuptools]
