@@ -39,6 +39,10 @@ class AsyncTrainingConfig:
             assert self.fwd_bwd_group_size >= 1
             assert self.mini_batch_size % self.fwd_bwd_group_size == 0, f"mini_batch_size ({self.mini_batch_size}) must be divisible by fwd_bwd_group_size ({self.fwd_bwd_group_size})"
 
+    @classmethod
+    def from_config(cls, config: DictConfig) -> "AsyncTrainingConfig":
+        return cls(**OmegaConf.to_container(config))  # type: ignore
+
 
 @dataclass
 class CompactFilteringConfig:
@@ -146,7 +150,7 @@ class RolloutCorrectionConfig:
     """
 
     tis_mode: str | None = None
-    bypass_mode: bool = True
+    bypass_mode: bool | None = None
     tis_cap: float = 5.0
 
 
@@ -219,8 +223,8 @@ class AlgorithmConfig:
         rc_section = config.rllm.algorithm.get("rollout_correction", {})
         rollout_correction = RolloutCorrectionConfig(
             tis_mode=rc_section.get("tis_mode", None),
-            bypass_mode=rc_section.get("bypass_mode", True),
-            tis_cap=rc_section.get("tis_cap", 5.0),
+            bypass_mode=rc_section.get("bypass_mode", None),
+            tis_cap=rc_section.get("tis_cap", 2.0),
         )
         return cls(
             estimator=rLLMAdvantageEstimator(config.algorithm.adv_estimator),

@@ -149,16 +149,7 @@ class UnifiedTrainer:
         self._validate_and_setup_configs()
         self._setup_logging()
 
-        # Async training config
-        async_cfg = self.rllm_config.get("async_training", {})
-        self.async_config = AsyncTrainingConfig(
-            enable=async_cfg.get("enable", False),
-            mini_batch_size=async_cfg.get("mini_batch_size", 1),
-            fwd_bwd_group_size=async_cfg.get("fwd_bwd_group_size", 1),
-            staleness_threshold=async_cfg.get("staleness_threshold", 0.0),
-            trigger_parameter_sync_step=async_cfg.get("trigger_parameter_sync_step", 1),
-            partial_rollout=async_cfg.get("partial_rollout", True),
-        )
+        self.async_config = AsyncTrainingConfig.from_config(self.rllm_config.get("async_training", {}))
 
         rollout_engine: RolloutEngine = self.backend.init_rollout_engine(
             cf_config=self.cf_config,
