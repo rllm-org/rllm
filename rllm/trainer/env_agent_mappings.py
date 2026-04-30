@@ -9,15 +9,11 @@ def safe_import(module_path, class_name):
 # Import environment classes
 ENV_CLASSES = {
     "tool": safe_import("rllm.environments.tools.tool_env", "ToolEnvironment"),
-    "math": safe_import("rllm.environments.base.single_turn_env", "SingleTurnEnvironment"),
-    "code": safe_import("rllm.environments.base.single_turn_env", "SingleTurnEnvironment"),
-    "single_turn_env": safe_import("rllm.environments.base.single_turn_env", "SingleTurnEnvironment"),
 }
 
 # Import agent classes
 AGENT_CLASSES = {
     "tool_agent": safe_import("rllm.agents.tool_agent", "ToolAgent"),
-    "math_agent": safe_import("rllm.agents.math_agent", "MathAgent"),
 }
 
 WORKFLOW_CLASSES = {

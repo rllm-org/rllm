@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "math-agent"
+version = "0.1.0"
+description = "Single-turn math agent plugin for rLLM (AgentFlow protocol)"
+requires-python = ">=3.10"
+dependencies = ["rllm", "openai"]
+
+[tool.setuptools]
+# NOTE: top-level module names must be unique across all installed
+# cookbooks (entry-point packages share the same `sys.path`). Use
+# distinct names per cookbook (e.g. `math_eval`, not `evaluator`).
+py-modules = ["math_flow", "math_eval"]
+
+# Plugin discovery: `rllm` CLI finds these by name.
+[project.entry-points."rllm.agents"]
+math = "math_flow:math_flow"
+
+[project.entry-points."rllm.evaluators"]
+math = "math_eval:math_evaluator"

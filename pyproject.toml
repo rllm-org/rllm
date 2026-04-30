@@ -205,7 +205,6 @@ ignore = [
 "examples/archive/deepresearch/deepresearch_agent.py" = ["E501"]
 "examples/fully_async/deepresearch/refine_agent.py" = ["E501"]
 "examples/fully_async/deepresearch/search_agent.py" = ["E501"]
-"examples/archive/vimgolf/prepare_vimgolf_data.py" = ["E501"]
 "examples/countdown/prepare_countdown_data.py" = ["E501"]
 "examples/eval_protocol/prepare_frozen_lake_data.py" = ["E501"]
 "examples/solver_judge/prepare_countdown_data.py" = ["E501"]

@@ -10,14 +10,12 @@ __all__ = [
     "Step",
     "Trajectory",
     "Episode",
-    "MathAgent",
     "ToolAgent",
 ]
 
 # name -> (module_path, attribute, optional)
 # If optional is True, ImportError is turned into AttributeError (missing optional deps).
 _LAZY_IMPORTS: dict[str, tuple[str, str, bool]] = {
-    "MathAgent": ("rllm.agents.math_agent", "MathAgent", False),
     "ToolAgent": ("rllm.agents.tool_agent", "ToolAgent", True),
 }
 
