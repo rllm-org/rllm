@@ -1298,54 +1298,6 @@ def swebench_transform(row: dict) -> dict:
     }
 
 
-def frozenlake_transform(row: dict) -> dict:
-    """Transform FrozenLake dataset row to standard format.
-
-    Handles both flat format (seed, size, p at top level) and legacy
-    nested format (params inside extra_info dict).
-    """
-    extra = row.get("extra_info", {})
-    if isinstance(extra, str):
-        try:
-            extra = json.loads(extra)
-        except (json.JSONDecodeError, TypeError):
-            extra = {}
-
-    return {
-        "seed": row.get("seed", extra.get("seed", 42)),
-        "size": row.get("size", extra.get("size", 4)),
-        "p": row.get("p", extra.get("p", 0.8)),
-        "data_source": "frozenlake",
-    }
-
-
-def frozenlake_generate(split: str, catalog_entry: dict) -> list[dict]:
-    """Procedurally generate FrozenLake tasks.
-
-    Produces tasks with varying grid sizes (2-8) and seeds.
-    Train split: 500 tasks. Test split: 100 tasks.
-    """
-    import random as _random
-
-    num_tasks = 500 if split == "train" else 100
-    seed_offset = 0 if split == "train" else 10000
-    rng = _random.Random(seed_offset)
-
-    tasks = []
-    for i in range(num_tasks):
-        size = rng.randint(3, 8)
-        tasks.append(
-            {
-                "task_id": f"frozenlake_{split}_{i}",
-                "seed": seed_offset + i,
-                "size": size,
-                "p": 0.8,
-                "data_source": "frozenlake",
-            }
-        )
-    return tasks
-
-
 def bfcl_transform(row: dict) -> dict:
     """Transform BFCL exec row to standard function-calling format.
 

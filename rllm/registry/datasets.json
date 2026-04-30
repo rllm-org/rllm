@@ -699,19 +699,6 @@
       "transform": "rllm.data.transforms:swebench_transform",
       "instruction_field": "question"
     },
-    "frozenlake": {
-      "description": "FrozenLake grid navigation (random maps, variable size 2-10)",
-      "source": "generated",
-      "category": "agentic",
-      "splits": [
-        "train",
-        "test"
-      ],
-      "default_agent": "frozenlake",
-      "reward_fn": "frozenlake_reward_fn",
-      "eval_split": "test",
-      "generator": "rllm.data.transforms:frozenlake_generate"
-    },
     "omnidocbench": {
       "description": "OmniDocBench: Comprehensive document understanding benchmark with structured eval",
       "source": "rwood-97/english_OmniDocBench_with_eval",

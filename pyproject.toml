@@ -204,7 +204,6 @@ ignore = [
 "rllm/system_prompts.py" = ["E501"]
 "rllm/agents/appworld_react_agents.py" = ["E501"]
 "rllm/agents/code_agent.py" = ["E501"]
-"rllm/agents/frozenlake_agent.py" = ["E501"]
 "rllm/agents/miniwob_agent.py" = ["E501"]
 "rllm/agents/webarena_agent.py" = ["E501"]
 "examples/archive/deepresearch/deepresearch_agent.py" = ["E501"]
