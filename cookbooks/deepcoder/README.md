@@ -1,28 +1,27 @@
 # Deepcoder Agent
 
-A multi-turn iterative-coding agent for rLLM that solves competition-style programming problems via the **AgentFlow protocol**, replacing the legacy `examples/deepcoder/` (which used `BaseAgent` + `SingleTurnEnvironment` + `AgentExecutionEngine`).
+A single-turn coding agent for rLLM that solves competition-style programming problems via the **AgentFlow protocol**, replacing the legacy `examples/deepcoder/` (which used `BaseAgent` + `SingleTurnEnvironment` + `AgentExecutionEngine`).
 
 ## Overview
 
-The agent receives a problem (LiveCodeBench / Codeforces / TACO / APPS / primeintellect formats), writes Python code in a fenced ```` ```python ```` block, and runs the solution against the hidden test cases. On any failing test, the failures are fed back to the model and it gets another revision turn — up to `max_turns` total. Reward is `1.0` if the final solution passes all hidden tests, `0.0` otherwise.
+The agent receives a problem (LiveCodeBench / Codeforces / TACO / APPS / primeintellect formats) and emits a single response containing reasoning followed by a fenced ```` ```python ```` code block. The full assistant response is stored on the episode; the evaluator extracts the last fenced block and runs it against the hidden test cases. Reward is `1.0` if all tests pass, `0.0` otherwise.
 
-The in-loop test runner is the same `RewardCodeFn` used by the final evaluator, so the train-time signal and eval-time score are identical.
+Long chain-of-thought reasoning happens *inside the assistant message* — there is no multi-turn revise/feedback loop. This matches the original deepcoder training setup.
 
 ## Architecture
 
 ```
 AgentFlow.run(task, config)
   │
-  └── Multi-turn loop (default 3 turns)
-        │
-        ├── LLM call via OpenAI(base_url=config.base_url)
-        │     Model outputs reasoning + ```python ... ```
-        │
-        ├── extract_code() → RewardCodeFn(task_info, code)
-        │
-        ├── If all tests pass → done (won)
-        │
-        └── Else → format_feedback(test_results) → revise
+  ├── one LLM call via OpenAI(base_url=config.base_url)
+  │     model outputs reasoning + ```python ... ```
+  │
+  └── store full response in episode.artifacts["answer"]
+
+Evaluator.evaluate(task, episode)
+  │
+  └── RewardCodeFn extracts last ```python``` block, runs against
+      task.metadata["ground_truth"] (hidden tests).
 ```
 
 ## Installation
