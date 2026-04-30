@@ -121,3 +121,7 @@ class GatewayConfig(BaseModel):
     sync_traces: bool = False
     sampling_params_priority: str = "client"
     model: str | None = None  # When set, overrides ``body.model``
+    tokenizer_name: str | None = None
+    disable_thinking: bool = False
+    accumulate_reasoning: bool = False
+    multi_turn_extension: bool = False

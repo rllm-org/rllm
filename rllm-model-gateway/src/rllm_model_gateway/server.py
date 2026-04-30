@@ -121,6 +121,13 @@ def create_app(
     if config is None:
         config = GatewayConfig()
 
+    if config.multi_turn_extension and local_handler is not None:
+        logger.warning(
+            "rllm.multi_turn_extension=true was set, but gateway parser transport is disabled because local_handler is in use. The local handler must preserve multi-turn prefix extension itself."
+        )
+    elif config.multi_turn_extension:
+        _validate_parser_transport_config(config)
+
     _install_access_log_filter()
 
     if store is None:
@@ -154,6 +161,7 @@ def create_app(
         strip_vllm=config.strip_vllm_fields,
         sync_traces=config.sync_traces,
         local_handler=local_handler,
+        parser_config=config if config.multi_turn_extension and local_handler is None else None,
     )
     sessions = SessionManager(store)
 
@@ -395,6 +403,7 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
         "RLLM_GATEWAY_DB_PATH": "db_path",
         "RLLM_GATEWAY_LOG_LEVEL": "log_level",
         "RLLM_GATEWAY_STORE": "store_worker",
+        "RLLM_GATEWAY_TOKENIZER_NAME": "tokenizer_name",
     }
     for env_key, config_key in env_map.items():
         val = os.environ.get(env_key)
@@ -403,6 +412,16 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
                 data[config_key] = int(val)
             else:
                 data[config_key] = val
+
+    bool_env_map = {
+        "RLLM_GATEWAY_MULTI_TURN_EXTENSION": "multi_turn_extension",
+        "RLLM_GATEWAY_DISABLE_THINKING": "disable_thinking",
+        "RLLM_GATEWAY_ACCUMULATE_REASONING": "accumulate_reasoning",
+    }
+    for env_key, config_key in bool_env_map.items():
+        val = os.environ.get(env_key)
+        if val is not None:
+            data[config_key] = val.lower() in ("1", "true", "yes", "on")
 
     # 3. CLI args (highest priority)
     if getattr(args, "host", None) is not None:
@@ -419,6 +438,14 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
         data["sampling_params_priority"] = args.sampling_params_priority
     if getattr(args, "model", None) is not None:
         data["model"] = args.model
+    if getattr(args, "tokenizer_name", None) is not None:
+        data["tokenizer_name"] = args.tokenizer_name
+    if getattr(args, "multi_turn_extension", None) is not None:
+        data["multi_turn_extension"] = args.multi_turn_extension
+    if getattr(args, "disable_thinking", None) is not None:
+        data["disable_thinking"] = args.disable_thinking
+    if getattr(args, "accumulate_reasoning", None) is not None:
+        data["accumulate_reasoning"] = args.accumulate_reasoning
 
     # Workers from CLI --worker flags (WorkerConfig validator auto-splits URLs)
     worker_urls = getattr(args, "worker", None) or []
@@ -426,6 +453,16 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
         data["workers"] = [{"url": raw_url, "worker_id": str(i)} for i, raw_url in enumerate(worker_urls)]
 
     return GatewayConfig(**data)
+
+
+def _validate_parser_transport_config(config: GatewayConfig) -> None:
+    if not config.tokenizer_name:
+        raise ValueError("multi_turn_extension=true requires tokenizer_name for gateway parser transport")
+    if not config.disable_thinking and not config.accumulate_reasoning:
+        raise ValueError(
+            "multi_turn_extension=true requires either disable_thinking=true or accumulate_reasoning=true. "
+            "Otherwise reasoning emitted by the model may be omitted from future rendered prompts and break prefix extension."
+        )
 
 
 # ------------------------------------------------------------------
@@ -460,6 +497,15 @@ def main() -> None:
         default=None,
         help="If set, the gateway rewrites every request body's 'model' field to this value before forwarding.",
     )
+    parser.add_argument(
+        "--tokenizer-name",
+        type=str,
+        default=None,
+        help="Tokenizer/model path used by parser transport when multi-turn extension is enabled.",
+    )
+    parser.add_argument("--multi-turn-extension", action="store_true", default=None)
+    parser.add_argument("--disable-thinking", action="store_true", default=None)
+    parser.add_argument("--accumulate-reasoning", action="store_true", default=None)
 
     args = parser.parse_args()
     config = _load_config(args)

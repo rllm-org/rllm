@@ -11,12 +11,20 @@ set -euo pipefail
 unset ROCR_VISIBLE_DEVICES 2>/dev/null || true
 
 MODEL_PATH=Qwen/Qwen3-4B-Instruct-2507
+MULTI_TURN_EXTENSION=${MULTI_TURN_EXTENSION:-true}
+VLLM_TOOL_ARGS=()
+if [[ "$MULTI_TURN_EXTENSION" != "true" ]]; then
+    VLLM_TOOL_ARGS+=(+actor_rollout_ref.rollout.engine_kwargs.vllm.enable_auto_tool_choice=true)
+    VLLM_TOOL_ARGS+=(+actor_rollout_ref.rollout.engine_kwargs.vllm.tool_call_parser=hermes)
+fi
 
 python -u train.py \
     rllm/backend=verl \
     algorithm.adv_estimator=grpo \
     algorithm.norm_adv_by_std_in_grpo=true \
     rllm.algorithm.use_rllm=true \
+    rllm.multi_turn_extension=$MULTI_TURN_EXTENSION \
+    rllm.accumulate_reasoning=true \
     data.train_batch_size=32 \
     data.val_batch_size=256 \
     data.max_prompt_length=2048 \
@@ -41,8 +49,7 @@ python -u train.py \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.mode=async \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.enable_auto_tool_choice=true \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.tool_call_parser=hermes \
+    "${VLLM_TOOL_ARGS[@]}" \
     actor_rollout_ref.rollout.enforce_eager=False \
     +actor_rollout_ref.rollout.max_model_len=32768 \
     actor_rollout_ref.rollout.temperature=1.0 \

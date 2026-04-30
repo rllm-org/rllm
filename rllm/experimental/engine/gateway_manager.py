@@ -78,6 +78,7 @@ class GatewayManager:
     """
 
     def __init__(self, config: DictConfig, mode: str = "thread") -> None:
+        self.config = config
         gw_cfg = config.rllm.get("gateway", {})
         configured_host = gw_cfg.get("host", None)
         self.host: str = configured_host if configured_host else _get_routable_ip()
@@ -87,6 +88,10 @@ class GatewayManager:
         self.sampling_params_priority: str = gw_cfg.get("sampling_params_priority", "client")
         # The gateway always pins ``body.model`` to whatever the trainer is serving
         self.model: str | None = config.get("model", {}).get("name", None)
+        self.tokenizer_name: str | None = gw_cfg.get("tokenizer_name", None)
+        self.multi_turn_extension: bool = bool(config.rllm.get("multi_turn_extension", False))
+        self.disable_thinking: bool = bool(config.rllm.get("disable_thinking", False))
+        self.accumulate_reasoning: bool = bool(config.rllm.get("accumulate_reasoning", False))
         self.mode = mode
 
         self._process: subprocess.Popen | None = None
@@ -127,6 +132,7 @@ class GatewayManager:
         For TinkerEngine: creates an in-process handler (no sidecar needed).
         """
         engine_cls = type(rollout_engine).__name__
+        self._populate_parser_config(rollout_engine)
 
         if engine_cls == "TinkerEngine":
             # In-process handler — no HTTP backend, no worker registration
@@ -135,6 +141,7 @@ class GatewayManager:
             self._local_handler = create_tinker_handler(rollout_engine)
             self._start_thread(local_handler=self._local_handler)
         else:
+            self._validate_parser_config_for_proxy()
             if self.mode == "process":
                 self._start_process()
             else:
@@ -218,6 +225,32 @@ class GatewayManager:
 
     # -- Internal ------------------------------------------------------------
 
+    def _populate_parser_config(self, rollout_engine: RolloutEngine) -> None:
+        if not self.model:
+            actor_rollout_ref = self.config.get("actor_rollout_ref", {})
+            model_cfg = actor_rollout_ref.get("model", {}) if actor_rollout_ref else {}
+            self.model = model_cfg.get("path") or self.config.get("model", {}).get("name", None)
+
+        if self.tokenizer_name:
+            return
+
+        tokenizer = getattr(rollout_engine, "tokenizer", None)
+        self.tokenizer_name = getattr(tokenizer, "name_or_path", None)
+        if self.tokenizer_name:
+            return
+
+        actor_rollout_ref = self.config.get("actor_rollout_ref", {})
+        model_cfg = actor_rollout_ref.get("model", {}) if actor_rollout_ref else {}
+        self.tokenizer_name = model_cfg.get("path") or self.config.get("model", {}).get("name", None)
+
+    def _validate_parser_config_for_proxy(self) -> None:
+        if not self.multi_turn_extension:
+            return
+        if not self.tokenizer_name:
+            raise ValueError("rllm.multi_turn_extension=true requires a tokenizer/model path for gateway parser transport")
+        if not self.disable_thinking and not self.accumulate_reasoning:
+            raise ValueError("rllm.multi_turn_extension=true requires either rllm.disable_thinking=true or rllm.accumulate_reasoning=true")
+
     def _start_process(self) -> None:
         """Launch gateway as a subprocess and poll until healthy."""
         cmd = [
@@ -235,6 +268,14 @@ class GatewayManager:
             cmd.extend(["--sampling-params-priority", self.sampling_params_priority])
         if self.model:
             cmd.extend(["--model", self.model])
+        if self.tokenizer_name:
+            cmd.extend(["--tokenizer-name", self.tokenizer_name])
+        if self.multi_turn_extension:
+            cmd.append("--multi-turn-extension")
+        if self.disable_thinking:
+            cmd.append("--disable-thinking")
+        if self.accumulate_reasoning:
+            cmd.append("--accumulate-reasoning")
 
         logger.info("Starting gateway subprocess: %s", " ".join(cmd))
         # Inherit parent's stdout/stderr so gateway logs are visible for debugging.
@@ -271,6 +312,10 @@ class GatewayManager:
             store_worker="sqlite" if self.db_path else "memory",
             sampling_params_priority=self.sampling_params_priority,
             model=self.model,
+            tokenizer_name=self.tokenizer_name,
+            disable_thinking=self.disable_thinking,
+            accumulate_reasoning=self.accumulate_reasoning,
+            multi_turn_extension=self.multi_turn_extension,
         )
         app = create_app(config=gw_config, local_handler=local_handler)
 

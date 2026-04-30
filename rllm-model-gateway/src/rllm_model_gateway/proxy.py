@@ -20,7 +20,7 @@ from rllm_model_gateway.data_process import (
     build_trace_record_from_chunks,
     strip_vllm_fields,
 )
-from rllm_model_gateway.models import TraceRecord
+from rllm_model_gateway.models import GatewayConfig, TraceRecord
 from rllm_model_gateway.session_router import SessionRouter
 from rllm_model_gateway.store.base import TraceStore
 
@@ -40,6 +40,202 @@ _HOP_BY_HOP = frozenset(
         "host",
     }
 )
+
+
+class _RllmParserTransport:
+    """Convert chat-completions requests to raw-text completions requests.
+
+    Rendering and completion parsing stay delegated to ``rllm.parser``; this
+    class only adapts the HTTP transport shape.
+    """
+
+    def __init__(self, config: GatewayConfig, parser: Any | None = None) -> None:
+        self.config = config
+        self.accumulate_reasoning = config.accumulate_reasoning
+
+        if parser is not None:
+            self.parser = parser
+            return
+
+        if not config.tokenizer_name:
+            raise ValueError("tokenizer_name is required for rLLM parser transport")
+
+        from transformers import AutoTokenizer
+
+        from rllm.parser import ChatTemplateParser
+
+        tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_name, trust_remote_code=True)
+        self.parser = ChatTemplateParser.get_parser(
+            tokenizer,
+            disable_thinking=config.disable_thinking,
+            multi_turn_extension=config.multi_turn_extension,
+        )
+
+        if type(self.parser).parse_completion_text is ChatTemplateParser.parse_completion_text:
+            raise ValueError(f"Parser {type(self.parser).__name__} does not implement parse_completion_text")
+
+    def chat_to_completion(self, body: dict[str, Any], *, originally_requested_logprobs: bool) -> dict[str, Any]:
+        messages = body.get("messages")
+        if not isinstance(messages, list):
+            raise ValueError("parser transport requires a chat messages list")
+        if body.get("stream"):
+            raise ValueError("parser transport does not support stream=true in v1")
+        if body.get("n", 1) != 1:
+            raise ValueError("parser transport supports only n=1 in v1")
+        if body.get("top_logprobs") is not None and not originally_requested_logprobs:
+            raise ValueError("top_logprobs requires logprobs=true")
+
+        self._reject_multimodal(messages)
+
+        tools = body.get("tools") or []
+        tool_choice = body.get("tool_choice")
+        if tool_choice in (None, "auto"):
+            tools_for_prompt = tools
+        elif tool_choice == "none":
+            tools_for_prompt = []
+        else:
+            raise ValueError("parser transport supports only omitted, auto, or none tool_choice in v1")
+
+        prompt_text = self.parser.parse(
+            messages,
+            add_generation_prompt=True,
+            is_first_msg=True,
+            tools=tools_for_prompt,
+            accumulate_reasoning=self.accumulate_reasoning,
+        )
+
+        stop_token_ids = sorted(set(body.get("stop_token_ids") or []) | set(getattr(self.parser, "stop_sequences", []) or []))
+        completion_logprobs = body["top_logprobs"] if body.get("top_logprobs") is not None else 1
+
+        converted: dict[str, Any] = {
+            "model": body.get("model"),
+            "prompt": prompt_text,
+            "max_tokens": body.get("max_tokens") or body.get("max_completion_tokens"),
+            "temperature": body.get("temperature"),
+            "top_p": body.get("top_p"),
+            "top_k": body.get("top_k"),
+            "stop": body.get("stop"),
+            "stop_token_ids": stop_token_ids,
+            "logprobs": completion_logprobs,
+            "return_token_ids": True,
+            "add_special_tokens": False,
+        }
+
+        for key in (
+            "min_tokens",
+            "frequency_penalty",
+            "presence_penalty",
+            "repetition_penalty",
+            "seed",
+            "ignore_eos",
+            "include_stop_str_in_output",
+            "skip_special_tokens",
+        ):
+            if key in body:
+                converted[key] = body[key]
+
+        return {k: v for k, v in converted.items() if v is not None}
+
+    def completion_to_chat(self, response: dict[str, Any]) -> dict[str, Any]:
+        choices = response.get("choices") or []
+        if len(choices) != 1:
+            raise ValueError("parser transport expected exactly one completion choice")
+
+        choice = choices[0]
+        completion_text = choice.get("text")
+        if completion_text is None:
+            raise ValueError("vLLM completion response missing choices[0].text")
+
+        token_ids = choice.get("token_ids")
+        if token_ids is None:
+            raise ValueError("vLLM completion response missing choices[0].token_ids")
+        token_ids = list(token_ids)
+
+        parsed = self.parser.parse_completion_text(completion_text)
+        logprobs = self._normalize_logprobs(choice, token_ids)
+        tool_calls = self._tool_calls_to_openai(parsed.get("tool_calls") or [], choice.get("index", 0))
+
+        message: dict[str, Any] = {
+            "role": "assistant",
+            "content": parsed.get("content", "") or "",
+        }
+        if parsed.get("reasoning"):
+            message["reasoning"] = parsed["reasoning"]
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+
+        prompt_token_ids = choice.get("prompt_token_ids")
+        if prompt_token_ids is None:
+            prompt_token_ids = response.get("prompt_token_ids", [])
+
+        return {
+            "id": response.get("id"),
+            "object": "chat.completion",
+            "created": response.get("created"),
+            "model": response.get("model"),
+            "prompt_token_ids": list(prompt_token_ids or []),
+            "choices": [
+                {
+                    "index": choice.get("index", 0),
+                    "message": message,
+                    "finish_reason": "tool_calls" if tool_calls else choice.get("finish_reason"),
+                    "token_ids": token_ids,
+                    "logprobs": logprobs,
+                }
+            ],
+            "usage": response.get("usage", {}),
+        }
+
+    @staticmethod
+    def _reject_multimodal(messages: list[dict[str, Any]]) -> None:
+        for message in messages:
+            if message.get("images") is not None:
+                raise ValueError("parser transport does not support image inputs in v1")
+            content = message.get("content")
+            if isinstance(content, list | dict):
+                raise ValueError("parser transport does not support multimodal message content in v1")
+
+    @staticmethod
+    def _normalize_logprobs(choice: dict[str, Any], token_ids: list[int]) -> dict[str, Any]:
+        lp_obj = choice.get("logprobs")
+        if not lp_obj:
+            raise ValueError("vLLM completion response missing logprobs")
+
+        tokens = lp_obj.get("tokens")
+        token_logprobs = lp_obj.get("token_logprobs")
+        top_logprobs = lp_obj.get("top_logprobs")
+        if tokens is None or token_logprobs is None:
+            raise ValueError("vLLM completion response missing sampled-token logprobs")
+        if len(tokens) != len(token_ids) or len(token_logprobs) != len(token_ids):
+            raise ValueError("vLLM completion logprobs are not aligned with token_ids")
+        if any(logprob is None for logprob in token_logprobs):
+            raise ValueError("vLLM completion logprobs contain None")
+
+        content: list[dict[str, Any]] = []
+        for i, (token, logprob) in enumerate(zip(tokens, token_logprobs, strict=True)):
+            entry: dict[str, Any] = {"token": token, "logprob": logprob}
+            if top_logprobs is not None and i < len(top_logprobs) and top_logprobs[i] is not None:
+                entry["top_logprobs"] = [{"token": top_token, "logprob": top_logprob} for top_token, top_logprob in top_logprobs[i].items()]
+            content.append(entry)
+        return {"content": content}
+
+    @staticmethod
+    def _tool_calls_to_openai(tool_calls: list[Any], choice_index: int) -> list[dict[str, Any]]:
+        result = []
+        for tool_index, tool_call in enumerate(tool_calls):
+            name = getattr(tool_call, "name", None)
+            arguments = getattr(tool_call, "arguments", None)
+            if name is None and isinstance(tool_call, dict):
+                name = tool_call.get("name")
+                arguments = tool_call.get("arguments")
+            result.append(
+                {
+                    "id": f"call_{choice_index}_{tool_index}",
+                    "type": "function",
+                    "function": {"name": name or "", "arguments": json.dumps(arguments or {})},
+                }
+            )
+        return result
 
 
 def _strip_logprobs(response: dict[str, Any]) -> dict[str, Any]:
@@ -79,6 +275,8 @@ class ReverseProxy:
         sync_traces: bool = False,
         max_retries: int = 2,
         local_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+        parser_config: GatewayConfig | None = None,
+        parser_transport: _RllmParserTransport | None = None,
     ) -> None:
         self.router = router
         self.store = store
@@ -86,6 +284,7 @@ class ReverseProxy:
         self.sync_traces = sync_traces
         self.max_retries = max_retries
         self.local_handler = local_handler
+        self.parser_transport = parser_transport or (_RllmParserTransport(parser_config) if parser_config is not None else None)
         self._http: httpx.AsyncClient | None = None
         self._pending_traces: set[asyncio.Task[None]] = set()
 
@@ -129,6 +328,8 @@ class ReverseProxy:
         is_stream = request_body.get("stream", False)
 
         if is_stream:
+            if self.parser_transport is not None and request.method.upper() == "POST" and request.url.path.endswith("/chat/completions"):
+                raise ValueError("parser transport does not support stream=true in v1")
             return await self._handle_streaming(request, body, request_body, session_id, originally_requested_logprobs)
         return await self._handle_non_streaming(request, body, request_body, session_id, originally_requested_logprobs)
 
@@ -152,14 +353,26 @@ class ReverseProxy:
             status_code = 200
         else:
             # HTTP proxy path
+            parser_mode = self.parser_transport is not None and request.method.upper() == "POST" and request.url.path.endswith("/chat/completions")
+            if parser_mode:
+                upstream_body = self.parser_transport.chat_to_completion(
+                    request_body,
+                    originally_requested_logprobs=originally_requested_logprobs,
+                )
+                upstream_path = "/v1/completions"
+                upstream_content = json.dumps(upstream_body).encode("utf-8")
+            else:
+                upstream_path = request.url.path
+                upstream_content = raw_body
+
             worker = self.router.route(session_id)
-            url = self._build_url(worker.api_url, request.url.path, str(request.url.query))
+            url = self._build_url(worker.api_url, upstream_path, str(request.url.query))
             headers = self._forward_headers(request)
             try:
                 resp = await self._send_with_retry(
                     method=request.method,
                     url=url,
-                    content=raw_body,
+                    content=upstream_content,
                     headers=headers,
                 )
                 content = resp.content
@@ -172,6 +385,9 @@ class ReverseProxy:
                 response_body = json.loads(content)
             except (json.JSONDecodeError, UnicodeDecodeError):
                 response_body = {}
+
+            if parser_mode and status_code < 400 and response_body:
+                response_body = self.parser_transport.completion_to_chat(response_body)
 
         latency_ms = (time.perf_counter() - t0) * 1000
 

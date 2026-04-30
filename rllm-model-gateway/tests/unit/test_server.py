@@ -5,13 +5,15 @@ mock vLLM backend server for proxy tests.
 """
 
 import json
+import logging
 
 import httpx
 import pytest
 import pytest_asyncio
+import rllm_model_gateway.proxy as proxy_mod
 from rllm_model_gateway import GatewayConfig, create_app
 from rllm_model_gateway.models import WorkerConfig, WorkerInfo, _split_worker_url
-from rllm_model_gateway.proxy import ReverseProxy
+from rllm_model_gateway.proxy import ReverseProxy, _RllmParserTransport
 
 from tests.helpers.mock_vllm import MockVLLMServer
 
@@ -245,6 +247,108 @@ class TestProxy:
         choice = data["choices"][0]
         assert "logprobs" in choice, "logprobs should be present when client requested them"
         assert choice["logprobs"]["content"] is not None
+
+
+class _FakeParser:
+    stop_sequences = [999]
+
+    def parse(self, messages, **kwargs):
+        self.parse_kwargs = kwargs
+        return "RAW_PROMPT"
+
+    def parse_completion_text(self, text):
+        return {"content": "Hello from parser!", "reasoning": "", "tool_calls": []}
+
+
+class TestParserTransportProxy:
+    @pytest.fixture
+    def parser_app(self, mock_vllm: MockVLLMServer, monkeypatch):
+        fake_parser = _FakeParser()
+
+        def _make_transport(config):
+            return _RllmParserTransport(config, parser=fake_parser)
+
+        monkeypatch.setattr(proxy_mod, "_RllmParserTransport", _make_transport)
+        config = GatewayConfig(
+            store_worker="memory",
+            workers=[{"url": f"{mock_vllm.url}/v1", "worker_id": "w0"}],
+            health_check_interval=999,
+            sync_traces=True,
+            model="Qwen/Qwen3-4B-Instruct-2507",
+            tokenizer_name="Qwen/Qwen3-4B-Instruct-2507",
+            multi_turn_extension=True,
+            accumulate_reasoning=True,
+        )
+        app = create_app(config)
+        app.state.fake_parser = fake_parser
+        return app
+
+    @pytest_asyncio.fixture
+    async def parser_client(self, parser_app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=parser_app),
+            base_url="http://testserver",
+        ) as c:
+            yield c
+
+    @pytest.mark.asyncio
+    async def test_parser_transport_forwards_to_completions_and_traces(
+        self,
+        parser_client: httpx.AsyncClient,
+        mock_vllm: MockVLLMServer,
+    ):
+        resp = await parser_client.post(
+            "/sessions/parser-sess/v1/chat/completions",
+            json={
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "tools": [{"type": "function", "function": {"name": "calculator"}}],
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["choices"][0]["message"]["content"] == "Hello from parser!"
+
+        upstream = mock_vllm.request_log[-1]
+        assert upstream["_path"] == "/v1/completions"
+        assert upstream["prompt"] == "RAW_PROMPT"
+        assert upstream["add_special_tokens"] is False
+        assert upstream["return_token_ids"] is True
+        assert upstream["logprobs"] == 1
+        assert "messages" not in upstream
+
+        traces_resp = await parser_client.get("/sessions/parser-sess/traces")
+        traces = traces_resp.json()
+        assert len(traces) == 1
+        assert traces[0]["messages"] == [{"role": "user", "content": "hello"}]
+        assert traces[0]["prompt_token_ids"] == [1, 2, 3, 4, 5]
+        assert traces[0]["completion_token_ids"] == [10, 11, 12]
+        assert traces[0]["logprobs"] == [-0.5, -0.3, -0.1]
+
+    def test_local_handler_logs_parser_transport_skip(self, caplog):
+        async def local_handler(body):
+            return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+        caplog.set_level(logging.WARNING)
+        create_app(
+            GatewayConfig(
+                store_worker="memory",
+                multi_turn_extension=True,
+            ),
+            local_handler=local_handler,
+        )
+        assert "gateway parser transport is disabled because local_handler is in use" in caplog.text
+
+    def test_parser_transport_config_requires_reasoning_mode(self, mock_vllm: MockVLLMServer):
+        with pytest.raises(ValueError, match="disable_thinking=true or accumulate_reasoning=true"):
+            create_app(
+                GatewayConfig(
+                    store_worker="memory",
+                    workers=[{"url": f"{mock_vllm.url}/v1", "worker_id": "w0"}],
+                    model="Qwen/Qwen3-4B-Instruct-2507",
+                    tokenizer_name="Qwen/Qwen3-4B-Instruct-2507",
+                    multi_turn_extension=True,
+                )
+            )
 
 
 # ------------------------------------------------------------------

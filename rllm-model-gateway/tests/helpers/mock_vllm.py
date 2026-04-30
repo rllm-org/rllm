@@ -45,6 +45,29 @@ MOCK_RESPONSE = {
     "kv_transfer_params": None,
 }
 
+MOCK_COMPLETION_RESPONSE = {
+    "id": "cmpl-mock",
+    "object": "text_completion",
+    "model": "mock-model",
+    "choices": [
+        {
+            "index": 0,
+            "text": "Hello from mock!",
+            "finish_reason": "stop",
+            "stop_reason": None,
+            "token_ids": [10, 11, 12],
+            "prompt_token_ids": [1, 2, 3, 4, 5],
+            "logprobs": {
+                "tokens": ["Hello", " from", " mock!"],
+                "token_logprobs": [-0.5, -0.3, -0.1],
+                "top_logprobs": [{"Hello": -0.5}, {" from": -0.3}, {" mock!": -0.1}],
+                "text_offset": [0, 5, 10],
+            },
+        }
+    ],
+    "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+}
+
 
 def stream_chunks():
     """Yield SSE chunks that mirror vLLM 0.11+ streaming format."""
@@ -131,7 +154,7 @@ def build_mock_vllm_app() -> FastAPI:
     async def chat_completions(request: Request):
         body = await request.json()
         with app.state._log_lock:
-            app.state.request_log.append(body)
+            app.state.request_log.append({"_path": "/v1/chat/completions", **body})
 
         if body.get("stream"):
             return StreamingResponse(stream_chunks(), media_type="text/event-stream")
@@ -141,8 +164,8 @@ def build_mock_vllm_app() -> FastAPI:
     async def completions(request: Request):
         body = await request.json()
         with app.state._log_lock:
-            app.state.request_log.append(body)
-        return JSONResponse(content=MOCK_RESPONSE)
+            app.state.request_log.append({"_path": "/v1/completions", **body})
+        return JSONResponse(content=MOCK_COMPLETION_RESPONSE)
 
     return app
 
@@ -187,7 +210,7 @@ def build_controllable_mock_vllm_app(response_delay: float = 0.0) -> FastAPI:
     async def chat_completions(request: Request):
         body = await request.json()
         with app.state._log_lock:
-            app.state.request_log.append(body)
+            app.state.request_log.append({"_path": "/v1/chat/completions", **body})
 
         if app.state.response_delay > 0:
             import asyncio

@@ -22,7 +22,13 @@ class VerlEngine(RolloutEngine):
 
         self.tokenizer = tokenizer
         self.processor = processor
-        self.chat_parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=config.get("rllm", {}).get("disable_thinking", False))
+        rllm_config = config.get("rllm", {})
+        self.chat_parser = ChatTemplateParser.get_parser(
+            tokenizer,
+            processor=processor,
+            disable_thinking=rllm_config.get("disable_thinking", False),
+            multi_turn_extension=rllm_config.get("multi_turn_extension", False),
+        )
 
         self.max_prompt_length = config.data.max_prompt_length
         self.max_response_length = config.data.max_response_length
