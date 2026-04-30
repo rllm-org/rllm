@@ -84,6 +84,24 @@ class DockerSandbox:
         tar_stream.seek(0)
         self._container.put_archive(remote_parent, tar_stream)
 
+    def commit(self, tag: str) -> None:
+        """Commit the running container as a new image with the given tag.
+
+        Lets harnesses cache an in-container install (e.g. a CLI tool
+        installed via apt+npm) so subsequent tasks can ``docker run``
+        directly from the post-install image and skip the cold-install
+        penalty.
+
+        ``tag`` is in Docker's ``name:tag`` form. The tag is overwritten
+        if it already exists.
+        """
+        if ":" in tag:
+            repository, image_tag = tag.rsplit(":", 1)
+        else:
+            repository, image_tag = tag, "latest"
+        self._container.commit(repository=repository, tag=image_tag)
+        logger.info("DockerSandbox %s committed → %s:%s", self.name, repository, image_tag)
+
     def start_agent_process(self, command: str, port: int) -> None:
         """Start a background process in the container using nohup."""
         bg_command = f"nohup {command} > /tmp/worker.log 2>&1 &"

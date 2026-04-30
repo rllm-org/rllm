@@ -79,10 +79,14 @@ class Runner:
         sandbox: Sandbox | None = None
         try:
             if needs_sandbox:
-                sandbox = _create_sandbox_for_task(task, self.sandbox_backend)
-                _setup_task_environment(task, sandbox)
+                sandbox, base_image, backend = _create_sandbox_for_task(task, self.sandbox_backend, agent_flow=self.agent_flow)
                 if isinstance(self.agent_flow, SandboxedAgentFlow):
                     self.agent_flow.set_sandbox(sandbox)
+                    # Install + (on docker) commit *before* per-task setup
+                    # so the cached image stays free of task-specific files.
+                    self.agent_flow.pre_setup(sandbox, base_image, backend)
+                _setup_task_environment(task, sandbox)
+                if isinstance(self.agent_flow, SandboxedAgentFlow):
                     self.agent_flow.on_sandbox_ready({"task_path": str(task.task_dir)}, config)
 
             # AgentFlow runs the agent → Episode
@@ -276,15 +280,30 @@ def _needs_sandbox(task: Task, verifier_kind: str) -> bool:
     return False
 
 
-def _create_sandbox_for_task(task: Task, sandbox_backend: str | None) -> Sandbox:
-    from rllm.sandbox.sandboxed_flow import create_sandbox
+def _create_sandbox_for_task(
+    task: Task,
+    sandbox_backend: str | None,
+    agent_flow: AgentFlow | None = None,
+) -> tuple[Sandbox, str, str]:
+    """Create a sandbox for *task* and return ``(sandbox, base_image, backend)``.
+
+    The base image is the result of building the task's environment
+    Dockerfile (or the configured fallback). When *agent_flow* exposes
+    :meth:`maybe_use_cached_image`, a post-install derived image is used
+    instead — but the *returned* base image is unchanged so the harness
+    can compute the same derived tag in :meth:`pre_setup`.
+    """
+    from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow, create_sandbox
 
     backend = sandbox_backend or task.metadata.get("sandbox_backend") or "docker"
-    image = _resolve_image(task, backend)
+    base_image = _resolve_image(task, backend)
+    image = base_image
+    if isinstance(agent_flow, SandboxedAgentFlow):
+        image = agent_flow.maybe_use_cached_image(base_image, backend)
 
     safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "-", task.id)
     name = f"rllm-{safe_id}-{uuid.uuid4().hex[:6]}"
-    return create_sandbox(backend, name=name, image=image)
+    return create_sandbox(backend, name=name, image=image), base_image, backend
 
 
 def _resolve_image(task: Task, backend: str) -> str:

@@ -103,6 +103,14 @@ class EvalGatewayManager:
         env_key = info.env_key or f"RLLM_PROVIDER_{self.provider.upper()}_KEY"
         os.environ[env_key] = self.api_key
 
+        # OpenAI's o-series + GPT-5 models reject ``max_tokens`` and require
+        # ``max_completion_tokens``. CLI agents (opencode, codex, mini-swe-agent)
+        # all send ``max_tokens`` by default. Dropping it lets the model use
+        # its own default output budget — the cleanest workaround until we
+        # extend the gateway with a rename map. Older models (gpt-4-turbo,
+        # gpt-3.5) still accept this; they just fall back to defaults too.
+        drop_params = ["max_tokens"] if self.provider == "openai" else []
+
         return GatewayConfig(
             host=self.host,
             port=self.port,
@@ -118,6 +126,7 @@ class EvalGatewayManager:
                     backend_url=info.backend_url,
                     backend_model=self.model_name,
                     api_key_env=env_key,
+                    drop_params=drop_params,
                 )
             ],
             run_id=self.run_id,
