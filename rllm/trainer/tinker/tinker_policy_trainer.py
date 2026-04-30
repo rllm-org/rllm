@@ -18,7 +18,6 @@ from tinker.types import AdamParams
 from tinker_cookbook import checkpoint_utils
 from tinker_cookbook.tokenizer_utils import Tokenizer
 
-from rllm.agents.agent import TrajectoryGroup
 from rllm.experimental.common import (
     AlgorithmConfig,
     CompactFilteringConfig,
@@ -26,6 +25,7 @@ from rllm.experimental.common import (
     rLLMAdvantageEstimator,
 )
 from rllm.trainer.tinker.transform import transform_trajectory_groups_to_datums
+from rllm.types import TrajectoryGroup
 
 if TYPE_CHECKING:
     import torch

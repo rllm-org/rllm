@@ -10,9 +10,9 @@ from collections.abc import Callable
 
 import numpy as np
 
-from rllm.agents.agent import TrajectoryGroup
 from rllm.experimental.common.config import AlgorithmConfig, rLLMAdvantageEstimator
 from rllm.experimental.common.rl_algo import calculate_grpo_advantages_per_group, calculate_rloo_advantages_per_group
+from rllm.types import TrajectoryGroup
 from rllm.utils.logging import DuplicateLoggingFilter
 
 logger = logging.getLogger(__name__)

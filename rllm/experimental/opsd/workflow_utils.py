@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 from rllm.experimental.opsd.advantage import calculate_reverse_kl_advantage
 
 if TYPE_CHECKING:
-    from rllm.agents.agent import Episode
+    from rllm.types import Episode
 
 logger = logging.getLogger(__name__)
 

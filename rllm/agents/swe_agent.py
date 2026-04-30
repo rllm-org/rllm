@@ -8,8 +8,9 @@ try:
 except ImportError:
     SWEAction = None
 
-from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
+from rllm.agents.agent import BaseAgent
 from rllm.agents.system_prompts import SWE_SYSTEM_PROMPT, SWE_SYSTEM_PROMPT_FN_CALL, SWE_USER_PROMPT, SWE_USER_PROMPT_FN_CALL, SWEAGENT_SYSTEM_PROMPT, SWEAGENT_USER_PROMPT
+from rllm.types import Action, Step, Trajectory
 
 
 def parse_oai_response(response):

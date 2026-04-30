@@ -3,11 +3,11 @@ import string
 from collections import Counter
 from typing import Protocol, runtime_checkable
 
-from rllm.agents.agent import Action
 from rllm.rewards.code_reward import RewardCodeFn
 from rllm.rewards.math_reward import RewardMathFn
 from rllm.rewards.reward_types import RewardConfig, RewardInput, RewardOutput
 from rllm.rewards.search_reward import RewardSearchFn
+from rllm.types import Action
 
 
 @runtime_checkable

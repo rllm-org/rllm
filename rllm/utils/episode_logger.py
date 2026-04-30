@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from rllm.agents.agent import Episode
+from rllm.types import Episode
 
 
 class EpisodeLogger:

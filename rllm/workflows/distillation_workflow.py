@@ -1,7 +1,7 @@
-from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.engine import ModelOutput, RolloutEngine
 from rllm.rewards.reward_fn import RewardFunction
 from rllm.trainer.distill import compute_step_distill_advantage
+from rllm.types import Episode, Step, Trajectory
 from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflow
 
 

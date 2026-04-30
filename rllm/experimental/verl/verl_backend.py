@@ -31,7 +31,6 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.metric import reduce_metrics
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
-from rllm.agents.agent import Episode
 from rllm.data import Dataset
 from rllm.experimental.common import (
     AlgorithmConfig,
@@ -42,6 +41,7 @@ from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.rollout import RolloutEngine, VerlEngine
 from rllm.experimental.verl import compute_advantage_verl, transform_episodes_to_dataproto, update_dataproto_with_advantages
 from rllm.experimental.verl.metrics import calculate_debug_metrics_compat
+from rllm.types import Episode
 
 if TYPE_CHECKING:
     from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine

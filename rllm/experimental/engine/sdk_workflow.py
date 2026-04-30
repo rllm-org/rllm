@@ -25,11 +25,11 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
-from rllm.agents.agent import Episode, Trajectory
 from rllm.sdk.data_process import group_steps, trace_to_step
 from rllm.sdk.protocol import Trace
 from rllm.sdk.session.base import wrap_with_session_context
 from rllm.sdk.store.sqlite_store import SqliteTraceStore
+from rllm.types import Episode, Trajectory
 from rllm.types import Trajectory as BaseTrajectory
 from rllm.workflows.workflow import TerminationReason, Workflow
 

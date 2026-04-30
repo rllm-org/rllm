@@ -8,7 +8,7 @@ from collections.abc import Callable
 
 import numpy as np
 
-from rllm.agents.agent import TrajectoryGroup
+from rllm.types import TrajectoryGroup
 
 
 def reduce_metrics_by_trajectory_name(trajectory_groups: list[TrajectoryGroup], prefix: str = "reward", include_fraction_zero: bool = False) -> dict:

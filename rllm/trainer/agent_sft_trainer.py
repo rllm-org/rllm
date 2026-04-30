@@ -2,7 +2,7 @@ import logging
 
 from torch.distributed.device_mesh import init_device_mesh
 
-from rllm.agents.agent import Trajectory
+from rllm.types import Trajectory
 
 logger = logging.getLogger(__name__)
 

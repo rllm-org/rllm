@@ -419,8 +419,8 @@ def outcome_to_episode(outcome: HarborTaskOutcome, uid: str, task: dict):
     Returns:
         An ``rllm.types.Episode`` populated with reward and metadata.
     """
-    from rllm.agents.agent import Episode, Trajectory
     from rllm.integrations.harbor.atif_trajectory_bridge import load_atif_steps
+    from rllm.types import Episode, Trajectory
 
     reward = outcome.reward
     is_correct = outcome.is_correct

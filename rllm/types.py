@@ -1,12 +1,18 @@
 """Canonical lightweight types for rLLM.
 
 Single source of truth for the core data shapes (:class:`Task`,
-:class:`Step`, :class:`Trajectory`, :class:`Episode`) and the
-producer/consumer protocols around them (:class:`AgentFlow`,
-:class:`Evaluator`, :class:`AgentConfig`, :func:`run_agent_flow`).
+:class:`Step`, :class:`Trajectory`, :class:`Episode`, :class:`Action`,
+:class:`TrajectoryGroup`) and the producer/consumer protocols around
+them (:class:`AgentFlow`, :class:`Evaluator`, :class:`AgentConfig`,
+:func:`run_agent_flow`).
 
 Eval-specific result shapes (:class:`~rllm.eval.types.EvalOutput`,
 :class:`~rllm.eval.types.Signal`) live in :mod:`rllm.eval.types`.
+
+Historically the training-side (token IDs, logprobs, advantages, ...)
+fields lived on subclasses in ``rllm.agents.agent``. They have been
+folded into the canonical classes here; ``rllm.agents.agent`` remains
+as a backward-compat re-export shim.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -21,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
+    from rllm.engine.rollout import ModelOutput
     from rllm.eval.types import EvalOutput
 
 
@@ -73,11 +81,35 @@ class Task:
         return self.dataset_dir / self.sub_dir if self.sub_dir else self.dataset_dir
 
 
+# ---------------------------------------------------------------------------
+# Trajectory data types (formerly defined in rllm.agents.agent)
+# ---------------------------------------------------------------------------
+
+_DEFAULT_TRAJ_NAME = "default_traj_name"
+
+
+class Action(BaseModel):
+    """Wraps an arbitrary action emitted by an agent."""
+
+    action: Any = None
+
+
 class Step(BaseModel):
-    """A single interaction step (one LLM call with optional reward)."""
+    """A single interaction step (one LLM call with optional reward).
+
+    Fields are split into two groups:
+
+    - **Core / eval**: ``id``, ``input``, ``output``, ``action``,
+      ``reward``, ``done``, ``metadata`` — populated by every code path
+      (harness, eval, training).
+    - **Training payloads**: ``prompt_ids``, ``response_ids``, ``logprobs``,
+      ``chat_completions``, ``model_output``, ``advantage`` etc. —
+      populated by training rollouts; default-empty in eval-only paths.
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
 
+    # Core / eval fields
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     input: Any | None = None
     output: Any | None = None
@@ -86,6 +118,122 @@ class Step(BaseModel):
     done: bool = False
     metadata: dict | None = None
 
+    # Training-side payloads
+    prompt_ids: list[int] | list[Any] = Field(default_factory=list)
+    response_ids: list[int] = Field(default_factory=list)
+    logprobs: list[float] = Field(default_factory=list)
+    routing_matrices: list[str] | None = None  # per-token routing matrices (R3, transient)
+    chat_completions: list[dict[str, Any]] = Field(default_factory=list)
+    observation: Any = None
+    thought: str = ""
+    model_response: str = ""
+    model_output: Any = None  # Runtime type is ModelOutput | None; uses Any to avoid circular import
+    mc_return: float = 0.0
+    advantage: list[float] | float | None = None
+    weight_version: int | None = None  # weight version at time of generation (async staleness)
+
+    @property
+    def info(self) -> dict:
+        """Alias for metadata. Auto-initializes to {} if None so mutation works."""
+        if self.metadata is None:
+            self.metadata = {}
+        return self.metadata
+
+    @info.setter
+    def info(self, value: dict) -> None:
+        self.metadata = value
+
+    def model_post_init(self, __context: Any) -> None:
+        self.chat_completions = deepcopy(self.chat_completions)
+        if self.model_output is None:
+            return
+        # backfill fields like prompt_ids, response_ids, logprobs, etc.
+        if len(self.prompt_ids) == 0 and self.model_output.prompt_ids is not None:
+            self.prompt_ids = self.model_output.prompt_ids
+        if len(self.response_ids) == 0 and self.model_output.completion_ids is not None:
+            self.response_ids = self.model_output.completion_ids
+        if len(self.logprobs) == 0 and self.model_output.logprobs is not None:
+            self.logprobs = self.model_output.logprobs
+        if self.routing_matrices is None and getattr(self.model_output, "routing_matrices", None) is not None:
+            self.routing_matrices = self.model_output.routing_matrices
+        if self.weight_version is None and hasattr(self.model_output, "weight_version"):
+            self.weight_version = self.model_output.weight_version
+
+        # check that the lengths would match up
+        if len(self.logprobs) > 0:
+            assert len(self.response_ids) == len(self.logprobs), f"length mismatch between response_ids and logprobs, got {len(self.response_ids)}, {len(self.logprobs)}"
+
+    def to_dict(self) -> dict:
+        from rllm.tools.tool_base import ToolCall, ToolOutput
+
+        # Helper function to recursively convert ToolCall and ToolOutput objects to dicts
+        def _serialize_value(value):
+            if isinstance(value, ToolCall | ToolOutput):
+                return value.to_dict()
+            elif isinstance(value, list):
+                return [_serialize_value(item) for item in value]
+            elif isinstance(value, dict):
+                return {k: _serialize_value(v) for k, v in value.items()}
+            else:
+                return value
+
+        return {
+            "prompt_ids": self.prompt_ids,
+            "response_ids": self.response_ids,
+            "logprobs": self.logprobs,
+            "routing_matrices": self.routing_matrices,
+            "chat_completions": _serialize_value(self.chat_completions),
+            "observation": self.observation,
+            "thought": self.thought,
+            "action": self.action.action if isinstance(self.action, Action) else self.action,
+            "model_response": self.model_response,
+            "model_output": self.model_output.to_dict() if self.model_output is not None else None,
+            "info": self.info,
+            "reward": self.reward,
+            "done": self.done,
+            "mc_return": self.mc_return,
+            "advantage": self.advantage,
+            "weight_version": self.weight_version,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Step:
+        from rllm.engine.rollout import ModelOutput
+
+        return cls(
+            prompt_ids=data["prompt_ids"],
+            response_ids=data["response_ids"],
+            logprobs=data["logprobs"],
+            routing_matrices=data.get("routing_matrices"),
+            chat_completions=data["chat_completions"],
+            observation=data["observation"],
+            thought=data["thought"],
+            action=data["action"],
+            model_response=data["model_response"],
+            model_output=ModelOutput.from_dict(data["model_output"]) if data.get("model_output", None) is not None else None,
+            metadata=data.get("info", data.get("metadata", {})),
+            reward=data["reward"],
+            done=data["done"],
+            mc_return=data["mc_return"],
+            advantage=data.get("advantage", 0.0),
+            weight_version=data.get("weight_version"),
+        )
+
+    @classmethod
+    def from_model_output(cls, model_output: ModelOutput, messages: list[dict] | None = None, action: Any | None = None) -> Step:
+        return cls(
+            prompt_ids=model_output.prompt_ids or [],
+            response_ids=model_output.completion_ids or [],
+            logprobs=model_output.logprobs or [],
+            routing_matrices=getattr(model_output, "routing_matrices", None),
+            chat_completions=(messages or []) + [{"role": "assistant", "content": model_output.content, "reasoning": model_output.reasoning}],
+            thought=model_output.reasoning or "",
+            action=action,
+            model_response=model_output.content or "",
+            model_output=model_output,
+            weight_version=model_output.weight_version,
+        )
+
 
 class Trajectory(BaseModel):
     """A sequence of Steps forming one agent trajectory."""
@@ -93,7 +241,7 @@ class Trajectory(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
 
     uid: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    name: str = "agent"
+    name: str = _DEFAULT_TRAJ_NAME
     task: Any = None
     steps: list[Step] = Field(default_factory=list)
     reward: float | None = None
@@ -106,6 +254,61 @@ class Trajectory(BaseModel):
     def result(self):
         """Get the output from the trajectory (backward compatibility)."""
         return self.output
+
+    @property
+    def info(self) -> dict:
+        """Alias for metadata. Auto-initializes to {} if None so mutation works."""
+        if self.metadata is None:
+            self.metadata = {}
+        return self.metadata
+
+    @info.setter
+    def info(self, value: dict) -> None:
+        self.metadata = value
+
+    def to_dict(self):
+        # Remove large/non-serializable payloads (e.g., images) from task
+        def _sanitize_task(task_obj):
+            if isinstance(task_obj, dict):
+                cleaned = {k: v for k, v in task_obj.items() if k not in ("image", "images")}
+                return cleaned
+            return task_obj
+
+        return {
+            "uid": self.uid,
+            "name": self.name,
+            "task": _sanitize_task(self.task),
+            "steps": [step.to_dict() for step in self.steps],
+            "reward": float(self.reward) if self.reward is not None else None,
+            "info": self.info,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Trajectory:
+        """Create Trajectory from dictionary, properly deserializing Step objects."""
+        return cls(
+            uid=data.get("uid", str(uuid.uuid4())),
+            name=data["name"],
+            task=data["task"],
+            steps=[Step.from_dict(step_data) for step_data in data.get("steps", [])],
+            reward=data["reward"],
+            metadata=data.get("info", data.get("metadata", {})),
+        )
+
+    def is_cumulative(self) -> bool:
+        """
+        Returns True if for every step after the first, its chat_completions is an exact superset
+        of the previous step's chat_completions (i.e., the previous chat_completions is a prefix).
+        """
+        prev = None
+        for step in self.steps:
+            if prev is not None:
+                prev_cc = prev.chat_completions
+                curr_cc = step.chat_completions
+                if not (len(curr_cc) >= len(prev_cc) and curr_cc[: len(prev_cc)] == prev_cc):
+                    return False
+            prev = step
+        return True
 
 
 class Episode(BaseModel):
@@ -129,6 +332,76 @@ class Episode(BaseModel):
     @property
     def rollout_idx(self) -> str:
         return self.id.split(":")[1]
+
+    @property
+    def info(self) -> dict:
+        """Alias for metadata. Auto-initializes to {} if None."""
+        return self.metadata
+
+    @info.setter
+    def info(self, value: dict) -> None:
+        self.metadata = value
+
+    def to_dict(self):
+        # Remove large/non-serializable payloads (e.g., images) from task
+        def _sanitize_task(task_obj):
+            if isinstance(task_obj, dict):
+                cleaned = {k: v for k, v in task_obj.items() if k not in ("image", "images")}
+                return cleaned
+            return task_obj
+
+        return {
+            "id": self.id,
+            "task": _sanitize_task(self.task),
+            "termination_reason": self.termination_reason.value if self.termination_reason is not None else None,
+            "is_correct": bool(self.is_correct),
+            "trajectories": [trajectory.to_dict() for trajectory in self.trajectories],
+            "metrics": self.metrics,
+            "info": self.info,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Episode:
+        """Create Episode from dictionary, properly deserializing Trajectory objects."""
+        from rllm.workflows.workflow import TerminationReason
+
+        return cls(
+            id=data["id"],
+            task=data["task"],
+            termination_reason=TerminationReason(data.get("termination_reason", TerminationReason.UNKNOWN)),
+            is_correct=data["is_correct"],
+            trajectories=[Trajectory.from_dict(trajectory_data) for trajectory_data in data["trajectories"]],
+            metrics=data.get("metrics", {}),
+            metadata=data.get("info", data.get("metadata", {})),
+        )
+
+
+class TrajectoryGroup(BaseModel):
+    """
+    A group of trajectories for advantage computation.
+
+    Unlike Episode (which represents raw rollout data), TrajectoryGroup is specifically
+    structured for advantage computation. All trajectories in a group will have their
+    rewards compared to compute advantages (e.g., via GRPO).
+
+    Attributes:
+        trajectories: List of trajectories to compare for advantage computation
+        group_id: Optional identifier for the group (e.g., "task1:agent_0")
+        metadata: List of metadata for each trajectory in the group
+    """
+
+    trajectories: list[Trajectory]
+    group_id: str = ""
+    metadata: list[dict] = Field(default_factory=list)
+    weight_version: int = 0
+
+    @property
+    def group_role(self) -> str:
+        return self.group_id.split(":")[1] if ":" in self.group_id[:-1] else "all_groups"
+
+    @property
+    def task_id(self) -> str:
+        return self.group_id.split(":")[0]
 
 
 # ---------------------------------------------------------------------------

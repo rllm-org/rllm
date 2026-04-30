@@ -5,9 +5,9 @@ from typing import Any
 
 from rllm_model_gateway.models import TraceRecord
 
-from rllm.agents.agent import Step, Trajectory
 from rllm.experimental.rollout import ModelOutput
 from rllm.tools.tool_base import ToolCall
+from rllm.types import Step, Trajectory
 
 
 def _parse_openai_tool_calls(raw_tool_calls: list[dict[str, Any]]) -> list[ToolCall]:

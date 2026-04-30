@@ -3,9 +3,10 @@ import logging
 import re
 from typing import Any
 
-from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
+from rllm.agents.agent import BaseAgent
 from rllm.agents.system_prompts import *
 from rllm.environments.frozenlake.frozenlake import FrozenLakeEnv
+from rllm.types import Action, Step, Trajectory
 
 logger = logging.getLogger(__name__)
 

@@ -9,7 +9,7 @@ import tinker
 import torch
 from tinker_cookbook.display import colorize_example
 
-from rllm.agents.agent import Episode
+from rllm.types import Episode
 
 logger = logging.getLogger(__name__)
 

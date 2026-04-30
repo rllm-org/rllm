@@ -10,7 +10,7 @@ try:
 except ImportError as err:
     raise ImportError("AgentExecutionEngine requires extra dependencies. Install with: pip install rllm[train]") from err
 
-from rllm.agents.agent import Action, BaseAgent, Trajectory
+from rllm.agents.agent import BaseAgent
 from rllm.agents.utils import (
     convert_messages_to_tokens_and_masks,
     get_recent_assistant_user_messages,
@@ -21,6 +21,7 @@ from rllm.environments.env_utils import (
     compute_trajectory_reward,
 )
 from rllm.parser import ChatTemplateParser
+from rllm.types import Action, Trajectory
 from rllm.utils import colorful_print
 
 logger = logging.getLogger(__name__)

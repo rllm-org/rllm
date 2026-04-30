@@ -4,7 +4,7 @@ from typing import Literal
 
 from omegaconf import DictConfig, OmegaConf
 
-from rllm.agents.agent import _DEFAULT_TRAJ_NAME
+from rllm.types import _DEFAULT_TRAJ_NAME
 from rllm.workflows.workflow import TerminationReason
 
 

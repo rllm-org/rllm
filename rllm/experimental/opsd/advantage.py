@@ -2,8 +2,8 @@ import numpy as np
 from tinker import ModelInput, SamplingClient
 from tinker_cookbook.rl.metrics import discounted_future_sum_vectorized
 
-from rllm.agents.agent import Step
 from rllm.parser.chat_template_parser import ChatTemplateParser
+from rllm.types import Step
 
 
 async def calculate_reverse_kl_advantage(

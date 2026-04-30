@@ -6,9 +6,9 @@ import torch
 from verl.protocol import DataProto
 from verl.utils.torch_functional import pad_sequence_to_length
 
-from rllm.agents.agent import Episode, Trajectory, TrajectoryGroup
 from rllm.experimental.rollout import VerlEngine
 from rllm.experimental.verl.dataclass import AccumulatedData, ProcessedStepData
+from rllm.types import Episode, Trajectory, TrajectoryGroup
 from rllm.workflows.workflow import TerminationReason
 
 logger = logging.getLogger(__name__)

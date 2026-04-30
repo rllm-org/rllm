@@ -13,8 +13,8 @@ try:
 except ImportError as err:
     raise ImportError("EvalProtocolWorkflow requires extra dependencies. Install with: pip install rllm[eval-protocol]") from err
 
-from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.engine.rollout.openai_engine import OpenAIEngine
+from rllm.types import Episode, Step, Trajectory
 from rllm.workflows.workflow import Workflow
 
 
