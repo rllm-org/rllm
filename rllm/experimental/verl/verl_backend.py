@@ -552,9 +552,11 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         # --- Compute old_log_probs ---
         rc = self.algorithm_config.rollout_correction if self.algorithm_config is not None else None
         bypass_mode = rc is not None and rc.bypass_mode
+        tis_mode = rc.tis_mode if rc is not None else None
+        has_rollout_log_probs = "rollout_log_probs" in batch.batch
 
         if bypass_mode:
-            assert "rollout_log_probs" in batch.batch, "bypass_mode requires rollout_log_probs in batch"
+            assert has_rollout_log_probs, "bypass_mode requires rollout_log_probs in batch"
             with simple_timer("old_log_probs", timing_dict):
                 batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
         else:
@@ -564,22 +566,15 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
                 log_probs = no_padding_2_padding(tu.get(output, "log_probs"), batch_td)
                 entropy = no_padding_2_padding(tu.get(output, "entropy"), batch_td)
 
-                # Entropy metric (for logging only)
                 response_masks = batch.batch["response_mask"]
                 loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
                 entropy_agg = agg_loss(loss_mat=entropy, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
                 metrics["actor/entropy"] = entropy_agg.detach().item()
 
-                # Merge old_log_probs back into the padded DataProto
                 old_log_prob = DataProto.from_tensordict(tu.get_tensordict({"old_log_probs": log_probs.float()}))
                 batch = batch.union(old_log_prob)
 
-                # Compute rollout log prob diff if available
-                if "rollout_log_probs" in batch.batch:
-                    metrics.update(calculate_debug_metrics_compat(batch))
-
-            tis_mode = rc.tis_mode if rc is not None else None
-            if tis_mode is not None and "rollout_log_probs" in batch.batch:
+            if tis_mode is not None and has_rollout_log_probs:
                 with simple_timer("rollout_correction", timing_dict):
                     from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_weights
 
@@ -592,6 +587,17 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
                     )
                     batch.batch["rollout_is_weights"] = rollout_is_weights
                     metrics.update({f"rollout_correction/{k}": v for k, v in is_metrics.items()})
+
+        if has_rollout_log_probs:
+            from verl.trainer.ppo.rollout_corr_helper import compute_offpolicy_metrics
+
+            offpolicy_metrics = compute_offpolicy_metrics(
+                old_log_prob=batch.batch["old_log_probs"],
+                rollout_log_prob=batch.batch["rollout_log_probs"],
+                response_mask=batch.batch["response_mask"],
+            )
+            metrics.update({f"offpolicy/{k}": v for k, v in offpolicy_metrics.items()})
+            metrics.update(calculate_debug_metrics_compat(batch))
 
         # --- Compute reference log_probs (reuse batch_td) ---
         if self.use_reference_policy:
