@@ -107,8 +107,14 @@ class TinkerPolicyTrainer:
         self.training_client = None
         # fill in the default versions of the configs if not provided
         self.cf_config = cf_config or CompactFilteringConfig.from_config(self.config.rllm.compact_filtering)
-        self.transform_config = transform_config or TransformConfig()
-        self.algorithm_config = algorithm_config or AlgorithmConfig.from_config(self.config)
+        self.transform_config = transform_config or TransformConfig.from_config(
+            self.config.rllm.get("transform", {}),
+            broadcast=self.config.rllm.stepwise_advantage.mode == "broadcast",
+        )
+        self.algorithm_config = algorithm_config or AlgorithmConfig.from_config(
+            self.config.rllm.algorithm,
+            stepwise_advantage_mode=self.config.rllm.stepwise_advantage.mode,
+        )
 
     async def initialize_async(self, resume_from_checkpoint: bool = True):
         """
