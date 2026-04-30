@@ -558,8 +558,15 @@ def _run_eval(
     "--sandbox-backend",
     "sandbox_backend",
     default=None,
-    type=click.Choice(["docker", "local", "modal", "daytona", "e2b", "runloop", "gke", "apple-container"], case_sensitive=False),
-    help="Sandbox/environment backend. For Harbor agents: docker, daytona, modal, e2b, etc. For sandboxed agents: docker, local, modal.",
+    type=click.Choice(["docker", "local", "modal"], case_sensitive=False),
+    help=(
+        "Where the sandboxed harness runs. ``docker`` = local Docker daemon "
+        "(default for sandboxed agents); ``local`` = current process (no isolation, "
+        "fastest); ``modal`` = serverless cloud sandbox (requires --tunnel or "
+        "--gateway-public-url so the sandbox can reach the gateway). "
+        "Daytona / e2b / runloop / gke / apple-container are routed via the "
+        "harbor: dataset prefix (e.g. ``rllm eval harbor:swebench --agent ...``)."
+    ),
 )
 @click.option("--sandbox-concurrency", "sandbox_concurrency", default=None, type=int, help="Override max concurrent sandboxes (default: agent's max_concurrent).")
 @click.option("--ui/--no-ui", "enable_ui", default=None, help="Enable/disable live UI logging. Default: auto-enabled when logged in (see 'rllm login').")
@@ -696,6 +703,21 @@ def eval_cmd(
                     "exposure configured.[/] Cloud sandboxes cannot reach 127.0.0.1; LLM calls "
                     "will fail.\n  Pass --tunnel (requires cloudflared) or --gateway-public-url."
                 )
+            # Preflight: surface a missing cloudflared *before* we boot the
+            # gateway, instead of after a partial start when the helper
+            # raises TunnelError. Saves the user from a confusing log trail.
+            if auto_tunnel:
+                import shutil
+
+                if shutil.which("cloudflared") is None:
+                    console.print(
+                        "  [error]--tunnel requires `cloudflared` on PATH but it wasn't found.[/]\n"
+                        "  Install: [bold]brew install cloudflared[/] (macOS), or download from "
+                        "https://github.com/cloudflare/cloudflared/releases.\n"
+                        "  Alternatively pass --gateway-public-url to use your own tunnel/IP, "
+                        "or --no-tunnel if you can reach the host's loopback some other way."
+                    )
+                    raise SystemExit(1)
             gateway_manager = EvalGatewayManager(
                 provider=rllm_cfg.provider,
                 model_name=model,

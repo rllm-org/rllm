@@ -244,6 +244,54 @@ class TestAutoTunnel:
         assert gm._tunnel_proc is None
 
 
+class TestSigtermCleanup:
+    """SIGTERM/atexit must close not just sandboxes but also tunnel + gateway,
+    otherwise ``kill <pid>`` leaves a public URL pointing at a dying port."""
+
+    def test_shutdown_deregisters_from_cleanup_registry(self):
+        from rllm.sandbox import cleanup
+
+        with cleanup._lock:
+            cleanup._late_callbacks.clear()
+
+        gm = EvalGatewayManager(
+            provider="openai",
+            model_name="gpt-5-mini",
+            api_key="sk-test",
+            public_url="https://x.trycloudflare.com",
+        )
+        # Manually register (the real path is via ``start()`` which we can't
+        # easily run hermetically without bringing up uvicorn).
+        cleanup.register_late_cleanup(gm._cleanup_name, gm.shutdown)
+        assert gm._cleanup_name in cleanup._late_callbacks
+
+        gm.shutdown()  # the graceful path also deregisters
+
+        assert gm._cleanup_name not in cleanup._late_callbacks
+
+    def test_close_all_invokes_gateway_shutdown(self):
+        """Process death triggers cleanup.close_all → reaches gateway."""
+        from rllm.sandbox import cleanup
+
+        with cleanup._lock:
+            cleanup._late_callbacks.clear()
+
+        gm = EvalGatewayManager(
+            provider="openai",
+            model_name="gpt-5-mini",
+            api_key="sk-test",
+            auto_tunnel=True,
+        )
+        proc = _FakeProc()
+        gm._tunnel_proc = proc
+        cleanup.register_late_cleanup(gm._cleanup_name, gm.shutdown)
+
+        cleanup.close_all()  # simulates SIGTERM / atexit
+
+        assert proc.terminated is True
+        assert gm._tunnel_proc is None
+
+
 class _FakeProc:
     """Minimal subprocess-like for tunnel tests."""
 

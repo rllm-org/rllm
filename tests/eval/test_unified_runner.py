@@ -226,3 +226,90 @@ class TestBuildDatasetEvaluator:
         bench.mkdir()
         (bench / "dataset.toml").write_text('[dataset]\nname = "x"\n')
         assert build_dataset_evaluator(bench) is None
+
+
+# ---------------------------------------------------------------------------
+# Sandbox lifecycle — runner must close even when agent_flow is a
+# SandboxedAgentFlow, otherwise cloud sandboxes (Modal, Daytona) leak
+# duration-billed containers on every task. Regression for the bug where
+# ``teardown_sandbox`` is a no-op for externally-managed sandboxes and the
+# runner's finally only closed on the non-SandboxedAgentFlow branch.
+# ---------------------------------------------------------------------------
+
+
+class _FakeSandbox:
+    """Minimal Sandbox protocol stub that records close() calls."""
+
+    def __init__(self) -> None:
+        self.closed = 0
+
+    def exec(self, command, timeout=None, user=None):  # noqa: ARG002
+        return ""
+
+    def upload_file(self, *_a, **_kw):
+        pass
+
+    def upload_dir(self, *_a, **_kw):
+        pass
+
+    def start_agent_process(self, *_a, **_kw):
+        pass
+
+    def get_endpoint(self, *_a, **_kw):
+        return ("", {})
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+def test_runner_closes_sandbox_on_sandboxed_flow_path(monkeypatch, tmp_path):
+    """SandboxedAgentFlow's ``teardown_sandbox`` is a no-op for externally-
+    managed sandboxes (the runner is the manager). The runner MUST still
+    close + deregister or Modal/Daytona containers leak per task."""
+    import rllm.runner as runner_mod
+    from rllm.sandbox import cleanup
+    from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
+
+    fake = _FakeSandbox()
+    teardown_calls: list[int] = []
+
+    class _Flow(SandboxedAgentFlow):
+        sandbox_backend = "docker"
+
+        def run(self, task, config):
+            return Episode(id=config.session_uid, task=task.id, trajectories=[])
+
+        # Track teardown calls to confirm both code paths fire.
+        def teardown_sandbox(self):  # type: ignore[override]
+            teardown_calls.append(1)
+            super().teardown_sandbox()
+
+    flow = _Flow()
+    flow.set_sandbox(fake)  # marks externally_managed=True
+    cleanup.register(fake)  # mirrors what ``create_sandbox`` does
+
+    monkeypatch.setattr(
+        runner_mod,
+        "_create_sandbox_for_task",
+        lambda task, backend, agent_flow: (fake, "python:3.11-slim", backend or "docker"),
+    )
+    monkeypatch.setattr(runner_mod, "_setup_task_environment", lambda task, sandbox: None)
+
+    class _NopEvaluator:
+        def evaluate(self, task, episode):  # noqa: ARG002
+            return EvalOutput(reward=0.0, is_correct=False, signals=[])
+
+    runner = Runner(agent_flow=flow, sandbox_backend="docker", evaluator_override=_NopEvaluator())
+    task = Task(id="t-1", instruction="hi", metadata={}, dataset_dir=tmp_path)
+    config = AgentConfig(base_url="http://x", model="m", session_uid="eval-0")
+
+    asyncio.run(runner.run(task, config))
+
+    # Harness's teardown drops its sandbox ref.
+    assert teardown_calls == [1]
+    # The runner ALSO closed the sandbox — this is the regression that was
+    # leaking Modal containers per task.
+    assert fake.closed == 1
+    # And deregistered, so SIGTERM doesn't try to double-close.
+    with cleanup._lock:
+        assert fake not in cleanup._active

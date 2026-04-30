@@ -145,18 +145,27 @@ class Runner:
             if sandbox is not None:
                 from rllm.sandbox.cleanup import deregister
 
+                # Let the harness drop its sandbox reference first
+                # (its own ``teardown_sandbox`` is a no-op for externally-
+                # managed sandboxes, but it clears internal state — e.g.,
+                # the harness's view of the sandbox handle — that matters
+                # if ``create_instance()`` reuses the harness instance).
                 if isinstance(self.agent_flow, SandboxedAgentFlow):
                     try:
-                        await asyncio.to_thread(self.agent_flow.teardown_sandbox)
+                        self.agent_flow.teardown_sandbox()  # local state only
                     except Exception:
                         logger.exception("teardown_sandbox failed")
-                else:
-                    try:
-                        await asyncio.to_thread(sandbox.close)
-                    except Exception:
-                        logger.exception("sandbox close failed")
-                    finally:
-                        deregister(sandbox)
+                # The runner owns the sandbox lifecycle whenever it
+                # created the sandbox (which is always, on this code
+                # path). Close + deregister unconditionally so cloud
+                # backends (Modal, Daytona) don't leak duration-billed
+                # containers when running through SandboxedAgentFlow.
+                try:
+                    await asyncio.to_thread(sandbox.close)
+                except Exception:
+                    logger.exception("sandbox close failed")
+                finally:
+                    deregister(sandbox)
 
 
 # ---------------------------------------------------------------------------

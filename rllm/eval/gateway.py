@@ -171,6 +171,11 @@ class EvalGatewayManager:
             inbound_auth_token=self.inbound_auth_token,
         )
 
+    @property
+    def _cleanup_name(self) -> str:
+        """Stable per-instance key for the late-cleanup registry."""
+        return f"gateway-{id(self)}"
+
     def start(self, *, startup_timeout: float = 10.0) -> str:
         """Boot the gateway in a background thread and return its URL."""
         if self._server is not None:
@@ -207,6 +212,12 @@ class EvalGatewayManager:
                     logger.info("rLLM gateway bound at %s, exposed via %s", self._url, self.public_url)
                 else:
                     logger.info("rLLM gateway ready at %s", self._url)
+                # Register so SIGTERM / atexit teardown reaches us even
+                # when the eval CLI's outer ``finally`` doesn't run
+                # (e.g., process killed mid-rollout).
+                from rllm.sandbox.cleanup import register_late_cleanup
+
+                register_late_cleanup(self._cleanup_name, self.shutdown)
                 return self.base_url
             time.sleep(0.05)
 
@@ -229,6 +240,12 @@ class EvalGatewayManager:
         self._tunnel_proc = proc
 
     def shutdown(self) -> None:
+        # Deregister from the cleanup registry first so that if the
+        # registry's close_all() is mid-iteration on us, our own
+        # ``shutdown`` calls don't recurse. Idempotent.
+        from rllm.sandbox.cleanup import deregister_late_cleanup
+
+        deregister_late_cleanup(self._cleanup_name)
         # Tunnel first: keeping it alive after the gateway is gone
         # leaves a public URL pointing at a dead port.
         if self._tunnel_proc is not None:
