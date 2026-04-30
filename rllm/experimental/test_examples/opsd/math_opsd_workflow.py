@@ -1,8 +1,8 @@
-from rllm.agents.agent import Episode, Trajectory
 from rllm.experimental.opsd.workflow_utils import OPSDConfig, opsd_postprocess
 from rllm.experimental.rollout.completer import Completer
 from rllm.experimental.rollout.rollout_engine import RolloutEngine
 from rllm.rewards.reward_fn import math_reward_fn
+from rllm.types import Episode, Trajectory
 from rllm.workflows.workflow import Workflow
 
 

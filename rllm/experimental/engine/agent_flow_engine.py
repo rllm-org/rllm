@@ -17,10 +17,9 @@ from typing import TYPE_CHECKING
 
 from tqdm import tqdm
 
-from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.eval.types import EvalOutput
 from rllm.experimental.engine.trace_converter import compute_step_metrics, trace_record_to_step
-from rllm.types import AgentConfig, Task, run_agent_flow
+from rllm.types import AgentConfig, Episode, Step, Task, Trajectory, run_agent_flow
 from rllm.utils import colorful_print
 from rllm.workflows.workflow import TerminationReason
 

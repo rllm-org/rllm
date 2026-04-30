@@ -33,7 +33,8 @@ def __getattr__(name: str):
 
     _agent_exports = {"BaseAgent", "Action", "Step", "Trajectory", "Episode"}
     if name in _agent_exports:
-        from rllm.agents.agent import Action, BaseAgent, Episode, Step, Trajectory
+        from rllm.agents.agent import BaseAgent
+        from rllm.types import Action, Episode, Step, Trajectory
 
         _exports = {
             "BaseAgent": BaseAgent,

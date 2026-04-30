@@ -1,7 +1,7 @@
 from typing import Any
 
-from rllm.agents.agent import Episode
 from rllm.engine.rollout.rollout_engine import ModelOutput
+from rllm.types import Episode
 from rllm.workflows.timing_mixin import TimingTrackingMixin
 from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflow
 

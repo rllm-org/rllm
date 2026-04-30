@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from rllm.agents.agent import Step
+from rllm.types import Step
 
 logger = logging.getLogger(__name__)
 

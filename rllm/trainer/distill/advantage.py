@@ -3,7 +3,7 @@
 import logging
 from collections.abc import Callable
 
-from rllm.agents.agent import Step
+from rllm.types import Step
 
 logger = logging.getLogger(__name__)
 

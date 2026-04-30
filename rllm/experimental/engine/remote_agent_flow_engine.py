@@ -10,7 +10,6 @@ import logging
 import uuid
 from collections import defaultdict
 
-from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.experimental.engine.gateway_manager import GatewayManager
 from rllm.experimental.engine.remote_runtime.protocol import (
     RemoteAgentRuntime,
@@ -18,6 +17,7 @@ from rllm.experimental.engine.remote_runtime.protocol import (
     TaskSubmission,
 )
 from rllm.experimental.engine.trace_converter import compute_step_metrics, trace_record_to_step
+from rllm.types import Episode, Step, Trajectory
 from rllm.utils.episode_logger import EpisodeLogger
 from rllm.workflows.workflow import TerminationReason
 
