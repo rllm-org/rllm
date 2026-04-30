@@ -231,6 +231,7 @@ class AgentFlowEngine:
             base_url=session_url,
             model=self.model,
             session_uid=uid,
+            is_validation=is_validation,
         )
 
         # 3. Run agent flow (prefers arun if available, else run in executor)
@@ -276,7 +277,8 @@ class AgentFlowEngine:
         for signal in eval_output.signals:
             enriched.metrics[signal.name] = signal.value
 
-        enriched.termination_reason = TerminationReason.ENV_DONE
+        if enriched.termination_reason is None:
+            enriched.termination_reason = TerminationReason.ENV_DONE
         return enriched
 
     def _enrich_episode(

@@ -418,6 +418,12 @@ class UnifiedTrainer:
             return
 
         workflow_metrics, termination_counts = self._collect_workflow_metrics_from_episodes(trainer_state.episodes)
+        for key, value in workflow_metrics.items():
+            trainer_state.metrics[f"batch/{key}"] = np.mean(value)
+
+        total_counts = max(sum(termination_counts.values()), 1)
+        for r in TerminationReason:
+            trainer_state.metrics[f"batch/termination_reason/{r.value}"] = termination_counts[r.value] / total_counts
 
         # stage 2: transform episodes to trajectory groups (sync)
         trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(trainer_state.episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook)
@@ -460,13 +466,6 @@ class UnifiedTrainer:
                 max_steps_to_visualize=2,
                 show_workflow_metadata=True,
             )
-
-        for key, value in workflow_metrics.items():
-            trainer_state.metrics[f"batch/{key}"] = np.mean(value)
-
-        total_counts = max(sum(termination_counts.values()), 1)
-        for r in TerminationReason:
-            trainer_state.metrics[f"batch/termination_reason/{r.value}"] = termination_counts[r.value] / total_counts
 
     # =========================================================================
     # Fully-asynchronous training pipeline
@@ -815,8 +814,8 @@ class UnifiedTrainer:
         for episode in episodes:
             for k, v in episode.metrics.items():
                 workflow_metrics[k].append(v)
-            if episode.termination_reason is not None:
-                termination_counts[episode.termination_reason.value] += 1
+            reason = episode.termination_reason or TerminationReason.UNKNOWN
+            termination_counts[getattr(reason, "value", reason)] += 1
         # reduce the metrics to a scalar value, with error handling
         reduced_workflow_metrics = {}
         for k, v in workflow_metrics.items():
