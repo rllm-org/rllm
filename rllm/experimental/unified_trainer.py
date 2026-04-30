@@ -808,7 +808,8 @@ class UnifiedTrainer:
     # =========================================================================
     # Helper functions
     # =========================================================================
-    def _collect_workflow_metrics_from_episodes(self, episodes: list[Episode]) -> tuple[dict, Counter]:
+    @staticmethod
+    def _collect_workflow_metrics_from_episodes(episodes: list[Episode]) -> tuple[dict, Counter]:
         workflow_metrics = defaultdict(list)
         termination_counts = Counter()
         for episode in episodes:
