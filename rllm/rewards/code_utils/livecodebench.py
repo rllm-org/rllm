@@ -491,7 +491,10 @@ def reliability_guard(maximum_memory_bytes=None):
 
     os.kill = None
     os.system = None
-    os.putenv = None
+    # NOTE: os.putenv is NOT Noned — numpy >= 2.0's init path calls it,
+    # and BASE_IMPORTS injects ``import numpy as np`` into every test
+    # program. Setting putenv to None makes every grading run fail with
+    # ``'NoneType' object is not callable``.
     os.remove = None
     os.removedirs = None
     os.rmdir = None
