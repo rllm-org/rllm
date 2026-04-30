@@ -1,3 +1,14 @@
+"""Legacy env / agent / workflow class lookup tables.
+
+Used by the legacy ``rllm.trainer.agent_trainer.AgentTrainer`` path to
+resolve config strings (``env.name``, ``agent.name``, ``workflow.name``)
+to concrete classes. After the cleanup of the
+Agent+Environment+AgentExecutionEngine stack, the env and agent maps
+are empty; only the workflow map still holds entries used by the
+remaining workflow-based examples (countdown, etc.).
+"""
+
+
 def safe_import(module_path, class_name):
     try:
         module = __import__(module_path, fromlist=[class_name])
@@ -6,15 +17,8 @@ def safe_import(module_path, class_name):
         return None
 
 
-# Import environment classes
-ENV_CLASSES = {
-    "tool": safe_import("rllm.environments.tools.tool_env", "ToolEnvironment"),
-}
-
-# Import agent classes
-AGENT_CLASSES = {
-    "tool_agent": safe_import("rllm.agents.tool_agent", "ToolAgent"),
-}
+ENV_CLASSES: dict = {}
+AGENT_CLASSES: dict = {}
 
 WORKFLOW_CLASSES = {
     "single_turn_workflow": safe_import("rllm.workflows.single_turn_workflow", "SingleTurnWorkflow"),

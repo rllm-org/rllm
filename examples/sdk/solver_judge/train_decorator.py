@@ -17,8 +17,8 @@ def main(config):
     train_dataset = DatasetRegistry.load_dataset("countdown", "train")
     test_dataset = DatasetRegistry.load_dataset("countdown", "test")
 
-    assert train_dataset, "Train dataset not found. Please run examples/solver_judge/prepare_countdown_data.py first."
-    assert test_dataset, "Test dataset not found. Please run examples/solver_judge/prepare_countdown_data.py first."
+    assert train_dataset, "Train dataset not found. Please run examples/countdown/prepare_countdown_data.py first."
+    assert test_dataset, "Test dataset not found. Please run examples/countdown/prepare_countdown_data.py first."
 
     trainer = AgentTrainer(
         agent_run_func=run_workflow,
