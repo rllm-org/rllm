@@ -55,5 +55,3 @@ python -m examples.countdown.unified_trainer.train_countdown_unified_verl \
     trainer.test_freq=10 \
     trainer.default_hdfs_dir=null \
     trainer.total_epochs=100
-
-pkill -9 -f 'ray::WorkerDict'

@@ -126,4 +126,5 @@ class VerlEngine(RolloutEngine):
             prompt_length=prompt_length,
             completion_length=len(completion_ids),
             finish_reason=finish_reason,
+            metrics={"num_preempted": token_output.num_preempted} if token_output.num_preempted else None,
         )

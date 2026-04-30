@@ -37,8 +37,24 @@ class VerlTaskRunner(TaskRunner):
         config.trainer.use_legacy_worker_impl = "disable"
         pprint(OmegaConf.to_container(config))
 
-        actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
-        self.add_ref_policy_worker(config, actor_rollout_cls)
+        is_separated = config.rllm.get("async_training", {}).get("enable", False)
+        if is_separated:
+            from verl.experimental.separation.utils import create_resource_pool_manager, create_role_worker_mapping
+            from verl.trainer.ppo.utils import Role
+
+            # Propagate rollout GPU config into actor_rollout_ref (verl convention)
+            config.actor_rollout_ref.rollout.nnodes = config.rollout.nnodes
+            config.actor_rollout_ref.rollout.n_gpus_per_node = config.rollout.n_gpus_per_node
+
+            role_worker_mapping, ray_worker_group_cls = create_role_worker_mapping(config)
+            # Trainer resource pool: all roles except Rollout (rollout runs standalone via AgentLoopManager)
+            trainer_roles = {r: cls for r, cls in role_worker_mapping.items() if r != Role.Rollout}
+            resource_pool_manager = create_resource_pool_manager(config, roles=list(trainer_roles.keys()))
+        else:
+            actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
+            self.add_ref_policy_worker(config, actor_rollout_cls)
+            trainer_roles = self.role_worker_mapping
+            resource_pool_manager = self.init_resource_pool_mgr(config)
 
         validate_config(
             config=config,
@@ -56,13 +72,11 @@ class VerlTaskRunner(TaskRunner):
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
-        resource_pool_manager = self.init_resource_pool_mgr(config)
-
         # Assemble backend-specific arguments for initializing the verl backend.
         backend_args = {
             "tokenizer": tokenizer,
             "processor": processor,
-            "role_worker_mapping": self.role_worker_mapping,
+            "role_worker_mapping": trainer_roles,
             "resource_pool_manager": resource_pool_manager,
             "ray_worker_group_cls": ray_worker_group_cls,
         }
