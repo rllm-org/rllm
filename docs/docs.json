@@ -49,6 +49,7 @@
           {
             "group": "Tutorials",
             "pages": [
+              "tutorials/cookbooks",
               "tutorials/solver-judge-workflow"
             ]
           },

@@ -1,0 +1,103 @@
+---
+title: Cookbooks
+description: End-to-end AgentFlow examples that ship as installable plugins
+---
+
+A **cookbook** is a small Python package that ships an `AgentFlow` + an `Evaluator` together with a `prepare_data.py` and a pair of `train_{tinker,verl}.sh` scripts. Each cookbook is self-contained: install it once with `pip install -e cookbooks/<name>`, and the rLLM CLI discovers the agent and the evaluator by name through Python entry points.
+
+```bash
+rllm eval  <dataset> --agent <name> --evaluator <name>
+rllm train <dataset> --agent <name> --evaluator <name>
+```
+
+Each cookbook is a plain async function that calls an OpenAI-compatible endpoint and returns an `Episode`. See [AgentFlow & Evaluator](/core-concepts/agentflow-evaluator) for the protocol.
+
+## Available cookbooks
+
+| Cookbook | Pattern | Description |
+|---|---|---|
+| [`frozenlake`](https://github.com/rllm-org/rllm/tree/main/cookbooks/frozenlake) | Multi-turn gym | Navigates procedurally-generated FrozenLake grids; demonstrates direct integration with a Gymnasium environment. |
+| [`math`](https://github.com/rllm-org/rllm/tree/main/cookbooks/math) | Single-turn | Solves competition / textbook math with `\boxed{}` answer extraction. |
+| [`math_tool_agent`](https://github.com/rllm-org/rllm/tree/main/cookbooks/math_tool_agent) | Multi-turn + tool | Solves math with a calculator tool via native OpenAI function calling. |
+| [`deepcoder`](https://github.com/rllm-org/rllm/tree/main/cookbooks/deepcoder) | Single-turn | Competition coding with `\`\`\`python\`\`\`` answer extraction; the evaluator runs the code against hidden tests. |
+| [`finqa`](https://github.com/rllm-org/rllm/tree/main/cookbooks/finqa) | Multi-turn + 4 tools | Financial QA over SEC 10-K tables: `get_table_names` / `get_table_info` / `sql_query` / `calculator`, judge-LLM grading. |
+| [`geo3k`](https://github.com/rllm-org/rllm/tree/main/cookbooks/geo3k) | VLM single-turn | Multimodal geometry on the Geometry3K dataset. |
+| [`solver_judge_flow`](https://github.com/rllm-org/rllm/tree/main/cookbooks/solver_judge_flow) | Multi-agent | Solver–judge pattern on the countdown task. |
+
+Each cookbook README has the full walkthrough — datasets, install flow, eval and train commands, and any configuration knobs.
+
+## Anatomy of a cookbook
+
+Every cookbook follows the same shape:
+
+```
+cookbooks/<name>/
+├── README.md           # walkthrough
+├── pyproject.toml      # entry-point declarations
+├── <name>_flow.py      # the AgentFlow function
+├── <name>_eval.py      # the Evaluator function (or evaluator.py)
+├── prepare_data.py     # DatasetRegistry registration / HF download
+├── train.py            # Hydra entry point used by train_*.sh
+├── train_tinker.sh     # single-machine LoRA training
+├── train_verl.sh       # distributed multi-GPU training
+└── test.py             # unit tests
+```
+
+### Entry-point declaration
+
+In `pyproject.toml`, the cookbook registers its flow and evaluator under two well-known groups:
+
+```toml
+[project.entry-points."rllm.agents"]
+my_agent = "my_flow:my_flow"
+
+[project.entry-points."rllm.evaluators"]
+my_eval = "my_eval:my_evaluator"
+```
+
+The CLI's `--agent <name>` and `--evaluator <name>` flags resolve through these groups (see [`rllm.eval.agent_loader`](https://github.com/rllm-org/rllm/blob/main/rllm/eval/agent_loader.py) and [`rllm.eval.evaluator_loader`](https://github.com/rllm-org/rllm/blob/main/rllm/eval/evaluator_loader.py)).
+
+### Module-name collision gotcha
+
+Top-level Python module names must be unique across **all** installed cookbooks — `pip install -e` puts each cookbook's modules at the import root. If two cookbooks both ship a top-level `evaluator.py`, only one wins.
+
+Convention: prefix module names with the cookbook name. `cookbooks/math/` ships `math_flow.py` + `math_eval.py`, not `flow.py` + `evaluator.py`. `cookbooks/finqa/` ships `finqa_flow.py` + `finqa_eval.py` + `finqa_tools.py` + `finqa_constants.py`.
+
+## Install + run
+
+```bash
+# 1. Install rLLM with the backend you want to train on
+uv pip install -e ".[tinker]"      # or .[verl]
+
+# 2. Install the cookbook (--no-deps reuses rllm's pinned deps)
+uv pip install --no-deps -e cookbooks/math
+
+# 3. Verify discovery
+rllm agent list                    # should list "math"
+
+# 4. Pull the dataset and run
+rllm dataset pull math500
+rllm eval math500 --agent math --evaluator math --max-examples 20
+```
+
+The same flow works for any cookbook — substitute the cookbook name and dataset.
+
+## Authoring a new cookbook
+
+The cleanest starting point is to copy an existing cookbook that matches your interaction shape:
+
+| Your agent looks like… | Copy from |
+|---|---|
+| One LLM call, parse answer | [`cookbooks/math`](https://github.com/rllm-org/rllm/tree/main/cookbooks/math) |
+| Multi-turn with a tool | [`cookbooks/math_tool_agent`](https://github.com/rllm-org/rllm/tree/main/cookbooks/math_tool_agent) |
+| Multi-turn with multiple tools + complex grading | [`cookbooks/finqa`](https://github.com/rllm-org/rllm/tree/main/cookbooks/finqa) |
+| Drives a Gym environment | [`cookbooks/frozenlake`](https://github.com/rllm-org/rllm/tree/main/cookbooks/frozenlake) |
+| Solver + judge multi-agent | [`cookbooks/solver_judge_flow`](https://github.com/rllm-org/rllm/tree/main/cookbooks/solver_judge_flow) |
+
+Then:
+
+1. Rename the modules (prefix with your cookbook name to avoid collisions).
+2. Rewrite the flow body — call the LLM, drive your loop, return an `Episode` with the model's final answer in `episode.artifacts["answer"]`.
+3. Rewrite the evaluator — read `artifacts["answer"]`, return an `EvalOutput`.
+4. Update the entry-point names in `pyproject.toml`.
+5. `pip install --no-deps -e cookbooks/<name>` and test with `rllm eval`.
