@@ -13,7 +13,6 @@ __all__ = [
     "MathAgent",
     "ToolAgent",
     "MiniWobAgent",
-    "CompetitionCodingAgent",
     "WebArenaAgent",
 ]
 
@@ -23,7 +22,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str, bool]] = {
     "MathAgent": ("rllm.agents.math_agent", "MathAgent", False),
     "ToolAgent": ("rllm.agents.tool_agent", "ToolAgent", True),
     "MiniWobAgent": ("rllm.agents.miniwob_agent", "MiniWobAgent", True),
-    "CompetitionCodingAgent": ("rllm.agents.code_agent", "CompetitionCodingAgent", True),
     "WebArenaAgent": ("rllm.agents.webarena_agent", "WebArenaAgent", True),
 }
 

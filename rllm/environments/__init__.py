@@ -15,7 +15,6 @@ def safe_import(module_path, class_name):
 
 ENVIRONMENT_IMPORTS = [
     ("rllm.environments.browsergym.browsergym", "BrowserGymEnv"),
-    ("rllm.environments.code.competition_coding", "CompetitionCodingEnv"),
     ("rllm.environments.appworld.appworld_env", "AppWorldEnv"),
 ]
 
