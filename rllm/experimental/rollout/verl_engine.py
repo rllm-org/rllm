@@ -1,17 +1,21 @@
+import logging
 import uuid
 from typing import cast
 
 from omegaconf import DictConfig
 from typing_extensions import override
+from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
 
 from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
 from rllm.experimental.rollout.types import TokenInput, Tokenizer, TokenOutput, VerlTokenOutput
 from rllm.parser import ChatTemplateParser
 from rllm.workflows import TerminationEvent, TerminationReason
 
+logger = logging.getLogger(__name__)
+
 
 class VerlEngine(RolloutEngine):
-    def __init__(self, config: DictConfig, server_manager, tokenizer: Tokenizer, processor=None, **kwargs):
+    def __init__(self, config: DictConfig, server_manager: AsyncLLMServerManager, tokenizer: Tokenizer, processor=None, **kwargs):
         super().__init__()
         self.config = config
 
@@ -42,8 +46,8 @@ class VerlEngine(RolloutEngine):
             logprobs=1,
         )
 
-        print(f"train_sampling_params: {self.train_sampling_params}")
-        print(f"val_sampling_params: {self.val_sampling_params}")
+        logger.info(f"train_sampling_params: {self.train_sampling_params}")
+        logger.info(f"val_sampling_params: {self.val_sampling_params}")
 
     @property
     def supports_token_in_token_out(self) -> bool:
