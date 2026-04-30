@@ -28,12 +28,12 @@ class VerlTaskRunner(TaskRunner):
         from verl.utils.config import validate_config
         from verl.utils.fs import copy_to_local
 
-        from rllm.experimental.verl.utils import propagate_rllm_to_verl_config
+        from rllm.experimental.verl.utils import sync_config
 
         print(f"VerlTaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
         OmegaConf.register_new_resolver("mul", lambda x, y: int(x) * int(y))
         OmegaConf.resolve(config)
-        propagate_rllm_to_verl_config(config, hydra_overrides=hydra_overrides)
+        sync_config(config, hydra_overrides=hydra_overrides)
         config.trainer.use_legacy_worker_impl = "disable"
         pprint(OmegaConf.to_container(config))
 

@@ -39,7 +39,7 @@ def _explicit_override_keys(hydra_overrides: list[str] | None = None) -> set[str
 
 
 # (verl_native_path, rllm_path) — value is the same on both sides; only the
-# location differs. Used by ``propagate_rllm_to_verl_config`` to keep both
+# location differs. Used by ``sync_config`` to keep both
 # namespaces in sync regardless of which side the user typed on the CLI.
 _SHARED_KEYS: list[tuple[str, str]] = [
     ("algorithm.adv_estimator", "rllm.algorithm.adv_estimator"),
@@ -65,7 +65,7 @@ _SHARED_KEYS: list[tuple[str, str]] = [
 ]
 
 
-def propagate_rllm_to_verl_config(config: DictConfig, hydra_overrides: list[str] | None = None) -> None:
+def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) -> None:
     """Keep verl-native and rllm-namespaced config in sync.
 
     Precedence per shared key: rllm CLI explicit > verl CLI explicit > rllm

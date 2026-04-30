@@ -1,4 +1,4 @@
-"""Tests for ``propagate_rllm_to_verl_config`` in ``rllm.experimental.verl.utils``."""
+"""Tests for ``sync_config`` in ``rllm.experimental.verl.utils``."""
 
 import pytest
 from omegaconf import OmegaConf
@@ -86,7 +86,7 @@ def propagate(monkeypatch):
 
     def run(config, explicit_keys: set[str] | None = None):
         monkeypatch.setattr(utils_mod, "_explicit_override_keys", lambda *_a, **_k: set(explicit_keys or ()))
-        utils_mod.propagate_rllm_to_verl_config(config)
+        utils_mod.sync_config(config)
         return config
 
     return run

@@ -2,7 +2,7 @@
 
 # Verl Backend Configuration for rLLM.
 # Loads verl's ppo_trainer.yaml as defaults; rllm-namespaced values are
-# propagated to verl-native keys at runtime by ``propagate_rllm_to_verl_config``
+# propagated to verl-native keys at runtime by ``sync_config``
 # in ``rllm/experimental/verl/utils.py`` — except when the user explicitly
 # overrode the verl-native key on the CLI (detected via Hydra overrides).
 
