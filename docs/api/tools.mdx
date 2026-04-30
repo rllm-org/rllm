@@ -452,31 +452,3 @@ print(result.output)  # 50
 # List all tools
 print(registry.list_tools())  # ["calculator"]
 ```
-
----
-
-## Example: Using Tools with Agents
-
-```python
-from rllm.agents import ToolAgent
-from rllm.environments import ToolEnvironment
-from rllm.tools import Tool, ToolOutput
-
-class MySearchTool(Tool):
-    # ... implementation ...
-    pass
-
-tool_map = {"search": MySearchTool}
-
-# Agent with tools
-agent = ToolAgent(
-    tool_map=tool_map,
-    system_prompt="You are a helpful assistant with search capabilities."
-)
-
-# Environment with tools
-env = ToolEnvironment(
-    tool_map=tool_map,
-    reward_fn=my_reward_fn
-)
-```

@@ -266,26 +266,6 @@ def multi_criteria_reward(task_info: dict, action: str) -> RewardOutput:
 
 ---
 
-## Using Rewards with Environments
-
-```python
-from rllm.environments import SingleTurnEnvironment
-from rllm.rewards import math_reward_fn
-
-env = SingleTurnEnvironment(
-    task={"question": "What is 5 * 7?", "answer": "35"},
-    reward_fn=math_reward_fn
-)
-
-obs, info = env.reset()
-action = "35"
-next_obs, reward, done, info = env.step(action)
-
-print(f"Reward: {reward}")  # 1.0 if correct
-```
-
----
-
 ## Using Rewards with Workflows
 
 ```python

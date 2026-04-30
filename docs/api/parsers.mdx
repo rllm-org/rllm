@@ -285,23 +285,23 @@ print(type(parser).__name__)  # QwenToolParser
 
 ---
 
-## Example: Using Parser with Agent
+## Example: Parsing Tool Calls
 
 ```python
 from transformers import AutoTokenizer
 from rllm.parser import ToolParser
-from rllm.agents import ToolAgent
 
 tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
 parser = ToolParser.get_parser(tokenizer)
 
-agent = ToolAgent(
-    tool_map={"search": MySearchTool},
-    parser_name="qwen",  # or pass parser directly
-    system_prompt="You are a helpful assistant."
-)
+# Parse a model response into structured tool calls.
+response = """<tool_call>
+{"name": "search", "arguments": {"query": "rllm"}}
+</tool_call>"""
 
-# Agent will use the parser to extract tool calls from model responses
+tool_calls = parser.parse(response)
+for tc in tool_calls:
+    print(tc.name, tc.arguments)
 ```
 
 ---

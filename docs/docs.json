@@ -110,34 +110,11 @@
         ]
       },
       {
-        "tab": "Examples",
-        "groups": [
-          {
-            "group": "Getting started",
-            "pages": [
-              "examples/math-agent",
-              "examples/frozen-lake"
-            ]
-          },
-          {
-            "group": "Advanced examples",
-            "pages": [
-              "examples/deep-scaler",
-              "examples/deep-coder",
-              "examples/deep-swe",
-              "examples/search-agent",
-              "examples/vlm-geo3k"
-            ]
-          }
-        ]
-      },
-      {
         "tab": "Projects",
         "groups": [
           {
             "group": "Case studies",
             "pages": [
-              "projects/finqa",
               "projects/deep-scaler",
               "projects/deep-coder",
               "projects/deep-swe",
@@ -168,7 +145,6 @@
           {
             "group": "Engines",
             "pages": [
-              "api/execution-engine",
               "api/workflow-engine",
               "api/rollout-engine"
             ]

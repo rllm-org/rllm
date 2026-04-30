@@ -206,14 +206,15 @@ Workflow for multi-step agent-environment interactions.
 
 ```python
 from rllm.workflows import MultiTurnWorkflow
-from rllm.agents import ToolAgent
-from rllm.environments import ToolEnvironment
+# Substitute your own BaseAgent subclass + BaseEnv subclass here.
+# (The legacy ToolAgent / ToolEnvironment classes have been removed —
+# port to an AgentFlow cookbook instead, see /core-concepts/agentflow-evaluator.)
 
 workflow = MultiTurnWorkflow(
-    agent_cls=ToolAgent,
-    env_cls=ToolEnvironment,
-    agent_args={"tool_map": tools},
-    env_args={"tool_map": tools, "reward_fn": reward_fn},
+    agent_cls=MyAgent,
+    env_cls=MyEnv,
+    agent_args={...},
+    env_args={"reward_fn": reward_fn},
     max_steps=5,
     rollout_engine=engine,
     executor=executor
@@ -234,7 +235,7 @@ def __init__(
 ```
 
 <ParamField path="agent_cls" type="type | str">
-  Agent class or string identifier (e.g., "ToolAgent").
+  Agent class (a `BaseAgent` subclass) or string identifier registered in `env_agent_mappings`.
 </ParamField>
 
 <ParamField path="env_cls" type="type | str">

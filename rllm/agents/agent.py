@@ -6,11 +6,10 @@ re-exports them so existing imports keep working::
 
     from rllm.agents.agent import Episode, Step, Trajectory  # still works
 
-The :class:`BaseAgent` ABC stays here because it is part of the legacy
-``Agent + Environment`` execution path (driven by
-:class:`rllm.engine.agent_execution_engine.AgentExecutionEngine`) which is
-slated for deprecation. New agents should implement
-:class:`rllm.types.AgentFlow` instead.
+:class:`BaseAgent` is still defined here because the surviving
+:mod:`rllm.workflows` path consumes it (e.g. as the ``agent_cls`` field on a
+:class:`~rllm.workflows.workflow.Workflow`). New agents that don't go through
+that path should implement :class:`rllm.types.AgentFlow` instead.
 """
 
 from __future__ import annotations
@@ -59,7 +58,7 @@ class BaseAgent(ABC):
             done (bool): Whether the episode has ended due to termination.
             info (dict): Additional metadata from the environment.
         """
-        raise NotImplementedError("Subclasses must implement this method if using AgentExecutionEngine")
+        raise NotImplementedError("Subclasses must implement update_from_env")
 
     def update_from_model(self, response: str, **kwargs) -> Action:
         """
@@ -71,7 +70,7 @@ class BaseAgent(ABC):
         Returns:
             None
         """
-        raise NotImplementedError("Subclasses must implement this method if using AgentExecutionEngine")
+        raise NotImplementedError("Subclasses must implement update_from_model")
 
     @abstractmethod
     def reset(self):

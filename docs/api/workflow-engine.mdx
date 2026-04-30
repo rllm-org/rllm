@@ -226,9 +226,9 @@ from concurrent.futures import ThreadPoolExecutor
 from rllm.engine import AgentWorkflowEngine
 from rllm.engine.rollout import OpenAIEngine
 from rllm.workflows import MultiTurnWorkflow
-from rllm.agents import ToolAgent
-from rllm.environments import ToolEnvironment
-from rllm.rewards import search_reward_fn
+# Substitute your own BaseAgent / BaseEnv subclasses (the legacy
+# ToolAgent / ToolEnvironment classes have been removed).
+from rllm.rewards import math_reward_fn
 
 rollout_engine = OpenAIEngine(
     base_url="http://localhost:8000/v1",
@@ -236,15 +236,13 @@ rollout_engine = OpenAIEngine(
     model="Qwen/Qwen3-4B"
 )
 
-tool_map = {"search": MySearchTool}
-
 engine = AgentWorkflowEngine(
     workflow_cls=MultiTurnWorkflow,
     workflow_args={
-        "agent_cls": ToolAgent,
-        "env_cls": ToolEnvironment,
-        "agent_args": {"tool_map": tool_map},
-        "env_args": {"tool_map": tool_map, "reward_fn": search_reward_fn},
+        "agent_cls": MyAgent,
+        "env_cls": MyEnv,
+        "agent_args": {...},
+        "env_args": {"reward_fn": math_reward_fn},
         "max_steps": 5,
         "executor": ThreadPoolExecutor(max_workers=128)
     },
