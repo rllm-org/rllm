@@ -12,8 +12,6 @@ __all__ = [
     "Episode",
     "MathAgent",
     "ToolAgent",
-    "MiniWobAgent",
-    "WebArenaAgent",
 ]
 
 # name -> (module_path, attribute, optional)
@@ -21,8 +19,6 @@ __all__ = [
 _LAZY_IMPORTS: dict[str, tuple[str, str, bool]] = {
     "MathAgent": ("rllm.agents.math_agent", "MathAgent", False),
     "ToolAgent": ("rllm.agents.tool_agent", "ToolAgent", True),
-    "MiniWobAgent": ("rllm.agents.miniwob_agent", "MiniWobAgent", True),
-    "WebArenaAgent": ("rllm.agents.webarena_agent", "WebArenaAgent", True),
 }
 
 
