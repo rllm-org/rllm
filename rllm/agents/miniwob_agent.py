@@ -16,8 +16,9 @@ from browsergym.core.action.highlevel import HighLevelActionSet  # type: ignore[
 from browsergym.utils.obs import flatten_axtree_to_str, flatten_dom_to_str, prune_html  # type: ignore[import-untyped]
 from PIL import Image
 
-from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
+from rllm.agents.agent import BaseAgent
 from rllm.agents.system_prompts import *
+from rllm.types import Action, Step, Trajectory
 
 logger = logging.getLogger(__name__)
 

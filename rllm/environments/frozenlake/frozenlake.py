@@ -12,8 +12,8 @@ import numpy as np
 from gymnasium.envs.toy_text.frozen_lake import FrozenLakeEnv as GymFrozenLakeEnv
 from gymnasium.utils import seeding
 
-from rllm.agents.agent import Action
 from rllm.environments.base.base_env import BaseEnv
+from rllm.types import Action
 
 MAX_STEPS: int = 5
 

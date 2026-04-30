@@ -3,7 +3,8 @@ from typing import Any
 
 from jinja2 import Template
 
-from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
+from rllm.agents.agent import BaseAgent
+from rllm.types import Action, Step, Trajectory
 
 
 class AppWorldReactAgent(BaseAgent):

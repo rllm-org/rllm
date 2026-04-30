@@ -11,7 +11,7 @@ import tinker
 import torch
 from tinker.types.tensor_data import TensorData
 
-from rllm.agents.agent import Step, Trajectory, TrajectoryGroup
+from rllm.types import Step, Trajectory, TrajectoryGroup
 
 logger = logging.getLogger(__name__)
 
@@ -717,7 +717,7 @@ async def process_episodes(
                     for step_idx, step in enumerate(trajectory.steps):
                         group_key = (task_id, trajectory.name, step_idx)
                         # Create single-step trajectory
-                        from rllm.agents.agent import Trajectory
+                        from rllm.types import Trajectory
 
                         single_step_traj = Trajectory(steps=[step], reward=step.reward, name=trajectory.name)
                         trajectory_groups_dict[group_key].append(single_step_traj)

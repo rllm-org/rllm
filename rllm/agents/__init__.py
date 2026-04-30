@@ -1,4 +1,5 @@
-from rllm.agents.agent import Action, BaseAgent, Episode, Step, Trajectory
+from rllm.agents.agent import BaseAgent
+from rllm.types import Action, Episode, Step, Trajectory
 
 # Concrete agent implementations load on first access (see __getattr__) so optional /
 # heavy dependencies are not pulled in by `import rllm.agents`.

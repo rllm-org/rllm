@@ -4,12 +4,13 @@ import logging
 import uuid
 from typing import Any
 
-from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
+from rllm.agents.agent import BaseAgent
 from rllm.agents.system_prompts import TOOL_SYSTEM_PROMPT
 from rllm.parser import ToolParser, get_tool_parser
 from rllm.tools.mcp_tool import MCPTool
 from rllm.tools.multi_tool import MultiTool
 from rllm.tools.tool_base import Tool
+from rllm.types import Action, Step, Trajectory
 
 logger = logging.getLogger(__name__)
 

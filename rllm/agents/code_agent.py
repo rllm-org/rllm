@@ -2,7 +2,8 @@ import copy
 import logging
 from typing import Any
 
-from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
+from rllm.agents.agent import BaseAgent
+from rllm.types import Action, Step, Trajectory
 
 logger = logging.getLogger(__name__)
 

@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from rllm.agents.agent import Trajectory
+from rllm.types import Trajectory
 
 
 def compute_trajectory_reward(trajectory: "Trajectory") -> "Trajectory":

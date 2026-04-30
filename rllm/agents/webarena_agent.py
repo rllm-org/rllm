@@ -11,8 +11,9 @@ import numpy as np
 from browsergym.utils.obs import _process_bid
 from PIL import Image
 
-from rllm.agents.agent import BaseAgent, Step, Trajectory
+from rllm.agents.agent import BaseAgent
 from rllm.agents.system_prompts import *
+from rllm.types import Step, Trajectory
 
 logger = logging.getLogger(__name__)
 
