@@ -19,18 +19,37 @@ This cookbook is the canonical example of returning **multiple named trajectorie
 
 ## Architecture
 
-```
-AgentFlow.run(task, config)
-  │
-  ├── Solver (N parallel threads)
-  │     └── client.chat.completions.create(...)
-  │         → Trajectory(name="solver", steps=[Step(action=parsed_answer)])
-  │
-  └── Judge
-        └── client.chat.completions.create(...)
-            → Trajectory(name="judge", steps=[Step(action=selected_answer)])
-  │
-  └── Episode(trajectories=[solver_0, ..., solver_{N-1}, judge])
+```mermaid
+flowchart TD
+    Run["AgentFlow.run(task, config)"]
+    Solver["Solver (N parallel)"]
+    S1["Solver_1: client.chat.completions.create(...)"]
+    S2["Solver_2: client.chat.completions.create(...)"]
+    Sdots["…"]
+    SN["Solver_N: client.chat.completions.create(...)"]
+    T1["Trajectory(name='solver', steps=[Step(action=parsed_answer)])"]
+    T2["Trajectory(name='solver', steps=[Step(action=parsed_answer)])"]
+    TN["Trajectory(name='solver', steps=[Step(action=parsed_answer)])"]
+    Judge["Judge: client.chat.completions.create(...)"]
+    TJ["Trajectory(name='judge', steps=[Step(action=selected_answer)])"]
+    Episode["Episode(trajectories=[solver_0, ..., solver_{N-1}, judge])"]
+
+    Run --> Solver
+    Solver --> S1
+    Solver --> S2
+    Solver --> Sdots
+    Solver --> SN
+    S1 --> T1
+    S2 --> T2
+    SN --> TN
+    T1 --> Judge
+    T2 --> Judge
+    TN --> Judge
+    Judge --> TJ
+    T1 --> Episode
+    T2 --> Episode
+    TN --> Episode
+    TJ --> Episode
 ```
 
 The evaluator scores each trajectory independently. GRPO then groups by name across rollouts: all `solver` trajectories for one task into one group; all `judge` trajectories into another.
