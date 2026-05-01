@@ -89,7 +89,8 @@
             "group": "Guides",
             "pages": [
               "guides/customizing-training",
-              "guides/distributed-training"
+              "guides/distributed-training",
+              "guides/ray-runtime-env"
             ]
           },
           {
