@@ -7,7 +7,7 @@ rLLM's eval framework is built around two protocols: **AgentFlow** runs an agent
 
 ## AgentFlow
 
-An `AgentFlow` is any callable that takes a task and returns an Episode. It is the eval-side equivalent of a `Workflow` (used during training), but has no training dependencies — it only needs a `base_url` and `model` to make LLM calls.
+An `AgentFlow` is any callable that takes a task and returns an Episode. The same flow runs at eval time and at training time — at training, `config.base_url` points at a model gateway that captures token IDs / logprobs transparently, so your flow code doesn't change between the two modes.
 
 ```python
 @runtime_checkable
@@ -42,7 +42,9 @@ class AgentConfig:
 
 ### Example AgentFlow
 
-A minimal math agent that solves a problem in one turn:
+A minimal math agent that solves a problem in one turn (see
+[`cookbooks/math/math_flow.py`](https://github.com/rllm-org/rllm/blob/main/cookbooks/math/math_flow.py)
+for the runnable, async version that ships in the repo):
 
 ```python
 from rllm.types import Episode, Trajectory, Step
@@ -168,8 +170,11 @@ The CLI resolves the appropriate AgentFlow and Evaluator from the benchmark name
 
 ## Connection to training
 
-AgentFlow and Evaluator are designed to be reusable across eval and training. During training:
+AgentFlow and Evaluator are designed to be reusable across eval and training. The same flow function that powers `rllm eval` also powers `rllm train` — the only thing that changes is which `base_url` `config.base_url` points at:
 
-- The **AgentFlow** logic is replaced by a `Workflow` that also captures token-level data (prompt IDs, logprobs) needed for policy gradients
-- The **Evaluator** logic maps directly to reward functions — the same scoring logic that produces `EvalOutput.reward` during eval produces the reward signal during training
-- The **Episode** structure is identical in both paths, so evaluation results are directly comparable to training metrics
+- During eval, `config.base_url` points at a regular OpenAI-compatible endpoint
+- During training, the trainer routes `config.base_url` through a model gateway that captures token IDs and logprobs alongside the chat-completion response, so policy-gradient training has the data it needs without any change to your flow code
+- The **Evaluator** runs unchanged — its `EvalOutput.reward` is the per-task reward signal the trainer feeds into advantage computation
+- The **Episode** structure is identical in both paths, so eval results are directly comparable to training metrics
+
+See [`cookbooks/`](https://github.com/rllm-org/rllm/tree/main/cookbooks) for seven worked examples that train end-to-end with this pattern.
