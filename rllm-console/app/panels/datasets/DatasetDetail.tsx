@@ -1,5 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, ChevronRight, ExternalLink, HardDrive } from "lucide-react";
+import {
+  ArrowLeft,
+  ChevronRight,
+  Download,
+  ExternalLink,
+  HardDrive,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 
 import {
@@ -10,6 +16,7 @@ import { compactNumber } from "~/lib/format";
 import { cn } from "~/lib/utils";
 
 import { EntriesViewer } from "./EntriesViewer";
+import { PullDialog } from "./PullDialog";
 
 interface Props {
   name: string;
@@ -31,6 +38,8 @@ export function DatasetDetail({ name, onBack }: Props) {
     const local = q.data.splits_detail.find((s) => s.is_local);
     setActiveSplit(local?.name ?? q.data.splits_detail[0]?.name ?? null);
   }, [q.data, activeSplit]);
+
+  const [pulling, setPulling] = useState(false);
 
   return (
     <div className="flex h-full flex-col">
@@ -68,11 +77,18 @@ export function DatasetDetail({ name, onBack }: Props) {
                 ?.is_local ? (
                 <EntriesViewer name={name} split={activeSplit} />
               ) : (
-                <NotDownloadedHint name={name} split={activeSplit} />
+                <NotDownloadedHint
+                  name={name}
+                  split={activeSplit}
+                  onPull={() => setPulling(true)}
+                />
               ))}
           </div>
         )}
       </div>
+      {pulling && (
+        <PullDialog name={name} onClose={() => setPulling(false)} />
+      )}
     </div>
   );
 }
@@ -196,7 +212,15 @@ function SplitTabs({
   );
 }
 
-function NotDownloadedHint({ name, split }: { name: string; split: string }) {
+function NotDownloadedHint({
+  name,
+  split,
+  onPull,
+}: {
+  name: string;
+  split: string;
+  onPull: () => void;
+}) {
   return (
     <div className="rounded-md border border-line bg-chrome p-6 text-center">
       <p className="text-sm text-muted">
@@ -206,13 +230,22 @@ function NotDownloadedHint({ name, split }: { name: string; split: string }) {
         </code>{" "}
         is not cached locally — entry preview is unavailable.
       </p>
-      <p className="mt-2 text-xs text-subtle">
-        Download via{" "}
-        <code className="rounded bg-active px-1.5 py-0.5 font-mono text-[10px]">
-          rllm dataset pull {name}
-        </code>{" "}
-        (or run an eval which fetches the dataset on demand).
-      </p>
+      <div className="mt-3 flex flex-col items-center gap-2">
+        <button
+          type="button"
+          onClick={onPull}
+          className="flex items-center gap-1.5 rounded border border-line bg-canvas px-3 py-1.5 text-xs text-strong transition-colors hover:bg-active"
+        >
+          <Download className="h-3.5 w-3.5" />
+          Pull dataset
+        </button>
+        <p className="text-[10px] text-faint">
+          equivalent to{" "}
+          <code className="rounded bg-active px-1 py-0.5 font-mono">
+            rllm dataset pull {name}
+          </code>
+        </p>
+      </div>
     </div>
   );
 }

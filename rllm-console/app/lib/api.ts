@@ -212,6 +212,56 @@ export const fetchDatasetEntries = (
   );
 };
 
+/** SSE event payload yielded by the pull stream. */
+export type PullEvent =
+  | { type: "start"; name: string }
+  | { type: "log"; line: string }
+  | { type: "done"; ok: boolean; exit_code: number };
+
+/**
+ * POST + read-streaming wrapper for ``rllm dataset pull <name>``.
+ *
+ * EventSource only supports GET, so we use ``fetch`` + a manual SSE
+ * parser over ``response.body``. Yields one PullEvent per ``data:``
+ * frame. Caller is responsible for awaiting the iterator to
+ * completion (or aborting via ``signal``, which cancels the stream
+ * and the subprocess).
+ */
+export async function* streamDatasetPull(
+  name: string,
+  signal?: AbortSignal,
+): AsyncGenerator<PullEvent> {
+  const response = await fetch(
+    `${API_BASE}/panels/datasets/${encodeURIComponent(name)}/pull`,
+    { method: "POST", signal },
+  );
+  if (!response.ok || !response.body) {
+    const text = await response.text().catch(() => "");
+    throw new ApiError(response.status, response.statusText, text);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf("\n\n")) >= 0) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      for (const line of frame.split("\n")) {
+        if (!line.startsWith("data: ")) continue;
+        try {
+          yield JSON.parse(line.slice(6)) as PullEvent;
+        } catch {
+          // Ignore malformed frames; keep streaming.
+        }
+      }
+    }
+  }
+}
+
 // ---- Settings panel -----------------------------------------------------
 
 export interface ConsoleConfig {

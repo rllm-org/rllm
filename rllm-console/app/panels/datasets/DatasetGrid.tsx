@@ -1,9 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
-import { HardDrive, Search } from "lucide-react";
+import { Download, HardDrive, Search } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { fetchDatasets, type DatasetCard as DatasetCardType } from "~/lib/api";
 import { cn } from "~/lib/utils";
+
+import { PullDialog } from "./PullDialog";
 
 interface Props {
   onPick: (name: string) => void;
@@ -19,6 +21,7 @@ export function DatasetGrid({ onPick }: Props) {
   const [filter, setFilter] = useState("");
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
   const [localOnly, setLocalOnly] = useState(false);
+  const [pulling, setPulling] = useState<string | null>(null);
 
   const filtered = useMemo(() => {
     if (!q.data) return [];
@@ -108,10 +111,18 @@ export function DatasetGrid({ onPick }: Props) {
         )}
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
           {filtered.map((d) => (
-            <DatasetCard key={d.name} dataset={d} onClick={() => onPick(d.name)} />
+            <DatasetCard
+              key={d.name}
+              dataset={d}
+              onClick={() => onPick(d.name)}
+              onPull={() => setPulling(d.name)}
+            />
           ))}
         </div>
       </div>
+      {pulling && (
+        <PullDialog name={pulling} onClose={() => setPulling(null)} />
+      )}
     </div>
   );
 }
@@ -119,21 +130,22 @@ export function DatasetGrid({ onPick }: Props) {
 function DatasetCard({
   dataset,
   onClick,
+  onPull,
 }: {
   dataset: DatasetCardType;
   onClick: () => void;
+  onPull: () => void;
 }) {
   return (
-    <button
-      type="button"
+    <div
       onClick={onClick}
-      className="group flex flex-col gap-2 rounded-md border border-line bg-chrome p-3 text-left transition-colors hover:border-line hover:bg-hover"
+      className="group flex cursor-pointer flex-col gap-2 rounded-md border border-line bg-chrome p-3 text-left transition-colors hover:border-line hover:bg-hover"
     >
       <div className="flex items-start justify-between gap-2">
         <div className="font-mono text-xs font-semibold text-strong group-hover:text-strong">
           {dataset.name}
         </div>
-        {dataset.is_local && (
+        {dataset.is_local ? (
           <span
             className="flex shrink-0 items-center gap-1 rounded bg-emerald-50 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
             title={`Cached locally: ${dataset.local_splits.join(", ")}`}
@@ -141,6 +153,19 @@ function DatasetCard({
             <HardDrive className="h-2.5 w-2.5" />
             local
           </span>
+        ) : (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onPull();
+            }}
+            className="flex shrink-0 items-center gap-1 rounded border border-line bg-canvas px-1.5 py-0.5 text-[10px] text-muted transition-colors hover:bg-active hover:text-strong"
+            title={`Pull this dataset`}
+          >
+            <Download className="h-2.5 w-2.5" />
+            pull
+          </button>
         )}
       </div>
       <p className="line-clamp-2 text-xs text-muted">
@@ -174,6 +199,6 @@ function DatasetCard({
       <div className="truncate font-mono text-[10px] text-faint">
         {dataset.source}
       </div>
-    </button>
+    </div>
   );
 }
