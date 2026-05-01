@@ -16,17 +16,15 @@ A multi-turn agent that solves competition math problems by calling a calculator
 
 ## Architecture
 
-```
-AgentFlow.run(task, config)
-  │
-  └── Multi-turn loop (up to 5 turns)
-        │
-        ├── client.chat.completions.create(messages, tools=TOOLS)
-        │     model outputs reasoning + <tool_call>...</tool_call>
-        │
-        ├── parse tool call → execute calculator → inject result
-        │
-        └── repeat until model outputs <answer>NUMBER</answer>
+```mermaid
+flowchart TD
+    A["AgentFlow.run(task, config)"] --> B["Multi-turn loop (up to 5 turns)"]
+    B --> C["client.chat.completions.create(messages, tools=TOOLS)"]
+    C --> D["model outputs reasoning + &lt;tool_call&gt;...&lt;/tool_call&gt;"]
+    D --> E{"tool call or final answer?"}
+    E -->|tool call| F["parse tool call -> execute calculator -> inject result"]
+    F --> B
+    E -->|"&lt;answer&gt;NUMBER&lt;/answer&gt;"| G["Done"]
 ```
 
 The evaluator checks the final `<answer>` against the ground truth via numeric comparison.
