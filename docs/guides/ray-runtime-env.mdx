@@ -1,0 +1,115 @@
+---
+title: Ray runtime environment
+description: How rLLM builds the Ray runtime_env that controls environment variables on training workers, and how to override it
+---
+
+When rLLM launches verl training, it calls `ray.init()` with a `runtime_env` that controls which environment variables every Ray worker sees. This page describes what `get_ppo_ray_runtime_env()` puts in that dict, the precedence order between rLLM defaults, your shell, and `ray job submit --runtime-env-json`, and the knobs you have for overriding each layer.
+
+## Precedence
+
+`get_ppo_ray_runtime_env()` composes the runtime env from three layers. Higher layers win on key conflicts.
+
+| Priority | Source | Where it comes from |
+| -------- | ------ | ------------------- |
+| 1 (low) | rLLM defaults | `PPO_RAY_RUNTIME_ENV` in `rllm/trainer/verl/ray_runtime_env.py` |
+| 2 | Forwarded host env | Variables in your shell whose names match a `FORWARD_PREFIXES` entry |
+| 3 (high) | Job-submit runtime env | `runtime_env` field of `--runtime-env-json` passed to `ray job submit` |
+
+The first two layers are merged inside `get_ppo_ray_runtime_env()` itself: the host-forwarded vars overwrite the rLLM defaults via a plain `dict.update`. The third layer is honored by Ray's own merge inside `ray.init()`. To make that merge behave as a proper override (instead of raising on a key conflict), rLLM pops every key the job config sets from the dict it returns, so the job config's value is the one that survives.
+
+<Note>
+  This is the contract as of [PR #521](https://github.com/rllm-org/rllm/pull/521). Earlier versions did not look at the job-submit runtime env at all, so a `ray job submit --runtime-env-json=...` invocation could collide with rLLM's defaults and fail.
+</Note>
+
+## Default environment variables
+
+These are the values rLLM sets at the lowest priority. Anything you forward from your shell or specify in `--runtime-env-json` will override them.
+
+```python
+PPO_RAY_RUNTIME_ENV = {
+    "env_vars": {
+        "TOKENIZERS_PARALLELISM": "true",
+        "NCCL_DEBUG": "WARN",
+        "VLLM_LOGGING_LEVEL": "WARN",
+        "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true",
+        "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+        "VLLM_DISABLE_COMPILE_CACHE": "1",
+        "NCCL_CUMEM_ENABLE": "0",
+    },
+}
+```
+
+The last two are present to work around known issues — vLLM's compile cache corruption ([vllm-project/vllm#31199](https://github.com/vllm-project/vllm/issues/31199)) and a hang during weight sync in disaggregated mode. Override them with care.
+
+## Forwarding from your shell
+
+Any variable in your shell whose name starts with one of these prefixes is forwarded to workers automatically:
+
+| Category | Prefixes |
+| -------- | -------- |
+| Inference engines | `VLLM_`, `SGL_`, `SGLANG_` |
+| HuggingFace | `HF_`, `TOKENIZERS_`, `DATASETS_` |
+| Training frameworks | `TORCH_`, `PYTORCH_`, `DEEPSPEED_`, `MEGATRON_` |
+| CUDA / NCCL | `NCCL_`, `CUDA_`, `CUBLAS_`, `CUDNN_`, `NV_`, `NVIDIA_` |
+
+So, to bump vLLM's logging level for a single run, you can just export it before launching training:
+
+```bash
+export VLLM_LOGGING_LEVEL=DEBUG
+export NCCL_DEBUG=INFO
+python train.py ...
+```
+
+Both values will overwrite rLLM's defaults (`WARN`) on every worker.
+
+## Suppressing forwarding with `RLLM_EXCLUDE`
+
+`RLLM_EXCLUDE` is a comma-separated list that opts variables out of the host-forwarding step. Two forms are supported:
+
+<CodeGroup>
+```bash Specific variables
+export RLLM_EXCLUDE="CUDA_VISIBLE_DEVICES,HF_TOKEN"
+```
+
+```bash Whole prefixes
+export RLLM_EXCLUDE="VLLM*,CUDA*,NCCL_IB_DISABLE"
+```
+</CodeGroup>
+
+A value containing `*` removes the corresponding entry from the forward-prefix list (so `VLLM*` drops the `VLLM_` prefix entirely). Values without `*` are matched against full variable names and excluded individually. The two forms can be combined.
+
+<Tip>
+  Reach for `RLLM_EXCLUDE` when a host variable is leaking into workers and breaking them — a stray `CUDA_VISIBLE_DEVICES` from your launcher is the classic case. It only affects the host-forwarding layer; the rLLM defaults and any `--runtime-env-json` keys are untouched.
+</Tip>
+
+## Overriding with `ray job submit`
+
+If you launch training via `ray job submit`, the `runtime_env` field of `--runtime-env-json` wins over both rLLM defaults and host-forwarded vars. This is the right escape hatch when you need a different value on the cluster than on the submitting node.
+
+```bash
+ray job submit \
+  --runtime-env-json='{
+    "env_vars": {
+      "NCCL_DEBUG": "INFO",
+      "VLLM_LOGGING_LEVEL": "DEBUG"
+    },
+    "working_dir": "."
+  }' \
+  -- python train.py ...
+```
+
+`get_ppo_ray_runtime_env()` reads this dict from `RAY_JOB_CONFIG_JSON_ENV_VAR` (which the Ray job runtime sets for you), pops the listed keys from its own `env_vars` so they cannot collide, and only sets `working_dir=None` when the job config does not specify a `working_dir`. Without that handling Ray's `ray.init()` would refuse to merge and raise unless you also exported `RAY_OVERRIDE_JOB_RUNTIME_ENV=1`.
+
+## Programmatic access
+
+`AgentTrainer` calls `get_ppo_ray_runtime_env()` for you. If you need the same dict for a custom Ray actor, import it directly:
+
+```python
+import ray
+from rllm.trainer.verl.ray_runtime_env import get_ppo_ray_runtime_env
+
+runtime_env = get_ppo_ray_runtime_env()
+ray.init(runtime_env=runtime_env)
+```
+
+The returned dict always contains an `env_vars` key. It contains a `working_dir` key only when no job-submit `working_dir` is in effect.
