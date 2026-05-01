@@ -16,15 +16,15 @@ Each cookbook is a plain async function that calls an OpenAI-compatible endpoint
 
 | Cookbook | Pattern | Description |
 |---|---|---|
-| [`frozenlake`](https://github.com/rllm-org/rllm/tree/main/cookbooks/frozenlake) | Multi-turn gym | Navigates procedurally-generated FrozenLake grids; demonstrates direct integration with a Gymnasium environment. |
-| [`math`](https://github.com/rllm-org/rllm/tree/main/cookbooks/math) | Single-turn | Solves competition / textbook math with `\boxed{}` answer extraction. |
-| [`math_tool_agent`](https://github.com/rllm-org/rllm/tree/main/cookbooks/math_tool_agent) | Multi-turn + tool | Solves math with a calculator tool via native OpenAI function calling. |
-| [`deepcoder`](https://github.com/rllm-org/rllm/tree/main/cookbooks/deepcoder) | Single-turn | Competition coding with `\`\`\`python\`\`\`` answer extraction; the evaluator runs the code against hidden tests. |
-| [`finqa`](https://github.com/rllm-org/rllm/tree/main/cookbooks/finqa) | Multi-turn + 4 tools | Financial QA over SEC 10-K tables: `get_table_names` / `get_table_info` / `sql_query` / `calculator`, judge-LLM grading. |
-| [`geo3k`](https://github.com/rllm-org/rllm/tree/main/cookbooks/geo3k) | VLM single-turn | Multimodal geometry on the Geometry3K dataset. |
-| [`solver_judge_flow`](https://github.com/rllm-org/rllm/tree/main/cookbooks/solver_judge_flow) | Multi-agent | Solver–judge pattern on the countdown task. |
+| [`frozenlake`](/cookbooks/frozenlake) | Multi-turn gym | Navigates procedurally-generated FrozenLake grids; demonstrates direct integration with a Gymnasium environment. |
+| [`math`](/cookbooks/math) | Single-turn | Solves competition / textbook math with `\boxed{}` answer extraction. |
+| [`math_tool_agent`](/cookbooks/math_tool_agent) | Multi-turn + tool | Solves math with a calculator tool via native OpenAI function calling. |
+| [`deepcoder`](/cookbooks/deepcoder) | Single-turn | Competition coding with `\`\`\`python\`\`\`` answer extraction; the evaluator runs the code against hidden tests. |
+| [`finqa`](/cookbooks/finqa) | Multi-turn + 4 tools | Financial QA over SEC 10-K tables: `get_table_names` / `get_table_info` / `sql_query` / `calculator`, judge-LLM grading. |
+| [`geo3k`](/cookbooks/geo3k) | VLM single-turn | Multimodal geometry on the Geometry3K dataset. |
+| [`solver_judge_flow`](/cookbooks/solver_judge_flow) | Multi-agent | Solver–judge pattern on the countdown task. |
 
-Each cookbook README has the full walkthrough — datasets, install flow, eval and train commands, and any configuration knobs.
+Click into any row for the deep-dive page — install flow, dataset, eval and train commands, and key code snippets. The full source, including the launch scripts, lives at [`cookbooks/`](https://github.com/rllm-org/rllm/tree/main/cookbooks) on GitHub.
 
 ## Anatomy of a cookbook
 

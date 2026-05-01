@@ -54,6 +54,18 @@
             ]
           },
           {
+            "group": "Cookbooks",
+            "pages": [
+              "cookbooks/frozenlake",
+              "cookbooks/math",
+              "cookbooks/math_tool_agent",
+              "cookbooks/deepcoder",
+              "cookbooks/finqa",
+              "cookbooks/geo3k",
+              "cookbooks/solver_judge_flow"
+            ]
+          },
+          {
             "group": "rLLM CLI & UI",
             "pages": [
               "core-concepts/cli-and-ui",
@@ -138,8 +150,7 @@
           {
             "group": "Core API",
             "pages": [
-              "api/agents",
-              "api/environments",
+              "api/agentflow",
               "api/workflows"
             ]
           },
