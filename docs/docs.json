@@ -49,20 +49,7 @@
           {
             "group": "Tutorials",
             "pages": [
-              "tutorials/cookbooks",
               "tutorials/solver-judge-workflow"
-            ]
-          },
-          {
-            "group": "Cookbooks",
-            "pages": [
-              "cookbooks/frozenlake",
-              "cookbooks/math",
-              "cookbooks/math_tool_agent",
-              "cookbooks/deepcoder",
-              "cookbooks/finqa",
-              "cookbooks/geo3k",
-              "cookbooks/solver_judge_flow"
             ]
           },
           {
@@ -118,6 +105,24 @@
             "pages": [
               "experimental/advantage-estimator",
               "experimental/precompute-advantage"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Cookbooks",
+        "groups": [
+          {
+            "group": "Cookbooks",
+            "pages": [
+              "cookbooks/overview",
+              "cookbooks/frozenlake",
+              "cookbooks/math",
+              "cookbooks/math_tool_agent",
+              "cookbooks/deepcoder",
+              "cookbooks/finqa",
+              "cookbooks/geo3k",
+              "cookbooks/solver_judge_flow"
             ]
           }
         ]
