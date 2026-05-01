@@ -212,7 +212,6 @@ ignore = [
 "examples/sdk/solver_judge/solver_judge_flow_decorator.py" = ["E501"]
 "examples/sdk/solver_judge/solver_judge_flow_session.py" = ["E501"]
 "rllm/cli/main.py" = ["E501"]
-"rllm/eval/visualizer.py" = ["E501"]
 "rllm/experimental/rllm_telemetry/examples/experiment_comparison.py" = ["E501"]
 "rllm/experimental/test_examples/opsd/math_opsd_workflow.py" = ["E501"]
 "rllm/harnesses/tools/file_editor_tool.py" = ["E501"]
@@ -226,7 +225,16 @@ where   = ["."]
 include = ["rllm", "rllm.*"]
 
 [tool.setuptools.package-data]
-rllm = ["trainer/config/*.yaml", "registry/*.json", "experimental/config/**/*.yaml"]
+rllm = [
+    "trainer/config/*.yaml",
+    "registry/*.json",
+    "experimental/config/**/*.yaml",
+    # Built rllm-console SPA. The directory is gitignored; CI runs
+    # `cd rllm-console && bun install && bun run build` before
+    # packaging the wheel, then the contents land here. `pip install -e`
+    # users have an empty static dir until `rllm view` auto-builds.
+    "console/static/**/*",
+]
 
 [tool.mypy]
 plugins = ["pydantic.mypy"]

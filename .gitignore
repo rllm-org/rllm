@@ -227,3 +227,12 @@ gcp-key.json
 # IDE
 .vscode/
 rllm/PR.md
+
+
+# rllm-console (frontend source)
+/rllm-console/node_modules/
+/rllm-console/build/
+/rllm-console/.react-router/
+
+# rllm console built assets — emitted by `bun run build` and copied here
+/rllm/console/static/
