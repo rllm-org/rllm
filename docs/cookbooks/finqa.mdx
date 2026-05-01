@@ -17,25 +17,30 @@ A multi-turn ReAct-style financial-QA agent that answers questions about SEC 10-
 
 ## Architecture
 
-```
-AgentFlow.run(task, config)
-  │
-  └── Multi-turn loop (up to 20 turns, native OpenAI tool calls)
-        │
-        ├── client.chat.completions.create(messages, tools=TOOL_SPECS)
-        │
-        ├── If msg.tool_calls is empty → that's the final answer, break.
-        │
-        └── Else: dispatch each tool call → append a `tool` message → repeat.
-              (track table_name in `accessed_tables` whenever
-               `get_table_info` is invoked, for the table-access bonus)
-  │
-  └── episode.artifacts = {"answer": full_response, "accessed_tables": [...], "turns": N}
+```mermaid
+flowchart TD
+    subgraph Run["AgentFlow.run(task, config)"]
+        A["Multi-turn loop (up to 20 turns, native OpenAI tool calls)"]
+        B["client.chat.completions.create(messages, tools=TOOL_SPECS)"]
+        C{"msg.tool_calls empty?"}
+        D["Final answer; break"]
+        E["Dispatch each tool call: get_table_names, get_table_info, sql_query, calculator"]
+        F["Append 'tool' message; if get_table_info, track table_name in accessed_tables (table-access bonus)"]
+        G["episode.artifacts = {'answer': full_response, 'accessed_tables': [...], 'turns': N}"]
+        A --> B --> C
+        C -- "Yes" --> D --> G
+        C -- "No" --> E --> F --> B
+    end
 
-Evaluator.evaluate(task, episode)
-  │
-  └── extract FINAL ANSWER from artifacts["answer"], grade via judge LLM,
-      add table-access bonus, return EvalOutput.
+    subgraph Eval["Evaluator.evaluate(task, episode)"]
+        H["Extract FINAL ANSWER from artifacts['answer']"]
+        I["Grade via judge LLM"]
+        J["Add table-access bonus"]
+        K["Return EvalOutput"]
+        H --> I --> J --> K
+    end
+
+    G -- "episode.artifacts" --> H
 ```
 
 [Model Weights](https://huggingface.co/rLLM/rLLM-FinQA-4B) | [Dataset](https://huggingface.co/datasets/rLLM/finqa)

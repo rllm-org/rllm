@@ -16,18 +16,22 @@ A single-turn coding agent for competition-style programming problems. The model
 
 ## Architecture
 
-```
-AgentFlow.run(task, config)
-  │
-  ├── one LLM call via OpenAI(base_url=config.base_url)
-  │     model outputs reasoning + ```python ... ```
-  │
-  └── store full response in episode.artifacts["answer"]
+```mermaid
+flowchart TD
+    subgraph Run["AgentFlow.run(task, config)"]
+        A["one LLM call via OpenAI(base_url=config.base_url)"]
+        B["model outputs reasoning + python code block"]
+        C["store full response in episode.artifacts[&quot;answer&quot;]"]
+        A --> B --> C
+    end
 
-Evaluator.evaluate(task, episode)
-  │
-  └── RewardCodeFn extracts last ```python``` block, runs against
-      task.metadata["ground_truth"] (hidden tests)
+    subgraph Eval["Evaluator.evaluate(task, episode)"]
+        D["RewardCodeFn extracts last python block"]
+        E["run against task.metadata[&quot;ground_truth&quot;] (hidden tests)"]
+        D --> E
+    end
+
+    Run -- "episode.artifacts" --> Eval
 ```
 
 Long chain-of-thought reasoning happens *inside* the assistant message — there is no multi-turn revise/feedback loop. This matches the original deepcoder training setup.

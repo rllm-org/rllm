@@ -17,16 +17,15 @@ A vision-language agent that solves geometry problems with diagram images via th
 
 ## Architecture
 
-```
-AgentFlow.run(task, config)
-  │
-  └── Solver
-        └── OpenAI(base_url=config.base_url).chat.completions.create(
-                messages=[system_prompt, {images + question}]
-            )
-            → Trajectory(name="solver", steps=[Step(action=response)])
-  │
-  └── Episode(trajectories=[solver], artifacts={"answer": response})
+```mermaid
+flowchart TD
+    A["AgentFlow.run(task, config)"] --> S["Solver"]
+    S --> C["OpenAI(base_url=config.base_url).chat.completions.create(...)"]
+    C --> M["messages=[system_prompt, image+question]"]
+    C --> R["response"]
+    R --> T["Trajectory(name=&quot;solver&quot;, steps=[Step(action=response)])"]
+    T --> E["Episode(trajectories=[solver], artifacts={&quot;answer&quot;: response})"]
+    A --> E
 ```
 
 The cookbook demonstrates the **multimodal content-block pattern** in an AgentFlow — the `messages` list contains a `{"type": "image_url", "image_url": {"url": f"data:image/png;base64,…"}}` block alongside the text content.
