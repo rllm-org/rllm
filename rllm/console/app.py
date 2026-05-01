@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # ``mount_console`` call. New panels added under ``rllm.console.panels.*``
 # only need an entry here.
 _DEFAULT_PANEL_MODULES: tuple[str, ...] = (
+    "rllm.console.panels.datasets",
     "rllm.console.panels.sessions",
     "rllm.console.panels.runs",
     "rllm.console.panels.sandboxes",

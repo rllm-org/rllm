@@ -30,9 +30,10 @@ def test_shell_info_lists_default_panels(app: FastAPI) -> None:
     ids = [p["id"] for p in body["panels"]]
     # Default panels self-register at import. The exact order matters
     # less than the set being present — this test pins both.
-    assert ids == ["sessions", "runs", "sandboxes", "eval_launcher", "training", "settings"]
+    assert ids == ["datasets", "sessions", "runs", "sandboxes", "eval_launcher", "training", "settings"]
     placeholder = {p["id"]: p["placeholder"] for p in body["panels"]}
     assert placeholder == {
+        "datasets": False,
         "sessions": False,
         "runs": False,
         "sandboxes": True,

@@ -150,6 +150,68 @@ export const fetchEpisodeIndex = (runId: string) =>
 export const fetchLivePayload = (runId: string) =>
   request<LivePayload>(`/panels/runs/${encodeURIComponent(runId)}/live`);
 
+// ---- Datasets panel -----------------------------------------------------
+
+export interface DatasetCard {
+  name: string;
+  description: string;
+  source: string;
+  category: string;
+  splits: string[];
+  default_agent: string | null;
+  reward_fn: string | null;
+  eval_split: string | null;
+  instruction_field: string | null;
+  transform: string | null;
+  local_splits: string[];
+  is_local: boolean;
+}
+
+export interface DatasetSplitInfo {
+  name: string;
+  is_local: boolean;
+  path: string | null;
+  n_rows: number | null;
+  schema: Record<string, string> | null;
+}
+
+export interface DatasetDetail extends DatasetCard {
+  splits_detail: DatasetSplitInfo[];
+}
+
+export interface DatasetEntries {
+  rows: Record<string, unknown>[];
+  total: number;
+  offset: number;
+  limit: number;
+  columns: string[];
+  n_pages: number;
+}
+
+export const fetchDatasets = () =>
+  request<{ datasets: DatasetCard[]; categories: string[] }>(
+    "/panels/datasets",
+  );
+
+export const fetchDatasetDetail = (name: string) =>
+  request<DatasetDetail>(`/panels/datasets/${encodeURIComponent(name)}`);
+
+export const fetchDatasetEntries = (
+  name: string,
+  split: string,
+  offset: number,
+  limit: number,
+) => {
+  const q = new URLSearchParams({
+    split,
+    offset: String(offset),
+    limit: String(limit),
+  });
+  return request<DatasetEntries>(
+    `/panels/datasets/${encodeURIComponent(name)}/entries?${q}`,
+  );
+};
+
 // ---- Settings panel -----------------------------------------------------
 
 export interface ConsoleConfig {

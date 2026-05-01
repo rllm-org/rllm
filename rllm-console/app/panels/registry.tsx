@@ -10,6 +10,7 @@
  */
 import type { ComponentType } from "react";
 
+import { DatasetsPanel } from "./datasets";
 import { Placeholder } from "./Placeholder";
 import { SessionsPanel } from "./sessions";
 import { RunsPanel } from "./runs";
@@ -18,6 +19,7 @@ import { SettingsPanel } from "./settings";
 export type PanelComponent = ComponentType<{ panelId: string }>;
 
 const REGISTRY: Record<string, PanelComponent> = {
+  datasets: DatasetsPanel,
   sessions: SessionsPanel,
   runs: RunsPanel,
   settings: SettingsPanel,
