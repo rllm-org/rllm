@@ -18,18 +18,22 @@ This is the no-tool counterpart to [`math_tool_agent`](/cookbooks/math_tool_agen
 
 ## Architecture
 
-```
-AgentFlow.run(task, config)
-  │
-  ├── one LLM call via OpenAI(base_url=config.base_url)
-  │     model outputs reasoning + \boxed{ANSWER}
-  │
-  └── store full response in episode.artifacts["answer"]
+```mermaid
+flowchart TD
+    subgraph Run["AgentFlow.run(task, config)"]
+        L["one LLM call via OpenAI(base_url=config.base_url)"]
+        O["model outputs reasoning + \boxed{ANSWER}"]
+        A["store full response in episode.artifacts['answer']"]
+        L --> O --> A
+    end
 
-Evaluator.evaluate(task, episode)
-  │
-  └── extract last \boxed{...}, grade against task.metadata["ground_truth"]
-      via mathd + sympy
+    subgraph Eval["Evaluator.evaluate(task, episode)"]
+        E["extract last \boxed{...}"]
+        G["grade against task.metadata['ground_truth'] via mathd + sympy"]
+        E --> G
+    end
+
+    Run -- "episode.artifacts" --> Eval
 ```
 
 ## Install
