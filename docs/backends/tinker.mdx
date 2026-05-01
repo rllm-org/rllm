@@ -56,51 +56,43 @@ tinker = [
 
 ### Agent Training
 
-Train a math agent with tinker backend:
+Train a math agent with tinker backend. The recommended path is to use the
+[`cookbooks/math`](https://github.com/rllm-org/rllm/tree/main/cookbooks/math) cookbook,
+which already wires an `AgentFlow` + `Evaluator` against the unified trainer:
 
-```python train_math_tinker.py
+```python train.py
 import hydra
 from omegaconf import DictConfig
 
-from examples.math_tinker.math_agent_with_fewshot import MathAgentWithFewshot
-from examples.math_tinker.math_reward import math_reward_fn
-from rllm.data.dataset import DatasetRegistry
-from rllm.environments.base.single_turn_env import SingleTurnEnvironment
-from rllm.trainer import AgentTrainer
+from math_flow import math_flow                # from cookbooks/math/
+from math_eval import math_evaluator           # from cookbooks/math/
 
-@hydra.main(
-    version_base=None,
-    config_path="../../rllm/trainer/config",
-    config_name="tinker_rl_trainer"
-)
+from rllm.data.dataset import DatasetRegistry
+from rllm.experimental.unified_trainer import AgentTrainer
+
+@hydra.main(config_path="pkg://rllm.experimental.config", config_name="unified", version_base=None)
 def main(config: DictConfig):
-    # Load datasets
     train_dataset = DatasetRegistry.load_dataset("gsm8k", "train")
     test_dataset = DatasetRegistry.load_dataset("math500", "test")
 
-    # Create trainer with tinker backend
     trainer = AgentTrainer(
+        backend="tinker",
+        agent_flow=math_flow,
+        evaluator=math_evaluator,
         config=config,
-        agent_class=MathAgentWithFewshot,
-        env_class=SingleTurnEnvironment,
-        agent_args={"use_fewshot": True},
-        env_args={"reward_fn": math_reward_fn},
         train_dataset=train_dataset,
         val_dataset=test_dataset,
-        backend="tinker",  # Specify tinker backend
     )
-
-    # Train
     trainer.train()
 
 if __name__ == "__main__":
     main()
 ```
 
-Run with:
+Run via the cookbook's pre-baked tinker launch script:
 
 ```bash
-python train_math_tinker.py \
+bash cookbooks/math/train_tinker.sh \
   model.name=Qwen/Qwen2.5-Math-7B-Instruct \
   data.train_batch_size=16 \
   training.group_size=16
@@ -252,8 +244,8 @@ tinker backend has native LoRA support built-in:
 # LoRA is enabled by default with rank=32
 trainer = AgentTrainer(
     config=config,
-    agent_class=MathAgent,
-    env_class=SingleTurnEnvironment,
+    agent_flow=math_flow,        # from cookbooks/math/math_flow.py
+    evaluator=math_evaluator,    # from cookbooks/math/math_eval.py
     backend="tinker",
     # ... other args
 )

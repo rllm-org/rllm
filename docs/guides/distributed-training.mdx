@@ -26,23 +26,23 @@ Default configuration for single-GPU setup:
 
 ```python
 import hydra
-from rllm.trainer.agent_trainer import AgentTrainer
-from rllm.data.dataset import DatasetRegistry
+from omegaconf import DictConfig
 
-@hydra.main(
-    config_path="pkg://rllm.trainer.config",
-    config_name="agent_ppo_trainer",
-    version_base=None
-)
-def main(config):
+from math_flow import math_flow                # from cookbooks/math/
+from math_eval import math_evaluator           # from cookbooks/math/
+
+from rllm.data.dataset import DatasetRegistry
+from rllm.experimental.unified_trainer import AgentTrainer
+
+@hydra.main(config_path="pkg://rllm.experimental.config", config_name="unified", version_base=None)
+def main(config: DictConfig):
     train_dataset = DatasetRegistry.load_dataset("gsm8k", "train")
     test_dataset = DatasetRegistry.load_dataset("gsm8k", "test")
-    
+
     trainer = AgentTrainer(
-        agent_class=MathAgent,
-        agent_args={},
-        env_class=SingleTurnEnvironment,
-        env_args={"reward_fn": math_reward_fn},
+        backend="verl",
+        agent_flow=math_flow,
+        evaluator=math_evaluator,
         config=config,
         train_dataset=train_dataset,
         val_dataset=test_dataset,
@@ -53,7 +53,7 @@ if __name__ == "__main__":
     main()
 ```
 
-From `examples/gsm8k_lora/train_gsm8k_with_lora.py:10`.
+The script above mirrors [`cookbooks/math/train.py`](https://github.com/rllm-org/rllm/blob/main/cookbooks/math/train.py); for distributed launch see [`cookbooks/math/train_verl.sh`](https://github.com/rllm-org/rllm/blob/main/cookbooks/math/train_verl.sh).
 
 ### Configuration Files
 
