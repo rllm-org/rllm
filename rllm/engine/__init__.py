@@ -8,8 +8,6 @@ This module contains the core execution infrastructure for agent trajectory roll
 from .rollout.rollout_engine import ModelOutput, RolloutEngine
 
 __all__ = [
-    "AgentExecutionEngine",
-    "AsyncAgentExecutionEngine",
     "AgentWorkflowEngine",
     "RolloutEngine",
     "ModelOutput",
@@ -19,10 +17,6 @@ __all__ = [
 
 
 def __getattr__(name):
-    if name in ("AgentExecutionEngine", "AsyncAgentExecutionEngine"):
-        from .agent_execution_engine import AgentExecutionEngine, AsyncAgentExecutionEngine
-
-        return AgentExecutionEngine if name == "AgentExecutionEngine" else AsyncAgentExecutionEngine
     if name == "AgentWorkflowEngine":
         from .agent_workflow_engine import AgentWorkflowEngine as _AgentWorkflowEngine
 

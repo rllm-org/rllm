@@ -110,23 +110,19 @@
         ]
       },
       {
-        "tab": "Examples",
+        "tab": "Cookbooks",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Cookbooks",
             "pages": [
-              "examples/math-agent",
-              "examples/frozen-lake"
-            ]
-          },
-          {
-            "group": "Advanced examples",
-            "pages": [
-              "examples/deep-scaler",
-              "examples/deep-coder",
-              "examples/deep-swe",
-              "examples/search-agent",
-              "examples/vlm-geo3k"
+              "cookbooks/overview",
+              "cookbooks/frozenlake",
+              "cookbooks/math",
+              "cookbooks/math_tool_agent",
+              "cookbooks/deepcoder",
+              "cookbooks/finqa",
+              "cookbooks/geo3k",
+              "cookbooks/solver_judge_flow"
             ]
           }
         ]
@@ -137,7 +133,6 @@
           {
             "group": "Case studies",
             "pages": [
-              "projects/finqa",
               "projects/deep-scaler",
               "projects/deep-coder",
               "projects/deep-swe",
@@ -160,15 +155,13 @@
           {
             "group": "Core API",
             "pages": [
-              "api/agents",
-              "api/environments",
+              "api/agentflow",
               "api/workflows"
             ]
           },
           {
             "group": "Engines",
             "pages": [
-              "api/execution-engine",
               "api/workflow-engine",
               "api/rollout-engine"
             ]

@@ -5,82 +5,66 @@ from rllm.data import Dataset
 
 
 class AgentTrainer:
-    """
-    A wrapper class that allows users to easily train custom agents with custom environments
-    without having to directly interact with the underlying training infrastructure.
+    """Wrapper that runs PPO training over a Workflow or an AgentFlow rollout function.
 
-    Supports two backends:
-    - 'verl' (default): Standard training backend supporting both workflow and agent/env classes
-    - 'fireworks': Pipeline-based training backend optimized for workflow-based training
+    Two ways to plug in your agent:
+
+    * ``workflow_class`` — a :class:`rllm.workflows.workflow.Workflow` subclass
+      (driven by :class:`rllm.engine.agent_workflow_engine.AgentWorkflowEngine`).
+    * ``agent_run_func`` — a plain rollout function (driven by
+      :class:`rllm.engine.agent_sdk_engine.AgentSdkEngine`).
+
+    Backends:
+
+    * ``verl`` (default): distributed PPO via the verl framework.
+    * ``fireworks``: pipeline-based variant for the Fireworks workflow API.
+    * ``tinker``: single-machine LoRA training via tinker.
+
+    The legacy ``agent_class`` + ``env_class`` path that was driven by
+    ``AgentExecutionEngine`` has been removed. New agents should be authored
+    as a Workflow or as an AgentFlow rollout function (see ``cookbooks/``).
     """
 
     def __init__(
         self,
         workflow_class: type | None = None,
         workflow_args: dict[str, Any] | None = None,
-        agent_class: type | None = None,
-        env_class: type | None = None,
-        agent_args: dict[str, Any] | None = None,
-        env_args: dict[str, Any] | None = None,
         config: dict[str, Any] | list[str] | None = None,
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         backend: Literal["verl", "fireworks", "tinker"] = "verl",
         agent_run_func: Callable | None = None,
     ):
-        """
-        Initialize the AgentTrainer.
+        """Initialize the AgentTrainer.
 
         Args:
-            workflow_class: The workflow class to use for training
-            workflow_args: Optional arguments to pass to the workflow class
-            agent_class: The custom agent class to use for training
-            env_class: The custom environment class to use for training
-            agent_args: Optional arguments to pass to the agent class
-            env_args: Optional arguments to pass to the environment class
-            config: Configuration overrides to apply to the default config
-                   Can be a dictionary with dot notation keys (e.g., {"data.train_batch_size": 8})
-                   or a list of strings in the format "key=value" (e.g., ["data.train_batch_size=8"])
-            train_dataset: Optional train dataset to use
-            val_dataset: Optional validation dataset to use
-            backend: Training backend to use ('verl' or 'fireworks'). Default is 'verl'
+            workflow_class: The workflow class to use for training.
+            workflow_args: Optional arguments to pass to the workflow class.
+            config: Configuration overrides to apply to the default config.
+                Can be a dictionary with dot notation keys
+                (e.g. ``{"data.train_batch_size": 8}``) or a list of strings
+                (e.g. ``["data.train_batch_size=8"]``).
+            train_dataset: Optional train dataset.
+            val_dataset: Optional validation dataset.
+            backend: Training backend (``'verl'`` | ``'fireworks'`` | ``'tinker'``).
+            agent_run_func: Plain rollout function for the AgentSdk path.
         """
-        # Validate backend
-        assert backend in ["verl", "fireworks", "tinker"], f"Unsupported backend: {backend}, must be one of ['verl', 'fireworks', 'tinker']"
-
+        assert backend in ("verl", "fireworks", "tinker"), f"Unsupported backend: {backend}; must be one of ('verl', 'fireworks', 'tinker')"
         self.backend = backend
 
-        # Validate backend-specific requirements
-        if backend == "fireworks":
-            if agent_class is not None or env_class is not None:
-                raise ValueError("The 'fireworks' backend only supports workflow_class. agent_class and env_class are not supported. Use workflow_args to configure agent and environment.")
-            if agent_args is not None or env_args is not None:
-                raise ValueError("The 'fireworks' backend does not support agent_args or env_args. Use workflow_args to configure the workflow.")
+        if backend == "fireworks" and workflow_class is None:
+            raise ValueError("The 'fireworks' backend requires workflow_class.")
 
-        if workflow_class is not None and config is not None and hasattr(config, "rllm") and hasattr(config.rllm, "workflow") and config.rllm.workflow.use_workflow:
-            if agent_class is not None:
-                raise ValueError("agent_class is not supported when using workflow, instead use workflow_args['agent_cls']")
-            if agent_args is not None:
-                raise ValueError("agent_args is not supported when using workflow, instead use workflow_args['agent_args']")
-            if env_class is not None:
-                raise ValueError("env_class is not supported when using workflow, instead use workflow_args['env_cls']")
-            if env_args is not None:
-                raise ValueError("env_args is not supported when using workflow, instead use workflow_args['env_args']")
+        if workflow_class is None and agent_run_func is None:
+            raise ValueError("AgentTrainer requires either workflow_class or agent_run_func. The legacy agent_class + env_class interface is no longer supported.")
 
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
-
-        self.agent_class = agent_class
-        self.env_class = env_class
-        self.agent_args = agent_args or {}
-        self.env_args = env_args or {}
-
         self.agent_run_func = agent_run_func
 
         self.config = config
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
-        self.backend = backend
 
         if train_dataset is not None and self.config is not None and hasattr(self.config, "data"):
             self.config.data.train_files = train_dataset.get_verl_data_path()
@@ -96,41 +80,26 @@ class AgentTrainer:
             self._train_tinker()
 
     def _train_tinker(self):
-        if self.workflow_class is not None:
-            from rllm.trainer.deprecated.tinker_workflow_trainer import TinkerWorkflowTrainer
+        if self.workflow_class is None:
+            raise ValueError("The tinker backend requires workflow_class.")
+        from rllm.trainer.deprecated.tinker_workflow_trainer import TinkerWorkflowTrainer
 
-            trainer = TinkerWorkflowTrainer(
-                config=self.config,
-                workflow_class=self.workflow_class,
-                workflow_args=self.workflow_args,
-                train_dataset=self.train_dataset,
-                val_dataset=self.val_dataset,
-            )
-        else:
-            from rllm.trainer.deprecated.tinker_agent_trainer import TinkerAgentTrainer
-
-            trainer = TinkerAgentTrainer(
-                config=self.config,
-                agent_class=self.agent_class,
-                env_class=self.env_class,
-                agent_args=self.agent_args,
-                env_args=self.env_args,
-                train_dataset=self.train_dataset,
-                val_dataset=self.val_dataset,
-            )
+        trainer = TinkerWorkflowTrainer(
+            config=self.config,
+            workflow_class=self.workflow_class,
+            workflow_args=self.workflow_args,
+            train_dataset=self.train_dataset,
+            val_dataset=self.val_dataset,
+        )
         trainer.fit_agent()
 
     def _train_verl(self):
-        """
-        Train using the standard verl backend.
-        Supports both workflow-based and agent/env-based training.
-        """
+        """Train using the standard verl backend."""
         import ray
 
         from rllm.trainer.verl.ray_runtime_env import get_ppo_ray_runtime_env
         from rllm.trainer.verl.train_agent_ppo import TaskRunner
 
-        # Check if Ray is not initialized
         if not ray.is_initialized():
             from rllm.trainer.ray_init_utils import get_ray_init_settings
 
@@ -145,19 +114,12 @@ class AgentTrainer:
                 config=self.config,
                 workflow_class=self.workflow_class,
                 workflow_args=self.workflow_args,
-                agent_class=self.agent_class,
-                env_class=self.env_class,
-                agent_args=self.agent_args,
-                env_args=self.env_args,
                 agent_run_func=self.agent_run_func,
             )
         )
 
     def _train_fireworks(self):
-        """
-        Train using the fireworks (pipeline) backend.
-        Optimized for workflow-based training with the Fireworks API.
-        """
+        """Train using the fireworks (pipeline) backend — workflow-only."""
         import ray
 
         if not ray.is_initialized():

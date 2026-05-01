@@ -3,7 +3,17 @@ title: Workflows
 description: Workflow orchestration for agent execution and training
 ---
 
-Workflows orchestrate the interaction between agents, environments, and models to execute complex multi-step tasks.
+Workflows orchestrate the interaction between an agent, an environment, and a rollout engine to execute multi-step tasks.
+
+<Note>
+  Workflows are the **older** of the two agent-authoring paths in rLLM. New
+  agents should be authored as **AgentFlows** — see the
+  [Cookbooks](/cookbooks/overview) tutorial and
+  [`cookbooks/`](https://github.com/rllm-org/rllm/tree/main/cookbooks). Workflows
+  remain supported for the use cases where you want explicit `BaseAgent` +
+  `BaseEnv` separation; the seven cookbooks ship as examples of the
+  AgentFlow alternative.
+</Note>
 
 ## Workflow
 
@@ -206,14 +216,15 @@ Workflow for multi-step agent-environment interactions.
 
 ```python
 from rllm.workflows import MultiTurnWorkflow
-from rllm.agents import ToolAgent
-from rllm.environments import ToolEnvironment
+# Substitute your own BaseAgent subclass + BaseEnv subclass here.
+# (The legacy ToolAgent / ToolEnvironment classes have been removed —
+# port to an AgentFlow cookbook instead, see /core-concepts/agentflow-evaluator.)
 
 workflow = MultiTurnWorkflow(
-    agent_cls=ToolAgent,
-    env_cls=ToolEnvironment,
-    agent_args={"tool_map": tools},
-    env_args={"tool_map": tools, "reward_fn": reward_fn},
+    agent_cls=MyAgent,
+    env_cls=MyEnv,
+    agent_args={...},
+    env_args={"reward_fn": reward_fn},
     max_steps=5,
     rollout_engine=engine,
     executor=executor
@@ -234,7 +245,7 @@ def __init__(
 ```
 
 <ParamField path="agent_cls" type="type | str">
-  Agent class or string identifier (e.g., "ToolAgent").
+  Agent class (a `BaseAgent` subclass) or string identifier registered in `env_agent_mappings`.
 </ParamField>
 
 <ParamField path="env_cls" type="type | str">

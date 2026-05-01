@@ -266,27 +266,38 @@ def multi_criteria_reward(task_info: dict, action: str) -> RewardOutput:
 
 ---
 
-## Using Rewards with Environments
+## Using Rewards in an AgentFlow
+
+Modern agents use the `Evaluator` protocol — a separate function that
+reads the `Episode` produced by an `AgentFlow` and returns an `EvalOutput`.
+The reward functions in `rllm.rewards` are wrapped inside the evaluator:
 
 ```python
-from rllm.environments import SingleTurnEnvironment
-from rllm.rewards import math_reward_fn
+import rllm
+from rllm.eval.types import EvalOutput, Signal
+from rllm.types import Episode
+from rllm.rewards.math_utils.utils import grade_answer_mathd, grade_answer_sympy
 
-env = SingleTurnEnvironment(
-    task={"question": "What is 5 * 7?", "answer": "35"},
-    reward_fn=math_reward_fn
-)
 
-obs, info = env.reset()
-action = "35"
-next_obs, reward, done, info = env.step(action)
-
-print(f"Reward: {reward}")  # 1.0 if correct
+@rllm.evaluator
+def math_evaluator(task: dict, episode: Episode) -> EvalOutput:
+    answer = str(episode.artifacts.get("answer", ""))
+    truth = str(task.get("ground_truth", ""))
+    is_correct = grade_answer_mathd(answer, truth) or grade_answer_sympy(answer, truth)
+    return EvalOutput(
+        reward=1.0 if is_correct else 0.0,
+        is_correct=is_correct,
+        signals=[Signal(name="accuracy", value=1.0 if is_correct else 0.0)],
+    )
 ```
 
----
+See [`cookbooks/math/math_eval.py`](https://github.com/rllm-org/rllm/blob/main/cookbooks/math/math_eval.py)
+for the full version that this snippet is adapted from.
 
 ## Using Rewards with Workflows
+
+For the legacy [Workflow](/api/workflows) path, the reward function is
+passed in directly:
 
 ```python
 from rllm.workflows import SimpleWorkflow
@@ -295,11 +306,11 @@ from rllm.rewards import search_reward_fn
 workflow = SimpleWorkflow(
     rollout_engine=engine,
     reward_function=search_reward_fn,
-    executor=executor
+    executor=executor,
 )
 
 episode = await workflow.run(
     task={"question": "...", "ground_truth": "..."},
-    uid="task_0"
+    uid="task_0",
 )
 ```

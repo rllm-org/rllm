@@ -92,30 +92,29 @@ verl = [
 
 ### Agent Training
 
-Train a math agent with verl backend:
+Train a math agent with verl backend. The recommended path is to use the
+[`cookbooks/math`](https://github.com/rllm-org/rllm/tree/main/cookbooks/math) cookbook
+— install once, and the trainer wires up an `AgentFlow` + `Evaluator` for you:
 
-```python train_math_agent.py
+```python train.py
 import hydra
-from rllm.agents.math_agent import MathAgent
-from rllm.data.dataset import DatasetRegistry
-from rllm.environments.base.single_turn_env import SingleTurnEnvironment
-from rllm.rewards.reward_fn import math_reward_fn
-from rllm.trainer.agent_trainer import AgentTrainer
+from omegaconf import DictConfig
 
-@hydra.main(
-    config_path="pkg://rllm.trainer.config",
-    config_name="agent_ppo_trainer",
-    version_base=None
-)
-def main(config):
+from math_flow import math_flow                # from cookbooks/math/
+from math_eval import math_evaluator           # from cookbooks/math/
+
+from rllm.data.dataset import DatasetRegistry
+from rllm.experimental.unified_trainer import AgentTrainer
+
+@hydra.main(config_path="pkg://rllm.experimental.config", config_name="unified", version_base=None)
+def main(config: DictConfig):
     train_dataset = DatasetRegistry.load_dataset("hendrycks_math", "train")
     test_dataset = DatasetRegistry.load_dataset("math500", "test")
 
     trainer = AgentTrainer(
-        agent_class=MathAgent,
-        agent_args={},
-        env_args={"reward_fn": math_reward_fn},
-        env_class=SingleTurnEnvironment,
+        backend="verl",
+        agent_flow=math_flow,
+        evaluator=math_evaluator,
         config=config,
         train_dataset=train_dataset,
         val_dataset=test_dataset,
@@ -126,10 +125,10 @@ if __name__ == "__main__":
     main()
 ```
 
-Run with:
+Run via the cookbook's pre-baked verl launch script:
 
 ```bash
-python train_math_agent.py \
+bash cookbooks/math/train_verl.sh \
   actor_rollout_ref.model.path=Qwen/Qwen2.5-Math-7B-Instruct \
   data.train_batch_size=16 \
   trainer.total_epochs=3
@@ -137,38 +136,14 @@ python train_math_agent.py \
 
 ### LoRA Training
 
-Enable LoRA for parameter-efficient training:
+LoRA is enabled via Hydra overrides — no code change needed:
 
-```python train_with_lora.py
-import hydra
-from rllm.agents.math_agent import MathAgent
-from rllm.data.dataset import DatasetRegistry
-from rllm.environments.base.single_turn_env import SingleTurnEnvironment
-from rllm.rewards.reward_fn import math_reward_fn
-from rllm.trainer.agent_trainer import AgentTrainer
-
-@hydra.main(
-    config_path="pkg://rllm.trainer.config",
-    config_name="agent_ppo_trainer",
-    version_base=None
-)
-def main(config):
-    train_dataset = DatasetRegistry.load_dataset("gsm8k", "train")
-    test_dataset = DatasetRegistry.load_dataset("gsm8k", "test")
-
-    trainer = AgentTrainer(
-        agent_class=MathAgent,
-        agent_args={},
-        env_args={"reward_fn": math_reward_fn},
-        env_class=SingleTurnEnvironment,
-        config=config,
-        train_dataset=train_dataset,
-        val_dataset=test_dataset,
-    )
-    trainer.train()
-
-if __name__ == "__main__":
-    main()
+```bash
+bash cookbooks/math/train_verl.sh \
+  +actor_rollout_ref.model.lora.rank=32 \
+  +actor_rollout_ref.model.lora.alpha=32 \
+  +actor_rollout_ref.model.lora.merge=true \
+  data.train_batch_size=16
 ```
 
 Run with LoRA configuration:

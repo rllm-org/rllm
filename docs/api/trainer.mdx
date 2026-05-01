@@ -19,10 +19,6 @@ from rllm.trainer import AgentTrainer
 def __init__(
     workflow_class: type | None = None,
     workflow_args: dict[str, Any] | None = None,
-    agent_class: type | None = None,
-    env_class: type | None = None,
-    agent_args: dict[str, Any] | None = None,
-    env_args: dict[str, Any] | None = None,
     config: dict[str, Any] | list[str] | None = None,
     train_dataset: Dataset | None = None,
     val_dataset: Dataset | None = None,
@@ -31,28 +27,14 @@ def __init__(
 )
 ```
 
+Two ways to plug in your agent: pass either `workflow_class` (a `Workflow` subclass) **or** `agent_run_func` (a plain rollout function for the AgentSdk path).
+
 <ParamField path="workflow_class" type="type | None">
   Workflow class to use for training (e.g., `SimpleWorkflow`, `MultiTurnWorkflow`).
 </ParamField>
 
 <ParamField path="workflow_args" type="dict | None">
   Arguments to pass to the workflow class.
-</ParamField>
-
-<ParamField path="agent_class" type="type | None">
-  Custom agent class (not used with `fireworks` backend).
-</ParamField>
-
-<ParamField path="env_class" type="type | None">
-  Custom environment class (not used with `fireworks` backend).
-</ParamField>
-
-<ParamField path="agent_args" type="dict | None">
-  Arguments to pass to the agent class.
-</ParamField>
-
-<ParamField path="env_args" type="dict | None">
-  Arguments to pass to the environment class.
 </ParamField>
 
 <ParamField path="config" type="dict | list[str] | None">
@@ -71,14 +53,24 @@ def __init__(
 
 <ParamField path="backend" type="Literal['verl', 'fireworks', 'tinker']" default="verl">
   Training backend:
-  - `"verl"`: Standard backend supporting workflows and agent/env classes
-  - `"fireworks"`: Pipeline-based backend optimized for workflows
-  - `"tinker"`: Legacy backend
+  - `"verl"`: Standard distributed PPO via the verl framework
+  - `"fireworks"`: Pipeline-based variant (workflow-only) for the Fireworks workflow API
+  - `"tinker"`: Single-machine LoRA training via tinker (workflow-only)
 </ParamField>
 
 <ParamField path="agent_run_func" type="Callable | None">
-  Optional custom function for agent execution (advanced usage).
+  Plain rollout function — drives the AgentSdk path. Use this **or**
+  `workflow_class`, not both.
 </ParamField>
+
+<Note>
+The legacy `agent_class` + `env_class` parameters that drove the
+`AgentExecutionEngine` rollout have been removed. Port your agent to
+either a [Workflow](/api/workflows) or an
+[AgentFlow](/core-concepts/agentflow-evaluator) — see the
+[`cookbooks/`](https://github.com/rllm-org/rllm/tree/main/cookbooks)
+directory for examples.
+</Note>
 
 ### Methods
 
@@ -164,52 +156,6 @@ if __name__ == "__main__":
 
 ---
 
-## Example: Training with Agent/Environment Classes
-
-```python
-import hydra
-from rllm.trainer import AgentTrainer
-from rllm.agents import ToolAgent
-from rllm.environments import ToolEnvironment
-from rllm.rewards import search_reward_fn
-from rllm.data import DatasetRegistry
-
-@hydra.main(
-    config_path="pkg://rllm.trainer.config",
-    config_name="agent_ppo_trainer",
-    version_base=None
-)
-def main(config):
-    train_dataset = DatasetRegistry.load_dataset("hotpotqa", "train")
-    val_dataset = DatasetRegistry.load_dataset("hotpotqa", "test")
-    
-    tool_map = {"search": MySearchTool}
-    
-    trainer = AgentTrainer(
-        agent_class=ToolAgent,
-        env_class=ToolEnvironment,
-        agent_args={
-            "tool_map": tool_map,
-            "system_prompt": "You are a helpful search assistant."
-        },
-        env_args={
-            "tool_map": tool_map,
-            "reward_fn": search_reward_fn
-        },
-        config=config,
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-        backend="verl"
-    )
-    
-    trainer.train()
-
-if __name__ == "__main__":
-    main()
-```
-
----
-
 ## Example: Config Overrides
 
 ```python
@@ -245,14 +191,15 @@ def main(config):
     trainer = AgentTrainer(
         workflow_class=MultiTurnWorkflow,
         workflow_args={
-            "agent_cls": "ToolAgent",
-            "env_cls": "ToolEnvironment",
-            "max_steps": 5
+            # Substitute your own BaseAgent / BaseEnv subclasses.
+            "agent_cls": MyAgent,
+            "env_cls": MyEnv,
+            "max_steps": 5,
         },
         config=config,
         train_dataset=DatasetRegistry.load_dataset("mydata", "train"),
         val_dataset=DatasetRegistry.load_dataset("mydata", "val"),
-        backend="verl"
+        backend="verl",
     )
     
     trainer.train()

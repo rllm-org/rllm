@@ -570,9 +570,9 @@ uv pip install "rllm[tinker] @ git+https://github.com/rllm-org/rllm.git"
     ```python
     trainer = AgentTrainer(
         config=config,
-        agent_class=MathAgent,
-        env_class=SingleTurnEnvironment,
-        backend="verl",  # Changed from "tinker"
+        agent_flow=math_flow,        # from cookbooks/math/math_flow.py
+        evaluator=math_evaluator,    # from cookbooks/math/math_eval.py
+        backend="verl",              # Changed from "tinker"
         # ...
     )
     ```
@@ -628,9 +628,9 @@ uv pip install "rllm[tinker] @ git+https://github.com/rllm-org/rllm.git"
     ```python
     trainer = AgentTrainer(
         config=config,
-        agent_class=MathAgent,
-        env_class=SingleTurnEnvironment,
-        backend="tinker",  # Changed from default/verl
+        agent_flow=math_flow,        # from cookbooks/math/math_flow.py
+        evaluator=math_evaluator,    # from cookbooks/math/math_eval.py
+        backend="tinker",            # Changed from default/verl
         # ...
     )
     ```
