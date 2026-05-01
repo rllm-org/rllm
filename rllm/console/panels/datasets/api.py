@@ -14,8 +14,11 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
+import pty
 import re
 import shutil
+import signal
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -117,30 +120,63 @@ async def pull_dataset(name: str) -> StreamingResponse:
 
 
 async def _stream_pull(rllm_bin: str, name: str) -> AsyncIterator[str]:
+    """Run ``rllm dataset pull <name>`` through a PTY and stream output.
+
+    Why PTY: when stdout is a plain pipe, libraries like ``rich`` and
+    ``tqdm`` detect non-TTY and either disable progress entirely or
+    fully buffer their output, so the UI saw nothing until the
+    subprocess exited. Allocating a pseudo-TTY makes them think
+    they're connected to a terminal — progress lines flow as they're
+    produced.
+
+    Output framing: tqdm overwrites the same line with ``\\r``; we
+    treat both ``\\r`` and ``\\n`` as line boundaries so each
+    progress update lands as one SSE frame. ANSI control sequences
+    pass through verbatim — the UI renders them as plain text, which
+    is noisy but readable, and avoids us having to maintain a
+    sanitiser.
+    """
     yield _sse({"type": "start", "name": name})
+
+    master_fd, slave_fd = pty.openpty()
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     proc = await asyncio.create_subprocess_exec(
         rllm_bin,
         "dataset",
         "pull",
         name,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        env=env,
     )
+    # Parent doesn't need the slave end any more — closing it lets
+    # ``read`` on the master return EOF when the child exits.
+    os.close(slave_fd)
+
+    loop = asyncio.get_running_loop()
+    buf = b""
     try:
-        assert proc.stdout is not None
         while True:
-            line = await proc.stdout.readline()
-            if not line:
+            chunk = await loop.run_in_executor(None, _read_or_empty, master_fd, 4096)
+            if not chunk:
                 break
-            yield _sse({"type": "log", "line": line.decode("utf-8", errors="replace").rstrip("\n")})
+            buf += chunk
+            # Split on either CR or LF so tqdm-style progress lines
+            # (``\rfoo: 10%\rfoo: 20%``) become one frame each.
+            buf = buf.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                if line:
+                    yield _sse({"type": "log", "line": line.decode("utf-8", errors="replace")})
+        if buf:
+            yield _sse({"type": "log", "line": buf.decode("utf-8", errors="replace")})
         await proc.wait()
         yield _sse({"type": "done", "ok": proc.returncode == 0, "exit_code": proc.returncode or 0})
     except asyncio.CancelledError:
-        # Client closed the connection — best-effort kill the child so
-        # we don't leak a half-finished pull.
         if proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):
-                proc.terminate()
+                proc.send_signal(signal.SIGTERM)
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(proc.wait(), timeout=2.0)
         raise
@@ -150,6 +186,16 @@ async def _stream_pull(rllm_bin: str, name: str) -> AsyncIterator[str]:
                 proc.kill()
             with contextlib.suppress(Exception):
                 await proc.wait()
+        with contextlib.suppress(OSError):
+            os.close(master_fd)
+
+
+def _read_or_empty(fd: int, n: int) -> bytes:
+    """``os.read`` that returns ``b""`` instead of raising on EIO/closed-PTY."""
+    try:
+        return os.read(fd, n)
+    except OSError:
+        return b""
 
 
 def _sse(payload: dict[str, Any]) -> str:
