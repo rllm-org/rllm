@@ -17,18 +17,16 @@ A multi-turn agent flow that trains a model to navigate procedurally-generated F
 
 ## Architecture
 
-```
-AgentFlow.run(task, config)
-  │
-  ├── generate_random_map(seed, size, p)          # deterministic, in-process
-  ├── env = gymnasium.make("FrozenLake-v1", …)
-  └── Multi-turn loop (up to max_steps turns)
-        │
-        ├── client.chat.completions.create(...)   # render grid as text, ask for action
-        ├── parse_action() → env.step(action)
-        └── repeat until terminated / truncated / max_steps
-  │
-  └── episode.artifacts = {"won": bool, "turns": int, "last_action": str}
+```mermaid
+flowchart TD
+    A["AgentFlow.run(task, config)"] --> M["generate_random_map(seed, size, p) — deterministic, in-process"]
+    M --> E["env = gymnasium.make('FrozenLake-v1', ...)"]
+    E --> L["Multi-turn loop (up to max_steps turns)"]
+    L --> C["client.chat.completions.create(...) — render grid as text, ask for action"]
+    C --> P["parse_action() → env.step(action)"]
+    P --> D{"terminated / truncated / max_steps?"}
+    D -->|no| C
+    D -->|yes| R["episode.artifacts = {'won': bool, 'turns': int, 'last_action': str}"]
 ```
 
 The cookbook is fully self-contained — there's no dependency on `rllm.environments`. The map is regenerated deterministically from `(seed, size, p)` every time the flow runs, so the dataset stores only those parameters.
