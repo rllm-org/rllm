@@ -3,7 +3,21 @@ title: Environments
 description: Environment classes for agent interaction and task evaluation
 ---
 
-The environments module provides standardized interfaces for agents to interact with tasks, including single-turn and multi-turn scenarios.
+`BaseEnv` is the ABC for environment-style agents on the legacy
+[Workflow](/api/workflows) path. The concrete `SingleTurnEnvironment` /
+`MultiTurnEnvironment` / `ToolEnvironment` subclasses have been removed —
+write a small subclass yourself if you need this shape.
+
+<Note>
+  Most agents don't need a `BaseEnv` at all. The recommended path,
+  [AgentFlow](/core-concepts/agentflow-evaluator), is a plain async
+  function: it embeds whatever environment-like state it needs (gym env,
+  SQLite handle, tool dispatch table) directly inside the function body.
+  See [`cookbooks/frozenlake/`](https://github.com/rllm-org/rllm/tree/main/cookbooks/frozenlake)
+  for an AgentFlow that drives a Gymnasium env without subclassing `BaseEnv`,
+  and [`cookbooks/finqa/`](https://github.com/rllm-org/rllm/tree/main/cookbooks/finqa)
+  for one that runs four tools against a process-wide SQLite store.
+</Note>
 
 ## BaseEnv
 

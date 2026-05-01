@@ -3,7 +3,22 @@ title: Tools
 description: Tool system for enabling agent capabilities
 ---
 
-The tools module provides a framework for creating and managing tools that agents can use to interact with external systems.
+The `rllm.tools` module exposes the data types (`Tool`, `ToolCall`,
+`ToolOutput`) the rLLM parser uses when reading tool calls out of model
+responses, plus a small registry. The higher-level `MultiTool` /
+`ToolEnvironment` wrappers that the old Workflow path used have been
+removed.
+
+<Note>
+  For a modern tool-using agent, the recommended pattern is to declare
+  tools as plain Python callables and pass an OpenAI-spec `tools` list
+  directly to the chat-completions API — see
+  [`cookbooks/finqa/finqa_tools.py`](https://github.com/rllm-org/rllm/blob/main/cookbooks/finqa/finqa_tools.py)
+  for a worked example with four tools, native OpenAI function calling,
+  and a process-wide SQLite store. Use the data types below if you need
+  to *parse* tool calls out of a raw text response (e.g. for non-native
+  tool-call formats); see [Parsers](/api/parsers).
+</Note>
 
 ## Tool
 

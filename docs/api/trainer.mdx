@@ -191,14 +191,15 @@ def main(config):
     trainer = AgentTrainer(
         workflow_class=MultiTurnWorkflow,
         workflow_args={
-            "agent_cls": "ToolAgent",
-            "env_cls": "ToolEnvironment",
-            "max_steps": 5
+            # Substitute your own BaseAgent / BaseEnv subclasses.
+            "agent_cls": MyAgent,
+            "env_cls": MyEnv,
+            "max_steps": 5,
         },
         config=config,
         train_dataset=DatasetRegistry.load_dataset("mydata", "train"),
         val_dataset=DatasetRegistry.load_dataset("mydata", "val"),
-        backend="verl"
+        backend="verl",
     )
     
     trainer.train()

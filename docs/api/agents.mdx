@@ -5,6 +5,14 @@ description: Core agent classes for building interactive AI agents
 
 The agent module provides the foundational classes for building agents that interact with environments through actions, observations, and rewards.
 
+<Note>
+  `BaseAgent` is the ABC consumed by the legacy [Workflow](/api/workflows)
+  path. New agents should be authored as **AgentFlow** functions — see
+  [AgentFlow & Evaluator](/core-concepts/agentflow-evaluator) and the
+  [Cookbooks](/tutorials/cookbooks) tutorial. The trajectory data types
+  (`Step`, `Trajectory`, `Episode`, `Action`) below are shared by both paths.
+</Note>
+
 ## BaseAgent
 
 Abstract base class for all agents in the rLLM framework.

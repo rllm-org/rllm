@@ -5,6 +5,14 @@ description: Engine for executing workflow-based agent training and evaluation
 
 The `AgentWorkflowEngine` manages workflow execution with built-in retry logic, episode logging, and parallel task processing.
 
+<Note>
+  The Workflow path is the older of the two agent-authoring paths. For new
+  code, see the [AgentFlow & Evaluator](/core-concepts/agentflow-evaluator)
+  protocol — it doesn't need a custom engine wrapper. The
+  [`cookbooks/`](https://github.com/rllm-org/rllm/tree/main/cookbooks) directory
+  has seven worked examples.
+</Note>
+
 ## AgentWorkflowEngine
 
 ```python
