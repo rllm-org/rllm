@@ -13,12 +13,14 @@ import type { ComponentType } from "react";
 import { Placeholder } from "./Placeholder";
 import { SessionsPanel } from "./sessions";
 import { RunsPanel } from "./runs";
+import { SettingsPanel } from "./settings";
 
 export type PanelComponent = ComponentType<{ panelId: string }>;
 
 const REGISTRY: Record<string, PanelComponent> = {
   sessions: SessionsPanel,
   runs: RunsPanel,
+  settings: SettingsPanel,
 };
 
 export function getPanelComponent(id: string): PanelComponent {

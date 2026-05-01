@@ -254,6 +254,14 @@ def _build_app(eval_root: Path, static_dir: Path | None):
     from fastapi.middleware.cors import CORSMiddleware
 
     from rllm.console import mount_console
+    from rllm.console.panels.settings import store as settings_store
+
+    # Load any user-managed env vars from ~/.rllm/console.env *before*
+    # the gateway/console initialise — the trace store path and
+    # provider keys both read os.environ at construction time.
+    loaded = settings_store.load_into_environ()
+    if loaded:
+        console.print(f"  loaded {len(loaded)} env var(s) from {settings_store.default_env_path()}")
 
     # View-only: a bare FastAPI app, no proxy workers, no model routes.
     # The console only needs the trace store (read-side via trace_loader)

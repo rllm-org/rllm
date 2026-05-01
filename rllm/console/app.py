@@ -24,6 +24,7 @@ _DEFAULT_PANEL_MODULES: tuple[str, ...] = (
     "rllm.console.panels.sandboxes",
     "rllm.console.panels.eval_launcher",
     "rllm.console.panels.training",
+    "rllm.console.panels.settings",
 )
 
 
