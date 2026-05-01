@@ -209,7 +209,7 @@ function NotDownloadedHint({ name, split }: { name: string; split: string }) {
       <p className="mt-2 text-xs text-subtle">
         Download via{" "}
         <code className="rounded bg-active px-1.5 py-0.5 font-mono text-[10px]">
-          rllm download {name}
+          rllm dataset pull {name}
         </code>{" "}
         (or run an eval which fetches the dataset on demand).
       </p>
