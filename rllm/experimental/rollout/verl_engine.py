@@ -1,30 +1,28 @@
+import logging
 import uuid
 from typing import cast
 
 from omegaconf import DictConfig
 from typing_extensions import override
-from verl.experimental.agent_loop.agent_loop import AgentLoopManager, AsyncLLMServerManager
+from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
 
 from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
 from rllm.experimental.rollout.types import TokenInput, Tokenizer, TokenOutput, VerlTokenOutput
 from rllm.parser import ChatTemplateParser
 from rllm.workflows import TerminationEvent, TerminationReason
 
+logger = logging.getLogger(__name__)
+
 
 class VerlEngine(RolloutEngine):
-    def __init__(self, config: DictConfig, rollout_manager: AgentLoopManager, tokenizer: Tokenizer, processor=None, **kwargs):
+    def __init__(self, config: DictConfig, server_manager: AsyncLLMServerManager, tokenizer: Tokenizer, processor=None, **kwargs):
         super().__init__()
         self.config = config
 
         if config.actor_rollout_ref.rollout.name not in ["vllm", "sglang"]:
             raise ValueError(f"VerlEngine only supports vllm or sglang rollout, but got {config.actor_rollout_ref.rollout.name}")
 
-        assert rollout_manager.global_load_balancer is not None, "global_load_balancer is not available. Issues with RayPPOTrainer's `init_workers()` function."
-
-        self.rollout_manager: AgentLoopManager = rollout_manager
-        # reconstruct the servers list from the server_addresses and server_handles (Verl 0.7.0+)
-        servers = zip(rollout_manager.server_addresses, rollout_manager.server_handles, strict=True)
-        self.server_manager = AsyncLLMServerManager(config, servers=servers, load_balancer_handle=rollout_manager.global_load_balancer)
+        self.server_manager = server_manager
 
         self.tokenizer = tokenizer
         self.processor = processor
@@ -48,8 +46,8 @@ class VerlEngine(RolloutEngine):
             logprobs=1,
         )
 
-        print(f"train_sampling_params: {self.train_sampling_params}")
-        print(f"val_sampling_params: {self.val_sampling_params}")
+        logger.info(f"train_sampling_params: {self.train_sampling_params}")
+        logger.info(f"val_sampling_params: {self.val_sampling_params}")
 
     @property
     def supports_token_in_token_out(self) -> bool:
