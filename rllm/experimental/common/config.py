@@ -241,6 +241,15 @@ class AlgorithmConfig:
         Returns:
             AlgorithmConfig: The AlgorithmConfig built from the configuration.
         """
+        if algorithm_config.get("use_rllm", None) is not None:
+            from warnings import warn
+
+            warn(
+                "`algorithm.use_rllm` is deprecated and ignored — advantages are always computed via the rLLM-native path. Remove the field from your config.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         rc_section = algorithm_config.get("rollout_correction", {})
         rollout_correction = RolloutCorrectionConfig(
             tis_mode=rc_section.get("tis_mode", None),
@@ -265,6 +274,15 @@ class AlgorithmConfig:
         )
 
     def __post_init__(self):
+        if self.use_rllm is not None:
+            from warnings import warn
+
+            warn(
+                "`algorithm.use_rllm` is deprecated and ignored — advantages are always computed via the rLLM-native path. Remove the field from your config.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         # Normalize estimator_map: split (estimator, loss_fn) tuples.
         normalized_map: dict[str, rLLMAdvantageEstimator | str] = {}
         for role, value in self.estimator_map.items():

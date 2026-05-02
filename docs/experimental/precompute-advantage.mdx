@@ -14,10 +14,7 @@ trajectory rewards.
 <Warning>
 **Required configuration**
 
-To enable precomputed advantages:
-
-- set `rllm.algorithm.use_precomputed_advantage: true`
-- if using **Verl backend**, also set `rllm.algorithm.use_rllm: true`
+To enable precomputed advantages, set `rllm.algorithm.use_precomputed_advantage: true`.
 
 With `use_precomputed_advantage=true`, rLLM will use your `step.advantage`
 values for groups that provide them.
@@ -108,7 +105,6 @@ With precomputed advantages, you can do something more flexible:
 rllm:
   algorithm:
     use_precomputed_advantage: true
-    use_rllm: true   # required for Verl;
     adv_estimator: grpo
 ```
 
