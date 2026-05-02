@@ -207,7 +207,7 @@ class AlgorithmConfig:
     ``estimator_map`` and the loss function goes into ``loss_fn_map``.
     """
 
-    use_rllm: bool = False  # This is ignored (assumed True) for tinker backend.
+    use_rllm: bool | None = None  # Deprecated
     estimator: rLLMAdvantageEstimator = rLLMAdvantageEstimator.GRPO
     estimator_map: dict[str, rLLMAdvantageEstimator | str | tuple] = field(default_factory=dict)
     # Per-role policy loss overrides (populated from tuples in estimator_map during __post_init__)
@@ -252,7 +252,6 @@ class AlgorithmConfig:
             estimator_map=estimator_map or {},
             stepwise_advantage_mode=stepwise_advantage_mode,
             norm_adv_by_std_in_grpo=algorithm_config.get("norm_adv_by_std_in_grpo", True),
-            use_rllm=algorithm_config.get("use_rllm", None),
             use_precomputed_advantage=algorithm_config.get("use_precomputed_advantage", False),
             loss_fn=algorithm_config.get("loss_fn", None),
             lr_schedule=algorithm_config.get("lr_schedule", "constant"),
