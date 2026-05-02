@@ -232,15 +232,17 @@ Both modes produce the same end result, but the fused path reduces round-trips
 to the training server. The trainer does not need to know which path is active --
 it simply calls all four methods in order.
 
-### Example: Pre-computed advantages (OPSD)
+### Example: Pre-computed advantages
 
-For On-Policy Self-Distillation, advantages are computed during episode generation
-(stage 1) via a workflow decorator. By the time `compute_advantages` (stage 6) runs,
-every `Step` already has its `.advantage` field set. The default implementation in
-`BackendProtocol` detects this and skips re-computation, collecting only metrics.
+For workflows that compute per-token advantages during episode generation
+(stage 1) — for example, distillation flows that derive a reverse-KL signal
+from a teacher policy — every `Step` already has its `.advantage` field set
+by the time `compute_advantages` (stage 6) runs. The default implementation
+in `BackendProtocol` detects this and skips re-computation, collecting only
+metrics.
 
-This means OPSD can work with the standard `TinkerBackend` -- no custom backend
-subclass is needed.
+This means such workflows can use the standard `TinkerBackend` directly —
+no custom backend subclass is needed.
 
 ## Implementing a custom backend
 
