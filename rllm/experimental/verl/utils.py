@@ -14,6 +14,101 @@ from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_
 logger = logging.getLogger(__name__)
 
 
+def _explicit_override_keys(hydra_overrides: list[str] | None = None) -> set[str]:
+    """Return the set of dotted paths the user explicitly set on the Hydra CLI.
+
+    If ``hydra_overrides`` is provided (typically captured in the main Hydra-
+    decorated process and forwarded into a Ray actor), use it. Otherwise fall
+    back to ``HydraConfig.get().overrides.task``, which only works when running
+    inside the Hydra entry-point process.
+    """
+    if hydra_overrides is None:
+        try:
+            from hydra.core.hydra_config import HydraConfig
+
+            hydra_overrides = list(HydraConfig.get().overrides.task)
+        except (ValueError, AttributeError, ImportError):
+            return set()
+    keys: set[str] = set()
+    for o in hydra_overrides:
+        if "=" not in o:
+            continue
+        key = o.split("=", 1)[0].lstrip("+~")
+        keys.add(key)
+    return keys
+
+
+# (verl_native_path, rllm_path) — value is the same on both sides; only the
+# location differs. Used by ``sync_config`` to keep both
+# namespaces in sync regardless of which side the user typed on the CLI.
+_SHARED_KEYS: list[tuple[str, str]] = [
+    ("algorithm.adv_estimator", "rllm.algorithm.adv_estimator"),
+    ("algorithm.norm_adv_by_std_in_grpo", "rllm.algorithm.norm_adv_by_std_in_grpo"),
+    ("algorithm.rollout_correction.bypass_mode", "rllm.algorithm.rollout_correction.bypass_mode"),
+    ("algorithm.rollout_correction.rollout_is", "rllm.algorithm.rollout_correction.tis_mode"),
+    ("algorithm.rollout_correction.rollout_is_threshold", "rllm.algorithm.rollout_correction.tis_cap"),
+    ("actor_rollout_ref.actor.kl_loss_coef", "rllm.algorithm.kl_beta"),
+    ("actor_rollout_ref.actor.policy_loss.loss_mode", "rllm.algorithm.loss_fn"),
+    ("actor_rollout_ref.actor.loss_agg_mode", "rllm.algorithm.loss_agg_mode"),
+    ("actor_rollout_ref.actor.clip_ratio_high", "rllm.algorithm.eps_clip_high"),
+    ("actor_rollout_ref.rollout.n", "rllm.rollout.n"),
+    ("actor_rollout_ref.rollout.val_kwargs.n", "rllm.rollout.n_val"),
+    ("trainer.save_freq", "rllm.trainer.save_freq"),
+    ("trainer.test_freq", "rllm.trainer.test_freq"),
+    ("trainer.val_before_train", "rllm.trainer.val_before_train"),
+    ("trainer.val_only", "rllm.trainer.val_only"),
+    ("trainer.total_epochs", "rllm.trainer.total_epochs"),
+    ("trainer.total_training_steps", "rllm.trainer.total_batches"),
+    ("trainer.logger", "rllm.trainer.logger"),
+    ("trainer.project_name", "rllm.trainer.project_name"),
+    ("trainer.experiment_name", "rllm.trainer.experiment_name"),
+]
+
+
+def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) -> None:
+    """Keep verl-native and rllm-namespaced config in sync.
+
+    Precedence per shared key: rllm CLI explicit > verl CLI explicit > rllm
+    yaml default > verl yaml default. ``None`` rllm values are treated as
+    "no rllm default", letting verl's yaml default stand.
+
+    ``hydra_overrides`` is the list of CLI overrides captured in the main
+    Hydra-decorated process (``HydraConfig.get().overrides.task``). It must be
+    passed in when this function runs inside a Ray actor (Hydra context isn't
+    available across processes). Outside Ray, it can be omitted.
+
+    Also derives ``actor.use_kl_loss = (kl_beta > 0)`` from rllm values.
+    """
+    explicit = _explicit_override_keys(hydra_overrides)
+
+    for verl_path, rllm_path in _SHARED_KEYS:
+        if rllm_path in explicit:
+            OmegaConf.update(config, verl_path, OmegaConf.select(config, rllm_path), merge=False)
+        elif verl_path in explicit:
+            OmegaConf.update(config, rllm_path, OmegaConf.select(config, verl_path), merge=False)
+        else:
+            value = OmegaConf.select(config, rllm_path)
+            if value is None:
+                continue
+            OmegaConf.update(config, verl_path, value, merge=False)
+
+    # Derived verl-only keys
+    if "actor_rollout_ref.actor.use_kl_loss" not in explicit:
+        kl_beta = config.rllm.algorithm.get("kl_beta", 0.0)
+        OmegaConf.update(config, "actor_rollout_ref.actor.use_kl_loss", kl_beta > 0, merge=False)
+
+    # clip_ratio family: verl uses clip_ratio_{low,high} when set, else falls back to clip_ratio.
+    # Mirror the effective low bound to/from rllm.algorithm.eps_clip.
+    if "actor_rollout_ref.actor.clip_ratio_low" in explicit:
+        OmegaConf.update(config, "rllm.algorithm.eps_clip", config.actor_rollout_ref.actor.clip_ratio_low, merge=False)
+    elif "actor_rollout_ref.actor.clip_ratio" in explicit:
+        OmegaConf.update(config, "rllm.algorithm.eps_clip", config.actor_rollout_ref.actor.clip_ratio, merge=False)
+    else:
+        eps_clip = config.rllm.algorithm.get("eps_clip", None)
+        if eps_clip is not None:
+            OmegaConf.update(config, "actor_rollout_ref.actor.clip_ratio", eps_clip, merge=False)
+
+
 def save_checkpoint(
     config: DictConfig,
     global_steps: int,
