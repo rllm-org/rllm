@@ -280,6 +280,12 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             "Reward models are not supported on the rLLM-native verl path; compute rewards in the workflow via a RewardFunction. Remove `reward.reward_model.enable=True` from your config."
         )
 
+        router_replay_mode = self.config.rllm.algorithm.get("router_replay", "disabled")
+        if router_replay_mode != "disabled":
+            strategy = self.config.actor_rollout_ref.actor.strategy
+            if strategy != "megatron":
+                raise ValueError(f"router_replay={router_replay_mode!r} requires actor.strategy='megatron', got {strategy!r}")
+
     def get_dataloader(self, dataset: Dataset | None, trainer_state: TrainerState) -> Iterable:
         """Get dataloader. Note that for Verl backend, the RayPPOTrainer init already creates the dataloaders."""
         if trainer_state.is_training:
@@ -475,15 +481,25 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
                 output = self.actor_rollout_wg.compute_log_prob(batch_td)
                 log_probs = no_padding_2_padding(tu.get(output, "log_probs"), batch_td)
                 entropy = no_padding_2_padding(tu.get(output, "entropy"), batch_td)
+                routed_experts = tu.get(output, "routed_experts", default=None)
 
-                # Entropy metric (for logging only)
+                # Build the old_log_prob DataProto. Include routed_experts when verl's
+                # R2 router-replay path populated it during the proximal forward pass —
+                # the actor update reads it from the batch in megatron_actor.py.
+                old_log_prob_tensors = {"old_log_probs": log_probs.float(), "entropys": entropy.float()}
+                if routed_experts is not None:
+                    old_log_prob_tensors["routed_experts"] = routed_experts
+                old_log_prob = DataProto.from_tensordict(tu.get_tensordict(old_log_prob_tensors))
+
+                # Entropy metric (for logging only); pop before union so it doesn't
+                # leak into the loss path.
+                entropys = old_log_prob.batch["entropys"]
                 response_masks = batch.batch["response_mask"]
                 loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
-                entropy_agg = agg_loss(loss_mat=entropy, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
+                entropy_agg = agg_loss(loss_mat=entropys, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
                 metrics["actor/entropy"] = entropy_agg.detach().item()
+                old_log_prob.batch.pop("entropys")
 
-                # Merge old_log_probs back into the padded DataProto
-                old_log_prob = DataProto.from_tensordict(tu.get_tensordict({"old_log_probs": log_probs.float()}))
                 batch = batch.union(old_log_prob)
 
                 # Compute rollout log prob diff if available

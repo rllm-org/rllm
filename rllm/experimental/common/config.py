@@ -230,7 +230,7 @@ class AlgorithmConfig:
     eps_clip_high: float | None = None
     loss_agg_mode: Literal["token-mean", "seq-mean-token-sum", "seq-mean-token-mean", None] = None
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
-    router_replay: bool = False
+    router_replay: Literal["disabled", "R2", "R3"] = "disabled"
 
     @classmethod
     def from_config(cls, algorithm_config: DictConfig, *, stepwise_advantage_mode: str = "broadcast", estimator_map: dict | None = None) -> "AlgorithmConfig":
@@ -270,7 +270,7 @@ class AlgorithmConfig:
             eps_clip_high=algorithm_config.get("eps_clip_high", None),
             loss_agg_mode=algorithm_config.get("loss_agg_mode", None),
             rollout_correction=rollout_correction,
-            router_replay=algorithm_config.get("router_replay", False),
+            router_replay=algorithm_config.get("router_replay", "disabled"),
         )
 
     def __post_init__(self):

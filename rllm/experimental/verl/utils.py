@@ -51,6 +51,7 @@ _SHARED_KEYS: list[tuple[str, str]] = [
     ("actor_rollout_ref.actor.policy_loss.loss_mode", "rllm.algorithm.loss_fn"),
     ("actor_rollout_ref.actor.loss_agg_mode", "rllm.algorithm.loss_agg_mode"),
     ("actor_rollout_ref.actor.clip_ratio_high", "rllm.algorithm.eps_clip_high"),
+    ("actor_rollout_ref.actor.router_replay.mode", "rllm.algorithm.router_replay"),
     ("actor_rollout_ref.rollout.n", "rllm.rollout.n"),
     ("actor_rollout_ref.rollout.val_kwargs.n", "rllm.rollout.n_val"),
     ("trainer.save_freq", "rllm.trainer.save_freq"),
@@ -96,6 +97,11 @@ def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) ->
     if "actor_rollout_ref.actor.use_kl_loss" not in explicit:
         kl_beta = config.rllm.algorithm.get("kl_beta", 0.0)
         OmegaConf.update(config, "actor_rollout_ref.actor.use_kl_loss", kl_beta > 0, merge=False)
+
+    # Router replay: derive verl's rollout-side flag from the rllm mode (R3 records at rollout).
+    router_replay_mode = config.rllm.algorithm.get("router_replay", "disabled")
+    if router_replay_mode == "R3":
+        OmegaConf.update(config, "actor_rollout_ref.rollout.enable_rollout_routing_replay", True, merge=False)
 
     # clip_ratio family: verl uses clip_ratio_{low,high} when set, else falls back to clip_ratio.
     # Mirror the effective low bound to/from rllm.algorithm.eps_clip.

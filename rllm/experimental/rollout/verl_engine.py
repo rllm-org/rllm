@@ -1,3 +1,5 @@
+import base64
+import json
 import logging
 import uuid
 from typing import cast
@@ -31,6 +33,7 @@ class VerlEngine(RolloutEngine):
         self.max_prompt_length = config.data.max_prompt_length
         self.max_response_length = config.data.max_response_length
         self.accumulate_reasoning = config.get("rllm", {}).get("accumulate_reasoning", False)
+        self.router_replay_mode = config.get("rllm", {}).get("algorithm", {}).get("router_replay", "disabled")
 
         self.train_sampling_params = dict(
             temperature=0.0 if config.actor_rollout_ref.rollout.do_sample is False else config.actor_rollout_ref.rollout.temperature,
@@ -118,6 +121,13 @@ class VerlEngine(RolloutEngine):
         # TODO: implement parse_completion for the standard parser
         parsed_output = self.chat_parser.parse_completion(completion_ids)
 
+        # R3 router replay: encode rollout-side routed_experts as [shape_header_json, base64_blob]
+        routing_matrices = None
+        if self.router_replay_mode == "R3" and token_output.routed_experts is not None:
+            arr = token_output.routed_experts  # (completion_len, num_layers, topk)
+            header = json.dumps({"shape": list(arr.shape[1:]), "dtype": str(arr.dtype)})
+            routing_matrices = [header, base64.b64encode(arr.tobytes()).decode("ascii")]
+
         return ModelOutput(
             text=completion_text,
             content=parsed_output["content"],
@@ -130,4 +140,5 @@ class VerlEngine(RolloutEngine):
             prompt_length=prompt_length,
             completion_length=len(completion_ids),
             finish_reason=finish_reason,
+            routing_matrices=routing_matrices,
         )
