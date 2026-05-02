@@ -189,10 +189,18 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         else:
             logger.warning("RayWorkerGroup.set_loss_fn not available — skipping custom loss injection")
 
-        # Step 3: initialize the rollout engine
+        # Step 3: build the AsyncLLMServerManager from the rollout manager and pass it directly
+        from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
+
+        rollout_manager = self.async_rollout_manager
+        assert rollout_manager.global_load_balancer is not None, "global_load_balancer is not available. Issues with RayPPOTrainer's `init_workers()` function."
+        servers = zip(rollout_manager.server_addresses, rollout_manager.server_handles, strict=True)
+        server_manager = AsyncLLMServerManager(self.config, servers=servers, load_balancer_handle=rollout_manager.global_load_balancer)
+
+        # Step 4: initialize the rollout engine
         self.rollout_engine = VerlEngine(
             config=self.config,
-            rollout_manager=self.async_rollout_manager,
+            server_manager=server_manager,
             tokenizer=self.tokenizer,
             processor=self.processor,
         )
