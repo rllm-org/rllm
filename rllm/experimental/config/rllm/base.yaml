@@ -56,7 +56,7 @@ algorithm:
   # When true, always use pre-computed step.advantage from the workflow (e.g. distillation)
   # and skip advantage computation (GRPO/REINFORCE). Missing advantages default to 0.
   use_precomputed_advantage: false
-  loss_fn: null           # [null, importance_sampling, ppo, cispo, dro, cross_entropy]
+  loss_fn: null           # backend-specific values; null = backend default
   loss_agg_mode: null     # [null, token-mean, seq-mean-token-sum, seq-mean-token-mean]
   kl_beta: 0.0            # KL penalty coefficient
   eps_clip: 0.2           # PPO clip epsilon
