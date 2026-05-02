@@ -100,11 +100,10 @@ RL algorithm and advantage estimation settings.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `adv_estimator` | `str` | `grpo` | Advantage estimator (options: `grpo`, `reinforce`, `reinforce_plus_plus_baseline`, `rloo`, `gae`) |
+| `adv_estimator` | `str` | `grpo` | Advantage estimator (options: `grpo`, `reinforce`, `reinforce_plus_plus_baseline`, `rloo`) |
 | `gamma` | `float` | `1.0` | Discount factor for future rewards |
 | `lam` | `float` | `0.95` | Lambda for GAE (Generalized Advantage Estimation) |
 | `norm_adv_by_std_in_grpo` | `bool` | `True` | Whether to normalize advantages by standard deviation in GRPO |
-| `use_rllm` | `bool` | `False` | Whether to use rLLM-specific features |
 | `loss_fn` | `str \| null` | `null` | Loss function for Tinker backend (options: `importance_sampling`, `ppo`, `cispo`, `dro`, `cross_entropy`) |
 
 ### Stepwise advantage configuration

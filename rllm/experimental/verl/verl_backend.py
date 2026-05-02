@@ -39,7 +39,7 @@ from rllm.experimental.common import (
 )
 from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.rollout import RolloutEngine, VerlEngine
-from rllm.experimental.verl import compute_advantage_verl, transform_episodes_to_dataproto, update_dataproto_with_advantages
+from rllm.experimental.verl import transform_episodes_to_dataproto, update_dataproto_with_advantages
 from rllm.experimental.verl.metrics import calculate_debug_metrics_compat
 from rllm.types import Episode
 
@@ -463,11 +463,8 @@ class VerlBackend(BackendProtocol[Iterable, DataProto], RayPPOTrainer):
         batch: DataProto = trainer_state.backend_batch  # type: ignore[assignment]
 
         with simple_timer("adv", trainer_state.timing_dict):
-            if algorithm_config.use_rllm:
-                adv_metrics = collect_reward_and_advantage_from_trajectory_groups(trajectory_groups, algorithm_config)
-                updated_batch = update_dataproto_with_advantages(batch, episodes, mode=algorithm_config.stepwise_advantage_mode)
-            else:
-                updated_batch, adv_metrics = compute_advantage_verl(batch, self.config)
+            adv_metrics = collect_reward_and_advantage_from_trajectory_groups(trajectory_groups, algorithm_config)
+            updated_batch = update_dataproto_with_advantages(batch, episodes, mode=algorithm_config.stepwise_advantage_mode)
 
         trainer_state.metrics.update(adv_metrics)
         trainer_state.backend_batch = updated_batch

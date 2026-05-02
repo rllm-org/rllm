@@ -241,9 +241,6 @@ class UnifiedTrainer:
         """Validate and setup common configs."""
         # validate common, backend-agnostic configs
         assert self.rllm_config is not None, "rLLM config is not set"
-        # if the traj_group_adv_estimator_map is given, the user must turn `use_rllm` to True
-        if self.traj_group_adv_estimator_map and not self.rllm_config.algorithm.get("use_rllm", False):
-            raise ValueError("If `traj_group_adv_estimator_map` is given, the user must explicitly turn `rllm.algorithm.use_rllm` to True")
 
         if self.rllm_config.rejection_sample.multiplier != 1:
             assert self.rllm_config.rejection_sample.enable is True, "rejection sampling is disabled, but rejection_sample.multiplier is not 1"
