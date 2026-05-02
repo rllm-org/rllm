@@ -49,8 +49,6 @@ trainer:
 # Algorithm Configuration
 algorithm:
   adv_estimator: grpo # [grpo, reinforce, reinforce_plus_plus_baseline, rloo]
-  gamma: 1.0
-  lam: 0.95
   norm_adv_by_std_in_grpo: true
   use_rllm: null  # deprecated, unified trainer only support rllm advantage estimators
   use_precomputed_advantage: false # use pre-computed step.advantage from the workflow (e.g. distillation)

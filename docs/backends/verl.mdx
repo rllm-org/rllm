@@ -75,10 +75,10 @@ The verl backend includes the following key dependencies (from `pyproject.toml`)
 
 ```toml
 verl = [
-    "verl==0.6.1",
-    "torch>=2.8.0",
+    "verl==0.7.1",
+    "torch>=2.10.0",
     "torchvision>=0.23.0",
-    "vllm>=0.10.2,<=0.11.0",
+    "vllm==0.17.0",
     "flash-attn>=2.8.1",
     "qwen-vl-utils",
 ]
@@ -156,6 +156,10 @@ python train_with_lora.py \
   data.train_batch_size=32
 ```
 
+## Supported advantage estimators
+
+Advantages on the unified Verl backend are computed through rLLM's native estimator hook. The built-in estimators are `grpo`, `reinforce`, `reinforce_plus_plus_baseline`, and `rloo`. Verl's other estimators — `gae`, `reinforce_plus_plus` (proper), `remax`, `opo`, `grpo_passk`, `gpg`, `gdpo`, `optimal_token_baseline`, `tir_optimal_token_baseline` — are **not available out of the box** and the corresponding `algorithm.gamma` / `algorithm.lam` knobs are no longer wired through. To use one of those, register a custom estimator via the rLLM registry; see [Advantage estimator](/experimental/advantage-estimator) for the contract and a worked OPO port.
+
 ## Configuration
 
 The verl backend uses Hydra configuration with defaults from `agent_ppo_trainer.yaml`:
@@ -187,15 +191,7 @@ The verl backend uses Hydra configuration with defaults from `agent_ppo_trainer.
 </ParamField>
 
 <ParamField path="algorithm.adv_estimator" type="string" default="grpo">
-  Advantage estimator: "grpo", "gae", or "reinforce"
-</ParamField>
-
-<ParamField path="algorithm.gamma" type="float" default="1.0">
-  Discount factor for rewards
-</ParamField>
-
-<ParamField path="algorithm.lam" type="float" default="0.95">
-  GAE lambda parameter
+  Advantage estimator: `grpo`, `reinforce`, `reinforce_plus_plus_baseline`, or `rloo`
 </ParamField>
 
 <ParamField path="trainer.total_epochs" type="integer" default="3">
