@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 _VERL_DYNAMIC_BATCH_PATCHED = False
 _VLLM_SDK_PATCHED = False
 _VERL_QWEN3_VL_DUMMY_INPLACE_PATCHED = False
+_CUDNN_DISABLED = False
 
 
 # ---------------------------------------------------------------------------
@@ -183,11 +184,41 @@ def patch_verl_qwen3_vl_dummy_inplace() -> None:
 # ---------------------------------------------------------------------------
 
 
+def patch_disable_cudnn() -> None:
+    """Disable cuDNN globally for the current process.
+
+    Workaround for environments where ``cudnnCreate`` returns
+    ``CUDNN_STATUS_NOT_INITIALIZED`` for any conv (1d/2d/3d) or for the
+    cuDNN-backed scaled-dot-product attention kernel — even from a
+    minimal `torch.nn.Conv2d` call. With cuDNN disabled, conv ops fall
+    back to cuBLAS/native kernels and SDPA falls back to FlashAttention
+    or the math/mem-efficient backend, all of which run fine on H100.
+
+    Apply at process start (before any conv/SDPA call) so the flag
+    sticks before the first cuDNN handle attempt.
+    """
+    global _CUDNN_DISABLED
+    if _CUDNN_DISABLED:
+        return
+
+    import torch
+
+    torch.backends.cudnn.enabled = False
+    try:
+        torch.backends.cuda.enable_cudnn_sdp(False)
+    except AttributeError:
+        # Older torch versions don't expose enable_cudnn_sdp.
+        pass
+
+    _CUDNN_DISABLED = True
+    logger.info("Disabled torch.backends.cudnn (and cuDNN-SDP) — env-level workaround")
+
+
 def apply_all_verl_patches() -> None:
     """Apply every Verl patch that is safe to run unconditionally on workers.
 
     Designed to be wired in as ``runtime_env.worker_process_setup_hook =
-    "rllm.experimental.verl.patch:apply_all_verl_patches"`` so that each Ray
+    "rllm.experimental.verl.patch.apply_all_verl_patches"`` so that each Ray
     worker process applies the patches in its own interpreter (driver-side
     monkey-patches do not propagate to worker processes).
 
@@ -198,6 +229,45 @@ def apply_all_verl_patches() -> None:
     the ``rllm.sdk.enable`` config flag and should only be applied when SDK
     instrumentation is requested.
     """
+    # Unmissable side-effects so we can verify (after the run) that this hook
+    # actually executed inside each Ray worker process. The marker file is the
+    # primary signal; the stderr print is a secondary one in case worker stdout
+    # logging is suppressed.
+    import os
+    import sys
+
+    pid = os.getpid()
+    try:
+        os.makedirs("/tmp/geo3k_run", exist_ok=True)
+        with open(f"/tmp/geo3k_run/setup_hook.{pid}.marker", "w") as f:
+            f.write(f"apply_all_verl_patches ran in pid={pid}\n")
+    except Exception:
+        pass
+    try:
+        print(f"[apply_all_verl_patches] pid={pid} setup hook running", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+    # Per-process Triton cache dir so concurrent FSDP/vLLM workers don't race
+    # on the shared ``~/.triton/cache`` directory (manifests as
+    # ``ImportError: __triton_launcher.cpython-...so`` or
+    # ``FileNotFoundError: cross_entropy_fwd_kernel.llir`` when one worker
+    # reads a kernel another worker is mid-compile on). MUST be set before
+    # any ``import triton`` in this process.
+    try:
+        triton_dir = f"/tmp/triton-cache-{pid}"
+        os.makedirs(triton_dir, exist_ok=True)
+        os.environ.setdefault("TRITON_CACHE_DIR", triton_dir)
+    except Exception:
+        pass
+
+    # cuDNN must be disabled BEFORE any torch op that would create a cuDNN
+    # handle (conv/SDPA). Doing it first in this hook is the safest place.
+    try:
+        patch_disable_cudnn()
+    except Exception:  # pragma: no cover — patch is best-effort
+        logger.exception("patch_disable_cudnn failed in worker setup hook")
+
     try:
         patch_verl_dynamic_batch_sync()
     except Exception:  # pragma: no cover — patch is best-effort
