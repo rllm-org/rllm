@@ -220,10 +220,15 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         Returns:
             VerlEngine: The initialized rollout engine.
         """
-        # Apply Verl patches
-        from rllm.experimental.verl.patch import patch_verl_dynamic_batch_sync
+        # Apply Verl patches (driver-side; workers run them via runtime_env
+        # worker_process_setup_hook -> rllm.experimental.verl.patch:apply_all_verl_patches)
+        from rllm.experimental.verl.patch import (
+            patch_verl_dynamic_batch_sync,
+            patch_verl_qwen3_vl_dummy_inplace,
+        )
 
         patch_verl_dynamic_batch_sync()
+        patch_verl_qwen3_vl_dummy_inplace()
 
         # If SDK is enabled, instrument vLLM replicas before creating workers
         sdk_enabled = self.full_config.rllm.get("sdk", {}).get("enable", False)

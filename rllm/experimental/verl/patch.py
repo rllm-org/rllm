@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 _VERL_DYNAMIC_BATCH_PATCHED = False
 _VLLM_SDK_PATCHED = False
+_VERL_QWEN3_VL_DUMMY_INPLACE_PATCHED = False
 
 
 # ---------------------------------------------------------------------------
@@ -114,3 +115,95 @@ def patch_vllm_for_sdk() -> None:
     vLLMReplica.__init__ = _patched_init
     _VLLM_SDK_PATCHED = True
     logger.info("Patched vLLMReplica for SDK instrumentation")
+
+
+# ---------------------------------------------------------------------------
+# Verl qwen3_vl: out-of-place add in dummy visual forward (backport PR #5881)
+# ---------------------------------------------------------------------------
+
+
+def patch_verl_qwen3_vl_dummy_inplace() -> None:
+    """Backport `volcengine/verl#5881` for ``verl.models.transformers.qwen3_vl``.
+
+    The dummy/no-image branch of ``_get_input_embeds`` mutates ``inputs_embeds``
+    inplace::
+
+        inputs_embeds += 0.0 * image_embeds.mean()
+        for emb in dummy_deepstack_image_embeds or []:
+            inputs_embeds += 0.0 * emb.mean()
+
+    ``inputs_embeds`` is produced by ``model.get_input_embeddings()(input_ids)``
+    and is a leaf with ``requires_grad=True`` after FSDP wrapping; the inplace
+    ``+=`` raises a RuntimeError on the autograd backward and, in our 0.7.1
+    pin, also surfaces as ``CUDNN_STATUS_NOT_INITIALIZED`` on the preceding
+    ``model.visual(...)`` call due to the way the failure propagates inside
+    Conv3d's cuDNN workspace setup. PR #5881 (merged main 2026-04-07; not in
+    0.7.1) replaces both lines with out-of-place addition.
+
+    We patch by re-exec'ing a fixed source of ``_get_input_embeds`` in the
+    module's global namespace; ``qwen3_vl_base_forward`` looks up
+    ``_get_input_embeds`` from module globals at call time, so the rebound
+    function is picked up automatically.
+    """
+    global _VERL_QWEN3_VL_DUMMY_INPLACE_PATCHED
+    if _VERL_QWEN3_VL_DUMMY_INPLACE_PATCHED:
+        return
+
+    import inspect
+
+    from verl.models.transformers import qwen3_vl as mod
+
+    src = inspect.getsource(mod._get_input_embeds)
+    new_src = src.replace(
+        "inputs_embeds += 0.0 * image_embeds.mean()",
+        "inputs_embeds = inputs_embeds + 0.0 * image_embeds.mean()",
+    ).replace(
+        "inputs_embeds += 0.0 * emb.mean()",
+        "inputs_embeds = inputs_embeds + 0.0 * emb.mean()",
+    )
+
+    if new_src == src:
+        # Upstream already fixed (e.g. user bumped verl past 0.7.1).
+        _VERL_QWEN3_VL_DUMMY_INPLACE_PATCHED = True
+        logger.info("qwen3_vl PR #5881 patch: source already uses out-of-place add; nothing to patch.")
+        return
+
+    # Compile and exec into the module's globals so the rebound function shares
+    # the module's namespace (torch, Optional, etc.) and so callers in the
+    # same module (qwen3_vl_base_forward) pick up the patched version on the
+    # next attribute lookup.
+    exec(compile(new_src, mod.__file__, "exec"), mod.__dict__)
+
+    _VERL_QWEN3_VL_DUMMY_INPLACE_PATCHED = True
+    logger.info("Patched verl qwen3_vl._get_input_embeds: dummy visual path now uses out-of-place addition (backport of volcengine/verl#5881)")
+
+
+# ---------------------------------------------------------------------------
+# Worker-side entry point (used as Ray runtime_env worker_process_setup_hook)
+# ---------------------------------------------------------------------------
+
+
+def apply_all_verl_patches() -> None:
+    """Apply every Verl patch that is safe to run unconditionally on workers.
+
+    Designed to be wired in as ``runtime_env.worker_process_setup_hook =
+    "rllm.experimental.verl.patch:apply_all_verl_patches"`` so that each Ray
+    worker process applies the patches in its own interpreter (driver-side
+    monkey-patches do not propagate to worker processes).
+
+    Each patch below is lazy and idempotent, so it is safe to call this
+    repeatedly and from any process.
+
+    Note: ``patch_vllm_for_sdk`` is NOT included here — it is gated behind
+    the ``rllm.sdk.enable`` config flag and should only be applied when SDK
+    instrumentation is requested.
+    """
+    try:
+        patch_verl_dynamic_batch_sync()
+    except Exception:  # pragma: no cover — patch is best-effort
+        logger.exception("patch_verl_dynamic_batch_sync failed in worker setup hook")
+
+    try:
+        patch_verl_qwen3_vl_dummy_inplace()
+    except Exception:  # pragma: no cover — patch is best-effort
+        logger.exception("patch_verl_qwen3_vl_dummy_inplace failed in worker setup hook")
