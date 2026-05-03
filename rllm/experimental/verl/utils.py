@@ -7,7 +7,7 @@ import os
 from typing import Any
 
 import torch
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from verl import DataProto
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 
@@ -240,5 +240,14 @@ def create_dataloaders(config: DictConfig, tokenizer, processor=None):
     total_training_steps = len(train_dataloader) * config.trainer.total_epochs
     if config.trainer.total_training_steps is not None:
         total_training_steps = config.trainer.total_training_steps
+
+    # Propagate total_training_steps into actor.optim so the LR scheduler (cosine / lr_warmup_steps_ratio) sees a valid count.
+    try:
+        OmegaConf.set_struct(config, True)
+        with open_dict(config):
+            if OmegaConf.select(config, "actor_rollout_ref.actor.optim"):
+                config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
+    except Exception as e:
+        logger.warning(f"Could not set total_training_steps on actor.optim: {e}")
 
     return train_dataloader, val_dataloader, total_training_steps

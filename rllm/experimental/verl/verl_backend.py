@@ -272,6 +272,11 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
         assert not self.config.algorithm.get("use_kl_in_reward", False), "only KL-in-loss is supported"
 
+        reward_model_cfg = self.config.get("reward", {}).get("reward_model", {})
+        assert not reward_model_cfg.get("enable", False), (
+            "Reward models are not supported on the rLLM-native verl path; compute rewards in the workflow via a RewardFunction. Remove `reward.reward_model.enable=True` from your config."
+        )
+
     def get_dataloader(self, dataset: Dataset | None, trainer_state: TrainerState) -> Iterable:
         """Get dataloader. Note that for Verl backend, the RayPPOTrainer init already creates the dataloaders."""
         if trainer_state.is_training:
