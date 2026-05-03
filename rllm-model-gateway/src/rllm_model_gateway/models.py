@@ -112,30 +112,25 @@ class SessionInfo(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ProviderRoute(BaseModel):
-    """Map a model name to an external provider backend.
+class UpstreamRoute(BaseModel):
+    """Map a model name to an OpenAI-compatible upstream endpoint.
 
-    Provider routing serves the eval path: the gateway forwards requests
-    whose ``model`` matches ``model_name`` (or its ``provider/model``
-    prefix form) to ``backend_url``, rewriting ``model`` to
-    ``backend_model`` and injecting an ``Authorization: Bearer <key>``
-    header from ``api_key_env``.
-
-    Worker-pool routing (training/vLLM workers) takes a separate code
-    path and is unaffected.
+    The gateway treats this as opaque routing: it does not know about
+    providers, auth shapes, or model-name conventions. The caller
+    (typically rllm) resolves any provider knowledge — choice of
+    upstream URL, the literal ``Authorization`` header value to use,
+    and any params the upstream rejects — and hands the gateway a
+    fully-resolved route to forward to.
     """
 
-    model_name: str  # what the client sends, e.g. "gpt-5-mini" or "openai/gpt-5-mini"
-    backend_url: str  # e.g. "https://api.openai.com/v1"
-    # What to forward as ``model``. If None, defaults to ``model_name``
-    # with any leading ``provider/`` prefix stripped.
-    backend_model: str | None = None
-    # Env var holding the API key. None means the gateway does not inject
-    # an Authorization header (rely on extra_headers or none).
-    api_key_env: str | None = None
-    extra_headers: dict[str, str] = Field(default_factory=dict)
-    # Sampling/request params to strip before forwarding (e.g. "logprobs"
-    # for providers that reject it). Stripped at the proxy layer.
+    upstream_url: str  # e.g. "http://127.0.0.1:4000/v1" or "https://api.openai.com/v1"
+    # Full ``Authorization`` header value, e.g. ``"Bearer sk-..."``.
+    # ``None`` means the gateway forwards no auth header upstream.
+    auth_header: str | None = None
+    # Body fields to strip before forwarding (e.g. ``"max_tokens"`` for
+    # OpenAI o-series models that reject it). The gateway treats this as
+    # a generic body-shaping list; it doesn't interpret which model needs
+    # what.
     drop_params: list[str] = Field(default_factory=list)
 
 
@@ -145,7 +140,10 @@ class GatewayConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 9090
     workers: list[WorkerConfig] = Field(default_factory=list)
-    providers: list[ProviderRoute] = Field(default_factory=list)
+    # Map model name → upstream route. The gateway looks up
+    # ``body["model"]`` and forwards to the matching route; falls
+    # through to the worker-pool path if no match.
+    routes: dict[str, UpstreamRoute] = Field(default_factory=dict)
     db_path: str | None = None
     store_worker: str = "sqlite"
     add_logprobs: bool = True
@@ -157,10 +155,6 @@ class GatewayConfig(BaseModel):
     sync_traces: bool = False
     sampling_params_priority: str = "client"
     model: str | None = None  # When set, overrides ``body.model``
-    # Params stripped from every request body before forwarding to a
-    # provider backend (in addition to per-route ``drop_params``).
-    # Mirrors litellm's ``drop_params: true`` global behaviour.
-    global_drop_params: list[str] = Field(default_factory=list)
     # Identifier of the gateway run — eval CLI sets this to the run dir
     # basename, training/harness shims pick something globally unique.
     # When set, every trace persisted by this gateway is tagged with it

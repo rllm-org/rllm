@@ -1,10 +1,11 @@
-"""End-to-end test of the eval flow: client → gateway → provider backend.
+"""End-to-end test of the upstream-routing flow.
 
-Stands up a fake "provider" (OpenAI-compatible) server alongside the
-gateway. The gateway is configured with a single ``ProviderRoute``
-pointing at it. A client posts to the gateway with ``X-RLLM-*`` headers
-and a prefixed model name; we then assert the request was rewritten
-correctly and the trace was stored with full metadata.
+Stands up a fake OpenAI-compatible server alongside the gateway. The
+gateway is configured with a single ``UpstreamRoute`` pointing at it.
+A client posts to the gateway with ``X-RLLM-*`` headers; we then assert
+the body forwards untouched, the auth header gets replaced with the
+route's ``auth_header``, no rLLM scaffolding leaks, and the trace lands
+with full session metadata.
 """
 
 import json
@@ -18,8 +19,7 @@ import pytest
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from rllm_model_gateway import GatewayConfig, create_app
-from rllm_model_gateway.models import ProviderRoute
+from rllm_model_gateway import GatewayConfig, UpstreamRoute, create_app
 
 from tests.helpers.gateway_server import GatewayServer
 
@@ -143,8 +143,7 @@ def fake_provider():
 
 
 @pytest.fixture
-def gateway_with_provider(fake_provider, tmp_path, monkeypatch):
-    monkeypatch.setenv("FAKE_PROVIDER_KEY", "sk-fake-test")
+def gateway_with_upstream(fake_provider, tmp_path):
     config = GatewayConfig(
         store_worker="sqlite",
         db_path=str(tmp_path / "traces.db"),
@@ -153,14 +152,12 @@ def gateway_with_provider(fake_provider, tmp_path, monkeypatch):
         add_logprobs=False,
         add_return_token_ids=False,
         strip_vllm_fields=False,
-        providers=[
-            ProviderRoute(
-                model_name="openai/gpt-5-mini",
-                backend_url=f"{fake_provider.url}/v1",
-                backend_model="gpt-5-mini",
-                api_key_env="FAKE_PROVIDER_KEY",
-            )
-        ],
+        routes={
+            "gpt-5-mini": UpstreamRoute(
+                upstream_url=f"{fake_provider.url}/v1",
+                auth_header="Bearer sk-fake-test",
+            ),
+        },
     )
     app = create_app(config)
     server = GatewayServer(app, port=0)
@@ -169,14 +166,14 @@ def gateway_with_provider(fake_provider, tmp_path, monkeypatch):
     server.stop()
 
 
-def test_eval_flow_rewrites_model_injects_auth_and_persists_trace(gateway_with_provider):
-    """Full eval flow: client → gateway → provider, with header-stamped metadata."""
-    gateway, provider = gateway_with_provider
+def test_eval_flow_forwards_body_replaces_auth_and_persists_trace(gateway_with_upstream):
+    """Full upstream flow: client → gateway → upstream, with header-stamped metadata."""
+    gateway, provider = gateway_with_upstream
 
     resp = httpx.post(
         f"{gateway.url}/v1/chat/completions",
         json={
-            "model": "openai/gpt-5-mini",
+            "model": "gpt-5-mini",
             "messages": [{"role": "user", "content": "hi"}],
         },
         headers={
@@ -185,6 +182,7 @@ def test_eval_flow_rewrites_model_injects_auth_and_persists_trace(gateway_with_p
             "X-RLLM-Harness": "opencode",
             "X-RLLM-Step-Id": "2",
             "Authorization": "Bearer client-original-key",
+            "x-api-key": "client-supplied-anthropic-key",
         },
         timeout=10.0,
     )
@@ -193,21 +191,25 @@ def test_eval_flow_rewrites_model_injects_auth_and_persists_trace(gateway_with_p
     body = resp.json()
     assert body["choices"][0]["message"]["content"] == "hello from fake provider"
 
-    # Provider saw the rewritten model + provider-issued auth, no X-RLLM leakage.
+    # Upstream sees the body unchanged: model is forwarded as-sent, not rewritten.
     assert len(provider.requests) == 1
     fwd_body = provider.requests[0]
     assert fwd_body["model"] == "gpt-5-mini"
     assert fwd_body["messages"] == [{"role": "user", "content": "hi"}]
 
     fwd_headers = provider.headers[0]
+    # Client's Authorization is replaced with the route's auth_header.
     assert fwd_headers.get("authorization") == "Bearer sk-fake-test"
+    # x-api-key from the client never reaches the upstream.
+    assert "x-api-key" not in fwd_headers
+    # X-RLLM-* headers stay gateway-internal.
     for h in (
         "x-rllm-session-id",
         "x-rllm-run-id",
         "x-rllm-harness",
         "x-rllm-step-id",
     ):
-        assert h not in fwd_headers, f"gateway leaked {h} to provider"
+        assert h not in fwd_headers, f"gateway leaked {h} to upstream"
 
     # Trace persisted with full metadata.
     traces_resp = httpx.get(f"{gateway.url}/sessions/sess-abc/traces", timeout=5.0)
@@ -220,19 +222,18 @@ def test_eval_flow_rewrites_model_injects_auth_and_persists_trace(gateway_with_p
     assert trace["harness"] == "opencode"
     assert trace["step_id"] == 2
     assert trace["span_type"] == "llm.call"
-    # The trace records the user-facing model, not the rewritten backend model.
-    assert trace["model"] == "openai/gpt-5-mini"
+    assert trace["model"] == "gpt-5-mini"
 
 
-def test_eval_flow_streaming(gateway_with_provider):
+def test_eval_flow_streaming(gateway_with_upstream):
     """Streaming variant: gateway proxies SSE chunks and still records the trace."""
-    gateway, provider = gateway_with_provider
+    gateway, provider = gateway_with_upstream
 
     with httpx.stream(
         "POST",
         f"{gateway.url}/v1/chat/completions",
         json={
-            "model": "openai/gpt-5-mini",
+            "model": "gpt-5-mini",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": True,
         },
@@ -267,14 +268,14 @@ def test_eval_flow_streaming(gateway_with_provider):
     assert trace["run_id"] == "run-s"
 
 
-def test_body_metadata_fallback_when_no_headers(gateway_with_provider):
+def test_body_metadata_fallback_when_no_headers(gateway_with_upstream):
     """Clients that can't set headers can stamp metadata via request body."""
-    gateway, provider = gateway_with_provider
+    gateway, provider = gateway_with_upstream
 
     resp = httpx.post(
         f"{gateway.url}/v1/chat/completions",
         json={
-            "model": "openai/gpt-5-mini",
+            "model": "gpt-5-mini",
             "messages": [{"role": "user", "content": "hi"}],
             "metadata": {"rllm": {"session_id": "sess-body", "harness": "claude-code"}},
         },
@@ -282,7 +283,7 @@ def test_body_metadata_fallback_when_no_headers(gateway_with_provider):
     )
     assert resp.status_code == 200
 
-    # Body-stamped metadata should not leak to the provider.
+    # Body-stamped metadata should not leak to the upstream.
     fwd_body = provider.requests[-1]
     assert "rllm" not in fwd_body
     assert "metadata" not in fwd_body  # whole metadata dict was empty after rllm strip
@@ -290,3 +291,43 @@ def test_body_metadata_fallback_when_no_headers(gateway_with_provider):
     traces = httpx.get(f"{gateway.url}/sessions/sess-body/traces", timeout=5.0).json()
     assert len(traces) == 1
     assert traces[0]["harness"] == "claude-code"
+
+
+def test_drop_params_removes_listed_fields(fake_provider, tmp_path):
+    """A route with drop_params strips those fields from the forwarded body."""
+    config = GatewayConfig(
+        store_worker="memory",
+        db_path=str(tmp_path / "traces.db"),
+        sync_traces=True,
+        add_logprobs=False,
+        add_return_token_ids=False,
+        strip_vllm_fields=False,
+        routes={
+            "gpt-5-mini": UpstreamRoute(
+                upstream_url=f"{fake_provider.url}/v1",
+                auth_header="Bearer sk-fake-test",
+                drop_params=["max_tokens"],
+            ),
+        },
+    )
+    app = create_app(config)
+    server = GatewayServer(app, port=0)
+    server.start()
+    try:
+        resp = httpx.post(
+            f"{server.url}/v1/chat/completions",
+            json={
+                "model": "gpt-5-mini",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 100,
+                "temperature": 0.7,
+            },
+            headers={"X-RLLM-Session-Id": "sess-drop"},
+            timeout=10.0,
+        )
+        assert resp.status_code == 200
+        fwd_body = fake_provider.requests[-1]
+        assert "max_tokens" not in fwd_body
+        assert fwd_body.get("temperature") == 0.7
+    finally:
+        server.stop()

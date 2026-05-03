@@ -4,9 +4,9 @@ from rllm_model_gateway._version import __version__
 from rllm_model_gateway.client import AsyncGatewayClient, GatewayClient
 from rllm_model_gateway.models import (
     GatewayConfig,
-    ProviderRoute,
     SessionInfo,
     TraceRecord,
+    UpstreamRoute,
     WorkerConfig,
     WorkerInfo,
 )
@@ -18,8 +18,8 @@ __all__ = [
     "GatewayClient",
     "AsyncGatewayClient",
     "GatewayConfig",
-    "ProviderRoute",
     "TraceRecord",
+    "UpstreamRoute",
     "WorkerConfig",
     "WorkerInfo",
     "SessionInfo",

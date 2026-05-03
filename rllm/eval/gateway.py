@@ -24,7 +24,7 @@ import time
 from typing import Any
 
 import uvicorn
-from rllm_model_gateway import GatewayConfig, ProviderRoute, create_app
+from rllm_model_gateway import GatewayConfig, UpstreamRoute, create_app
 
 from rllm.eval.config import get_provider_info
 
@@ -130,9 +130,11 @@ class EvalGatewayManager:
     def build_config(self) -> GatewayConfig:
         """Compose a single-route ``GatewayConfig`` from the provider registry.
 
-        The API key is exported into ``info.env_key`` so the gateway can read
-        it via ``ProviderRoute.api_key_env`` — it is never stored on the
-        config object.
+        We resolve the provider's backend URL + auth header here (rllm
+        owns provider knowledge) and hand the gateway a fully-resolved
+        ``UpstreamRoute``. The API key is also exported into
+        ``info.env_key`` so harness pre-flight checks find it; the
+        gateway itself doesn't read env vars.
         """
         info = get_provider_info(self.provider)
         if info is None or not info.backend_url:
@@ -144,8 +146,8 @@ class EvalGatewayManager:
         # ``max_completion_tokens``. CLI agents (opencode, codex, mini-swe-agent)
         # all send ``max_tokens`` by default. Dropping it lets the model use
         # its own default output budget — the cleanest workaround until we
-        # extend the gateway with a rename map. Older models (gpt-4-turbo,
-        # gpt-3.5) still accept this; they just fall back to defaults too.
+        # route through the LiteLLM proxy in Phase 2 (which handles this
+        # natively via its own ``drop_params`` support).
         drop_params = ["max_tokens"] if self.provider == "openai" else []
 
         return GatewayConfig(
@@ -157,15 +159,13 @@ class EvalGatewayManager:
             add_logprobs=False,
             add_return_token_ids=False,
             strip_vllm_fields=False,
-            providers=[
-                ProviderRoute(
-                    model_name=self.model_name,
-                    backend_url=info.backend_url,
-                    backend_model=self.model_name,
-                    api_key_env=env_key,
+            routes={
+                self.model_name: UpstreamRoute(
+                    upstream_url=info.backend_url,
+                    auth_header=f"Bearer {self.api_key}",
                     drop_params=drop_params,
-                )
-            ],
+                ),
+            },
             run_id=self.run_id,
             run_metadata=self.run_metadata,
             inbound_auth_token=self.inbound_auth_token,

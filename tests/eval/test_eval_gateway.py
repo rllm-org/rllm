@@ -11,13 +11,12 @@ class TestEvalGatewayManagerConfig:
         gm = EvalGatewayManager(provider="openai", model_name="gpt-5-mini", api_key="sk-test")
         config = gm.build_config()
 
-        assert len(config.providers) == 1
-        route = config.providers[0]
-        assert route.model_name == "gpt-5-mini"
-        assert route.backend_url == "https://api.openai.com/v1"
-        assert route.backend_model == "gpt-5-mini"
-        assert route.api_key_env == "OPENAI_API_KEY"
-        # API key flowed through env (so it's never on the config object)
+        assert set(config.routes.keys()) == {"gpt-5-mini"}
+        route = config.routes["gpt-5-mini"]
+        assert route.upstream_url == "https://api.openai.com/v1"
+        assert route.auth_header == "Bearer sk-test"
+        # API key still exported into the standard env var so harness
+        # pre-flight checks find it (gateway itself doesn't read env).
         import os
 
         assert os.environ["OPENAI_API_KEY"] == "sk-test"
@@ -66,9 +65,9 @@ class TestEvalGatewayManagerConfig:
     def test_build_config_minimax(self):
         gm = EvalGatewayManager(provider="minimax", model_name="MiniMax-M2.7", api_key="mm-test")
         config = gm.build_config()
-        route = config.providers[0]
-        assert route.backend_url == "https://api.minimaxi.chat/v1"
-        assert route.api_key_env == "MINIMAX_API_KEY"
+        route = config.routes["MiniMax-M2.7"]
+        assert route.upstream_url == "https://api.minimaxi.chat/v1"
+        assert route.auth_header == "Bearer mm-test"
 
     def test_build_config_fails_for_unknown_provider(self):
         gm = EvalGatewayManager(provider="not-a-provider", model_name="x", api_key="k")

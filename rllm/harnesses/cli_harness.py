@@ -121,9 +121,9 @@ class BaseCliHarness(SandboxedAgentFlow):
         ``config.metadata["gateway_auth_token"]``. Every provider key
         the harness writes into the sandbox env (``OPENAI_API_KEY``,
         ``ANTHROPIC_API_KEY``, …) must be that bearer token, because
-        that's what the gateway's middleware checks. ``apply_route``
-        replaces the auth header with the real upstream key (read from
-        a server-side env var) before forwarding.
+        that's what the gateway's middleware checks. The gateway then
+        replaces the auth header with the route's pre-resolved upstream
+        auth header before forwarding.
 
         Loopback gateways (no token) keep the current behaviour: pass
         the user's real key through, or a placeholder if unset.

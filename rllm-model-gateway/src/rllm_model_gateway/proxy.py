@@ -21,8 +21,7 @@ from rllm_model_gateway.data_process import (
     strip_vllm_fields,
 )
 from rllm_model_gateway.metadata import RllmMetadata
-from rllm_model_gateway.models import ProviderRoute, TraceRecord
-from rllm_model_gateway.providers import ProviderRouter, apply_route
+from rllm_model_gateway.models import TraceRecord, UpstreamRoute
 from rllm_model_gateway.session_router import SessionRouter
 from rllm_model_gateway.store.base import TraceStore
 
@@ -43,13 +42,13 @@ _HOP_BY_HOP = frozenset(
     }
 )
 
-# Headers stripped before forwarding to a provider backend. The client's
-# Authorization header is replaced with one derived from the provider's
-# api_key_env. X-RLLM-* headers are gateway-internal metadata and should
-# not leak to providers.
-_PROVIDER_FORWARD_STRIP = frozenset(
+# Headers stripped before forwarding to an upstream. The client's auth
+# headers are replaced with the route's ``auth_header`` (if set), and
+# the X-RLLM-* metadata is gateway-internal and never leaks upstream.
+_UPSTREAM_FORWARD_STRIP = frozenset(
     {
         "authorization",
+        "x-api-key",
         "x-rllm-session-id",
         "x-rllm-run-id",
         "x-rllm-harness",
@@ -98,8 +97,7 @@ class ReverseProxy:
         sync_traces: bool = False,
         max_retries: int = 2,
         local_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
-        provider_router: ProviderRouter | None = None,
-        global_drop_params: list[str] | None = None,
+        routes: dict[str, UpstreamRoute] | None = None,
         run_id: str | None = None,
     ) -> None:
         self.router = router
@@ -108,12 +106,7 @@ class ReverseProxy:
         self.sync_traces = sync_traces
         self.max_retries = max_retries
         self.local_handler = local_handler
-        self.provider_router = provider_router
-        # Params stripped from every request body before forwarding to a
-        # provider backend, in addition to per-route ``drop_params``.
-        # ``return_token_ids`` is always stripped because it's a vLLM
-        # extension that real providers will reject.
-        self._provider_drop_params = list(global_drop_params or []) + ["return_token_ids"]
+        self.routes: dict[str, UpstreamRoute] = dict(routes or {})
         # Tag every persisted trace with this run_id so the cross-run
         # viewer can group by gateway lifetime. Empty string is the
         # "unstamped" bucket for callers that don't pass a run_id.
@@ -178,19 +171,14 @@ class ReverseProxy:
     ) -> Response:
         t0 = time.perf_counter()
         rllm_metadata: RllmMetadata | None = getattr(request.state, "rllm_metadata", None)
-        provider_route = self._lookup_provider_route(request_body)
+        route = self._lookup_route(request_body)
 
-        if provider_route is not None:
-            forward_url, route_headers, mutated_body = apply_route(
-                request_body=request_body,
-                route=provider_route,
-                request_path=request.url.path,
-                global_drop_params=self._provider_drop_params,
-            )
-            forward_body = json.dumps(mutated_body).encode("utf-8")
-            url = self._append_query(forward_url, str(request.url.query))
-            headers = self._forward_headers(request, extra_strip=_PROVIDER_FORWARD_STRIP)
-            headers.update(route_headers)
+        if route is not None:
+            url = self._build_url(route.upstream_url, request.url.path, str(request.url.query))
+            headers = self._forward_headers(request, extra_strip=_UPSTREAM_FORWARD_STRIP)
+            if route.auth_header:
+                headers["authorization"] = route.auth_header
+            forward_body = self._maybe_drop_params(raw_body, request_body, route.drop_params)
             resp = await self._send_with_retry(
                 method=request.method,
                 url=url,
@@ -273,15 +261,16 @@ class ReverseProxy:
         originally_requested_logprobs: bool = False,
     ) -> StreamingResponse:
         rllm_metadata: RllmMetadata | None = getattr(request.state, "rllm_metadata", None)
-        provider_route = self._lookup_provider_route(request_body)
+        route = self._lookup_route(request_body)
 
-        if provider_route is not None:
-            return await self._handle_streaming_provider(
+        if route is not None:
+            return await self._handle_streaming_upstream(
                 request,
+                raw_body,
                 request_body,
                 session_id,
                 originally_requested_logprobs,
-                provider_route,
+                route,
                 rllm_metadata,
             )
 
@@ -405,30 +394,26 @@ class ReverseProxy:
             status_code=resp.status_code,
         )
 
-    async def _handle_streaming_provider(
+    async def _handle_streaming_upstream(
         self,
         request: Request,
+        raw_body: bytes,
         request_body: dict[str, Any],
         session_id: str | None,
         originally_requested_logprobs: bool,
-        route: ProviderRoute,
+        route: UpstreamRoute,
         rllm_metadata: RllmMetadata | None,
     ) -> StreamingResponse:
-        """Stream a chat-completions response from a configured provider backend.
+        """Stream a chat-completions response from a configured upstream.
 
         Same shape as the worker-pool streaming path but skips ``SessionRouter``
-        and uses the provider's URL + API key instead.
+        and uses the upstream's URL + auth header instead.
         """
-        forward_url, route_headers, mutated_body = apply_route(
-            request_body=request_body,
-            route=route,
-            request_path=request.url.path,
-            global_drop_params=self._provider_drop_params,
-        )
-        forward_body = json.dumps(mutated_body).encode("utf-8")
-        url = self._append_query(forward_url, str(request.url.query))
-        headers = self._forward_headers(request, extra_strip=_PROVIDER_FORWARD_STRIP)
-        headers.update(route_headers)
+        url = self._build_url(route.upstream_url, request.url.path, str(request.url.query))
+        headers = self._forward_headers(request, extra_strip=_UPSTREAM_FORWARD_STRIP)
+        if route.auth_header:
+            headers["authorization"] = route.auth_header
+        forward_body = self._maybe_drop_params(raw_body, request_body, route.drop_params)
 
         assert self._http is not None
         upstream = self._http.stream(
@@ -664,17 +649,25 @@ class ReverseProxy:
         skip = _HOP_BY_HOP | extra_strip
         return {k: v for k, v in request.headers.items() if k.lower() not in skip}
 
-    @staticmethod
-    def _append_query(url: str, query: str) -> str:
-        if not query:
-            return url
-        joiner = "&" if "?" in url else "?"
-        return f"{url}{joiner}{query}"
-
-    def _lookup_provider_route(self, request_body: dict[str, Any]) -> ProviderRoute | None:
-        if self.provider_router is None:
+    def _lookup_route(self, request_body: dict[str, Any]) -> UpstreamRoute | None:
+        if not self.routes:
             return None
         model = request_body.get("model") if isinstance(request_body, dict) else None
         if not isinstance(model, str):
             return None
-        return self.provider_router.lookup(model)
+        return self.routes.get(model)
+
+    @staticmethod
+    def _maybe_drop_params(
+        raw_body: bytes,
+        request_body: dict[str, Any],
+        drop_params: list[str],
+    ) -> bytes:
+        """Return ``raw_body`` untouched, or a re-serialised body with *drop_params* removed."""
+        if not drop_params or not isinstance(request_body, dict):
+            return raw_body
+        present = [k for k in drop_params if k in request_body]
+        if not present:
+            return raw_body
+        mutated = {k: v for k, v in request_body.items() if k not in present}
+        return json.dumps(mutated).encode("utf-8")
