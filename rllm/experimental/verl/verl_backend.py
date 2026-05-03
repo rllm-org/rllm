@@ -14,7 +14,7 @@ import torch
 from omegaconf import DictConfig
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.experimental.agent_loop import AgentLoopManager
+from verl.experimental.agent_loop.agent_loop import AgentLoopManager, AsyncLLMServerManager
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.core_algos import agg_loss
@@ -238,8 +238,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             self.actor_rollout_wg.set_loss_fn(CustomPPOLoss(self.config.actor_rollout_ref.actor))
         else:
             logger.warning("RayWorkerGroup.set_loss_fn not available — skipping custom loss injection")
-
-        from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
 
         servers = zip(self.async_rollout_manager.server_addresses, self.async_rollout_manager.server_handles, strict=True)
         server_manager = AsyncLLMServerManager(self.config, servers=servers, load_balancer_handle=self.async_rollout_manager.global_load_balancer)

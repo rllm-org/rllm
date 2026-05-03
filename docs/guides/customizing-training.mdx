@@ -27,7 +27,6 @@ Set `algorithm.adv_estimator` in your config to one of the built-in estimators:
 rllm:
   algorithm:
     adv_estimator: rloo  # grpo | reinforce | reinforce_plus_plus_baseline | rloo
-    use_rllm: true
 ```
 
 | Estimator | Behavior |
@@ -115,7 +114,6 @@ overrides = OmegaConf.create({
     "rllm": {
         "algorithm": {
             "adv_estimator": "rloo",
-            "use_rllm": True,
         },
         "rejection_sample": {"enable": True},
     }
@@ -140,7 +138,7 @@ config = build_train_config(
 
 # Merge custom algorithm settings
 config = OmegaConf.merge(config, OmegaConf.create({
-    "rllm": {"algorithm": {"adv_estimator": "rloo", "use_rllm": True}}
+    "rllm": {"algorithm": {"adv_estimator": "rloo"}}
 }))
 ```
 
@@ -231,10 +229,6 @@ trainer.train()
 
 The map keys are **group roles**, derived from the `group_id` of each `TrajectoryGroup`. The default grouping produces IDs like `{task_id}:{trajectory_name}`, and the role is the `trajectory_name` portion.
 
-<Note>
-When using `traj_group_adv_estimator_map`, you must set `algorithm.use_rllm: true` in your config. The trainer raises an error otherwise.
-</Note>
-
 ### Workflow arguments
 
 Pass arbitrary arguments to your `Workflow.__init__()` via `workflow_args`:
@@ -267,6 +261,7 @@ from rllm.experimental.common.advantage import register_rllm_adv_estimator
 @register_rllm_adv_estimator("median_baseline")
 def calculate_median_baseline_advantages(
     rewards: list[np.ndarray],
+    algorithm_config,
     **kwargs,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Use median reward as the baseline instead of mean."""
@@ -294,7 +289,6 @@ config = OmegaConf.merge(config, OmegaConf.create({
     "rllm": {
         "algorithm": {
             "adv_estimator": "median_baseline",
-            "use_rllm": True,
         }
     }
 }))
@@ -314,20 +308,19 @@ Your function must accept and return these types:
 
 ```python
 def my_estimator(
-    rewards: list[np.ndarray],  # one array per trajectory group
-    **kwargs,                    # receives norm_adv_by_std_in_grpo and other config values
+    rewards: list[np.ndarray],          # one array per trajectory group
+    algorithm_config: AlgorithmConfig,  # pull whatever config the estimator needs
+    **kwargs,                            # receives traj_groups for per-trajectory metadata
 ) -> tuple[
-    list[np.ndarray],           # advantages (same shape as rewards)
-    list[np.ndarray],           # returns (same shape as rewards)
+    list[np.ndarray],                    # advantages (same shape as rewards)
+    list[np.ndarray],                    # returns (same shape as rewards)
 ]:
     ...
 ```
 
 Each element in `rewards` is a 1-D array of trajectory rewards for one group. Return advantages and returns in the same list-of-arrays structure.
 
-<Info>
-The `**kwargs` currently receives `norm_adv_by_std_in_grpo` from the algorithm config. Future versions may pass additional parameters.
-</Info>
+`**kwargs` carries `traj_groups: list[TrajectoryGroup]`, aligned with `rewards`, so estimators that need per-trajectory metadata (response lengths, step counts) can read it via `kwargs.get("traj_groups")`. See [Advantage estimator](/experimental/advantage-estimator#worked-example-porting-opo-from-verl) for a worked example.
 
 ## What you cannot customize today
 
