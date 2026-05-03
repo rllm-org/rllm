@@ -317,6 +317,12 @@ def patch_verl_tensordict_jagged_layout() -> None:
 # Worker-side entry point (used as Ray runtime_env worker_process_setup_hook)
 # ---------------------------------------------------------------------------
 
+_ALL_VERL_PATCHES = {
+    "patch_verl_dynamic_batch_sync": patch_verl_dynamic_batch_sync,
+    "patch_verl_qwen3_vl_dummy_inplace": patch_verl_qwen3_vl_dummy_inplace,
+    "patch_verl_tensordict_jagged_layout": patch_verl_tensordict_jagged_layout,
+}
+
 
 def apply_all_verl_patches() -> None:
     """Apply every Verl patch that is safe to run unconditionally on workers.
@@ -341,20 +347,11 @@ def apply_all_verl_patches() -> None:
     the ``rllm.sdk.enable`` config flag and should only be applied when SDK
     instrumentation is requested.
     """
-    try:
-        patch_verl_dynamic_batch_sync()
-    except Exception:  # pragma: no cover — patch is best-effort
-        logger.exception("patch_verl_dynamic_batch_sync failed in worker setup hook")
-
-    try:
-        patch_verl_qwen3_vl_dummy_inplace()
-    except Exception:  # pragma: no cover — patch is best-effort
-        logger.exception("patch_verl_qwen3_vl_dummy_inplace failed in worker setup hook")
-
-    try:
-        patch_verl_tensordict_jagged_layout()
-    except Exception:  # pragma: no cover — patch is best-effort
-        logger.exception("patch_verl_tensordict_jagged_layout failed in worker setup hook")
+    for patch_name, patch_func in _ALL_VERL_PATCHES.items():
+        try:
+            patch_func()
+        except Exception:  # pragma: no cover — patch is best-effort
+            logger.exception(f"{patch_name} failed in worker setup hook")
 
     _run_extra_worker_setup_hook()
 
