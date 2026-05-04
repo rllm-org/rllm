@@ -87,8 +87,6 @@ trainer.fit()
 | `traj_group_adv_estimator_map` | `dict \| None` | Optional per-role advantage estimator override map |
 | `**kwargs` | `Any` | Forwarded to the selected launcher/backend |
 
-When `traj_group_adv_estimator_map` is provided, `rllm.algorithm.use_rllm` must be `true`.
-
 ## `TrainerState`
 
 A mutable dataclass that serves as the shared context between the trainer and the
@@ -241,7 +239,6 @@ For the full configuration reference, see [configuration](/experimental/configur
 | `estimator_map` | `dict[str, rLLMAdvantageEstimator \| str]` | `{}` | Per-role estimator override map (set by `traj_group_adv_estimator_map`) |
 | `stepwise_advantage_mode` | `"broadcast"` | `"broadcast"` | How advantages map to steps |
 | `norm_adv_by_std_in_grpo` | `bool` | `True` | Normalize advantages by std in GRPO |
-| `use_rllm` | `bool` | `False` | Whether to use rLLM-native advantage path (relevant for Verl backend) |
 | `use_precomputed_advantage` | `bool` | `False` | Reuse pre-computed `step.advantage` from workflow instead of recomputing |
 | `loss_fn` | `str \| None` | `None` | Backend loss function (e.g. `"importance_sampling"`) |
 | `lr_schedule` | `str` | `"constant"` | LR schedule: `"constant"`, `"linear"`, `"cosine"` |

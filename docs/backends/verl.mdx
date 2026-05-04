@@ -14,6 +14,20 @@ verl is designed for large-scale distributed training with the following archite
 - **Reference Policy Workers**: Maintain frozen reference policy for KL divergence
 - **Ray-based Orchestration**: Manages distributed worker groups and resource allocation
 
+## How rLLM uses verl
+
+rLLM drives verl from its own `UnifiedTrainer` rather than running verl's `RayPPOTrainer.fit()` loop. The verl backend reuses verl's worker groups, checkpoint engine, and async rollout manager, but the training lifecycle — batch shaping, advantage computation, weight sync, validation cadence — is owned by rLLM. As a result, a few verl features are intentionally **not wired through** on this path:
+
+- **No critic.** `use_critic` is forced to `False` and no critic worker is spawned. Value-based estimators (GAE, REMAX) cannot run as-is.
+- **No reward model.** `reward.reward_model.enable=True` is rejected at startup. Compute rewards inside your workflow via a `RewardFunction` so they flow through the same path as the Tinker backend.
+- **No in-reward KL.** `algorithm.use_kl_in_reward=True` is rejected at startup. KL-in-loss is supported — set `actor_rollout_ref.actor.use_kl_loss=True` and it runs inside verl's actor worker.
+- **Async rollout only.** `actor_rollout_ref.rollout.mode` must be `async`.
+- **New EngineWorker path only.** `trainer.use_legacy_worker_impl` is forced to `disable`.
+
+<Note>
+  Need an estimator that requires a critic or per-token signal? See [Pre-computed advantages](/experimental/precompute-advantage) for writing per-token advantages directly in the workflow, and the [Advantage estimator](/experimental/advantage-estimator) page for registering a custom rLLM-native estimator (with a worked OPO port).
+</Note>
+
 ## Key Features
 
 <CardGroup cols={2}>
@@ -75,10 +89,10 @@ The verl backend includes the following key dependencies (from `pyproject.toml`)
 
 ```toml
 verl = [
-    "verl==0.6.1",
-    "torch>=2.8.0",
+    "verl==0.7.1",
+    "torch>=2.10.0",
     "torchvision>=0.23.0",
-    "vllm>=0.10.2,<=0.11.0",
+    "vllm==0.17.0",
     "flash-attn>=2.8.1",
     "qwen-vl-utils",
 ]
@@ -156,6 +170,10 @@ python train_with_lora.py \
   data.train_batch_size=32
 ```
 
+## Supported advantage estimators
+
+Advantages on the unified Verl backend are computed through rLLM's native estimator hook. The built-in estimators are `grpo`, `reinforce`, `reinforce_plus_plus_baseline`, and `rloo`. Verl's other estimators — `gae`, `reinforce_plus_plus` (proper), `remax`, `opo`, `grpo_passk`, `gpg`, `gdpo`, `optimal_token_baseline`, `tir_optimal_token_baseline` — are **not available out of the box** and the corresponding `algorithm.gamma` / `algorithm.lam` knobs are no longer wired through. To use one of those, register a custom estimator via the rLLM registry; see [Advantage estimator](/experimental/advantage-estimator) for the contract and a worked OPO port.
+
 ## Configuration
 
 The verl backend uses Hydra configuration with defaults from `agent_ppo_trainer.yaml`:
@@ -187,15 +205,7 @@ The verl backend uses Hydra configuration with defaults from `agent_ppo_trainer.
 </ParamField>
 
 <ParamField path="algorithm.adv_estimator" type="string" default="grpo">
-  Advantage estimator: "grpo", "gae", or "reinforce"
-</ParamField>
-
-<ParamField path="algorithm.gamma" type="float" default="1.0">
-  Discount factor for rewards
-</ParamField>
-
-<ParamField path="algorithm.lam" type="float" default="0.95">
-  GAE lambda parameter
+  Advantage estimator: `grpo`, `reinforce`, `reinforce_plus_plus_baseline`, or `rloo`
 </ParamField>
 
 <ParamField path="trainer.total_epochs" type="integer" default="3">
@@ -284,10 +294,6 @@ python train_agent.py \
   Number of GPUs for actor-rollout workers
 </ParamField>
 
-<ParamField path="resource_pool_config.critic_gpu" type="integer">
-  Number of GPUs for critic workers
-</ParamField>
-
 <ParamField path="resource_pool_config.ref_policy_gpu" type="integer">
   Number of GPUs for reference policy workers
 </ParamField>
@@ -365,7 +371,6 @@ trainer:
 - `actor/entropy`: Policy entropy
 - `actor/loss`: Actor policy loss
 - `actor/ppo_ratio_mean`: PPO clipping ratio
-- `critic/loss`: Critic value loss
 - `critic/full-score/mean`: Average trajectory reward
 - `val/test_score/*`: Validation accuracy by data source
 - `training/global_step`: Current training step
@@ -411,8 +416,6 @@ data:
 
 algorithm:
   adv_estimator: grpo
-  gamma: 1.0
-  lam: 0.95
 
 trainer:
   total_epochs: 3

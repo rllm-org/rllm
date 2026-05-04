@@ -100,11 +100,8 @@ RL algorithm and advantage estimation settings.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `adv_estimator` | `str` | `grpo` | Advantage estimator (options: `grpo`, `reinforce`, `reinforce_plus_plus_baseline`, `rloo`, `gae`) |
-| `gamma` | `float` | `1.0` | Discount factor for future rewards |
-| `lam` | `float` | `0.95` | Lambda for GAE (Generalized Advantage Estimation) |
+| `adv_estimator` | `str` | `grpo` | Advantage estimator (options: `grpo`, `reinforce`, `reinforce_plus_plus_baseline`, `rloo`) |
 | `norm_adv_by_std_in_grpo` | `bool` | `True` | Whether to normalize advantages by standard deviation in GRPO |
-| `use_rllm` | `bool` | `False` | Whether to use rLLM-specific features |
 | `loss_fn` | `str \| null` | `null` | Loss function for Tinker backend (options: `importance_sampling`, `ppo`, `cispo`, `dro`, `cross_entropy`) |
 
 ### Stepwise advantage configuration
@@ -244,15 +241,6 @@ This file contains:
 | `data.train_batch_size` | `int` | `64` | Train batch size |
 | `data.val_batch_size` | `int` | `32` | Validation batch size |
 
-#### OPSD block
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `opsd.kl_penalty_coef` | `float` | `1.0` | KL penalty coefficient |
-| `opsd.kl_discount_factor` | `float` | `0.0` | KL discount factor |
-| `opsd.teacher_messages_key` | `str` | `teacher_messages` | Key for teacher messages |
-| `opsd.teacher_policy_update_freq` | `int` | `-1` | Teacher refresh frequency (`-1` = initial teacher only) |
-
 #### Forwarding to common `rllm.*`
 
 Tinker backend forwards group-size settings into backend-agnostic rollout config:
@@ -291,8 +279,6 @@ In rLLM, the `verl.yaml` mainly does three things:
 | `data.gen_batch_size` | `int` | `${mul:...}` | Generated batch size |
 | `data.return_multi_modal_inputs` | `bool` | `False` | Include multimodal inputs in data path |
 | `algorithm.adv_estimator` | `str` | `???` | Native algorithm estimator |
-| `algorithm.gamma` | `float` | `???` | Native discount factor |
-| `algorithm.lam` | `float` | `???` | Native lambda |
 | `algorithm.norm_adv_by_std_in_grpo` | `bool` | `???` | Native GRPO normalization |
 | `trainer.total_epochs` | `int` | `???` | Native epoch count |
 | `trainer.total_training_steps` | `int` | `???` | Native total-step budget |
@@ -308,7 +294,7 @@ In rLLM, the `verl.yaml` mainly does three things:
 
 Verl backend forwards the following:
 
-- `rllm.algorithm.{adv_estimator,gamma,lam,norm_adv_by_std_in_grpo}`
+- `rllm.algorithm.{adv_estimator,norm_adv_by_std_in_grpo}`
 - `rllm.rollout.{n,n_val}`
 - `rllm.trainer.{total_epochs,total_batches,logger,project_name,experiment_name,test_freq,save_freq,val_before_train,val_only}`
 
@@ -363,16 +349,14 @@ Similarly, algorithm configurations can be forwarded:
 ```yaml
 # Backend-specific algorithm config
 algorithm:
-  adv_estimator: gae
-  gamma: 0.99
-  lam: 0.95
+  adv_estimator: rloo
+  norm_adv_by_std_in_grpo: false
 
 # Forwarded to rLLM
 rllm:
   algorithm:
-    adv_estimator: ${oc.select:algorithm.adv_estimator, grpo}  # Uses 'gae'
-    gamma: ${oc.select:algorithm.gamma, 1.0}  # Uses 0.99
-    lam: ${oc.select:algorithm.lam, 0.95}  # Uses 0.95
+    adv_estimator: ${oc.select:algorithm.adv_estimator, grpo}  # Uses 'rloo'
+    norm_adv_by_std_in_grpo: ${oc.select:algorithm.norm_adv_by_std_in_grpo, true}  # Uses false
 ```
 
 ### Benefits

@@ -14,7 +14,7 @@ import torch
 from omegaconf import DictConfig
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.experimental.agent_loop import AgentLoopManager
+from verl.experimental.agent_loop.agent_loop import AgentLoopManager, AsyncLLMServerManager
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.core_algos import agg_loss
@@ -220,10 +220,13 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         Returns:
             VerlEngine: The initialized rollout engine.
         """
-        # Apply Verl patches
-        from rllm.experimental.verl.patch import patch_verl_dynamic_batch_sync
+        # Apply driver-side patches. Most verl monkey-patches only affect
+        # worker code paths (FSDP / vLLM), so they live in the worker hook
+        # at rllm.experimental.verl.patch:apply_all_verl_patches (wired via
+        # runtime_env.worker_process_setup_hook in ray_runtime_env.py).
+        from rllm.experimental.verl.patch import patch_verl_tensordict_jagged_layout
 
-        patch_verl_dynamic_batch_sync()
+        patch_verl_tensordict_jagged_layout()
 
         # If SDK is enabled, instrument vLLM replicas before creating workers
         sdk_enabled = self.full_config.rllm.get("sdk", {}).get("enable", False)
@@ -238,8 +241,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             self.actor_rollout_wg.set_loss_fn(CustomPPOLoss(self.config.actor_rollout_ref.actor))
         else:
             logger.warning("RayWorkerGroup.set_loss_fn not available — skipping custom loss injection")
-
-        from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
 
         servers = zip(self.async_rollout_manager.server_addresses, self.async_rollout_manager.server_handles, strict=True)
         server_manager = AsyncLLMServerManager(self.config, servers=servers, load_balancer_handle=self.async_rollout_manager.global_load_balancer)
@@ -273,6 +274,11 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             raise ValueError("bypass_mode=True and tis_mode!=None is invalid: IS correction is meaningless when π_old = π_rollout")
 
         assert not self.config.algorithm.get("use_kl_in_reward", False), "only KL-in-loss is supported"
+
+        reward_model_cfg = self.config.get("reward", {}).get("reward_model", {})
+        assert not reward_model_cfg.get("enable", False), (
+            "Reward models are not supported on the rLLM-native verl path; compute rewards in the workflow via a RewardFunction. Remove `reward.reward_model.enable=True` from your config."
+        )
 
     def get_dataloader(self, dataset: Dataset | None, trainer_state: TrainerState) -> Iterable:
         """Get dataloader. Note that for Verl backend, the RayPPOTrainer init already creates the dataloaders."""

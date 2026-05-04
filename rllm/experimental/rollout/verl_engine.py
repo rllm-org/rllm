@@ -71,6 +71,11 @@ class VerlEngine(RolloutEngine):
         sampling_params["max_tokens"] = max_tokens
 
         token_output = await self.server_manager.generate(request_id=application_id, prompt_ids=token_input, sampling_params=sampling_params)
+
+        if token_output.stop_reason in ("aborted", "abort"):
+            raise RuntimeError("Rollout aborted")
+        token_output.stop_reason = "length" if len(token_output.token_ids) >= max_tokens else "stop"
+
         return token_output
 
     @override
@@ -107,13 +112,7 @@ class VerlEngine(RolloutEngine):
         token_output = cast(VerlTokenOutput, token_output)
         completion_ids = token_output.token_ids
         logprobs = token_output.log_probs
-
-        # convert the stop reason from verl back to the standard finish reason TODO(listar2000): check backward-compatibility
-        reason_mapping = {"aborted": "abort", "completed": "stop"}
-        if token_output.stop_reason is not None:
-            finish_reason = reason_mapping.get(token_output.stop_reason, token_output.stop_reason)
-        else:
-            finish_reason = "stop"
+        finish_reason = token_output.stop_reason
 
         completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
         # TODO: implement parse_completion for the standard parser

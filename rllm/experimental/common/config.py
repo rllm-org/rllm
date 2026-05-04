@@ -207,7 +207,7 @@ class AlgorithmConfig:
     ``estimator_map`` and the loss function goes into ``loss_fn_map``.
     """
 
-    use_rllm: bool = False  # This is ignored (assumed True) for tinker backend.
+    use_rllm: bool | None = None  # Deprecated
     estimator: rLLMAdvantageEstimator = rLLMAdvantageEstimator.GRPO
     estimator_map: dict[str, rLLMAdvantageEstimator | str | tuple] = field(default_factory=dict)
     # Per-role policy loss overrides (populated from tuples in estimator_map during __post_init__)
@@ -219,8 +219,8 @@ class AlgorithmConfig:
     # advantage computation (GRPO/REINFORCE). Steps missing advantages default to 0.0.
     # When False (default), always compute advantages normally.
     use_precomputed_advantage: bool = False
-    # Global loss_fn override (for tinker backend; Verl uses loss_fn_map per role)
-    loss_fn: Literal["importance_sampling", "ppo", "cispo", "dro", "cross_entropy"] | None = None
+    # Global loss function (backend-specific values; null = backend default)
+    loss_fn: str | None = None
     lr_schedule: Literal["linear", "cosine", "constant"] = "constant"
     warmup_steps_ratio: float = 0.0
 
@@ -228,7 +228,7 @@ class AlgorithmConfig:
     kl_beta: float = 0.0
     eps_clip: float = 0.2
     eps_clip_high: float | None = None
-    loss_agg_mode: Literal["token_mean", "seq_mean_token_sum", "seq_mean_token_mean", None] = None
+    loss_agg_mode: Literal["token-mean", "seq-mean-token-sum", "seq-mean-token-mean", None] = None
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
     router_replay: bool = False
 
@@ -241,6 +241,15 @@ class AlgorithmConfig:
         Returns:
             AlgorithmConfig: The AlgorithmConfig built from the configuration.
         """
+        if algorithm_config.get("use_rllm", None) is not None:
+            from warnings import warn
+
+            warn(
+                "`algorithm.use_rllm` is deprecated and ignored — advantages are always computed via the rLLM-native path. Remove the field from your config.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         rc_section = algorithm_config.get("rollout_correction", {})
         rollout_correction = RolloutCorrectionConfig(
             tis_mode=rc_section.get("tis_mode", None),
@@ -252,7 +261,6 @@ class AlgorithmConfig:
             estimator_map=estimator_map or {},
             stepwise_advantage_mode=stepwise_advantage_mode,
             norm_adv_by_std_in_grpo=algorithm_config.get("norm_adv_by_std_in_grpo", True),
-            use_rllm=algorithm_config.get("use_rllm", None),
             use_precomputed_advantage=algorithm_config.get("use_precomputed_advantage", False),
             loss_fn=algorithm_config.get("loss_fn", None),
             lr_schedule=algorithm_config.get("lr_schedule", "constant"),
@@ -266,6 +274,15 @@ class AlgorithmConfig:
         )
 
     def __post_init__(self):
+        if self.use_rllm is not None:
+            from warnings import warn
+
+            warn(
+                "`algorithm.use_rllm` is deprecated and ignored — advantages are always computed via the rLLM-native path. Remove the field from your config.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         # Normalize estimator_map: split (estimator, loss_fn) tuples.
         normalized_map: dict[str, rLLMAdvantageEstimator | str] = {}
         for role, value in self.estimator_map.items():
