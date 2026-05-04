@@ -100,7 +100,22 @@ def test_live_payload_structure(client: tuple[TestClient, Path]) -> None:
     r = c.get("/console/api/panels/runs/bench_model_20260101_120000/live")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) == {"in_flight", "finished_count", "started_count"}
+    # Liveness now sources started/ended from the gateway runs table;
+    # ``in_flight`` is derived from ``ended_at IS NULL``. Sessions list
+    # comes from the trace store. Tasks.jsonl backs ``in_flight_tasks``.
+    assert set(body) == {
+        "run_id",
+        "started_at",
+        "ended_at",
+        "in_flight",
+        "sessions",
+        "in_flight_tasks",
+        "finished_count",
+        "started_count",
+    }
+    # No gateway db in this test → in_flight is False and sessions empty.
+    assert body["in_flight"] is False
+    assert body["sessions"] == []
 
 
 def test_path_traversal_rejected(client: tuple[TestClient, Path]) -> None:

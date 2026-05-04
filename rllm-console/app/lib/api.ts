@@ -49,51 +49,62 @@ export const fetchShellInfo = () => request<ShellInfo>("/shell/info");
 
 // ---- Sessions panel -----------------------------------------------------
 
-export interface RunRow {
-  run_id: string;
-  started_at: number | null;
-  ended_at: number | null;
-  metadata: Record<string, unknown>;
-  session_count: number;
-  trace_count: number;
-  last_trace_at: number | null;
-}
-
-export interface SessionRow {
-  session_id: string;
-  run_id: string;
-  trace_count: number;
-  first_at: number | null;
-  last_at: number | null;
-}
-
 export interface TraceRecord {
   _created_at: number;
   [key: string]: unknown;
 }
 
-export const fetchSessionRuns = () =>
-  request<RunRow[]>("/panels/sessions/runs");
+/**
+ * Filter shape for ``GET /panels/sessions/traces``. All keys are
+ * optional and are pushed down to SQL via the denormalized columns.
+ *
+ * Cursor pagination: ``until`` (older-than) for scroll-back,
+ * ``since`` (newer-than) for live tail. ``limit`` capped at 500
+ * server-side; default 100.
+ */
+export interface TraceFilters {
+  run_id?: string;
+  session_id?: string;
+  model?: string;
+  harness?: string;
+  has_error?: boolean;
+  latency_min?: number;
+  latency_max?: number;
+  since?: number;
+  until?: number;
+  limit?: number;
+  order?: "ASC" | "DESC";
+}
 
-export const fetchSessions = (runId?: string) =>
-  request<SessionRow[]>(
-    "/panels/sessions/sessions" +
-      (runId ? `?run_id=${encodeURIComponent(runId)}` : ""),
+export interface TraceFacets {
+  models: string[];
+  harnesses: string[];
+  runs: string[];
+}
+
+function filtersToQuery(f: TraceFilters): URLSearchParams {
+  const q = new URLSearchParams();
+  if (f.run_id) q.set("run_id", f.run_id);
+  if (f.session_id) q.set("session_id", f.session_id);
+  if (f.model) q.set("model", f.model);
+  if (f.harness) q.set("harness", f.harness);
+  if (f.has_error != null) q.set("has_error", String(f.has_error));
+  if (f.latency_min != null) q.set("latency_min", String(f.latency_min));
+  if (f.latency_max != null) q.set("latency_max", String(f.latency_max));
+  if (f.since != null) q.set("since", String(f.since));
+  if (f.until != null) q.set("until", String(f.until));
+  if (f.limit != null) q.set("limit", String(f.limit));
+  if (f.order) q.set("order", f.order);
+  return q;
+}
+
+export const fetchTraceFeed = (filters: TraceFilters = {}) =>
+  request<TraceRecord[]>(
+    `/panels/sessions/traces?${filtersToQuery(filters)}`,
   );
 
-export const fetchTraces = (params: {
-  session_id: string;
-  run_id?: string;
-  since?: number;
-  limit?: number;
-}) => {
-  const q = new URLSearchParams();
-  q.set("session_id", params.session_id);
-  if (params.run_id) q.set("run_id", params.run_id);
-  if (params.since != null) q.set("since", String(params.since));
-  if (params.limit != null) q.set("limit", String(params.limit));
-  return request<TraceRecord[]>(`/panels/sessions/traces?${q}`);
-};
+export const fetchTraceFacets = () =>
+  request<TraceFacets>("/panels/sessions/facets");
 
 // ---- Runs panel ---------------------------------------------------------
 
@@ -110,7 +121,10 @@ export interface EvalRunSummary {
   total: number | null;
   errors: number | null;
   n_episodes: number;
-  status: "completed" | "incomplete";
+  status: "completed" | "incomplete" | "running";
+  in_flight: boolean;
+  started_at: number | null;
+  ended_at: number | null;
 }
 
 export interface EpisodeIndexRow {
@@ -136,8 +150,20 @@ export interface InFlightTask {
   last_trace_at: number | null;
 }
 
+export interface RunSessionSummary {
+  session_id: string;
+  trace_count: number;
+  first_at: number | null;
+  last_at: number | null;
+}
+
 export interface LivePayload {
-  in_flight: InFlightTask[];
+  run_id: string;
+  started_at: number | null;
+  ended_at: number | null;
+  in_flight: boolean;
+  sessions: RunSessionSummary[];
+  in_flight_tasks: InFlightTask[];
   finished_count: number;
   started_count: number;
 }
@@ -149,6 +175,12 @@ export const fetchEpisodeIndex = (runId: string) =>
   );
 export const fetchLivePayload = (runId: string) =>
   request<LivePayload>(`/panels/runs/${encodeURIComponent(runId)}/live`);
+
+/** Per-run paginated trace feed. Same filter shape as Sessions. */
+export const fetchRunTraces = (runId: string, filters: TraceFilters = {}) =>
+  request<TraceRecord[]>(
+    `/panels/runs/${encodeURIComponent(runId)}/traces?${filtersToQuery(filters)}`,
+  );
 
 // ---- Datasets panel -----------------------------------------------------
 

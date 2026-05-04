@@ -1,8 +1,15 @@
 """SQLite-backed trace store with session-indexed persistence.
 
-Extracted and adapted from ``rllm/sdk/store/sqlite_store.py``.  Uses the same
-junction-table pattern (``trace_sessions``) for efficient session-based
-queries but simplifies the schema to match the gateway's needs.
+Schema v2 denormalizes a few hot fields from the JSON ``data`` column
+onto the ``traces`` row (``run_id``, ``session_id``, ``model``,
+``harness``, ``latency_ms``, ``has_error``, ``step_id``) so the global
+trace feed can filter without table-scanning JSON. ``data`` keeps the
+authoritative ``TraceRecord`` payload.
+
+A schema-version mismatch on an existing db drops every table and
+recreates from scratch — gateway data is dev-only and the cost of a
+real migration isn't worth it. Bump :data:`_SCHEMA_VERSION` for any
+schema change.
 """
 
 import json
@@ -16,6 +23,35 @@ import aiosqlite
 
 logger = logging.getLogger(__name__)
 
+# Bump on any schema change. ``_get_conn`` drops and recreates every
+# table when the on-disk PRAGMA user_version is non-zero and ≠ this.
+_SCHEMA_VERSION = 2
+
+# Finish reasons that indicate a healthy LLM completion. Anything else
+# (or a missing finish_reason on a non-empty response) gets has_error=1.
+_OK_FINISH_REASONS = frozenset({"stop", "tool_calls", "length", "function_call"})
+
+
+def _compute_has_error(data: dict[str, Any]) -> int:
+    """Heuristic error flag derived from the trace payload at insert time.
+
+    A trace counts as errored when:
+    - ``raw_response`` carries an ``error`` key (upstream returned 4xx/5xx
+      with an error body the gateway captured anyway), or
+    - ``finish_reason`` is missing AND ``response_message`` is empty
+      (the upstream returned no usable completion), or
+    - ``finish_reason`` is set to something outside the well-known
+      "good" set (e.g. ``content_filter``).
+    """
+    raw_response = data.get("raw_response")
+    if isinstance(raw_response, dict) and "error" in raw_response:
+        return 1
+    finish_reason = data.get("finish_reason")
+    response_message = data.get("response_message") or {}
+    if not finish_reason:
+        return 1 if not response_message else 0
+    return 0 if finish_reason in _OK_FINISH_REASONS else 1
+
 
 class SqliteTraceStore:
     """Persistent trace store backed by a single SQLite file.
@@ -25,8 +61,9 @@ class SqliteTraceStore:
     use and closed explicitly via :meth:`close`.
 
     Features:
-    - Junction table for session_id ↔ trace_id mapping
-    - Composite indexes for fast session-scoped queries
+    - Denormalized filter columns on ``traces`` for the global feed
+    - Junction table ``trace_sessions`` retained for many-session-per-trace
+      back-compat (in practice 1:1)
     - WAL journal mode for faster local-disk read/write concurrency
     - Checkpoint-on-close to keep WAL growth bounded after long runs
     """
@@ -74,59 +111,93 @@ class SqliteTraceStore:
                     logger.warning("SQLite pragma failed (%s): %s", pragma, exc)
 
             await conn.execute("PRAGMA foreign_keys = ON")
-            await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS traces (
-                    trace_id   TEXT PRIMARY KEY,
-                    data       TEXT NOT NULL,
-                    created_at REAL NOT NULL
-                )
-                """
-            )
-            await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS trace_sessions (
-                    trace_id   TEXT NOT NULL,
-                    session_id TEXT NOT NULL,
-                    run_id     TEXT NOT NULL DEFAULT '',
-                    created_at REAL NOT NULL,
-                    PRIMARY KEY (trace_id, session_id),
-                    FOREIGN KEY (trace_id) REFERENCES traces(trace_id) ON DELETE CASCADE
-                )
-                """
-            )
-            # Lightweight forward migration: dbs created before run_id was a
-            # column get the column added with the default. PK isn't widened
-            # because trace_id is already a UUID — (trace_id, session_id)
-            # remains unique; run_id is filterable metadata.
-            async with conn.execute("PRAGMA table_info(trace_sessions)") as cur:
-                cols = {row[1] async for row in cur}
-            if "run_id" not in cols:
-                await conn.execute("ALTER TABLE trace_sessions ADD COLUMN run_id TEXT NOT NULL DEFAULT ''")
-
-            # ``runs`` records gateway-run metadata so the cross-run viewer
-            # can list runs even before any traces have landed. Inserted by
-            # the gateway lifespan via ``register_run``; ``ended_at`` is
-            # filled in on shutdown.
-            await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS runs (
-                    run_id     TEXT PRIMARY KEY,
-                    started_at REAL NOT NULL,
-                    ended_at   REAL,
-                    metadata   TEXT NOT NULL DEFAULT '{}'
-                )
-                """
-            )
-
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_ts_session ON trace_sessions(session_id)")
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_ts_session_time ON trace_sessions(session_id, created_at ASC)")
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_ts_run_session ON trace_sessions(run_id, session_id, created_at ASC)")
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_traces_time ON traces(created_at)")
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at DESC)")
-            await conn.commit()
+            await self._ensure_schema(conn)
             self._conn = conn
         return self._conn
+
+    async def _ensure_schema(self, conn: aiosqlite.Connection) -> None:
+        """Create or rebuild tables to match :data:`_SCHEMA_VERSION`.
+
+        Three states to handle:
+        - Fresh db (no tables, ``user_version=0``): just create v2.
+        - v2 db (``user_version==_SCHEMA_VERSION``): no-op create-if-not-exists.
+        - Anything else (legacy db with tables but no version stamp,
+          or a future-version db downgraded): drop and recreate.
+        """
+        async with conn.execute("PRAGMA user_version") as cur:
+            row = await cur.fetchone()
+            current = int(row[0]) if row else 0
+
+        async with conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('traces', 'trace_sessions', 'runs')") as cur:
+            existing_tables = [r[0] async for r in cur]
+
+        if existing_tables and current != _SCHEMA_VERSION:
+            logger.warning(
+                "rllm-gateway: dropping trace store at %s (schema v%d → v%d)",
+                self.db_path,
+                current,
+                _SCHEMA_VERSION,
+            )
+            # Drop in dependency order: trace_sessions has an FK on traces.
+            for table in ("trace_sessions", "traces", "runs"):
+                await conn.execute(f"DROP TABLE IF EXISTS {table}")
+
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS traces (
+                trace_id    TEXT PRIMARY KEY,
+                data        TEXT NOT NULL,
+                created_at  REAL NOT NULL,
+                session_id  TEXT NOT NULL DEFAULT '',
+                run_id      TEXT NOT NULL DEFAULT '',
+                model       TEXT NOT NULL DEFAULT '',
+                harness     TEXT,
+                latency_ms  INTEGER NOT NULL DEFAULT 0,
+                has_error   INTEGER NOT NULL DEFAULT 0,
+                step_id     INTEGER
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trace_sessions (
+                trace_id   TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                run_id     TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                PRIMARY KEY (trace_id, session_id),
+                FOREIGN KEY (trace_id) REFERENCES traces(trace_id) ON DELETE CASCADE
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS runs (
+                run_id     TEXT PRIMARY KEY,
+                started_at REAL NOT NULL,
+                ended_at   REAL,
+                metadata   TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+
+        # Filter-pushdown indexes for the global trace feed. All on
+        # ``traces`` because the feed query never needs the junction.
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_traces_time ON traces(created_at DESC)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_traces_run_time ON traces(run_id, created_at DESC)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_traces_model_time ON traces(model, created_at DESC)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_traces_run_model_time ON traces(run_id, model, created_at DESC)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_traces_session_time ON traces(session_id, created_at DESC)")
+        # Junction-side indexes — kept so legacy ``get_session_traces``
+        # still hits an index. Phase 2/3 rewrites query ``traces``
+        # directly via the new column.
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_ts_session ON trace_sessions(session_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_ts_session_time ON trace_sessions(session_id, created_at ASC)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_ts_run_session ON trace_sessions(run_id, session_id, created_at ASC)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at DESC)")
+
+        await conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+        await conn.commit()
 
     async def close(self) -> None:
         """Close the persistent connection and checkpoint WAL state."""
@@ -148,12 +219,46 @@ class SqliteTraceStore:
     ) -> None:
         conn = await self._get_conn()
         now = time.time()
+        run_id = run_id or ""
+        # Pull denormalized values from the TraceRecord-shaped dict. The
+        # junction table's ``run_id`` is the authoritative gateway run
+        # tag (set by the proxy at persist time), which we mirror onto
+        # ``traces.run_id`` rather than trusting ``data["run_id"]``.
+        model = str(data.get("model") or "")
+        harness = data.get("harness")
+        latency_ms = int(data.get("latency_ms") or 0)
+        step_id = data.get("step_id")
+        has_error = _compute_has_error(data)
+
         await conn.execute(
             """
-            INSERT OR REPLACE INTO traces (trace_id, data, created_at)
-            VALUES (?, ?, COALESCE((SELECT created_at FROM traces WHERE trace_id = ?), ?))
+            INSERT INTO traces (
+                trace_id, data, created_at,
+                session_id, run_id, model, harness, latency_ms, has_error, step_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(trace_id) DO UPDATE SET
+                data       = excluded.data,
+                session_id = excluded.session_id,
+                run_id     = excluded.run_id,
+                model      = excluded.model,
+                harness    = excluded.harness,
+                latency_ms = excluded.latency_ms,
+                has_error  = excluded.has_error,
+                step_id    = excluded.step_id
             """,
-            (trace_id, json.dumps(data), trace_id, now),
+            (
+                trace_id,
+                json.dumps(data),
+                now,
+                session_id,
+                run_id,
+                model,
+                harness,
+                latency_ms,
+                has_error,
+                step_id,
+            ),
         )
         await conn.execute(
             """
@@ -162,7 +267,7 @@ class SqliteTraceStore:
                 (SELECT created_at FROM traces WHERE trace_id = ?), ?
             ))
             """,
-            (trace_id, session_id, run_id or "", trace_id, now),
+            (trace_id, session_id, run_id, trace_id, now),
         )
         await conn.commit()
 
@@ -183,11 +288,10 @@ class SqliteTraceStore:
         *,
         run_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Get traces for a session, optionally narrowed to one ``run_id``.
+        """Get traces for a session, ordered ASC. Back-compat wrapper.
 
-        ``run_id=None`` (default) is cross-run — useful when an external
-        client used the same ``session_id`` across multiple gateway runs.
-        Pass an empty string to match the unstamped bucket explicitly.
+        New callers should prefer :meth:`query_traces` for richer
+        filtering. ``run_id=None`` is cross-run.
         """
         conn = await self._get_conn()
         conn.row_factory = aiosqlite.Row
@@ -211,6 +315,170 @@ class SqliteTraceStore:
         async with conn.execute(sql, params) as cur:
             rows = await cur.fetchall()
         return [json.loads(r["data"]) for r in rows]
+
+    async def query_traces(
+        self,
+        *,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        model: str | None = None,
+        harness: str | None = None,
+        has_error: bool | None = None,
+        latency_min: float | None = None,
+        latency_max: float | None = None,
+        since: float | None = None,
+        until: float | None = None,
+        limit: int | None = 200,
+        order: str = "DESC",
+    ) -> list[dict[str, Any]]:
+        """Filter+paginate traces directly off the denormalized columns.
+
+        ``since`` / ``until`` are cursors on ``created_at``; pass
+        ``until=last_seen`` for older-than-N scroll-back, ``since=last_seen``
+        for newer-than-N live tail. ``order`` is ``DESC`` (newest first)
+        for the global feed and ``ASC`` for per-session timelines.
+
+        Each row carries a synthetic ``_created_at`` so callers can
+        advance a polling cursor without inspecting ``timestamp`` inside
+        ``data`` (which is the LLM request time and skews on long
+        requests).
+        """
+        if order not in ("ASC", "DESC"):
+            raise ValueError(f"order must be ASC or DESC, got {order!r}")
+        conn = await self._get_conn()
+        conn.row_factory = aiosqlite.Row
+
+        where, params = self._build_filters(
+            run_id=run_id,
+            session_id=session_id,
+            model=model,
+            harness=harness,
+            has_error=has_error,
+            latency_min=latency_min,
+            latency_max=latency_max,
+            since=since,
+            until=until,
+        )
+        sql = "SELECT data, created_at FROM traces"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += f" ORDER BY created_at {order}"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+
+        async with conn.execute(sql, params) as cur:
+            rows = await cur.fetchall()
+
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            try:
+                data = json.loads(r["data"])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict):
+                data["_created_at"] = r["created_at"]
+                out.append(data)
+        return out
+
+    async def count_traces(
+        self,
+        *,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        model: str | None = None,
+        harness: str | None = None,
+        has_error: bool | None = None,
+        latency_min: float | None = None,
+        latency_max: float | None = None,
+        since: float | None = None,
+        until: float | None = None,
+    ) -> int:
+        """COUNT(*) over the same filters as :meth:`query_traces`."""
+        conn = await self._get_conn()
+        where, params = self._build_filters(
+            run_id=run_id,
+            session_id=session_id,
+            model=model,
+            harness=harness,
+            has_error=has_error,
+            latency_min=latency_min,
+            latency_max=latency_max,
+            since=since,
+            until=until,
+        )
+        sql = "SELECT COUNT(*) FROM traces"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        async with conn.execute(sql, params) as cur:
+            row = await cur.fetchone()
+        return int(row[0] or 0) if row else 0
+
+    async def facets(self) -> dict[str, list[str]]:
+        """Distinct values for filter-bar dropdowns.
+
+        Returns ``{"models": [...], "harnesses": [...], "runs": [...]}``.
+        Excludes the empty bucket from each list. Cheap because each
+        column is indexed and the cardinality is small (handful of
+        models/harnesses, dozens-to-hundreds of runs).
+        """
+        conn = await self._get_conn()
+
+        async def _distinct(col: str, table: str = "traces") -> list[str]:
+            sql = f"SELECT DISTINCT {col} FROM {table} WHERE {col} IS NOT NULL AND {col} != '' ORDER BY {col}"
+            async with conn.execute(sql) as cur:
+                rows = await cur.fetchall()
+            return [r[0] for r in rows]
+
+        return {
+            "models": await _distinct("model"),
+            "harnesses": await _distinct("harness"),
+            "runs": await _distinct("run_id"),
+        }
+
+    @staticmethod
+    def _build_filters(
+        *,
+        run_id: str | None,
+        session_id: str | None,
+        model: str | None,
+        harness: str | None,
+        has_error: bool | None,
+        latency_min: float | None,
+        latency_max: float | None,
+        since: float | None,
+        until: float | None,
+    ) -> tuple[list[str], list[Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if run_id is not None:
+            where.append("run_id = ?")
+            params.append(run_id)
+        if session_id is not None:
+            where.append("session_id = ?")
+            params.append(session_id)
+        if model is not None:
+            where.append("model = ?")
+            params.append(model)
+        if harness is not None:
+            where.append("harness = ?")
+            params.append(harness)
+        if has_error is not None:
+            where.append("has_error = ?")
+            params.append(1 if has_error else 0)
+        if latency_min is not None:
+            where.append("latency_ms >= ?")
+            params.append(latency_min)
+        if latency_max is not None:
+            where.append("latency_ms <= ?")
+            params.append(latency_max)
+        if since is not None:
+            where.append("created_at > ?")
+            params.append(since)
+        if until is not None:
+            where.append("created_at < ?")
+            params.append(until)
+        return where, params
 
     async def delete_session(
         self,

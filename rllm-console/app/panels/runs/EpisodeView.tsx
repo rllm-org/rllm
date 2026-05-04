@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, ChevronRight } from "lucide-react";
 
 import { API_BASE, ApiError } from "~/lib/api";
-import { JsonField } from "~/panels/sessions/JsonField";
+import { JsonField } from "~/components/trace/JsonField";
 
 interface EpisodeJson {
   id?: string;

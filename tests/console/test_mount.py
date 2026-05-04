@@ -46,7 +46,8 @@ def test_shell_info_lists_default_panels(app: FastAPI) -> None:
 def test_panel_routes_registered_under_prefix(app: FastAPI) -> None:
     paths = {getattr(r, "path", "") for r in app.routes}
     assert "/console/api/shell/info" in paths
-    assert "/console/api/panels/sessions/runs" in paths
+    assert "/console/api/panels/sessions/traces" in paths
+    assert "/console/api/panels/sessions/facets" in paths
     assert "/console/api/panels/runs/{run_id}/index" in paths
 
 
@@ -111,7 +112,7 @@ def test_eval_results_root_optional() -> None:
     assert info["eval_results_root"] is None
 
     # Sessions panel doesn't need the eval root.
-    assert client.get("/console/api/panels/sessions/runs").status_code == 200
+    assert client.get("/console/api/panels/sessions/traces").status_code == 200
 
     # Runs panel does.
     r = client.get("/console/api/panels/runs")

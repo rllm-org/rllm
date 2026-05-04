@@ -1,121 +1,65 @@
-"""Sessions panel — cross-run gateway tracing browser.
+"""Sessions panel — global gateway-trace feed with filter pushdown.
 
-Three endpoints, all read-only against the shared sqlite trace store:
+Two endpoints, both read-only against the shared sqlite trace store:
 
-* ``GET /runs``                   — runs with derived session/trace counts
-* ``GET /sessions?run_id=``       — session summaries (per-run or cross-run)
-* ``GET /traces?session_id=&run_id=&since=&limit=`` — trace timeline for one session
+* ``GET /traces?<filters>`` — paginated trace feed (newest first by default).
+  All filters are optional and pushed down to SQL via the denormalized
+  columns on ``traces`` (``run_id``, ``session_id``, ``model``,
+  ``harness``, ``has_error``, ``latency_ms``, ``created_at``).
+* ``GET /facets``           — distinct values for the filter-bar dropdowns.
 
-Ported from ``rllm/eval/visualizer.py``'s ``/api/gateway/*`` handlers.
+Cursor pagination uses ``until`` (older-than, for scroll-back) and
+``since`` (newer-than, for live tail) on persisted-at time. Pass the
+last row's ``_created_at`` back to advance the cursor.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 
 from rllm.eval import trace_loader
 
 router = APIRouter()
 
 
-@router.get("/runs")
-def list_runs() -> list[dict[str, Any]]:
-    """Every gateway run with observed session and trace counts.
-
-    Includes orphan runs (registered but no traces yet) and "ghost" runs
-    (sessions whose run was never registered, e.g. legacy schema rows).
-    Sorted by most-recent activity first.
-    """
-    db = trace_loader.default_db_path()
-    runs = trace_loader.list_runs(db)
-    summaries = trace_loader.session_summaries_by_run(db)
-
-    counts: dict[str, int] = {}
-    trace_counts: dict[str, int] = {}
-    last_at: dict[str, float] = {}
-    for s in summaries:
-        rid = s["run_id"]
-        counts[rid] = counts.get(rid, 0) + 1
-        trace_counts[rid] = trace_counts.get(rid, 0) + int(s.get("trace_count") or 0)
-        if s.get("last_at") is not None:
-            last_at[rid] = max(last_at.get(rid, 0.0), float(s["last_at"]))
-
-    seen_run_ids = {r["run_id"] for r in runs}
-    for rid in counts.keys() - seen_run_ids:
-        runs.append(
-            {
-                "run_id": rid,
-                "started_at": None,
-                "ended_at": None,
-                "metadata": {},
-            }
-        )
-
-    out: list[dict[str, Any]] = []
-    for r in runs:
-        rid = r["run_id"]
-        out.append(
-            {
-                **r,
-                "session_count": counts.get(rid, 0),
-                "trace_count": trace_counts.get(rid, 0),
-                "last_trace_at": last_at.get(rid),
-            }
-        )
-
-    out.sort(key=lambda r: -(r.get("last_trace_at") or r.get("started_at") or 0.0))
-    return out
-
-
-@router.get("/sessions")
-def list_sessions(
-    run_id: str | None = Query(default=None),
-) -> list[dict[str, Any]]:
-    """Session summaries.
-
-    With ``run_id`` set, returns sessions for that run. Without it,
-    returns every ``(run_id, session_id)`` pair across the store.
-    """
-    db = trace_loader.default_db_path()
-    if run_id:
-        summaries = trace_loader.session_summaries(db, run_id=run_id)
-        rows = [
-            {
-                "session_id": sid,
-                "run_id": run_id,
-                "trace_count": s["trace_count"],
-                "first_at": s["first_at"],
-                "last_at": s["last_at"],
-            }
-            for sid, s in summaries.items()
-        ]
-    else:
-        rows = trace_loader.session_summaries_by_run(db)
-
-    rows.sort(key=lambda r: -(r.get("last_at") or 0.0))
-    return rows
-
-
 @router.get("/traces")
-def get_traces(
-    session_id: str = Query(..., min_length=1),
+def query_traces(
     run_id: str | None = Query(default=None),
+    session_id: str | None = Query(default=None),
+    model: str | None = Query(default=None),
+    harness: str | None = Query(default=None),
+    has_error: bool | None = Query(default=None),
+    latency_min: float | None = Query(default=None, ge=0),
+    latency_max: float | None = Query(default=None, ge=0),
     since: float | None = Query(default=None),
-    limit: int | None = Query(default=None, ge=1, le=10_000),
+    until: float | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    order: str = Query(default="DESC"),
 ) -> list[dict[str, Any]]:
-    """Traces for a session, ordered by store-time ASC.
+    """Filter+paginate the global trace feed.
 
-    ``since`` is a wall-clock cursor (seconds since epoch); pass the
-    last ``_created_at`` you saw to fetch only newer rows for live tail.
+    Default order is DESC (newest first) for the global feed; pass
+    ``order=ASC`` for per-session timelines.
     """
-    if not session_id:
-        raise HTTPException(400, "session_id required")
-    return trace_loader.get_traces(
+    return trace_loader.query_traces(
         trace_loader.default_db_path(),
-        session_id,
-        since=since,
-        limit=limit,
         run_id=run_id,
+        session_id=session_id,
+        model=model,
+        harness=harness,
+        has_error=has_error,
+        latency_min=latency_min,
+        latency_max=latency_max,
+        since=since,
+        until=until,
+        limit=limit,
+        order=order,
     )
+
+
+@router.get("/facets")
+def list_facets() -> dict[str, list[str]]:
+    """Distinct values for filter-bar dropdowns: ``models``, ``harnesses``, ``runs``."""
+    return trace_loader.list_facets(trace_loader.default_db_path())

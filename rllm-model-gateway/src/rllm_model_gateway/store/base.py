@@ -40,6 +40,55 @@ class TraceStore(Protocol):
         """Get all traces for a session, ordered by timestamp ascending.
 
         ``run_id=None`` is cross-run; pass an explicit value to filter.
+        Back-compat wrapper; new callers should prefer ``query_traces``.
+        """
+        ...
+
+    async def query_traces(
+        self,
+        *,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        model: str | None = None,
+        harness: str | None = None,
+        has_error: bool | None = None,
+        latency_min: float | None = None,
+        latency_max: float | None = None,
+        since: float | None = None,
+        until: float | None = None,
+        limit: int | None = 200,
+        order: str = "DESC",
+    ) -> list[dict[str, Any]]:
+        """Filter+paginate traces by their denormalized columns.
+
+        ``since`` / ``until`` are cursors on persisted-at time;
+        ``order=DESC`` is the global feed (newest first), ``ASC`` for
+        per-session timelines. Each row carries ``_created_at`` so
+        callers can advance a polling cursor.
+        """
+        ...
+
+    async def count_traces(
+        self,
+        *,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        model: str | None = None,
+        harness: str | None = None,
+        has_error: bool | None = None,
+        latency_min: float | None = None,
+        latency_max: float | None = None,
+        since: float | None = None,
+        until: float | None = None,
+    ) -> int:
+        """COUNT(*) over the same filter shape as :meth:`query_traces`."""
+        ...
+
+    async def facets(self) -> dict[str, list[str]]:
+        """Distinct values for filter-bar dropdowns.
+
+        Returns ``{"models", "harnesses", "runs"}`` lists. Empty buckets
+        are excluded.
         """
         ...
 

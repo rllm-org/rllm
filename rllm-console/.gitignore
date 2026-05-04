@@ -1,6 +1,7 @@
 node_modules
 build
 .react-router
+.vite
 .DS_Store
 *.log
 

@@ -1,4 +1,9 @@
-"""Tests for the local sqlite reader in :mod:`rllm.eval.trace_loader`."""
+"""Tests for the local sqlite reader in :mod:`rllm.eval.trace_loader`.
+
+The reader is a stdlib-only ``sqlite3`` consumer of the v2 gateway
+schema (see ``rllm_model_gateway.store.sqlite_store``). Tests seed the
+db directly so we don't drag in ``aiosqlite`` here.
+"""
 
 import json
 import sqlite3
@@ -9,60 +14,83 @@ import pytest
 
 from rllm.eval import trace_loader
 
+_SCHEMA_V2_TRACES = """
+CREATE TABLE traces (
+    trace_id    TEXT PRIMARY KEY,
+    data        TEXT NOT NULL,
+    created_at  REAL NOT NULL,
+    session_id  TEXT NOT NULL DEFAULT '',
+    run_id      TEXT NOT NULL DEFAULT '',
+    model       TEXT NOT NULL DEFAULT '',
+    harness     TEXT,
+    latency_ms  INTEGER NOT NULL DEFAULT 0,
+    has_error   INTEGER NOT NULL DEFAULT 0,
+    step_id     INTEGER
+)
+"""
+
+_SCHEMA_V2_TRACE_SESSIONS = """
+CREATE TABLE trace_sessions (
+    trace_id   TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    run_id     TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    PRIMARY KEY (trace_id, session_id)
+)
+"""
+
+_SCHEMA_V2_RUNS = """
+CREATE TABLE runs (
+    run_id     TEXT PRIMARY KEY,
+    started_at REAL NOT NULL,
+    ended_at   REAL,
+    metadata   TEXT NOT NULL DEFAULT '{}'
+)
+"""
+
 
 def _seed_db(
     db_path: Path,
     rows: list,
     *,
-    include_run_id: bool = True,
     runs: list | None = None,
 ) -> None:
-    """Create the gateway's sqlite schema and insert *rows*.
+    """Seed a v2-shaped db with traces.
 
-    With ``include_run_id=True`` (default) each row is
-    ``(trace_id, session_id, run_id, data_dict, created_at_or_None)`` and
-    the schema includes the ``run_id`` column plus the ``runs`` table.
-
-    With ``include_run_id=False`` each row is
-    ``(trace_id, session_id, data_dict, created_at_or_None)`` and the
-    schema is the legacy form (no ``run_id`` column) — used to verify
-    the loader's backwards-compat path.
+    Each row: ``(trace_id, session_id, run_id, data_dict, created_at)``.
+    Denormalized columns (``model``, ``harness``, ``latency_ms``,
+    ``has_error``, ``step_id``) come from ``data_dict`` keys with
+    sensible defaults so most tests can omit them.
     """
     conn = sqlite3.connect(str(db_path))
     try:
-        conn.execute("CREATE TABLE traces (trace_id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at REAL NOT NULL)")
-        if include_run_id:
+        conn.execute("PRAGMA user_version = 2")
+        conn.execute(_SCHEMA_V2_TRACES)
+        conn.execute(_SCHEMA_V2_TRACE_SESSIONS)
+        conn.execute(_SCHEMA_V2_RUNS)
+        for trace_id, session_id, run_id, data, ts in rows:
+            now = ts if ts is not None else time.time()
+            model = data.get("model", "")
+            harness = data.get("harness")
+            latency_ms = int(data.get("latency_ms") or 0)
+            has_error = int(data.get("has_error") or 0)
+            step_id = data.get("step_id")
             conn.execute(
-                "CREATE TABLE trace_sessions (trace_id TEXT NOT NULL, session_id TEXT NOT NULL, run_id TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL, PRIMARY KEY (trace_id, session_id))"
+                """INSERT INTO traces
+                   (trace_id, data, created_at, session_id, run_id,
+                    model, harness, latency_ms, has_error, step_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (trace_id, json.dumps(data), now, session_id, run_id, model, harness, latency_ms, has_error, step_id),
             )
-            conn.execute("CREATE TABLE runs (run_id TEXT PRIMARY KEY, started_at REAL NOT NULL, ended_at REAL, metadata TEXT NOT NULL DEFAULT '{}')")
-            for trace_id, session_id, run_id, data, ts in rows:
-                now = ts if ts is not None else time.time()
-                conn.execute(
-                    "INSERT INTO traces (trace_id, data, created_at) VALUES (?, ?, ?)",
-                    (trace_id, json.dumps(data), now),
-                )
-                conn.execute(
-                    "INSERT INTO trace_sessions (trace_id, session_id, run_id, created_at) VALUES (?, ?, ?, ?)",
-                    (trace_id, session_id, run_id, now),
-                )
-            for rid, started, ended, metadata in runs or []:
-                conn.execute(
-                    "INSERT INTO runs (run_id, started_at, ended_at, metadata) VALUES (?, ?, ?, ?)",
-                    (rid, started, ended, json.dumps(metadata)),
-                )
-        else:
-            conn.execute("CREATE TABLE trace_sessions (trace_id TEXT NOT NULL, session_id TEXT NOT NULL, created_at REAL NOT NULL, PRIMARY KEY (trace_id, session_id))")
-            for trace_id, session_id, data, ts in rows:
-                now = ts if ts is not None else time.time()
-                conn.execute(
-                    "INSERT INTO traces (trace_id, data, created_at) VALUES (?, ?, ?)",
-                    (trace_id, json.dumps(data), now),
-                )
-                conn.execute(
-                    "INSERT INTO trace_sessions (trace_id, session_id, created_at) VALUES (?, ?, ?)",
-                    (trace_id, session_id, now),
-                )
+            conn.execute(
+                "INSERT INTO trace_sessions (trace_id, session_id, run_id, created_at) VALUES (?, ?, ?, ?)",
+                (trace_id, session_id, run_id, now),
+            )
+        for rid, started, ended, metadata in runs or []:
+            conn.execute(
+                "INSERT INTO runs (run_id, started_at, ended_at, metadata) VALUES (?, ?, ?, ?)",
+                (rid, started, ended, json.dumps(metadata)),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -108,17 +136,16 @@ def two_run_db(tmp_path):
 
 
 @pytest.fixture
-def legacy_db(tmp_path):
-    """Db with the pre-run_id schema — exercises the loader's compat path."""
+def filterable_db(tmp_path):
+    """Mixed models, harnesses, latencies — for filter-pushdown tests."""
     db = tmp_path / "traces.db"
-    # Old shape: 4-tuple (no run_id)
     _seed_db(
         db,
         [
-            ("t1", "eval-0", {"trace_id": "t1"}, 100.0),
-            ("t2", "eval-0", {"trace_id": "t2"}, 101.0),
+            ("t1", "s", "r", {"trace_id": "t1", "model": "gpt-5", "harness": "bash", "latency_ms": 50}, 100.0),
+            ("t2", "s", "r", {"trace_id": "t2", "model": "claude", "harness": "bash", "latency_ms": 500}, 101.0),
+            ("t3", "s", "r", {"trace_id": "t3", "model": "gpt-5", "harness": "claude-code", "latency_ms": 1500, "has_error": 1}, 102.0),
         ],
-        include_run_id=False,
     )
     return db
 
@@ -133,9 +160,6 @@ class TestListSessionIds:
         assert trace_loader.list_session_ids(two_run_db, run_id="run-B") == ["eval-0"]
         # No filter: both rows collapsed (one distinct session_id).
         assert trace_loader.list_session_ids(two_run_db) == ["eval-0"]
-
-    def test_legacy_schema_works(self, legacy_db):
-        assert trace_loader.list_session_ids(legacy_db) == ["eval-0"]
 
     def test_missing_db_returns_empty(self, tmp_path):
         assert trace_loader.list_session_ids(tmp_path / "nope.db") == []
@@ -155,23 +179,6 @@ class TestSessionSummaries:
 
     def test_missing_db_returns_empty(self, tmp_path):
         assert trace_loader.session_summaries(tmp_path / "nope.db") == {}
-
-
-class TestSessionSummariesByRun:
-    def test_disambiguates_same_session_across_runs(self, two_run_db):
-        rows = trace_loader.session_summaries_by_run(two_run_db)
-        # Two rows: (eval-0, run-A) and (eval-0, run-B).
-        keys = {(r["session_id"], r["run_id"]) for r in rows}
-        assert keys == {("eval-0", "run-A"), ("eval-0", "run-B")}
-        by_run = {r["run_id"]: r for r in rows}
-        assert by_run["run-A"]["trace_count"] == 2
-        assert by_run["run-B"]["trace_count"] == 3
-
-    def test_legacy_schema_buckets_to_empty_run_id(self, legacy_db):
-        rows = trace_loader.session_summaries_by_run(legacy_db)
-        assert len(rows) == 1
-        assert rows[0]["run_id"] == ""
-        assert rows[0]["session_id"] == "eval-0"
 
 
 class TestGetTraces:
@@ -198,7 +205,6 @@ class TestGetTraces:
         assert [r["trace_id"] for r in b] == ["b1", "b2", "b3"]
 
     def test_no_run_id_is_cross_run(self, two_run_db):
-        # Without a filter, both runs' rows for session_id eval-0 land together.
         rows = trace_loader.get_traces(two_run_db, "eval-0")
         assert [r["trace_id"] for r in rows] == ["a1", "a2", "b1", "b2", "b3"]
 
@@ -209,11 +215,72 @@ class TestGetTraces:
         assert trace_loader.get_traces(tmp_path / "nope.db", "eval-0") == []
 
 
+class TestQueryTraces:
+    def test_filter_by_model(self, filterable_db):
+        rows = trace_loader.query_traces(filterable_db, model="claude")
+        assert [r["trace_id"] for r in rows] == ["t2"]
+
+    def test_filter_by_harness(self, filterable_db):
+        rows = trace_loader.query_traces(filterable_db, harness="bash")
+        assert {r["trace_id"] for r in rows} == {"t1", "t2"}
+
+    def test_filter_by_has_error(self, filterable_db):
+        ok = trace_loader.query_traces(filterable_db, has_error=False)
+        err = trace_loader.query_traces(filterable_db, has_error=True)
+        assert {r["trace_id"] for r in ok} == {"t1", "t2"}
+        assert {r["trace_id"] for r in err} == {"t3"}
+
+    def test_filter_by_latency_range(self, filterable_db):
+        rows = trace_loader.query_traces(filterable_db, latency_min=100, latency_max=1000)
+        assert [r["trace_id"] for r in rows] == ["t2"]
+
+    def test_combined_filters(self, filterable_db):
+        rows = trace_loader.query_traces(filterable_db, model="gpt-5", harness="bash")
+        assert [r["trace_id"] for r in rows] == ["t1"]
+
+    def test_order_desc_default(self, filterable_db):
+        rows = trace_loader.query_traces(filterable_db)
+        assert [r["trace_id"] for r in rows] == ["t3", "t2", "t1"]
+
+    def test_order_asc(self, filterable_db):
+        rows = trace_loader.query_traces(filterable_db, order="ASC")
+        assert [r["trace_id"] for r in rows] == ["t1", "t2", "t3"]
+
+    def test_pagination_until_cursor(self, filterable_db):
+        # Newest-first feed: t3 (102), t2 (101), t1 (100).
+        page1 = trace_loader.query_traces(filterable_db, limit=2)
+        assert [r["trace_id"] for r in page1] == ["t3", "t2"]
+        # Next page using until = oldest seen.
+        cursor = page1[-1]["_created_at"]
+        page2 = trace_loader.query_traces(filterable_db, limit=2, until=cursor)
+        assert [r["trace_id"] for r in page2] == ["t1"]
+
+    def test_live_tail_since_cursor(self, filterable_db):
+        # Strictly-after cursor → 102.0 returns nothing (only t3 has 102.0).
+        rows = trace_loader.query_traces(filterable_db, since=102.0)
+        assert rows == []
+        # 101.0 returns the newer t3.
+        rows = trace_loader.query_traces(filterable_db, since=101.0)
+        assert [r["trace_id"] for r in rows] == ["t3"]
+
+    def test_invalid_order(self, filterable_db):
+        with pytest.raises(ValueError):
+            trace_loader.query_traces(filterable_db, order="bogus")
+
+    def test_missing_db_returns_empty(self, tmp_path):
+        assert trace_loader.query_traces(tmp_path / "nope.db") == []
+
+
 class TestCountTraces:
-    def test_count(self, populated_db):
+    def test_count_by_session(self, populated_db):
         assert trace_loader.count_traces(populated_db, "eval-0") == 2
         assert trace_loader.count_traces(populated_db, "eval-1") == 1
         assert trace_loader.count_traces(populated_db, "absent") == 0
+
+    def test_count_with_filters(self, filterable_db):
+        assert trace_loader.count_traces(filterable_db) == 3
+        assert trace_loader.count_traces(filterable_db, model="gpt-5") == 2
+        assert trace_loader.count_traces(filterable_db, has_error=True) == 1
 
     def test_run_id_scope(self, two_run_db):
         assert trace_loader.count_traces(two_run_db, "eval-0", run_id="run-A") == 2
@@ -221,6 +288,17 @@ class TestCountTraces:
 
     def test_missing_db_returns_zero(self, tmp_path):
         assert trace_loader.count_traces(tmp_path / "nope.db", "eval-0") == 0
+
+
+class TestListFacets:
+    def test_facets(self, filterable_db):
+        f = trace_loader.list_facets(filterable_db)
+        assert f["models"] == ["claude", "gpt-5"]
+        assert f["harnesses"] == ["bash", "claude-code"]
+        assert f["runs"] == ["r"]
+
+    def test_missing_db(self, tmp_path):
+        assert trace_loader.list_facets(tmp_path / "nope.db") == {"models": [], "harnesses": [], "runs": []}
 
 
 class TestListRuns:
@@ -233,10 +311,6 @@ class TestListRuns:
         assert a["started_at"] == 99.0
         b = next(r for r in rows if r["run_id"] == "run-B")
         assert b["ended_at"] is None  # still running
-
-    def test_legacy_schema_returns_empty(self, legacy_db):
-        # No `runs` table exists in the legacy schema.
-        assert trace_loader.list_runs(legacy_db) == []
 
     def test_missing_db_returns_empty(self, tmp_path):
         assert trace_loader.list_runs(tmp_path / "nope.db") == []

@@ -4,6 +4,8 @@ import time
 from collections import defaultdict
 from typing import Any
 
+from rllm_model_gateway.store.sqlite_store import _compute_has_error
+
 
 class MemoryTraceStore:
     """Ephemeral in-memory store. Useful for tests and short-lived processes.
@@ -18,6 +20,8 @@ class MemoryTraceStore:
         self._traces: dict[str, dict[str, Any]] = {}
         # trace_id -> created_at
         self._timestamps: dict[str, float] = {}
+        # trace_id -> (session_id, run_id) — denormalized for query_traces
+        self._trace_meta: dict[str, tuple[str, str]] = {}
         # (session_id, run_id) -> list[trace_id]  (insertion order)
         self._session_index: dict[tuple[str, str], list[str]] = defaultdict(list)
         # run_id -> {metadata, started_at, ended_at}
@@ -34,6 +38,7 @@ class MemoryTraceStore:
         self._traces[trace_id] = data
         if trace_id not in self._timestamps:
             self._timestamps[trace_id] = now
+        self._trace_meta[trace_id] = (session_id, run_id or "")
         idx = self._session_index[(session_id, run_id or "")]
         if trace_id not in idx:
             idx.append(trace_id)
@@ -66,6 +71,103 @@ class MemoryTraceStore:
             results = results[:limit]
         return results
 
+    async def query_traces(
+        self,
+        *,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        model: str | None = None,
+        harness: str | None = None,
+        has_error: bool | None = None,
+        latency_min: float | None = None,
+        latency_max: float | None = None,
+        since: float | None = None,
+        until: float | None = None,
+        limit: int | None = 200,
+        order: str = "DESC",
+    ) -> list[dict[str, Any]]:
+        if order not in ("ASC", "DESC"):
+            raise ValueError(f"order must be ASC or DESC, got {order!r}")
+        rows: list[tuple[float, dict[str, Any]]] = []
+        for tid, data in self._traces.items():
+            sid, rid = self._trace_meta.get(tid, ("", ""))
+            if run_id is not None and rid != run_id:
+                continue
+            if session_id is not None and sid != session_id:
+                continue
+            if model is not None and (data.get("model") or "") != model:
+                continue
+            if harness is not None and data.get("harness") != harness:
+                continue
+            if has_error is not None and bool(_compute_has_error(data)) != has_error:
+                continue
+            lat = float(data.get("latency_ms") or 0)
+            if latency_min is not None and lat < latency_min:
+                continue
+            if latency_max is not None and lat > latency_max:
+                continue
+            ts = self._timestamps.get(tid, 0.0)
+            if since is not None and ts <= since:
+                continue
+            if until is not None and ts >= until:
+                continue
+            row = dict(data)
+            row["_created_at"] = ts
+            rows.append((ts, row))
+
+        rows.sort(key=lambda r: r[0], reverse=(order == "DESC"))
+        out = [r[1] for r in rows]
+        if limit is not None:
+            out = out[:limit]
+        return out
+
+    async def count_traces(
+        self,
+        *,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        model: str | None = None,
+        harness: str | None = None,
+        has_error: bool | None = None,
+        latency_min: float | None = None,
+        latency_max: float | None = None,
+        since: float | None = None,
+        until: float | None = None,
+    ) -> int:
+        rows = await self.query_traces(
+            run_id=run_id,
+            session_id=session_id,
+            model=model,
+            harness=harness,
+            has_error=has_error,
+            latency_min=latency_min,
+            latency_max=latency_max,
+            since=since,
+            until=until,
+            limit=None,
+        )
+        return len(rows)
+
+    async def facets(self) -> dict[str, list[str]]:
+        models: set[str] = set()
+        harnesses: set[str] = set()
+        runs: set[str] = set()
+        for tid, data in self._traces.items():
+            m = data.get("model") or ""
+            if m:
+                models.add(m)
+            h = data.get("harness")
+            if h:
+                harnesses.add(h)
+            _, rid = self._trace_meta.get(tid, ("", ""))
+            if rid:
+                runs.add(rid)
+        return {
+            "models": sorted(models),
+            "harnesses": sorted(harnesses),
+            "runs": sorted(runs),
+        }
+
     async def delete_session(
         self,
         session_id: str,
@@ -91,6 +193,7 @@ class MemoryTraceStore:
                 if tid not in referenced:
                     self._traces.pop(tid, None)
                     self._timestamps.pop(tid, None)
+                    self._trace_meta.pop(tid, None)
                     deleted += 1
         return deleted
 
