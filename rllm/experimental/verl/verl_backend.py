@@ -220,10 +220,13 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         Returns:
             VerlEngine: The initialized rollout engine.
         """
-        # Apply Verl patches
-        from rllm.experimental.verl.patch import patch_verl_dynamic_batch_sync
+        # Apply driver-side patches. Most verl monkey-patches only affect
+        # worker code paths (FSDP / vLLM), so they live in the worker hook
+        # at rllm.experimental.verl.patch:apply_all_verl_patches (wired via
+        # runtime_env.worker_process_setup_hook in ray_runtime_env.py).
+        from rllm.experimental.verl.patch import patch_verl_tensordict_jagged_layout
 
-        patch_verl_dynamic_batch_sync()
+        patch_verl_tensordict_jagged_layout()
 
         # If SDK is enabled, instrument vLLM replicas before creating workers
         sdk_enabled = self.full_config.rllm.get("sdk", {}).get("enable", False)

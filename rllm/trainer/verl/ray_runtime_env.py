@@ -38,6 +38,7 @@ FORWARD_PREFIXES = [
     "CUDNN_",
     "NV_",
     "NVIDIA_",
+    "RLLM_",
 ]
 
 
@@ -102,4 +103,11 @@ def get_ppo_ray_runtime_env():
     # Only set working_dir=None when the job config doesn't specify one (avoid merge conflict)
     if job_runtime_env.get("working_dir") is None:
         runtime_env["working_dir"] = None
+    # Apply rLLM's verl patches (PR #5881 backport, dynamic-batch sync, etc.) on every
+    # Ray worker process so the patches take effect inside FSDP workers — driver-side
+    # monkey-patches do not propagate. The hook function is lazy and idempotent.
+    if job_runtime_env.get("worker_process_setup_hook") is None:
+        # Ray expects a dotted import path (no colon); it does
+        # ``module.rpartition('.') -> module + attr`` to load the hook.
+        runtime_env["worker_process_setup_hook"] = "rllm.experimental.verl.patch.apply_all_verl_patches"
     return runtime_env

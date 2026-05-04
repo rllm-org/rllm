@@ -51,6 +51,7 @@ Any variable in your shell whose name starts with one of these prefixes is forwa
 | HuggingFace | `HF_`, `TOKENIZERS_`, `DATASETS_` |
 | Training frameworks | `TORCH_`, `PYTORCH_`, `DEEPSPEED_`, `MEGATRON_` |
 | CUDA / NCCL | `NCCL_`, `CUDA_`, `CUBLAS_`, `CUDNN_`, `NV_`, `NVIDIA_` |
+| rLLM extension hooks | `RLLM_` (used by `RLLM_EXTRA_WORKER_SETUP_HOOK`; see below) |
 
 So, to bump vLLM's logging level for a single run, you can just export it before launching training:
 
@@ -99,6 +100,39 @@ ray job submit \
 ```
 
 `get_ppo_ray_runtime_env()` reads this dict from `RAY_JOB_CONFIG_JSON_ENV_VAR` (which the Ray job runtime sets for you), pops the listed keys from its own `env_vars` so they cannot collide, and only sets `working_dir=None` when the job config does not specify a `working_dir`. Without that handling Ray's `ray.init()` would refuse to merge and raise unless you also exported `RAY_OVERRIDE_JOB_RUNTIME_ENV=1`.
+
+## Worker process setup hook
+
+Beyond environment variables, rLLM also wires a `worker_process_setup_hook` into the runtime env. Ray invokes this once at the start of every worker interpreter, before any user code runs. rLLM points it at `rllm.experimental.verl.patch.apply_all_verl_patches`, which monkey-patches the verl modules that the FSDP / vLLM workers re-import on startup.
+
+This matters because verl is pinned (currently 0.7.1) and rLLM ships small backports for known issues — e.g. the qwen3-VL inplace-add fix from [verl#5881](https://github.com/volcengine/verl/pull/5881), the NCCL-deadlock fix on dynamic-batching from [verl#5750](https://github.com/volcengine/verl/issues/5750), and the jagged-NestedTensor `_ragged_idx` preservation fix from [verl#6127](https://github.com/volcengine/verl/pull/6127). Ray spawns each worker as a fresh Python interpreter that re-imports verl from disk, so a driver-side `import verl; verl.X = patched_X` never propagates. The setup hook runs the patches *inside* every worker.
+
+If your `--runtime-env-json` already specifies a `worker_process_setup_hook`, rLLM steps out of the way (same precedence rule as for `env_vars`): the job-submitted hook wins and rLLM does not register its own. In that case you are responsible for calling `apply_all_verl_patches()` yourself if you want the verl backports.
+
+### Adding your own setup hook (`RLLM_EXTRA_WORKER_SETUP_HOOK`)
+
+Sometimes you need to apply environment-specific tweaks on every worker — for example, disabling cuDNN on a host whose cuDNN install is broken, or pointing Triton at a per-PID cache to avoid races between concurrent FSDP workers. These do not belong in rLLM itself (they are properties of one machine), so we expose an extension point instead of asking you to fork the runtime env.
+
+Set the `RLLM_EXTRA_WORKER_SETUP_HOOK` environment variable to `"<absolute-path-to-file.py>:<function-name>"`. `apply_all_verl_patches` reads it on every worker, loads the file via `importlib.util.spec_from_file_location` (so it works even when the file is not on `sys.path` — e.g. lives under a gitignored `tmp/` directory), and calls the named function. Failures are logged but never re-raised.
+
+```python title="my_local_setup.py"
+def apply():
+    import torch
+    torch.backends.cudnn.enabled = False  # workaround broken cuDNN install
+    import os
+    os.environ.setdefault("TRITON_CACHE_DIR", f"/tmp/triton-cache-{os.getpid()}")
+```
+
+```python title="train.py"
+import os
+from pathlib import Path
+
+# Set BEFORE importing rllm — get_ppo_ray_runtime_env() reads it via
+# the RLLM_ forwarded prefix and propagates it to every Ray worker.
+os.environ["RLLM_EXTRA_WORKER_SETUP_HOOK"] = f"{Path(__file__).parent / 'my_local_setup.py'}:apply"
+```
+
+The `RLLM_` prefix is in `FORWARD_PREFIXES`, so the variable is forwarded to workers without any extra config. The hook runs *after* rLLM's verl patches.
 
 ## Programmatic access
 
