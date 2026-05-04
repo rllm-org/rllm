@@ -332,6 +332,11 @@ def _create_sandbox_for_task(
     :meth:`maybe_use_cached_image`, a post-install derived image is used
     instead — but the *returned* base image is unchanged so the harness
     can compute the same derived tag in :meth:`pre_setup`.
+
+    The image's ``WORKDIR`` (read from the Dockerfile) is propagated as
+    the sandbox's working directory so backends that don't honour image
+    metadata at exec time (Modal) still land commands in the right
+    place. Falls back to ``[environment].workdir`` when set explicitly.
     """
     from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow, create_sandbox
 
@@ -343,11 +348,30 @@ def _create_sandbox_for_task(
 
     safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "-", task.id)
     name = f"rllm-{safe_id}-{uuid.uuid4().hex[:6]}"
-    return create_sandbox(backend, name=name, image=image), base_image, backend
+    sandbox_kwargs: dict[str, Any] = {}
+    workdir = _resolve_workdir(task)
+    if workdir:
+        sandbox_kwargs["workdir"] = workdir
+    base_image_str = base_image if isinstance(base_image, str) else "<modal.Image>"
+    return create_sandbox(backend, name=name, image=image, **sandbox_kwargs), base_image_str, backend
 
 
-def _resolve_image(task: Task, backend: str) -> str:
-    """Build from Dockerfile if present and backend is docker, else config default."""
+def _resolve_image(task: Task, backend: str) -> Any:
+    """Resolve the sandbox image for *task* on *backend*.
+
+    Returns either:
+    - A locally-built ``rllm-task-<id>`` tag string (docker backend with
+      a task ``Dockerfile``).
+    - A ``modal.Image`` object built from the task's ``Dockerfile``
+      (modal backend with a task ``Dockerfile``). Modal's ``Sandbox``
+      accepts both strings and ``modal.Image`` objects directly.
+    - The configured registry image string (everything else).
+
+    The previous implementation silently dropped the task's Dockerfile
+    on non-docker backends, so Modal runs always boots ``python:3.11-slim``
+    regardless of what the task asked for. That breaks every
+    Dockerfile-driven task on Modal.
+    """
     env_config = task.metadata.get("environment", {}) or {}
     configured = env_config.get("docker_image", "python:3.11-slim")
 
@@ -355,9 +379,64 @@ def _resolve_image(task: Task, backend: str) -> str:
     if not dockerfile.exists():
         dockerfile = task.dataset_dir / "environment" / "Dockerfile"
 
-    if dockerfile.exists() and backend == "docker":
+    if not dockerfile.exists():
+        return configured
+
+    if backend == "docker":
         return _build_docker_image(dockerfile.parent, task.id)
+    if backend == "modal":
+        return _build_modal_image(dockerfile)
     return configured
+
+
+def _resolve_workdir(task: Task) -> str | None:
+    """Resolve the sandbox's working directory for *task*.
+
+    Order of precedence:
+    1. ``[environment].workdir`` in task.toml — explicit override.
+    2. Last ``WORKDIR`` directive in the task's ``Dockerfile``.
+    3. ``None`` — let the backend use its default cwd.
+
+    Returning a value guarantees both Docker and Modal exec commands
+    in the same directory, removing image-WORKDIR-vs-explicit-workdir
+    drift between backends.
+    """
+    env_config = task.metadata.get("environment", {}) or {}
+    explicit = env_config.get("workdir") or task.metadata.get("workdir")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+
+    dockerfile = task.task_dir / "environment" / "Dockerfile"
+    if not dockerfile.exists():
+        dockerfile = task.dataset_dir / "environment" / "Dockerfile"
+    if dockerfile.exists():
+        return _parse_dockerfile_workdir(dockerfile)
+    return None
+
+
+def _parse_dockerfile_workdir(dockerfile: Path) -> str | None:
+    """Return the last ``WORKDIR`` directive in *dockerfile*, or ``None``.
+
+    Tolerates whitespace, trailing comments, and empty lines. Doesn't
+    handle ARG/ENV expansion — if a Dockerfile uses ``WORKDIR $FOO``
+    we leave the literal value alone (the caller will probably pass it
+    to the sandbox unchanged, which is rare enough not to special-case).
+    """
+    try:
+        text = dockerfile.read_text()
+    except OSError:
+        return None
+    workdir: str | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if not line.upper().startswith("WORKDIR"):
+            continue
+        rest = line[len("WORKDIR") :].strip()
+        if rest:
+            workdir = rest
+    return workdir
 
 
 def _build_docker_image(context_dir: Path, task_id: str) -> str:
@@ -375,6 +454,19 @@ def _build_docker_image(context_dir: Path, task_id: str) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"Docker build failed for {task_id}:\n{result.stderr[:1000]}")
     return tag
+
+
+def _build_modal_image(dockerfile: Path) -> Any:
+    """Build a ``modal.Image`` from the task's Dockerfile.
+
+    Modal builds remotely on its own infra and caches by content, so
+    repeated runs against the same Dockerfile are cheap. The returned
+    ``modal.Image`` is passed straight through to ``Sandbox.create()``.
+    """
+    import modal
+
+    logger.info("Building Modal image from %s", dockerfile)
+    return modal.Image.from_dockerfile(dockerfile)
 
 
 def _setup_task_environment(task: Task, sandbox: Sandbox) -> None:

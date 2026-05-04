@@ -31,6 +31,10 @@ _PROVIDER_AUTH = {
 
 _INSTALL_SCRIPT = r"""
 set -e
+# DEBIAN_FRONTEND=noninteractive: see mini_swe_agent.py — Modal exec
+# leaves stdin connected and debconf prompts (e.g. tzdata) hang forever
+# when apt installs pull in interactive packages.
+export DEBIAN_FRONTEND=noninteractive
 if ! command -v opencode >/dev/null 2>&1; then
     if command -v apt-get >/dev/null 2>&1; then
         apt-get update -qq && apt-get install -y -qq curl ca-certificates

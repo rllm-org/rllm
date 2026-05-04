@@ -50,10 +50,15 @@ def _mk_run(root: Path, run_id: str, *, episode_idx: int = 0, with_results: bool
 
 
 @pytest.fixture
-def client(tmp_path: Path) -> tuple[TestClient, Path]:
+def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, Path]:
     eval_root = tmp_path / "eval_results"
     eval_root.mkdir()
     _mk_run(eval_root, "bench_model_20260101_120000")
+
+    # Isolate from the user's real ``~/.rllm/gateway/traces.db`` —
+    # ``scan_runs`` unions disk runs with gateway runs, so a populated
+    # real db on the dev machine would inflate the test count.
+    monkeypatch.setenv("RLLM_GATEWAY_DB", str(tmp_path / "no-gateway.db"))
 
     app = FastAPI()
     mount_console(app, eval_results_root=eval_root)
@@ -144,10 +149,11 @@ def test_unknown_run_404(client: tuple[TestClient, Path]) -> None:
     assert c.get("/console/api/panels/runs/no-such-run/index").status_code == 404
 
 
-def test_run_without_aggregate_still_listed(tmp_path: Path) -> None:
+def test_run_without_aggregate_still_listed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     eval_root = tmp_path / "eval_results"
     eval_root.mkdir()
     _mk_run(eval_root, "incomplete_run_20260101_000000", with_results=False)
+    monkeypatch.setenv("RLLM_GATEWAY_DB", str(tmp_path / "no-gateway.db"))
 
     app = FastAPI()
     mount_console(app, eval_results_root=eval_root)

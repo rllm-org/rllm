@@ -26,15 +26,28 @@ class DockerSandbox:
 
         self.name = name
         self.image = image
-        self._client = docker.from_env()
-        self._container = self._client.containers.run(
-            image,
+        # Explicit workdir overrides the image's WORKDIR. Useful when the
+        # caller resolves the right cwd from task config and wants both
+        # backends (docker, modal) to behave identically — without this
+        # arg DockerSandbox falls back on the image's WORKDIR.
+        workdir = kwargs.get("workdir")
+        run_kwargs: dict = dict(
             command="sleep infinity",
             name=f"rllm-sandbox-{name}",
             detach=True,
             remove=False,
         )
-        logger.info("DockerSandbox %s created (container: %s, image: %s)", name, self._container.short_id, image)
+        if workdir:
+            run_kwargs["working_dir"] = workdir
+        self._client = docker.from_env()
+        self._container = self._client.containers.run(image, **run_kwargs)
+        logger.info(
+            "DockerSandbox %s created (container: %s, image: %s, workdir: %s)",
+            name,
+            self._container.short_id,
+            image,
+            workdir or "<image default>",
+        )
 
     def exec(self, command: str, timeout: float | None = None, user: str | None = None) -> str:
         """Execute a command inside the container.

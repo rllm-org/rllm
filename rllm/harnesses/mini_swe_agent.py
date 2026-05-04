@@ -42,6 +42,11 @@ def _provider_key_var(model: str) -> str:
 
 _INSTALL_SCRIPT = r"""
 set -e
+# DEBIAN_FRONTEND=noninteractive is mandatory: ``apt-get install python3``
+# pulls in ``tzdata``, which triggers a debconf timezone prompt and
+# hangs forever on Modal sandboxes (Docker exec falls back to
+# Noninteractive automatically when there's no TTY; Modal does not).
+export DEBIAN_FRONTEND=noninteractive
 if ! command -v mini-swe-agent >/dev/null 2>&1; then
     if command -v apt-get >/dev/null 2>&1; then
         apt-get update -qq && apt-get install -y -qq curl ca-certificates git python3 python3-venv
