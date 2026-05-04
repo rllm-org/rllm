@@ -7,7 +7,7 @@ import os
 from typing import Any
 
 import torch
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from verl import DataProto
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 
@@ -100,11 +100,11 @@ def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) ->
     # clip_ratio family: verl uses clip_ratio_{low,high} when set, else falls back to clip_ratio.
     # Mirror the effective low bound to/from rllm.algorithm.eps_clip.
     if "actor_rollout_ref.actor.clip_ratio_low" in explicit:
-        OmegaConf.update(config, "rllm.algorithm.eps_clip", config.actor_rollout_ref.actor.clip_ratio_low, merge=False)
+        OmegaConf.update(config, "rllm.algorithm.eps_clip", OmegaConf.select(config, "actor_rollout_ref.actor.clip_ratio_low"), merge=False)
     elif "actor_rollout_ref.actor.clip_ratio" in explicit:
-        OmegaConf.update(config, "rllm.algorithm.eps_clip", config.actor_rollout_ref.actor.clip_ratio, merge=False)
+        OmegaConf.update(config, "rllm.algorithm.eps_clip", OmegaConf.select(config, "actor_rollout_ref.actor.clip_ratio"), merge=False)
     else:
-        eps_clip = config.rllm.algorithm.get("eps_clip", None)
+        eps_clip = OmegaConf.select(config, "rllm.algorithm.eps_clip")
         if eps_clip is not None:
             OmegaConf.update(config, "actor_rollout_ref.actor.clip_ratio", eps_clip, merge=False)
 
