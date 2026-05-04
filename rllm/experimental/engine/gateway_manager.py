@@ -24,7 +24,7 @@ from rllm_model_gateway.models import TraceRecord
 if TYPE_CHECKING:
     from omegaconf import DictConfig
 
-    from rllm.experimental.rollout import RolloutEngine
+    from rllm.experimental.rollout import RolloutEngine, VerlEngine
 
 logger = logging.getLogger(__name__)
 
@@ -134,16 +134,18 @@ class GatewayManager:
 
             self._local_handler = create_tinker_handler(rollout_engine)
             self._start_thread(local_handler=self._local_handler)
-        else:
+        elif engine_cls == "VerlEngine":
             if self.mode == "process":
                 self._start_process()
             else:
                 self._start_thread()
 
-            worker_urls = self._ensure_workers(rollout_engine)
+            worker_urls = self._ensure_verl_engine_workers(rollout_engine)
             for url in worker_urls:
                 worker_id = self.client.add_worker(url=url)
                 logger.info("Registered worker %s -> %s", worker_id, url)
+        else:
+            logger.warning("Unknown engine type %s — no workers registered", engine_cls)
 
         # Extract per-mode sampling params from the rollout engine
         self._train_sampling_params = getattr(rollout_engine, "train_sampling_params", {})
@@ -205,16 +207,10 @@ class GatewayManager:
 
     # -- Worker setup --------------------------------------------------------
 
-    def _ensure_workers(self, rollout_engine: RolloutEngine) -> list[str]:
-        """Get or create worker URLs for the given engine type."""
-        engine_cls = type(rollout_engine).__name__
-
-        if engine_cls == "VerlEngine":
-            addresses = rollout_engine.rollout_manager.server_addresses
-            return [f"http://{addr}" if not addr.startswith("http") else addr for addr in addresses]
-
-        logger.warning("Unknown engine type %s — no workers registered", engine_cls)
-        return []
+    def _ensure_verl_engine_workers(self, rollout_engine: VerlEngine) -> list[str]:
+        """Get or create worker URLs for the VerlEngine."""
+        addresses = rollout_engine.server_manager._server_id_to_handle.keys()
+        return [f"http://{addr}" if not addr.startswith("http") else addr for addr in addresses]
 
     # -- Internal ------------------------------------------------------------
 

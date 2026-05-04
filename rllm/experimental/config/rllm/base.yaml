@@ -48,14 +48,10 @@ trainer:
 
 # Algorithm Configuration
 algorithm:
-  adv_estimator: grpo # [grpo, reinforce, reinforce_plus_plus_baseline, rloo, gae]
-  gamma: 1.0
-  lam: 0.95
+  adv_estimator: grpo # [grpo, reinforce, reinforce_plus_plus_baseline, rloo]
   norm_adv_by_std_in_grpo: true
-  use_rllm: false
-  # When true, always use pre-computed step.advantage from the workflow (e.g. distillation)
-  # and skip advantage computation (GRPO/REINFORCE). Missing advantages default to 0.
-  use_precomputed_advantage: false
+  use_rllm: null  # deprecated, unified trainer only support rllm advantage estimators
+  use_precomputed_advantage: false # use pre-computed step.advantage from the workflow (e.g. distillation)
   loss_fn: null           # backend-specific values; null = backend default
   loss_agg_mode: null     # [null, token-mean, seq-mean-token-sum, seq-mean-token-mean]
   kl_beta: 0.0            # KL penalty coefficient
