@@ -172,19 +172,33 @@ class TestVerlPathFromArrow:
 
 
 # ---------------------------------------------------------------------------
-# strip binary columns
+# wrap binary columns for parquet
 # ---------------------------------------------------------------------------
 
 
-class TestStripBinaryColumns:
-    def test_strips(self):
+class TestWrapBinaryColumnsForParquet:
+    def test_wraps_scalar_bytes(self):
         data = [{"text": "q", "img": b"data", "label": 1}]
-        result = DatasetRegistry._strip_binary_columns(data, ["img"])
-        assert result[0]["img"] is None
+        result = DatasetRegistry._wrap_binary_columns_for_parquet(data, ["img"])
+        assert result[0]["img"] == {"bytes": b"data", "path": ""}
         assert result[0]["text"] == "q"
         assert result[0]["label"] == 1
         # Original unchanged
         assert data[0]["img"] == b"data"
+
+    def test_wraps_list_of_bytes(self):
+        data = [{"text": "q", "imgs": [b"a", b"b"], "label": 1}]
+        result = DatasetRegistry._wrap_binary_columns_for_parquet(data, ["imgs"])
+        assert result[0]["imgs"] == [
+            {"bytes": b"a", "path": ""},
+            {"bytes": b"b", "path": ""},
+        ]
+        assert data[0]["imgs"] == [b"a", b"b"]
+
+    def test_leaves_none_untouched(self):
+        data = [{"text": "q", "img": None}]
+        result = DatasetRegistry._wrap_binary_columns_for_parquet(data, ["img"])
+        assert result[0]["img"] is None
 
 
 # ---------------------------------------------------------------------------
