@@ -60,6 +60,13 @@ class VerlEngine(RolloutEngine):
         input_length = len(token_input)
         application_id = kwargs.pop("application_id", str(uuid.uuid4()))
         enforce_max_prompt_length = kwargs.pop("enforce_max_prompt_length", True)
+        # Multimodal: verl's AsyncLLMServerManager.generate accepts image_data /
+        # video_data (list of PIL.Image / video tensors) and the underlying
+        # vLLM server expands the per-image <|image_pad|> placeholder in
+        # ``prompt_ids`` based on each image's actual grid size. Pull these
+        # out of kwargs before the rest leaks into sampling_params.
+        image_data = kwargs.pop("image_data", None)
+        video_data = kwargs.pop("video_data", None)
 
         if enforce_max_prompt_length and input_length > self.max_prompt_length:
             raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
@@ -70,7 +77,13 @@ class VerlEngine(RolloutEngine):
         # starting from verl 0.7.0, we can pass in per-turn max_tokens into the sampling_params
         sampling_params["max_tokens"] = max_tokens
 
-        token_output = await self.server_manager.generate(request_id=application_id, prompt_ids=token_input, sampling_params=sampling_params)
+        token_output = await self.server_manager.generate(
+            request_id=application_id,
+            prompt_ids=token_input,
+            sampling_params=sampling_params,
+            image_data=image_data,
+            video_data=video_data,
+        )
 
         if token_output.stop_reason in ("aborted", "abort"):
             raise RuntimeError("Rollout aborted")
@@ -90,16 +103,30 @@ class VerlEngine(RolloutEngine):
 
         if any(msg.get("images", None) is not None and msg["role"] == "user" for msg in messages) and self.processor is not None:
             image_data = self.chat_parser.process_image_data(messages)  # list[PIL.Image.Image]
-            model_inputs = self.processor(text=[prompt], images=image_data)
+            # ``return_tensors='pt'`` mirrors verl's ``_compute_multi_modal_inputs``
+            # — without it some processors return numpy arrays for grid info
+            # and downstream ``.tolist()``-based aggregation fails.
+            model_inputs = self.processor(text=[prompt], images=image_data, return_tensors="pt")
             prompt_ids = model_inputs.pop("input_ids")[0]  # list[int]
             model_inputs.pop("attention_mask")
             multi_modal_inputs = dict(model_inputs)
+            # Synthesize ``images_seqlens`` the same way verl's own
+            # ``agent_loop._compute_multi_modal_inputs`` does — the verl
+            # backend reads this key from every per-sample multi_modal_inputs
+            # dict during ``process_backend_batch`` (verl_backend.py:455).
+            # Formula: per image with grid (T, H, W), the visual encoder
+            # emits T*H*W tokens; expand per-row by the temporal dim.
+            import torch as _torch
+
+            grid_thw = multi_modal_inputs.get("image_grid_thw")
+            if grid_thw is not None:
+                multi_modal_inputs["images_seqlens"] = _torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0])
         else:
             image_data = None
             multi_modal_inputs = None
             prompt_ids = request_prompt_ids
 
-        token_output: TokenOutput = await self.get_token_output_from_token_input(token_input=request_prompt_ids, **kwargs)
+        token_output: TokenOutput = await self.get_token_output_from_token_input(token_input=request_prompt_ids, image_data=image_data, **kwargs)
         extra_kwargs = dict(prompt_ids=prompt_ids, multi_modal_inputs=multi_modal_inputs)
         return self.assemble_model_output(token_input=request_prompt_ids, token_output=token_output, **extra_kwargs)
 
