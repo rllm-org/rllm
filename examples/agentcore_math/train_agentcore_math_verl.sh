@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Requires megatron deps: bash scripts/install_megatron.sh <cu128|cu129|cu130|...>
+# Tested on 8x A100 40GB. Parallelism (TP=8, SP=true) and gpu_memory_utilization
+# are tuned for this configuration; larger GPUs likely support lower TP.
 set -eux
 
 # Load environment variables (AGENTCORE_AGENT_ARN, AGENTCORE_S3_BUCKET)
@@ -14,12 +16,17 @@ MODEL_PATH=Qwen/Qwen3-4B-Instruct-2507
 
 # actor_rollout_ref.actor.megatron.param_offload=True is required for
 # verl 0.7.1 to work around device mismatch errors caused by unconditional param offloading
+#
+# actor_rollout_ref.rollout.engine_kwargs.vllm.tokenizer_mode=slow avoids the
+# 'Already borrowed' race in Hermes2ProToolParser.__init__ (vllm-project/vllm#34932).
+# Fix landed in vllm PR #38168, first released in vllm 0.18.1; remove this override
+# once rllm's vllm==0.17.0 pin is bumped past 0.18.1.
 python -m examples.agentcore_math.train_agentcore_math_verl \
     rllm/backend=verl \
     model_engine=megatron \
     algorithm.adv_estimator=grpo \
     algorithm.norm_adv_by_std_in_grpo=true \
-    rllm.algorithm.use_rllm=true \
+    rllm.algorithm.rollout_correction.bypass_mode=true \
     data.train_batch_size=64 \
     data.val_batch_size=256 \
     data.max_prompt_length=14336 \
@@ -36,20 +43,22 @@ python -m examples.agentcore_math.train_agentcore_math_verl \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=1 \
-    actor_rollout_ref.actor.megatron.tensor_model_parallel_size=1 \
-    actor_rollout_ref.actor.megatron.sequence_parallel=false \
+    actor_rollout_ref.actor.megatron.tensor_model_parallel_size=8 \
+    actor_rollout_ref.actor.megatron.sequence_parallel=true \
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=False \
     actor_rollout_ref.actor.megatron.use_mbridge=True \
     actor_rollout_ref.actor.megatron.vanilla_mbridge=False \
     actor_rollout_ref.actor.megatron.param_offload=True \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-sum \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=8 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.mode=async \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.enable_auto_tool_choice=true \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.tool_call_parser=hermes \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.tokenizer_mode=slow \
+    actor_rollout_ref.rollout.max_model_len=16384 \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.temperature=1.0 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
@@ -59,9 +68,9 @@ python -m examples.agentcore_math.train_agentcore_math_verl \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=1 \
-    actor_rollout_ref.ref.megatron.tensor_model_parallel_size=1 \
-    actor_rollout_ref.ref.megatron.sequence_parallel=false \
-    trainer.logger="['console','ui']" \
+    actor_rollout_ref.ref.megatron.tensor_model_parallel_size=8 \
+    actor_rollout_ref.ref.megatron.sequence_parallel=true \
+    trainer.logger="['console','wandb']" \
     trainer.project_name=agentcore-math \
     trainer.experiment_name=gsm8k-agentcore-verl-megatron-4b-instruct \
     trainer.val_before_train=false \
