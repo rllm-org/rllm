@@ -196,7 +196,10 @@ async def run_dataset(
                 )
             except Exception as e:
                 logger.warning("Error evaluating example %d: %s", idx, e)
-                return (EvalItem(idx=idx, reward=0.0, is_correct=False, error=str(e)), None)
+                # Stamp the exception class so the result aggregator can
+                # bucket errors by type for the panel's exception table.
+                err_str = f"{type(e).__name__}: {e}"
+                return (EvalItem(idx=idx, reward=0.0, is_correct=False, error=err_str), None)
 
     task_coros = [run_one(i, t) for i, t in enumerate(tasks)]
     results = await tqdm_asyncio.gather(*task_coros, desc="Evaluating")

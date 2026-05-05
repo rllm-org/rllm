@@ -36,6 +36,40 @@ def _suggest_benchmarks(name: str, catalog_names: list[str], max_suggestions: in
     return get_close_matches(name, catalog_names, n=max_suggestions, cutoff=0.5)
 
 
+def _fmt_duration(seconds: float) -> str:
+    """Format a wall-clock duration for the result panel.
+
+    Sub-minute → ``"21.4s"``; minutes → ``"3m 14s"``; hours → ``"1h 2m 5s"``.
+    Any negative or NaN slips through as a literal seconds string.
+    """
+    if seconds < 0 or seconds != seconds:  # noqa: PLR0124  (NaN check)
+        return f"{seconds:.1f}s"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    s = int(round(seconds))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}m {sec}s"
+    return f"{m}m {sec}s"
+
+
+def _fmt_reward(value: float) -> str:
+    """Format a mean/min/max reward with a sensible precision.
+
+    Small magnitudes get more digits (so 0.667 stays readable); anything
+    above ~10 collapses to two decimals to match the panel's column width.
+    """
+    if value != value:  # noqa: PLR0124  (NaN check)
+        return "nan"
+    abs_v = abs(value)
+    if abs_v >= 1000:
+        return f"{value:.1f}"
+    if abs_v >= 10:
+        return f"{value:.2f}"
+    return f"{value:.3f}"
+
+
 def _dict_rows_to_tasks(rows: list[dict]) -> list:
     """Wrap dict-rows from a catalog dataset as Task objects.
 
@@ -88,9 +122,14 @@ def _run_eval(
     runtime: str = "rllm",
 ):
     """Core eval logic, extracted for clean proxy lifecycle management."""
+    import time
+
     from rllm.data import DatasetRegistry
     from rllm.eval.agent_loader import load_agent
     from rllm.eval.evaluator_loader import load_evaluator, resolve_evaluator_from_catalog
+
+    # Wall-clock start so the result panel can show how long the eval took.
+    _eval_start = time.monotonic()
 
     # ------------------------------------------------------------------
     # Runtime selection
@@ -541,31 +580,56 @@ def _run_eval(
     if _flush_episode_buffer is not None:
         _flush_episode_buffer()
 
+    # Stamp runtime onto the result so it persists in results.json and
+    # the result panel below can render it.
+    result.runtime_sec = time.monotonic() - _eval_start
+
     # Print results
     pct = f"{result.score * 100:.1f}%"
     res_table = Table(show_header=False, box=None, padding=(0, 2))
-    res_table.add_column(style="label", width=12)
+    res_table.add_column(style="label", width=14)
     res_table.add_column()
     score_style = "bold green" if result.score >= 0.5 else "bold yellow" if result.score >= 0.2 else "bold red"
     res_table.add_row("Accuracy", f"[{score_style}]{pct}[/]  [dim]({result.correct}/{result.total})[/]")
+    res_table.add_row("Mean reward", f"[bold]{_fmt_reward(result.mean_reward)}[/]")
+    if result.reward_min is not None and result.reward_max is not None and result.total > 1 and result.reward_max - result.reward_min > 1e-9:
+        res_table.add_row(
+            "Reward range",
+            f"[dim]{_fmt_reward(result.reward_min)} – {_fmt_reward(result.reward_max)}[/]",
+        )
     error_style = "dim" if result.errors == 0 else "bold red"
     res_table.add_row("Errors", f"[{error_style}]{result.errors}[/]")
+    res_table.add_row("Runtime", f"[dim]{_fmt_duration(result.runtime_sec)}[/]")
 
-    # Display signal breakdown if any
+    # Display signal breakdown — but skip names that would just duplicate
+    # rows we already render (Accuracy / Mean reward).
+    _DUPLICATE_NAMES = {"accuracy", "is_correct", "score", "reward", "mean_reward"}
     if result.signal_averages:
         for sig_name, sig_avg in result.signal_averages.items():
+            if sig_name.lower() in _DUPLICATE_NAMES:
+                continue
             res_table.add_row(sig_name.title(), f"[dim]{sig_avg:.3f}[/]")
 
     console.print(Panel(res_table, title="[bold]Results[/]", border_style="green" if result.score >= 0.5 else "yellow", expand=False))
 
-    # Print error details so the user knows what went wrong
-    if result.errors > 0:
-        error_items = [item for item in result.items if item.error]
+    # Exception breakdown when any tasks errored. Counts by type, with
+    # one example message per type so the user can see at a glance which
+    # failure modes are dominating.
+    if result.exception_counts:
         console.print()
-        for item in error_items[:5]:
-            console.print(f"  [bold red]Task {item.idx}:[/] {item.error}")
-        if len(error_items) > 5:
-            console.print(f"  [dim]... and {len(error_items) - 5} more errors (see JSON output for details)[/]")
+        exc_table = Table(show_header=True, box=None, padding=(0, 2))
+        exc_table.add_column("Exception", style="bold red")
+        exc_table.add_column("Count", justify="right")
+        exc_table.add_column("Example", style="dim", overflow="fold")
+        for exc_type, count in sorted(result.exception_counts.items(), key=lambda x: -x[1]):
+            example = next(
+                (item.error for item in result.items if item.error and item.error.startswith(exc_type)),
+                "",
+            )
+            if len(example) > 80:
+                example = example[:79] + "…"
+            exc_table.add_row(exc_type, str(count), example)
+        console.print(exc_table)
 
     # Save aggregate results inside the run dir so a single path holds
     # everything: meta.json, results.json, and (optionally) episodes/.
