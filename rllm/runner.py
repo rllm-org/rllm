@@ -65,7 +65,23 @@ class Runner:
     async def run(self, task: Task, config: AgentConfig) -> Episode:
         import asyncio
 
+        from rllm.integrations.harbor.runtime import HarborRuntime
         from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
+
+        # HarborRuntime is fully self-contained: it spins up its own
+        # sandbox via Harbor's Trial machinery, runs the verifier inside
+        # it, and returns an Episode with reward already populated.
+        # Layering rLLM's sandbox + evaluator on top would double-eval —
+        # the second pass runs ``tests/test.sh`` in a sandbox where
+        # ``solve.sh`` never executed, scoring the task's missing-
+        # submission sentinel and clobbering the real reward.
+        if isinstance(self.agent_flow, HarborRuntime):
+            episode = await _run_agent_flow(self.agent_flow, task, config)
+            if config.session_uid:
+                for traj in episode.trajectories:
+                    if traj.session_id is None:
+                        traj.session_id = config.session_uid
+            return episode
 
         # Every sandbox lifecycle call below is sync and can do real I/O
         # (Modal API roundtrips, docker exec, file uploads, verifier

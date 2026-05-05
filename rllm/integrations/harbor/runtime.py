@@ -130,11 +130,17 @@ class HarborRuntime:
         if not task_path:
             raise ValueError(f"Harbor task missing 'task_path' field in task data: {list(task.metadata.keys())}")
 
+        # Pass an empty trial_name so Harbor's TrialConfig validator
+        # generates a fresh ``<task-name>__<shortuuid7>`` per call. Reusing
+        # the rLLM session_uid (e.g. ``eval-0``) made every run with the
+        # same task index land in ``trials/eval-0/``, where stale verifier
+        # files (reward.txt from a prior run) get re-read by Harbor's
+        # result extractor and overwrite today's reward.
         outcome = await self._run_one(
             task_path=task_path,
             model_name=config.model,
             inference_url=config.base_url,
-            trial_name=config.session_uid,
+            trial_name="",
         )
 
         # Surface infrastructure failures as exceptions so run_dataset counts

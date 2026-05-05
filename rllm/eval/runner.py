@@ -10,8 +10,10 @@ import asyncio
 import json
 import logging
 import os
+import re
 import threading
 import time
+import uuid
 from collections.abc import Callable
 
 from tqdm.asyncio import tqdm_asyncio
@@ -23,6 +25,22 @@ logger = logging.getLogger(__name__)
 
 _TASKS_JSONL = "tasks.jsonl"
 _INSTRUCTION_PREVIEW_LIMIT = 240
+
+
+def _generate_session_uid(idx: int, task) -> str:
+    """Per-task, per-run unique session ID of shape ``<task-leaf>__<7hex>``.
+
+    The previous ``eval-{idx}`` form collided across runs and made trace
+    correlation in the shared gateway db hairy. Falls back to
+    ``task-<idx>`` when the task has no usable id.
+    """
+    raw = str(getattr(task, "id", "") or "").strip()
+    if not raw:
+        raw = f"task-{idx}"
+    leaf = raw.split("/")[-1]
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", leaf)
+    base = safe[:32].rstrip("_-") or f"task-{idx}"
+    return f"{base}__{uuid.uuid4().hex[:7]}"
 
 
 class _TaskLifecycleLog:
@@ -133,7 +151,7 @@ async def run_dataset(
                 sandbox_backend=sandbox_backend,
                 evaluator_override=evaluator_override,
             )
-            session_uid = f"eval-{idx}"
+            session_uid = _generate_session_uid(idx, task)
             task_base_url = _stamp_session_in_url(base_url, session_uid) if stamp_session_in_url else base_url
             metadata: dict = {}
             if gateway_auth_token:
