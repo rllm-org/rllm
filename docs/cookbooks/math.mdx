@@ -1,0 +1,137 @@
+---
+title: Math
+description: Single-turn math agent with \boxed{} answer extraction
+---
+
+A single-turn math agent that solves competition / textbook problems via the **AgentFlow protocol**. The model emits reasoning followed by `\boxed{ANSWER}`; the evaluator pulls the boxed value and grades it via mathd + sympy equivalence.
+
+This is the no-tool counterpart to [`math_tool_agent`](/cookbooks/math_tool_agent), which uses a calculator tool. Use `math` for chain-of-thought-only training.
+
+## Pattern
+
+| Aspect | Value |
+|---|---|
+| Loop shape | Single-turn (one LLM call per task) |
+| Tools | None — answer is parsed out of the response text |
+| Termination | Single LLM call returns; evaluator grades the boxed answer |
+| Reward shape | `1.0` if `\boxed{…}` matches ground truth (mathd + sympy), else `0.0` |
+
+## Architecture
+
+```mermaid
+flowchart TD
+    subgraph Run["AgentFlow.run(task, config)"]
+        L["one LLM call via OpenAI(base_url=config.base_url)"]
+        O["model outputs reasoning + \boxed{ANSWER}"]
+        A["store full response in episode.artifacts['answer']"]
+        L --> O --> A
+    end
+
+    subgraph Eval["Evaluator.evaluate(task, episode)"]
+        E["extract last \boxed{...}"]
+        G["grade against task.metadata['ground_truth'] via mathd + sympy"]
+        E --> G
+    end
+
+    Run -- "episode.artifacts" --> Eval
+```
+
+## Install
+
+```bash
+uv pip install -e ".[tinker]"                    # rllm + tinker backend
+uv pip install --no-deps -e cookbooks/math       # this cookbook
+rllm agent list                                  # should show "math"
+```
+
+## Datasets
+
+```bash
+rllm dataset pull hendrycks_math    # train (Hendrycks MATH)
+rllm dataset pull math500           # 500-problem test
+rllm dataset pull gsm8k             # alternative train
+rllm dataset pull deepscaler_math   # ~40K AIME/AMC/Omni-MATH/STILL
+rllm dataset pull aime2024          # AIME 2024 (eval)
+```
+
+## Eval
+
+```bash
+rllm eval math500 \
+    --agent math \
+    --evaluator math \
+    --model Qwen/Qwen3-4B-Instruct-2507 \
+    --base-url http://localhost:8000/v1 \
+    --max-examples 20
+```
+
+Verified with `gpt-5.4-mini`: **100% (10/10)** on a smoke run.
+
+## Training
+
+```bash
+# Tinker single-machine
+bash cookbooks/math/train_tinker.sh
+
+# Verl distributed
+bash cookbooks/math/train_verl.sh
+```
+
+For LoRA-only training (the legacy `gsm8k_lora` use case), set `--lora-rank` higher and pass `--train-dataset gsm8k`:
+
+```bash
+rllm train gsm8k --agent math --evaluator math --lora-rank 32
+```
+
+## Key code
+
+```python
+@rllm.rollout(name="math")
+async def math_flow(task: Task, config: AgentConfig) -> Episode:
+    question = str(task.metadata.get("question") or task.metadata.get("problem") or task.instruction)
+    client = AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": question},
+    ]
+
+    resp = await client.chat.completions.create(
+        model=config.model, messages=messages,
+        temperature=0.6, max_tokens=8192,
+    )
+    content = resp.choices[0].message.content or ""
+    messages.append({"role": "assistant", "content": content})
+    step = Step(chat_completions=list(messages), model_response=content, action=content, thought=content)
+
+    return Episode(
+        trajectories=[Trajectory(name="math", steps=[step])],
+        artifacts={"answer": content},
+    )
+```
+
+The evaluator wraps the existing `rllm.eval.reward_fns.math.evaluate`:
+
+```python
+@rllm.evaluator
+def math_evaluator(task, episode) -> EvalOutput:
+    if isinstance(task, dict):
+        task = Task(id="", instruction="", metadata=task, dataset_dir=Path("."))
+    return _math_evaluate(task, episode)
+```
+
+## Files
+
+| File | Description |
+|---|---|
+| `math_flow.py` | The single-turn AgentFlow |
+| `math_eval.py` | Wraps `rllm.eval.reward_fns.math` |
+| `train.py` + `train_{tinker,verl}.sh` | Hydra entry points |
+| `pyproject.toml` | Plugin entry-point declarations |
+| `test.py` | 7 unit tests covering correct / wrong / no-fence / latex equivalence |
+
+## On GitHub
+
+<Card title="cookbooks/math" icon="github" href="https://github.com/rllm-org/rllm/tree/main/cookbooks/math">
+  Full source, README, and runnable launch scripts
+</Card>

@@ -1,0 +1,378 @@
+---
+title: Customizing the training loop
+description: How to customize advantage computation, trajectory grouping, rejection sampling, and other training behavior without modifying rLLM source code
+---
+
+This guide documents every customization surface available to users who install rLLM as a package (`pip install rllm`) and want to control training behavior from their own project, without forking the codebase.
+
+## Customization layers
+
+rLLM offers three tiers of customization, from least to most effort:
+
+| Tier | Mechanism | What you can change |
+|------|-----------|---------------------|
+| **Config** | YAML file or CLI flags | Algorithm selection, hyperparameters, filtering, rejection sampling |
+| **Python kwargs** | `AgentTrainer(...)` or `UnifiedTrainer(...)` arguments | Trajectory grouping logic, per-group advantage estimator selection |
+| **Registry** | `@register_rllm_adv_estimator` decorator | Custom advantage computation functions |
+
+## Tier 1: Config-level customization
+
+The simplest path. Pass a YAML file via `--config` on the CLI, or set keys programmatically with OmegaConf before passing to `AgentTrainer`.
+
+### Selecting an advantage estimator
+
+Set `algorithm.adv_estimator` in your config to one of the built-in estimators:
+
+```yaml title="my_config.yaml"
+rllm:
+  algorithm:
+    adv_estimator: rloo  # grpo | reinforce | reinforce_plus_plus_baseline | rloo
+```
+
+| Estimator | Behavior |
+|-----------|----------|
+| `grpo` | `(reward - group_mean) / group_std` — default, works well for most tasks |
+| `reinforce` | `advantage = reward` — no baseline subtraction |
+| `reinforce_plus_plus_baseline` | Per-group mean baseline, then whiten by batch-level std |
+| `rloo` | Leave-one-out: baseline for trajectory *i* is the mean of all *other* trajectories in its group |
+
+From the CLI:
+
+```bash
+rllm train gsm8k --model Qwen/Qwen3-8B --config my_config.yaml
+```
+
+### Advantage normalization
+
+GRPO normalizes advantages by group standard deviation by default. Disable this if your reward distribution is already well-scaled:
+
+```yaml
+rllm:
+  algorithm:
+    norm_adv_by_std_in_grpo: false
+```
+
+### Using precomputed advantages
+
+If your workflow computes per-step advantages internally (e.g., for distillation or supervised fine-tuning), skip the advantage estimator entirely:
+
+```yaml
+rllm:
+  algorithm:
+    use_precomputed_advantage: true
+```
+
+When enabled, the trainer reads `step.advantage` from each step in your trajectories and uses those values directly. Steps with missing advantages default to 0.
+
+### Loss function (tinker backend)
+
+The tinker backend supports multiple loss functions. Set via config:
+
+```yaml
+rllm:
+  algorithm:
+    loss_fn: ppo  # importance_sampling | ppo | cispo | dro | cross_entropy
+    lr_schedule: cosine  # constant | linear | cosine
+    warmup_steps_ratio: 0.1
+```
+
+### Rejection sampling
+
+Control whether low-quality batches are discarded or accumulated:
+
+```yaml
+rllm:
+  rejection_sample:
+    enable: true
+    min_partial_solve_tasks: 1  # min tasks with non-zero reward before proceeding
+    min_trajs_per_group: 2      # min trajectories per group
+```
+
+### Compact filtering
+
+Mask out trajectories that hit error conditions, so they don't contribute to the gradient:
+
+```yaml
+rllm:
+  compact_filtering:
+    enable: true
+    mask_timeout: true
+    mask_error: true
+    mask_max_response_length_exceeded: true
+    mask_max_turns_exceeded: true
+```
+
+### Programmatic config
+
+From Python, build the config the same way the CLI does:
+
+```python
+from omegaconf import OmegaConf
+
+base = OmegaConf.load("path/to/base.yaml")
+overrides = OmegaConf.create({
+    "rllm": {
+        "algorithm": {
+            "adv_estimator": "rloo",
+        },
+        "rejection_sample": {"enable": True},
+    }
+})
+config = OmegaConf.merge(base, overrides)
+```
+
+Or use `build_train_config()` from the CLI module and merge your overrides on top:
+
+```python
+from rllm.cli.train import build_train_config
+from omegaconf import OmegaConf
+
+config = build_train_config(
+    model_name="Qwen/Qwen3-8B",
+    group_size=8, batch_size=32, lr=2e-5,
+    lora_rank=32, total_epochs=1, total_steps=None,
+    val_freq=5, save_freq=20,
+    project="my-project", experiment="experiment-1",
+    output_dir=None, config_file=None,
+)
+
+# Merge custom algorithm settings
+config = OmegaConf.merge(config, OmegaConf.create({
+    "rllm": {"algorithm": {"adv_estimator": "rloo"}}
+}))
+```
+
+## Tier 2: Python API hooks
+
+These require using `AgentTrainer` or `UnifiedTrainer` directly from Python, not the CLI.
+
+### Custom trajectory grouping
+
+By default, trajectories are grouped by `{task_id}:{trajectory_name}` — all rollouts for the same task and trajectory role end up in one group, and advantages are computed within that group.
+
+Override this with `traj_grouping_hook` to control how trajectories are grouped:
+
+```python
+from rllm.agents.agent import Episode, TrajectoryGroup
+from rllm.experimental.common.config import TransformConfig, CompactFilteringConfig
+
+def my_grouping_hook(
+    episodes: list[Episode],
+    transform_config: TransformConfig,
+    compact_filtering_config: CompactFilteringConfig | None = None,
+) -> list[TrajectoryGroup]:
+    """Group trajectories by task_id only, ignoring trajectory name."""
+    from collections import defaultdict
+
+    groups = defaultdict(list)
+    metadata = defaultdict(list)
+
+    for episode in episodes:
+        for traj in episode.trajectories:
+            if not traj.steps:
+                continue
+            key = episode.task_id  # group all trajectories for the same task
+            groups[key].append(traj)
+            metadata[key].append({
+                "task_id": episode.task_id,
+                "rollout_idx": episode.rollout_idx,
+            })
+
+    return [
+        TrajectoryGroup(
+            trajectories=trajs,
+            group_id=key,
+            metadata=metadata[key],
+        )
+        for key, trajs in groups.items()
+    ]
+```
+
+Pass it to the trainer:
+
+```python
+from rllm.experimental.unified_trainer import AgentTrainer
+
+trainer = AgentTrainer(
+    backend="tinker",
+    workflow_class=MyWorkflow,
+    config=config,
+    train_dataset=train_dataset,
+    traj_grouping_hook=my_grouping_hook,
+)
+trainer.train()
+```
+
+<Warning>
+Your hook must return `TrajectoryGroup` objects with valid `group_id` and `trajectories` fields. Each trajectory must have a non-None `reward` when using broadcast mode (the default). The trainer validates rewards after your hook runs.
+</Warning>
+
+### Per-group advantage estimator map
+
+In multi-agent workflows (e.g., solver-judge), different trajectory groups play different roles. You may want a different advantage estimator for each role:
+
+```python
+from rllm.experimental.common.config import rLLMAdvantageEstimator
+
+trainer = AgentTrainer(
+    backend="tinker",
+    workflow_class=SolverJudgeWorkflow,
+    config=config,
+    train_dataset=train_dataset,
+    traj_group_adv_estimator_map={
+        "solver": rLLMAdvantageEstimator.GRPO,
+        "judge": rLLMAdvantageEstimator.REINFORCE,
+    },
+)
+trainer.train()
+```
+
+The map keys are **group roles**, derived from the `group_id` of each `TrajectoryGroup`. The default grouping produces IDs like `{task_id}:{trajectory_name}`, and the role is the `trajectory_name` portion.
+
+### Workflow arguments
+
+Pass arbitrary arguments to your `Workflow.__init__()` via `workflow_args`:
+
+```python
+trainer = AgentTrainer(
+    backend="tinker",
+    workflow_class=DistillationWorkflow,
+    workflow_args={
+        "timeout": 600,
+        "teacher_engine": teacher_engine,
+        "clip_min": -5.0,
+        "clip_max": 5.0,
+    },
+    config=config,
+    train_dataset=train_dataset,
+)
+```
+
+## Tier 3: Registering custom advantage estimators
+
+The advantage estimator registry (`RLLM_ADV_ESTIMATOR_REGISTRY`) uses a decorator pattern. You can register your own estimator at import time, and then reference it by name in your config.
+
+### Defining a custom estimator
+
+```python
+import numpy as np
+from rllm.experimental.common.advantage import register_rllm_adv_estimator
+
+@register_rllm_adv_estimator("median_baseline")
+def calculate_median_baseline_advantages(
+    rewards: list[np.ndarray],
+    algorithm_config,
+    **kwargs,
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """Use median reward as the baseline instead of mean."""
+    advantages = []
+    returns = []
+    for group_rewards in rewards:
+        baseline = np.median(group_rewards)
+        adv = group_rewards - baseline
+        advantages.append(adv)
+        returns.append(group_rewards)
+    return advantages, returns
+```
+
+### Using it
+
+After importing the module that contains your registration, set the estimator name in config:
+
+```python
+# Must import before creating the trainer so the decorator runs
+import my_project.custom_advantages  # registers "median_baseline"
+
+from omegaconf import OmegaConf
+
+config = OmegaConf.merge(config, OmegaConf.create({
+    "rllm": {
+        "algorithm": {
+            "adv_estimator": "median_baseline",
+        }
+    }
+}))
+
+trainer = AgentTrainer(
+    backend="tinker",
+    workflow_class=MyWorkflow,
+    config=config,
+    train_dataset=train_dataset,
+)
+trainer.train()
+```
+
+### Estimator function signature
+
+Your function must accept and return these types:
+
+```python
+def my_estimator(
+    rewards: list[np.ndarray],          # one array per trajectory group
+    algorithm_config: AlgorithmConfig,  # pull whatever config the estimator needs
+    **kwargs,                            # receives traj_groups for per-trajectory metadata
+) -> tuple[
+    list[np.ndarray],                    # advantages (same shape as rewards)
+    list[np.ndarray],                    # returns (same shape as rewards)
+]:
+    ...
+```
+
+Each element in `rewards` is a 1-D array of trajectory rewards for one group. Return advantages and returns in the same list-of-arrays structure.
+
+`**kwargs` carries `traj_groups: list[TrajectoryGroup]`, aligned with `rewards`, so estimators that need per-trajectory metadata (response lengths, step counts) can read it via `kwargs.get("traj_groups")`. See [Advantage estimator](/experimental/advantage-estimator#worked-example-porting-opo-from-verl) for a worked example.
+
+## What you cannot customize today
+
+The following aspects of the training loop are fixed and require source modifications to change:
+
+| Area | Limitation |
+|------|------------|
+| **Training pipeline stages** | The 8-stage loop (generate → transform → reject → backend batch → process → advantages → update → log) is hardcoded. You cannot add, remove, or reorder stages. |
+| **Rejection sampling logic** | Only three modes exist: `none`, `episode`, `group`. You cannot provide a custom rejection function. |
+| **Transform pipeline internals** | Name imputation happens before your grouping hook; reward validation happens after it. You cannot change this order. |
+| **Backend protocol** | Implementing a new training backend requires subclassing `BackendProtocol` (8 abstract methods + 8 optional hooks). There is no lightweight plugin mechanism. |
+| **Loss functions** | The tinker backend supports a fixed set (`importance_sampling`, `ppo`, `cispo`, `dro`, `cross_entropy`). Custom loss functions require backend modifications. |
+| **CLI flags** | The `rllm train` CLI does not expose `traj_grouping_hook` or `traj_group_adv_estimator_map`. These are Python API-only. The CLI also doesn't expose `adv_estimator` as a flag — it must be set via `--config`. |
+| **Advantage estimator kwargs** | The `_prepare_adv_estimator_input` function passes a fixed set of kwargs to your estimator. You cannot inject custom config values without modifying this function. |
+| **Per-step advantage computation** | The `per_step` mode is deprecated. Only `broadcast` mode (trajectory-level rewards applied to all steps) is supported in the unified trainer. |
+
+## Summary: customization decision tree
+
+```
+Want to change the advantage algorithm?
+├── Use a built-in one → set `algorithm.adv_estimator` in config (Tier 1)
+├── Use different estimators for different agent roles → pass `traj_group_adv_estimator_map` (Tier 2)
+├── Write your own math → register with `@register_rllm_adv_estimator` (Tier 3)
+└── Bring precomputed advantages from your workflow → set `use_precomputed_advantage: true` (Tier 1)
+
+Want to change how trajectories are grouped?
+├── Default grouping is fine → do nothing
+└── Custom logic needed → pass `traj_grouping_hook` (Tier 2)
+
+Want to change training hyperparameters?
+└── YAML config or CLI flags (Tier 1)
+
+Want to change the training loop structure?
+└── Not possible without source modifications
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Unified trainer" icon="code" href="/experimental/unified-trainer">
+    Architecture of the 8-stage training pipeline
+  </Card>
+
+  <Card title="RL algorithms" icon="brain" href="/core-concepts/rl-algorithms">
+    Mathematical details of GRPO, REINFORCE, and RLOO
+  </Card>
+
+  <Card title="Multi-agent training" icon="users" href="/tutorials/solver-judge-workflow">
+    Solver-judge and other multi-trajectory workflows
+  </Card>
+
+  <Card title="Training backends" icon="server" href="/backends/comparison">
+    Compare verl and tinker backends
+  </Card>
+</CardGroup>

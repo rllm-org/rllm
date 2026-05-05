@@ -1,0 +1,482 @@
+---
+title: verl Backend
+description: Training with verl - distributed RL training with vLLM and SGLang support
+---
+
+The **verl** backend is rLLM's high-performance distributed training backend built on top of [verl](https://github.com/volcengine/verl) (v0.6.1). It provides efficient distributed reinforcement learning for language agents with support for vLLM and SGLang inference engines.
+
+## Overview
+
+verl is designed for large-scale distributed training with the following architecture:
+
+- **Actor-Rollout Workers**: Handle policy updates and trajectory generation
+- **Critic Workers**: Compute value estimates for advantage calculation
+- **Reference Policy Workers**: Maintain frozen reference policy for KL divergence
+- **Ray-based Orchestration**: Manages distributed worker groups and resource allocation
+
+## How rLLM uses verl
+
+rLLM drives verl from its own `UnifiedTrainer` rather than running verl's `RayPPOTrainer.fit()` loop. The verl backend reuses verl's worker groups, checkpoint engine, and async rollout manager, but the training lifecycle — batch shaping, advantage computation, weight sync, validation cadence — is owned by rLLM. As a result, a few verl features are intentionally **not wired through** on this path:
+
+- **No critic.** `use_critic` is forced to `False` and no critic worker is spawned. Value-based estimators (GAE, REMAX) cannot run as-is.
+- **No reward model.** `reward.reward_model.enable=True` is rejected at startup. Compute rewards inside your workflow via a `RewardFunction` so they flow through the same path as the Tinker backend.
+- **No in-reward KL.** `algorithm.use_kl_in_reward=True` is rejected at startup. KL-in-loss is supported — set `actor_rollout_ref.actor.use_kl_loss=True` and it runs inside verl's actor worker.
+- **Async rollout only.** `actor_rollout_ref.rollout.mode` must be `async`.
+- **New EngineWorker path only.** `trainer.use_legacy_worker_impl` is forced to `disable`.
+
+<Note>
+  Need an estimator that requires a critic or per-token signal? See [Pre-computed advantages](/experimental/precompute-advantage) for writing per-token advantages directly in the workflow, and the [Advantage estimator](/experimental/advantage-estimator) page for registering a custom rLLM-native estimator (with a worked OPO port).
+</Note>
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Distributed Training" icon="server">
+    Multi-GPU and multi-node training with Ray-based orchestration
+  </Card>
+  <Card title="Hybrid Engine" icon="bolt">
+    Combined actor-rollout engine for efficient async trajectory generation
+  </Card>
+  <Card title="VLM Support" icon="image">
+    Native support for vision-language models (Qwen2-VL, Qwen3-VL)
+  </Card>
+  <Card title="LoRA Training" icon="layer-group">
+    Parameter-efficient fine-tuning with LoRA adapters
+  </Card>
+</CardGroup>
+
+## Installation
+
+Install rLLM with the verl backend:
+
+<CodeGroup>
+```bash Direct Installation
+uv pip install "rllm[verl] @ git+https://github.com/rllm-org/rllm.git"
+```
+
+```bash From Source
+git clone https://github.com/rllm-org/rllm.git
+cd rllm
+uv venv --python 3.10
+source .venv/bin/activate
+uv pip install -e .[verl] --torch-backend=cu128  # or cu129, cu130
+```
+
+```bash Docker
+docker build -t rllm .
+docker create --runtime=nvidia --gpus all --net=host \
+  --shm-size="10g" --cap-add=SYS_ADMIN \
+  -v .:/workspace/rllm -v /tmp:/tmp \
+  --name rllm-container rllm sleep infinity
+docker start rllm-container
+docker exec -it rllm-container bash
+```
+</CodeGroup>
+
+<Note>
+**Megatron support** — verl also supports Megatron for efficient large-scale training. Adding it requires a from-source install since the script lives in the rLLM repo:
+
+```bash
+bash scripts/install_megatron.sh <cu128|cu129|cu130>
+```
+
+This installs nvidia-modelopt, transformer-engine, megatron-core, megatron-bridge, and NVIDIA Apex. The CUDA version you pass here must match the `--torch-backend` flag in your rLLM install: e.g. `cu128` for CUDA 12.8. Compilation may take a while.
+</Note>
+
+## Dependencies
+
+The verl backend includes the following key dependencies (from `pyproject.toml`):
+
+```toml
+verl = [
+    "verl==0.7.1",
+    "torch>=2.10.0",
+    "torchvision>=0.23.0",
+    "vllm==0.17.0",
+    "flash-attn>=2.8.1",
+    "qwen-vl-utils",
+]
+```
+
+<Note>
+  **Python Version**: Requires Python >= 3.10
+</Note>
+
+## Basic Usage
+
+### Agent Training
+
+Train a math agent with verl backend. The recommended path is to use the
+[`cookbooks/math`](https://github.com/rllm-org/rllm/tree/main/cookbooks/math) cookbook
+— install once, and the trainer wires up an `AgentFlow` + `Evaluator` for you:
+
+```python train.py
+import hydra
+from omegaconf import DictConfig
+
+from math_flow import math_flow                # from cookbooks/math/
+from math_eval import math_evaluator           # from cookbooks/math/
+
+from rllm.data.dataset import DatasetRegistry
+from rllm.experimental.unified_trainer import AgentTrainer
+
+@hydra.main(config_path="pkg://rllm.experimental.config", config_name="unified", version_base=None)
+def main(config: DictConfig):
+    train_dataset = DatasetRegistry.load_dataset("hendrycks_math", "train")
+    test_dataset = DatasetRegistry.load_dataset("math500", "test")
+
+    trainer = AgentTrainer(
+        backend="verl",
+        agent_flow=math_flow,
+        evaluator=math_evaluator,
+        config=config,
+        train_dataset=train_dataset,
+        val_dataset=test_dataset,
+    )
+    trainer.train()
+
+if __name__ == "__main__":
+    main()
+```
+
+Run via the cookbook's pre-baked verl launch script:
+
+```bash
+bash cookbooks/math/train_verl.sh \
+  actor_rollout_ref.model.path=Qwen/Qwen2.5-Math-7B-Instruct \
+  data.train_batch_size=16 \
+  trainer.total_epochs=3
+```
+
+### LoRA Training
+
+LoRA is enabled via Hydra overrides — no code change needed:
+
+```bash
+bash cookbooks/math/train_verl.sh \
+  +actor_rollout_ref.model.lora.rank=32 \
+  +actor_rollout_ref.model.lora.alpha=32 \
+  +actor_rollout_ref.model.lora.merge=true \
+  data.train_batch_size=16
+```
+
+Run with LoRA configuration:
+
+```bash
+python train_with_lora.py \
+  actor_rollout_ref.model.path=Qwen/Qwen2.5-Math-7B-Instruct \
+  actor_rollout_ref.model.lora.rank=64 \
+  actor_rollout_ref.model.lora.alpha=128 \
+  data.train_batch_size=32
+```
+
+## Supported advantage estimators
+
+Advantages on the unified Verl backend are computed through rLLM's native estimator hook. The built-in estimators are `grpo`, `reinforce`, `reinforce_plus_plus_baseline`, and `rloo`. Verl's other estimators — `gae`, `reinforce_plus_plus` (proper), `remax`, `opo`, `grpo_passk`, `gpg`, `gdpo`, `optimal_token_baseline`, `tir_optimal_token_baseline` — are **not available out of the box** and the corresponding `algorithm.gamma` / `algorithm.lam` knobs are no longer wired through. To use one of those, register a custom estimator via the rLLM registry; see [Advantage estimator](/experimental/advantage-estimator) for the contract and a worked OPO port.
+
+## Configuration
+
+The verl backend uses Hydra configuration with defaults from `agent_ppo_trainer.yaml`:
+
+### Key Configuration Options
+
+<ParamField path="actor_rollout_ref.model.path" type="string" required>
+  Model path (HuggingFace or local)
+</ParamField>
+
+<ParamField path="actor_rollout_ref.rollout.mode" type="string" default="async">
+  Rollout mode - must be "async" for verl backend
+</ParamField>
+
+<ParamField path="actor_rollout_ref.hybrid_engine" type="boolean" default="true">
+  Enable hybrid actor-rollout engine
+</ParamField>
+
+<ParamField path="data.train_batch_size" type="integer" default="64">
+  Training batch size per update step
+</ParamField>
+
+<ParamField path="data.max_prompt_length" type="integer" default="2048">
+  Maximum prompt length in tokens
+</ParamField>
+
+<ParamField path="data.max_response_length" type="integer" default="2048">
+  Maximum response length in tokens
+</ParamField>
+
+<ParamField path="algorithm.adv_estimator" type="string" default="grpo">
+  Advantage estimator: `grpo`, `reinforce`, `reinforce_plus_plus_baseline`, or `rloo`
+</ParamField>
+
+<ParamField path="trainer.total_epochs" type="integer" default="3">
+  Number of training epochs
+</ParamField>
+
+<ParamField path="trainer.save_freq" type="integer" default="100">
+  Checkpoint save frequency (steps)
+</ParamField>
+
+### LoRA Configuration
+
+<ParamField path="actor_rollout_ref.model.lora.rank" type="integer" default="0">
+  LoRA rank (0 disables LoRA)
+</ParamField>
+
+<ParamField path="actor_rollout_ref.model.lora.alpha" type="integer" default="16">
+  LoRA scaling parameter
+</ParamField>
+
+<ParamField path="actor_rollout_ref.model.lora.target_modules" type="list">
+  Modules to apply LoRA (default: attention and MLP layers)
+</ParamField>
+
+## Vision-Language Models (VLM)
+
+verl backend supports multimodal models like Qwen2-VL and Qwen3-VL:
+
+```python train_vlm.py
+import hydra
+from examples.geo3k.geo3k_workflow import Geo3KWorkflow
+from rllm.data.dataset import DatasetRegistry
+from rllm.rewards.reward_fn import f1_reward_fn
+from rllm.trainer.agent_trainer import AgentTrainer
+
+@hydra.main(
+    config_path="pkg://rllm.trainer.config",
+    config_name="agent_ppo_trainer",
+    version_base=None
+)
+def main(config):
+    train_dataset = DatasetRegistry.load_dataset("latex_ocr", "train")
+    test_dataset = DatasetRegistry.load_dataset("latex_ocr", "test")
+
+    trainer = AgentTrainer(
+        workflow_class=Geo3KWorkflow,
+        workflow_args={"reward_function": f1_reward_fn},
+        config=config,
+        train_dataset=train_dataset,
+        val_dataset=test_dataset,
+    )
+    trainer.train()
+
+if __name__ == "__main__":
+    main()
+```
+
+Run with VLM:
+
+```bash
+python train_vlm.py \
+  actor_rollout_ref.model.path=Qwen/Qwen2-VL-7B-Instruct \
+  data.return_multi_modal_inputs=true
+```
+
+<Warning>
+  When training VLMs, ensure `data.return_multi_modal_inputs=true` is set and the dataset provides image inputs.
+</Warning>
+
+## Distributed Training
+
+verl backend uses Ray for distributed training across multiple GPUs and nodes:
+
+### Multi-GPU Training
+
+```bash
+python train_agent.py \
+  actor_rollout_ref.actor.fsdp_config.param_offload=false \
+  actor_rollout_ref.actor.fsdp_config.grad_offload=false \
+  resource_pool_config.actor_rollout_gpu=4  # Use 4 GPUs
+```
+
+### Resource Pool Configuration
+
+<ParamField path="resource_pool_config.actor_rollout_gpu" type="integer">
+  Number of GPUs for actor-rollout workers
+</ParamField>
+
+<ParamField path="resource_pool_config.ref_policy_gpu" type="integer">
+  Number of GPUs for reference policy workers
+</ParamField>
+
+## Advanced Features
+
+### Step-wise Advantage
+
+For multi-step agent trajectories, enable step-wise advantage computation:
+
+```bash
+python train_agent.py \
+  rllm.stepwise_advantage.enable=true \
+  rllm.stepwise_advantage.mode=broadcast \
+  rllm.agent.max_steps=20
+```
+
+<Info>
+  Step-wise advantage mode:
+  - **broadcast**: Propagate final advantage to all steps (recommended for GRPO)
+  - **per_step**: Compute advantages independently per step
+</Info>
+
+### Rejection Sampling
+
+Filter out trajectories with no correct or all correct solutions:
+
+```bash
+python train_agent.py \
+  rllm.rejection_sample.enable=true \
+  rllm.rejection_sample.multiplier=2  # Generate 2x trajectories per prompt
+```
+
+### Compact Filtering
+
+Filter trajectories based on termination reasons:
+
+```yaml
+rllm:
+  compact_filtering:
+    enable: true
+    mask_timeout: true
+    mask_error: true
+    mask_max_turns_exceeded: true
+```
+
+## Checkpointing
+
+verl backend automatically saves checkpoints during training:
+
+- **Location**: `{trainer.default_local_dir}/checkpoints/`
+- **Frequency**: Controlled by `trainer.save_freq`
+- **Resume**: Automatically resumes from latest checkpoint if available
+
+### Manual Checkpoint Loading
+
+```bash
+python train_agent.py \
+  trainer.default_local_dir=/path/to/checkpoint/dir
+```
+
+## Monitoring
+
+Configure logging backends:
+
+```yaml
+trainer:
+  logger: ["console", "wandb", "tensorboard"]
+  project_name: "my-project"
+  experiment_name: "math-agent-v1"
+```
+
+### Key Metrics
+
+- `actor/entropy`: Policy entropy
+- `actor/loss`: Actor policy loss
+- `actor/ppo_ratio_mean`: PPO clipping ratio
+- `critic/full-score/mean`: Average trajectory reward
+- `val/test_score/*`: Validation accuracy by data source
+- `training/global_step`: Current training step
+
+## Performance Tips
+
+<CardGroup cols={2}>
+  <Card title="Use Async Rollout" icon="rocket">
+    Always use `rollout.mode=async` for better throughput
+  </Card>
+  <Card title="Tune Batch Size" icon="sliders">
+    Increase `train_batch_size` to maximize GPU utilization
+  </Card>
+  <Card title="Enable FSDP" icon="layer-group">
+    Use FSDP for models > 7B parameters
+  </Card>
+  <Card title="Optimize vLLM" icon="gauge">
+    Tune vLLM tensor parallel size and max tokens
+  </Card>
+</CardGroup>
+
+## Example Configuration
+
+Complete configuration for training a math agent:
+
+```yaml config.yaml
+actor_rollout_ref:
+  model:
+    path: Qwen/Qwen2.5-Math-7B-Instruct
+    lora:
+      rank: 64
+      alpha: 128
+  rollout:
+    mode: async
+    n: 16  # Generate 16 trajectories per prompt
+    val_kwargs:
+      n: 4  # Generate 4 trajectories for validation
+
+data:
+  train_batch_size: 32
+  max_prompt_length: 2048
+  max_response_length: 2048
+
+algorithm:
+  adv_estimator: grpo
+
+trainer:
+  total_epochs: 3
+  save_freq: 100
+  test_freq: 50
+  logger: ["wandb"]
+  project_name: "math-rl"
+  experiment_name: "qwen-math-7b"
+
+rllm:
+  stepwise_advantage:
+    enable: false
+  rejection_sample:
+    enable: true
+    multiplier: 2
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Out of Memory Errors">
+    - Reduce `data.train_batch_size`
+    - Enable FSDP parameter offloading: `actor_rollout_ref.actor.fsdp_config.param_offload=true`
+    - Reduce `data.max_prompt_length` or `data.max_response_length`
+    - Use LoRA instead of full fine-tuning
+  </Accordion>
+
+  <Accordion title="Slow Training">
+    - Increase `data.train_batch_size` if GPU memory allows
+    - Use `rollout.mode=async` (required for verl)
+    - Tune vLLM parameters: increase `tensor_parallel_size`
+    - Check Ray resource allocation: `resource_pool_config.*`
+  </Accordion>
+
+  <Accordion title="Ray Connection Errors">
+    - Ensure Ray is properly initialized
+    - Check firewall settings for multi-node training
+    - Verify GPU availability: `ray.available_resources()`
+  </Accordion>
+
+  <Accordion title="VLM Training Issues">
+    - Set `data.return_multi_modal_inputs=true`
+    - Install vision dependencies: `qwen-vl-utils`
+    - Verify image processor is loaded correctly
+    - Check dataset provides images in correct format
+  </Accordion>
+</AccordionGroup>
+
+## See Also
+
+<CardGroup cols={2}>
+  <Card title="Tinker Backend" icon="cube" href="/backends/tinker">
+    Alternative backend with async-first design
+  </Card>
+  <Card title="Backend Comparison" icon="scale-balanced" href="/backends/comparison">
+    Compare verl vs tinker features
+  </Card>
+  <Card title="verl Documentation" icon="book" href="https://github.com/volcengine/verl">
+    Official verl repository and docs
+  </Card>
+  <Card title="Agent Trainer" icon="robot" href="/api/trainer">
+    Learn about AgentTrainer API
+  </Card>
+</CardGroup>

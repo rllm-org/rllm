@@ -26,7 +26,10 @@ class ChatTemplateParser:
         self.generation_prompt = self._get_generation_prompt(tokenizer)
 
     def _get_generation_prompt(self, tokenizer):
-        messages = [{"role": "assistant", "content": ""}]
+        # Some chat templates (e.g. Qwen3.5) reject a lone assistant message,
+        # so prepend a stub user message. It is present in both with_prompt
+        # and without_prompt and cancels out in the slice below.
+        messages = [{"role": "user", "content": ""}, {"role": "assistant", "content": ""}]
 
         with_prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
         without_prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=False, tokenize=False)
@@ -100,7 +103,7 @@ class ChatTemplateParser:
             model_name = tokenizer.name_or_path.lower()
             tokenizer_cls = tokenizer.__class__.__name__.lower()
             logger.info(f"model_name: {model_name}, tokenizer_cls: {tokenizer_cls}")
-            if any(x in model_name for x in ("deepseek", "deepscaler", "deepcoder")) and "llama" in tokenizer_cls:
+            if any(x in model_name for x in ("deepseek", "deepscaler", "deepcoder")) and ("llama" in tokenizer_cls or "distill-qwen" in model_name):
                 if "deepseek-math-v2" in model_name or "deepseek-v3.2-exp" in model_name:
                     logger.info(f"Using DeepSeekV32ExpChatTemplateParser for {tokenizer.name_or_path}")
                     return DeepSeekV32ExpChatTemplateParser(tokenizer, disable_thinking=disable_thinking)

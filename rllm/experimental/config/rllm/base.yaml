@@ -48,24 +48,20 @@ trainer:
 
 # Algorithm Configuration
 algorithm:
-  adv_estimator: grpo # [grpo, reinforce, reinforce_plus_plus_baseline, rloo, gae]
-  gamma: 1.0
-  lam: 0.95
+  adv_estimator: grpo # [grpo, reinforce, reinforce_plus_plus_baseline, rloo]
   norm_adv_by_std_in_grpo: true
-  use_rllm: false
-  # When true, always use pre-computed step.advantage from the workflow (e.g. distillation)
-  # and skip advantage computation (GRPO/REINFORCE). Missing advantages default to 0.
-  use_precomputed_advantage: false
-  loss_fn: null           # [null, importance_sampling, ppo, cispo, dro, cross_entropy]
+  use_rllm: null  # deprecated, unified trainer only support rllm advantage estimators
+  use_precomputed_advantage: false # use pre-computed step.advantage from the workflow (e.g. distillation)
+  loss_fn: null           # backend-specific values; null = backend default
   loss_agg_mode: null     # [null, token-mean, seq-mean-token-sum, seq-mean-token-mean]
   kl_beta: 0.0            # KL penalty coefficient
   eps_clip: 0.2           # PPO clip epsilon
   eps_clip_high: null     # Asymmetric upper clip bound (null = symmetric)
   router_replay: false    # Router Replay (R3): replay MoE expert routing from inference during training
   rollout_correction:
-    bypass_mode: true     # true = use rollout logprobs as pi_old (2-policy), false = proximal forward (3-policy)
+    bypass_mode: null     # true = pi_old = pi_rollout, false = pi_old is computed (null = backend default)
     tis_mode: null        # null = disabled, "token" or "sequence" = TIS importance sampling level
-    tis_cap: 5.0          # Upper clamp on TIS importance weight
+    tis_cap: 2.0          # Upper clamp on TIS importance weight
 
 # Stepwise advantage
 # TODO(listar2000): deprecate the `per_step` mode and refactor this config.
@@ -146,30 +142,41 @@ sdk:
     #   max_retry_attempts: boto3 adaptive retry attempts (default: 5)
     extra: {}
 
-# Remote Runtime Configuration (for agent-in-container runtimes like AgentCore)
+# Remote Runtime Configuration (for agent-in-container runtimes like AgentCore, Harbor)
 remote_runtime:
   enabled: false
-  backend: agentcore
-  backend_config:
+  backend: agentcore   # agentcore | harbor
+  # Per-backend named sub-configs. Only the sub-dict matching `backend` is read.
+  agentcore:
     agent_runtime_arn: ""
     s3_bucket: ""
     tps_limit: 25
+  harbor:
+    agent: mini-swe-agent       # scaffold name (mini-swe-agent | aider | openhands | swe-agent | qwen-coder | ...)
+    environment_type: docker    # docker | modal | daytona | e2b | runloop | gke | apple-container
+    agent_kwargs: {}            # pass-through to harbor's AgentConfig.kwargs (scaffold-specific flags)
+    agent_timeout_multiplier: null
+    verifier_timeout_multiplier: null
+    agent_setup_timeout_multiplier: null
+    environment_build_timeout_multiplier: null
   session_timeout: 300.0
 
 # Gateway Configuration (model gateway for AgentFlow-based training)
 gateway:
   port: 9090
   host: null          # Auto-detects routable IP; set explicitly to override
+  public_url: null    # Public URL for remote agents (e.g. http://<tunnel-host>:9090); defaults to http://<host>:<port>
   db_path: null       # Defaults to temp file
+  sampling_params_priority: session   # "session" | "client" — who wins when both set the same key
 
 # Async Training Configuration
 async_training:
   enable: false
-  mini_batch_size: 1
+  mini_batch_size: 64
   fwd_bwd_group_size: null  # task batches per forward-backward pass (default: mini_batch_size)
   staleness_threshold: 0.0
   trigger_parameter_sync_step: 1
-  partial_rollout: true
+  partial_rollout: false
   episode_offload_dir: null       # NVMe offload dir for pending episodes (null = disabled)
   trajectory_group_offload_dir: null  # NVMe offload dir for queued task batches (null = disabled)
 

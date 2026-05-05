@@ -181,6 +181,56 @@ def math500_transform(row: dict) -> dict:
     }
 
 
+def deepscaler_math_transform(row: dict) -> dict:
+    """Transform agentica-org/DeepScaleR-Preview-Dataset row to standard math format.
+
+    Source rows contain ``problem``, ``solution``, and ``answer`` fields; we
+    surface ``problem`` as the question and the pre-extracted ``answer`` as the
+    ground truth.
+    """
+    return {
+        "question": row.get("problem", ""),
+        "ground_truth": row.get("answer", ""),
+        "data_source": "deepscaler_math",
+    }
+
+
+def hendrycks_math_transform(row: dict) -> dict:
+    """Transform EleutherAI/hendrycks_math row to standard math format.
+
+    The answer is extracted from ``\\boxed{...}`` in the solution field,
+    handling nested braces.
+    """
+    import re
+
+    solution = row.get("solution", "")
+    ground_truth = solution
+    # Extract the last \boxed{...} occurrence (handles nested braces)
+    idx = solution.rfind("\\boxed{")
+    if idx != -1:
+        start = idx + len("\\boxed{")
+        depth = 1
+        end = start
+        while end < len(solution) and depth > 0:
+            if solution[end] == "{":
+                depth += 1
+            elif solution[end] == "}":
+                depth -= 1
+            end += 1
+        ground_truth = solution[start : end - 1]
+    else:
+        # Fallback: try #### pattern
+        m = re.search(r"####\s*(.+?)(?:\n|$)", solution)
+        if m:
+            ground_truth = m.group(1).strip()
+
+    return {
+        "question": row.get("problem", ""),
+        "ground_truth": ground_truth,
+        "data_source": "hendrycks_math",
+    }
+
+
 def countdown_transform(row: dict) -> dict:
     """Transform Countdown row to standard format.
 
@@ -1246,54 +1296,6 @@ def swebench_transform(row: dict) -> dict:
         "environment_setup_commit": row.get("environment_setup_commit", ""),
         "data_source": "swebench",
     }
-
-
-def frozenlake_transform(row: dict) -> dict:
-    """Transform FrozenLake dataset row to standard format.
-
-    Handles both flat format (seed, size, p at top level) and legacy
-    nested format (params inside extra_info dict).
-    """
-    extra = row.get("extra_info", {})
-    if isinstance(extra, str):
-        try:
-            extra = json.loads(extra)
-        except (json.JSONDecodeError, TypeError):
-            extra = {}
-
-    return {
-        "seed": row.get("seed", extra.get("seed", 42)),
-        "size": row.get("size", extra.get("size", 4)),
-        "p": row.get("p", extra.get("p", 0.8)),
-        "data_source": "frozenlake",
-    }
-
-
-def frozenlake_generate(split: str, catalog_entry: dict) -> list[dict]:
-    """Procedurally generate FrozenLake tasks.
-
-    Produces tasks with varying grid sizes (2-8) and seeds.
-    Train split: 500 tasks. Test split: 100 tasks.
-    """
-    import random as _random
-
-    num_tasks = 500 if split == "train" else 100
-    seed_offset = 0 if split == "train" else 10000
-    rng = _random.Random(seed_offset)
-
-    tasks = []
-    for i in range(num_tasks):
-        size = rng.randint(3, 8)
-        tasks.append(
-            {
-                "task_id": f"frozenlake_{split}_{i}",
-                "seed": seed_offset + i,
-                "size": size,
-                "p": 0.8,
-                "data_source": "frozenlake",
-            }
-        )
-    return tasks
 
 
 def bfcl_transform(row: dict) -> dict:

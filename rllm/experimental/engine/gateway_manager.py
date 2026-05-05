@@ -24,12 +24,13 @@ from rllm_model_gateway.models import TraceRecord
 if TYPE_CHECKING:
     from omegaconf import DictConfig
 
-    from rllm.experimental.rollout import RolloutEngine
+    from rllm.experimental.rollout import RolloutEngine, VerlEngine
 
 logger = logging.getLogger(__name__)
 
 _HEALTH_POLL_INTERVAL = 0.5
 _HEALTH_POLL_TIMEOUT = 30.0
+_TRACE_API_TIMEOUT = 600.0
 
 
 def _get_routable_ip() -> str:
@@ -82,6 +83,10 @@ class GatewayManager:
         self.host: str = configured_host if configured_host else _get_routable_ip()
         self.port: int = gw_cfg.get("port", 9090)
         self.db_path: str | None = gw_cfg.get("db_path", None)
+        self.public_url: str | None = gw_cfg.get("public_url", None)
+        self.sampling_params_priority: str = gw_cfg.get("sampling_params_priority", "client")
+        # The gateway always pins ``body.model`` to whatever the trainer is serving
+        self.model: str | None = config.get("model", {}).get("name", None)
         self.mode = mode
 
         self._process: subprocess.Popen | None = None
@@ -110,7 +115,7 @@ class GatewayManager:
     def async_client(self) -> AsyncGatewayClient:
         """Async client for runtime operations (sessions, traces)."""
         if self._async_client is None:
-            self._async_client = AsyncGatewayClient(self.gateway_url)
+            self._async_client = AsyncGatewayClient(self.gateway_url, timeout=_TRACE_API_TIMEOUT)
         return self._async_client
 
     # -- Lifecycle -----------------------------------------------------------
@@ -129,16 +134,18 @@ class GatewayManager:
 
             self._local_handler = create_tinker_handler(rollout_engine)
             self._start_thread(local_handler=self._local_handler)
-        else:
+        elif engine_cls == "VerlEngine":
             if self.mode == "process":
                 self._start_process()
             else:
                 self._start_thread()
 
-            worker_urls = self._ensure_workers(rollout_engine)
+            worker_urls = self._ensure_verl_engine_workers(rollout_engine)
             for url in worker_urls:
                 worker_id = self.client.add_worker(url=url)
                 logger.info("Registered worker %s -> %s", worker_id, url)
+        else:
+            logger.warning("Unknown engine type %s — no workers registered", engine_cls)
 
         # Extract per-mode sampling params from the rollout engine
         self._train_sampling_params = getattr(rollout_engine, "train_sampling_params", {})
@@ -174,6 +181,9 @@ class GatewayManager:
         return self.client.create_session(session_id=session_id, sampling_params=sp or None)
 
     def get_session_url(self, session_id: str) -> str:
+        if self.public_url:
+            base = self.public_url.rstrip("/")
+            return f"{base}/sessions/{session_id}/v1"
         return self.client.get_session_url(session_id)
 
     def get_traces(self, session_id: str) -> list[TraceRecord]:
@@ -187,21 +197,20 @@ class GatewayManager:
         return await self.async_client.create_session(session_id=session_id, sampling_params=sp or None)
 
     async def aget_traces(self, session_id: str) -> list[TraceRecord]:
-        await self.async_client.flush()
+        await self.async_client.flush(timeout=_TRACE_API_TIMEOUT)
         return await self.async_client.get_session_traces(session_id)
+
+    async def adelete_session(self, session_id: str) -> int:
+        """Delete a session and all its accumulated traces. Returns count removed."""
+        await self.async_client.flush()
+        return await self.async_client.delete_session(session_id)
 
     # -- Worker setup --------------------------------------------------------
 
-    def _ensure_workers(self, rollout_engine: RolloutEngine) -> list[str]:
-        """Get or create worker URLs for the given engine type."""
-        engine_cls = type(rollout_engine).__name__
-
-        if engine_cls == "VerlEngine":
-            addresses = rollout_engine.rollout_manager.server_addresses
-            return [f"http://{addr}" if not addr.startswith("http") else addr for addr in addresses]
-
-        logger.warning("Unknown engine type %s — no workers registered", engine_cls)
-        return []
+    def _ensure_verl_engine_workers(self, rollout_engine: VerlEngine) -> list[str]:
+        """Get or create worker URLs for the VerlEngine."""
+        addresses = rollout_engine.server_manager._server_id_to_handle.keys()
+        return [f"http://{addr}" if not addr.startswith("http") else addr for addr in addresses]
 
     # -- Internal ------------------------------------------------------------
 
@@ -218,6 +227,10 @@ class GatewayManager:
         ]
         if self.db_path:
             cmd.extend(["--db-path", self.db_path])
+        if self.sampling_params_priority != "client":
+            cmd.extend(["--sampling-params-priority", self.sampling_params_priority])
+        if self.model:
+            cmd.extend(["--model", self.model])
 
         logger.info("Starting gateway subprocess: %s", " ".join(cmd))
         # Inherit parent's stdout/stderr so gateway logs are visible for debugging.
@@ -252,6 +265,8 @@ class GatewayManager:
             port=self.port,
             db_path=self.db_path,
             store_worker="sqlite" if self.db_path else "memory",
+            sampling_params_priority=self.sampling_params_priority,
+            model=self.model,
         )
         app = create_app(config=gw_config, local_handler=local_handler)
 

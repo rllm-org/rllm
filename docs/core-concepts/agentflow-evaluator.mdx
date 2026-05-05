@@ -1,0 +1,180 @@
+---
+title: AgentFlow and Evaluator
+description: The two protocols that define how agents run tasks and how results are scored
+---
+
+rLLM's eval framework is built around two protocols: **AgentFlow** runs an agent on a task and produces an Episode, and **Evaluator** scores that Episode. Together they form a clean separation between agent logic and evaluation logic.
+
+## AgentFlow
+
+An `AgentFlow` is any callable that takes a task and returns an Episode. The same flow runs at eval time and at training time — at training, `config.base_url` points at a model gateway that captures token IDs / logprobs transparently, so your flow code doesn't change between the two modes.
+
+```python
+@runtime_checkable
+class AgentFlow(Protocol):
+    def run(self, task: Task, config: AgentConfig) -> Episode: ...
+```
+
+An AgentFlow may orchestrate one or many agents internally. Each agent contributes one or more Trajectories to the returned Episode. Implementations can provide `run` (sync) or `arun` (async) — the runner prefers `arun` when available.
+
+### Task and AgentConfig
+
+The two arguments passed to every AgentFlow call:
+
+```python
+@dataclass
+class Task:
+    id: str                                  # Stable identifier (row index, task name, ...)
+    instruction: str | list[dict]            # What the agent sees (text or multimodal blocks)
+    metadata: dict[str, Any]                 # Ground truth, MCQ choices, parsed task.toml, ...
+    dataset_dir: Path                        # Where dataset.toml lives
+    sub_dir: Path | None                     # Per-task subdir (sandbox tasks); None for data tasks
+
+@dataclass
+class AgentConfig:
+    base_url: str                            # LLM API endpoint
+    model: str                               # Model name
+    session_uid: str                         # Unique session identifier
+    metadata: dict                           # Extra configuration
+```
+
+`Task` is pure data. The instruction is rendered ahead of time (from a JSONL row, an `instruction.md` file, or an `instruction.md.tpl` template). `metadata` carries everything the verifier needs — for catalog datasets that's the source row; for sandbox tasks it's the parsed `task.toml`. See [Tasks and the Runner](/core-concepts/task-and-runner) for the loader and execution pipeline.
+
+### Example AgentFlow
+
+A minimal math agent that solves a problem in one turn (see
+[`cookbooks/math/math_flow.py`](https://github.com/rllm-org/rllm/blob/main/cookbooks/math/math_flow.py)
+for the runnable, async version that ships in the repo):
+
+```python
+from rllm.types import Episode, Trajectory, Step
+from openai import OpenAI
+
+class MathAgentFlow:
+    def run(self, task, config):
+        client = OpenAI(base_url=config.base_url, api_key="unused")
+
+        response = client.chat.completions.create(
+            model=config.model,
+            messages=[{"role": "user", "content": task.instruction}],
+        )
+        answer = response.choices[0].message.content
+
+        step = Step(input=task.instruction, output=answer)
+        trajectory = Trajectory(steps=[step], output=answer)
+        return Episode(trajectories=[trajectory])
+```
+
+## Evaluator
+
+An `Evaluator` scores an Episode produced by an AgentFlow. It examines the task and the episode's trajectories, then returns an `EvalOutput` with a reward and correctness flag.
+
+```python
+@runtime_checkable
+class Evaluator(Protocol):
+    def evaluate(self, task: Task, episode: Episode) -> EvalOutput: ...
+```
+
+### EvalOutput
+
+The result of evaluating a single episode:
+
+```python
+@dataclass
+class EvalOutput:
+    reward: float                           # Scalar reward
+    is_correct: bool                        # Whether the agent succeeded
+    signals: list[Signal] = []              # Named sub-scores
+    metadata: dict = {}                     # Extra data (e.g., extracted answer)
+
+@dataclass
+class Signal:
+    name: str           # e.g., "accuracy", "format", "f1"
+    value: float        # Typically 0.0–1.0
+    metadata: dict = {}
+```
+
+`signals` lets an evaluator report multiple dimensions of quality. For example, an IFEval evaluator might return separate signals for instruction-following accuracy and format compliance.
+
+### Example Evaluator
+
+A simple exact-match evaluator for math:
+
+```python
+from rllm.eval.types import EvalOutput
+
+class ExactMatchEvaluator:
+    def evaluate(self, task, episode):
+        expected = str(task.metadata["ground_truth"])
+        actual = episode.trajectories[0].steps[-1].output or ""
+
+        # Extract boxed answer if present
+        if "\\boxed{" in actual:
+            actual = actual.split("\\boxed{")[1].split("}")[0]
+
+        is_correct = actual.strip() == expected.strip()
+        return EvalOutput(
+            reward=1.0 if is_correct else 0.0,
+            is_correct=is_correct,
+        )
+```
+
+In practice you rarely write a class — most rLLM evaluators are plain `evaluate(task, episode) -> EvalOutput` functions exported from a module under `rllm.eval.reward_fns`. See [Reward functions](/core-concepts/reward-functions) for the convention and how a benchmark wires one up.
+
+### Built-in reward functions
+
+A non-exhaustive selection from `rllm.eval.reward_fns`:
+
+| Module | Method | Use case |
+|--------|--------|----------|
+| `rllm.eval.reward_fns.math` | `\boxed{}` extraction + symbolic grading | Math, GSM8K, MATH-500 |
+| `rllm.eval.reward_fns.mcq` | Letter-choice match | Multiple-choice QA, MMLU |
+| `rllm.eval.reward_fns.code` | Test execution | Code generation |
+| `rllm.eval.reward_fns.llm_judge` | LLM-as-judge | Open-ended generation |
+| `rllm.eval.reward_fns.bfcl` | Function-call matching | Tool-use benchmarks |
+| `rllm.eval.reward_fns.ifeval` | Instruction-following checks | IFEval |
+
+## How they work together
+
+The eval runner connects AgentFlow and Evaluator in a simple pipeline:
+
+```
+Dataset → AgentFlow.run(task) → Episode → Evaluator.evaluate(task, episode) → EvalOutput
+```
+
+<Steps>
+  <Step title="Load dataset">
+    The runner loads tasks from the dataset catalog or a custom source.
+  </Step>
+
+  <Step title="Run agent">
+    For each task, the runner calls `agent_flow.run(task, config)` to produce an Episode.
+  </Step>
+
+  <Step title="Score results">
+    The runner passes each Episode to `evaluator.evaluate(task, episode)` to get an EvalOutput.
+  </Step>
+
+  <Step title="Aggregate">
+    Rewards and signals are aggregated into an `EvalResult` with overall score, per-example breakdowns, and signal averages.
+  </Step>
+</Steps>
+
+From the CLI, this entire pipeline runs with a single command:
+
+```bash
+rllm eval gsm8k --model Qwen/Qwen3-8B
+```
+
+The CLI resolves the appropriate AgentFlow and Evaluator from the benchmark name, pulls the dataset from HuggingFace, and runs the pipeline.
+
+## Connection to training
+
+AgentFlow and Evaluator are designed to be reusable across eval and training. The same flow function that powers `rllm eval` also powers `rllm train` — the only thing that changes is which `base_url` `config.base_url` points at:
+
+- During eval, `config.base_url` points at a regular OpenAI-compatible endpoint
+- During training, the trainer routes `config.base_url` through a model gateway that captures token IDs and logprobs alongside the chat-completion response, so policy-gradient training has the data it needs without any change to your flow code
+- The **Evaluator** runs unchanged — its `EvalOutput.reward` is the per-task reward signal the trainer feeds into advantage computation
+- The **Episode** structure is identical in both paths, so eval results are directly comparable to training metrics
+
+See [`cookbooks/`](https://github.com/rllm-org/rllm/tree/main/cookbooks) for seven worked examples that train end-to-end with this pattern.

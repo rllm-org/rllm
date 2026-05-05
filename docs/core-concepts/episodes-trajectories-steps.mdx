@@ -1,0 +1,141 @@
+---
+title: Episodes, trajectories, and steps
+description: The core data structures that represent agent interactions in rLLM
+---
+
+rLLM represents all agent interactions through three nested data structures: **Episode**, **Trajectory**, and **Step**. These types are the common currency across evaluation, training, and the SDK.
+
+## The hierarchy
+
+```
+Episode
+├── Trajectory (agent A)
+│   ├── Step 0  (input → LLM call → output, reward)
+│   ├── Step 1
+│   └── Step 2
+├── Trajectory (agent B)
+│   ├── Step 0
+│   └── Step 1
+└── metrics, artifacts, metadata
+```
+
+An **Episode** is a complete rollout for a single task. It contains one or more **Trajectories** — one per agent involved. Each Trajectory is a sequence of **Steps**, where each Step captures one LLM call and its result.
+
+## Step
+
+A Step records a single interaction turn: the input sent to the model, the output it produced, and the reward assigned by the environment or evaluator.
+
+```python
+class Step(BaseModel):
+    id: str               # Unique identifier
+    input: Any | None      # What was sent to the model
+    output: Any | None     # What the model returned
+    action: Any | None     # Parsed action (if applicable)
+    reward: float          # Reward for this step (default 0.0)
+    done: bool             # Whether the episode ended here
+    metadata: dict | None  # Arbitrary extra data
+```
+
+The training-extended version in `rllm.agents.agent` adds token-level fields needed for RL:
+
+```python
+# Training-specific fields (added by the execution engine)
+prompt_ids: list[int]          # Tokenized prompt
+response_ids: list[int]        # Tokenized response
+logprobs: list[float]          # Log-probabilities per token
+chat_completions: list[dict]   # Full conversation in OpenAI format
+advantage: float | None        # Computed during training
+```
+
+## Trajectory
+
+A Trajectory groups the steps produced by a single agent across an episode. In a single-agent setup there is one Trajectory per Episode; in multi-agent workflows there may be several.
+
+```python
+class Trajectory(BaseModel):
+    uid: str                        # Unique identifier
+    name: str                       # Agent or role name (default "agent")
+    task: Any                       # Task this trajectory was generated for
+    steps: list[Step]               # Ordered interaction steps
+    reward: float | None            # Trajectory-level reward
+    input: dict | None              # Function arguments (SDK mode)
+    output: Any                     # Function return value (SDK mode)
+    signals: dict[str, float]       # Named evaluation signals
+    metadata: dict | None           # Arbitrary extra data
+```
+
+The `name` field identifies which agent produced this trajectory. During training, trajectories are grouped by `{task_id}:{trajectory.name}` for advantage computation — GRPO compares trajectories within the same group to determine which rollouts were better than average.
+
+## Episode
+
+An Episode is the top-level container for a complete rollout on a single task. Its ID encodes both the task and rollout index.
+
+```python
+class Episode(BaseModel):
+    id: str                               # Format: "{task_id}:{rollout_idx}"
+    task: Any                             # The task data
+    termination_reason: Any | None        # Why the episode ended
+    is_correct: bool                      # Whether the agent succeeded
+    trajectories: list[Trajectory]        # All agent trajectories
+    artifacts: dict[str, Any]             # Files, images, or other outputs
+    metrics: dict                         # Computed evaluation metrics
+    metadata: dict                        # Arbitrary extra data
+```
+
+The `task_id` and `rollout_idx` properties parse the ID string:
+
+```python
+episode = Episode(id="gsm8k_42:3")
+episode.task_id     # "gsm8k_42"
+episode.rollout_idx # "3"
+```
+
+## How they connect
+
+<Steps>
+  <Step title="Environment resets">
+    The engine creates a fresh Episode and initializes the agent and environment for a new task.
+  </Step>
+
+  <Step title="Agent-environment loop">
+    Each turn through the loop produces a Step: the agent receives an observation, calls the LLM, and returns an action. The environment evaluates the action and assigns a reward.
+  </Step>
+
+  <Step title="Trajectory accumulates">
+    Steps are appended to the agent's Trajectory until the environment signals `done=True` or the step limit is reached.
+  </Step>
+
+  <Step title="Episode completes">
+    The finished Trajectory (or Trajectories, in multi-agent settings) is attached to the Episode along with final metrics and artifacts.
+  </Step>
+</Steps>
+
+## Single-agent vs multi-agent
+
+In a single-agent task, an Episode contains exactly one Trajectory:
+
+```python
+episode.trajectories[0].name  # "agent"
+```
+
+In a multi-agent workflow (e.g., solver-judge), the Episode contains one Trajectory per role:
+
+```python
+episode.trajectories[0].name  # "solver"
+episode.trajectories[1].name  # "judge"
+```
+
+Each Trajectory tracks its own steps independently, and the training pipeline computes advantages per trajectory group.
+
+## Role in the training pipeline
+
+These data structures flow through the training pipeline in order:
+
+1. **Generate**: The execution engine runs agents and produces Episodes with Trajectories and Steps
+2. **Transform**: Trajectories are grouped by `{task_id}:{trajectory.name}` into `TrajectoryGroup`s
+3. **Advantage**: GRPO/REINFORCE computes advantages by comparing rewards within each group
+4. **Update**: The trainer uses the token-level data (prompt IDs, response IDs, logprobs, advantages) from each Step to compute policy gradients
+
+<Info>
+The canonical type definitions live in `rllm/types.py`. The training-extended versions with token-level fields are in `rllm/agents/agent.py`.
+</Info>

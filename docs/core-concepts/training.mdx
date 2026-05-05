@@ -1,0 +1,222 @@
+---
+title: AgentTrainer and the training loop
+description: How rLLM closes the RL loop using AgentFlow and Evaluator
+---
+
+rLLM's training loop uses the same [AgentFlow and Evaluator](/core-concepts/agentflow-evaluator) abstractions you use for evaluation. You pass your AgentFlow, Evaluator, and datasets into `AgentTrainer` — it handles episode generation, reward assignment, advantage computation, and policy updates.
+
+During eval, the pipeline is one-directional:
+
+```
+Dataset → AgentFlow.run(task) → Episode → Evaluator.evaluate(task, episode) → EvalOutput
+```
+
+During training, the same pipeline runs in a loop, with rewards flowing back into the model:
+
+```
+Dataset → AgentFlow.run(task) → Episode → Evaluator.evaluate() → reward
+    → advantage computation → policy update → (repeat with updated model)
+```
+
+Your AgentFlow and Evaluator code stays the same. The `AgentTrainer` handles the additional machinery — routing LLM calls through a gateway that captures token-level data (prompt IDs, response IDs, logprobs) needed for policy gradients.
+
+## Basic usage
+
+Pass an `agent_flow` and `evaluator` to `AgentTrainer`, then call `train()`:
+
+```python
+from rllm.experimental.unified_trainer import AgentTrainer
+from rllm.eval import load_agent, load_evaluator
+from rllm.cli.train import build_train_config
+from rllm.data import DatasetRegistry
+
+# Load your agent flow and evaluator
+agent = load_agent("concierge")
+evaluator = load_evaluator("relevance")
+
+# Load datasets
+train_dataset = DatasetRegistry.load_dataset("concierge", "train")
+val_dataset = DatasetRegistry.load_dataset("concierge", "test")
+
+# Build config
+config = build_train_config(
+    model_name="Qwen/Qwen3-8B",
+    group_size=8,
+    batch_size=32,
+    lr=2e-5,
+    lora_rank=32,
+    total_epochs=1,
+    project="concierge-train",
+    experiment="concierge-rl",
+)
+
+# Train
+trainer = AgentTrainer(
+    backend="tinker",
+    agent_flow=agent,
+    evaluator=evaluator,
+    config=config,
+    train_dataset=train_dataset,
+    val_dataset=val_dataset,
+)
+trainer.train()
+```
+
+You can also use custom AgentFlow and Evaluator classes directly:
+
+```python
+trainer = AgentTrainer(
+    backend="verl",
+    agent_flow=MyAgentFlow(),
+    evaluator=MyEvaluator(),
+    config=config,
+    train_dataset=train_dataset,
+    val_dataset=val_dataset,
+)
+trainer.train()
+```
+
+## The training loop
+
+Each training iteration runs through these stages:
+
+<Steps>
+  <Step title="Generate episodes">
+    For each task in the batch, the trainer calls `agent_flow.run(task, config)` to produce an Episode — just like during eval. The `AgentConfig.base_url` points to a gateway that transparently captures token-level traces (prompt IDs, response IDs, logprobs) from every LLM call.
+  </Step>
+
+  <Step title="Evaluate and assign rewards">
+    The trainer calls `evaluator.evaluate(task, episode)` for each Episode, producing an `EvalOutput` with a reward and correctness flag. The reward is written back onto each Trajectory in the Episode.
+  </Step>
+
+  <Step title="Enrich with token data">
+    The gateway's captured traces are matched to Trajectories and converted into training-ready Steps with full token information. This is what makes the same AgentFlow work for both eval and training — your agent code doesn't need to know about tokens or logprobs.
+  </Step>
+
+  <Step title="Compute advantages">
+    Trajectories are grouped by `{task_id}:{trajectory.name}`. The RL algorithm (GRPO, REINFORCE, etc.) compares rewards within each group to compute advantages — determining which rollouts were better than average.
+  </Step>
+
+  <Step title="Update policy">
+    The training backend uses the token-level data and advantages from each Step to compute policy gradients and update model weights.
+  </Step>
+
+  <Step title="Iterate">
+    The updated model generates new Episodes on the next batch. The cycle repeats.
+  </Step>
+</Steps>
+
+## How the gateway works
+
+Your AgentFlow makes LLM calls like normal — using an OpenAI-compatible client pointed at the `base_url` from `AgentConfig`. Behind the scenes, this URL routes through a gateway that:
+
+1. Forwards requests to the actual model server
+2. Records every request and response with token IDs and logprobs
+3. Associates traces with the correct Episode via the `session_uid`
+
+After the AgentFlow completes, the trainer retrieves these traces and enriches the Episode's Steps with the token-level data needed for training. Your agent code never needs to handle tokenization or logprob collection.
+
+## Training backends
+
+`AgentTrainer` supports two backends:
+
+<Tabs>
+  <Tab title="verl">
+    Distributed RL training via Ray with vLLM/SGLang inference. Best for large-scale multi-GPU training.
+
+    ```python
+    trainer = AgentTrainer(
+        backend="verl",
+        agent_flow=agent,
+        evaluator=evaluator,
+        config=config,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+    )
+    ```
+  </Tab>
+
+  <Tab title="tinker">
+    Training via the Tinker service. Simpler setup for single-node training.
+
+    ```python
+    trainer = AgentTrainer(
+        backend="tinker",
+        agent_flow=agent,
+        evaluator=evaluator,
+        config=config,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+    )
+    ```
+  </Tab>
+</Tabs>
+
+See [verl](/backends/verl) and [tinker](/backends/tinker) for backend-specific configuration.
+
+## Configuration
+
+Training configs are OmegaConf/Hydra-based. The `build_train_config` helper covers common options:
+
+```python
+config = build_train_config(
+    model_name="Qwen/Qwen3-8B",    # Base model
+    group_size=8,                    # Rollouts per task (for GRPO)
+    batch_size=32,                   # Tasks per training batch
+    lr=2e-5,                         # Learning rate
+    lora_rank=32,                    # LoRA rank (None for full fine-tuning)
+    total_epochs=1,                  # Training epochs
+    total_steps=None,                # Or stop after N steps
+    val_freq=5,                      # Validate every N steps
+    save_freq=20,                    # Checkpoint every N steps
+    project="my-project",           # W&B project name
+    experiment="my-experiment",     # Experiment name
+    output_dir=None,                # Checkpoint directory
+    config_file=None,               # Optional YAML overrides
+)
+```
+
+For full control, you can also provide a YAML config file or override individual values:
+
+<Accordion title="Key configuration sections">
+```yaml
+data:
+  train_batch_size: 32
+  max_prompt_length: 2048
+  max_response_length: 1024
+
+training:
+  total_epochs: 1
+  save_freq: 20
+  val_freq: 5
+  lr: 2e-5
+
+model:
+  name: "Qwen/Qwen3-8B"
+
+rllm:
+  algorithm:
+    name: "grpo"
+    group_size: 8
+  workflow:
+    n_parallel_tasks: 64
+    retry_limit: 3
+```
+</Accordion>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Cookbooks" icon="book" href="/cookbooks/overview">
+    Worked end-to-end training examples (math, deepcoder, frozenlake, finqa, …)
+  </Card>
+  <Card title="RL algorithms" icon="brain" href="/core-concepts/rl-algorithms">
+    Learn about GRPO, REINFORCE, and other algorithms
+  </Card>
+  <Card title="Distributed training" icon="server" href="/guides/distributed-training">
+    Scale to multiple GPUs and nodes
+  </Card>
+  <Card title="Solver-judge tutorial" icon="diagram-project" href="/tutorials/solver-judge-workflow">
+    Multi-agent training walkthrough
+  </Card>
+</CardGroup>

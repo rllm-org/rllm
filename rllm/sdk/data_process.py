@@ -3,9 +3,9 @@ import logging
 import uuid
 from collections import defaultdict
 
-from rllm.agents.agent import Step, Trajectory
 from rllm.engine.rollout import ModelOutput
 from rllm.sdk.protocol import LLMInput, LLMOutput, Trace
+from rllm.types import Step, Trajectory
 
 logger = logging.getLogger(__name__)
 

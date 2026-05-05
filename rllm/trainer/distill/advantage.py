@@ -3,7 +3,7 @@
 import logging
 from collections.abc import Callable
 
-from rllm.agents.agent import Step
+from rllm.types import Step
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +103,7 @@ async def compute_step_distill_advantage(
         teacher_chat_parser: Chat parser for the teacher (required when shared_tokenizer=False or teacher_prompt_fn is set).
         teacher_prompt_fn: Optional function (prompt_messages) -> transformed_messages.
             Transforms prompt messages for the teacher, e.g., to inject ground-truth
-            for privileged-context distillation (OPSD).
+            for privileged-context distillation.
         clip_min: Optional lower bound for clipping advantages.
         clip_max: Optional upper bound for clipping advantages.
         kl_penalty_coef: Coefficient for the KL penalty (default 1.0).

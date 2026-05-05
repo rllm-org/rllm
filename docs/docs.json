@@ -1,0 +1,198 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "rLLM",
+  "theme": "aspen",
+  "colors": {
+    "primary": "#6366f1",
+    "light": "#818cf8",
+    "dark": "#4f46e5"
+  },
+  "favicon": "/favicon.svg",
+  "logo": {
+    "light": "/logo/light.png",
+    "dark": "/logo/dark.png"
+  },
+  "navbar": {
+    "links": [
+      {
+        "type": "github",
+        "href": "https://github.com/rllm-org/rllm"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Slack",
+      "href": "https://join.slack.com/t/rllmproject/shared_invite/zt-3pyblo6ef-m9kqAoInI8xSyUBkpuOyXA"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/rllm-org/rllm",
+      "x": "https://x.com/rllm_project",
+      "website": "https://rllm-project.com",
+      "slack": "https://join.slack.com/t/rllmproject/shared_invite/zt-3pyblo6ef-m9kqAoInI8xSyUBkpuOyXA"
+    }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get started",
+            "pages": [
+              "index",
+              "installation",
+              "quickstart-cli"
+            ]
+          },
+          {
+            "group": "Tutorials",
+            "pages": [
+              "tutorials/solver-judge-workflow"
+            ]
+          },
+          {
+            "group": "rLLM CLI & UI",
+            "pages": [
+              "core-concepts/cli-and-ui",
+              "experimental/ui",
+              "datasets"
+            ]
+          },
+          {
+            "group": "Core concepts",
+            "pages": [
+              "core-concepts/episodes-trajectories-steps",
+              "core-concepts/task-and-runner",
+              "core-concepts/agentflow-evaluator",
+              "core-concepts/reward-functions",
+              "core-concepts/harnesses",
+              "core-concepts/training"
+            ]
+          },
+          {
+            "group": "Agent runtimes",
+            "pages": [
+              "agent-runtimes/agentcore"
+            ]
+          },
+          {
+            "group": "Training backends",
+            "pages": [
+              "backends/verl",
+              "backends/tinker",
+              "backends/comparison"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/customizing-training",
+              "guides/distributed-training",
+              "guides/ray-runtime-env"
+            ]
+          },
+          {
+            "group": "Unified workflow trainer",
+            "pages": [
+              "experimental/unified-trainer",
+              "experimental/backend-protocol",
+              "experimental/configuration"
+            ]
+          },
+          {
+            "group": "Advanced algorithms",
+            "pages": [
+              "experimental/advantage-estimator",
+              "experimental/precompute-advantage"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Cookbooks",
+        "groups": [
+          {
+            "group": "Cookbooks",
+            "pages": [
+              "cookbooks/overview",
+              "cookbooks/frozenlake",
+              "cookbooks/math",
+              "cookbooks/math_tool_agent",
+              "cookbooks/deepcoder",
+              "cookbooks/finqa",
+              "cookbooks/geo3k",
+              "cookbooks/solver_judge_flow"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Projects",
+        "groups": [
+          {
+            "group": "Case studies",
+            "pages": [
+              "projects/deep-scaler",
+              "projects/deep-coder",
+              "projects/deep-swe",
+              "projects/tongyi-deep-research",
+              "projects/terminal-bench-rl",
+              "projects/petting-llms",
+              "projects/seta",
+              "projects/llm-in-sandbox",
+              "projects/cogito-ergo-ludo",
+              "projects/cut-the-bill",
+              "projects/experiential-rl",
+              "projects/v1-parallel-reasoners"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core API",
+            "pages": [
+              "api/agentflow",
+              "api/workflows"
+            ]
+          },
+          {
+            "group": "Engines",
+            "pages": [
+              "api/workflow-engine",
+              "api/rollout-engine"
+            ]
+          },
+          {
+            "group": "Training",
+            "pages": [
+              "api/trainer",
+              "api/rewards"
+            ]
+          },
+          {
+            "group": "Tools & utilities",
+            "pages": [
+              "api/tools",
+              "api/parsers",
+              "api/data"
+            ]
+          }
+        ]
+      }
+    ],
+    "global": {
+      "anchors": [
+        {
+          "anchor": "Blog",
+          "href": "https://rllm-project.com/blog.html",
+          "icon": "newspaper"
+        }
+      ]
+    }
+  }
+}

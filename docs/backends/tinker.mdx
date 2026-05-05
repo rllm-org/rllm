@@ -1,0 +1,578 @@
+---
+title: Tinker Backend
+description: Training with tinker - async-first RL training with unified architecture
+---
+
+The **tinker** backend is rLLM's async-first training backend that provides a unified architecture for both agent and workflow training. It's designed for flexibility and ease of use with built-in support for LoRA and seamless integration with the tinker service.
+
+## Overview
+
+tinker backend features:
+
+- **Async-First Design**: Native async/await support throughout the training pipeline
+- **Unified Architecture**: Single codebase for agent and workflow training
+- **Service-Based**: Uses tinker service for model serving and training
+- **Simplified API**: Cleaner configuration and easier setup
+
+<Note>
+  **Python Version**: Requires Python >= 3.11 for tinker backend
+</Note>
+
+## Installation
+
+Install rLLM with the tinker backend:
+
+<CodeGroup>
+```bash Direct Installation
+uv pip install "rllm[tinker] @ git+https://github.com/rllm-org/rllm.git"
+```
+
+```bash From Source
+git clone https://github.com/rllm-org/rllm.git
+cd rllm
+uv venv --python 3.11  # Python 3.11+ required
+source .venv/bin/activate
+uv pip install -e .[tinker]
+```
+
+```bash CPU-Only Installation
+# For CPU-only machines (e.g., development)
+uv pip install -e .[tinker] --torch-backend=cpu
+```
+</CodeGroup>
+
+## Dependencies
+
+The tinker backend includes (from `pyproject.toml`):
+
+```toml
+tinker = [
+    "tinker ; python_version >= '3.11'",
+    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook ; python_version >= '3.11'",
+]
+```
+
+## Basic Usage
+
+### Agent Training
+
+Train a math agent with tinker backend. The recommended path is to use the
+[`cookbooks/math`](https://github.com/rllm-org/rllm/tree/main/cookbooks/math) cookbook,
+which already wires an `AgentFlow` + `Evaluator` against the unified trainer:
+
+```python train.py
+import hydra
+from omegaconf import DictConfig
+
+from math_flow import math_flow                # from cookbooks/math/
+from math_eval import math_evaluator           # from cookbooks/math/
+
+from rllm.data.dataset import DatasetRegistry
+from rllm.experimental.unified_trainer import AgentTrainer
+
+@hydra.main(config_path="pkg://rllm.experimental.config", config_name="unified", version_base=None)
+def main(config: DictConfig):
+    train_dataset = DatasetRegistry.load_dataset("gsm8k", "train")
+    test_dataset = DatasetRegistry.load_dataset("math500", "test")
+
+    trainer = AgentTrainer(
+        backend="tinker",
+        agent_flow=math_flow,
+        evaluator=math_evaluator,
+        config=config,
+        train_dataset=train_dataset,
+        val_dataset=test_dataset,
+    )
+    trainer.train()
+
+if __name__ == "__main__":
+    main()
+```
+
+Run via the cookbook's pre-baked tinker launch script:
+
+```bash
+bash cookbooks/math/train_tinker.sh \
+  model.name=Qwen/Qwen2.5-Math-7B-Instruct \
+  data.train_batch_size=16 \
+  training.group_size=16
+```
+
+### Workflow Training
+
+Tinker backend also supports workflow-based training:
+
+```python train_workflow_tinker.py
+import hydra
+from omegaconf import DictConfig
+
+from examples.solver_judge_tinker.solver_judge_flow import SolverJudgeFlow
+from rllm.data.dataset import DatasetRegistry
+from rllm.trainer import WorkflowTrainer
+
+@hydra.main(
+    version_base=None,
+    config_path="../../rllm/trainer/config",
+    config_name="tinker_rl_trainer"
+)
+def main(config: DictConfig):
+    train_dataset = DatasetRegistry.load_dataset("countdown", "train")
+    test_dataset = DatasetRegistry.load_dataset("countdown", "test")
+
+    trainer = WorkflowTrainer(
+        config=config,
+        workflow_class=SolverJudgeFlow,
+        workflow_args={},
+        train_dataset=train_dataset,
+        val_dataset=test_dataset,
+        backend="tinker",
+    )
+
+    trainer.train()
+
+if __name__ == "__main__":
+    main()
+```
+
+## Configuration
+
+The tinker backend uses `tinker_rl_trainer.yaml` configuration:
+
+### Model Configuration
+
+<ParamField path="model.name" type="string" default="Qwen/Qwen3-8B">
+  Model path (HuggingFace or local)
+</ParamField>
+
+<ParamField path="model.lora_rank" type="integer" default="32">
+  LoRA rank (parameter-efficient fine-tuning)
+</ParamField>
+
+<ParamField path="model.train_unembed" type="boolean" default="true">
+  Train LoRA on output embedding layer
+</ParamField>
+
+<ParamField path="model.train_attn" type="boolean" default="true">
+  Train LoRA on attention layers
+</ParamField>
+
+<ParamField path="model.train_mlp" type="boolean" default="true">
+  Train LoRA on MLP layers
+</ParamField>
+
+### Training Configuration
+
+<ParamField path="training.group_size" type="integer" default="16">
+  Number of rollouts per prompt (for GRPO)
+</ParamField>
+
+<ParamField path="training.val_group_size" type="integer" default="1">
+  Number of rollouts per validation prompt
+</ParamField>
+
+<ParamField path="training.learning_rate" type="float" default="2e-5">
+  Learning rate for optimizer
+</ParamField>
+
+<ParamField path="training.max_length" type="integer" default="32768">
+  Maximum sequence length (prompt + response)
+</ParamField>
+
+<ParamField path="training.num_minibatches" type="integer" default="1">
+  Number of minibatches per update (currently only 1 is fully tested)
+</ParamField>
+
+### Algorithm Configuration
+
+<ParamField path="algorithm.adv_estimator" type="string" default="grpo">
+  Advantage estimator: "grpo", "reinforce", or "distill"
+</ParamField>
+
+<ParamField path="algorithm.gamma" type="float" default="1.0">
+  Discount factor for rewards
+</ParamField>
+
+<ParamField path="algorithm.grouping_level" type="string" default="trajectory">
+  Grouping level: "trajectory" or "step"
+</ParamField>
+
+<ParamField path="algorithm.norm_adv_by_std_in_grpo" type="boolean" default="false">
+  Normalize advantages by standard deviation in GRPO
+</ParamField>
+
+### Data Configuration
+
+<ParamField path="data.train_batch_size" type="integer" default="64">
+  Training batch size
+</ParamField>
+
+<ParamField path="data.val_batch_size" type="integer" default="32">
+  Validation batch size
+</ParamField>
+
+<ParamField path="data.max_prompt_length" type="integer" default="2048">
+  Maximum prompt length in tokens
+</ParamField>
+
+<ParamField path="data.max_response_length" type="integer" default="2048">
+  Maximum response length in tokens
+</ParamField>
+
+### Trainer Configuration
+
+<ParamField path="trainer.total_epochs" type="integer" default="10">
+  Number of training epochs
+</ParamField>
+
+<ParamField path="trainer.test_freq" type="integer" default="5">
+  Validation frequency (in steps)
+</ParamField>
+
+<ParamField path="trainer.save_freq" type="integer" default="20">
+  Checkpoint save frequency (in steps)
+</ParamField>
+
+<ParamField path="trainer.default_local_dir" type="string" default="/tmp/rllm-tinker-checkpoints">
+  Checkpoint directory
+</ParamField>
+
+## LoRA Training
+
+tinker backend has native LoRA support built-in:
+
+```python
+# LoRA is enabled by default with rank=32
+trainer = AgentTrainer(
+    config=config,
+    agent_flow=math_flow,        # from cookbooks/math/math_flow.py
+    evaluator=math_evaluator,    # from cookbooks/math/math_eval.py
+    backend="tinker",
+    # ... other args
+)
+```
+
+Configure LoRA parameters:
+
+```bash
+python train_agent.py \
+  model.lora_rank=64 \
+  model.train_attn=true \
+  model.train_mlp=true \
+  model.train_unembed=true
+```
+
+<Warning>
+  Set `model.train_unembed=false` for Fireworks AI compatibility when deploying LoRA adapters.
+</Warning>
+
+## Tinker Service
+
+### Local Service
+
+By default, tinker backend uses a local service:
+
+```yaml
+tinker_base_url: null  # null means local
+```
+
+### Remote Service
+
+Connect to a remote tinker service:
+
+```bash
+python train_agent.py \
+  tinker_base_url=http://remote-server:8080
+```
+
+## Sampling Configuration
+
+Configure sampling parameters:
+
+<ParamField path="sampling.temperature" type="float" default="1.0">
+  Sampling temperature
+</ParamField>
+
+<ParamField path="sampling.top_p" type="float" default="1.0">
+  Top-p (nucleus) sampling parameter
+</ParamField>
+
+<Warning>
+  **Important**: Setting `temperature` or `top_p` away from 1.0 is not recommended by tinker and can cause mysterious issues with logprobs. See [tinker-cookbook#86](https://github.com/thinking-machines-lab/tinker-cookbook/pull/86) for discussion.
+</Warning>
+
+## Rollout Engine Configuration
+
+<ParamField path="rollout_engine.reasoning_effort" type="string" default="medium">
+  Reasoning effort level: "low", "medium", "high"
+</ParamField>
+
+<ParamField path="rollout_engine.accumulate_reasoning" type="boolean" default="false">
+  Accumulate reasoning tokens across steps
+</ParamField>
+
+<ParamField path="rollout_engine.disable_thinking" type="boolean" default="false">
+  Disable thinking tokens in responses
+</ParamField>
+
+<ParamField path="rollout_engine.bypass_render_with_parser" type="boolean" default="false">
+  Bypass renderer and use parser directly
+</ParamField>
+
+## Checkpointing
+
+tinker backend provides flexible checkpointing:
+
+### Automatic Checkpointing
+
+```yaml
+trainer:
+  save_freq: 20  # Save every 20 steps
+  default_local_dir: /tmp/rllm-tinker-checkpoints
+```
+
+### Resume from Checkpoint
+
+Resume from a tinker checkpoint:
+
+```bash
+python train_agent.py \
+  trainer.resume_from_tinker_id=tinker://uuid/weights/000060
+```
+
+### Manual Checkpoint Loading
+
+```bash
+python train_agent.py \
+  trainer.default_local_dir=/path/to/checkpoint/dir
+```
+
+## Distillation Support
+
+tinker backend supports knowledge distillation from teacher models:
+
+```yaml
+algorithm:
+  adv_estimator: distill
+  shared_tokenizer: false
+  teacher_rollout_args:
+    backend: tinker  # or openai
+    model: "Qwen/Qwen3-32B"
+    base_url: "http://localhost:8000/v1"
+    api_key: "EMPTY"
+    max_prompt_length: 32768
+```
+
+Run distillation training:
+
+```bash
+python train_agent.py \
+  algorithm.adv_estimator=distill \
+  algorithm.teacher_rollout_args.model=Qwen/Qwen3-32B
+```
+
+## Advanced Features
+
+### Fused Forward-Backward and Optimizer Step
+
+For better performance, tinker can fuse forward-backward pass with optimizer step:
+
+```yaml
+fuse_forward_backward_and_optim_step: true
+```
+
+<Info>
+  This optimization reduces overhead by combining gradient computation and parameter updates into a single operation.
+</Info>
+
+### Multi-Step Agents
+
+For multi-turn agent interactions:
+
+```yaml
+agent:
+  max_steps: 20  # Allow up to 20 turns
+```
+
+### Workflow Parallel Tasks
+
+Control parallelism in workflow execution:
+
+```yaml
+workflow:
+  n_parallel_tasks: 256  # Run up to 256 tasks in parallel
+  retry_limit: 3  # Retry failed tasks up to 3 times
+```
+
+## Monitoring
+
+Configure logging backends:
+
+```yaml
+trainer:
+  logger: ['console', 'wandb', 'tensorboard']
+  project_name: 'rllm-tinker'
+  experiment_name: 'math-agent-v1'
+```
+
+## Example Configuration
+
+Complete configuration for MATH dataset training:
+
+```yaml config.yaml
+# Model
+model:
+  name: "Qwen/Qwen3-8B"
+  lora_rank: 32
+  train_unembed: true
+  train_attn: true
+  train_mlp: true
+
+# Training
+training:
+  group_size: 16
+  val_group_size: 1
+  learning_rate: 2e-5
+  max_length: 32768
+
+# Sampling
+sampling:
+  temperature: 1.0
+  top_p: 1.0
+
+# Algorithm
+algorithm:
+  adv_estimator: grpo
+  gamma: 1.0
+  lam: 0.95
+  norm_adv_by_std_in_grpo: false
+  grouping_level: 'trajectory'
+
+# Data
+data:
+  train_batch_size: 64
+  val_batch_size: 32
+  max_prompt_length: 2048
+  max_response_length: 2048
+
+# Trainer
+trainer:
+  total_epochs: 10
+  test_freq: 5
+  save_freq: 20
+  logger: ['console', 'wandb']
+  project_name: 'math-rl'
+  experiment_name: 'qwen3-8b-gsm8k'
+  default_local_dir: '/tmp/rllm-tinker-checkpoints'
+
+# Agent
+agent:
+  max_steps: 1  # Single-turn
+  agent_args: {}
+
+# Environment
+env:
+  env_args: {}
+
+# Rollout Engine
+rollout_engine:
+  reasoning_effort: "medium"
+  accumulate_reasoning: false
+  disable_thinking: false
+```
+
+## Performance Optimization
+
+<CardGroup cols={2}>
+  <Card title="Increase Batch Size" icon="layer-group">
+    Tune `data.train_batch_size` and `training.group_size` for better GPU utilization
+  </Card>
+  <Card title="Use LoRA" icon="bolt">
+    Enable LoRA for faster training and lower memory usage
+  </Card>
+  <Card title="Fuse Operations" icon="compress">
+    Set `fuse_forward_backward_and_optim_step=true` for reduced overhead
+  </Card>
+  <Card title="Parallel Workflows" icon="rocket">
+    Increase `workflow.n_parallel_tasks` for workflow-based training
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Python Version Error">
+    tinker requires Python >= 3.11. Upgrade your Python version:
+    ```bash
+    uv venv --python 3.11
+    source .venv/bin/activate
+    uv pip install -e .[tinker]
+    ```
+  </Accordion>
+
+  <Accordion title="Sampling Parameter Warning">
+    If you see warnings about `temperature` or `top_p`:
+    ```yaml
+    sampling:
+      temperature: 1.0  # Keep at 1.0
+      top_p: 1.0        # Keep at 1.0
+    ```
+    Setting these away from 1.0 can cause logprob issues.
+  </Accordion>
+
+  <Accordion title="Minibatch Warning">
+    Currently only `num_minibatches=1` is fully tested:
+    ```yaml
+    training:
+      num_minibatches: 1  # Don't change this
+    ```
+  </Accordion>
+
+  <Accordion title="Checkpoint Not Found">
+    Ensure the checkpoint directory exists:
+    ```bash
+    mkdir -p /tmp/rllm-tinker-checkpoints
+    python train_agent.py trainer.default_local_dir=/tmp/rllm-tinker-checkpoints
+    ```
+  </Accordion>
+
+  <Accordion title="Tinker Service Connection Failed">
+    If using remote service, verify the URL:
+    ```bash
+    curl http://remote-server:8080/health
+    python train_agent.py tinker_base_url=http://remote-server:8080
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Comparison with verl
+
+Key differences from verl backend:
+
+| Feature | tinker | verl |
+|---------|--------|------|
+| Python Version | >= 3.11 | >= 3.10 |
+| Architecture | Async-first | Ray-based |
+| LoRA Support | Native | Via config |
+| VLM Support | Limited | Full (Qwen2-VL, Qwen3-VL) |
+| Distributed Training | Limited | Multi-node Ray |
+| Configuration | Simpler | More complex |
+| Service Model | tinker service | vLLM/SGLang |
+
+See [Backend Comparison](/backends/comparison) for detailed feature comparison.
+
+## See Also
+
+<CardGroup cols={2}>
+  <Card title="verl Backend" icon="server" href="/backends/verl">
+    Distributed training with verl
+  </Card>
+  <Card title="Backend Comparison" icon="scale-balanced" href="/backends/comparison">
+    Compare tinker vs verl features
+  </Card>
+  <Card title="tinker Cookbook" icon="book" href="https://github.com/thinking-machines-lab/tinker-cookbook">
+    Official tinker cookbook repository
+  </Card>
+  <Card title="Agent Trainer" icon="robot" href="/api/trainer">
+    Learn about AgentTrainer API
+  </Card>
+</CardGroup>

@@ -220,5 +220,9 @@ uv.lock
 # GCP service account keys
 gcp-key.json
 
+# litellm proxy auto-generated config (may contain API keys)
+**/litellm_proxy_config_autogen.yaml
+**/.litellm_proxy/
+
 # IDE
 .vscode/

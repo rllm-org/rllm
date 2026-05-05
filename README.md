@@ -69,15 +69,14 @@ Define a rollout (your agent) and an evaluator (your reward function), then hand
 # my_flow.py
 from openai import OpenAI
 import rllm
-from rllm.experimental.eval.types import AgentConfig, Task
-from rllm.types import Episode, Trajectory
+from rllm.types import AgentConfig, Episode, Task, Trajectory
 
 @rllm.rollout
 def solve(task: Task, config: AgentConfig) -> Episode:
     client = OpenAI(base_url=config.base_url, api_key="EMPTY")
     response = client.chat.completions.create(
         model=config.model,
-        messages=[{"role": "user", "content": task.data["question"]}],
+        messages=[{"role": "user", "content": task.instruction}],
     )
     answer = response.choices[0].message.content or ""
     return Episode(
@@ -89,12 +88,12 @@ def solve(task: Task, config: AgentConfig) -> Episode:
 ```python
 # my_evaluator.py
 import rllm
-from rllm.experimental.eval.types import EvalOutput, Signal, _extract_agent_answer
+from rllm.eval.types import EvalOutput, Signal
 from rllm.types import Episode
 
 @rllm.evaluator
 def score(task: dict, episode: Episode) -> EvalOutput:
-    answer = _extract_agent_answer(episode)
+    answer = str(episode.artifacts.get("answer", ""))
     is_correct = answer.strip() == task["ground_truth"].strip()
     reward = 1.0 if is_correct else 0.0
     return EvalOutput(reward=reward, is_correct=is_correct,

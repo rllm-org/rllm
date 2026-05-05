@@ -13,9 +13,9 @@ from collections.abc import Callable
 from dataclasses import field
 from typing import TYPE_CHECKING, Any
 
-from rllm.agents.agent import Step
 from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
 from rllm.experimental.rollout.types import TokenInput, Tokenizer, TokenOutput
+from rllm.types import Step
 
 if TYPE_CHECKING:
     from rllm.parser import ChatTemplateParser

@@ -1,0 +1,247 @@
+---
+title: "Advantage estimator"
+description: "How the rLLM advantage estimator works, its role-level customization capabilities, and how to register custom estimators."
+---
+
+<Note>
+**Module**: `rllm.experimental.common.advantage`
+</Note>
+
+This page covers:
+
+1. The estimator interface and its data contract
+2. Built-in estimators and what rLLM does (and doesn't) support today
+3. Role-level estimator overrides
+4. Registering a custom estimator
+5. A worked example: porting OPO from Verl
+
+## Core concept
+
+In the unified trainer, advantages are computed on `TrajectoryGroup`s.
+Groups are partitioned by `group_role` (for example, `solver` and `judge`); each role's estimator is invoked once with all the groups belonging to that role.
+
+The orchestrator passes three things to the estimator:
+
+- `rewards: list[np.ndarray]` — outer list aligned with the role's `TrajectoryGroup`s, inner array indexed by trajectory.
+- `algorithm_config: AlgorithmConfig` — the resolved algorithm config, so the estimator can pull whatever it needs (for example, `norm_adv_by_std_in_grpo`).
+- `traj_groups: list[TrajectoryGroup]` — same outer shape as `rewards`, exposed for estimators that need per-trajectory metadata (response lengths, step counts, etc.).
+
+```python
+def my_adv_estimator(
+    rewards: list[np.ndarray],
+    algorithm_config: AlgorithmConfig,
+    **kwargs,
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    ...
+```
+
+### What `rewards` looks like
+
+Concretely, if a training step produced 4 `solver` groups with 8 trajectories each, the solver call receives:
+
+- `rewards` — a length-4 list of 1-D numpy arrays of shape `(8,)`.
+- `rewards[i][j]` is the scalar reward for trajectory `j` in group `i`.
+
+The output `(advantages_by_group, returns_by_group)` must align with `rewards`:
+
+- `advantages_by_group[i].shape == rewards[i].shape`
+- one scalar advantage per trajectory; the unified trainer broadcasts it across the trajectory's response tokens later.
+
+<Note>
+The estimator interface is **trajectory-level scalar in, trajectory-level scalar out**. Per-token signals (returns over time, GAE, K3 detector, etc.) cannot be expressed through this hook today. For per-token signals, see [Pre-computing advantage in workflow](/experimental/precompute-advantage).
+</Note>
+
+## Tinker loss mapping
+
+For the Tinker backend, rLLM also maps each estimator to a default loss function in
+`rllm/trainer/tinker/tinker_policy_trainer.py`:
+
+| Advantage estimator | Default Tinker loss fn |
+|---|---|
+| `REINFORCE` | `importance_sampling` |
+| `REINFORCE_PLUS_PLUS_BASELINE` | `importance_sampling` |
+| `GRPO` | `ppo` |
+| `RLOO` | `importance_sampling` |
+| `OTHER` / unknown | `importance_sampling` (safe fallback) |
+
+Override anytime via:
+
+```yaml
+rllm:
+  algorithm:
+    loss_fn: ppo  # or importance_sampling / cispo / dro / cross_entropy
+```
+
+## Built-in estimators
+
+| Estimator enum | Value | Behavior |
+|---|---|---|
+| `GRPO` | `grpo` | Per-group reward centering; optional std normalization (`norm_adv_by_std_in_grpo`) |
+| `REINFORCE` | `reinforce` | No baseline (`adv = reward`) |
+| `REINFORCE_PLUS_PLUS_BASELINE` | `reinforce_plus_plus_baseline` | Per-group centering, then role-batch std normalization |
+| `RLOO` | `rloo` | Leave-one-out baseline per group |
+
+For `REINFORCE++ baseline`, normalization uses batch-level statistics across all centered rewards in the role.
+
+## What rLLM supports today
+
+The four estimators above are intentionally a subset of Verl's full catalog. We expose what fits the rLLM hook contract — **scalar reward per trajectory, scalar advantage per trajectory** — so that the same code path serves both Tinker and Verl backends.
+
+Verl's broader catalog includes GAE, REINFORCE++ (proper, per-token discounted reward-to-go), REMAX, OPO, GPG, GRPO-passk, GDPO, and OTB / TIR-OTB. Of these:
+
+- **Scalar-per-trajectory estimators** (OPO, GPG, GRPO-passk, GDPO) can be expressed through the current hook. The [OPO worked example](#worked-example-porting-opo-from-verl) below walks through one such port. We plan to add more on request.
+- **Per-token or critic-dependent estimators** (GAE, REINFORCE++ proper, OTB, TIR-OTB) need an interface extension and are a larger follow-up. If you need one of these today, write a per-token signal in your workflow and use [`use_precomputed_advantage`](/experimental/precompute-advantage) to bypass the estimator hook entirely.
+
+## Setting role-level estimators
+
+The most powerful feature of the rLLM path is **assigning different estimators to different trajectory roles** in one training job.
+
+This is especially useful for multi-agent workflows where roles have different reward distributions. In a solver-judge workflow, for example, there are typically multiple solver trajectories per rollout (`2 solver trajectories per rollout × N rollouts = 2N solver trajectories`), so **GRPO** is a good fit for the solver. The judge depends on the solver's outputs, so cross-rollout grouping is less meaningful for it; a vanilla **REINFORCE** is often the better choice.
+
+Configure this via `traj_group_adv_estimator_map` in the trainer constructor:
+
+```python
+from rllm.experimental.common.config import rLLMAdvantageEstimator
+from rllm.experimental.unified_trainer import AgentTrainer
+
+traj_group_adv_estimator_map = {
+    "solver": rLLMAdvantageEstimator.GRPO,
+    "judge": rLLMAdvantageEstimator.REINFORCE,
+}
+
+trainer = AgentTrainer(
+    ...,
+    backend="tinker",
+    traj_group_adv_estimator_map=traj_group_adv_estimator_map,
+)
+```
+
+Global default is set in yaml:
+
+```yaml
+rllm:
+  algorithm:
+    adv_estimator: grpo
+  stepwise_advantage:
+    mode: broadcast
+    norm_adv_by_std_in_grpo: true
+```
+
+## Custom estimators
+
+Use the registry helpers to register and retrieve custom advantage estimators:
+
+- `register_rllm_adv_estimator(name)`
+- `get_rllm_adv_estimator(name)`
+
+The canonical signature is:
+
+```python
+def my_estimator(
+    rewards: list[np.ndarray],
+    algorithm_config: AlgorithmConfig,
+    **kwargs,
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    ...
+```
+
+`**kwargs` carries `traj_groups: list[TrajectoryGroup]` aligned with `rewards`. Pull it when you need per-trajectory metadata; ignore it otherwise.
+
+A toy custom estimator that subtracts the role-batch mean:
+
+```python
+import numpy as np
+from rllm.experimental.common.advantage import (
+    register_rllm_adv_estimator,
+    get_rllm_adv_estimator,
+)
+
+
+@register_rllm_adv_estimator("batch_mean_baseline")
+def batch_mean_baseline(rewards, algorithm_config, **kwargs):
+    batch_mean = np.mean(np.concatenate(rewards)) if rewards else 0.0
+    advantages_by_group = [group_rewards - batch_mean for group_rewards in rewards]
+    return advantages_by_group, advantages_by_group
+
+
+fn = get_rllm_adv_estimator("batch_mean_baseline")
+```
+
+Use the custom estimator as a global default:
+
+```yaml
+rllm:
+  algorithm:
+    adv_estimator: batch_mean_baseline
+```
+
+Or as a role-specific override in `traj_group_adv_estimator_map`:
+
+```python
+traj_group_adv_estimator_map = {
+    "solver": "batch_mean_baseline",
+    "judge": "reinforce",
+}
+```
+
+## Worked example: porting OPO from Verl
+
+OPO (https://arxiv.org/abs/2505.23585) computes a length-weighted baseline per group:
+
+$$
+\text{baseline} = \frac{\sum_i \text{len}_i \cdot \text{score}_i}{\sum_i \text{len}_i},
+\qquad \text{advantage}_i = \text{score}_i - \text{baseline}
+$$
+
+Verl's reference implementation is `compute_opo_outcome_advantage` in `verl/trainer/ppo/core_algos.py`. It reads response lengths from `response_mask`. In rLLM, response lengths come from `traj.steps[*].response_ids`, which are reachable through `traj_groups` in `**kwargs`.
+
+```python
+import numpy as np
+from rllm.experimental.common.advantage import register_rllm_adv_estimator
+
+
+@register_rllm_adv_estimator("opo")
+def calculate_opo_advantages(rewards, algorithm_config, **kwargs):
+    traj_groups = kwargs.get("traj_groups")
+    assert traj_groups is not None, "OPO needs traj_groups for response lengths"
+
+    advantages_by_group = []
+    for group_rewards, traj_group in zip(rewards, traj_groups, strict=True):
+        lengths = np.array(
+            [
+                sum(len(step.response_ids) for step in traj.steps)
+                for traj in traj_group.trajectories
+            ],
+            dtype=np.float64,
+        )
+        total_len = float(np.sum(lengths))
+        baseline = float(np.sum(lengths * group_rewards) / total_len) if total_len > 0 else 0.0
+        advantages_by_group.append(group_rewards - baseline)
+
+    return advantages_by_group, advantages_by_group
+```
+
+Use it as a global default:
+
+```yaml
+rllm:
+  algorithm:
+    adv_estimator: opo
+```
+
+Or per role:
+
+```python
+traj_group_adv_estimator_map = {
+    "solver": "opo",
+    "judge": rLLMAdvantageEstimator.REINFORCE,
+}
+```
+
+The same pattern works for any scalar-per-trajectory estimator: pull what you need from `algorithm_config` and `traj_groups`, return a list of advantage arrays aligned with `rewards`.
+
+## Related references
+
+- [Pre-computing advantage in workflow](/experimental/precompute-advantage) — for per-token signals (SFT-like, OPD)
+- [Unified trainer](/experimental/unified-trainer) — `AlgorithmConfig` reference
+- [Configuration](/experimental/configuration) — full config field list

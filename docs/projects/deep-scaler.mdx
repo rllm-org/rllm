@@ -1,0 +1,25 @@
+---
+title: DeepScaleR
+description: A 1.5B model that surpasses O1-Preview by scaling RL on math reasoning
+---
+
+<Card title="Read the full write-up" icon="arrow-up-right-from-square" href="https://pretty-radio-b75.notion.site/DeepScaleR-Surpassing-O1-Preview-with-a-1-5B-Model-by-Scaling-RL-19681902c1468005bed8ca303013a4e2">
+  Notion blog post with full details
+</Card>
+
+DeepScaleR is a 1.5B math reasoning model that achieves **43.1% Pass@1 on AIME**, surpassing O1-Preview. It demonstrates that small models can match frontier-level performance when RL training is scaled effectively.
+
+## Results
+
+| Model | Parameters | AIME Pass@1 |
+|-------|-----------|-------------|
+| **DeepScaleR** | **1.5B** | **43.1%** |
+| O1-Preview | Unknown | 42.0% |
+
+## Approach
+
+DeepScaleR iteratively scales Deepseek's GRPO algorithm from 8K to 16K to 24K context length for thinking, trained on top of DeepSeek-R1-Distill-1.5B on math competition problems.
+
+See the [`cookbooks/math`](https://github.com/rllm-org/rllm/tree/main/cookbooks/math) cookbook (single-turn math with `\boxed{}` answers) for the AgentFlow-based reproducer.
+
+**Released**: February 2025

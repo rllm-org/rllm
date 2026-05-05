@@ -10,9 +10,9 @@ from collections.abc import Callable
 
 import numpy as np
 
-from rllm.agents.agent import TrajectoryGroup
 from rllm.experimental.common.config import AlgorithmConfig, rLLMAdvantageEstimator
 from rllm.experimental.common.rl_algo import calculate_grpo_advantages_per_group, calculate_rloo_advantages_per_group
+from rllm.types import TrajectoryGroup
 from rllm.utils.logging import DuplicateLoggingFilter
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,31 @@ RLLM_ADV_ESTIMATOR_REGISTRY: dict[str, Callable] = {}
 
 
 def register_rllm_adv_estimator(name: str | rLLMAdvantageEstimator) -> Callable:
-    """Register a rLLM advantage estimator -- either built-in or custom.
+    """Register a rLLM advantage estimator — either built-in or custom.
+
+    Registered estimators must follow the canonical signature:
+
+        def my_estimator(
+            rewards: list[np.ndarray],
+            algorithm_config: AlgorithmConfig,
+            **kwargs,
+        ) -> tuple[list[np.ndarray], list[np.ndarray]]
+
+    `rewards` is one entry per `TrajectoryGroup` of the same `group_role`;
+    each entry is a 1-D array of scalar trajectory rewards. The output
+    `(advantages_by_group, returns_by_group)` must be aligned with
+    `rewards` (same outer length and same inner shapes).
+
+    `algorithm_config` is the resolved `AlgorithmConfig`; pull whatever
+    config the estimator needs (e.g. `norm_adv_by_std_in_grpo`).
+
+    `**kwargs` carries optional per-call data injected by
+    `collect_reward_and_advantage_from_trajectory_groups`. The orchestrator
+    currently injects:
+
+    * `traj_groups: list[TrajectoryGroup]` — aligned with `rewards`,
+      so estimators can read per-trajectory metadata (response lengths,
+      step counts, etc.) from `traj_groups[i].trajectories[j].steps`.
 
     Args:
         name: Name of the advantage estimator.
@@ -48,9 +72,10 @@ def get_rllm_adv_estimator(name: str | rLLMAdvantageEstimator) -> Callable:
 
 
 @register_rllm_adv_estimator(rLLMAdvantageEstimator.GRPO)
-def calculate_grpo_advantages(rewards: list[np.ndarray], norm_adv_by_std_in_grpo=True, episilon=1e-6, **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
+def calculate_grpo_advantages(rewards: list[np.ndarray], algorithm_config: AlgorithmConfig, **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    norm_adv_by_std_in_grpo = algorithm_config.norm_adv_by_std_in_grpo
     advantages_by_group, returns_by_group = zip(
-        *[calculate_grpo_advantages_per_group(group_rewards, norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo, episilon=episilon) for group_rewards in rewards],
+        *[calculate_grpo_advantages_per_group(group_rewards, norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo) for group_rewards in rewards],
         strict=True,
     )
 
@@ -58,13 +83,13 @@ def calculate_grpo_advantages(rewards: list[np.ndarray], norm_adv_by_std_in_grpo
 
 
 @register_rllm_adv_estimator(rLLMAdvantageEstimator.REINFORCE)
-def calculate_reinforce_advantages(rewards: list[np.ndarray], **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
+def calculate_reinforce_advantages(rewards: list[np.ndarray], algorithm_config: AlgorithmConfig, **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """REINFORCE: advantage = reward (no baseline)"""
     return rewards, rewards
 
 
 @register_rllm_adv_estimator(rLLMAdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE)
-def calculate_reinforce_plus_plus_baseline_advantages(rewards: list[np.ndarray], epsilon=1e-6, **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
+def calculate_reinforce_plus_plus_baseline_advantages(rewards: list[np.ndarray], algorithm_config: AlgorithmConfig, epsilon: float = 1e-6, **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """REINFORCE++ baseline estimator.
 
     In line with Verl's REINFORCE++ baseline logic for grouped rollouts:
@@ -87,7 +112,7 @@ def calculate_reinforce_plus_plus_baseline_advantages(rewards: list[np.ndarray],
 
 
 @register_rllm_adv_estimator(rLLMAdvantageEstimator.RLOO)
-def calculate_rloo_advantages(rewards: list[np.ndarray], **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
+def calculate_rloo_advantages(rewards: list[np.ndarray], algorithm_config: AlgorithmConfig, **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Reinforce Leave-one-out (RLOO): https://arxiv.org/abs/2402.14740"""
     advantages_by_group, returns_by_group = zip(*[calculate_rloo_advantages_per_group(group_rewards) for group_rewards in rewards], strict=True)
     return advantages_by_group, returns_by_group
@@ -123,20 +148,6 @@ def _collect_precomputed_advantages(group: TrajectoryGroup, group_role: str) -> 
         logger.warning(f"[group={group_role}] {steps_missing}/{total_steps} steps missing pre-computed advantages, defaulted to zeros.")
 
     return flattened_advantages
-
-
-def _prepare_adv_estimator_input(rewards: list[np.ndarray], algorithm_config: AlgorithmConfig) -> dict:
-    """Prepare input for advantage estimator.
-
-    Args:
-        rewards: List of rewards for the groups
-        algorithm_config: Algorithm configuration
-    """
-    adv_kwargs = {
-        "rewards": rewards,
-        "norm_adv_by_std_in_grpo": algorithm_config.norm_adv_by_std_in_grpo,
-    }
-    return adv_kwargs
 
 
 def collect_reward_and_advantage_from_trajectory_groups(
@@ -189,15 +200,18 @@ def collect_reward_and_advantage_from_trajectory_groups(
         for group_role, traj_groups in traj_groups_by_role.items():
             advantage_fn = get_rllm_adv_estimator(algorithm_config.estimator_map.get(group_role, algorithm_config.estimator))
             traj_rewards = traj_rewards_by_role[group_role]
-            adv_kwargs = _prepare_adv_estimator_input(traj_rewards, algorithm_config)
-            advantages_by_group, _ = advantage_fn(**adv_kwargs)  # ignore the returns here
+            advantages_by_group, _ = advantage_fn(  # ignore returns here
+                rewards=traj_rewards,
+                algorithm_config=algorithm_config,
+                traj_groups=traj_groups,
+            )
             assert len(advantages_by_group) == len(traj_groups), "length mismatch between advantages and trajectory groups"
             for traj_group, advantages_by_traj in zip(traj_groups, advantages_by_group, strict=True):
                 assert len(advantages_by_traj) == len(traj_group.trajectories), "length mismatch between trajectory rewards and computed advantages"
                 advantages_by_role[group_role].extend(np.asarray(advantages_by_traj).tolist())  # for metrics calculation
                 for traj, advantage in zip(traj_group.trajectories, advantages_by_traj, strict=True):
                     for step in traj.steps:
-                        step.advantage = advantage
+                        step.advantage = float(advantage)
 
     # reduce metrics by group
     final_metrics = {}

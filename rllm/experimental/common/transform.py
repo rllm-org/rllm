@@ -16,8 +16,8 @@ from collections.abc import Callable
 
 import numpy as np
 
-from rllm.agents.agent import Episode, Trajectory, TrajectoryGroup
 from rllm.experimental.common.config import CompactFilteringConfig, TransformConfig
+from rllm.types import Episode, Trajectory, TrajectoryGroup
 from rllm.workflows.workflow import TerminationReason
 
 logger = logging.getLogger(__name__)

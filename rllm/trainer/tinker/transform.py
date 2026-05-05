@@ -10,10 +10,10 @@ import tinker
 from tinker.types.tensor_data import TensorData
 from tinker_cookbook.supervised.common import create_rightshifted_model_input_and_leftshifted_targets
 
-from rllm.agents.agent import Trajectory, TrajectoryGroup
 from rllm.experimental.common import AlgorithmConfig, collect_reward_and_advantage_from_trajectory_groups
 from rllm.experimental.rollout.tinker_engine import _flat_token_input_length, _flat_token_input_to_model_input
 from rllm.experimental.rollout.types import TinkerTokenInput
+from rllm.types import Trajectory, TrajectoryGroup
 
 
 def _is_prefix(seq1: TinkerTokenInput, seq2: TinkerTokenInput) -> bool:
@@ -157,28 +157,67 @@ def transform_trajectory_groups_to_datums(
     else:
         datums = []
 
-    # step 2: iterate over all steps and build the Tinker Datum objects
-    seqs_per_traj = []
-    seq_lengths = []
+    # step 2: iterate over all steps and build the Tinker Datum objects.
+    # Track per-trajectory split count, per-Datum response length, and
+    # per-Datum action-token fraction so the caller can log the same
+    # metrics across backends. Metric semantics shared with verl's
+    # transform_episodes_to_dataproto:
+    #   - steps_per_traj: number of training rows/datums one trajectory
+    #     becomes after prefix-merging. =1 for healthy cumulative agents;
+    #     >1 indicates a prefix break (re-tokenization quirk, mid-
+    #     trajectory context reset).
+    #   - step_response_length: length of the response region per row,
+    #     i.e. everything from the first action token onward (action
+    #     tokens + interleaved observation tokens), excluding the initial
+    #     prompt.
+    #   - merge_compression_ratio (batch-level scalar): total agent
+    #     steps ÷ total emitted rows. =N for a fully cumulative N-turn
+    #     batch; =1 means no merging (per-step rows or all single-step).
+    #   - action_token_ratio: fraction of response tokens that are
+    #     trainable (mask=1) per row. =1.0 for single-step rows (no
+    #     observations); <1.0 for merged multi-turn (tool/observation
+    #     tokens are mask=0 between actions).
+    steps_per_traj = []
+    step_response_lengths = []
+    action_token_ratios = []
+    total_agent_steps = 0
     for group in trajectory_groups:
         for trajectory in group.trajectories:
+            total_agent_steps += len(trajectory.steps)
             traj_datums = trajectory_to_datums(trajectory, router_replay=algorithm_config.router_replay)
-            seqs_per_traj.append(len(traj_datums))
+            steps_per_traj.append(len(traj_datums))
             for d in traj_datums:
-                seq_lengths.append(d.model_input.length)
+                mask_data = d.loss_fn_inputs["mask"].data
+                # Response region = total Datum length - leading prompt
+                # length. Mask is 0 over the initial prompt (before any
+                # action) and 0/1-interleaved after, so the first mask=1
+                # position is the prompt boundary.
+                first_action = next(
+                    (i for i, m in enumerate(mask_data) if m > 0.5),
+                    len(mask_data),
+                )
+                resp_len = len(mask_data) - first_action
+                action_count = sum(1 for m in mask_data[first_action:] if m > 0.5)
+                step_response_lengths.append(resp_len)
+                action_token_ratios.append(action_count / resp_len if resp_len > 0 else 0.0)
             if algorithm_config.estimator_map:
                 datums_dict[group.group_role].extend(traj_datums)
             else:
                 datums.extend(traj_datums)
 
-    if seqs_per_traj:
+    if steps_per_traj:
         import numpy as _np
 
-        adv_metrics["batch/seqs_per_traj/mean"] = _np.mean(seqs_per_traj)
-        adv_metrics["batch/seqs_per_traj/min"] = _np.min(seqs_per_traj)
-        adv_metrics["batch/seqs_per_traj/max"] = _np.max(seqs_per_traj)
-        adv_metrics["batch/seq_length/mean"] = _np.mean(seq_lengths)
-        adv_metrics["batch/seq_length/min"] = _np.min(seq_lengths)
-        adv_metrics["batch/seq_length/max"] = _np.max(seq_lengths)
+        total_emitted_rows = sum(steps_per_traj)
+        adv_metrics["batch/steps_per_traj/mean"] = _np.mean(steps_per_traj)
+        adv_metrics["batch/steps_per_traj/min"] = _np.min(steps_per_traj)
+        adv_metrics["batch/steps_per_traj/max"] = _np.max(steps_per_traj)
+        adv_metrics["batch/step_response_length/mean"] = _np.mean(step_response_lengths)
+        adv_metrics["batch/step_response_length/min"] = _np.min(step_response_lengths)
+        adv_metrics["batch/step_response_length/max"] = _np.max(step_response_lengths)
+        adv_metrics["batch/action_token_ratio/mean"] = _np.mean(action_token_ratios)
+        adv_metrics["batch/action_token_ratio/min"] = _np.min(action_token_ratios)
+        adv_metrics["batch/action_token_ratio/max"] = _np.max(action_token_ratios)
+        adv_metrics["batch/merge_compression_ratio"] = total_agent_steps / total_emitted_rows if total_emitted_rows > 0 else 0.0
 
     return (datums if not algorithm_config.estimator_map else datums_dict), adv_metrics

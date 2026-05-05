@@ -1,3 +1,14 @@
+"""Legacy env / agent / workflow class lookup tables.
+
+Used by the legacy ``rllm.trainer.agent_trainer.AgentTrainer`` path to
+resolve config strings (``env.name``, ``agent.name``, ``workflow.name``)
+to concrete classes. After the cleanup of the
+Agent+Environment+AgentExecutionEngine stack, the env and agent maps
+are empty; only the workflow map still holds entries used by the
+remaining workflow-based examples (countdown, etc.).
+"""
+
+
 def safe_import(module_path, class_name):
     try:
         module = __import__(module_path, fromlist=[class_name])
@@ -6,27 +17,8 @@ def safe_import(module_path, class_name):
         return None
 
 
-# Import environment classes
-ENV_CLASSES = {
-    "browsergym": safe_import("rllm.environments.browsergym.browsergym", "BrowserGymEnv"),
-    "frozenlake": safe_import("rllm.environments.frozenlake.frozenlake", "FrozenLakeEnv"),
-    "tool": safe_import("rllm.environments.tools.tool_env", "ToolEnvironment"),
-    "math": safe_import("rllm.environments.base.single_turn_env", "SingleTurnEnvironment"),
-    "code": safe_import("rllm.environments.base.single_turn_env", "SingleTurnEnvironment"),
-    "swe": safe_import("rllm.environments.swe.swe", "SWEEnv"),
-    "competition_coding": safe_import("rllm.environments.code.competition_coding", "CompetitionCodingEnv"),
-    "single_turn_env": safe_import("rllm.environments.base.single_turn_env", "SingleTurnEnvironment"),
-}
-
-# Import agent classes
-AGENT_CLASSES = {
-    "miniwobagent": safe_import("rllm.agents.miniwob_agent", "MiniWobAgent"),
-    "frozenlakeagent": safe_import("rllm.agents.frozenlake_agent", "FrozenLakeAgent"),
-    "tool_agent": safe_import("rllm.agents.tool_agent", "ToolAgent"),
-    "sweagent": safe_import("rllm.agents.swe_agent", "SWEAgent"),
-    "math_agent": safe_import("rllm.agents.math_agent", "MathAgent"),
-    "code_agent": safe_import("rllm.agents.code_agent", "CompetitionCodingAgent"),
-}
+ENV_CLASSES: dict = {}
+AGENT_CLASSES: dict = {}
 
 WORKFLOW_CLASSES = {
     "single_turn_workflow": safe_import("rllm.workflows.single_turn_workflow", "SingleTurnWorkflow"),

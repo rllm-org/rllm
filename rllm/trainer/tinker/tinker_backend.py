@@ -21,7 +21,6 @@ import torch
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 
-from rllm.agents.agent import Episode
 from rllm.data import Dataset
 from rllm.experimental.common import AlgorithmConfig, simple_timer
 from rllm.experimental.protocol import BackendProtocol
@@ -30,6 +29,7 @@ from rllm.trainer.tinker.tinker_metrics_utils import (
     update_training_metrics,
 )
 from rllm.trainer.tinker.tinker_policy_trainer import TinkerPolicyTrainer
+from rllm.types import Episode
 
 if TYPE_CHECKING:
     from transformers.tokenization_utils import PreTrainedTokenizer

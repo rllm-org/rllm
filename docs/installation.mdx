@@ -1,0 +1,256 @@
+---
+title: Installation
+description: Install rLLM with pip, uv, or Docker
+---
+
+This guide will help you set up rLLM on your system.
+
+## Prerequisites
+
+rLLM requires **Python >= 3.10** (Python 3.11 is required if using the `tinker` backend).
+
+### Install uv (recommended)
+
+Starting with v0.2.1, rLLM's recommended dependency manager is `uv`. To install `uv`, run:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+### Install Python 3.11
+
+Ensure that your system has a suitable installation of Python:
+
+```bash
+uv python install 3.11
+```
+
+## Installation methods
+
+Choose one of the following installation methods based on your needs.
+
+<Tabs>
+  <Tab title="Direct installation">
+    ### Quick install with uv
+
+    Install rLLM directly from GitHub with a single command:
+
+    ```bash
+    uv pip install "rllm[verl] @ git+https://github.com/rllm-org/rllm.git"
+    ```
+
+    <Note>
+      Replace `verl` with `tinker` to install with the tinker backend instead:
+      ```bash
+      uv pip install "rllm[tinker] @ git+https://github.com/rllm-org/rllm.git"
+      ```
+    </Note>
+  </Tab>
+
+  <Tab title="Build from source">
+    ### Clone and install from source
+
+    For development or to access the latest features:
+
+    <Steps>
+      <Step title="Clone the repository">
+        ```bash
+        git clone https://github.com/rllm-org/rllm.git
+        cd rllm
+        ```
+      </Step>
+
+      <Step title="Create a virtual environment">
+        ```bash
+        uv venv --python 3.11
+        source .venv/bin/activate
+        ```
+      </Step>
+
+      <Step title="Install rLLM with a training backend">
+        rLLM supports two training backends: **verl** and **tinker**. Choose one based on your needs.
+
+        <Tabs>
+          <Tab title="verl (GPU)">
+            Install with the verl backend for GPU-accelerated training:
+
+            ```bash
+            uv pip install -e .[verl]
+            ```
+
+            For CUDA 12.8 specifically:
+            ```bash
+            uv pip install -e .[verl] --torch-backend=cu128
+            ```
+
+            <Note>
+              The `verl` extra installs vLLM by default. If you prefer SGLang for sampling rollouts:
+              ```bash
+              uv pip install sglang --torch-backend=cu128
+              ```
+            </Note>
+
+            <Warning>
+              For AMD ROCm or Huawei Ascend accelerators, we strongly recommend installing rLLM on top of verl's official Docker containers:
+              - [ROCm Docker](https://github.com/volcengine/verl/tree/main/docker/rocm)
+              - [Ascend Docker](https://github.com/volcengine/verl/tree/main/docker/ascend)
+            </Warning>
+          </Tab>
+
+          <Tab title="tinker (CPU/GPU)">
+            Install with the tinker backend for flexible training:
+
+            ```bash
+            uv pip install -e .[tinker]
+            ```
+
+            For CPU-only machines:
+            ```bash
+            uv pip install -e .[tinker] --torch-backend=cpu
+            ```
+
+            <Note>
+              The tinker backend requires **Python >= 3.11**.
+            </Note>
+          </Tab>
+        </Tabs>
+      </Step>
+    </Steps>
+
+    ### Activate your environment
+
+    Be sure to activate the virtual environment before running any scripts:
+
+    ```bash
+    source .venv/bin/activate
+    python your_script.py
+    ```
+  </Tab>
+
+  <Tab title="Docker">
+    ### Containerized installation
+
+    For a containerized setup with GPU support:
+
+    <Steps>
+      <Step title="Build the Docker image">
+        ```bash
+        docker build -t rllm .
+        ```
+      </Step>
+
+      <Step title="Create and start the container">
+        ```bash
+        docker create --runtime=nvidia --gpus all --net=host \
+          --shm-size="10g" --cap-add=SYS_ADMIN \
+          -v .:/workspace/rllm -v /tmp:/tmp \
+          --name rllm-container rllm sleep infinity
+
+        docker start rllm-container
+        ```
+      </Step>
+
+      <Step title="Enter the container">
+        ```bash
+        docker exec -it rllm-container bash
+        ```
+      </Step>
+    </Steps>
+
+    <Note>
+      The Docker setup includes GPU support via NVIDIA runtime and mounts the current directory to `/workspace/rllm` for easy development.
+    </Note>
+  </Tab>
+
+  <Tab title="Without uv (not recommended)">
+    ### Install with pip and conda
+
+    While rLLM can be installed without `uv`, this is not recommended and may cause issues if you don't have a compatible PyTorch or CUDA version preinstalled.
+
+    ```bash
+    conda create -n rllm python=3.11
+    conda activate rllm
+    pip install -e .[verl]
+    ```
+
+    <Warning>
+      This installation method may fail if you don't have compatible CUDA and PyTorch versions already installed. Use `uv` for reliable dependency resolution.
+    </Warning>
+  </Tab>
+</Tabs>
+
+## Optional dependencies
+
+rLLM provides additional optional dependencies for specific agent domains and framework integrations:
+
+<AccordionGroup>
+  <Accordion title="Framework integrations">
+    - **sdk**: LiteLLM proxy integration
+    - **smolagents**: Hugging Face SmolAgents integration
+    - **strands**: Strands agents framework
+  </Accordion>
+
+  <Accordion title="Domain-specific tools">
+    - **web**: Web agents (BrowserGym, Selenium, Firecrawl)
+    - **code-tools**: Sandboxed code execution (Daytona, E2B, Together)
+    - **swe**: Software engineering tools (Docker, Kubernetes, SWEBench)
+    - **verifiers**: Verifiers integration for validation
+  </Accordion>
+
+  <Accordion title="Development and utilities">
+    - **dev**: Development tools (pytest, ruff, mypy, mkdocs)
+    - **ui**: UI components (httpx, python-multipart)
+    - **opentelemetry**: OpenTelemetry SDK for observability
+  </Accordion>
+</AccordionGroup>
+
+Install optional dependencies by adding them to the installation command:
+
+```bash
+# Install with web and code-tools extras
+uv pip install -e .[verl,web,code-tools]
+```
+
+## Advanced: Editable verl installation
+
+If you wish to make changes to the verl backend itself:
+
+```bash
+git clone https://github.com/volcengine/verl.git
+cd verl
+git checkout v0.6.1
+uv pip install -e .
+```
+
+## Verify installation
+
+Verify that rLLM is installed correctly:
+
+```bash
+python -c "import rllm; print(rllm.__version__)"
+```
+
+You should see the version number printed (e.g., `0.2.1`).
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quick start" icon="rocket" href="/quickstart-cli">
+    Build your first math reasoning agent in 10 minutes
+  </Card>
+
+  <Card title="Core concepts" icon="book" href="/core-concepts/episodes-trajectories-steps">
+    Learn about the key components of rLLM
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+If you encounter issues during installation:
+
+1. **Check Python version**: Ensure you're using Python >= 3.10 (3.11 for tinker)
+2. **GPU compatibility**: Verify CUDA version matches PyTorch requirements
+3. **Dependency conflicts**: Use `uv` instead of pip for better dependency resolution
+4. **GitHub issues**: Check the [GitHub issues page](https://github.com/rllm-org/rllm/issues) for known issues
+
+For additional help, join our [Slack community](https://join.slack.com/t/rllmproject/shared_invite/zt-3pyblo6ef-m9kqAoInI8xSyUBkpuOyXA).

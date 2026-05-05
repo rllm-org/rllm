@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from rllm.experimental.eval.rollout_decorator import (
+from rllm.eval.rollout_decorator import (
     AgentFlowFn,
     EvaluatorFn,
     _coerce_to_episode,
@@ -15,8 +16,8 @@ from rllm.experimental.eval.rollout_decorator import (
     evaluator,
     rollout,
 )
-from rllm.experimental.eval.types import AgentConfig, AgentFlow, EvalOutput, Evaluator, Task, run_agent_flow
-from rllm.types import Episode, Trajectory
+from rllm.eval.types import EvalOutput
+from rllm.types import AgentConfig, AgentFlow, Episode, Evaluator, Task, Trajectory, run_agent_flow
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -25,7 +26,7 @@ from rllm.types import Episode, Trajectory
 
 @pytest.fixture()
 def task():
-    return Task(data={"question": "What is 2+2?", "ground_truth": "4"})
+    return Task(id="t", instruction="", metadata={"question": "What is 2+2?", "ground_truth": "4"}, dataset_dir=Path("."))
 
 
 @pytest.fixture()
@@ -76,7 +77,7 @@ class TestRolloutBareDecorator:
         episode = my_agent.run(task, config)
         assert isinstance(episode, Episode)
         assert episode.artifacts["answer"] == "the answer is 4"
-        assert episode.task == task.data
+        assert episode.task == task.metadata
 
     def test_default_trajectory_name(self, task, config):
         @rollout
@@ -106,7 +107,7 @@ class TestRolloutParameterizedDecorator:
         assert episode.trajectories[0].name == "reasoning"
 
     def test_register_calls_register_agent(self):
-        with patch("rllm.experimental.eval.agent_loader.register_agent") as mock_reg:
+        with patch("rllm.eval.agent_loader.register_agent") as mock_reg:
 
             @rollout(register="my-agent")
             def my_agent(task, config):
@@ -137,7 +138,7 @@ class TestRolloutReturnCoercion:
     def test_episode_return(self, task, config):
         @rollout
         def my_agent(task, config):
-            return Episode(task=task.data, trajectories=[], artifacts={"answer": "direct"})
+            return Episode(task=task.metadata, trajectories=[], artifacts={"answer": "direct"})
 
         ep = my_agent.run(task, config)
         assert ep.artifacts["answer"] == "direct"
@@ -148,7 +149,7 @@ class TestRolloutReturnCoercion:
             return Episode(trajectories=[], artifacts={"answer": "x"})
 
         ep = my_agent.run(task, config)
-        assert ep.task == task.data
+        assert ep.task == task.metadata
 
     def test_trajectory_list_return(self, task, config):
         @rollout
@@ -263,7 +264,7 @@ class TestEvaluatorBareDecorator:
 
 class TestEvaluatorParameterizedDecorator:
     def test_register_calls_register_evaluator(self):
-        with patch("rllm.experimental.eval.evaluator_loader.register_evaluator") as mock_reg:
+        with patch("rllm.eval.evaluator_loader.register_evaluator") as mock_reg:
 
             @evaluator(register="my-eval")
             def my_eval(task, episode):
@@ -351,18 +352,18 @@ class TestEvaluatorReturnCoercion:
 
 class TestCoerceToEpisode:
     def test_episode_passthrough(self):
-        task = Task(data={"q": "test"})
+        task = Task(id="t", instruction="", metadata={"q": "test"}, dataset_dir=Path("."))
         ep = Episode(task={"q": "test"}, trajectories=[], artifacts={"answer": "x"})
         result = _coerce_to_episode(ep, task, "solver")
         assert result is ep
 
     def test_str(self):
-        task = Task(data={"q": "test"})
+        task = Task(id="t", instruction="", metadata={"q": "test"}, dataset_dir=Path("."))
         result = _coerce_to_episode("hello", task, "solver")
         assert result.artifacts["answer"] == "hello"
 
     def test_dict(self):
-        task = Task(data={"q": "test"})
+        task = Task(id="t", instruction="", metadata={"q": "test"}, dataset_dir=Path("."))
         result = _coerce_to_episode({"answer": "world", "extra": 1}, task, "solver")
         assert result.artifacts["answer"] == "world"
         assert result.artifacts["extra"] == 1

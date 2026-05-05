@@ -1,6 +1,7 @@
 """FastAPI application factory and CLI entrypoint for rllm-model-gateway."""
 
 import argparse
+import asyncio
 import logging
 import os
 import uuid
@@ -23,6 +24,52 @@ from rllm_model_gateway.session_router import SessionRouter
 from rllm_model_gateway.store.base import TraceStore
 
 logger = logging.getLogger(__name__)
+
+
+# ------------------------------------------------------------------
+# Access-log noise filter
+# ------------------------------------------------------------------
+
+# Paths whose access lines are filtered from uvicorn.access. These fire on
+# every rollout (often dozens of times per task) and crowd out the lines
+# that actually help — chat completions, session create/delete, trace reads.
+_NOISY_ACCESS_PATHS: tuple[str, ...] = (
+    "/admin/flush",
+    "/admin/workers",
+    "/health",
+    "/health/workers",
+)
+
+
+class _AccessLogPathFilter(logging.Filter):
+    """Drop uvicorn.access records whose request path is in _NOISY_ACCESS_PATHS.
+
+    uvicorn.access formats records with positional args:
+        (client_addr, method, full_path, http_version, status_code)
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if not args or len(args) < 3:
+            return True
+        path = args[2]
+        if not isinstance(path, str):
+            return True
+        # Strip query string before matching.
+        bare = path.split("?", 1)[0]
+        return bare not in _NOISY_ACCESS_PATHS
+
+
+_access_filter_installed = False
+
+
+def _install_access_log_filter() -> None:
+    """Idempotently attach the path filter to the uvicorn.access logger."""
+    global _access_filter_installed
+    if _access_filter_installed:
+        return
+    logging.getLogger("uvicorn.access").addFilter(_AccessLogPathFilter())
+    _access_filter_installed = True
 
 
 # ------------------------------------------------------------------
@@ -73,6 +120,8 @@ def create_app(
     """Create and return a fully configured FastAPI application."""
     if config is None:
         config = GatewayConfig()
+
+    _install_access_log_filter()
 
     if store is None:
         store = create_store(config)
@@ -132,6 +181,8 @@ def create_app(
         add_logprobs=config.add_logprobs,
         add_return_token_ids=config.add_return_token_ids,
         sessions=sessions,
+        sampling_params_priority=config.sampling_params_priority,
+        model=config.model,
     )
 
     # -- Health endpoints --------------------------------------------------
@@ -262,6 +313,15 @@ def create_app(
 
     @app.post("/admin/flush")
     async def flush():
+        # Drain in-flight fire-and-forget _safe_store tasks queued by the
+        # non-streaming and streaming paths in Proxy._persist. Without this,
+        # /admin/flush only flushes the store's own buffers and a trace
+        # captured milliseconds before this call may not yet be persisted —
+        # the trainer's aget_traces would then return N-1 traces for an
+        # agent that made N calls, causing positional mismatch downstream.
+        pending = list(proxy._pending_traces)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         await store.flush()
         return {"status": "flushed"}
 
@@ -355,6 +415,10 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
         data["log_level"] = args.log_level
     if getattr(args, "store", None) is not None:
         data["store_worker"] = args.store
+    if getattr(args, "sampling_params_priority", None) is not None:
+        data["sampling_params_priority"] = args.sampling_params_priority
+    if getattr(args, "model", None) is not None:
+        data["model"] = args.model
 
     # Workers from CLI --worker flags (WorkerConfig validator auto-splits URLs)
     worker_urls = getattr(args, "worker", None) or []
@@ -383,6 +447,19 @@ def main() -> None:
     parser.add_argument("--db-path", type=str, default=None)
     parser.add_argument("--store", type=str, default=None, choices=["sqlite", "memory"])
     parser.add_argument("--log-level", type=str, default=None)
+    parser.add_argument(
+        "--sampling-params-priority",
+        type=str,
+        default=None,
+        choices=["client", "session"],
+        help="Conflict resolution for sampling params: 'client' (default) or 'session'.",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="If set, the gateway rewrites every request body's 'model' field to this value before forwarding.",
+    )
 
     args = parser.parse_args()
     config = _load_config(args)

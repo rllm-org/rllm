@@ -56,32 +56,35 @@ rllm dataset pull countdown
 
 ## Training
 
-### Option 1: rllm CLI
+### Tinker (single-machine)
 
 ```bash
-rllm train countdown \
-    --agent solver_judge \
-    --evaluator solver_judge_countdown \
-    --model Qwen/Qwen3-8B \
-    --lora-rank 32 \
-    --group-size 8 \
-    --epochs 1
+bash cookbooks/solver_judge_flow/train_tinker.sh
 ```
 
-### Option 2: Python API
+Or directly via the Python API:
 
 ```bash
 python cookbooks/solver_judge_flow/train.py \
     rllm/backend=tinker \
-    model.name=Qwen/Qwen3-8B \
+    model.name=Qwen/Qwen3-4B-Instruct-2507 \
     model.lora_rank=32 \
-    training.group_size=8
+    training.group_size=4
 ```
-g
-Or use the provided script (wraps train.py with defaults):
+
+### Verl (distributed GPU)
+
+Requires verl extras and megatron:
 
 ```bash
-bash cookbooks/solver_judge_flow/train.sh
+uv pip install -e ".[verl]"
+bash scripts/install_megatron.sh <cu128|cu129|...>
+```
+
+Then:
+
+```bash
+bash cookbooks/solver_judge_flow/train_verl.sh
 ```
 
 ## Eval
@@ -100,6 +103,7 @@ rllm eval countdown \
 | `solver_judge_flow.py` | `SolverJudgeFlow` — AgentFlow implementation |
 | `evaluator.py` | `SolverJudgeCountdownEvaluator` — per-trajectory reward scoring |
 | `train.py` | Python API training script (Hydra config) |
-| `train.sh` | Shell wrapper — calls `train.py` with default overrides |
+| `train_tinker.sh` | Tinker backend — single-machine training |
+| `train_verl.sh` | Verl backend — distributed multi-GPU training |
 | `pyproject.toml` | Plugin metadata and entry points |
 | `test.py` | Unit tests for parsing and evaluation |

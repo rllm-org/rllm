@@ -4,7 +4,7 @@ from typing import Any
 
 import click
 
-from rllm.agents.agent import Trajectory, TrajectoryGroup
+from rllm.types import Trajectory, TrajectoryGroup
 
 
 @dataclass

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import rllm
-from rllm.experimental.eval.types import EvalOutput, Signal
+from rllm.eval.types import EvalOutput, Signal
 from rllm.rewards.countdown_reward import compute_score
 from rllm.types import Episode
 

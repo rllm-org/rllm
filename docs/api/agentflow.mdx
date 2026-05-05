@@ -1,0 +1,368 @@
+---
+title: AgentFlow
+description: The protocol for authoring agents that run identically at eval time and at training time
+---
+
+`AgentFlow` is the recommended way to author an agent in rLLM. An AgentFlow is a plain async function that takes a [`Task`](#task) and an [`AgentConfig`](#agentconfig) and returns an [`Episode`](#episode). The same function runs both for evaluation and for training — at training time the trainer routes `config.base_url` through a model gateway that captures token IDs and logprobs transparently, so the flow code itself doesn't change.
+
+For a conceptual walkthrough see [AgentFlow & Evaluator](/core-concepts/agentflow-evaluator); for worked examples see [`cookbooks/`](https://github.com/rllm-org/rllm/tree/main/cookbooks).
+
+## The protocol
+
+```python
+from rllm.types import AgentFlow, AgentConfig, Episode, Task
+
+@runtime_checkable
+class AgentFlow(Protocol):
+    def run(self, task: Task, config: AgentConfig) -> Episode: ...
+```
+
+An implementation may provide either `run` (sync) or `arun` (async). The runner prefers `arun` when running inside an event loop. In practice you almost always write the async form.
+
+## `@rllm.rollout` decorator
+
+The simplest way to satisfy the `AgentFlow` protocol is to decorate a plain function:
+
+```python
+import rllm
+from rllm.types import AgentConfig, Episode, Task
+
+@rllm.rollout(name="my-agent")
+async def my_flow(task: Task, config: AgentConfig) -> Episode:
+    # ...build messages, call the LLM, package an Episode
+    ...
+```
+
+The decorator returns an `AgentFlowFn` object that exposes `.run()` (sync, blocks until done) and `.arun()` (async). Both are usable directly; the trainer/runner calls them automatically.
+
+### Bare and parameterized forms
+
+```python
+@rllm.rollout                          # bare — uses default trajectory name "solver"
+@rllm.rollout(name="solver")           # parameterized
+@rllm.rollout(name="solver", register="my_agent")   # also auto-registers under entry-point group
+```
+
+The `name` is what shows up on `Trajectory.name` when the function returns a non-Episode (raw `str`, `dict`, or `list[Trajectory]`) and the decorator coerces it. When the function already returns an `Episode`, the trajectory names you set inside the function are preserved.
+
+### Return-value coercion
+
+The decorator accepts several return-value shapes for convenience:
+
+| Function returns | Decorator wraps as |
+|---|---|
+| `Episode` | passed through unchanged |
+| `Trajectory` | wrapped in `Episode(trajectories=[t])` |
+| `list[Trajectory]` | wrapped in `Episode(trajectories=[…])` |
+| `str` / `dict` / anything else | wrapped in `Episode(trajectories=[Trajectory(name=…, output=…)])`, with the value placed on `output` |
+
+Returning the explicit `Episode` is the canonical form — see any flow under `cookbooks/`.
+
+## `Task`
+
+The first argument to every `AgentFlow.run`:
+
+```python
+@dataclass
+class Task:
+    id: str                              # Stable identifier (row index, task name, ...)
+    instruction: str | list[dict]        # What the agent sees (text or multimodal blocks)
+    metadata: dict[str, Any]             # Ground truth, MCQ choices, parsed task.toml, ...
+    dataset_dir: Path                    # Where dataset.toml lives (for sandbox tasks)
+    sub_dir: Path | None                 # Per-task subdir (sandbox); None for data tasks
+```
+
+`Task` is pure data. The `instruction` is rendered ahead of time (from a JSONL row, an `instruction.md`, or an `instruction.md.tpl` template). `metadata` carries everything the verifier or the flow needs at runtime — the source row for catalog datasets, the parsed `task.toml` for sandbox tasks, the gym-env config for `cookbooks/frozenlake`.
+
+## `AgentConfig`
+
+The second argument:
+
+```python
+@dataclass
+class AgentConfig:
+    base_url: str       # OpenAI-compatible endpoint URL
+    model: str          # Model name to pass to chat.completions.create
+    session_uid: str    # Unique session identifier (used for trace stitching at training)
+    metadata: dict      # Extra configuration the flow may need
+```
+
+Construct an `AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")` and call `.chat.completions.create(model=config.model, …)` — that's the canonical wiring. Don't hard-code a `base_url` or `model` in the flow body.
+
+## `Evaluator` protocol
+
+```python
+from rllm.types import Evaluator, Episode
+from rllm.eval.types import EvalOutput
+
+@runtime_checkable
+class Evaluator(Protocol):
+    def evaluate(self, task: Any, episode: Episode) -> EvalOutput: ...
+```
+
+The Evaluator scores the `Episode` produced by an `AgentFlow`. Set `traj.reward` on each trajectory if you need per-trajectory rewards (e.g. solver vs judge in `cookbooks/solver_judge_flow`); set `EvalOutput.reward` for the episode-level scalar that `rllm eval` aggregates and `rllm train` feeds into advantage computation.
+
+## `@rllm.evaluator` decorator
+
+```python
+import rllm
+from rllm.eval.types import EvalOutput, Signal
+from rllm.types import Episode
+
+@rllm.evaluator
+def my_evaluator(task: dict, episode: Episode) -> EvalOutput:
+    answer = str(episode.artifacts.get("answer", ""))
+    is_correct = answer == task["ground_truth"]
+    return EvalOutput(
+        reward=1.0 if is_correct else 0.0,
+        is_correct=is_correct,
+        signals=[Signal(name="accuracy", value=1.0 if is_correct else 0.0)],
+    )
+```
+
+Like `@rllm.rollout`, supports bare and parameterized forms (`@rllm.evaluator(register="my_eval")`).
+
+### `EvalOutput`
+
+```python
+@dataclass
+class EvalOutput:
+    reward: float
+    is_correct: bool
+    signals: list[Signal] = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)
+```
+
+`signals` is the right place for per-axis metrics that aggregate across the eval — accuracy, table-access rate, judge-correctness, etc. `rllm eval` reports the mean of each signal across the dataset.
+
+### Return-value coercion
+
+The decorator accepts `EvalOutput`, a plain `float` (treated as reward), or a `(reward: float, is_correct: bool)` tuple. Returning the explicit `EvalOutput` keeps the signal/metadata channels available.
+
+## `run_agent_flow` helper
+
+For ad-hoc use outside the trainer / runner:
+
+```python
+from rllm.types import run_agent_flow
+
+episode = await run_agent_flow(my_flow, task, config)
+```
+
+Prefers `arun` when present, falls back to `run` in a thread executor so sync flows don't block the event loop.
+
+## Data types
+
+The shapes the protocols return and consume. All live in `rllm.types` and are re-exported from `rllm.agents` for backward compatibility.
+
+### `Action`
+
+Wraps an arbitrary action emitted by an agent.
+
+```python
+from rllm.types import Action
+
+action = Action(action="move_forward")
+```
+
+<ParamField path="action" type="Any">
+  The action content (string, dict, or any type).
+</ParamField>
+
+### `Step`
+
+A single LLM interaction. The first group of fields is what every flow populates; the second group is filled in transparently by the gateway during training.
+
+```python
+from rllm.types import Step
+```
+
+**Core fields**
+
+<ParamField path="id" type="str">
+  Auto-generated UUID.
+</ParamField>
+
+<ParamField path="input" type="Any | None">
+  Optional structured input (rendered prompt, tool args, …).
+</ParamField>
+
+<ParamField path="output" type="Any | None">
+  Optional structured output (parsed answer, return value, …).
+</ParamField>
+
+<ParamField path="action" type="Any | None">
+  The action taken at this step (parsed answer, tool call, …).
+</ParamField>
+
+<ParamField path="reward" type="float" default="0.0">
+  Per-step reward (set by the evaluator if you score per-step).
+</ParamField>
+
+<ParamField path="done" type="bool" default="False">
+  Whether the episode ended at this step.
+</ParamField>
+
+<ParamField path="metadata" type="dict | None">
+  Arbitrary per-step metadata (also accessible as `step.info`).
+</ParamField>
+
+<ParamField path="chat_completions" type="list[dict]">
+  The chat history at this step in OpenAI message format.
+</ParamField>
+
+<ParamField path="model_response" type="str">
+  The raw assistant content from this step's LLM call.
+</ParamField>
+
+<ParamField path="thought" type="str">
+  Reasoning text (e.g. `<think>…</think>` content extracted from the response).
+</ParamField>
+
+**Training-side fields** (populated by the gateway; default-empty in eval-only paths)
+
+<ParamField path="prompt_ids" type="list[int]">
+  Prompt token IDs.
+</ParamField>
+
+<ParamField path="response_ids" type="list[int]">
+  Response token IDs.
+</ParamField>
+
+<ParamField path="logprobs" type="list[float]">
+  Per-token logprobs.
+</ParamField>
+
+<ParamField path="model_output" type="ModelOutput | None">
+  The full structured output from the rollout engine.
+</ParamField>
+
+<ParamField path="advantage" type="list[float] | float | None">
+  Per-token or scalar advantage, populated by the trainer.
+</ParamField>
+
+<ParamField path="weight_version" type="int | None">
+  Model-weight version at generation time (used for async-staleness tracking).
+</ParamField>
+
+### `Trajectory`
+
+A sequence of `Step`s with a name. The name is what the trainer uses to group trajectories across rollouts when computing advantages — see `cookbooks/solver_judge_flow/` for an example with two named groups (`solver` / `judge`).
+
+```python
+from rllm.types import Trajectory
+
+trajectory = Trajectory(name="solver", steps=[step1, step2])
+```
+
+<ParamField path="uid" type="str">
+  Auto-generated UUID.
+</ParamField>
+
+<ParamField path="name" type="str">
+  Trajectory role name. Used for advantage grouping. Default: `"default_traj_name"`.
+</ParamField>
+
+<ParamField path="steps" type="list[Step]">
+  Ordered list of steps in this trajectory.
+</ParamField>
+
+<ParamField path="reward" type="float | None">
+  Trajectory-level reward (set by the evaluator for per-trajectory scoring).
+</ParamField>
+
+<ParamField path="output" type="Any">
+  Optional final answer / return value.
+</ParamField>
+
+<ParamField path="metadata" type="dict | None">
+  Arbitrary per-trajectory metadata (also accessible as `traj.info`).
+</ParamField>
+
+`is_cumulative()`: returns `True` if every step's `chat_completions` is a strict superset of the previous step's — useful for trainers that need to know whether the trajectory shares a single growing context vs. independent turns.
+
+### `Episode`
+
+The top-level return shape of an `AgentFlow`. Bundles all trajectories from one rollout plus any artifacts the evaluator will read.
+
+```python
+from rllm.types import Episode
+
+episode = Episode(
+    trajectories=[traj1, traj2],
+    artifacts={"answer": final_answer},
+)
+```
+
+<ParamField path="id" type="str">
+  Auto-generated UUID. The runner overrides this to `f"{task.id}:{rollout_idx}"`.
+</ParamField>
+
+<ParamField path="task" type="Any">
+  Task data (often `task.id` or the metadata dict, depending on the flow).
+</ParamField>
+
+<ParamField path="trajectories" type="list[Trajectory]">
+  All trajectories produced during this rollout.
+</ParamField>
+
+<ParamField path="artifacts" type="dict">
+  Free-form output bag the evaluator reads. Convention: store the agent's final answer at `artifacts["answer"]`.
+</ParamField>
+
+<ParamField path="is_correct" type="bool" default="False">
+  Whether this episode counts as a correct solve. The evaluator typically writes this.
+</ParamField>
+
+<ParamField path="termination_reason" type="TerminationReason | None">
+  Why the episode ended (set by the trainer / runner, not usually by the flow).
+</ParamField>
+
+<ParamField path="metrics" type="dict">
+  Optional per-episode metrics that the trainer logs.
+</ParamField>
+
+<ParamField path="metadata" type="dict">
+  Arbitrary metadata.
+</ParamField>
+
+### `TrajectoryGroup`
+
+The trainer reorganizes per-rollout `Episode` objects into per-task `TrajectoryGroup`s for advantage computation — all `solver` trajectories for one task into one group, all `judge` trajectories into another, and so on. Most users don't construct these directly; the trainer does.
+
+```python
+from rllm.types import TrajectoryGroup
+```
+
+<ParamField path="trajectories" type="list[Trajectory]">
+  All trajectories in this group (typically same `name`, same task).
+</ParamField>
+
+<ParamField path="group_id" type="str">
+  Identifier in the form `{task_id}:{role}` (e.g. `"task1:solver"`).
+</ParamField>
+
+<ParamField path="metadata" type="list[dict]">
+  Per-trajectory metadata aligned with `trajectories`.
+</ParamField>
+
+## Episode artifacts convention
+
+The convention across all rLLM cookbooks: the flow stores its final user-facing answer in `episode.artifacts["answer"]`, and the evaluator reads it from there. This keeps reward computation outside the flow (so the same flow is reusable with different graders) and gives `rllm.eval.reward_fns._helpers.extract_answer_text` a single place to look.
+
+## See also
+
+<CardGroup cols={2}>
+  <Card title="Cookbooks" icon="book" href="/cookbooks/overview">
+    Seven worked AgentFlow examples
+  </Card>
+  <Card title="AgentFlow & Evaluator" icon="diagram-project" href="/core-concepts/agentflow-evaluator">
+    Conceptual walkthrough of the protocol
+  </Card>
+  <Card title="Workflows" icon="robot" href="/api/workflows">
+    The legacy Workflow path (uses `BaseAgent` + `BaseEnv`)
+  </Card>
+  <Card title="Trainer" icon="dumbbell" href="/api/trainer">
+    Wire an AgentFlow + Evaluator into RL training
+  </Card>
+</CardGroup>

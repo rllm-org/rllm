@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from tqdm import tqdm
 
-from rllm.agents.agent import Episode, TrajectoryGroup
 from rllm.experimental.common import (
     AlgorithmConfig,
     CompactFilteringConfig,
@@ -28,6 +27,7 @@ from rllm.experimental.common import (
 from rllm.experimental.common.transform import transform_episodes_to_trajectory_groups
 from rllm.experimental.metrics import MetricsAggregator
 from rllm.experimental.sync_coordinator import SyncCoordinator
+from rllm.types import Episode, TrajectoryGroup
 from rllm.workflows.workflow import TerminationReason
 
 logger = logging.getLogger(__name__)

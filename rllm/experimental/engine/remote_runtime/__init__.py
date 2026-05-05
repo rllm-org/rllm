@@ -30,6 +30,24 @@ def create_remote_runtime(
 
         return AgentCoreRuntime(config, exp_id=exp_id, model_id=model_id)
 
+    if config.backend == "harbor":
+        from rllm.experimental.engine.remote_runtime.protocol import (
+            HarborRuntimeConfig,
+        )
+        from rllm.integrations.harbor.runtime import HarborRuntime
+
+        h = HarborRuntimeConfig(**config.harbor)
+        return HarborRuntime(
+            agent_name=h.agent,
+            environment_type=h.environment_type,
+            agent_kwargs=dict(h.agent_kwargs),
+            agent_timeout_multiplier=h.agent_timeout_multiplier,
+            verifier_timeout_multiplier=h.verifier_timeout_multiplier,
+            agent_setup_timeout_multiplier=h.agent_setup_timeout_multiplier,
+            environment_build_timeout_multiplier=h.environment_build_timeout_multiplier,
+            session_timeout=config.session_timeout,
+        )
+
     raise ValueError(f"Unknown remote runtime backend: {config.backend!r}")
 
 

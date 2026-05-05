@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deepcoder-agent"
+version = "0.1.0"
+description = "Multi-turn iterative-coding agent plugin for rLLM (AgentFlow protocol)"
+requires-python = ">=3.10"
+dependencies = ["rllm", "openai", "datasets"]
+
+[tool.setuptools]
+py-modules = ["deepcoder_flow", "evaluator", "prepare_data"]
+
+# Plugin discovery: `rllm` CLI finds these by name.
+[project.entry-points."rllm.agents"]
+deepcoder = "deepcoder_flow:deepcoder_flow"
+
+[project.entry-points."rllm.evaluators"]
+deepcoder = "evaluator:deepcoder_evaluator"

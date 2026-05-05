@@ -19,7 +19,7 @@ def image_dir(tmp_path, monkeypatch):
     (img_dir / "test_1_image.png").write_bytes(png_bytes)
 
     monkeypatch.setattr(
-        "rllm.experimental.agents.vlm_utils._DATASETS_ROOT",
+        "rllm.eval.vlm_utils._DATASETS_ROOT",
         str(datasets_dir),
     )
 
@@ -60,22 +60,22 @@ def _make_webp_bytes():
 
 class TestDetectMimeType:
     def test_png(self):
-        from rllm.experimental.agents.vlm_utils import _detect_mime_type
+        from rllm.eval.vlm_utils import _detect_mime_type
 
         assert _detect_mime_type(_make_png_bytes()) == "image/png"
 
     def test_jpeg(self):
-        from rllm.experimental.agents.vlm_utils import _detect_mime_type
+        from rllm.eval.vlm_utils import _detect_mime_type
 
         assert _detect_mime_type(_make_jpeg_bytes()) == "image/jpeg"
 
     def test_webp(self):
-        from rllm.experimental.agents.vlm_utils import _detect_mime_type
+        from rllm.eval.vlm_utils import _detect_mime_type
 
         assert _detect_mime_type(_make_webp_bytes()) == "image/webp"
 
     def test_unknown_defaults_to_png(self):
-        from rllm.experimental.agents.vlm_utils import _detect_mime_type
+        from rllm.eval.vlm_utils import _detect_mime_type
 
         assert _detect_mime_type(b"\x00\x00\x00\x00") == "image/png"
 
@@ -87,7 +87,7 @@ class TestDetectMimeType:
 
 class TestImageToDataUri:
     def test_bytes_png(self):
-        from rllm.experimental.agents.vlm_utils import _image_to_data_uri
+        from rllm.eval.vlm_utils import _image_to_data_uri
 
         png = _make_png_bytes()
         uri = _image_to_data_uri(png)
@@ -96,20 +96,20 @@ class TestImageToDataUri:
         assert decoded == png
 
     def test_bytes_jpeg(self):
-        from rllm.experimental.agents.vlm_utils import _image_to_data_uri
+        from rllm.eval.vlm_utils import _image_to_data_uri
 
         jpeg = _make_jpeg_bytes()
         uri = _image_to_data_uri(jpeg)
         assert uri.startswith("data:image/jpeg;base64,")
 
     def test_str_path(self, image_dir):
-        from rllm.experimental.agents.vlm_utils import _image_to_data_uri
+        from rllm.eval.vlm_utils import _image_to_data_uri
 
         uri = _image_to_data_uri("test_bench/images/test_0_image.png")
         assert uri.startswith("data:image/png;base64,")
 
     def test_invalid_type_raises(self):
-        from rllm.experimental.agents.vlm_utils import _image_to_data_uri
+        from rllm.eval.vlm_utils import _image_to_data_uri
 
         with pytest.raises(TypeError):
             _image_to_data_uri(12345)
@@ -122,7 +122,7 @@ class TestImageToDataUri:
 
 class TestLoadImageAsDataURI:
     def test_loads_image(self, image_dir):
-        from rllm.experimental.agents.vlm_utils import _load_image_as_data_uri
+        from rllm.eval.vlm_utils import _load_image_as_data_uri
 
         uri = _load_image_as_data_uri("test_bench/images/test_0_image.png")
         assert uri.startswith("data:image/png;base64,")
@@ -138,7 +138,7 @@ class TestLoadImageAsDataURI:
 
 class TestBuildVLMContent:
     def test_single_image(self, image_dir):
-        from rllm.experimental.agents.vlm_utils import _build_vlm_content
+        from rllm.eval.vlm_utils import _build_vlm_content
 
         content = _build_vlm_content("hello", ["test_bench/images/test_0_image.png"])
         assert len(content) == 2
@@ -148,7 +148,7 @@ class TestBuildVLMContent:
         assert content[1]["text"] == "hello"
 
     def test_multiple_images(self, image_dir):
-        from rllm.experimental.agents.vlm_utils import _build_vlm_content
+        from rllm.eval.vlm_utils import _build_vlm_content
 
         content = _build_vlm_content(
             "question",
@@ -163,21 +163,21 @@ class TestBuildVLMContent:
         assert content[2]["type"] == "text"
 
     def test_no_images(self, image_dir):
-        from rllm.experimental.agents.vlm_utils import _build_vlm_content
+        from rllm.eval.vlm_utils import _build_vlm_content
 
         content = _build_vlm_content("text only", [])
         assert len(content) == 1
         assert content[0]["type"] == "text"
 
     def test_missing_image_skipped(self, image_dir):
-        from rllm.experimental.agents.vlm_utils import _build_vlm_content
+        from rllm.eval.vlm_utils import _build_vlm_content
 
         content = _build_vlm_content("text", ["nonexistent/path.png"])
         assert len(content) == 1
         assert content[0]["type"] == "text"
 
     def test_single_bytes_image(self):
-        from rllm.experimental.agents.vlm_utils import _build_vlm_content
+        from rllm.eval.vlm_utils import _build_vlm_content
 
         png = _make_png_bytes()
         content = _build_vlm_content("hello", [png])
@@ -188,7 +188,7 @@ class TestBuildVLMContent:
         assert content[1]["text"] == "hello"
 
     def test_multiple_bytes_images(self):
-        from rllm.experimental.agents.vlm_utils import _build_vlm_content
+        from rllm.eval.vlm_utils import _build_vlm_content
 
         png = _make_png_bytes()
         jpeg = _make_jpeg_bytes()
@@ -198,7 +198,7 @@ class TestBuildVLMContent:
         assert content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
 
     def test_mixed_bytes_and_paths(self, image_dir):
-        from rllm.experimental.agents.vlm_utils import _build_vlm_content
+        from rllm.eval.vlm_utils import _build_vlm_content
 
         png = _make_png_bytes()
         content = _build_vlm_content("q", [png, "test_bench/images/test_0_image.png"])

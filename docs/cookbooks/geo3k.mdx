@@ -1,0 +1,82 @@
+---
+title: Geo3K
+description: Single-turn VLM geometry agent on the Geometry3K dataset
+---
+
+A vision-language agent that solves geometry problems with diagram images via the **AgentFlow protocol**. Trains on the [Geometry3K](https://huggingface.co/datasets/hiyouga/geometry3k) dataset.
+
+## Pattern
+
+| Aspect | Value |
+|---|---|
+| Loop shape | Single-turn (one VLM call per task) |
+| Tools | None — answer is parsed out of the response |
+| Inputs | Multimodal — text question + base64-encoded diagram image |
+| Termination | Single LLM call returns; evaluator extracts `\boxed{…}` |
+| Reward shape | `1.0` if boxed answer matches ground truth (symbolic math), else `0.0` |
+
+## Architecture
+
+```mermaid
+flowchart TD
+    A["AgentFlow.run(task, config)"] --> S["Solver"]
+    S --> C["OpenAI(base_url=config.base_url).chat.completions.create(...)"]
+    C --> M["messages=[system_prompt, image+question]"]
+    C --> R["response"]
+    R --> T["Trajectory(name=&quot;solver&quot;, steps=[Step(action=response)])"]
+    T --> E["Episode(trajectories=[solver], artifacts={&quot;answer&quot;: response})"]
+    A --> E
+```
+
+The cookbook demonstrates the **multimodal content-block pattern** in an AgentFlow — the `messages` list contains a `{"type": "image_url", "image_url": {"url": f"data:image/png;base64,…"}}` block alongside the text content.
+
+## Install
+
+```bash
+uv pip install -e ".[tinker]"                    # rllm + tinker backend
+uv pip install --no-deps -e cookbooks/geo3k      # this cookbook
+rllm agent list                                  # should show "geo3k"
+```
+
+## Dataset
+
+```bash
+rllm dataset pull geo3k
+```
+
+## Eval
+
+```bash
+rllm eval geo3k \
+    --agent geo3k \
+    --evaluator geo3k \
+    --model Qwen/Qwen3-VL-8B-Instruct \
+    --base-url http://localhost:8000/v1 \
+    --max-examples 20
+```
+
+## Training
+
+```bash
+# Tinker (single-machine LoRA)
+bash cookbooks/geo3k/train_tinker.sh
+
+# Verl (distributed GPU)
+bash cookbooks/geo3k/train_verl.sh
+```
+
+## Files
+
+| File | Description |
+|---|---|
+| `geo3k_flow.py` | Single-turn VLM AgentFlow with multimodal content blocks |
+| `evaluator.py` | `\boxed{}` extraction + symbolic math grading |
+| `train.py` + `train_{tinker,verl}.sh` | Hydra entry points |
+| `pyproject.toml` | Plugin entry-point declarations |
+| `test.py` | Unit tests |
+
+## On GitHub
+
+<Card title="cookbooks/geo3k" icon="github" href="https://github.com/rllm-org/rllm/tree/main/cookbooks/geo3k">
+  Full source, README, and runnable launch scripts
+</Card>

@@ -4,7 +4,7 @@ from typing import Literal
 
 from omegaconf import DictConfig, OmegaConf
 
-from rllm.agents.agent import _DEFAULT_TRAJ_NAME
+from rllm.types import _DEFAULT_TRAJ_NAME
 from rllm.workflows.workflow import TerminationReason
 
 
@@ -38,6 +38,10 @@ class AsyncTrainingConfig:
         if self.enable:
             assert self.fwd_bwd_group_size >= 1
             assert self.mini_batch_size % self.fwd_bwd_group_size == 0, f"mini_batch_size ({self.mini_batch_size}) must be divisible by fwd_bwd_group_size ({self.fwd_bwd_group_size})"
+
+    @classmethod
+    def from_config(cls, config: DictConfig) -> "AsyncTrainingConfig":
+        return cls(**OmegaConf.to_container(config))  # type: ignore
 
 
 @dataclass
@@ -108,6 +112,15 @@ class TransformConfig:
     # Reward configuration
     broadcast: bool = True  # If True, use trajectory-level rewards; if False, use per-step rewards
 
+    @classmethod
+    def from_config(cls, transform_config: DictConfig, *, broadcast: bool = True) -> "TransformConfig":
+        return cls(
+            impute_missing_names=transform_config.get("impute_missing_names", True),
+            default_traj_name=transform_config.get("default_traj_name", _DEFAULT_TRAJ_NAME),
+            drop_unnamed_traj=transform_config.get("drop_unnamed_traj", False),
+            broadcast=broadcast,
+        )
+
 
 @dataclass
 class RejectionSamplingConfig:
@@ -129,6 +142,18 @@ class RejectionSamplingConfig:
     # Applied at the accumulator level in async training, before groups enter the buffer.
     filter_uniform_groups: bool = False
 
+    @classmethod
+    def from_config(cls, config: DictConfig) -> "RejectionSamplingConfig":
+        mode = config.get("mode", None)
+        if mode is None:
+            mode = "episode" if config.get("enable", False) else "none"
+        return cls(
+            mode=mode,
+            min_trajs_per_group=config.get("min_trajs_per_group", 2),
+            min_partial_solve_tasks=config.get("min_partial_solve_tasks", 1),
+            filter_uniform_groups=config.get("filter_uniform_groups", False),
+        )
+
 
 @dataclass
 class RolloutCorrectionConfig:
@@ -146,7 +171,7 @@ class RolloutCorrectionConfig:
     """
 
     tis_mode: str | None = None
-    bypass_mode: bool = True
+    bypass_mode: bool | None = None
     tis_cap: float = 5.0
 
 
@@ -182,7 +207,7 @@ class AlgorithmConfig:
     ``estimator_map`` and the loss function goes into ``loss_fn_map``.
     """
 
-    use_rllm: bool = False  # This is ignored (assumed True) for tinker backend.
+    use_rllm: bool | None = None  # Deprecated
     estimator: rLLMAdvantageEstimator = rLLMAdvantageEstimator.GRPO
     estimator_map: dict[str, rLLMAdvantageEstimator | str | tuple] = field(default_factory=dict)
     # Per-role policy loss overrides (populated from tuples in estimator_map during __post_init__)
@@ -194,8 +219,8 @@ class AlgorithmConfig:
     # advantage computation (GRPO/REINFORCE). Steps missing advantages default to 0.0.
     # When False (default), always compute advantages normally.
     use_precomputed_advantage: bool = False
-    # Global loss_fn override (for tinker backend; Verl uses loss_fn_map per role)
-    loss_fn: Literal["importance_sampling", "ppo", "cispo", "dro", "cross_entropy"] | None = None
+    # Global loss function (backend-specific values; null = backend default)
+    loss_fn: str | None = None
     lr_schedule: Literal["linear", "cosine", "constant"] = "constant"
     warmup_steps_ratio: float = 0.0
 
@@ -203,43 +228,61 @@ class AlgorithmConfig:
     kl_beta: float = 0.0
     eps_clip: float = 0.2
     eps_clip_high: float | None = None
-    loss_agg_mode: Literal["token_mean", "seq_mean_token_sum", "seq_mean_token_mean", None] = None
+    loss_agg_mode: Literal["token-mean", "seq-mean-token-sum", "seq-mean-token-mean", None] = None
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
     router_replay: bool = False
 
     @classmethod
-    def from_config(cls, config: DictConfig) -> "AlgorithmConfig":
+    def from_config(cls, algorithm_config: DictConfig, *, stepwise_advantage_mode: str = "broadcast", estimator_map: dict | None = None) -> "AlgorithmConfig":
         """Create an AlgorithmConfig from a dictionary configuration.
 
         Args:
-            config: Dictionary configuration.
+            algorithm_config: Dictionary configuration.
         Returns:
             AlgorithmConfig: The AlgorithmConfig built from the configuration.
         """
-        rc_section = config.rllm.algorithm.get("rollout_correction", {})
+        if algorithm_config.get("use_rllm", None) is not None:
+            from warnings import warn
+
+            warn(
+                "`algorithm.use_rllm` is deprecated and ignored — advantages are always computed via the rLLM-native path. Remove the field from your config.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+        rc_section = algorithm_config.get("rollout_correction", {})
         rollout_correction = RolloutCorrectionConfig(
             tis_mode=rc_section.get("tis_mode", None),
-            bypass_mode=rc_section.get("bypass_mode", True),
-            tis_cap=rc_section.get("tis_cap", 5.0),
+            bypass_mode=rc_section.get("bypass_mode", None),
+            tis_cap=rc_section.get("tis_cap", 2.0),
         )
         return cls(
-            estimator=rLLMAdvantageEstimator(config.algorithm.adv_estimator),
-            stepwise_advantage_mode=config.rllm.stepwise_advantage.mode,
-            norm_adv_by_std_in_grpo=config.rllm.algorithm.get("norm_adv_by_std_in_grpo", True),
-            use_rllm=config.rllm.stepwise_advantage.get("use_rllm", False),
-            use_precomputed_advantage=config.rllm.algorithm.get("use_precomputed_advantage", False),
-            loss_fn=config.rllm.algorithm.get("loss_fn", None),
-            lr_schedule=config.rllm.algorithm.get("lr_schedule", "constant"),
-            warmup_steps_ratio=config.rllm.algorithm.get("warmup_steps_ratio", 0.0),
-            kl_beta=config.rllm.algorithm.get("kl_beta", 0.0),
-            eps_clip=config.rllm.algorithm.get("eps_clip", 0.2),
-            eps_clip_high=config.rllm.algorithm.get("eps_clip_high", None),
-            loss_agg_mode=config.rllm.algorithm.get("loss_agg_mode", None),
+            estimator=rLLMAdvantageEstimator(algorithm_config.adv_estimator),
+            estimator_map=estimator_map or {},
+            stepwise_advantage_mode=stepwise_advantage_mode,
+            norm_adv_by_std_in_grpo=algorithm_config.get("norm_adv_by_std_in_grpo", True),
+            use_precomputed_advantage=algorithm_config.get("use_precomputed_advantage", False),
+            loss_fn=algorithm_config.get("loss_fn", None),
+            lr_schedule=algorithm_config.get("lr_schedule", "constant"),
+            warmup_steps_ratio=algorithm_config.get("warmup_steps_ratio", 0.0),
+            kl_beta=algorithm_config.get("kl_beta", 0.0),
+            eps_clip=algorithm_config.get("eps_clip", 0.2),
+            eps_clip_high=algorithm_config.get("eps_clip_high", None),
+            loss_agg_mode=algorithm_config.get("loss_agg_mode", None),
             rollout_correction=rollout_correction,
-            router_replay=config.rllm.algorithm.get("router_replay", False),
+            router_replay=algorithm_config.get("router_replay", False),
         )
 
     def __post_init__(self):
+        if self.use_rllm is not None:
+            from warnings import warn
+
+            warn(
+                "`algorithm.use_rllm` is deprecated and ignored — advantages are always computed via the rLLM-native path. Remove the field from your config.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         # Normalize estimator_map: split (estimator, loss_fn) tuples.
         normalized_map: dict[str, rLLMAdvantageEstimator | str] = {}
         for role, value in self.estimator_map.items():

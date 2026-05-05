@@ -18,7 +18,6 @@ from tinker.types import AdamParams
 from tinker_cookbook import checkpoint_utils
 from tinker_cookbook.tokenizer_utils import Tokenizer
 
-from rllm.agents.agent import TrajectoryGroup
 from rllm.experimental.common import (
     AlgorithmConfig,
     CompactFilteringConfig,
@@ -26,6 +25,7 @@ from rllm.experimental.common import (
     rLLMAdvantageEstimator,
 )
 from rllm.trainer.tinker.transform import transform_trajectory_groups_to_datums
+from rllm.types import TrajectoryGroup
 
 if TYPE_CHECKING:
     import torch
@@ -107,8 +107,14 @@ class TinkerPolicyTrainer:
         self.training_client = None
         # fill in the default versions of the configs if not provided
         self.cf_config = cf_config or CompactFilteringConfig.from_config(self.config.rllm.compact_filtering)
-        self.transform_config = transform_config or TransformConfig()
-        self.algorithm_config = algorithm_config or AlgorithmConfig.from_config(self.config)
+        self.transform_config = transform_config or TransformConfig.from_config(
+            self.config.rllm.get("transform", {}),
+            broadcast=self.config.rllm.stepwise_advantage.mode == "broadcast",
+        )
+        self.algorithm_config = algorithm_config or AlgorithmConfig.from_config(
+            self.config.rllm.algorithm,
+            stepwise_advantage_mode=self.config.rllm.stepwise_advantage.mode,
+        )
 
     async def initialize_async(self, resume_from_checkpoint: bool = True):
         """

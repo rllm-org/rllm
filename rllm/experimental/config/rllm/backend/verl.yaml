@@ -24,8 +24,6 @@ data:
 # First we need to set the verl-native config to missing -- so we can try to override them with the rLLM-common config
 algorithm:
   adv_estimator: ???
-  gamma: ???
-  lam: ???
   norm_adv_by_std_in_grpo: ???
 
 trainer:
@@ -45,9 +43,9 @@ rllm:
   backend: verl
   algorithm:
     adv_estimator: ${oc.select:algorithm.adv_estimator, grpo}
-    gamma: ${oc.select:algorithm.gamma, 1.0}
-    lam: ${oc.select:algorithm.lam, 0.95}
     norm_adv_by_std_in_grpo: ${oc.select:algorithm.norm_adv_by_std_in_grpo, true}
+    rollout_correction:
+      bypass_mode: False
 
   rollout:
     n: ${oc.select:actor_rollout_ref.rollout.n, 8}

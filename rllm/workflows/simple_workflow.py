@@ -1,6 +1,7 @@
-from rllm.agents.agent import Action, BaseAgent, Episode, Step, Trajectory
+from rllm.agents.agent import BaseAgent
 from rllm.engine import ModelOutput, RolloutEngine
 from rllm.rewards.reward_fn import RewardFunction
+from rllm.types import Action, Episode, Step, Trajectory
 from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflow
 
 

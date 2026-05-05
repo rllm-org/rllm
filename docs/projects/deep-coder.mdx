@@ -1,0 +1,26 @@
+---
+title: DeepCoder
+description: A fully open-source 14B coder matching O3-mini on competitive programming
+---
+
+<Card title="Read the full write-up" icon="arrow-up-right-from-square" href="https://pretty-radio-b75.notion.site/DeepCoder-A-Fully-Open-Source-14B-Coder-at-O3-mini-Level-1cf81902c14680b3bee5eb349a512a51">
+  Notion blog post with full details
+</Card>
+
+DeepCoder is a 14B coding model that achieves **60.6% Pass@1 on LiveCodeBench**, an 8% improvement over the base model. It matches `o3-mini` and `o1` performance on competitive programming benchmarks.
+
+## Results
+
+| Model | Parameters | LiveCodeBench Pass@1 |
+|-------|-----------|---------------------|
+| **DeepCoder** | **14B** | **60.6%** |
+| o3-mini (Low) | Unknown | ~60% |
+| o1 | Unknown | ~60% |
+
+## Approach
+
+Fine-tuned from DeepSeek-R1-Distill-Qwen-14B on coding competition problems using RL with code execution feedback.
+
+See the [`cookbooks/deepcoder`](https://github.com/rllm-org/rllm/tree/main/cookbooks/deepcoder) cookbook (single-turn coding with hidden-test grading) for the AgentFlow-based reproducer.
+
+**Released**: April 2025

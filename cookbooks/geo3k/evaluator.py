@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import rllm
-from rllm.experimental.eval.types import EvalOutput, Signal, _extract_agent_answer
+from rllm.eval.types import EvalOutput, Signal
 from rllm.types import Episode
 
 
@@ -12,7 +12,7 @@ def geo3k_evaluator(task: dict, episode: Episode) -> EvalOutput:
     """Grade geometry answers by extracting the boxed answer and comparing to ground truth."""
     from rllm.rewards.math_utils.utils import extract_answer, grade_answer_mathd, grade_answer_sympy
 
-    answer_text = _extract_agent_answer(episode)
+    answer_text = str(episode.artifacts.get("answer", ""))
     model_answer = extract_answer(answer_text)
 
     if model_answer is None:

@@ -1,0 +1,335 @@
+---
+title: Parsers
+description: Parsers for tool calling and chat formatting
+---
+
+The parsers module provides utilities for parsing tool calls from model outputs and formatting chat templates.
+
+## ToolParser
+
+Abstract base class for tool call parsers.
+
+```python
+from rllm.parser import ToolParser
+```
+
+### Methods
+
+#### parse
+
+Extract tool calls from model response.
+
+```python
+tool_calls = parser.parse(model_response)
+```
+
+<ParamField path="model_response" type="str">
+  Raw model output containing tool calls.
+</ParamField>
+
+<ResponseField name="tool_calls" type="list[ToolCall]">
+  List of parsed tool calls.
+</ResponseField>
+
+#### get_tool_prompt
+
+Get the tool prompt for the model.
+
+```python
+prompt = parser.get_tool_prompt(tools_schema)
+```
+
+<ParamField path="tools_schema" type="str">
+  JSON schema for available tools.
+</ParamField>
+
+<ResponseField name="prompt" type="str">
+  Formatted tool prompt to include in system message.
+</ResponseField>
+
+#### get_parser
+
+Factory method to get appropriate parser for a tokenizer.
+
+```python
+parser = ToolParser.get_parser(tokenizer)
+```
+
+<ParamField path="tokenizer" type="PreTrainedTokenizer">
+  Tokenizer to detect parser type from.
+</ParamField>
+
+<ResponseField name="parser" type="ToolParser">
+  Appropriate parser instance (R1ToolParser or QwenToolParser).
+</ResponseField>
+
+---
+
+## R1ToolParser
+
+Parser for DeepSeek R1-style tool call format.
+
+```python
+from rllm.parser import R1ToolParser
+
+parser = R1ToolParser()
+```
+
+### Format
+
+R1 format uses special tokens:
+
+```text
+<|tool_calls_begin|>
+<|tool_call_begin|>function<|tool_sep|>function_name
+{"param1": "value1", "param2": "value2"}
+<|tool_call_end|>
+<|tool_calls_end|>
+```
+
+### Methods
+
+```python
+tool_calls = parser.parse(model_response)
+prompt = parser.get_tool_prompt(tools_schema)
+```
+
+---
+
+## QwenToolParser
+
+Parser for Qwen-style tool call format.
+
+```python
+from rllm.parser import QwenToolParser
+
+parser = QwenToolParser()
+```
+
+### Format
+
+Qwen format uses XML-like tags:
+
+```
+<tool_call>{"name": "function_name", "arguments": {...}}</tool_call>
+```
+
+### Methods
+
+```python
+tool_calls = parser.parse(model_response)
+prompt = parser.get_tool_prompt(tools_schema)
+```
+
+---
+
+## ChatTemplateParser
+
+Parser for converting between chat format and tokens.
+
+```python
+from rllm.parser import ChatTemplateParser
+
+parser = ChatTemplateParser.get_parser(tokenizer)
+```
+
+### Methods
+
+#### apply_chat_template
+
+Convert messages to tokens.
+
+```python
+tokens = parser.apply_chat_template(
+    messages,
+    add_generation_prompt=True
+)
+```
+
+#### decode
+
+Convert tokens back to text.
+
+```python
+text = parser.decode(tokens)
+```
+
+---
+
+## Example: Parsing Tool Calls (R1)
+
+```python
+from rllm.parser import R1ToolParser
+from rllm.tools import ToolCall
+
+parser = R1ToolParser()
+
+model_response = """
+<|tool_calls_begin|>
+<|tool_call_begin|>function<|tool_sep|>search_web
+{"query": "What is rLLM?", "num_results": 5}
+<|tool_call_end|>
+<|tool_calls_end|>
+"""
+
+tool_calls = parser.parse(model_response)
+
+for call in tool_calls:
+    print(f"Tool: {call.name}")
+    print(f"Arguments: {call.arguments}")
+
+# Output:
+# Tool: search_web
+# Arguments: {'query': 'What is rLLM?', 'num_results': 5}
+```
+
+---
+
+## Example: Parsing Tool Calls (Qwen)
+
+```python
+from rllm.parser import QwenToolParser
+
+parser = QwenToolParser()
+
+model_response = '''
+Let me search for that information.
+<tool_call>{"name": "search", "arguments": {"query": "capital of France"}}</tool_call>
+'''
+
+tool_calls = parser.parse(model_response)
+
+for call in tool_calls:
+    print(f"Tool: {call.name}")
+    print(f"Arguments: {call.arguments}")
+
+# Output:
+# Tool: search
+# Arguments: {'query': 'capital of France'}
+```
+
+---
+
+## Example: Multiple Tool Calls
+
+```python
+from rllm.parser import QwenToolParser
+
+parser = QwenToolParser()
+
+model_response = '''
+<tool_call>{"name": "calculator", "arguments": {"a": 5, "b": 3, "op": "add"}}</tool_call>
+<tool_call>{"name": "calculator", "arguments": {"a": 10, "b": 2, "op": "multiply"}}</tool_call>
+'''
+
+tool_calls = parser.parse(model_response)
+
+print(f"Found {len(tool_calls)} tool calls")
+for i, call in enumerate(tool_calls):
+    print(f"\nCall {i+1}:")
+    print(f"  Name: {call.name}")
+    print(f"  Args: {call.arguments}")
+```
+
+---
+
+## Example: Getting Tool Prompt
+
+```python
+from rllm.parser import R1ToolParser
+import json
+
+parser = R1ToolParser()
+
+tools_schema = json.dumps([
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": "Search the web for information",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"}
+                },
+                "required": ["query"]
+            }
+        }
+    }
+], indent=2)
+
+tool_prompt = parser.get_tool_prompt(tools_schema)
+
+print(tool_prompt)
+# Outputs formatted tool prompt with instructions
+```
+
+---
+
+## Example: Auto-detecting Parser
+
+```python
+from transformers import AutoTokenizer
+from rllm.parser import ToolParser
+
+# DeepSeek model -> R1ToolParser
+tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
+parser = ToolParser.get_parser(tokenizer)
+print(type(parser).__name__)  # R1ToolParser
+
+# Qwen model -> QwenToolParser
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
+parser = ToolParser.get_parser(tokenizer)
+print(type(parser).__name__)  # QwenToolParser
+```
+
+---
+
+## Example: Parsing Tool Calls
+
+```python
+from transformers import AutoTokenizer
+from rllm.parser import ToolParser
+
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
+parser = ToolParser.get_parser(tokenizer)
+
+# Parse a model response into structured tool calls.
+response = """<tool_call>
+{"name": "search", "arguments": {"query": "rllm"}}
+</tool_call>"""
+
+tool_calls = parser.parse(response)
+for tc in tool_calls:
+    print(tc.name, tc.arguments)
+```
+
+---
+
+## Example: ChatTemplateParser
+
+```python
+from transformers import AutoTokenizer
+from rllm.parser import ChatTemplateParser
+
+tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
+parser = ChatTemplateParser.get_parser(tokenizer)
+
+messages = [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": "What is 2+2?"}
+]
+
+# Convert to tokens
+tokens = parser.apply_chat_template(
+    messages,
+    add_generation_prompt=True,
+    return_tensors="pt"
+)
+
+print(f"Tokens: {tokens}")
+
+# Decode back to text
+text = parser.decode(tokens[0])
+print(f"Formatted: {text}")
+```

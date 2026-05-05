@@ -1,0 +1,126 @@
+---
+title: Deepcoder
+description: Single-turn coding agent with hidden-test grading
+---
+
+A single-turn coding agent for competition-style programming problems. The model emits reasoning followed by a fenced ```` ```python ```` block; the evaluator extracts the last block and runs it against hidden test cases.
+
+## Pattern
+
+| Aspect | Value |
+|---|---|
+| Loop shape | Single-turn (one LLM call per task) |
+| Tools | None — code is parsed out of the response |
+| Termination | Single LLM call returns; evaluator runs hidden tests |
+| Reward shape | `1.0` if all hidden tests pass, `0.0` otherwise |
+
+## Architecture
+
+```mermaid
+flowchart TD
+    subgraph Run["AgentFlow.run(task, config)"]
+        A["one LLM call via OpenAI(base_url=config.base_url)"]
+        B["model outputs reasoning + python code block"]
+        C["store full response in episode.artifacts[&quot;answer&quot;]"]
+        A --> B --> C
+    end
+
+    subgraph Eval["Evaluator.evaluate(task, episode)"]
+        D["RewardCodeFn extracts last python block"]
+        E["run against task.metadata[&quot;ground_truth&quot;] (hidden tests)"]
+        D --> E
+    end
+
+    Run -- "episode.artifacts" --> Eval
+```
+
+Long chain-of-thought reasoning happens *inside* the assistant message — there is no multi-turn revise/feedback loop. This matches the original deepcoder training setup.
+
+## Install
+
+```bash
+uv pip install -e ".[tinker]"                          # rllm + tinker backend
+uv pip install --no-deps -e cookbooks/deepcoder        # this cookbook
+rllm agent list                                        # should show "deepcoder"
+```
+
+## Dataset
+
+```bash
+python cookbooks/deepcoder/prepare_data.py
+# Smoke-size:
+python cookbooks/deepcoder/prepare_data.py --train-size 200 --test-size 50
+```
+
+This pulls `agentica-org/DeepCoder-Preview-Dataset` (primeintellect + taco + lcbv5 train; codeforces + lcbv5 test) and normalizes the test schemas (TACO's nested dict → flat list).
+
+## Eval
+
+```bash
+rllm eval deepcoder \
+    --agent deepcoder \
+    --evaluator deepcoder \
+    --model agentica-org/DeepCoder-14B-Preview \
+    --base-url http://localhost:8000/v1 \
+    --split test \
+    --max-examples 20
+```
+
+Verified end-to-end: `rllm eval deepcoder --max-examples 10` against `gpt-5.4-mini` reports **5/10 correct (50% accuracy)** with per-item rewards split mixed 1.0 / 0.0.
+
+## Training
+
+```bash
+# Tinker (single-machine LoRA)
+bash cookbooks/deepcoder/train_tinker.sh
+
+# Verl (distributed GPU)
+bash cookbooks/deepcoder/train_verl.sh
+```
+
+## Key code
+
+The flow is a single LLM call — all the reasoning lives inside the one assistant message:
+
+```python
+@rllm.rollout(name="deepcoder")
+async def deepcoder_flow(task: Task, config: AgentConfig) -> Episode:
+    question = str(task.metadata.get("question") or task.instruction or "")
+    client = AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": question},
+    ]
+
+    resp = await client.chat.completions.create(
+        model=config.model, messages=messages,
+        temperature=0.6, max_tokens=16384, timeout=600,
+    )
+    content = resp.choices[0].message.content or ""
+    messages.append({"role": "assistant", "content": content})
+    step = Step(chat_completions=list(messages), model_response=content, action=content, thought=content)
+
+    return Episode(
+        trajectories=[Trajectory(name="deepcoder", steps=[step])],
+        artifacts={"answer": content},
+    )
+```
+
+The evaluator delegates to `rllm.rewards.code_reward.RewardCodeFn`, which runs the extracted code against the hidden tests in a sandboxed subprocess.
+
+## Files
+
+| File | Description |
+|---|---|
+| `deepcoder_flow.py` | The single-turn AgentFlow |
+| `evaluator.py` | Wraps `RewardCodeFn` for hidden-test grading |
+| `prepare_data.py` | Pull + normalize Deepcoder splits via `DatasetRegistry` |
+| `train.py` + `train_{tinker,verl}.sh` | Hydra entry points |
+| `pyproject.toml` | Plugin entry-point declarations |
+| `test.py` | 5 unit tests covering correct / wrong / no-fence / multi-block / Task vs dict |
+
+## On GitHub
+
+<Card title="cookbooks/deepcoder" icon="github" href="https://github.com/rllm-org/rllm/tree/main/cookbooks/deepcoder">
+  Full source, README, and runnable launch scripts
+</Card>

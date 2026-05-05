@@ -16,11 +16,11 @@ import tinker
 import torch
 from transformers import AutoTokenizer
 
-from rllm.agents.agent import Episode
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.tinker_engine import TinkerEngine
 from rllm.trainer.deprecated.tinker_agent_trainer import TinkerAgentTrainer
 from rllm.trainer.deprecated.tinker_policy_trainer import TinkerPolicyTrainer
+from rllm.types import Episode
 
 if TYPE_CHECKING:
     pass
@@ -224,7 +224,7 @@ class TinkerWorkflowTrainer(TinkerAgentTrainer):
         # Update trajectory-level rewards from step-level rewards
         for episode in episodes:
             for trajectory in episode.trajectories:
-                if trajectory.reward == 0.0 and trajectory.steps:
+                if trajectory.reward is None and trajectory.steps:
                     # Compute trajectory reward from step rewards
                     trajectory.reward = sum(step.reward if step.reward is not None else 0.0 for step in trajectory.steps)
 

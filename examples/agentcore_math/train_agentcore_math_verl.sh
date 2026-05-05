@@ -5,11 +5,15 @@ set -eux
 # Load environment variables (AGENTCORE_AGENT_ARN, AGENTCORE_S3_BUCKET)
 set -a && source .env && set +a
 
-export CUDA_DEVICE_MAX_CONNECTIONS=1
 export VLLM_ALLREDUCE_USE_SYMM_MEM=0
+
+# Clean up stale ZMQ sockets from previous runs
+rm -f /tmp/rl-colocate-zmq-*.sock
 
 MODEL_PATH=Qwen/Qwen3-4B-Instruct-2507
 
+# actor_rollout_ref.actor.megatron.param_offload=True is required for
+# verl 0.7.1 to work around device mismatch errors caused by unconditional param offloading
 python -m examples.agentcore_math.train_agentcore_math_verl \
     rllm/backend=verl \
     model_engine=megatron \
@@ -37,7 +41,8 @@ python -m examples.agentcore_math.train_agentcore_math_verl \
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=False \
     actor_rollout_ref.actor.megatron.use_mbridge=True \
     actor_rollout_ref.actor.megatron.vanilla_mbridge=False \
-    actor_rollout_ref.actor.loss_agg_mode=token-mean \
+    actor_rollout_ref.actor.megatron.param_offload=True \
+    actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-sum \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
@@ -69,7 +74,7 @@ python -m examples.agentcore_math.train_agentcore_math_verl \
     trainer.resume_mode=disable \
     rllm.remote_runtime.enabled=true \
     rllm.remote_runtime.backend=agentcore \
-    rllm.remote_runtime.backend_config.agent_runtime_arn=$AGENTCORE_AGENT_ARN \
-    rllm.remote_runtime.backend_config.s3_bucket=$AGENTCORE_S3_BUCKET \
-    rllm.remote_runtime.backend_config.tps_limit=25 \
+    rllm.remote_runtime.agentcore.agent_runtime_arn=$AGENTCORE_AGENT_ARN \
+    rllm.remote_runtime.agentcore.s3_bucket=$AGENTCORE_S3_BUCKET \
+    rllm.remote_runtime.agentcore.tps_limit=25 \
     rllm.remote_runtime.session_timeout=300

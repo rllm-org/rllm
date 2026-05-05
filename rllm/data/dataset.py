@@ -364,18 +364,28 @@ class DatasetRegistry:
         return [{col: col_dict[col][i] for col in col_dict} for i in range(num_rows)]
 
     @classmethod
-    def _strip_binary_columns(cls, data_list: list[dict[str, Any]], bin_cols: list[str]) -> list[dict[str, Any]]:
-        """Return copies of rows with binary columns set to ``None``.
+    def _wrap_binary_columns_for_parquet(cls, data_list: list[dict[str, Any]], bin_cols: list[str]) -> list[dict[str, Any]]:
+        """Wrap binary columns into verl-compatible ``{"bytes": ..., "path": ""}`` dicts.
 
-        Used for verl postprocessing where image data isn't needed.
+        Parquet stores raw ``bytes``/``list[bytes]`` fine, but verl's data path
+        (``verl/utils/dataset/rl_dataset.py:_build_messages``) expects each
+        image element to be either a PIL ``Image`` or a dict with a ``bytes``
+        key. We standardise on ``[{"bytes": <png-bytes>, "path": ""}, ...]``
+        so the same parquet works for both verl's native pipeline AND rLLM's
+        agent flows (which read via ``task.metadata["images"]``).
         """
-        stripped = []
+        wrapped = []
         for row in data_list:
             new_row = dict(row)
             for col in bin_cols:
-                new_row[col] = None
-            stripped.append(new_row)
-        return stripped
+                val = new_row.get(col)
+                if isinstance(val, bytes):
+                    new_row[col] = {"bytes": val, "path": ""}
+                elif isinstance(val, list):
+                    new_row[col] = [{"bytes": item, "path": ""} if isinstance(item, bytes) else item for item in val]
+                # leave None / other types untouched
+            wrapped.append(new_row)
+        return wrapped
 
     @classmethod
     def _verl_path_for(cls, dataset_path: str) -> str:
@@ -425,9 +435,12 @@ class DatasetRegistry:
             dataset_path = os.path.join(cls._DATASET_DIR, rel_path)
             cls._save_arrow_ipc(data_list, dataset_path)
 
-            # Strip binary columns for verl postprocessing (images not needed)
-            stripped = cls._strip_binary_columns(data_list, bin_cols)
-            verl_data = cls.apply_verl_postprocessing(stripped)
+            # Wrap binary columns as {"bytes": ..., "path": ""} dicts so they
+            # round-trip through parquet AND match verl's expected image format.
+            # Images flow through into ``extra_info`` so rLLM agent flows can
+            # read them via ``task.metadata["images"]``.
+            wrapped = cls._wrap_binary_columns_for_parquet(data_list, bin_cols)
+            verl_data = cls.apply_verl_postprocessing(wrapped)
             verl_dataset_path = cls._verl_path_for(dataset_path)
             verl_data_df = pd.DataFrame(verl_data)
             verl_data_df.to_parquet(verl_dataset_path)

@@ -1,0 +1,316 @@
+---
+title: Rewards
+description: Reward functions for evaluating agent performance
+---
+
+The rewards module provides customizable reward functions for various task domains including math, code, and search.
+
+## RewardFunction
+
+Protocol defining the interface for reward functions.
+
+```python
+from rllm.rewards import RewardFunction
+
+class RewardFunction(Protocol):
+    def __call__(self, task_info: dict, action: str) -> RewardOutput:
+        ...
+```
+
+<ParamField path="task_info" type="dict">
+  Task dictionary containing question, answer, and other metadata.
+</ParamField>
+
+<ParamField path="action" type="str | Action">
+  Agent's response/solution. Can be a string or Action object.
+</ParamField>
+
+<ResponseField name="output" type="RewardOutput">
+  Reward output containing reward value and metadata.
+</ResponseField>
+
+---
+
+## RewardOutput
+
+Dataclass for reward function results.
+
+```python
+from rllm.rewards import RewardOutput
+
+output = RewardOutput(reward=1.0, metadata={"correct": True})
+```
+
+<ParamField path="reward" type="float">
+  The computed reward value (typically 0.0 or 1.0).
+</ParamField>
+
+<ParamField path="metadata" type="dict">
+  Additional information about the evaluation.
+</ParamField>
+
+---
+
+## Built-in Reward Functions
+
+### math_reward_fn
+
+Reward function for mathematical reasoning tasks.
+
+```python
+from rllm.rewards import math_reward_fn
+
+task = {
+    "question": "What is 2 + 2?",
+    "answer": "4",
+    "data_source": "hendrycks_math"  # optional
+}
+action = "The answer is 4"
+
+output = math_reward_fn(task, action)
+print(output.reward)  # 1.0 if correct, 0.0 otherwise
+```
+
+Supported task fields:
+- `answer` or `ground_truth`: Expected answer
+- `data_source`: Dataset identifier (optional)
+
+---
+
+### code_reward_fn
+
+Reward function for code generation tasks with execution-based evaluation.
+
+```python
+from rllm.rewards import code_reward_fn
+
+task = {
+    "test_cases": [
+        {"input": [2, 3], "output": 5},
+        {"input": [10, 20], "output": 30}
+    ],
+    "entry_point": "add_numbers"
+}
+action = '''
+def add_numbers(a, b):
+    return a + b
+'''
+
+output = code_reward_fn(task, action)
+print(output.reward)  # 1.0 if all tests pass
+```
+
+Supported task fields:
+- `test_cases`: List of input/output test pairs
+- `entry_point`: Function name to test
+- `timeout`: Execution timeout in seconds (optional)
+
+---
+
+### search_reward_fn
+
+Reward function for information retrieval and question answering tasks.
+
+```python
+from rllm.rewards import search_reward_fn
+
+task = {
+    "question": "What is the capital of France?",
+    "ground_truth": "Paris",
+    "supporting_facts": [["France", 0]]  # optional
+}
+action = "The capital of France is Paris."
+
+output = search_reward_fn(task, action)
+print(output.reward)  # F1 score or exact match
+```
+
+Supported task fields:
+- `ground_truth` or `answer`: Expected answer
+- `supporting_facts`: Supporting evidence (optional)
+- `data_source`: Dataset identifier (optional)
+
+---
+
+### f1_reward_fn
+
+Generic F1 score-based reward function using token overlap.
+
+```python
+from rllm.rewards import f1_reward_fn
+
+task = {"ground_truth": "The quick brown fox"}
+action = "the quick fox"
+
+output = f1_reward_fn(task, action)
+print(output.reward)  # F1 score based on normalized token overlap
+```
+
+Features:
+- Normalizes text (lowercase, remove punctuation/articles)
+- Computes token-level precision and recall
+- Returns F1 score as reward
+
+---
+
+### zero_reward
+
+Placeholder reward function that always returns 0.
+
+```python
+from rllm.rewards import zero_reward
+
+output = zero_reward(task_info={}, action="anything")
+print(output.reward)  # Always 0.0
+```
+
+---
+
+## Custom Reward Functions
+
+### Example: Custom Keyword Reward
+
+```python
+from rllm.rewards import RewardOutput
+
+def keyword_reward_fn(task_info: dict, action: str) -> RewardOutput:
+    """Reward agent if response contains required keywords."""
+    required_keywords = task_info.get("keywords", [])
+    action_lower = action.lower()
+    
+    matches = sum(1 for kw in required_keywords if kw.lower() in action_lower)
+    reward = matches / len(required_keywords) if required_keywords else 0.0
+    
+    return RewardOutput(
+        reward=reward,
+        metadata={"matches": matches, "total": len(required_keywords)}
+    )
+
+# Usage
+task = {"keywords": ["machine learning", "neural network"]}
+action = "Machine learning uses neural networks for prediction."
+
+output = keyword_reward_fn(task, action)
+print(output.reward)  # 1.0 (both keywords present)
+```
+
+---
+
+### Example: Custom Length Penalty
+
+```python
+from rllm.rewards import RewardOutput, math_reward_fn
+
+def concise_math_reward(task_info: dict, action: str) -> RewardOutput:
+    """Math reward with penalty for overly long responses."""
+    # Get base math reward
+    base_output = math_reward_fn(task_info, action)
+    
+    # Apply length penalty
+    max_length = task_info.get("max_length", 500)
+    length_penalty = max(0, (len(action) - max_length) / 1000)
+    
+    final_reward = max(0, base_output.reward - length_penalty)
+    
+    return RewardOutput(
+        reward=final_reward,
+        metadata={
+            **base_output.metadata,
+            "base_reward": base_output.reward,
+            "length_penalty": length_penalty,
+            "response_length": len(action)
+        }
+    )
+```
+
+---
+
+### Example: Multi-Criteria Reward
+
+```python
+from rllm.rewards import RewardOutput
+import re
+
+def multi_criteria_reward(task_info: dict, action: str) -> RewardOutput:
+    """Reward based on multiple criteria with weights."""
+    # Criterion 1: Correctness
+    correct = task_info["answer"].lower() in action.lower()
+    correctness_score = 1.0 if correct else 0.0
+    
+    # Criterion 2: Explanation quality (has reasoning words)
+    reasoning_words = ["because", "therefore", "thus", "since"]
+    has_reasoning = any(word in action.lower() for word in reasoning_words)
+    reasoning_score = 1.0 if has_reasoning else 0.0
+    
+    # Criterion 3: Formatting (uses proper structure)
+    has_structure = bool(re.search(r'\n\n|\d+\.', action))
+    formatting_score = 1.0 if has_structure else 0.0
+    
+    # Weighted combination
+    weights = {"correctness": 0.7, "reasoning": 0.2, "formatting": 0.1}
+    final_reward = (
+        weights["correctness"] * correctness_score +
+        weights["reasoning"] * reasoning_score +
+        weights["formatting"] * formatting_score
+    )
+    
+    return RewardOutput(
+        reward=final_reward,
+        metadata={
+            "correctness": correctness_score,
+            "reasoning": reasoning_score,
+            "formatting": formatting_score
+        }
+    )
+```
+
+---
+
+## Using Rewards in an AgentFlow
+
+Modern agents use the `Evaluator` protocol — a separate function that
+reads the `Episode` produced by an `AgentFlow` and returns an `EvalOutput`.
+The reward functions in `rllm.rewards` are wrapped inside the evaluator:
+
+```python
+import rllm
+from rllm.eval.types import EvalOutput, Signal
+from rllm.types import Episode
+from rllm.rewards.math_utils.utils import grade_answer_mathd, grade_answer_sympy
+
+
+@rllm.evaluator
+def math_evaluator(task: dict, episode: Episode) -> EvalOutput:
+    answer = str(episode.artifacts.get("answer", ""))
+    truth = str(task.get("ground_truth", ""))
+    is_correct = grade_answer_mathd(answer, truth) or grade_answer_sympy(answer, truth)
+    return EvalOutput(
+        reward=1.0 if is_correct else 0.0,
+        is_correct=is_correct,
+        signals=[Signal(name="accuracy", value=1.0 if is_correct else 0.0)],
+    )
+```
+
+See [`cookbooks/math/math_eval.py`](https://github.com/rllm-org/rllm/blob/main/cookbooks/math/math_eval.py)
+for the full version that this snippet is adapted from.
+
+## Using Rewards with Workflows
+
+For the legacy [Workflow](/api/workflows) path, the reward function is
+passed in directly:
+
+```python
+from rllm.workflows import SimpleWorkflow
+from rllm.rewards import search_reward_fn
+
+workflow = SimpleWorkflow(
+    rollout_engine=engine,
+    reward_function=search_reward_fn,
+    executor=executor,
+)
+
+episode = await workflow.run(
+    task={"question": "...", "ground_truth": "..."},
+    uid="task_0",
+)
+```

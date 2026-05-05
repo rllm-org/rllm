@@ -36,6 +36,7 @@ from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_pad
 
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
+from rllm.experimental.verl.metrics import calculate_debug_metrics_compat
 from rllm.utils.episode_logger import EpisodeLogger
 from rllm.workflows.workflow import TerminationReason
 
@@ -358,10 +359,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         batch = batch.union(old_log_prob)
 
                         if "rollout_log_probs" in batch.batch.keys():
-                            from verl.utils.debug.metrics import calculate_debug_metrics
-
-                            debug_metrics = calculate_debug_metrics(batch)
-                            metrics.update(debug_metrics)
+                            metrics.update(calculate_debug_metrics_compat(batch))
 
                     if self.use_reference_policy:
                         # compute reference log_prob

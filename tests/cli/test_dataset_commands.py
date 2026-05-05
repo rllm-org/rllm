@@ -7,7 +7,7 @@ import os
 import pytest
 from click.testing import CliRunner
 
-from rllm.experimental.cli.main import cli
+from rllm.cli.main import cli
 
 
 @pytest.fixture

@@ -33,10 +33,10 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.engine.rollout import ModelOutput
 from rllm.sdk.proxy.proxy_manager import VerlProxyManager
 from rllm.sdk.store.sqlite_store import SqliteTraceStore
+from rllm.types import Episode, Step, Trajectory
 
 if TYPE_CHECKING:
     from verifiers import Environment

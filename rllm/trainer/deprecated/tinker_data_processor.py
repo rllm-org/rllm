@@ -11,7 +11,7 @@ import tinker
 import torch
 from tinker.types.tensor_data import TensorData
 
-from rllm.agents.agent import Step, Trajectory, TrajectoryGroup
+from rllm.types import Step, Trajectory, TrajectoryGroup
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,8 @@ class TinkerAdvantageComputer:
 
             mean_reward = sum(valid_group_rewards) / len(valid_group_rewards)
             std_reward = np.std(valid_group_rewards)
+            if std_reward == 0.0:
+                std_reward = 1.0
             return mean_reward, float(std_reward)
 
         valid_group_rewards = [r for r in group_rewards if r is not None]
@@ -715,7 +717,7 @@ async def process_episodes(
                     for step_idx, step in enumerate(trajectory.steps):
                         group_key = (task_id, trajectory.name, step_idx)
                         # Create single-step trajectory
-                        from rllm.agents.agent import Trajectory
+                        from rllm.types import Trajectory
 
                         single_step_traj = Trajectory(steps=[step], reward=step.reward, name=trajectory.name)
                         trajectory_groups_dict[group_key].append(single_step_traj)

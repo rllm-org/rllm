@@ -1,6 +1,6 @@
 """Tests for EvalProxyManager config generation."""
 
-from rllm.experimental.eval.proxy import EvalProxyManager
+from rllm.eval.proxy import EvalProxyManager
 
 
 class TestEvalProxyManager:

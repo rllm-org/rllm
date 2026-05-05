@@ -25,11 +25,11 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
-from rllm.agents.agent import Episode, Trajectory
 from rllm.sdk.data_process import group_steps, trace_to_step
 from rllm.sdk.protocol import Trace
 from rllm.sdk.session.base import wrap_with_session_context
 from rllm.sdk.store.sqlite_store import SqliteTraceStore
+from rllm.types import Episode, Trajectory
 from rllm.types import Trajectory as BaseTrajectory
 from rllm.workflows.workflow import TerminationReason, Workflow
 
@@ -109,8 +109,8 @@ class SdkWorkflowFactory:
 
     def _setup_sandbox(self, sandbox_cfg: dict) -> None:
         """Create a SandboxOrchestrator from the config."""
-        from rllm.sdk.sandbox import create_sandbox_orchestrator
-        from rllm.sdk.sandbox.protocol import SandboxConfig
+        from rllm.sandbox import create_sandbox_orchestrator
+        from rllm.sandbox.protocol import SandboxConfig
 
         sc = SandboxConfig(
             enabled=sandbox_cfg.get("enabled", False),
@@ -146,7 +146,7 @@ class SdkWorkflowFactory:
         if self.sandbox_orchestrator is None:
             return
 
-        from rllm.sdk.sandbox.result_store import ExecutionResultStore
+        from rllm.sandbox.result_store import ExecutionResultStore
 
         db_path = self._sdk_cfg.get("store", {}).get("path", None)
         result_store = ExecutionResultStore(db_path=db_path)
@@ -368,7 +368,7 @@ class SdkWorkflow(Workflow):
 
     async def _run_sandboxed(self, task: dict, uid: str, rollout_start_time: float) -> Episode:
         """Execute via sandbox orchestrator and build Episode from result."""
-        from rllm.sdk.sandbox.protocol import ExecutionResult
+        from rllm.sandbox.protocol import ExecutionResult
 
         result: ExecutionResult = await self.sandbox_orchestrator.execute(task, self.agent_config)
 
