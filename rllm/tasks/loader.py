@@ -281,6 +281,22 @@ def _build_metadata(row: dict, metadata_fields: list[str] | None) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _default_harness_for(tasks: list[Task]) -> str:
+    """Pick a sane default harness given the loaded tasks.
+
+    A task is "sandbox-style" when it (or its dataset dir) ships an
+    ``environment/`` directory — i.e. it expects a container plus a shell
+    verifier. Those tasks need a harness that can act inside the sandbox;
+    ``react`` (one-shot LLM call, no sandbox) would silently produce empty
+    output and let the verifier score the missing submission. Default to
+    ``opencode`` instead.
+    """
+    for task in tasks:
+        if (task.task_dir / "environment").is_dir() or (task.dataset_dir / "environment").is_dir():
+            return "opencode"
+    return "react"
+
+
 def _load_sandbox_dataset(
     path: Path,
     config: DatasetConfig,
@@ -300,7 +316,7 @@ def _load_sandbox_dataset(
         tasks=tasks,
         name=config.name,
         split=config.split,
-        harness_name=harness_name or config.default_agent or "react",
+        harness_name=harness_name or config.default_agent or _default_harness_for(tasks),
         sandbox_backend=sandbox_backend or config.default_sandbox,
         description=config.description,
         category="agentic",
@@ -318,7 +334,7 @@ def _load_single_task(
         tasks=[task],
         name=task.id,
         split="test",
-        harness_name=harness_name or "react",
+        harness_name=harness_name or _default_harness_for([task]),
         sandbox_backend=sandbox_backend,
         description=task.metadata.get("task", {}).get("description", "") if isinstance(task.metadata.get("task"), dict) else "",
         category="agentic",
@@ -339,7 +355,7 @@ def _load_auto_discover(
         tasks=tasks,
         name=path.name,
         split="test",
-        harness_name=harness_name or "react",
+        harness_name=harness_name or _default_harness_for(tasks),
         sandbox_backend=sandbox_backend,
         description=f"Auto-discovered tasks from {path.name}",
         category="agentic",

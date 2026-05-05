@@ -11,10 +11,20 @@
       "function": "BashHarness",
       "description": "Multi-turn ReAct bash loop inside a sandbox."
     },
-    "claude-code": {
-      "module": "rllm.harnesses.claude_code",
-      "function": "ClaudeCodeHarness",
-      "description": "Run the Claude Code CLI inside the sandbox."
+    "opencode": {
+      "module": "rllm.harnesses.opencode",
+      "function": "OpenCodeHarness",
+      "description": "Run the opencode-ai CLI inside the sandbox."
+    },
+    "mini-swe-agent": {
+      "module": "rllm.harnesses.mini_swe_agent",
+      "function": "MiniSweAgentHarness",
+      "description": "Run mini-swe-agent inside the sandbox."
+    },
+    "oracle": {
+      "module": "rllm.harnesses.oracle",
+      "function": "OracleHarness",
+      "description": "Run the task's reference solution (solution/solve.sh) without an LLM. Smoke-test for verifier + image."
     }
   }
 }

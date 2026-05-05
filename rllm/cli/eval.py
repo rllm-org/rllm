@@ -119,6 +119,7 @@ def _run_eval(
     timestamp: str | None = None,
     stamp_session_in_url: bool = False,
     gateway_auth_token: str | None = None,
+    runtime: str = "rllm",
 ):
     """Core eval logic, extracted for clean proxy lifecycle management."""
     import time
@@ -129,6 +130,35 @@ def _run_eval(
 
     # Wall-clock start so the result panel can show how long the eval took.
     _eval_start = time.monotonic()
+
+    # ------------------------------------------------------------------
+    # Runtime selection
+    # ------------------------------------------------------------------
+    # Two ways to opt into the harbor runtime:
+    #   1. ``--runtime harbor``  — explicit flag.
+    #   2. ``--agent harbor:*``  — explicit user prefix (kept for
+    #      backwards-compat).
+    # A catalog ``default_agent`` carrying the prefix does NOT count;
+    # otherwise pulling a harbor dataset (e.g. ``harbor:swebench-verified``)
+    # would silently force the harbor runtime when the user passed neither
+    # signal. ``agent_name`` here is the user-supplied value before any
+    # catalog default fills it in, which is exactly the right input.
+    _is_harbor_runtime = (runtime == "harbor") or bool(agent_name and agent_name.startswith("harbor:"))
+
+    def _normalise_agent_name(name: str | None) -> str | None:
+        """Align *name* with the active runtime.
+
+        - harbor runtime: ensure a ``harbor:`` prefix (so ``load_agent``
+          dispatches to ``HarborRuntime``).
+        - rllm runtime: strip a ``harbor:`` prefix (so a catalog-supplied
+          default like ``harbor:mini-swe-agent`` resolves to the rllm-
+          native harness instead of routing through HarborRuntime).
+        """
+        if not name:
+            return name
+        if _is_harbor_runtime:
+            return name if name.startswith("harbor:") else f"harbor:{name}"
+        return name.removeprefix("harbor:")
 
     # ------------------------------------------------------------------
     # Local benchmark path: directory with dataset.toml / task.toml
@@ -184,6 +214,7 @@ def _run_eval(
         # Resolve agent name (display + harness lookup)
         if agent_name is None:
             agent_name = bench_result.harness_name or "react"
+        agent_name = _normalise_agent_name(agent_name)
 
         # Construct the AgentFlow: catalog covers built-in harnesses
         # (react/bash/claude-code) and any user-registered or plugin agents.
@@ -233,11 +264,14 @@ def _run_eval(
         all_datasets = catalog.get("datasets", {})
         catalog_entry = all_datasets.get(benchmark)
 
-        # Explicit Harbor prefix: "harbor:<name>" resolves from Harbor registry
-        if catalog_entry is None and benchmark.startswith("harbor:"):
+        # Resolve from Harbor registry when either (a) the benchmark
+        # carries the explicit ``harbor:`` prefix, or (b) ``--runtime
+        # harbor`` is set and the bare name didn't match an rLLM catalog
+        # entry.
+        if catalog_entry is None and (benchmark.startswith("harbor:") or _is_harbor_runtime):
             from rllm.cli._pull import resolve_harbor_catalog_entry
 
-            harbor_name = benchmark.removeprefix("harbor:")
+            harbor_name = benchmark.removeprefix("harbor:") if benchmark.startswith("harbor:") else benchmark
             with Status(f"[dim]Looking up '{harbor_name}' in Harbor registry...[/]", console=console):
                 catalog_entry = resolve_harbor_catalog_entry(harbor_name)
             if catalog_entry:
@@ -260,6 +294,7 @@ def _run_eval(
             else:
                 console.print(f"  [error]No --agent specified and no default_agent in catalog for '{benchmark}'.[/]")
                 raise SystemExit(1)
+        agent_name = _normalise_agent_name(agent_name)
 
         # Resolve split
         if split is None:
@@ -268,8 +303,16 @@ def _run_eval(
             else:
                 split = "test"
 
-        # Docker check for Harbor tasks
-        if (agent_name and agent_name.startswith("harbor:")) or (catalog_entry and catalog_entry.get("source", "").startswith("harbor:")):
+        # Docker check for Harbor tasks. Harbor's docker-backed environments
+        # require a working daemon on the host even when the eventual sandbox
+        # backend is something else (the local trial bootstrap still touches
+        # docker). The check applies whenever we're entering the Harbor
+        # runtime — explicit flag, ``harbor:`` agent prefix, or a Harbor-
+        # sourced catalog entry — and only when the chosen sandbox-backend
+        # is the default ``docker``.
+        _is_harbor_dataset = bool(catalog_entry) and catalog_entry.get("source", "").startswith("harbor:")
+        _backend = (agent_metadata or {}).get("sandbox_backend") or "docker"
+        if (_is_harbor_runtime or _is_harbor_dataset) and _backend == "docker":
             from rllm.integrations.harbor.utils import diagnose_docker
 
             ok, reason, hint = diagnose_docker()
@@ -278,8 +321,6 @@ def _run_eval(
                 if hint:
                     console.print(f"  [dim]{hint}[/]")
                 raise SystemExit(1)
-
-        _is_harbor_agent = bool(agent_name) and agent_name.startswith("harbor:")
 
         # Load the agent. Catalog covers built-in flows (react/bash/claude-code)
         # plus user-registered + plugin agents; ``harbor:<scaffold>`` resolves
@@ -346,7 +387,7 @@ def _run_eval(
         # datasets carry their verifier inside the harbor task dir (read via
         # task.metadata["task_path"]), so we wrap rows directly.
         bench_result = None
-        if not _is_harbor_agent:
+        if not _is_harbor_runtime:
             _materialised = os.path.expanduser(os.path.join(os.environ.get("RLLM_HOME", "~/.rllm"), "datasets", benchmark))
             if not os.path.isfile(os.path.join(_materialised, "dataset.toml")):
                 try:
@@ -403,6 +444,12 @@ def _run_eval(
     if agent_desc:
         agent_text += f"  [dim]{agent_desc}[/]"
     table.add_row("Agent", agent_text)
+    if _is_harbor_runtime:
+        runtime_detail = "harbor"
+        backend = (agent_metadata or {}).get("sandbox_backend")
+        if backend:
+            runtime_detail += f" [dim]({backend} sandbox)[/]"
+        table.add_row("Runtime", f"[val]{runtime_detail}[/]")
     table.add_row("Evaluator", f"[dim]{evaluator_display}[/]")
     console.print()
     console.print(Panel(table, border_style="cyan", expand=False))
@@ -626,7 +673,25 @@ def _run_eval(
     "--sandbox-backend",
     "sandbox_backend",
     default=None,
-    help=("Where the sandboxed harness runs. One of ``docker`` (default) / ``local`` / ``modal``. ``modal`` requires --tunnel or --gateway-public-url so the sandbox can reach the gateway."),
+    help=(
+        "Where the sandboxed harness runs. With ``--runtime rllm`` (default): one of "
+        "``docker`` / ``local`` / ``modal``. With ``--runtime harbor``: any backend "
+        "Harbor's ``EnvironmentType`` accepts (docker, modal, daytona, e2b, runloop, "
+        "gke, apple-container, ...). ``modal`` requires --tunnel or --gateway-public-url "
+        "so the sandbox can reach the gateway."
+    ),
+)
+@click.option(
+    "--runtime",
+    "runtime",
+    type=click.Choice(["rllm", "harbor"], case_sensitive=False),
+    default="rllm",
+    help=(
+        "Execution path. ``rllm`` (default) runs each task through rLLM's native "
+        "Runner + sandbox + verifier. ``harbor`` delegates to Harbor's Trial machinery; "
+        "``--agent`` is passed through verbatim (no ``harbor:`` prefix needed) and "
+        "``--sandbox-backend`` maps to Harbor's EnvironmentType."
+    ),
 )
 @click.option("--sandbox-concurrency", "sandbox_concurrency", default=None, type=int, help="Override max concurrent sandboxes (default: agent's max_concurrent).")
 @click.option("--ui/--no-ui", "enable_ui", default=None, help="Enable/disable live UI logging. Default: auto-enabled when logged in (see 'rllm login').")
@@ -668,6 +733,7 @@ def eval_cmd(
     output_path: str | None,
     search_backend: str | None,
     sandbox_backend: str | None,
+    runtime: str,
     sandbox_concurrency: int | None,
     enable_ui: bool | None,
     save_episodes: bool,
@@ -676,12 +742,21 @@ def eval_cmd(
     auto_tunnel: bool | None,
 ):
     """Evaluate a model on a benchmark dataset."""
-    # Normalise sandbox-backend.
+    # Normalise + validate sandbox-backend now that the Choice is gone.
+    # Native runtime supports ``docker | local | modal``; harbor accepts
+    # any string Harbor's ``EnvironmentType`` recognises (validated when
+    # the runtime sets ``environment_type`` on the agent).
+    runtime = runtime.lower()
     if sandbox_backend:
         sandbox_backend = sandbox_backend.lower()
         _native_backends = {"docker", "local", "modal"}
-        if sandbox_backend not in _native_backends:
-            console.print(f"  [error]--sandbox-backend {sandbox_backend!r} is not supported (allowed: {sorted(_native_backends)}).[/]")
+        if runtime != "harbor" and sandbox_backend not in _native_backends:
+            console.print(
+                f"  [error]--sandbox-backend {sandbox_backend!r} is not supported by the rllm runtime "
+                f"(allowed: {sorted(_native_backends)}).[/]\n"
+                "  Pass [bold]--runtime harbor[/] to use Harbor-only backends "
+                "(daytona, e2b, runloop, gke, apple-container, ...)."
+            )
             raise SystemExit(1)
 
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
@@ -854,6 +929,7 @@ def eval_cmd(
             timestamp=timestamp,
             stamp_session_in_url=gateway_manager is not None,
             gateway_auth_token=(gateway_manager.inbound_auth_token if gateway_manager else None),
+            runtime=runtime,
         )
     finally:
         if gateway_manager is not None:
