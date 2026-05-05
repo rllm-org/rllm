@@ -26,15 +26,28 @@ class DockerSandbox:
 
         self.name = name
         self.image = image
-        self._client = docker.from_env()
-        self._container = self._client.containers.run(
-            image,
+        # Explicit workdir overrides the image's WORKDIR. Useful when the
+        # caller resolves the right cwd from task config and wants both
+        # backends (docker, modal) to behave identically — without this
+        # arg DockerSandbox falls back on the image's WORKDIR.
+        workdir = kwargs.get("workdir")
+        run_kwargs: dict = dict(
             command="sleep infinity",
             name=f"rllm-sandbox-{name}",
             detach=True,
             remove=False,
         )
-        logger.info("DockerSandbox %s created (container: %s, image: %s)", name, self._container.short_id, image)
+        if workdir:
+            run_kwargs["working_dir"] = workdir
+        self._client = docker.from_env()
+        self._container = self._client.containers.run(image, **run_kwargs)
+        logger.info(
+            "DockerSandbox %s created (container: %s, image: %s, workdir: %s)",
+            name,
+            self._container.short_id,
+            image,
+            workdir or "<image default>",
+        )
 
     def exec(self, command: str, timeout: float | None = None, user: str | None = None) -> str:
         """Execute a command inside the container.
@@ -83,6 +96,24 @@ class DockerSandbox:
             tar.add(local_path, arcname=remote_name)
         tar_stream.seek(0)
         self._container.put_archive(remote_parent, tar_stream)
+
+    def commit(self, tag: str) -> None:
+        """Commit the running container as a new image with the given tag.
+
+        Lets harnesses cache an in-container install (e.g. a CLI tool
+        installed via apt+npm) so subsequent tasks can ``docker run``
+        directly from the post-install image and skip the cold-install
+        penalty.
+
+        ``tag`` is in Docker's ``name:tag`` form. The tag is overwritten
+        if it already exists.
+        """
+        if ":" in tag:
+            repository, image_tag = tag.rsplit(":", 1)
+        else:
+            repository, image_tag = tag, "latest"
+        self._container.commit(repository=repository, tag=image_tag)
+        logger.info("DockerSandbox %s committed → %s:%s", self.name, repository, image_tag)
 
     def start_agent_process(self, command: str, port: int) -> None:
         """Start a background process in the container using nohup."""

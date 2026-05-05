@@ -1,7 +1,7 @@
 from rllm.eval.agent_loader import load_agent
 from rllm.eval.config import RllmConfig, load_config, save_config
 from rllm.eval.evaluator_loader import load_evaluator, resolve_evaluator_from_catalog
-from rllm.eval.proxy import EvalProxyManager
+from rllm.eval.gateway import EvalGatewayManager
 from rllm.eval.results import EvalItem, EvalResult
 from rllm.eval.runner import run_dataset
 from rllm.eval.types import EvalOutput, Signal
@@ -17,7 +17,7 @@ __all__ = [
     "RllmConfig",
     "load_config",
     "save_config",
-    "EvalProxyManager",
+    "EvalGatewayManager",
     "AgentConfig",
     "AgentFlow",
     "Evaluator",
