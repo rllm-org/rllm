@@ -12,6 +12,14 @@ class TraceRecord(BaseModel):
     trace_id: str
     session_id: str
     model: str = ""
+    # rLLM session metadata — populated by middleware from headers/body/URL.
+    # All optional so existing training writers (which only stamp session_id)
+    # remain valid; eval and harness-stamped requests fill these in.
+    run_id: str | None = None
+    harness: str | None = None
+    step_id: int | None = None
+    parent_span_id: str | None = None
+    span_type: str = "llm.call"
     # Input
     messages: list[dict[str, Any]] = Field(default_factory=list)
     prompt_token_ids: list[int] = Field(default_factory=list)
@@ -104,12 +112,38 @@ class SessionInfo(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class UpstreamRoute(BaseModel):
+    """Map a model name to an OpenAI-compatible upstream endpoint.
+
+    The gateway treats this as opaque routing: it does not know about
+    providers, auth shapes, or model-name conventions. The caller
+    (typically rllm) resolves any provider knowledge — choice of
+    upstream URL, the literal ``Authorization`` header value to use,
+    and any params the upstream rejects — and hands the gateway a
+    fully-resolved route to forward to.
+    """
+
+    upstream_url: str  # e.g. "http://127.0.0.1:4000/v1" or "https://api.openai.com/v1"
+    # Full ``Authorization`` header value, e.g. ``"Bearer sk-..."``.
+    # ``None`` means the gateway forwards no auth header upstream.
+    auth_header: str | None = None
+    # Body fields to strip before forwarding (e.g. ``"max_tokens"`` for
+    # OpenAI o-series models that reject it). The gateway treats this as
+    # a generic body-shaping list; it doesn't interpret which model needs
+    # what.
+    drop_params: list[str] = Field(default_factory=list)
+
+
 class GatewayConfig(BaseModel):
     """Top-level gateway configuration."""
 
     host: str = "0.0.0.0"
     port: int = 9090
     workers: list[WorkerConfig] = Field(default_factory=list)
+    # Map model name → upstream route. The gateway looks up
+    # ``body["model"]`` and forwards to the matching route; falls
+    # through to the worker-pool path if no match.
+    routes: dict[str, UpstreamRoute] = Field(default_factory=dict)
     db_path: str | None = None
     store_worker: str = "sqlite"
     add_logprobs: bool = True
@@ -121,3 +155,15 @@ class GatewayConfig(BaseModel):
     sync_traces: bool = False
     sampling_params_priority: str = "client"
     model: str | None = None  # When set, overrides ``body.model``
+    # Identifier of the gateway run — eval CLI sets this to the run dir
+    # basename, training/harness shims pick something globally unique.
+    # When set, every trace persisted by this gateway is tagged with it
+    # and a row is registered in the ``runs`` table on startup.
+    run_id: str | None = None
+    # Free-form metadata for the run (benchmark, model, agent, source,
+    # …). Surfaced by the cross-run viewer.
+    run_metadata: dict[str, Any] = Field(default_factory=dict)
+    # When set, every inbound request must carry
+    # ``Authorization: Bearer <inbound_auth_token>``. Generated per-run
+    # by the eval gateway when a public URL is exposed; never persisted.
+    inbound_auth_token: str | None = None
