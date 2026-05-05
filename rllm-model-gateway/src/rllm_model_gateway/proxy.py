@@ -20,7 +20,8 @@ from rllm_model_gateway.data_process import (
     build_trace_record_from_chunks,
     strip_vllm_fields,
 )
-from rllm_model_gateway.models import TraceRecord
+from rllm_model_gateway.metadata import RllmMetadata
+from rllm_model_gateway.models import TraceRecord, UpstreamRoute
 from rllm_model_gateway.session_router import SessionRouter
 from rllm_model_gateway.store.base import TraceStore
 
@@ -38,6 +39,23 @@ _HOP_BY_HOP = frozenset(
         "content-length",
         "content-encoding",
         "host",
+    }
+)
+
+# Headers stripped before forwarding to an upstream. The client's auth
+# headers are replaced with the route's ``auth_header`` (if set), and
+# the X-RLLM-* metadata is gateway-internal and never leaks upstream.
+_UPSTREAM_FORWARD_STRIP = frozenset(
+    {
+        "authorization",
+        "x-api-key",
+        "x-rllm-session-id",
+        "x-rllm-run-id",
+        "x-rllm-harness",
+        "x-rllm-step-id",
+        "x-rllm-parent-span-id",
+        "x-rllm-project",
+        "x-rllm-experiment",
     }
 )
 
@@ -79,6 +97,8 @@ class ReverseProxy:
         sync_traces: bool = False,
         max_retries: int = 2,
         local_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+        routes: dict[str, UpstreamRoute] | None = None,
+        run_id: str | None = None,
     ) -> None:
         self.router = router
         self.store = store
@@ -86,6 +106,11 @@ class ReverseProxy:
         self.sync_traces = sync_traces
         self.max_retries = max_retries
         self.local_handler = local_handler
+        self.routes: dict[str, UpstreamRoute] = dict(routes or {})
+        # Tag every persisted trace with this run_id so the cross-run
+        # viewer can group by gateway lifetime. Empty string is the
+        # "unstamped" bucket for callers that don't pass a run_id.
+        self._run_id = run_id or ""
         self._http: httpx.AsyncClient | None = None
         self._pending_traces: set[asyncio.Task[None]] = set()
 
@@ -145,13 +170,33 @@ class ReverseProxy:
         originally_requested_logprobs: bool = False,
     ) -> Response:
         t0 = time.perf_counter()
+        rllm_metadata: RllmMetadata | None = getattr(request.state, "rllm_metadata", None)
+        route = self._lookup_route(request_body)
 
-        if self.local_handler is not None:
+        if route is not None:
+            url = self._build_url(route.upstream_url, request.url.path, str(request.url.query))
+            headers = self._forward_headers(request, extra_strip=_UPSTREAM_FORWARD_STRIP)
+            if route.auth_header:
+                headers["authorization"] = route.auth_header
+            forward_body = self._maybe_drop_params(raw_body, request_body, route.drop_params)
+            resp = await self._send_with_retry(
+                method=request.method,
+                url=url,
+                content=forward_body,
+                headers=headers,
+            )
+            content = resp.content
+            status_code = resp.status_code
+            try:
+                response_body = json.loads(content)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                response_body = {}
+        elif self.local_handler is not None:
             # In-process path: call handler directly, no HTTP
             response_body = await self.local_handler(request_body)
             status_code = 200
         else:
-            # HTTP proxy path
+            # HTTP proxy path (worker pool — training)
             worker = self.router.route(session_id)
             url = self._build_url(worker.api_url, request.url.path, str(request.url.query))
             headers = self._forward_headers(request)
@@ -177,7 +222,13 @@ class ReverseProxy:
 
         # Persist trace
         if session_id and response_body:
-            trace = build_trace_record(session_id, request_body, response_body, latency_ms)
+            trace = build_trace_record(
+                session_id,
+                request_body,
+                response_body,
+                latency_ms,
+                rllm_metadata=rllm_metadata,
+            )
             await self._persist(trace)
 
         # Sanitise response
@@ -209,6 +260,20 @@ class ReverseProxy:
         session_id: str | None,
         originally_requested_logprobs: bool = False,
     ) -> StreamingResponse:
+        rllm_metadata: RllmMetadata | None = getattr(request.state, "rllm_metadata", None)
+        route = self._lookup_route(request_body)
+
+        if route is not None:
+            return await self._handle_streaming_upstream(
+                request,
+                raw_body,
+                request_body,
+                session_id,
+                originally_requested_logprobs,
+                route,
+                rllm_metadata,
+            )
+
         if self.local_handler is not None:
             return await self._handle_streaming_local(request_body, session_id, originally_requested_logprobs)
 
@@ -306,7 +371,99 @@ class ReverseProxy:
                 # finally block may run during GeneratorExit, where await
                 # on real async I/O (e.g. aiosqlite) is not reliable.
                 if session_id and chunks:
-                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms)
+                    trace = build_trace_record_from_chunks(
+                        session_id,
+                        request_body,
+                        chunks,
+                        latency_ms,
+                        rllm_metadata=rllm_metadata,
+                    )
+                    task = asyncio.create_task(
+                        self._safe_store(
+                            trace.trace_id,
+                            trace.session_id,
+                            trace.model_dump(),
+                        )
+                    )
+                    self._pending_traces.add(task)
+                    task.add_done_callback(self._pending_traces.discard)
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            status_code=resp.status_code,
+        )
+
+    async def _handle_streaming_upstream(
+        self,
+        request: Request,
+        raw_body: bytes,
+        request_body: dict[str, Any],
+        session_id: str | None,
+        originally_requested_logprobs: bool,
+        route: UpstreamRoute,
+        rllm_metadata: RllmMetadata | None,
+    ) -> StreamingResponse:
+        """Stream a chat-completions response from a configured upstream.
+
+        Same shape as the worker-pool streaming path but skips ``SessionRouter``
+        and uses the upstream's URL + auth header instead.
+        """
+        url = self._build_url(route.upstream_url, request.url.path, str(request.url.query))
+        headers = self._forward_headers(request, extra_strip=_UPSTREAM_FORWARD_STRIP)
+        if route.auth_header:
+            headers["authorization"] = route.auth_header
+        forward_body = self._maybe_drop_params(raw_body, request_body, route.drop_params)
+
+        assert self._http is not None
+        upstream = self._http.stream(
+            method=request.method,
+            url=url,
+            content=forward_body,
+            headers=headers,
+        )
+        resp = await upstream.__aenter__()
+
+        t0 = time.perf_counter()
+        chunks: list[dict[str, Any]] = []
+        needs_strip_vllm = self.strip_vllm
+        needs_strip_logprobs = not originally_requested_logprobs
+
+        async def event_generator():
+            try:
+                async for line in resp.aiter_lines():
+                    if line.startswith("data: "):
+                        data_str = line[6:].strip()
+                        if data_str == "[DONE]":
+                            yield "data: [DONE]\n\n"
+                            continue
+                        try:
+                            chunk = json.loads(data_str)
+                            chunks.append(chunk)
+                            if not needs_strip_vllm and not needs_strip_logprobs:
+                                yield f"data: {data_str}\n\n"
+                            else:
+                                sanitized = strip_vllm_fields(chunk) if needs_strip_vllm else chunk
+                                if needs_strip_logprobs:
+                                    sanitized = _strip_logprobs(sanitized)
+                                yield f"data: {json.dumps(sanitized)}\n\n"
+                            continue
+                        except json.JSONDecodeError:
+                            pass
+                    if not line:
+                        continue
+                    yield line + "\n"
+            finally:
+                await upstream.__aexit__(None, None, None)
+                latency_ms = (time.perf_counter() - t0) * 1000
+                if session_id and chunks:
+                    trace = build_trace_record_from_chunks(
+                        session_id,
+                        request_body,
+                        chunks,
+                        latency_ms,
+                        rllm_metadata=rllm_metadata,
+                    )
                     task = asyncio.create_task(
                         self._safe_store(
                             trace.trace_id,
@@ -456,7 +613,7 @@ class ReverseProxy:
         try:
             data = trace.model_dump()
             if self.sync_traces:
-                await self.store.store_trace(trace.trace_id, trace.session_id, data)
+                await self.store.store_trace(trace.trace_id, trace.session_id, data, self._run_id)
             else:
                 task = asyncio.create_task(self._safe_store(trace.trace_id, trace.session_id, data))
                 self._pending_traces.add(task)
@@ -466,7 +623,7 @@ class ReverseProxy:
 
     async def _safe_store(self, trace_id: str, session_id: str, data: dict[str, Any]) -> None:
         try:
-            await self.store.store_trace(trace_id, session_id, data)
+            await self.store.store_trace(trace_id, session_id, data, self._run_id)
         except Exception:
             logger.exception("Failed to persist trace %s", trace_id)
 
@@ -484,5 +641,33 @@ class ReverseProxy:
         return url
 
     @staticmethod
-    def _forward_headers(request: Request) -> dict[str, str]:
-        return {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
+    def _forward_headers(
+        request: Request,
+        *,
+        extra_strip: frozenset[str] = frozenset(),
+    ) -> dict[str, str]:
+        skip = _HOP_BY_HOP | extra_strip
+        return {k: v for k, v in request.headers.items() if k.lower() not in skip}
+
+    def _lookup_route(self, request_body: dict[str, Any]) -> UpstreamRoute | None:
+        if not self.routes:
+            return None
+        model = request_body.get("model") if isinstance(request_body, dict) else None
+        if not isinstance(model, str):
+            return None
+        return self.routes.get(model)
+
+    @staticmethod
+    def _maybe_drop_params(
+        raw_body: bytes,
+        request_body: dict[str, Any],
+        drop_params: list[str],
+    ) -> bytes:
+        """Return ``raw_body`` untouched, or a re-serialised body with *drop_params* removed."""
+        if not drop_params or not isinstance(request_body, dict):
+            return raw_body
+        present = [k for k in drop_params if k in request_body]
+        if not present:
+            return raw_body
+        mutated = {k: v for k, v in request_body.items() if k not in present}
+        return json.dumps(mutated).encode("utf-8")

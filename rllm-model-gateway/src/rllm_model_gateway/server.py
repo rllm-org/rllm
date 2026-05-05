@@ -154,27 +154,34 @@ def create_app(
         strip_vllm=config.strip_vllm_fields,
         sync_traces=config.sync_traces,
         local_handler=local_handler,
+        routes=config.routes,
+        run_id=config.run_id,
     )
     sessions = SessionManager(store)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await proxy.start()
+        if config.run_id:
+            try:
+                await store.register_run(config.run_id, config.run_metadata)
+            except Exception:
+                logger.exception("register_run failed for run_id=%r", config.run_id)
         if router.workers:
             await router.start_health_checks()
         yield
         await router.stop_health_checks()
         await proxy.stop()
+        if config.run_id:
+            try:
+                await store.end_run(config.run_id)
+            except Exception:
+                logger.exception("end_run failed for run_id=%r", config.run_id)
         await store.close()
 
     app = FastAPI(title="rllm-model-gateway", version="0.1.0", lifespan=lifespan)
 
     # -- Middleware ---------------------------------------------------------
-
-    # TODO: Add API key auth middleware here for securing gateway access
-    # from cloud containers. Validate an API key from the Authorization
-    # header before allowing access to admin and proxy endpoints.
-    # Add corresponding `api_key` field to GatewayConfig and client classes.
 
     app.add_middleware(
         SessionRoutingMiddleware,
@@ -183,6 +190,7 @@ def create_app(
         sessions=sessions,
         sampling_params_priority=config.sampling_params_priority,
         model=config.model,
+        inbound_auth_token=config.inbound_auth_token,
     )
 
     # -- Health endpoints --------------------------------------------------
