@@ -10,6 +10,7 @@ import time
 import uuid
 from typing import Any
 
+from rllm_model_gateway.metadata import RllmMetadata
 from rllm_model_gateway.models import TraceRecord
 
 logger = logging.getLogger(__name__)
@@ -127,6 +128,18 @@ def strip_vllm_fields(response: dict[str, Any]) -> dict[str, Any]:
 # ------------------------------------------------------------------
 
 
+def _metadata_fields(rllm_metadata: RllmMetadata | None) -> dict[str, Any]:
+    """Project RllmMetadata onto the TraceRecord field set (excluding session_id)."""
+    if rllm_metadata is None:
+        return {}
+    return {
+        "run_id": rllm_metadata.run_id,
+        "harness": rllm_metadata.harness,
+        "step_id": rllm_metadata.step_id,
+        "parent_span_id": rllm_metadata.parent_span_id,
+    }
+
+
 def build_trace_record(
     session_id: str,
     request_body: dict[str, Any],
@@ -134,6 +147,7 @@ def build_trace_record(
     latency_ms: float,
     *,
     metadata: dict[str, Any] | None = None,
+    rllm_metadata: RllmMetadata | None = None,
 ) -> TraceRecord:
     """Assemble a ``TraceRecord`` from raw request/response dicts."""
     choices = response_body.get("choices") or []
@@ -162,6 +176,7 @@ def build_trace_record(
         metadata=metadata or {},
         raw_request=request_body,
         raw_response=response_body,
+        **_metadata_fields(rllm_metadata),
     )
 
 
@@ -172,6 +187,7 @@ def build_trace_record_from_chunks(
     latency_ms: float,
     *,
     metadata: dict[str, Any] | None = None,
+    rllm_metadata: RllmMetadata | None = None,
 ) -> TraceRecord:
     """Assemble a ``TraceRecord`` from accumulated streaming SSE chunks.
 
@@ -246,4 +262,5 @@ def build_trace_record_from_chunks(
         metadata=metadata or {},
         raw_request=request_body,
         raw_response=None,  # Too large for streaming; individual chunks not stored
+        **_metadata_fields(rllm_metadata),
     )
