@@ -14,7 +14,7 @@ The aggregate :class:`~rllm.eval.results.EvalResult` JSON sits next to
 ``run_dir`` (same parent directory, same ``<dataset>_<model>_<timestamp>``
 basename) so the two are paired by name.
 
-The store is consumed by :mod:`rllm.eval.visualizer` for read-back.
+The store is consumed by the rLLM Console (:mod:`rllm.console`) for read-back.
 """
 
 from __future__ import annotations

@@ -63,7 +63,18 @@ class Runner:
         self.evaluator_override = evaluator_override
 
     async def run(self, task: Task, config: AgentConfig) -> Episode:
+        import asyncio
+
         from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
+
+        # Every sandbox lifecycle call below is sync and can do real I/O
+        # (Modal API roundtrips, docker exec, file uploads, verifier
+        # script execution). Running them directly inside this async
+        # method blocks the event loop — Modal's SDK even surfaces this
+        # as ``AsyncUsageWarning`` — and serialises every concurrent
+        # task on the slowest setup. ``asyncio.to_thread`` offloads to
+        # a worker thread where Modal's "in async context" check fails
+        # cleanly and other in-flight tasks keep making progress.
 
         # Skip per-task verifier detection when an override is provided —
         # the override fully dictates scoring, so we shouldn't probe the
@@ -79,21 +90,50 @@ class Runner:
         sandbox: Sandbox | None = None
         try:
             if needs_sandbox:
-                sandbox = _create_sandbox_for_task(task, self.sandbox_backend)
-                _setup_task_environment(task, sandbox)
+                sandbox, base_image, backend = await asyncio.to_thread(
+                    _create_sandbox_for_task,
+                    task,
+                    self.sandbox_backend,
+                    self.agent_flow,
+                )
                 if isinstance(self.agent_flow, SandboxedAgentFlow):
-                    self.agent_flow.set_sandbox(sandbox)
-                    self.agent_flow.on_sandbox_ready({"task_path": str(task.task_dir)}, config)
+                    self.agent_flow.set_sandbox(sandbox)  # local assignment, no I/O
+                    # Install + (on docker) commit *before* per-task setup
+                    # so the cached image stays free of task-specific files.
+                    await asyncio.to_thread(
+                        self.agent_flow.pre_setup,
+                        sandbox,
+                        base_image,
+                        backend,
+                    )
+                await asyncio.to_thread(_setup_task_environment, task, sandbox)
+                if isinstance(self.agent_flow, SandboxedAgentFlow):
+                    await asyncio.to_thread(
+                        self.agent_flow.on_sandbox_ready,
+                        {"task_path": str(task.task_dir)},
+                        config,
+                    )
 
-            # AgentFlow runs the agent → Episode
+            # AgentFlow runs the agent → Episode (already runs ``run`` in
+            # a thread pool via ``_run_agent_flow``, so its sandbox.exec
+            # calls don't block the event loop either).
             episode = await _run_agent_flow(self.agent_flow, task, config)
+
+            # Stamp session_uid onto every trajectory so the UI can join
+            # back to traces in the shared gateway db
+            # (filtered by run_id). Harnesses may pre-set this; we only
+            # fill in blanks.
+            if config.session_uid:
+                for traj in episode.trajectories:
+                    if traj.session_id is None:
+                        traj.session_id = config.session_uid
 
             # Evaluator: explicit override > per-task resolution
             if self.evaluator_override is not None:
                 evaluator = _adapt_legacy_evaluator(self.evaluator_override)
             else:
                 evaluator = _resolve_evaluator(task, sandbox, verifier_kind, verifier_config)
-            eval_output = evaluator.evaluate(task, episode)
+            eval_output = await asyncio.to_thread(evaluator.evaluate, task, episode)
 
             # Write rewards back
             for traj in episode.trajectories:
@@ -103,16 +143,29 @@ class Runner:
             return episode
         finally:
             if sandbox is not None:
+                from rllm.sandbox.cleanup import deregister
+
+                # Let the harness drop its sandbox reference first
+                # (its own ``teardown_sandbox`` is a no-op for externally-
+                # managed sandboxes, but it clears internal state — e.g.,
+                # the harness's view of the sandbox handle — that matters
+                # if ``create_instance()`` reuses the harness instance).
                 if isinstance(self.agent_flow, SandboxedAgentFlow):
                     try:
-                        self.agent_flow.teardown_sandbox()
+                        self.agent_flow.teardown_sandbox()  # local state only
                     except Exception:
                         logger.exception("teardown_sandbox failed")
-                else:
-                    try:
-                        sandbox.close()
-                    except Exception:
-                        logger.exception("sandbox close failed")
+                # The runner owns the sandbox lifecycle whenever it
+                # created the sandbox (which is always, on this code
+                # path). Close + deregister unconditionally so cloud
+                # backends (Modal, Daytona) don't leak duration-billed
+                # containers when running through SandboxedAgentFlow.
+                try:
+                    await asyncio.to_thread(sandbox.close)
+                except Exception:
+                    logger.exception("sandbox close failed")
+                finally:
+                    deregister(sandbox)
 
 
 # ---------------------------------------------------------------------------
@@ -267,19 +320,59 @@ def _needs_sandbox(task: Task, verifier_kind: str) -> bool:
     return False
 
 
-def _create_sandbox_for_task(task: Task, sandbox_backend: str | None) -> Sandbox:
-    from rllm.sandbox.sandboxed_flow import create_sandbox
+def _create_sandbox_for_task(
+    task: Task,
+    sandbox_backend: str | None,
+    agent_flow: AgentFlow | None = None,
+) -> tuple[Sandbox, str, str]:
+    """Create a sandbox for *task* and return ``(sandbox, base_image, backend)``.
+
+    The base image is the result of building the task's environment
+    Dockerfile (or the configured fallback). When *agent_flow* exposes
+    :meth:`maybe_use_cached_image`, a post-install derived image is used
+    instead — but the *returned* base image is unchanged so the harness
+    can compute the same derived tag in :meth:`pre_setup`.
+
+    The image's ``WORKDIR`` (read from the Dockerfile) is propagated as
+    the sandbox's working directory so backends that don't honour image
+    metadata at exec time (Modal) still land commands in the right
+    place. Falls back to ``[environment].workdir`` when set explicitly.
+    """
+    from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow, create_sandbox
 
     backend = sandbox_backend or task.metadata.get("sandbox_backend") or "docker"
-    image = _resolve_image(task, backend)
+    base_image = _resolve_image(task, backend)
+    image = base_image
+    if isinstance(agent_flow, SandboxedAgentFlow):
+        image = agent_flow.maybe_use_cached_image(base_image, backend)
 
     safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "-", task.id)
     name = f"rllm-{safe_id}-{uuid.uuid4().hex[:6]}"
-    return create_sandbox(backend, name=name, image=image)
+    sandbox_kwargs: dict[str, Any] = {}
+    workdir = _resolve_workdir(task)
+    if workdir:
+        sandbox_kwargs["workdir"] = workdir
+    sandbox_kwargs.update(_resolve_resource_kwargs(task, backend))
+    base_image_str = base_image if isinstance(base_image, str) else "<modal.Image>"
+    return create_sandbox(backend, name=name, image=image, **sandbox_kwargs), base_image_str, backend
 
 
-def _resolve_image(task: Task, backend: str) -> str:
-    """Build from Dockerfile if present and backend is docker, else config default."""
+def _resolve_image(task: Task, backend: str) -> Any:
+    """Resolve the sandbox image for *task* on *backend*.
+
+    Returns either:
+    - A locally-built ``rllm-task-<id>`` tag string (docker backend with
+      a task ``Dockerfile``).
+    - A ``modal.Image`` object built from the task's ``Dockerfile``
+      (modal backend with a task ``Dockerfile``). Modal's ``Sandbox``
+      accepts both strings and ``modal.Image`` objects directly.
+    - The configured registry image string (everything else).
+
+    The previous implementation silently dropped the task's Dockerfile
+    on non-docker backends, so Modal runs always boots ``python:3.11-slim``
+    regardless of what the task asked for. That breaks every
+    Dockerfile-driven task on Modal.
+    """
     env_config = task.metadata.get("environment", {}) or {}
     configured = env_config.get("docker_image", "python:3.11-slim")
 
@@ -287,9 +380,102 @@ def _resolve_image(task: Task, backend: str) -> str:
     if not dockerfile.exists():
         dockerfile = task.dataset_dir / "environment" / "Dockerfile"
 
-    if dockerfile.exists() and backend == "docker":
+    if not dockerfile.exists():
+        return configured
+
+    if backend == "docker":
         return _build_docker_image(dockerfile.parent, task.id)
+    if backend == "modal":
+        return _build_modal_image(dockerfile)
     return configured
+
+
+def _resolve_workdir(task: Task) -> str | None:
+    """Resolve the sandbox's working directory for *task*.
+
+    Order of precedence:
+    1. ``[environment].workdir`` in task.toml — explicit override.
+    2. Last ``WORKDIR`` directive in the task's ``Dockerfile``.
+    3. ``None`` — let the backend use its default cwd.
+
+    Returning a value guarantees both Docker and Modal exec commands
+    in the same directory, removing image-WORKDIR-vs-explicit-workdir
+    drift between backends.
+    """
+    env_config = task.metadata.get("environment", {}) or {}
+    explicit = env_config.get("workdir") or task.metadata.get("workdir")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+
+    dockerfile = task.task_dir / "environment" / "Dockerfile"
+    if not dockerfile.exists():
+        dockerfile = task.dataset_dir / "environment" / "Dockerfile"
+    if dockerfile.exists():
+        return _parse_dockerfile_workdir(dockerfile)
+    return None
+
+
+def _resolve_resource_kwargs(task: Task, backend: str) -> dict[str, Any]:
+    """Translate Harbor-style ``[environment]`` resource hints into backend kwargs.
+
+    Reads ``cpus`` / ``memory_mb`` / ``gpus`` / ``gpu_types`` from
+    ``task.metadata['environment']`` and emits ``cpu`` / ``memory`` / ``gpu``
+    kwargs in the shape Modal's ``Sandbox.create()`` expects. Other backends
+    (docker, local) accept ``**kwargs`` and silently ignore unknown keys, so
+    we only emit when the backend is ``modal`` to avoid noisy warnings.
+
+    GPU encoding follows Modal's API:
+      - ``gpus = N`` + no types → ``gpu = "any:N"`` (or ``"any"`` when N==1).
+      - ``gpus = N`` + ``gpu_types = ["A100", ...]`` → first type wins,
+        ``gpu = "A100:N"`` (or ``"A100"`` when N==1).
+    """
+    if backend != "modal":
+        return {}
+
+    env_config = task.metadata.get("environment", {}) or {}
+    out: dict[str, Any] = {}
+
+    cpus = env_config.get("cpus")
+    if isinstance(cpus, int | float) and cpus > 0:
+        out["cpu"] = float(cpus)
+
+    memory_mb = env_config.get("memory_mb")
+    if isinstance(memory_mb, int | float) and memory_mb > 0:
+        out["memory"] = int(memory_mb)
+
+    gpus = env_config.get("gpus")
+    if isinstance(gpus, int | float) and gpus > 0:
+        gpu_types = env_config.get("gpu_types") or []
+        gpu_kind = str(gpu_types[0]) if isinstance(gpu_types, list) and gpu_types else "any"
+        gpu_count = int(gpus)
+        out["gpu"] = gpu_kind if gpu_count == 1 else f"{gpu_kind}:{gpu_count}"
+
+    return out
+
+
+def _parse_dockerfile_workdir(dockerfile: Path) -> str | None:
+    """Return the last ``WORKDIR`` directive in *dockerfile*, or ``None``.
+
+    Tolerates whitespace, trailing comments, and empty lines. Doesn't
+    handle ARG/ENV expansion — if a Dockerfile uses ``WORKDIR $FOO``
+    we leave the literal value alone (the caller will probably pass it
+    to the sandbox unchanged, which is rare enough not to special-case).
+    """
+    try:
+        text = dockerfile.read_text()
+    except OSError:
+        return None
+    workdir: str | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if not line.upper().startswith("WORKDIR"):
+            continue
+        rest = line[len("WORKDIR") :].strip()
+        if rest:
+            workdir = rest
+    return workdir
 
 
 def _build_docker_image(context_dir: Path, task_id: str) -> str:
@@ -307,6 +493,25 @@ def _build_docker_image(context_dir: Path, task_id: str) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"Docker build failed for {task_id}:\n{result.stderr[:1000]}")
     return tag
+
+
+def _build_modal_image(dockerfile: Path) -> Any:
+    """Build a ``modal.Image`` from the task's Dockerfile.
+
+    Modal builds remotely on its own infra and caches by content, so
+    repeated runs against the same Dockerfile are cheap. The returned
+    ``modal.Image`` is passed straight through to ``Sandbox.create()``.
+
+    ``context_dir`` is pinned to the Dockerfile's parent so ``COPY``
+    directives resolve against the task's ``environment/`` directory.
+    Modal otherwise defaults to ``Path.cwd()``, which makes every
+    ``COPY Gemfile ...`` (or any other relative path) silently fail
+    when ``rllm eval`` is invoked from the repo root.
+    """
+    import modal
+
+    logger.info("Building Modal image from %s", dockerfile)
+    return modal.Image.from_dockerfile(dockerfile, context_dir=dockerfile.parent)
 
 
 def _setup_task_environment(task: Task, sandbox: Sandbox) -> None:

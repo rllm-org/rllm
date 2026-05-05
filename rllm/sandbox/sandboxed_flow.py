@@ -94,6 +94,24 @@ class SandboxedAgentFlow(ABC):
 
         self.on_sandbox_ready(task, config)
 
+    def maybe_use_cached_image(self, base_image: str, backend: str) -> str:  # noqa: ARG002
+        """Return an alternate image to launch the sandbox from, or *base_image*.
+
+        Hook used by harnesses that bake their CLI install into a
+        committed derived image (see :class:`rllm.harnesses.cli_harness.BaseCliHarness`).
+        Default returns *base_image* unchanged.
+        """
+        return base_image
+
+    def pre_setup(self, sandbox: Sandbox, base_image: str, backend: str) -> None:  # noqa: B027,ARG002
+        """Hook that runs *before* per-task setup (workdir, file uploads).
+
+        CLI harnesses use this to install the binary and ``docker
+        commit`` the result so the next task with the same base image
+        can skip install entirely. Runs before any task-specific state
+        touches the container, so the committed image is clean.
+        """
+
     def on_sandbox_ready(self, task: dict, config: AgentConfig) -> None:  # noqa: B027
         """Hook for subclasses to run additional setup after sandbox creation."""
 
@@ -107,10 +125,13 @@ class SandboxedAgentFlow(ABC):
         if self._sandbox_externally_managed:
             self._sandbox = None
             return
+        from rllm.sandbox.cleanup import deregister
+
         try:
             self._sandbox.close()
         except Exception:
             logger.exception("Sandbox teardown error")
+        deregister(self._sandbox)
         self._sandbox = None
 
     def get_image(self, task: dict) -> str:
@@ -122,18 +143,27 @@ class SandboxedAgentFlow(ABC):
 
 
 def create_sandbox(backend: str, name: str, image: str, **kwargs) -> Sandbox:
-    """Factory: create a Sandbox from a backend name. Lazy imports."""
+    """Factory: create a Sandbox from a backend name. Lazy imports.
+
+    Every sandbox is registered with :mod:`rllm.sandbox.cleanup` so that
+    process-death (atexit + SIGTERM) tears it down — critical for cloud
+    backends (modal, daytona) that meter by duration.
+    """
+    from rllm.sandbox.cleanup import register
+
     if backend == "docker":
         from rllm.sandbox.backends.docker import DockerSandbox
 
-        return DockerSandbox(name=name, image=image, **kwargs)
+        sandbox: Sandbox = DockerSandbox(name=name, image=image, **kwargs)
     elif backend == "local":
         from rllm.sandbox.backends.local import LocalSandbox
 
-        return LocalSandbox(name=name, **kwargs)
+        sandbox = LocalSandbox(name=name, **kwargs)
     elif backend == "modal":
         from rllm.sandbox.backends.modal_backend import ModalSandbox
 
-        return ModalSandbox(name=name, **kwargs)
+        sandbox = ModalSandbox(name=name, image=image, **kwargs)
     else:
         raise ValueError(f"Unknown sandbox backend: {backend}. Available: docker, local, modal")
+    register(sandbox)
+    return sandbox

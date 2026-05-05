@@ -371,7 +371,13 @@ def _load_task_from_dir(
     # Lift commonly-used config into top-level metadata for the Runner
     metadata: dict = dict(raw)
     env_section = raw.get("environment", {}) or {}
-    metadata["workdir"] = env_section.get("workdir", "/workspace")
+    # Only set when task.toml explicitly specifies. Otherwise leave the
+    # key absent so harnesses can respect the Dockerfile's WORKDIR via
+    # ``dict.get(key, fallback)`` semantics. Setting ``None`` here would
+    # break callers that use ``.get("workdir", "/workspace")`` (the
+    # default fires only on missing keys, not on present-but-None).
+    if env_section.get("workdir"):
+        metadata["workdir"] = env_section["workdir"]
     metadata["env_vars"] = env_section.get("env", {}) or {}
     metadata["agent_user"] = raw.get("agent", {}).get("user")
     metadata["verifier_user"] = raw.get("verifier", {}).get("user")

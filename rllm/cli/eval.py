@@ -2,8 +2,9 @@
 
 ``rllm eval <benchmark> --agent <name> [--evaluator <name>] [--base-url <url>] [--model <name>]``
 
-When ``--base-url`` is omitted, a LiteLLM proxy is auto-started using the
-configuration from ``rllm setup`` (stored in ``~/.rllm/config.json``).
+When ``--base-url`` is omitted, the rLLM model gateway is auto-started
+in-process using the configuration from ``rllm setup`` (stored in
+``~/.rllm/config.json``).
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 
 import click
 from rich.console import Console
@@ -32,6 +34,40 @@ def _suggest_benchmarks(name: str, catalog_names: list[str], max_suggestions: in
     from difflib import get_close_matches
 
     return get_close_matches(name, catalog_names, n=max_suggestions, cutoff=0.5)
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Format a wall-clock duration for the result panel.
+
+    Sub-minute → ``"21.4s"``; minutes → ``"3m 14s"``; hours → ``"1h 2m 5s"``.
+    Any negative or NaN slips through as a literal seconds string.
+    """
+    if seconds < 0 or seconds != seconds:  # noqa: PLR0124  (NaN check)
+        return f"{seconds:.1f}s"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    s = int(round(seconds))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}m {sec}s"
+    return f"{m}m {sec}s"
+
+
+def _fmt_reward(value: float) -> str:
+    """Format a mean/min/max reward with a sensible precision.
+
+    Small magnitudes get more digits (so 0.667 stays readable); anything
+    above ~10 collapses to two decimals to match the panel's column width.
+    """
+    if value != value:  # noqa: PLR0124  (NaN check)
+        return "nan"
+    abs_v = abs(value)
+    if abs_v >= 1000:
+        return f"{value:.1f}"
+    if abs_v >= 10:
+        return f"{value:.2f}"
+    return f"{value:.3f}"
 
 
 def _dict_rows_to_tasks(rows: list[dict]) -> list:
@@ -79,11 +115,20 @@ def _run_eval(
     enable_ui: bool = False,
     save_episodes: bool = True,
     episodes_dir: str | None = None,
+    run_dir: str | None = None,
+    timestamp: str | None = None,
+    stamp_session_in_url: bool = False,
+    gateway_auth_token: str | None = None,
 ):
     """Core eval logic, extracted for clean proxy lifecycle management."""
+    import time
+
     from rllm.data import DatasetRegistry
     from rllm.eval.agent_loader import load_agent
     from rllm.eval.evaluator_loader import load_evaluator, resolve_evaluator_from_catalog
+
+    # Wall-clock start so the result panel can show how long the eval took.
+    _eval_start = time.monotonic()
 
     # ------------------------------------------------------------------
     # Local benchmark path: directory with dataset.toml / task.toml
@@ -150,9 +195,13 @@ def _run_eval(
 
         # Apply CLI sandbox overrides
         if agent_metadata:
+            from rllm.integrations.harbor.runtime import HarborRuntime
             from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
 
-            if isinstance(agent, SandboxedAgentFlow):
+            if isinstance(agent, HarborRuntime):
+                if "sandbox_backend" in agent_metadata:
+                    agent.environment_type = agent_metadata["sandbox_backend"]
+            elif isinstance(agent, SandboxedAgentFlow):
                 if "sandbox_backend" in agent_metadata:
                     agent.sandbox_backend = agent_metadata["sandbox_backend"]
                 if "sandbox_concurrency" in agent_metadata:
@@ -359,25 +408,32 @@ def _run_eval(
     console.print(Panel(table, border_style="cyan", expand=False))
     console.print()
 
-    # Single timestamp shared by UI session, results.json, and episodes dir.
+    # ``run_dir`` and ``timestamp`` are passed from ``eval_cmd`` so they're
+    # locked in before the gateway boots (the gateway tags its traces with
+    # ``run_id = basename(run_dir)`` in the shared ``~/.rllm/gateway/traces.db``).
+    # Recompute defensively if a caller invokes ``_run_eval`` directly.
     from datetime import datetime, timezone
 
-    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+    if timestamp is None:
+        timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
 
     # Set up the run directory. Layout:
     #   <run_dir>/
     #     meta.json        — always
     #     results.json     — written below, after the run completes
+    #     traces.db        — populated by the rLLM gateway (when used)
+    #     tasks.jsonl      — append-only task lifecycle stream
     #     episodes/        — populated only when save_episodes is True
     from rllm.eval.episode_store import EvalEpisodeStore
 
-    if episodes_dir is not None:
-        run_dir = os.path.expanduser(episodes_dir)
-    else:
-        rllm_home = os.path.expanduser(os.environ.get("RLLM_HOME", "~/.rllm"))
-        model_safe = model.replace("/", "_").replace("\\", "_")
-        bench_safe = benchmark.replace("/", "_").replace("\\", "_")
-        run_dir = os.path.join(rllm_home, "eval_results", f"{bench_safe}_{model_safe}_{timestamp}")
+    if run_dir is None:
+        if episodes_dir is not None:
+            run_dir = os.path.expanduser(episodes_dir)
+        else:
+            rllm_home = os.path.expanduser(os.environ.get("RLLM_HOME", "~/.rllm"))
+            model_safe = re.sub(r"[^A-Za-z0-9._-]", "_", model)
+            bench_safe = re.sub(r"[^A-Za-z0-9._-]", "_", benchmark)
+            run_dir = os.path.join(rllm_home, "eval_results", f"{bench_safe}_{model_safe}_{timestamp}")
     run_store = EvalEpisodeStore(run_dir)
     run_store.write_meta(
         {
@@ -386,6 +442,12 @@ def _run_eval(
             "agent": agent_name,
             "split": split,
             "timestamp": timestamp,
+            # ``gateway_run_id`` is the join key into the shared
+            # ``~/.rllm/gateway/traces.db`` — the cross-run viewer uses
+            # it to scope a run's traces. Equals the run dir basename
+            # by construction (eval_cmd computes both from the same
+            # template).
+            "gateway_run_id": os.path.basename(os.path.normpath(run_dir)),
         }
     )
     episode_store = run_store if save_episodes else None
@@ -458,6 +520,9 @@ def _run_eval(
             dataset_name=getattr(dataset, "name", benchmark) or benchmark,
             on_episode_complete=on_episode_complete,
             evaluator_override=evaluator,
+            stamp_session_in_url=stamp_session_in_url,
+            run_dir=run_dir,
+            gateway_auth_token=gateway_auth_token,
         )
     )
 
@@ -468,31 +533,56 @@ def _run_eval(
     if _flush_episode_buffer is not None:
         _flush_episode_buffer()
 
+    # Stamp runtime onto the result so it persists in results.json and
+    # the result panel below can render it.
+    result.runtime_sec = time.monotonic() - _eval_start
+
     # Print results
     pct = f"{result.score * 100:.1f}%"
     res_table = Table(show_header=False, box=None, padding=(0, 2))
-    res_table.add_column(style="label", width=12)
+    res_table.add_column(style="label", width=14)
     res_table.add_column()
     score_style = "bold green" if result.score >= 0.5 else "bold yellow" if result.score >= 0.2 else "bold red"
     res_table.add_row("Accuracy", f"[{score_style}]{pct}[/]  [dim]({result.correct}/{result.total})[/]")
+    res_table.add_row("Mean reward", f"[bold]{_fmt_reward(result.mean_reward)}[/]")
+    if result.reward_min is not None and result.reward_max is not None and result.total > 1 and result.reward_max - result.reward_min > 1e-9:
+        res_table.add_row(
+            "Reward range",
+            f"[dim]{_fmt_reward(result.reward_min)} – {_fmt_reward(result.reward_max)}[/]",
+        )
     error_style = "dim" if result.errors == 0 else "bold red"
     res_table.add_row("Errors", f"[{error_style}]{result.errors}[/]")
+    res_table.add_row("Runtime", f"[dim]{_fmt_duration(result.runtime_sec)}[/]")
 
-    # Display signal breakdown if any
+    # Display signal breakdown — but skip names that would just duplicate
+    # rows we already render (Accuracy / Mean reward).
+    _DUPLICATE_NAMES = {"accuracy", "is_correct", "score", "reward", "mean_reward"}
     if result.signal_averages:
         for sig_name, sig_avg in result.signal_averages.items():
+            if sig_name.lower() in _DUPLICATE_NAMES:
+                continue
             res_table.add_row(sig_name.title(), f"[dim]{sig_avg:.3f}[/]")
 
     console.print(Panel(res_table, title="[bold]Results[/]", border_style="green" if result.score >= 0.5 else "yellow", expand=False))
 
-    # Print error details so the user knows what went wrong
-    if result.errors > 0:
-        error_items = [item for item in result.items if item.error]
+    # Exception breakdown when any tasks errored. Counts by type, with
+    # one example message per type so the user can see at a glance which
+    # failure modes are dominating.
+    if result.exception_counts:
         console.print()
-        for item in error_items[:5]:
-            console.print(f"  [bold red]Task {item.idx}:[/] {item.error}")
-        if len(error_items) > 5:
-            console.print(f"  [dim]... and {len(error_items) - 5} more errors (see JSON output for details)[/]")
+        exc_table = Table(show_header=True, box=None, padding=(0, 2))
+        exc_table.add_column("Exception", style="bold red")
+        exc_table.add_column("Count", justify="right")
+        exc_table.add_column("Example", style="dim", overflow="fold")
+        for exc_type, count in sorted(result.exception_counts.items(), key=lambda x: -x[1]):
+            example = next(
+                (item.error for item in result.items if item.error and item.error.startswith(exc_type)),
+                "",
+            )
+            if len(example) > 80:
+                example = example[:79] + "…"
+            exc_table.add_row(exc_type, str(count), example)
+        console.print(exc_table)
 
     # Save aggregate results inside the run dir so a single path holds
     # everything: meta.json, results.json, and (optionally) episodes/.
@@ -536,13 +626,35 @@ def _run_eval(
     "--sandbox-backend",
     "sandbox_backend",
     default=None,
-    type=click.Choice(["docker", "local", "modal", "daytona", "e2b", "runloop", "gke", "apple-container"], case_sensitive=False),
-    help="Sandbox/environment backend. For Harbor agents: docker, daytona, modal, e2b, etc. For sandboxed agents: docker, local, modal.",
+    help=("Where the sandboxed harness runs. One of ``docker`` (default) / ``local`` / ``modal``. ``modal`` requires --tunnel or --gateway-public-url so the sandbox can reach the gateway."),
 )
 @click.option("--sandbox-concurrency", "sandbox_concurrency", default=None, type=int, help="Override max concurrent sandboxes (default: agent's max_concurrent).")
 @click.option("--ui/--no-ui", "enable_ui", default=None, help="Enable/disable live UI logging. Default: auto-enabled when logged in (see 'rllm login').")
 @click.option("--save-episodes/--no-save-episodes", "save_episodes", default=True, help="Save each Episode as its own JSON file for later visualization (default: enabled).")
 @click.option("--episodes-dir", "episodes_dir", default=None, help="Directory to write the episode JSONs into. Default: ~/.rllm/eval_results/<bench>_<model>_<timestamp>/.")
+@click.option(
+    "--gateway-public-url",
+    "gateway_public_url",
+    default=None,
+    envvar="RLLM_GATEWAY_PUBLIC_URL",
+    help=(
+        "Publicly-reachable URL for the gateway (tunnel or public IP). Required for "
+        "remote sandbox backends (modal, daytona, e2b, runloop) since they cannot reach "
+        "the host's loopback. The gateway binds 0.0.0.0 automatically when this is set. "
+        "Mutually exclusive with --tunnel."
+    ),
+)
+@click.option(
+    "--tunnel/--no-tunnel",
+    "auto_tunnel",
+    default=None,
+    help=(
+        "Auto-spawn a Cloudflare quick tunnel (`cloudflared tunnel --url …`) and "
+        "expose the gateway through it. Auto-enabled when --sandbox-backend is one "
+        "of {modal, daytona, e2b, runloop, gke} unless --gateway-public-url is set; "
+        "off otherwise. Requires `cloudflared` on PATH."
+    ),
+)
 def eval_cmd(
     benchmark: str,
     agent_name: str | None,
@@ -560,13 +672,21 @@ def eval_cmd(
     enable_ui: bool | None,
     save_episodes: bool,
     episodes_dir: str | None,
+    gateway_public_url: str | None,
+    auto_tunnel: bool | None,
 ):
     """Evaluate a model on a benchmark dataset."""
+    # Normalise sandbox-backend.
+    if sandbox_backend:
+        sandbox_backend = sandbox_backend.lower()
+        _native_backends = {"docker", "local", "modal"}
+        if sandbox_backend not in _native_backends:
+            console.print(f"  [error]--sandbox-backend {sandbox_backend!r} is not supported (allowed: {sorted(_native_backends)}).[/]")
+            raise SystemExit(1)
+
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
     _ui_explicit = enable_ui is not None
     if enable_ui is None:
-        import os
-
         from rllm.eval.config import load_ui_config
 
         ui_config = load_ui_config()
@@ -575,54 +695,123 @@ def eval_cmd(
     if not enable_ui and not _ui_explicit:
         console.print("  [blue]Tip: Try rllm UI for live monitoring! Run [bold]rllm login[/bold] to get started.[/]")
 
-    proxy_manager = None
+    gateway_manager = None
 
-    if base_url is not None:
-        # Direct mode: user provided --base-url, require --model too
-        if model is None:
-            console.print("  [error]--model is required when --base-url is provided.[/]")
-            raise SystemExit(1)
-    else:
-        # Proxy mode: auto-start LiteLLM proxy from config
+    # Resolve model + (optionally) the rllm config first so we can compute
+    # run_dir before booting the gateway — ``basename(run_dir)`` becomes
+    # the gateway's ``run_id`` for tagging traces in the shared db.
+    rllm_cfg = None
+    if base_url is None:
         from rllm.eval.config import load_config
 
-        config = load_config()
-        if not config.is_configured():
+        rllm_cfg = load_config()
+        if not rllm_cfg.is_configured():
             console.print()
             console.print("  [error]No configuration found.[/] Run [bold]rllm setup[/] first to configure your provider and API key.")
             console.print()
             raise SystemExit(1)
-
-        # --model overrides configured model
         if model is None:
-            model = config.model
+            model = rllm_cfg.model
 
-        if config.provider == "custom":
-            # Custom provider: skip LiteLLM proxy, use base_url directly
-            import os as _os
+    if model is None:
+        console.print("  [error]--model is required when --base-url is provided.[/]")
+        raise SystemExit(1)
 
-            base_url = config.base_url
-            if config.api_key:
-                _os.environ.setdefault("OPENAI_API_KEY", config.api_key)
+    # Decide run_dir up front: <RLLM_HOME>/eval_results/<bench>_<model>_<ts>/.
+    # Used both as the gateway's traces.db parent and as the EvalEpisodeStore
+    # root inside _run_eval.
+    from datetime import datetime, timezone
+
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+    if episodes_dir is not None:
+        run_dir = os.path.expanduser(episodes_dir)
+    else:
+        rllm_home = os.path.expanduser(os.environ.get("RLLM_HOME", "~/.rllm"))
+        # Coerce to characters the local viewer's safe_id regex permits
+        # (`^[A-Za-z0-9._-]+$`). Without this, prefixes like ``harbor:``
+        # and slashes from model names would land in the directory name
+        # and the viewer's /api/runs/<id>/* endpoints would 400.
+        model_safe = re.sub(r"[^A-Za-z0-9._-]", "_", model)
+        bench_safe = re.sub(r"[^A-Za-z0-9._-]", "_", benchmark)
+        run_dir = os.path.join(rllm_home, "eval_results", f"{bench_safe}_{model_safe}_{timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
+
+    if base_url is None:
+        if rllm_cfg.provider == "custom":
+            # Custom provider: skip the gateway, use base_url directly
+            base_url = rllm_cfg.base_url
+            if rllm_cfg.api_key:
+                os.environ.setdefault("OPENAI_API_KEY", rllm_cfg.api_key)
             console.print(f"  [success]Using custom endpoint[/] at [dim]{base_url}[/]")
         else:
-            from rllm.eval.proxy import EvalProxyManager
+            from rllm.eval.gateway import EvalGatewayManager
 
-            proxy_manager = EvalProxyManager(
-                provider=config.provider,
+            # ``run_id`` matches the run dir basename so the cross-run
+            # gateway viewer can join shared-db traces back to the
+            # episode JSONs in this folder.
+            run_id = os.path.basename(os.path.normpath(run_dir))
+            # Remote sandbox backends (modal, daytona, e2b, …) cannot
+            # reach host loopback. The manager exposes the gateway via
+            # one of:
+            #   1. --gateway-public-url <url>      (user-managed tunnel/IP)
+            #   2. --tunnel  → auto-spawn cloudflared quick tunnel
+            #   3. neither   → loopback only; remote sandboxes will 404
+            _remote_backends = {"modal", "daytona", "e2b", "runloop", "gke"}
+            backend_is_remote = (sandbox_backend or "").lower() in _remote_backends
+            # Default tunnel-on for remote backends unless the user
+            # supplied their own public URL.
+            if auto_tunnel is None:
+                auto_tunnel = backend_is_remote and not gateway_public_url
+            if auto_tunnel and gateway_public_url:
+                console.print("  [error]--tunnel and --gateway-public-url are mutually exclusive.[/]")
+                raise SystemExit(1)
+            if backend_is_remote and not (gateway_public_url or auto_tunnel):
+                console.print(
+                    f"  [warning]Sandbox backend '{sandbox_backend}' is remote but no public "
+                    "exposure configured.[/] Cloud sandboxes cannot reach 127.0.0.1; LLM calls "
+                    "will fail.\n  Pass --tunnel (requires cloudflared) or --gateway-public-url."
+                )
+            # Preflight: surface a missing cloudflared *before* we boot the
+            # gateway, instead of after a partial start when the helper
+            # raises TunnelError. Saves the user from a confusing log trail.
+            if auto_tunnel:
+                import shutil
+
+                if shutil.which("cloudflared") is None:
+                    console.print(
+                        "  [error]--tunnel requires `cloudflared` on PATH but it wasn't found.[/]\n"
+                        "  Install: [bold]brew install cloudflared[/] (macOS), or download from "
+                        "https://github.com/cloudflare/cloudflared/releases.\n"
+                        "  Alternatively pass --gateway-public-url to use your own tunnel/IP, "
+                        "or --no-tunnel if you can reach the host's loopback some other way."
+                    )
+                    raise SystemExit(1)
+            gateway_manager = EvalGatewayManager(
+                provider=rllm_cfg.provider,
                 model_name=model,
-                api_key=config.api_key,
+                api_key=rllm_cfg.api_key,
+                run_id=run_id,
+                run_metadata={
+                    "benchmark": benchmark,
+                    "model": model,
+                    "agent": agent_name,
+                    "provider": rllm_cfg.provider,
+                    "source": "eval",
+                    "run_dir": run_dir,
+                    "timestamp": timestamp,
+                },
+                public_url=gateway_public_url,
+                auto_tunnel=auto_tunnel,
             )
-            with Status(f"[dim]Starting LiteLLM proxy for [bold]{config.provider}/{model}[/bold]...[/]", console=console):
+            with Status(f"[dim]Starting rLLM gateway for [bold]{rllm_cfg.provider}/{model}[/bold]...[/]", console=console):
                 try:
-                    proxy_manager.start_proxy_subprocess(proxy_manager.build_proxy_config())
-                except (RuntimeError, TimeoutError) as e:
-                    console.print(f"\n  [error]Failed to start LiteLLM proxy.[/]\n\n  {e}")
-                    console.print("\n  [dim]Make sure litellm is installed:[/] [bold]pip install litellm\\[proxy][/]")
+                    gateway_manager.start()
+                except (RuntimeError, TimeoutError, ValueError) as e:
+                    console.print(f"\n  [error]Failed to start rLLM gateway.[/]\n\n  {e}")
                     console.print()
                     raise SystemExit(1) from None
-            base_url = proxy_manager.get_proxy_url()
-            console.print(f"  [success]Proxy ready[/] at [dim]{base_url}[/]")
+            base_url = gateway_manager.get_url()
+            console.print(f"  [success]Gateway ready[/] at [dim]{base_url}[/]")
 
     # Build agent metadata from CLI options
     agent_metadata = {}
@@ -661,7 +850,11 @@ def eval_cmd(
             enable_ui=enable_ui,
             save_episodes=save_episodes,
             episodes_dir=episodes_dir,
+            run_dir=run_dir,
+            timestamp=timestamp,
+            stamp_session_in_url=gateway_manager is not None,
+            gateway_auth_token=(gateway_manager.inbound_auth_token if gateway_manager else None),
         )
     finally:
-        if proxy_manager is not None:
-            proxy_manager.shutdown_proxy()
+        if gateway_manager is not None:
+            gateway_manager.shutdown()

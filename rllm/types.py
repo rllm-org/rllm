@@ -249,6 +249,10 @@ class Trajectory(BaseModel):
     output: Any = None  # Function return value (SDK usage)
     signals: dict[str, float] = Field(default_factory=dict)  # Evaluation signals
     metadata: dict | None = None
+    # Join key into the gateway trace store (matches AgentConfig.session_uid).
+    # Set by Runner.run after the harness returns; left None for harnesses
+    # that explicitly stamp their own value.
+    session_id: str | None = None
 
     @property
     def result(self):
