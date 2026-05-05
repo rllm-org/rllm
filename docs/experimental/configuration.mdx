@@ -288,7 +288,7 @@ All other shared knobs (`algorithm.adv_estimator`, `actor.kl_loss_coef`, `traine
 
 #### Bidirectional config sync
 
-For a fixed table of "shared keys" (the same value, different paths in the two namespaces), `sync_config` mirrors the value between the verl-native side and the `rllm.*` side at trainer startup. You can drive any of these knobs from either namespace, and the other namespace will see the same value.
+For a fixed table of "shared keys" (the same value, different paths in the two namespaces), `sync_config` mirrors the value between the verl-native side and the `rllm.*` side at trainer startup. New configs should use the `rllm.*` path. Existing Verl-style CLI overrides still work for backward compatibility, but they log a deprecation warning.
 
 Per-key precedence:
 
@@ -296,6 +296,10 @@ Per-key precedence:
 2. Verl-native value explicitly set on the Hydra CLI
 3. `rllm.*` value from `base.yaml` (when non-`null`)
 4. Verl-native value from `ppo_trainer.yaml`
+
+<Warning>
+  Verl-native shared-key CLI overrides are deprecated. If you set a shared key on the Verl-native side, rLLM will still sync it for now and log a warning. If both sides set conflicting values, the `rllm.*` value wins and rLLM logs a conflict warning. Passing an extra yaml/config group to override shared keys is not a supported migration path; pass shared values as individual Hydra overrides instead.
+</Warning>
 
 The shared-keys table:
 
@@ -324,8 +328,8 @@ The shared-keys table:
 
 Two extra rules sit alongside this table:
 
-- **`actor.use_kl_loss` is derived** from `kl_beta`: if you do not explicitly set `actor_rollout_ref.actor.use_kl_loss` on the CLI, `sync_config` sets it to `(kl_beta > 0)`. Setting the KL coefficient enables the KL-in-loss term automatically.
-- **`clip_ratio` family.** `rllm.algorithm.eps_clip` mirrors to `actor_rollout_ref.actor.clip_ratio` (the symmetric fallback verl uses when `clip_ratio_low` / `clip_ratio_high` are unset). When the user sets `actor.clip_ratio_low` (or `actor.clip_ratio`) on the CLI, `rllm.algorithm.eps_clip` is updated to match. The asymmetric upper bound goes through the regular `eps_clip_high ↔ clip_ratio_high` shared-key bridge.
+- **`actor.use_kl_loss` is derived** from `kl_beta`: if you do not explicitly set `actor_rollout_ref.actor.use_kl_loss` on the CLI, `sync_config` sets it to `(kl_beta > 0)`. Setting `rllm.algorithm.kl_beta` also mirrors into `actor_rollout_ref.actor.kl_loss_coef`. Setting the Verl-native coefficient still backfills `rllm.algorithm.kl_beta` for now, with a deprecation warning.
+- **`clip_ratio` family.** `rllm.algorithm.eps_clip` mirrors to `actor_rollout_ref.actor.clip_ratio` and `actor_rollout_ref.actor.clip_ratio_low`. If `rllm.algorithm.eps_clip_high` is set, it mirrors to `actor_rollout_ref.actor.clip_ratio_high`; otherwise the upper bound mirrors `eps_clip`. Verl-native `clip_ratio`, `clip_ratio_low`, and `clip_ratio_high` still backfill the rLLM values for now when the rLLM side is not set, with deprecation warnings.
 
 It also extends the Hydra search path so `/ppo_trainer` resolves:
 
@@ -337,23 +341,23 @@ rllm:
 
 ## Config forwarding mechanism
 
-The Verl backend uses bidirectional sync (described above): for any shared key, set it on either the verl-native side or the `rllm.*` side and the other side stays in agreement. The Tinker backend does its own one-way forwarding from native group-size settings into `rllm.rollout.{n,n_val}` (see "Tinker backend" above).
+The Verl backend uses bidirectional sync (described above): for any shared key, the preferred path is `rllm.*`, while legacy Verl-native shared-key CLI overrides still work with deprecation warnings. The Tinker backend does its own one-way forwarding from native group-size settings into `rllm.rollout.{n,n_val}` (see "Tinker backend" above).
 
-### Example: pick a knob, set it on either side
+### Example: set the preferred shared knob
 
-You can set `adv_estimator` on the verl-native side:
-
-```bash
-python train.py rllm/backend=verl algorithm.adv_estimator=rloo
-```
-
-…or on the `rllm.*` side — both produce the same configuration:
+Set `adv_estimator` on the `rllm.*` side:
 
 ```bash
 python train.py rllm/backend=verl rllm.algorithm.adv_estimator=rloo
 ```
 
-If you accidentally set both at once, the `rllm.*` value wins (per the precedence rules).
+A legacy Verl-native override still works for now, but logs a deprecation warning:
+
+```bash
+python train.py rllm/backend=verl algorithm.adv_estimator=rloo
+```
+
+If both are set and conflict, the `rllm.*` value wins.
 
 ### Example: KL-in-loss
 
@@ -363,7 +367,7 @@ Setting `rllm.algorithm.kl_beta=0.01` is enough — `actor.kl_loss_coef` is mirr
 python train.py rllm/backend=verl rllm.algorithm.kl_beta=0.01
 ```
 
-The verl-native equivalent is also valid:
+The legacy Verl-native equivalent still works for now, but logs a deprecation warning:
 
 ```bash
 python train.py rllm/backend=verl actor_rollout_ref.actor.kl_loss_coef=0.01
@@ -371,7 +375,7 @@ python train.py rllm/backend=verl actor_rollout_ref.actor.kl_loss_coef=0.01
 
 ### Benefits
 
-- **Backward compatibility.** Existing scripts that override on the verl-native side continue to work; the rllm-side value is mirrored automatically.
+- **Backward compatibility.** Existing scripts that override on the verl-native side continue to work while logging deprecation warnings; the rllm-side value is mirrored automatically.
 - **Backend portability.** New scripts can target the backend-agnostic `rllm.*` namespace and run on either Tinker or Verl with the same flags.
 - **Single source of truth at runtime.** No `oc.select` interpolation in the yaml; the merged config that goes to verl's workers and rLLM's trainer holds the same values on both sides.
 
@@ -379,7 +383,7 @@ python train.py rllm/backend=verl actor_rollout_ref.actor.kl_loss_coef=0.01
 
 1. **Use rLLM configs for new projects**: If starting from scratch, use the rLLM backend-agnostic configs for better portability across backends.
 
-2. **Leverage forwarding for migration**: If migrating from a specific backend, use the forwarding mechanism to maintain existing configs while gradually adopting rLLM conventions.
+2. **Use rLLM paths for shared knobs**: Existing Verl-native shared-key overrides still work for compatibility, but new configs should use `rllm.*`.
 
 3. **Check the unified config**: The `unified.yaml` file shows how all configs are combined and is useful for debugging configuration issues.
 

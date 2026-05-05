@@ -1,5 +1,7 @@
 """Tests for ``sync_config`` in ``rllm.experimental.verl.utils``."""
 
+import logging
+
 import pytest
 from omegaconf import OmegaConf
 
@@ -113,23 +115,28 @@ def test_adv_estimator_rllm_cli_wins(propagate):
     assert cfg.rllm.algorithm.adv_estimator == "rloo"
 
 
-def test_adv_estimator_verl_cli_wins(propagate):
-    """User typed verl-side → propagates to rllm."""
+def test_adv_estimator_verl_cli_wins_with_deprecation_warning(propagate, caplog):
+    """User typed verl-side → propagates to rllm for now, with a warning."""
+    caplog.set_level(logging.WARNING, logger="rllm.experimental.verl.utils")
     cfg = _make_config()
     cfg.algorithm.adv_estimator = "rloo"
     cfg = propagate(cfg, explicit_keys={"algorithm.adv_estimator"})
     assert cfg.algorithm.adv_estimator == "rloo"
     assert cfg.rllm.algorithm.adv_estimator == "rloo"
+    assert "algorithm.adv_estimator is deprecated" in caplog.text
+    assert "rllm.algorithm.adv_estimator" in caplog.text
 
 
-def test_adv_estimator_rllm_wins_over_verl(propagate):
+def test_adv_estimator_rllm_wins_over_verl_conflict(propagate, caplog):
     """User typed both → rllm CLI takes precedence."""
+    caplog.set_level(logging.WARNING, logger="rllm.experimental.verl.utils")
     cfg = _make_config()
     cfg.rllm.algorithm.adv_estimator = "rloo"
     cfg.algorithm.adv_estimator = "reinforce"
     cfg = propagate(cfg, explicit_keys={"rllm.algorithm.adv_estimator", "algorithm.adv_estimator"})
     assert cfg.algorithm.adv_estimator == "rloo"
     assert cfg.rllm.algorithm.adv_estimator == "rloo"
+    assert "algorithm.adv_estimator conflicts with rllm.algorithm.adv_estimator" in caplog.text
 
 
 def test_rllm_none_lets_verl_default_stand(propagate):
@@ -139,6 +146,43 @@ def test_rllm_none_lets_verl_default_stand(propagate):
     cfg.actor_rollout_ref.actor.policy_loss.loss_mode = "vanilla"  # verl default
     cfg = propagate(cfg)
     assert cfg.actor_rollout_ref.actor.policy_loss.loss_mode == "vanilla"
+
+
+def test_total_batches_maps_to_verl_total_training_steps(propagate):
+    cfg = _make_config()
+    cfg.rllm.trainer.total_batches = 42
+    cfg = propagate(cfg, explicit_keys={"rllm.trainer.total_batches"})
+    assert cfg.trainer.total_training_steps == 42
+
+    cfg = _make_config()
+    cfg.rllm.trainer.total_batches = -1
+    cfg = propagate(cfg)
+    assert cfg.trainer.total_training_steps is None
+
+    cfg = _make_config()
+    cfg.rllm.trainer.total_batches = 0
+    cfg = propagate(cfg, explicit_keys={"rllm.trainer.total_batches"})
+    assert cfg.trainer.total_training_steps is None
+
+
+def test_verl_total_training_steps_syncs_to_rllm_total_batches_with_warning(propagate, caplog):
+    caplog.set_level(logging.WARNING, logger="rllm.experimental.verl.utils")
+    cfg = _make_config()
+    cfg.trainer.total_training_steps = 42
+    cfg = propagate(cfg, explicit_keys={"trainer.total_training_steps"})
+    assert cfg.trainer.total_training_steps == 42
+    assert cfg.rllm.trainer.total_batches == 42
+    assert "trainer.total_training_steps is deprecated" in caplog.text
+
+
+def test_sync_before_resolve_updates_interpolated_verl_paths(propagate):
+    cfg = _make_config()
+    cfg.trainer.default_local_dir = "checkpoints/${trainer.project_name}/${trainer.experiment_name}"
+    cfg.rllm.trainer.project_name = "project"
+    cfg.rllm.trainer.experiment_name = "experiment"
+    cfg = propagate(cfg, explicit_keys={"rllm.trainer.project_name", "rllm.trainer.experiment_name"})
+    OmegaConf.resolve(cfg)
+    assert cfg.trainer.default_local_dir == "checkpoints/project/experiment"
 
 
 # ---------------------------------------------------------------------------
@@ -170,13 +214,15 @@ def test_explicit_use_kl_loss_overrides_derivation(propagate):
     assert cfg.actor_rollout_ref.actor.use_kl_loss is False
 
 
-def test_verl_kl_loss_coef_propagates_to_rllm_kl_beta(propagate):
+def test_verl_kl_loss_coef_propagates_to_rllm_kl_beta_with_warning(propagate, caplog):
     """User typed verl-side → kl_beta synced; use_kl_loss derived True."""
+    caplog.set_level(logging.WARNING, logger="rllm.experimental.verl.utils")
     cfg = _make_config()
     cfg.actor_rollout_ref.actor.kl_loss_coef = 0.02
     cfg = propagate(cfg, explicit_keys={"actor_rollout_ref.actor.kl_loss_coef"})
     assert cfg.rllm.algorithm.kl_beta == 0.02
     assert cfg.actor_rollout_ref.actor.use_kl_loss is True
+    assert "actor_rollout_ref.actor.kl_loss_coef is deprecated" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -196,14 +242,28 @@ def test_rllm_eps_clip_propagates_to_clip_ratio(propagate):
     cfg.rllm.algorithm.eps_clip = 0.3
     cfg = propagate(cfg, explicit_keys={"rllm.algorithm.eps_clip"})
     assert cfg.actor_rollout_ref.actor.clip_ratio == 0.3
+    assert cfg.actor_rollout_ref.actor.clip_ratio_low == 0.3
+    assert cfg.actor_rollout_ref.actor.clip_ratio_high == 0.3
 
 
-def test_verl_clip_ratio_propagates_to_rllm_eps_clip(propagate):
+def test_rllm_eps_clip_high_sets_asymmetric_upper_bound(propagate):
+    cfg = _make_config()
+    cfg.rllm.algorithm.eps_clip = 0.2
+    cfg.rllm.algorithm.eps_clip_high = 0.28
+    cfg = propagate(cfg, explicit_keys={"rllm.algorithm.eps_clip", "rllm.algorithm.eps_clip_high"})
+    assert cfg.actor_rollout_ref.actor.clip_ratio == 0.2
+    assert cfg.actor_rollout_ref.actor.clip_ratio_low == 0.2
+    assert cfg.actor_rollout_ref.actor.clip_ratio_high == 0.28
+
+
+def test_verl_clip_ratio_propagates_to_rllm_eps_clip_with_warning(propagate, caplog):
     """User sets verl.clip_ratio (no asymmetric override) → rllm.eps_clip mirrors it."""
+    caplog.set_level(logging.WARNING, logger="rllm.experimental.verl.utils")
     cfg = _make_config()
     cfg.actor_rollout_ref.actor.clip_ratio = 0.3
     cfg = propagate(cfg, explicit_keys={"actor_rollout_ref.actor.clip_ratio"})
     assert cfg.rllm.algorithm.eps_clip == 0.3
+    assert "actor_rollout_ref.actor.clip_ratio is deprecated" in caplog.text
 
 
 def test_clip_ratio_low_takes_precedence_over_clip_ratio(propagate):
@@ -219,6 +279,18 @@ def test_clip_ratio_low_takes_precedence_over_clip_ratio(propagate):
         },
     )
     assert cfg.rllm.algorithm.eps_clip == 0.15
+
+
+def test_rllm_eps_clip_wins_over_verl_clip_ratio_conflict(propagate, caplog):
+    caplog.set_level(logging.WARNING, logger="rllm.experimental.verl.utils")
+    cfg = _make_config()
+    cfg.rllm.algorithm.eps_clip = 0.3
+    cfg.actor_rollout_ref.actor.clip_ratio = 0.15
+    cfg = propagate(cfg, explicit_keys={"rllm.algorithm.eps_clip", "actor_rollout_ref.actor.clip_ratio"})
+    assert cfg.rllm.algorithm.eps_clip == 0.3
+    assert cfg.actor_rollout_ref.actor.clip_ratio == 0.3
+    assert cfg.actor_rollout_ref.actor.clip_ratio_low == 0.3
+    assert "actor_rollout_ref.actor.clip_ratio conflicts with rllm.algorithm.eps_clip" in caplog.text
 
 
 def test_asymmetric_clip_propagates_to_rllm(propagate):
