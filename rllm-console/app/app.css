@@ -1,0 +1,58 @@
+@import "tailwindcss";
+
+/* `.dark` on <html> opts the entire tree into the dark token set.
+   Default (no class) is light. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans:
+    "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* Custom shade between zinc-900 (#18181b) and zinc-950 (#09090b),
+     used for panel chrome that needs to read as "elevated background"
+     against the page bg in dark mode. */
+  --color-zinc-925: #131316;
+
+  /* Semantic neutral tokens — light mode defaults. The dark-mode
+     overrides live in the `.dark { ... }` block below. Components
+     should reach for these (`bg-canvas`, `text-strong`, ...) instead
+     of hardcoded zinc shades, so the whole UI re-themes in one spot. */
+  --color-canvas: #ffffff;
+  --color-panel: #ffffff;
+  --color-chrome: var(--color-zinc-50);
+  --color-hover: var(--color-zinc-100);
+  --color-active: var(--color-zinc-200);
+
+  --color-strong: var(--color-zinc-900);
+  --color-body: var(--color-zinc-700);
+  --color-muted: var(--color-zinc-600);
+  --color-subtle: var(--color-zinc-500);
+  --color-faint: var(--color-zinc-400);
+
+  --color-line: var(--color-zinc-200);
+  --color-line-subtle: var(--color-zinc-100);
+}
+
+.dark {
+  --color-canvas: var(--color-zinc-950);
+  --color-panel: var(--color-zinc-925);
+  --color-chrome: var(--color-zinc-925);
+  --color-hover: var(--color-zinc-900);
+  --color-active: var(--color-zinc-800);
+
+  --color-strong: var(--color-zinc-100);
+  --color-body: var(--color-zinc-200);
+  --color-muted: var(--color-zinc-400);
+  --color-subtle: var(--color-zinc-500);
+  --color-faint: var(--color-zinc-600);
+
+  --color-line: var(--color-zinc-800);
+  --color-line-subtle: var(--color-zinc-900);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}

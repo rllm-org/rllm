@@ -1,0 +1,11 @@
+node_modules
+build
+.react-router
+.vite
+.DS_Store
+*.log
+
+# Repo-root .gitignore has `lib/` (a Python convention); our frontend
+# source includes app/lib/. Negate so it gets tracked.
+!app/lib/
+!app/lib/**
