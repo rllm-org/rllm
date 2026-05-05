@@ -8,7 +8,7 @@ This module provides two classes:
   (``TinkerProxyManager``) backends via the same LiteLLM proxy pipeline.
 
 - ``SdkWorkflow(Workflow)`` – per-task adapter executed by
-  ``UnifiedWorkflowEngine``.  Each call to ``run()`` invokes the user-provided
+  ``WorkflowEngine``.  Each call to ``run()`` invokes the user-provided
   ``agent_run_func`` inside a session context, collects traces from the SQLite
   store, and converts them into an ``Episode``.
 """
@@ -318,7 +318,7 @@ class SdkWorkflowFactory:
 class SdkWorkflow(Workflow):
     """Workflow adapter that runs an SDK ``agent_run_func`` inside a session.
 
-    Instantiated once per parallel slot by ``UnifiedWorkflowEngine``.
+    Instantiated once per parallel slot by ``WorkflowEngine``.
     Each ``run()`` call:
 
     1. Executes the wrapped agent function (with session context).

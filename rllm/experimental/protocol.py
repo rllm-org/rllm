@@ -20,7 +20,7 @@ from rllm.experimental.rollout import RolloutEngine
 from rllm.types import Episode
 
 if TYPE_CHECKING:
-    from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
+    from rllm.experimental.engine.base import FlowEngine
     from rllm.experimental.unified_trainer import TrainerState
 
 TDataset = TypeVar("TDataset", bound=Iterable)  # backend-specific dataset type
@@ -89,7 +89,7 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
     async def generate_episodes(
         self,
         batch: TBatch,
-        agent_workflow_engine: UnifiedWorkflowEngine,
+        agent_workflow_engine: FlowEngine,
         is_validation: bool = False,
         **kwargs,
     ) -> list[Episode]:

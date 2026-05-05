@@ -225,7 +225,7 @@ class TestSdkWorkflowFactory:
 
 
 # ---------------------------------------------------------------------------
-# UnifiedWorkflowEngine post_execute_hook tests
+# WorkflowEngine post_execute_hook tests
 # ---------------------------------------------------------------------------
 
 
@@ -235,7 +235,7 @@ class TestPostExecuteHook:
     @pytest.mark.asyncio
     async def test_hook_invoked(self):
         """post_execute_hook should be called once after all tasks complete."""
-        from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
+        from rllm.experimental.engine.workflow_engine import WorkflowEngine
         from rllm.workflows.workflow import Workflow
 
         hook_called = []
@@ -251,7 +251,7 @@ class TestPostExecuteHook:
             def is_multithread_safe(self):
                 return True
 
-        engine = UnifiedWorkflowEngine(
+        engine = WorkflowEngine(
             workflow_cls=DummyWorkflow,
             workflow_args={},
             rollout_engine=MagicMock(),
@@ -270,7 +270,7 @@ class TestPostExecuteHook:
     @pytest.mark.asyncio
     async def test_no_hook(self):
         """When no hook is provided, execution should still work fine."""
-        from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
+        from rllm.experimental.engine.workflow_engine import WorkflowEngine
         from rllm.workflows.workflow import Workflow
 
         class DummyWorkflow(Workflow):
@@ -280,7 +280,7 @@ class TestPostExecuteHook:
             def is_multithread_safe(self):
                 return True
 
-        engine = UnifiedWorkflowEngine(
+        engine = WorkflowEngine(
             workflow_cls=DummyWorkflow,
             workflow_args={},
             rollout_engine=MagicMock(),

@@ -36,7 +36,7 @@ from rllm.experimental.common.transform import (
     transform_episodes_to_trajectory_groups,
 )
 from rllm.experimental.common.visualization import print_metrics_table, visualize_trajectory_last_steps
-from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
+from rllm.experimental.engine.workflow_engine import WorkflowEngine
 from rllm.experimental.metrics import MetricsAggregator
 from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.rollout import RolloutEngine
@@ -161,7 +161,7 @@ class UnifiedTrainer:
         # Determine which engine path to use:
         # 1. agent_flow + evaluator → AgentFlowEngine (gateway-based, local)
         # 2. remote_runtime → RemoteAgentFlowEngine (gateway-based, remote)
-        # 3. workflow_class → UnifiedWorkflowEngine (direct)
+        # 3. workflow_class → WorkflowEngine (direct)
         self._gateway = None
         self._remote_runtime = None
 
@@ -221,7 +221,7 @@ class UnifiedTrainer:
                 episode_logger=self.episode_logger,
             )
         else:
-            self.agent_workflow_engine = UnifiedWorkflowEngine(
+            self.agent_workflow_engine = WorkflowEngine(
                 workflow_cls=self.workflow_class,
                 workflow_args=self.workflow_args,
                 rollout_engine=rollout_engine,
@@ -300,7 +300,7 @@ class UnifiedTrainer:
         if self._remote_runtime is not None:
             self._remote_runtime.initialize()
 
-        # initialize the UnifiedWorkflowEngine (init the workflow pool)
+        # initialize the WorkflowEngine (init the workflow pool)
         # AgentFlowEngine and RemoteAgentFlowEngine don't need pool initialization
         if hasattr(self.agent_workflow_engine, "initialize_pool"):
             await self.agent_workflow_engine.initialize_pool()

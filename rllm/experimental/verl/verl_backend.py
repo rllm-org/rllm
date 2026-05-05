@@ -51,7 +51,7 @@ from rllm.experimental.verl.utils import (
 from rllm.types import Episode
 
 if TYPE_CHECKING:
-    from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
+    from rllm.experimental.engine.base import FlowEngine
     from rllm.experimental.unified_trainer import TrainerState
 
 import logging
@@ -289,19 +289,19 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         else:
             raise ValueError("No validation dataloader available. Please check the configuration.")
 
-    async def generate_episodes(self, batch: Any, agent_workflow_engine: UnifiedWorkflowEngine, is_validation: bool = False, **kwargs) -> list[Episode]:
-        """Generate episodes using the workflow engine.
+    async def generate_episodes(self, batch: Any, flow_engine: FlowEngine, is_validation: bool = False, **kwargs) -> list[Episode]:
+        """Generate episodes using the flow engine.
 
         For Verl backend, this function handles the following procedures:
 
         1. Build an "interleaved" batch, where each task is repeated `rollout.n` times.
         2. Extract the tasks and task IDs from the batch.
-        3. Execute the tasks using the agent workflow engine.
+        3. Execute the tasks using the flow engine.
         4. Return the episodes.
 
         Args:
             batch: Input batch (dict format from dataloader).
-            agent_workflow_engine: The workflow engine to use.
+            flow_engine: The flow engine to use.
             **kwargs: Additional arguments.
 
         Returns:
@@ -317,8 +317,8 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         else:
             repeat_times = self.full_config.rllm.rollout.n
         batch = batch.repeat(repeat_times=repeat_times)
-        # Step 2: execute tasks using the agent workflow engine (async)
-        episodes = await self._execute_tasks_async(batch, agent_workflow_engine, is_validation=is_validation, **kwargs)
+        # Step 2: execute tasks using the flow engine (async)
+        episodes = await self._execute_tasks_async(batch, flow_engine, is_validation=is_validation, **kwargs)
         # Step 3: sleep the replicas to free kv_cache before weight sync (if free_cache_engine is enabled)
         # Only sleep during training — validation doesn't update weights, so there's no wake_up call after it.
         # Sleeping after validation would leave replicas asleep, causing CUDA illegal memory access on the next generation.
@@ -326,12 +326,12 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             await self.checkpoint_manager.sleep_replicas()
         return episodes
 
-    async def _execute_tasks_async(self, batch: DataProto, agent_workflow_engine: UnifiedWorkflowEngine, **kwargs) -> list[Episode]:
+    async def _execute_tasks_async(self, batch: DataProto, flow_engine: FlowEngine, **kwargs) -> list[Episode]:
         """A Verl-specific helper function to execute tasks asynchronously."""
         assert self.rollout_engine is not None, "rollout_engine is not initialized."
         tasks = batch.non_tensor_batch["extra_info"].tolist()
         task_ids = batch.non_tensor_batch["task_ids"].tolist()
-        episodes = await agent_workflow_engine.execute_tasks(tasks, task_ids, **kwargs)
+        episodes = await flow_engine.execute_tasks(tasks, task_ids, **kwargs)
         # handle data sources in the input dataproto
         if "data_source" in batch.non_tensor_batch:
             data_sources = batch.non_tensor_batch["data_source"].tolist()

@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
-from collections import defaultdict
 from collections.abc import Callable, Coroutine
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
-from tqdm import tqdm
-
+from rllm.experimental.engine.base import FlowEngine
 from rllm.experimental.rollout import RolloutEngine
 from rllm.types import Episode
 from rllm.workflows.store import Store
@@ -18,14 +15,13 @@ from rllm.workflows.workflow import TerminationReason, Workflow
 # Avoid hard dependency on verl at import time; only for typing
 if TYPE_CHECKING:
     from omegaconf import DictConfig
-    from verl import DataProto
 
     from rllm.utils.episode_logger import EpisodeLogger
 
 logger = logging.getLogger(__name__)
 
 
-class UnifiedWorkflowEngine:
+class WorkflowEngine(FlowEngine):
     def __init__(
         self,
         workflow_cls: type[Workflow],
@@ -41,7 +37,7 @@ class UnifiedWorkflowEngine:
         **kwargs,
     ):
         """
-        Initialize the UnifiedWorkflowEngine.
+        Initialize the WorkflowEngine.
 
         Args:
             workflow_cls: The workflow class to instantiate for each task.
@@ -58,6 +54,7 @@ class UnifiedWorkflowEngine:
             store: Optional cross-episode store shared across all workflow instances.
             **kwargs: Additional keyword arguments.
         """
+        super().__init__(n_parallel_tasks=n_parallel_tasks, episode_logger=episode_logger)
         self.workflow_cls = workflow_cls
         self.workflow_args = workflow_args or {}
         self.store = store
@@ -69,30 +66,11 @@ class UnifiedWorkflowEngine:
         self.raise_on_error = raise_on_error
         self.kwargs = kwargs
 
-        self.n_parallel_tasks = n_parallel_tasks
         self.executor = ThreadPoolExecutor(max_workers=self.n_parallel_tasks)
-        self.workflow_queue = None
+        self.workflow_queue: asyncio.Queue[Workflow] | None = None
 
         # Post-execute hook (e.g. SDK trace flushing)
         self.post_execute_hook = post_execute_hook
-
-        # Episode logging support
-        self.episode_logger = episode_logger
-        self.current_step = 0
-        self.current_epoch = 0
-        self.current_mode = "train"  # "train" or "val"
-
-    def set_training_step(self, step: int, mode: str = "train", epoch: int = 0):
-        """Set current training step for episode logging.
-
-        Args:
-            step: Current training step number
-            mode: Mode identifier ('train' or 'val'), defaults to 'train'
-            epoch: Current epoch number, defaults to 0
-        """
-        self.current_step = step
-        self.current_mode = mode
-        self.current_epoch = epoch
 
     async def initialize_pool(self):
         """Initialize the workflow pool with parallel workflow instances.
@@ -106,7 +84,7 @@ class UnifiedWorkflowEngine:
             return
         logger.info(f"[WorkflowEngine] Initializing pool with {self.n_parallel_tasks} workflows")
         self.workflow_queue = asyncio.Queue(maxsize=self.n_parallel_tasks)
-        for i in range(self.n_parallel_tasks):
+        for _ in range(self.n_parallel_tasks):
             workflow = self.workflow_cls(
                 rollout_engine=self.rollout_engine,
                 executor=self.executor,
@@ -117,7 +95,25 @@ class UnifiedWorkflowEngine:
             self.workflow_queue.put_nowait(workflow)
         logger.info(f"[WorkflowEngine] Pool initialized. Queue size: {self.workflow_queue.qsize()}")
 
-    async def process_task_with_retry(self, task: dict, task_id: str, rollout_idx: int, result_idx: int, **kwargs) -> tuple[str, int, int, Episode]:
+    async def _pre_execute(self, *, is_validation: bool = False, **kwargs) -> None:
+        if self.workflow_queue is None:
+            await self.initialize_pool()
+        self.rollout_engine.is_validation = is_validation
+
+    async def _post_execute(self, *, is_validation: bool = False, **kwargs) -> None:
+        if self.post_execute_hook is not None:
+            await self.post_execute_hook()
+
+    async def process_task_with_retry(
+        self,
+        task: dict,
+        task_id: str,
+        rollout_idx: int,
+        result_idx: int,
+        *,
+        is_validation: bool = False,
+        **kwargs,
+    ) -> tuple[str, int, int, Episode]:
         """Process a single task rollout with retry logic based on termination reasons.
 
         Args:
@@ -125,6 +121,8 @@ class UnifiedWorkflowEngine:
             task_id: Unique identifier for the task.
             rollout_idx: Index of this rollout attempt for the task.
             result_idx: Index of the result in the results list. This is useful for tracking the order of streaming results back.
+            is_validation: Forwarded for parity with the base API; the per-batch
+                value is set on ``rollout_engine`` in :meth:`_pre_execute`.
             **kwargs: Additional arguments passed to the workflow.
 
         Returns:
@@ -133,6 +131,8 @@ class UnifiedWorkflowEngine:
         Raises:
             Exception: If task fails permanently after retry_limit attempts and raise_on_error is True.
         """
+        del is_validation  # already applied to rollout_engine in _pre_execute
+
         assert self.workflow_queue is not None, "workflow_queue is not initialized"
         logger.debug(f"[WorkflowEngine] Waiting for workflow from queue. Available: {self.workflow_queue.qsize()}")
         workflow = await self.workflow_queue.get()
@@ -147,15 +147,7 @@ class UnifiedWorkflowEngine:
                 episode.id = uid
                 episode.task = task
 
-                # Display rewards for all trajectories. Fallback to last step reward if trajectory reward is not set.
-                reward_strs = []
-                for traj in episode.trajectories:
-                    reward = "N/A"
-                    if traj.reward is not None:
-                        reward = f"{traj.reward:.1f}"
-                    elif len(traj.steps) > 0:
-                        reward = f"{traj.steps[-1].reward:.1f}"
-                    reward_strs.append(f"{traj.name}: {reward}")
+                reward_strs = self.format_reward_strs(episode)
                 logger.debug(f"[{uid}] Rollout completed. Rewards: [{', '.join(reward_strs)}], Termination: {episode.termination_reason}")
 
                 if episode.termination_reason != TerminationReason.ERROR:
@@ -179,90 +171,3 @@ class UnifiedWorkflowEngine:
         finally:
             await self.workflow_queue.put(workflow)
             logger.debug(f"[WorkflowEngine] Returned workflow to queue. Available: {self.workflow_queue.qsize()}")
-
-    async def execute_tasks(self, tasks: list[dict], task_ids: list[str] | None = None, is_validation: bool = False, **kwargs) -> list[Episode]:
-        """Run asynchronous workflow execution with retry logic for multiple tasks.
-        Args:
-            tasks: List of task dictionaries to process.
-            task_ids: Optional list of task identifiers. If None, UUIDs are generated.
-            is_validation: Whether the generation is for validation.
-            **kwargs: Additional arguments passed to individual task processing.
-
-        Returns:
-            list[Episode]: List of completed episodes from all tasks.
-        """
-        if self.workflow_queue is None:
-            await self.initialize_pool()
-
-        self.rollout_engine.is_validation = is_validation
-
-        if task_ids is None:
-            task_ids = [str(uuid.uuid4()) for _ in tasks]
-
-        # counting the number of occurences for each task_id, which gives us the rollout index
-        task_id_counter = defaultdict(int)
-        # pre-allocate results
-        results = [None] * len(tasks)
-
-        futures = []
-        for idx, (task, task_id) in enumerate(zip(tasks, task_ids, strict=True)):
-            rollout_idx = task_id_counter[task_id]
-            futures.append(self.process_task_with_retry(task, task_id, rollout_idx, idx, **kwargs))
-            task_id_counter[task_id] += 1
-
-        with tqdm(total=len(tasks), desc="Generating trajectories") as pbar:
-            for future in asyncio.as_completed(futures):  # the completion order might not be ordered
-                task_id, rollout_idx, idx, episode = await future
-                results[idx] = episode
-                pbar.update(1)
-
-        # Invoke post-execute hook (e.g. batch-level SDK trace flush)
-        if self.post_execute_hook is not None:
-            await self.post_execute_hook()
-
-        ordered_results: list[Episode] = results  # type: ignore[assignment]
-        # Log episodes if logger is provided
-        if self.episode_logger is not None:
-            try:
-                logger.info(f"Logging {len(ordered_results)} episodes to step={self.current_step}, mode={self.current_mode}, epoch={self.current_epoch}")
-                self.episode_logger.log_episodes_batch(
-                    ordered_results,
-                    self.current_step,
-                    self.current_mode,
-                    self.current_epoch,
-                )
-            except Exception as e:
-                logger.error(f"Failed to log episodes: {e}")
-                import traceback
-
-                traceback.print_exc()
-
-        return ordered_results
-
-    # TODO(listar2000): eventually the agent_workflow_engine should be backend agnostic.
-    async def execute_tasks_verl(self, batch: DataProto, is_validation: bool = False, **kwargs) -> list[Episode]:
-        """Execute tasks from a Verl DataProto batch and return results.
-
-        Args:
-            batch: Verl DataProto containing tasks and metadata.
-            is_validation: Whether the generation is for validation.
-            **kwargs: Additional arguments passed to execute_tasks.
-
-        Returns:
-            list[Episode]: List of completed episodes.
-        """
-        tasks = batch.non_tensor_batch["extra_info"].tolist()
-        task_ids = batch.non_tensor_batch["task_ids"].tolist()
-        episodes = await self.execute_tasks(tasks, task_ids, is_validation=is_validation, **kwargs)
-        # handle data sources in the input dataproto
-        if "data_source" in batch.non_tensor_batch:
-            data_sources = batch.non_tensor_batch["data_source"].tolist()
-            for episode, data_source in zip(episodes, data_sources, strict=True):
-                episode.info["data_source"] = data_source
-        return episodes
-
-    def shutdown(self):
-        """Shutdown the workflow engine and cleanup resources."""
-        if hasattr(self, "executor") and self.executor is not None:
-            self.executor.shutdown(wait=True)
-            self.executor = None

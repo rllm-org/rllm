@@ -8,8 +8,8 @@ converting gateway traces to training Steps.
 import asyncio
 import logging
 import uuid
-from collections import defaultdict
 
+from rllm.experimental.engine.base import FlowEngine
 from rllm.experimental.engine.gateway_manager import GatewayManager
 from rllm.experimental.engine.remote_runtime.protocol import (
     RemoteAgentRuntime,
@@ -24,7 +24,7 @@ from rllm.workflows.workflow import TerminationReason
 logger = logging.getLogger(__name__)
 
 
-class RemoteAgentFlowEngine:
+class RemoteAgentFlowEngine(FlowEngine):
     """Submits tasks to remote runtimes and builds Episodes from gateway traces + rewards."""
 
     def __init__(
@@ -35,64 +35,17 @@ class RemoteAgentFlowEngine:
         n_parallel_tasks: int = 128,
         episode_logger: EpisodeLogger | None = None,
     ) -> None:
+        super().__init__(n_parallel_tasks=n_parallel_tasks, episode_logger=episode_logger)
         self.runtime = runtime
         self.gateway = gateway
         self.session_timeout = session_timeout
-        self.n_parallel_tasks = n_parallel_tasks
-        self.episode_logger = episode_logger
         self._semaphore = asyncio.Semaphore(n_parallel_tasks)
 
-        # Training step tracking (set by set_training_step)
-        self.current_step = 0
-        self.current_epoch = 0
-        self.current_mode = "train"
+    async def _pre_execute(self, *, is_validation: bool = False, **kwargs) -> None:
+        return None
 
-    def set_training_step(self, step: int, mode: str = "train", epoch: int = 0) -> None:
-        self.current_step = step
-        self.current_mode = mode
-        self.current_epoch = epoch
-
-    async def execute_tasks(
-        self,
-        tasks: list[dict],
-        task_ids: list[str] | None = None,
-        is_validation: bool = False,
-        **kwargs,
-    ) -> list[Episode]:
-        """Submit tasks to remote runtime, gather results, build Episodes from gateway traces."""
-        from tqdm.asyncio import tqdm
-
-        if task_ids is None:
-            task_ids = [str(uuid.uuid4()) for _ in tasks]
-
-        task_id_counter: dict[str, int] = defaultdict(int)
-        results: list[Episode | None] = [None] * len(tasks)
-
-        futures = []
-        for idx, (task, task_id) in enumerate(zip(tasks, task_ids, strict=True)):
-            rollout_idx = task_id_counter[task_id]
-            task_id_counter[task_id] += 1
-            futures.append(self.process_task_with_retry(task, task_id, rollout_idx, idx, is_validation=is_validation))
-
-        for future in tqdm(asyncio.as_completed(futures), total=len(futures), desc="rollouts"):
-            task_id, rollout_idx, idx, episode = await future
-            results[idx] = episode
-
-        episodes: list[Episode] = results  # type: ignore[assignment]
-
-        # Log episodes if logger is provided
-        if self.episode_logger is not None:
-            try:
-                self.episode_logger.log_episodes_batch(
-                    episodes,
-                    self.current_step,
-                    self.current_mode,
-                    self.current_epoch,
-                )
-            except Exception as e:
-                logger.error("Failed to log episodes: %s", e)
-
-        return episodes
+    async def _post_execute(self, *, is_validation: bool = False, **kwargs) -> None:
+        return None
 
     async def process_task_with_retry(
         self,
@@ -100,13 +53,16 @@ class RemoteAgentFlowEngine:
         task_id: str,
         rollout_idx: int,
         result_idx: int,
+        *,
+        is_validation: bool = False,
         **kwargs,
     ) -> tuple[str, int, int, Episode]:
         """Process a single task with concurrency control."""
+        del kwargs
+
         async with self._semaphore:
             uid = f"{task_id}:{rollout_idx}"
             session_id = str(uuid.uuid4())
-            is_validation = kwargs.get("is_validation", False)
 
             await self.gateway.acreate_session(session_id, is_validation=is_validation)
             session_url = self.gateway.get_session_url(session_id)
@@ -135,10 +91,6 @@ class RemoteAgentFlowEngine:
             await self.gateway.adelete_session(session_id)
 
             return task_id, rollout_idx, result_idx, episode
-
-    def shutdown(self) -> None:
-        """No local resources to clean up (runtime shutdown is separate)."""
-        pass
 
 
 def _build_episode(
