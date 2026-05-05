@@ -20,6 +20,11 @@
       "module": "rllm.harnesses.mini_swe_agent",
       "function": "MiniSweAgentHarness",
       "description": "Run mini-swe-agent inside the sandbox."
+    },
+    "oracle": {
+      "module": "rllm.harnesses.oracle",
+      "function": "OracleHarness",
+      "description": "Run the task's reference solution (solution/solve.sh) without an LLM. Smoke-test for verifier + image."
     }
   }
 }

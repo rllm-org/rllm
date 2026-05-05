@@ -352,6 +352,7 @@ def _create_sandbox_for_task(
     workdir = _resolve_workdir(task)
     if workdir:
         sandbox_kwargs["workdir"] = workdir
+    sandbox_kwargs.update(_resolve_resource_kwargs(task, backend))
     base_image_str = base_image if isinstance(base_image, str) else "<modal.Image>"
     return create_sandbox(backend, name=name, image=image, **sandbox_kwargs), base_image_str, backend
 
@@ -414,6 +415,44 @@ def _resolve_workdir(task: Task) -> str | None:
     return None
 
 
+def _resolve_resource_kwargs(task: Task, backend: str) -> dict[str, Any]:
+    """Translate Harbor-style ``[environment]`` resource hints into backend kwargs.
+
+    Reads ``cpus`` / ``memory_mb`` / ``gpus`` / ``gpu_types`` from
+    ``task.metadata['environment']`` and emits ``cpu`` / ``memory`` / ``gpu``
+    kwargs in the shape Modal's ``Sandbox.create()`` expects. Other backends
+    (docker, local) accept ``**kwargs`` and silently ignore unknown keys, so
+    we only emit when the backend is ``modal`` to avoid noisy warnings.
+
+    GPU encoding follows Modal's API:
+      - ``gpus = N`` + no types → ``gpu = "any:N"`` (or ``"any"`` when N==1).
+      - ``gpus = N`` + ``gpu_types = ["A100", ...]`` → first type wins,
+        ``gpu = "A100:N"`` (or ``"A100"`` when N==1).
+    """
+    if backend != "modal":
+        return {}
+
+    env_config = task.metadata.get("environment", {}) or {}
+    out: dict[str, Any] = {}
+
+    cpus = env_config.get("cpus")
+    if isinstance(cpus, int | float) and cpus > 0:
+        out["cpu"] = float(cpus)
+
+    memory_mb = env_config.get("memory_mb")
+    if isinstance(memory_mb, int | float) and memory_mb > 0:
+        out["memory"] = int(memory_mb)
+
+    gpus = env_config.get("gpus")
+    if isinstance(gpus, int | float) and gpus > 0:
+        gpu_types = env_config.get("gpu_types") or []
+        gpu_kind = str(gpu_types[0]) if isinstance(gpu_types, list) and gpu_types else "any"
+        gpu_count = int(gpus)
+        out["gpu"] = gpu_kind if gpu_count == 1 else f"{gpu_kind}:{gpu_count}"
+
+    return out
+
+
 def _parse_dockerfile_workdir(dockerfile: Path) -> str | None:
     """Return the last ``WORKDIR`` directive in *dockerfile*, or ``None``.
 
@@ -462,11 +501,17 @@ def _build_modal_image(dockerfile: Path) -> Any:
     Modal builds remotely on its own infra and caches by content, so
     repeated runs against the same Dockerfile are cheap. The returned
     ``modal.Image`` is passed straight through to ``Sandbox.create()``.
+
+    ``context_dir`` is pinned to the Dockerfile's parent so ``COPY``
+    directives resolve against the task's ``environment/`` directory.
+    Modal otherwise defaults to ``Path.cwd()``, which makes every
+    ``COPY Gemfile ...`` (or any other relative path) silently fail
+    when ``rllm eval`` is invoked from the repo root.
     """
     import modal
 
     logger.info("Building Modal image from %s", dockerfile)
-    return modal.Image.from_dockerfile(dockerfile)
+    return modal.Image.from_dockerfile(dockerfile, context_dir=dockerfile.parent)
 
 
 def _setup_task_environment(task: Task, sandbox: Sandbox) -> None:
