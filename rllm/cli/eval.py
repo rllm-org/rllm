@@ -95,23 +95,31 @@ def _run_eval(
     # ------------------------------------------------------------------
     # Runtime selection
     # ------------------------------------------------------------------
-    # Two orthogonal axes select Harbor execution:
-    #   1. ``--runtime harbor``  — explicit, no prefixes required.
-    #   2. ``--agent harbor:*``  — implicit, kept for backwards-compat
-    #      and for cases where a Harbor-pulled dataset wants the rLLM
-    #      runtime instead.
-    # ``_is_harbor_runtime`` is the single predicate the rest of the
-    # function should branch on. The loader name (with ``harbor:``
-    # prefix when needed) is computed *just before* each ``load_agent``
-    # call — ``agent_name`` may not be finalised at this point (the
-    # catalog branch fills it in from ``catalog_entry['default_agent']``
-    # later), and a top-level snapshot would freeze ``None``.
+    # Two ways to opt into the harbor runtime:
+    #   1. ``--runtime harbor``  — explicit flag.
+    #   2. ``--agent harbor:*``  — explicit user prefix (kept for
+    #      backwards-compat).
+    # A catalog ``default_agent`` carrying the prefix does NOT count;
+    # otherwise pulling a harbor dataset (e.g. ``harbor:swebench-verified``)
+    # would silently force the harbor runtime when the user passed neither
+    # signal. ``agent_name`` here is the user-supplied value before any
+    # catalog default fills it in, which is exactly the right input.
     _is_harbor_runtime = (runtime == "harbor") or bool(agent_name and agent_name.startswith("harbor:"))
 
-    def _harbor_loader_name(name: str | None) -> str | None:
-        if _is_harbor_runtime and name and not name.startswith("harbor:"):
-            return f"harbor:{name}"
-        return name
+    def _normalise_agent_name(name: str | None) -> str | None:
+        """Align *name* with the active runtime.
+
+        - harbor runtime: ensure a ``harbor:`` prefix (so ``load_agent``
+          dispatches to ``HarborRuntime``).
+        - rllm runtime: strip a ``harbor:`` prefix (so a catalog-supplied
+          default like ``harbor:mini-swe-agent`` resolves to the rllm-
+          native harness instead of routing through HarborRuntime).
+        """
+        if not name:
+            return name
+        if _is_harbor_runtime:
+            return name if name.startswith("harbor:") else f"harbor:{name}"
+        return name.removeprefix("harbor:")
 
     # ------------------------------------------------------------------
     # Local benchmark path: directory with dataset.toml / task.toml
@@ -167,13 +175,12 @@ def _run_eval(
         # Resolve agent name (display + harness lookup)
         if agent_name is None:
             agent_name = bench_result.harness_name or "react"
+        agent_name = _normalise_agent_name(agent_name)
 
         # Construct the AgentFlow: catalog covers built-in harnesses
         # (react/bash/claude-code) and any user-registered or plugin agents.
-        # When the harbor runtime is selected the loader name carries a
-        # ``harbor:`` prefix so we get a HarborRuntime back.
         try:
-            agent = load_agent(_harbor_loader_name(agent_name))
+            agent = load_agent(agent_name)
         except (KeyError, ImportError, AttributeError, TypeError) as e:
             console.print(f"  [error]Cannot load agent '{agent_name}': {e}[/]")
             raise SystemExit(1) from None
@@ -248,6 +255,7 @@ def _run_eval(
             else:
                 console.print(f"  [error]No --agent specified and no default_agent in catalog for '{benchmark}'.[/]")
                 raise SystemExit(1)
+        agent_name = _normalise_agent_name(agent_name)
 
         # Resolve split
         if split is None:
@@ -279,7 +287,7 @@ def _run_eval(
         # plus user-registered + plugin agents; ``harbor:<scaffold>`` resolves
         # to a HarborRuntime via the harbor: prefix branch in load_agent.
         try:
-            agent = load_agent(_harbor_loader_name(agent_name))
+            agent = load_agent(agent_name)
         except (KeyError, ImportError, AttributeError, TypeError) as e:
             console.print(f"  [error]Error loading agent '{agent_name}': {e}[/]")
             raise SystemExit(1) from None
