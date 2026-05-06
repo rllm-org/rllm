@@ -218,7 +218,13 @@ class AgentFlowEngine:
             raise RuntimeError(f"[{uid}] Exhausted all retries")
 
     async def _run_single(self, task: dict, uid: str, is_validation: bool = False) -> Episode:
-        """Run a single AgentFlow task: execute, evaluate, enrich."""
+        """Run a single AgentFlow task: execute, enrich, evaluate.
+
+        Order matters: enrichment runs *before* evaluation so that flows
+        that return ``None`` (or a Trajectory with no steps) get their
+        ``artifacts["answer"]`` backfilled from the gateway traces, which
+        the evaluator then reads.
+        """
         loop = asyncio.get_event_loop()
 
         # 1. Create gateway session
@@ -246,29 +252,29 @@ class AgentFlowEngine:
         episode = await run_agent_flow(self.agent_flow, task_obj, config, executor=self.executor)
         logger.debug("[%s] Agent flow completed, %d trajectories", uid, len(episode.trajectories))
 
-        # 4. Evaluate
+        # 4. Retrieve traces from gateway and enrich episode with token data.
+        # Enrichment also backfills artifacts["answer"] from the last step's
+        # model_response if the flow didn't set one (e.g. None-returners).
+        traces = await self.gateway.aget_traces(uid)
+        enriched = self._enrich_episode(episode, traces, uid, task)
+
+        # 5. Evaluate the enriched Episode
         eval_output: EvalOutput = await loop.run_in_executor(
             self.executor,
             self.evaluator.evaluate,
             task,
-            episode,
+            enriched,
         )
 
         # Apply reward to trajectories that don't already have one.
         # Evaluators for multi-trajectory flows (e.g. solver-judge) may set
         # per-trajectory rewards directly on the episode; those are preserved.
-        for traj in episode.trajectories:
+        for traj in enriched.trajectories:
             if traj.reward is None:
                 traj.reward = eval_output.reward
-        episode.is_correct = eval_output.is_correct
+        enriched.is_correct = eval_output.is_correct
 
-        # 5. Retrieve traces from gateway
-        traces = await self.gateway.aget_traces(uid)
-
-        # 6. Enrich episode with token data
-        enriched = self._enrich_episode(episode, traces, uid, task)
-
-        # 7. Delete traces from gateway DB to prevent unbounded growth
+        # 6. Delete traces from gateway DB to prevent unbounded growth
         await self.gateway.adelete_session(uid)
 
         # Attach eval metrics
@@ -398,6 +404,17 @@ class AgentFlowEngine:
         metrics["steps_collected"] = len(traces)
         metrics.update(episode.metrics)
 
+        # Backfill artifacts["answer"] from the last step's model_response
+        # so that flows that returned None (no explicit artifacts set) still
+        # expose an answer string for evaluators that follow the
+        # episode.artifacts["answer"] convention. Preserves anything the
+        # flow set explicitly.
+        artifacts = dict(episode.artifacts)
+        if not artifacts.get("answer") and enriched_trajectories:
+            last_traj = enriched_trajectories[-1]
+            if last_traj.steps:
+                artifacts["answer"] = last_traj.steps[-1].model_response
+
         return Episode(
             id=uid,
             task=task,
@@ -406,7 +423,7 @@ class AgentFlowEngine:
             metrics=metrics,
             metadata=episode.metadata,
             termination_reason=episode.termination_reason,
-            artifacts=episode.artifacts,
+            artifacts=artifacts,
         )
 
     def shutdown(self) -> None:
