@@ -1,11 +1,24 @@
 """LangGraph / LangChain integration for rLLM trajectory tracking.
 
+.. deprecated:: 0.2
+
+   ``RLLMTrajectoryCallbackHandler`` is deprecated for training use. The
+   rLLM model gateway now captures LLM calls by URL-routed sessions, so
+   any LangGraph agent whose ``ChatOpenAI`` client is pointed at
+   ``config.base_url`` is automatically traced — no callback handler
+   needed. See ``cookbooks/langgraph_math/`` for the AgentFlow-protocol
+   replacement pattern.
+
+   This module is kept for non-training contexts where you need
+   in-process trajectory snapshots without a gateway. For training
+   under ``rllm.experimental.unified_trainer.AgentTrainer``, migrate to
+   the AgentFlow pattern shown in the cookbook.
+
 Provides ``RLLMTrajectoryCallbackHandler``, a LangChain
 ``BaseCallbackHandler`` that captures all LLM calls during LangGraph
-agent execution and builds rLLM ``Trajectory`` objects for SFT
-distillation and RL training.
+agent execution and builds rLLM ``Trajectory`` objects.
 
-Usage::
+Usage (legacy)::
 
     from langchain_openai import ChatOpenAI
     from langgraph.prebuilt import create_react_agent
@@ -30,6 +43,7 @@ import json
 import logging
 import time
 import uuid
+import warnings
 from typing import Any
 
 from rllm.sdk.protocol import (
@@ -236,6 +250,13 @@ class RLLMTrajectoryCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
     def __init__(self) -> None:
         if not _LANGCHAIN_AVAILABLE:
             raise ImportError("LangChain is required for RLLMTrajectoryCallbackHandler. Install it with: pip install langchain-core langchain-openai")
+        warnings.warn(
+            "RLLMTrajectoryCallbackHandler is deprecated for training use. "
+            "Point ChatOpenAI at config.base_url and return None from your @rllm.rollout — "
+            "the gateway captures traces automatically. See cookbooks/langgraph_math/.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         super().__init__()
         self._traces: list[Trace] = []
         self._trajectories: list[Trajectory] = []

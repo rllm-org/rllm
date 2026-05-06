@@ -3,6 +3,12 @@ title: LangGraph Integration
 description: Train a LangGraph RAG agent with rLLM SDK tracing
 ---
 
+<Warning>
+  **Deprecated for training use.** This tutorial uses the SDK callback-handler approach to capture LangChain LLM calls in-process. For training under `AgentTrainer`, the rLLM model gateway now captures token-accurate traces by URL-routed sessions automatically — pointing `ChatOpenAI` at `config.base_url` is sufficient and the callback handler is no longer required. See the [`langgraph_math` cookbook](/cookbooks/langgraph_math) for the AgentFlow-protocol replacement pattern.
+
+  The SDK approach is preserved here for non-training contexts where you need in-process trajectory snapshots without a gateway.
+</Warning>
+
 In this tutorial, you'll train a retrieval-augmented generation (RAG) agent built with LangGraph. This demonstrates that rLLM SDK works seamlessly with popular agent frameworks—your LangGraph code runs unchanged.
 
 {/* <Frame>
