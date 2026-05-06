@@ -434,9 +434,9 @@ class AgentFlow(Protocol):
     Return value: ``Episode`` for full control (multi-trajectory flows
     must use this), a ``Trajectory`` (auto-wrapped in an Episode), or
     ``None`` (framework builds an Episode with one empty Trajectory;
-    gateway traces fill in the Steps during enrichment, and
-    ``episode.artifacts["answer"]`` is backfilled from the last
-    assistant message so evaluators can extract the answer).
+    gateway traces fill in the Steps during enrichment). The evaluator
+    is responsible for parsing whatever it needs out of the resulting
+    trajectories.
     """
 
     def run(self, task: Any, config: AgentConfig) -> Episode | Trajectory | None: ...
@@ -452,9 +452,8 @@ def _coerce_to_episode(result: Any, task: Any, traj_name: str) -> Episode:
       The trajectory is left untouched; the evaluator is responsible
       for parsing whatever the user put on it.
     * ``None`` — framework builds an empty single-trajectory Episode.
-      Gateway traces populate the Steps during enrichment, and the
-      engine backfills ``artifacts["answer"]`` from the last step's
-      ``model_response``.
+      Gateway traces populate the Steps during enrichment; the
+      evaluator reads what it needs out of those steps.
 
     Anything else raises :class:`TypeError`.
     """

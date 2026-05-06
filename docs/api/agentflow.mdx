@@ -55,7 +55,7 @@ The same coercion applies whether you use `@rllm.rollout` or implement the `Agen
 |---|---|
 | `Episode` | passed through (multi-trajectory flows must use this) |
 | `Trajectory` | `Episode(trajectories=[t])`. The trajectory is left untouched — the evaluator parses whatever the user put on it. |
-| `None` | `Episode(trajectories=[Trajectory(name=…, steps=[])])`. Gateway traces fill in the Steps during enrichment, and `episode.artifacts["answer"]` is backfilled from the last step's `model_response` so evaluators can extract the answer. |
+| `None` | `Episode(trajectories=[Trajectory(name=…, steps=[])])`. Gateway traces fill in the Steps during enrichment; the evaluator reads what it needs from those steps (e.g. `step.model_response`, `step.chat_completions`). |
 
 Anything else raises `TypeError`. The canonical patterns are: `return None` for single-agent flows where the gateway captures everything, and `return Episode(...)` when you need explicit `artifacts` or multiple named trajectories — see `cookbooks/solver_judge_flow/`.
 

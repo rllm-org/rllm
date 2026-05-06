@@ -146,8 +146,8 @@ def rollout(
     * an :class:`Episode` — passed through (use this for multi-trajectory flows
       and when you want to set ``artifacts`` explicitly)
     * a :class:`Trajectory` — wrapped in ``Episode(trajectories=[t])``
-    * ``None`` — framework builds an empty single-trajectory Episode and
-      backfills ``artifacts["answer"]`` from the last gateway trace
+    * ``None`` — framework builds an empty single-trajectory Episode;
+      gateway traces fill in the Steps during enrichment
 
     Examples::
 
@@ -158,8 +158,8 @@ def rollout(
                 model=config.model,
                 messages=[{"role": "user", "content": task.metadata["question"]}],
             )
-            # Return None — gateway captured the trace; framework auto-builds
-            # the Episode and the evaluator reads artifacts["answer"].
+            # Return None — the gateway captured the trace; the framework
+            # builds the Episode and the evaluator reads what it needs.
             return None
 
         @rllm.rollout(name="reasoning", register="my-agent")

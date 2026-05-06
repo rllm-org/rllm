@@ -221,9 +221,10 @@ class AgentFlowEngine:
         """Run a single AgentFlow task: execute, enrich, evaluate.
 
         Order matters: enrichment runs *before* evaluation so that flows
-        that return ``None`` (or a Trajectory with no steps) get their
-        ``artifacts["answer"]`` backfilled from the gateway traces, which
-        the evaluator then reads.
+        which returned ``None`` (or a Trajectory with no steps) hand the
+        evaluator a Trajectory whose ``steps`` are populated from the
+        gateway traces. The evaluator is responsible for parsing whatever
+        it needs out of those steps.
         """
         loop = asyncio.get_event_loop()
 
@@ -253,8 +254,6 @@ class AgentFlowEngine:
         logger.debug("[%s] Agent flow completed, %d trajectories", uid, len(episode.trajectories))
 
         # 4. Retrieve traces from gateway and enrich episode with token data.
-        # Enrichment also backfills artifacts["answer"] from the last step's
-        # model_response if the flow didn't set one (e.g. None-returners).
         traces = await self.gateway.aget_traces(uid)
         enriched = self._enrich_episode(episode, traces, uid, task)
 
@@ -404,17 +403,6 @@ class AgentFlowEngine:
         metrics["steps_collected"] = len(traces)
         metrics.update(episode.metrics)
 
-        # Backfill artifacts["answer"] from the last step's model_response
-        # so that flows that returned None (no explicit artifacts set) still
-        # expose an answer string for evaluators that follow the
-        # episode.artifacts["answer"] convention. Preserves anything the
-        # flow set explicitly.
-        artifacts = dict(episode.artifacts)
-        if not artifacts.get("answer") and enriched_trajectories:
-            last_traj = enriched_trajectories[-1]
-            if last_traj.steps:
-                artifacts["answer"] = last_traj.steps[-1].model_response
-
         return Episode(
             id=uid,
             task=task,
@@ -423,7 +411,7 @@ class AgentFlowEngine:
             metrics=metrics,
             metadata=episode.metadata,
             termination_reason=episode.termination_reason,
-            artifacts=artifacts,
+            artifacts=episode.artifacts,
         )
 
     def shutdown(self) -> None:
