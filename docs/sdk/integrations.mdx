@@ -7,6 +7,10 @@ The rLLM SDK integrates seamlessly with popular agent frameworks and infrastruct
 
 ## LangGraph Integration
 
+<Warning>
+  **Deprecated for training use.** The patterns below use the SDK's traced chat clients (`get_chat_client` / `get_chat_client_async`) to capture LangChain LLM calls in-process. For training under `AgentTrainer`, the rLLM model gateway captures token-accurate traces by URL-routed sessions automatically — pointing `ChatOpenAI` at `config.base_url` is sufficient. See the [`langgraph_math` cookbook](/cookbooks/langgraph_math) for the AgentFlow-protocol replacement pattern.
+</Warning>
+
 [LangGraph](https://github.com/langchain-ai/langgraph) is a library for building stateful, multi-actor applications with LLMs. The rLLM SDK tracks all LLM calls made through LangGraph agents.
 
 ### Basic Setup
