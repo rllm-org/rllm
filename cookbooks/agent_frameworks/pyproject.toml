@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-frameworks"
+version = "0.1.0"
+description = "Math agent built four ways: LangGraph, OpenAI Agents SDK, smolagents, Strands"
+requires-python = ">=3.10"
+dependencies = ["rllm"]
+
+[project.optional-dependencies]
+langgraph = [
+    "langgraph>=0.2",
+    "langchain-openai>=0.2",
+    "langchain-core>=0.3",
+]
+openai-agents = ["openai-agents>=0.15"]
+smolagents = ["smolagents>=1.20,<1.23"]   # 1.23+ caps huggingface-hub<1.0 which conflicts with transformers>=4.55
+strands = ["strands-agents>=1.0"]
+
+# Convenience: install every framework at once.
+all = [
+    "langgraph>=0.2",
+    "langchain-openai>=0.2",
+    "langchain-core>=0.3",
+    "openai-agents>=0.15",
+    "smolagents>=1.20,<1.23",
+    "strands-agents>=1.0",
+]
+
+[tool.setuptools]
+py-modules = ["calculator", "evaluator", "system_prompt"]
+packages = ["agentflow"]
+
+# Each framework flow registers under its own name; install only the
+# `[<framework>]` extra you actually want, then `rllm agent list` will
+# report exactly the agents whose deps are present (loading a flow
+# whose deps are missing raises ImportError on use).
+[project.entry-points."rllm.agents"]
+langgraph_math = "agentflow.langgraph:langgraph_math"
+openai_agents_math = "agentflow.openai_agents:openai_agents_math"
+smolagents_math = "agentflow.smolagents:smolagents_math"
+strands_math = "agentflow.strands:strands_math"
+
+[project.entry-points."rllm.evaluators"]
+math_evaluator = "evaluator:math_evaluator"

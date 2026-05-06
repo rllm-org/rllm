@@ -19,7 +19,7 @@ Each cookbook is a plain async function that calls an OpenAI-compatible endpoint
 | [`frozenlake`](/cookbooks/frozenlake) | Multi-turn gym | Navigates procedurally-generated FrozenLake grids; demonstrates direct integration with a Gymnasium environment. |
 | [`math`](/cookbooks/math) | Single-turn | Solves competition / textbook math with `\boxed{}` answer extraction. |
 | [`math_tool_agent`](/cookbooks/math_tool_agent) | Multi-turn + tool | Solves math with a calculator tool via native OpenAI function calling. |
-| [`langgraph_math`](/cookbooks/langgraph_math) | Multi-turn + tool (LangGraph) | Same math + calculator task as `math_tool_agent`, authored with LangGraph's `create_react_agent`. Demonstrates that any LangGraph agent integrates with rLLM training without writing a callback handler. |
+| [`agent_frameworks`](/cookbooks/agent_frameworks) | Multi-turn + tool (4 frameworks) | Same math + calculator task built four ways — LangGraph, OpenAI Agents SDK, smolagents, Strands — each in a single AgentFlow file. Use as a template for plugging your own framework into rLLM. |
 | [`deepcoder`](/cookbooks/deepcoder) | Single-turn | Competition coding with `\`\`\`python\`\`\`` answer extraction; the evaluator runs the code against hidden tests. |
 | [`finqa`](/cookbooks/finqa) | Multi-turn + 4 tools | Financial QA over SEC 10-K tables: `get_table_names` / `get_table_info` / `sql_query` / `calculator`, judge-LLM grading. |
 | [`geo3k`](/cookbooks/geo3k) | VLM single-turn | Multimodal geometry on the Geometry3K dataset. |
@@ -91,7 +91,7 @@ The cleanest starting point is to copy an existing cookbook that matches your in
 |---|---|
 | One LLM call, parse answer | [`cookbooks/math`](https://github.com/rllm-org/rllm/tree/main/cookbooks/math) |
 | Multi-turn with a tool | [`cookbooks/math_tool_agent`](https://github.com/rllm-org/rllm/tree/main/cookbooks/math_tool_agent) |
-| Built with LangGraph | [`cookbooks/langgraph_math`](https://github.com/rllm-org/rllm/tree/main/cookbooks/langgraph_math) |
+| Multi-turn built on a third-party framework (LangGraph, Agents SDK, smolagents, Strands) | [`cookbooks/agent_frameworks`](https://github.com/rllm-org/rllm/tree/main/cookbooks/agent_frameworks) |
 | Multi-turn with multiple tools + complex grading | [`cookbooks/finqa`](https://github.com/rllm-org/rllm/tree/main/cookbooks/finqa) |
 | Drives a Gym environment | [`cookbooks/frozenlake`](https://github.com/rllm-org/rllm/tree/main/cookbooks/frozenlake) |
 | Solver + judge multi-agent | [`cookbooks/solver_judge_flow`](https://github.com/rllm-org/rllm/tree/main/cookbooks/solver_judge_flow) |

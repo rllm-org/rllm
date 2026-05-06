@@ -1,8 +1,9 @@
-"""Evaluator for the LangGraph math agent.
+"""Shared evaluator for every framework flow.
 
-The flow returns ``None``, so ``episode.artifacts`` is empty. The evaluator
+Each flow returns ``None``, so ``episode.artifacts`` is empty. The evaluator
 extracts the answer directly from the final assistant message captured by
-the gateway — that's the canonical "evaluator parses the Trajectory" pattern.
+the gateway — that's the canonical "evaluator parses the Trajectory" pattern
+under the AgentFlow protocol.
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ from rllm.types import Episode
 
 
 def _extract_boxed(text: str) -> str | None:
-    """Extract the contents of the last ``\\boxed{...}`` with balanced braces."""
     idx = text.rfind(r"\boxed{")
     if idx < 0:
         return None
@@ -36,7 +36,6 @@ def _extract_boxed(text: str) -> str | None:
 
 
 def _extract_answer(text: str) -> str:
-    """Try multiple patterns to extract the final answer from assistant text."""
     boxed = _extract_boxed(text)
     if boxed is not None:
         return boxed
@@ -56,12 +55,10 @@ def _extract_answer(text: str) -> str:
 
 
 def _last_assistant_text(episode: Episode) -> str:
-    """Return the last assistant message content from the gateway-captured trajectory.
+    """Walk back through Steps until we find the last assistant message.
 
-    Walks back through Steps until it finds one with a non-empty
-    ``model_response``. The trailing Step in a tool-using ReAct agent is
-    always an assistant message (LangGraph stops once the LLM returns text
-    without further tool calls).
+    In a tool-using ReAct loop the trajectory ends on an assistant turn,
+    but tool-message Steps in between have empty ``model_response``.
     """
     if not episode.trajectories:
         return ""
@@ -72,7 +69,7 @@ def _last_assistant_text(episode: Episode) -> str:
 
 
 @rllm.evaluator
-def langgraph_math_evaluator(task: dict, episode: Episode) -> EvalOutput:
+def math_evaluator(task: dict, episode: Episode) -> EvalOutput:
     """Grade the agent's answer against ground truth using symbolic math comparison."""
     answer_text = _extract_answer(_last_assistant_text(episode))
     ground_truth = str(task.get("answer") or task.get("ground_truth") or "")
