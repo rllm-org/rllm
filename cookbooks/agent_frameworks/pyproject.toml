@@ -16,7 +16,7 @@ langgraph = [
     "langchain-core>=0.3",
 ]
 openai-agents = ["openai-agents>=0.15"]
-smolagents = ["smolagents>=1.20"]
+smolagents = ["smolagents>=1.20,<1.23"]   # 1.23+ caps huggingface-hub<1.0 which conflicts with transformers>=4.55
 strands = ["strands-agents>=1.0"]
 
 # Convenience: install every framework at once.
@@ -25,7 +25,7 @@ all = [
     "langchain-openai>=0.2",
     "langchain-core>=0.3",
     "openai-agents>=0.15",
-    "smolagents>=1.20",
+    "smolagents>=1.20,<1.23",
     "strands-agents>=1.0",
 ]
 
