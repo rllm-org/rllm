@@ -383,7 +383,9 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             so the registered mesh is ``"ref"``.
         """
         dp_sizes: list[int] = []
-        if self.use_reference_policy and self.ref_policy_wg.world_size != 0:
+        # ref_in_actor (LoRA): ref log-probs run on the actor mesh with
+        # no_lora_adapter=True, and the "ref" mesh is not registered.
+        if self.use_reference_policy and not self.ref_in_actor and self.ref_policy_wg.world_size != 0:
             dp_sizes.append(self._get_dp_size(self.ref_policy_wg, "ref"))
         if self.actor_rollout_wg.world_size != 0:
             dp_sizes.append(self._get_dp_size(self.actor_rollout_wg, "actor"))
