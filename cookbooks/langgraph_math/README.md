@@ -2,7 +2,7 @@
 
 A multi-turn math agent authored with [LangGraph](https://github.com/langchain-ai/langgraph)'s `create_react_agent`, trained end-to-end with rLLM. Demonstrates that any LangGraph agent integrates with rLLM training **without writing a callback handler** — pointing LangChain's `ChatOpenAI` at `config.base_url` is enough, because the rLLM model gateway captures every LLM call.
 
-This cookbook is the AgentFlow-protocol counterpart of the legacy `rllm.sdk.integrations.langgraph` callback-handler approach (now deprecated; see [Migration](#migration)). It is intentionally a near-clone of [`cookbooks/math_tool_agent/`](../math_tool_agent/) so you can compare a hand-rolled tool loop against a LangGraph one on the same dataset.
+It is intentionally a near-clone of [`cookbooks/math_tool_agent/`](../math_tool_agent/) so you can compare a hand-rolled tool loop against a LangGraph one on the same dataset.
 
 ## Why so little code?
 
@@ -108,15 +108,3 @@ The tests cover the calculator's safe-eval whitelist, answer-extraction patterns
 | `train_verl.sh` | Verl backend — distributed multi-GPU training |
 | `pyproject.toml` | Plugin metadata and entry points |
 | `test.py` | Unit tests for calculator, parsing, and evaluation |
-
-## Migration
-
-If you previously used `rllm.sdk.integrations.langgraph.RLLMTrajectoryCallbackHandler` to capture LangChain's LLM calls into rLLM `Trajectory` objects in-process, that path is **deprecated** for training. The gateway now provides token-accurate trace capture out of the band, so for any LangGraph agent that uses `ChatOpenAI` (or any other LangChain client that accepts a `base_url`) the integration collapses to:
-
-```python
-llm = ChatOpenAI(base_url=config.base_url, api_key="EMPTY", model=config.model)
-# ...build your graph as usual...
-return None
-```
-
-The callback handler still works for non-rLLM-training contexts where you need in-process trajectory snapshots, but for training under `AgentTrainer` you should use this cookbook's pattern instead.

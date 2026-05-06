@@ -85,8 +85,6 @@ def build_train_config(
             "validation": {"group_size": group_size},
             "data": {"train_batch_size": batch_size},
             "rllm": {
-                # model_name is read by SdkWorkflowFactory to register
-                # the model in the LiteLLM proxy
                 "model_name": model_name,
                 "trainer": {
                     "total_epochs": total_epochs,

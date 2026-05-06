@@ -11,7 +11,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 _VERL_DYNAMIC_BATCH_PATCHED = False
-_VLLM_SDK_PATCHED = False
 _VERL_QWEN3_VL_DUMMY_INPLACE_PATCHED = False
 _VERL_TENSORDICT_JAGGED_PATCHED = False
 
@@ -64,58 +63,6 @@ def patch_verl_dynamic_batch_sync() -> None:
 
     _VERL_DYNAMIC_BATCH_PATCHED = True
     logger.info("Patched prepare_dynamic_batch to sync micro-batch counts across DP ranks (verl#5750)")
-
-
-# ---------------------------------------------------------------------------
-# vLLM SDK instrumentation
-# ---------------------------------------------------------------------------
-
-
-def patch_vllm_for_sdk() -> None:
-    """Patch vLLM replicas to add logprob/token-id instrumentation for SDK traces.
-
-    Creates an ``InstrumentedvLLMHttpServer`` Ray actor that loads
-    ``rllm/patches/vllm_instrumentation.py`` in an isolated module namespace
-    and patches ``vLLMReplica.__init__`` to use it.
-    """
-    global _VLLM_SDK_PATCHED
-    if _VLLM_SDK_PATCHED:
-        return
-
-    import ray
-    from verl.workers.rollout.vllm_rollout.vllm_async_server import (
-        vLLMHttpServer,
-        vLLMReplica,
-    )
-
-    @ray.remote(num_cpus=1)
-    class InstrumentedvLLMHttpServer(vLLMHttpServer):
-        """vLLM HTTP server with automatic vLLM instrumentation in Ray worker."""
-
-        def __init__(self, *args, **kwargs):
-            import importlib.util
-            import sys
-            from pathlib import Path
-
-            instrumentation_path = Path(__file__).parent.parent.parent / "patches" / "vllm_instrumentation.py"
-
-            spec = importlib.util.spec_from_file_location("rllm_vllm_instrumentation_isolated", str(instrumentation_path))
-            vllm_instrumentation = importlib.util.module_from_spec(spec)
-            sys.modules["rllm_vllm_instrumentation_isolated"] = vllm_instrumentation
-            spec.loader.exec_module(vllm_instrumentation)
-
-            vllm_instrumentation.instrument_vllm(add_response_logprobs=True)
-            super().__init__(*args, **kwargs)
-
-    _original_init = vLLMReplica.__init__
-
-    def _patched_init(self, *args, **kwargs):
-        _original_init(self, *args, **kwargs)
-        self.server_class = InstrumentedvLLMHttpServer
-
-    vLLMReplica.__init__ = _patched_init
-    _VLLM_SDK_PATCHED = True
-    logger.info("Patched vLLMReplica for SDK instrumentation")
 
 
 # ---------------------------------------------------------------------------
@@ -342,10 +289,6 @@ def apply_all_verl_patches() -> None:
     it does not need to live in a package on ``sys.path``. This is intended
     for environment-specific workarounds (e.g. disabling cuDNN on a host
     with a broken cuDNN install) that should not be baked into rLLM itself.
-
-    Note: ``patch_vllm_for_sdk`` is NOT included here — it is gated behind
-    the ``rllm.sdk.enable`` config flag and should only be applied when SDK
-    instrumentation is requested.
     """
     for patch_name, patch_func in _ALL_VERL_PATCHES.items():
         try:

@@ -1,18 +1,14 @@
-from collections.abc import Callable
 from typing import Any, Literal
 
 from rllm.data import Dataset
 
 
 class AgentTrainer:
-    """Wrapper that runs PPO training over a Workflow or an AgentFlow rollout function.
+    """Wrapper that runs PPO training over a Workflow.
 
-    Two ways to plug in your agent:
-
-    * ``workflow_class`` — a :class:`rllm.workflows.workflow.Workflow` subclass
-      (driven by :class:`rllm.engine.agent_workflow_engine.AgentWorkflowEngine`).
-    * ``agent_run_func`` — a plain rollout function (driven by
-      :class:`rllm.engine.agent_sdk_engine.AgentSdkEngine`).
+    Plug in your agent via ``workflow_class`` — a
+    :class:`rllm.workflows.workflow.Workflow` subclass driven by
+    :class:`rllm.engine.agent_workflow_engine.AgentWorkflowEngine`.
 
     Backends:
 
@@ -20,9 +16,9 @@ class AgentTrainer:
     * ``fireworks``: pipeline-based variant for the Fireworks workflow API.
     * ``tinker``: single-machine LoRA training via tinker.
 
-    The legacy ``agent_class`` + ``env_class`` path that was driven by
-    ``AgentExecutionEngine`` has been removed. New agents should be authored
-    as a Workflow or as an AgentFlow rollout function (see ``cookbooks/``).
+    The legacy ``agent_class`` + ``env_class`` and ``agent_run_func`` (SDK)
+    paths have been removed. New agents should be authored as a Workflow or
+    as an AgentFlow (see ``cookbooks/``).
     """
 
     def __init__(
@@ -33,7 +29,6 @@ class AgentTrainer:
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         backend: Literal["verl", "fireworks", "tinker"] = "verl",
-        agent_run_func: Callable | None = None,
     ):
         """Initialize the AgentTrainer.
 
@@ -47,20 +42,15 @@ class AgentTrainer:
             train_dataset: Optional train dataset.
             val_dataset: Optional validation dataset.
             backend: Training backend (``'verl'`` | ``'fireworks'`` | ``'tinker'``).
-            agent_run_func: Plain rollout function for the AgentSdk path.
         """
         assert backend in ("verl", "fireworks", "tinker"), f"Unsupported backend: {backend}; must be one of ('verl', 'fireworks', 'tinker')"
         self.backend = backend
 
-        if backend == "fireworks" and workflow_class is None:
-            raise ValueError("The 'fireworks' backend requires workflow_class.")
-
-        if workflow_class is None and agent_run_func is None:
-            raise ValueError("AgentTrainer requires either workflow_class or agent_run_func. The legacy agent_class + env_class interface is no longer supported.")
+        if workflow_class is None:
+            raise ValueError("AgentTrainer requires workflow_class. The legacy agent_class + env_class and agent_run_func interfaces are no longer supported.")
 
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
-        self.agent_run_func = agent_run_func
 
         self.config = config
         self.train_dataset = train_dataset
@@ -80,8 +70,6 @@ class AgentTrainer:
             self._train_tinker()
 
     def _train_tinker(self):
-        if self.workflow_class is None:
-            raise ValueError("The tinker backend requires workflow_class.")
         from rllm.trainer.deprecated.tinker_workflow_trainer import TinkerWorkflowTrainer
 
         trainer = TinkerWorkflowTrainer(
@@ -114,7 +102,6 @@ class AgentTrainer:
                 config=self.config,
                 workflow_class=self.workflow_class,
                 workflow_args=self.workflow_args,
-                agent_run_func=self.agent_run_func,
             )
         )
 
