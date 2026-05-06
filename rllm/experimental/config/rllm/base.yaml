@@ -99,49 +99,6 @@ rejection_sample:
   min_trajs_per_group: 2
   filter_uniform_groups: false
 
-# SDK Configuration
-# DEPRECATED: This section is only kept for backward compatibility with
-# standalone SDK usage (rllm/sdk/). The unified trainer no longer uses the
-# SDK/agent_run_func path — use AgentFlow + Evaluator instead.
-sdk:
-  store:
-    path: ~/.rllm/traces.db
-  processing:
-    groupby_key: null
-    traj_name_key: null
-  proxy:
-    host: 127.0.0.1
-    port: 4000
-    mode: subprocess  # external | subprocess
-    admin_token: my-shared-secret
-  sandbox:
-    enabled: false
-    backend: local  # local | docker | modal | agentcore
-    agent_dir: ""
-    agent_module: agent
-    agent_func: rollout
-    image: "python:3.11-slim"
-    dockerfile: ""
-    requirements_file: ""
-    install_rllm_sdk: true
-    pool_mode: persistent  # persistent | per_task
-    num_workers: 8
-    worker_port: 8100
-    max_concurrent: 32
-    task_setup_commands: []
-    task_setup_timeout: 300
-    teardown_on_complete: true
-    execution_timeout: 600.0
-    setup_commands: []
-    # Backend-specific configuration.
-    # For agentcore backend:
-    #   agent_runtime_arn: ARN of the AgentCore runtime (required)
-    #   base_url: Reachable proxy URL for the ACR container, e.g. http://<host-ip>:4000/v1
-    #             Required unless the proxy is publicly reachable at its default address.
-    #   tps_limit: Max concurrent invocations (default: 25)
-    #   max_retry_attempts: boto3 adaptive retry attempts (default: 5)
-    extra: {}
-
 # Remote Runtime Configuration (for agent-in-container runtimes like AgentCore, Harbor)
 remote_runtime:
   enabled: false

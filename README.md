@@ -129,11 +129,11 @@ rLLM follows a simple pipeline: **run your agent → collect traces → compute 
 └──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
 ```
 
-Your agent runs as-is — rLLM's SDK intercepts LLM calls and structures them into **Episodes** (one task) containing **Trajectories** (one agent run) made of **Steps** (one LLM call). A reward function scores the result, and the RL algorithm updates the model weights. The same agent code works for both eval and training.
+Your agent runs as-is — rLLM's model gateway captures LLM calls (token IDs + logprobs) by URL-routed sessions and structures them into **Episodes** (one task) containing **Trajectories** (one agent run) made of **Steps** (one LLM call). A reward function scores the result, and the RL algorithm updates the model weights. The same agent code works for both eval and training.
 
 Under the hood:
 - **Workflow Engine** runs N parallel agent instances to collect rollouts
-- **LiteLLM Proxy** routes requests and captures token IDs + logprobs
+- **Model Gateway** routes requests and captures token IDs + logprobs
 - **Transform Pipeline** groups trajectories for advantage computation
 - **Training Backend** (verl or tinker) handles the policy update
 

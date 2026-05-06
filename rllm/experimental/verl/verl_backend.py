@@ -228,11 +228,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
         patch_verl_tensordict_jagged_layout()
 
-        # If SDK is enabled, instrument vLLM replicas before creating workers
-        sdk_enabled = self.full_config.rllm.get("sdk", {}).get("enable", False)
-        if sdk_enabled:
-            self._instrument_vllm_for_sdk()
-
         self._init_colocated_workers()
 
         assert self.async_rollout_manager is not None
@@ -255,12 +250,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         self.algorithm_config = kwargs.get("algorithm_config")
 
         return self.rollout_engine
-
-    def _instrument_vllm_for_sdk(self) -> None:
-        """Monkey-patch vLLM replicas to add logprob/token-id instrumentation for SDK trace collection."""
-        from rllm.experimental.verl.patch import patch_vllm_for_sdk
-
-        patch_vllm_for_sdk()
 
     def validate_config(self) -> None:
         """Validate verl-specific configuration settings."""
