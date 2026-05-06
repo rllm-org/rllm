@@ -430,9 +430,50 @@ class AgentFlow(Protocol):
     Implementations may provide either ``run`` (sync) or ``arun``
     (async). If both are present, callers should prefer ``arun`` when
     running inside an event loop — see :func:`run_agent_flow`.
+
+    Return value: ``Episode`` for full control (multi-trajectory flows
+    must use this), a ``Trajectory`` (auto-wrapped in an Episode), or
+    ``None`` (framework builds an Episode with one empty Trajectory;
+    gateway traces fill in the Steps during enrichment). The evaluator
+    is responsible for parsing whatever it needs out of the resulting
+    trajectories.
     """
 
-    def run(self, task: Any, config: AgentConfig) -> Episode: ...
+    def run(self, task: Any, config: AgentConfig) -> Episode | Trajectory | None: ...
+
+
+def _coerce_to_episode(result: Any, task: Any, traj_name: str) -> Episode:
+    """Normalize an ``AgentFlow`` return value into an :class:`Episode`.
+
+    Accepts:
+
+    * :class:`Episode` — passed through (``task`` filled if missing).
+    * :class:`Trajectory` — wrapped in ``Episode(trajectories=[t])``.
+      The trajectory is left untouched; the evaluator is responsible
+      for parsing whatever the user put on it.
+    * ``None`` — framework builds an empty single-trajectory Episode.
+      Gateway traces populate the Steps during enrichment; the
+      evaluator reads what it needs out of those steps.
+
+    Anything else raises :class:`TypeError`.
+    """
+    task_metadata = getattr(task, "metadata", task)
+
+    if isinstance(result, Episode):
+        if result.task is None:
+            result.task = task_metadata
+        return result
+
+    if isinstance(result, Trajectory):
+        if result.name == _DEFAULT_TRAJ_NAME:
+            result.name = traj_name
+        return Episode(task=task_metadata, trajectories=[result])
+
+    if result is None:
+        traj = Trajectory(name=traj_name, steps=[])
+        return Episode(task=task_metadata, trajectories=[traj])
+
+    raise TypeError(f"AgentFlow returned unsupported type {type(result).__name__}; expected Episode, Trajectory, or None")
 
 
 @runtime_checkable
@@ -457,9 +498,16 @@ async def run_agent_flow(
 
     Falls back to running ``run`` in *executor* (a ``ThreadPoolExecutor``)
     so that sync agent flows don't block the event loop.
+
+    The return value is coerced into an :class:`Episode` via
+    :func:`_coerce_to_episode`, so flows may return ``Episode``,
+    ``Trajectory``, or ``None``.
     """
     if hasattr(agent, "arun") and inspect.iscoroutinefunction(agent.arun):
-        return await agent.arun(task, config)
+        result = await agent.arun(task, config)
+    else:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(executor, agent.run, task, config)
 
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(executor, agent.run, task, config)
+    traj_name = getattr(agent, "name", None) or _DEFAULT_TRAJ_NAME
+    return _coerce_to_episode(result, task, traj_name)

@@ -218,7 +218,14 @@ class AgentFlowEngine:
             raise RuntimeError(f"[{uid}] Exhausted all retries")
 
     async def _run_single(self, task: dict, uid: str, is_validation: bool = False) -> Episode:
-        """Run a single AgentFlow task: execute, evaluate, enrich."""
+        """Run a single AgentFlow task: execute, enrich, evaluate.
+
+        Order matters: enrichment runs *before* evaluation so that flows
+        which returned ``None`` (or a Trajectory with no steps) hand the
+        evaluator a Trajectory whose ``steps`` are populated from the
+        gateway traces. The evaluator is responsible for parsing whatever
+        it needs out of those steps.
+        """
         loop = asyncio.get_event_loop()
 
         # 1. Create gateway session
@@ -246,29 +253,27 @@ class AgentFlowEngine:
         episode = await run_agent_flow(self.agent_flow, task_obj, config, executor=self.executor)
         logger.debug("[%s] Agent flow completed, %d trajectories", uid, len(episode.trajectories))
 
-        # 4. Evaluate
+        # 4. Retrieve traces from gateway and enrich episode with token data.
+        traces = await self.gateway.aget_traces(uid)
+        enriched = self._enrich_episode(episode, traces, uid, task)
+
+        # 5. Evaluate the enriched Episode
         eval_output: EvalOutput = await loop.run_in_executor(
             self.executor,
             self.evaluator.evaluate,
             task,
-            episode,
+            enriched,
         )
 
         # Apply reward to trajectories that don't already have one.
         # Evaluators for multi-trajectory flows (e.g. solver-judge) may set
         # per-trajectory rewards directly on the episode; those are preserved.
-        for traj in episode.trajectories:
+        for traj in enriched.trajectories:
             if traj.reward is None:
                 traj.reward = eval_output.reward
-        episode.is_correct = eval_output.is_correct
+        enriched.is_correct = eval_output.is_correct
 
-        # 5. Retrieve traces from gateway
-        traces = await self.gateway.aget_traces(uid)
-
-        # 6. Enrich episode with token data
-        enriched = self._enrich_episode(episode, traces, uid, task)
-
-        # 7. Delete traces from gateway DB to prevent unbounded growth
+        # 6. Delete traces from gateway DB to prevent unbounded growth
         await self.gateway.adelete_session(uid)
 
         # Attach eval metrics
