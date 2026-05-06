@@ -1,18 +1,26 @@
 #!/usr/bin/env bash
-# Train the LangGraph math agent with the verl (distributed GPU) backend.
+# Train one of the framework AgentFlows on the verl (distributed GPU) backend.
+#
+# Usage:
+#   bash cookbooks/agent_frameworks/train_verl.sh                       # default: langgraph_math
+#   bash cookbooks/agent_frameworks/train_verl.sh strands_math
 #
 # Prerequisites:
-#   1. Install rllm with verl extras:     uv pip install -e ".[verl]"
-#   2. Install this cookbook:              uv pip install --no-deps -e cookbooks/langgraph_math
+#   1. Install rllm with verl extras:    uv pip install -e ".[verl]"
+#   2. Install this cookbook + framework: uv pip install --no-deps -e "cookbooks/agent_frameworks[all]"
 #   3. Pull the datasets:                 rllm dataset pull deepscaler_math && rllm dataset pull math500
 
 set -euo pipefail
+
+AGENT="${1:-langgraph_math}"
+shift || true
 
 unset ROCR_VISIBLE_DEVICES 2>/dev/null || true
 
 MODEL_PATH=Qwen/Qwen3-4B-Instruct-2507
 
 python -u train.py \
+    +rllm.agent_name=$AGENT \
     rllm/backend=verl \
     algorithm.adv_estimator=grpo \
     algorithm.norm_adv_by_std_in_grpo=true \
@@ -53,8 +61,8 @@ python -u train.py \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     trainer.logger="['console','ui']" \
-    trainer.project_name=langgraph_math \
-    trainer.experiment_name=qwen3-4b-instruct-verl \
+    trainer.project_name=agent_frameworks \
+    trainer.experiment_name=$AGENT \
     trainer.val_before_train=false \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \

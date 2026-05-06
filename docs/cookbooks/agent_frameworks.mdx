@@ -1,0 +1,149 @@
+---
+title: Agent Frameworks
+description: One math task, one cookbook, four framework integrations
+---
+
+A single math task — solve a competition problem with a calculator tool — built four ways in one cookbook. Use this to compare LangGraph, OpenAI Agents SDK, smolagents, and Strands on the same dataset, or as a template for plugging your own framework into rLLM.
+
+The point of this cookbook is to make the AgentFlow + model-gateway architecture concrete. Every framework integration collapses to ~6 lines of agent body that points the framework's LLM client at `config.base_url` and returns `None`. The gateway captures every LLM call by URL-routed session, the framework auto-builds an `Episode` from those captured traces, and the evaluator parses the answer out of the resulting trajectory. No callback handler, no traced chat client, no manual `Step` / `Trajectory` construction.
+
+## Pattern
+
+| Aspect | Value |
+|---|---|
+| Loop shape | Multi-turn (each framework's own ReAct loop) |
+| Tools | One: `calculate` — AST-based safe arithmetic interpreter, shared across all four flows |
+| Termination | Whatever each framework decides (typically: model emits no more tool calls) |
+| Reward shape | `1.0` if final answer matches ground truth (mathd + sympy), else `0.0` |
+| Return type | `None` — the gateway captures everything; the framework auto-builds the Episode |
+| GRPO grouping | Each flow's trajectory `name` is set on `@rllm.rollout` and routed via `f"{task_id}:{name}"` |
+
+## Layout
+
+```
+cookbooks/agent_frameworks/
+├── README.md
+├── pyproject.toml         # one package, four entry-point agents
+├── calculator.py          # safe_eval — shared
+├── system_prompt.py       # SYSTEM_PROMPT — shared
+├── evaluator.py           # math_evaluator — shared
+├── agentflow/
+│   ├── __init__.py
+│   ├── langgraph.py       # langgraph_math
+│   ├── openai_agents.py   # openai_agents_math
+│   ├── smolagents.py      # smolagents_math
+│   └── strands.py         # strands_math
+├── train.py               # python train.py +rllm.agent_name=<agent>
+├── train_tinker.sh
+├── train_verl.sh
+└── test.py
+```
+
+## Each flow
+
+```python
+# agentflow/langgraph.py
+@rllm.rollout(name="langgraph-math")
+async def langgraph_math(task, config):
+    llm = ChatOpenAI(model=config.model, base_url=config.base_url, api_key="EMPTY", temperature=1.0)
+    agent = create_react_agent(llm, tools=[calculate], prompt=SYSTEM_PROMPT)
+    await agent.ainvoke({"messages": [("user", task.instruction)]})
+    return None
+
+# agentflow/openai_agents.py
+@rllm.rollout(name="openai-agents-math")
+async def openai_agents_math(task, config):
+    client = AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")
+    model = OpenAIChatCompletionsModel(model=config.model, openai_client=client)
+    agent = Agent(name="solver", instructions=SYSTEM_PROMPT, tools=[calculate], model=model)
+    await Runner.run(agent, input=task.instruction)
+    return None
+
+# agentflow/smolagents.py
+@rllm.rollout(name="smolagents-math")
+def smolagents_math(task, config):
+    model = OpenAIServerModel(model_id=config.model, api_base=config.base_url, api_key="EMPTY")
+    agent = ToolCallingAgent(tools=[calculate], model=model)
+    agent.run(SYSTEM_PROMPT + "\n\n" + str(task.instruction))
+    return None
+
+# agentflow/strands.py
+@rllm.rollout(name="strands-math")
+async def strands_math(task, config):
+    client = AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")
+    model = OpenAIModel(client=client, model_id=config.model)
+    agent = Agent(model=model, tools=[calculate], system_prompt=SYSTEM_PROMPT)
+    await agent.invoke_async(task.instruction)
+    return None
+```
+
+## Install
+
+```bash
+# rLLM + the backend you want to train on
+uv pip install -e ".[tinker]"
+
+# Then pick one framework — or [all] for everything:
+uv pip install --no-deps -e "cookbooks/agent_frameworks[langgraph]"
+uv pip install --no-deps -e "cookbooks/agent_frameworks[openai-agents]"
+uv pip install --no-deps -e "cookbooks/agent_frameworks[smolagents]"
+uv pip install --no-deps -e "cookbooks/agent_frameworks[strands]"
+uv pip install --no-deps -e "cookbooks/agent_frameworks[all]"
+
+# Verify discovery
+rllm agent list
+```
+
+## Datasets
+
+```bash
+rllm dataset pull deepscaler_math
+rllm dataset pull math500
+```
+
+## Eval
+
+```bash
+rllm eval math500 \
+    --agent strands_math \
+    --evaluator math_evaluator \
+    --model Qwen/Qwen3-4B-Instruct-2507 \
+    --base-url http://localhost:8000/v1 \
+    --max-examples 20
+```
+
+Substitute `--agent` with `langgraph_math`, `openai_agents_math`, `smolagents_math`, or `strands_math`. Same `--evaluator math_evaluator` for every flow.
+
+## Training
+
+```bash
+# Tinker (single-machine LoRA) — first arg is the agent name
+bash cookbooks/agent_frameworks/train_tinker.sh langgraph_math
+bash cookbooks/agent_frameworks/train_tinker.sh strands_math
+
+# Verl (distributed GPU)
+bash cookbooks/agent_frameworks/train_verl.sh openai_agents_math
+```
+
+Or directly via `train.py`:
+
+```bash
+python cookbooks/agent_frameworks/train.py \
+    +rllm.agent_name=smolagents_math \
+    rllm/backend=tinker \
+    model.name=Qwen/Qwen3-4B-Instruct-2507
+```
+
+## Adding a new framework
+
+1. Create `agentflow/<framework>.py` with one `@rllm.rollout(name="<framework>-math")` function that wires the framework's LLM client to `config.base_url`, runs the agent on `task.instruction`, and `return None`s.
+2. Add it to `pyproject.toml`'s `[project.entry-points."rllm.agents"]` and `[tool.setuptools] py-modules` lists; declare the framework's package in `[project.optional-dependencies].<framework>`.
+3. Reinstall the cookbook with `uv pip install --no-deps -e "cookbooks/agent_frameworks[<framework>]"` and your agent shows up under `rllm agent list`.
+
+That's the entire integration surface.
+
+## On GitHub
+
+<Card title="cookbooks/agent_frameworks" icon="github" href="https://github.com/rllm-org/rllm/tree/main/cookbooks/agent_frameworks">
+  Full source, README, and runnable launch scripts
+</Card>
