@@ -61,11 +61,14 @@ class TaskContext:
     """Per-task state returned by :meth:`TaskHooks.setup`.
 
     Encapsulates the per-task evaluator (resolved by the hook from a task's
-    [verifier] config, or pre-bound by the caller) and a teardown callback
-    that releases any per-task resources (sandboxes, temp dirs, ...).
+    [verifier] config, or pre-bound by the caller), an optional per-task
+    agent flow (so SandboxedAgentFlow's per-task sandbox can't leak across
+    parallel rollouts), and a teardown callback that releases any per-task
+    resources (sandboxes, temp dirs, ...).
     """
 
     evaluator: Evaluator
+    agent_flow: Any = None  # AgentFlow | None — kept loose for the import-cycle reason below
     teardown: Any = None  # Callable[[], None] | None — kept loose to avoid Callable import loop
 
     def run_teardown(self) -> None:
@@ -471,9 +474,14 @@ class AgentFlowEngine:
                     is_validation=is_validation,
                 )
 
-                # 3. Run agent flow (prefers arun if available, else run in executor)
+                # 3. Run agent flow (prefers arun if available, else run in executor).
+                # The hook may return a per-task agent flow instance (eg. a
+                # SandboxedAgentFlow with the task's sandbox already injected);
+                # use it when present so parallel tasks don't share mutable
+                # ``self._sandbox`` state on the engine-bound ``self.agent_flow``.
+                flow_for_task = ctx.agent_flow if (ctx is not None and ctx.agent_flow is not None) else self.agent_flow
                 logger.debug("[%s] Starting agent flow at %s", uid, session_url)
-                episode = await run_agent_flow(self.agent_flow, task_obj, config, executor=self.executor)
+                episode = await run_agent_flow(flow_for_task, task_obj, config, executor=self.executor)
                 logger.debug("[%s] Agent flow completed, %d trajectories", uid, len(episode.trajectories))
 
                 # 4. Retrieve traces from gateway and enrich episode with token data.

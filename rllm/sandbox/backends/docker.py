@@ -56,8 +56,22 @@ class DockerSandbox:
         stdout = (output[0] or b"").decode("utf-8", errors="replace")
         stderr = (output[1] or b"").decode("utf-8", errors="replace")
         if exit_code != 0:
-            logger.warning("Command failed in container %s: %s\nstderr: %s", self.name, command, stderr[:500])
-            raise RuntimeError(f"Command failed (exit {exit_code}) in container {self.name}: {command}\n{stderr[:500]}")
+            # Surface enough context to debug verifier failures inside the
+            # container — the full pytest/setup log can be megabytes; show
+            # the last ~8KB of each stream which is where exit-causing
+            # errors live.
+            tail_chars = 8000
+            stderr_tail = stderr[-tail_chars:] if len(stderr) > tail_chars else stderr
+            stdout_tail = stdout[-tail_chars:] if len(stdout) > tail_chars else stdout
+            logger.warning(
+                "Command failed (exit %d) in container %s: %s\nstdout (tail):\n%s\nstderr (tail):\n%s",
+                exit_code,
+                self.name,
+                command,
+                stdout_tail,
+                stderr_tail,
+            )
+            raise RuntimeError(f"Command failed (exit {exit_code}) in container {self.name}: {command}\nstderr (tail):\n{stderr_tail}\nstdout (tail):\n{stdout_tail}")
         return stdout
 
     def upload_file(self, local_path: str, remote_path: str) -> None:

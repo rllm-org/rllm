@@ -270,16 +270,27 @@ def _run_eval(
                 console.print(f"  [error]Error loading evaluator '{evaluator_name}': {e}[/]")
                 raise SystemExit(1) from None
         else:
-            evaluator = resolve_evaluator_from_catalog(benchmark)
-            if evaluator is not None:
-                reward_fn_name = catalog_entry.get("reward_fn", "") if catalog_entry else ""
-                evaluator_display = reward_fn_name or type(evaluator).__name__
-            elif catalog_entry and catalog_entry.get("reward_fn"):
-                try:
-                    evaluator = load_evaluator(catalog_entry["reward_fn"])
-                    evaluator_display = catalog_entry["reward_fn"]
-                except (KeyError, ImportError):
-                    pass
+            # ``harbor_reward_fn`` reads ``episode.artifacts['harbor_reward']``,
+            # which is only populated by HarborRuntime. When the user runs a
+            # harbor-sourced dataset through an rllm-native harness (oracle,
+            # opencode, mini-swe-agent, …), the artifact never gets set and
+            # the eval would always score zero. Skip the catalog evaluator in
+            # that case and let ``EvalHooks`` resolve a per-task verifier
+            # (typically ``tests/test.sh`` inside the harbor task dir).
+            _harbor_reward_fn_skipped = catalog_entry and catalog_entry.get("reward_fn") == "harbor_reward_fn" and not _is_harbor_agent
+            if _harbor_reward_fn_skipped:
+                evaluator_display = "per-task (rllm runtime on harbor task)"
+            else:
+                evaluator = resolve_evaluator_from_catalog(benchmark)
+                if evaluator is not None:
+                    reward_fn_name = catalog_entry.get("reward_fn", "") if catalog_entry else ""
+                    evaluator_display = reward_fn_name or type(evaluator).__name__
+                elif catalog_entry and catalog_entry.get("reward_fn"):
+                    try:
+                        evaluator = load_evaluator(catalog_entry["reward_fn"])
+                        evaluator_display = catalog_entry["reward_fn"]
+                    except (KeyError, ImportError):
+                        pass
 
         # Load dataset — auto-pull if not available locally
         dataset = DatasetRegistry.load_dataset(benchmark, split)
