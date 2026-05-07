@@ -196,7 +196,7 @@ def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) ->
         if kl_beta is None:
             kl_beta = 0.0
         OmegaConf.update(config, "actor_rollout_ref.actor.use_kl_loss", kl_beta > 0, merge=False)
-        
+
     # Router replay: derive verl's rollout-side flag from the rllm mode (R3 records at rollout).
     router_replay_mode = config.rllm.algorithm.get("router_replay", "disabled")
     if router_replay_mode == "R3":
