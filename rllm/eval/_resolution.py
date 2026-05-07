@@ -235,16 +235,26 @@ def _setup_task_environment(task: Task, sandbox: Sandbox) -> None:
 
     Honors the agent/verifier user split when configured in task.toml.
     """
-    workdir = task.metadata.get("workdir", "/workspace")
+    # ``workdir`` is unset for tasks (e.g. swesmith) whose Dockerfile
+    # already declares a meaningful WORKDIR (``/testbed``) — forcing
+    # ``/workspace`` would override it and break verifiers that
+    # ``cd``-into-cwd or ``git checkout``. The ``mkdir`` / ``chown``
+    # / ``upload_dir(files)`` steps below only fire when a workdir is
+    # explicitly declared.
+    workdir = task.metadata.get("workdir")
     env_root = task.task_dir / "environment"
     if not env_root.is_dir():
         env_root = task.dataset_dir / "environment"
 
-    _safe_exec(sandbox, f"mkdir -p {workdir}", timeout=30)
+    if workdir:
+        _safe_exec(sandbox, f"mkdir -p {workdir}", timeout=30)
 
     files_dir = env_root / "files"
     if files_dir.is_dir():
-        sandbox.upload_dir(str(files_dir), workdir)
+        # Falls back to ``/workspace`` when files/ ships but no workdir
+        # is declared — preserves the historical default for tasks that
+        # actually rely on it.
+        sandbox.upload_dir(str(files_dir), workdir or "/workspace")
 
     setup_script = env_root / "setup.sh"
     if setup_script.exists():
@@ -259,7 +269,8 @@ def _setup_task_environment(task: Task, sandbox: Sandbox) -> None:
         _safe_exec(sandbox, "mkdir -p /logs/verifier /tmp/rllm /tests", timeout=10)
         _safe_exec(sandbox, "chmod 700 /logs/verifier /tmp/rllm /tests", timeout=10)
         _safe_exec(sandbox, "chown root:root /logs/verifier /tmp/rllm /tests", timeout=10)
-        _safe_exec(sandbox, f"chown -R {agent_user} {workdir}", timeout=30)
+        if workdir:
+            _safe_exec(sandbox, f"chown -R {agent_user} {workdir}", timeout=30)
 
     env_vars = task.metadata.get("env_vars", {}) or task.metadata.get("environment", {}).get("env", {})
     if env_vars:

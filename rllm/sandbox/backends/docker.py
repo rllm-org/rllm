@@ -56,8 +56,24 @@ class DockerSandbox:
         stdout = (output[0] or b"").decode("utf-8", errors="replace")
         stderr = (output[1] or b"").decode("utf-8", errors="replace")
         if exit_code != 0:
-            logger.warning("Command failed in container %s: %s\nstderr: %s", self.name, command, stderr[:500])
-            raise RuntimeError(f"Command failed (exit {exit_code}) in container {self.name}: {command}\n{stderr[:500]}")
+            # The raised message stays short — callers print it at WARNING
+            # for *every* failed verifier, and dumping kilobytes of pytest
+            # output for each agent that didn't solve a task spams the
+            # terminal. The full tail goes to ``logger.debug`` so it's
+            # available with ``--log-level=debug`` without polluting the
+            # default run.
+            short_tail = 600
+            err_tail = stderr[-short_tail:] if len(stderr) > short_tail else stderr
+            full_tail = 8000
+            logger.debug(
+                "Command failed (exit %d) in container %s: %s\nstdout (tail):\n%s\nstderr (tail):\n%s",
+                exit_code,
+                self.name,
+                command,
+                stdout[-full_tail:] if len(stdout) > full_tail else stdout,
+                stderr[-full_tail:] if len(stderr) > full_tail else stderr,
+            )
+            raise RuntimeError(f"Command failed (exit {exit_code}) in container {self.name}: {command}\nstderr (tail):\n{err_tail}")
         return stdout
 
     def upload_file(self, local_path: str, remote_path: str) -> None:

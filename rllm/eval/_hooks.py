@@ -78,16 +78,26 @@ class EvalHooks:
             verifier_kind, verifier_config = _detect_verifier(task)
             needs_sandbox = _needs_sandbox(task, verifier_kind) or isinstance(agent_flow, SandboxedAgentFlow)
 
+        # Per-task agent flow instance. SandboxedAgentFlow stores the
+        # active sandbox on ``self._sandbox``; with the engine-bound
+        # ``self.agent_flow`` shared across parallel rollouts, calling
+        # ``set_sandbox`` here would clobber whatever sandbox an in-flight
+        # sibling task is using. ``create_instance`` shallow-copies the
+        # flow so each task owns its own ``_sandbox`` slot.
+        task_flow: AgentFlow = agent_flow
+        if isinstance(agent_flow, SandboxedAgentFlow):
+            task_flow = agent_flow.create_instance()
+
         sandbox = None
         if needs_sandbox:
             sandbox = _create_sandbox_for_task(task, self.sandbox_backend)
             _setup_task_environment(task, sandbox)
-            if isinstance(agent_flow, SandboxedAgentFlow):
-                agent_flow.set_sandbox(sandbox)
+            if isinstance(task_flow, SandboxedAgentFlow):
+                task_flow.set_sandbox(sandbox)
                 # ``on_sandbox_ready`` predates AgentConfig threading the gateway
                 # session URL, so we pass None here — callers that need config
                 # access should read ``self.config`` (set by run_agent_flow).
-                agent_flow.on_sandbox_ready({"task_path": str(task.task_dir)}, None)
+                task_flow.on_sandbox_ready({"task_path": str(task.task_dir)}, None)
 
         # Resolve the evaluator (override beats per-task verifier).
         if self.evaluator_override is not None:
@@ -95,15 +105,15 @@ class EvalHooks:
         else:
             evaluator = _resolve_evaluator(task, sandbox, verifier_kind, verifier_config)
 
-        # Capture sandbox + agent_flow into the teardown closure so the
+        # Capture sandbox + per-task flow into the teardown closure so the
         # right release path runs (SandboxedAgentFlow has its own
         # `teardown_sandbox`, plain agents just close the sandbox).
         def teardown() -> None:
             if sandbox is None:
                 return
-            if isinstance(agent_flow, SandboxedAgentFlow):
+            if isinstance(task_flow, SandboxedAgentFlow):
                 try:
-                    agent_flow.teardown_sandbox()
+                    task_flow.teardown_sandbox()
                 except Exception:
                     logger.exception("teardown_sandbox failed")
             else:
@@ -112,4 +122,9 @@ class EvalHooks:
                 except Exception:
                     logger.exception("sandbox close failed")
 
-        return TaskContext(evaluator=evaluator, teardown=teardown)
+        # Surface ``task_flow`` only when it's a fresh per-task copy;
+        # for non-sandboxed flows we hand the engine the original instance
+        # by leaving ``agent_flow=None`` (engine then falls back to
+        # ``self.agent_flow``).
+        ctx_flow = task_flow if task_flow is not agent_flow else None
+        return TaskContext(evaluator=evaluator, agent_flow=ctx_flow, teardown=teardown)

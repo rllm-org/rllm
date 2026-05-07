@@ -80,15 +80,25 @@ class ShellScriptEvaluator:
                 metadata={"error": f"verifier script {script_name} not found in {tests_dir}"},
             )
 
-        workdir = task.metadata.get("workdir", "/workspace")
+        # Only ``cd`` when the task explicitly declared a workdir.
+        # Otherwise the Dockerfile's WORKDIR wins — required for swesmith
+        # and similar harbor task families whose verifier scripts run
+        # ``git`` and ``pytest`` against ``/testbed`` (the image WORKDIR)
+        # and silently collect zero tests when forced into ``/workspace``.
+        workdir = task.metadata.get("workdir")
+        cd_prefix = f"cd {workdir} && " if workdir else ""
         try:
             self.sandbox.exec(
-                f"chmod +x /tests/{script_name} && cd {workdir} && /tests/{script_name}",
+                f"chmod +x /tests/{script_name} && {cd_prefix}/tests/{script_name}",
                 timeout=self.verifier_timeout,
                 user=v_user,
             )
         except Exception as e:
-            logger.warning("Test script execution error for %s: %s", task.id, e)
+            # Verifier exit != 0 is the *expected* outcome when an agent
+            # didn't solve the task; the reward (read from reward.txt
+            # below) carries the signal. Log at debug so a benchmark of
+            # 100 unsolved tasks doesn't spam 100 multi-KB stack traces.
+            logger.debug("Verifier exited non-zero for %s: %s", task.id, e)
 
         # Read reward (as verifier — agent may not have read access)
         reward_paths = list(_REWARD_PATHS)

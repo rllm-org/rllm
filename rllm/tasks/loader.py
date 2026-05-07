@@ -126,12 +126,28 @@ def _load_data_dataset(
         else:
             instruction = text
         task_metadata = _build_metadata(row, metadata_fields)
+
+        # Harbor-sourced rows carry a ``task_path`` pointing at the real
+        # on-disk task dir (under ~/.cache/harbor/tasks/<digest>/<name>/).
+        # Root the Task there so ``task.task_dir`` resolves to the dir
+        # that actually contains ``solution/``, ``environment/``,
+        # ``tests/``, and the per-task ``task.toml``. Without this,
+        # harnesses like oracle (which reads ``solution/solve.sh``) and
+        # the auto-detected ``tests/test.sh`` verifier both look at the
+        # rllm dataset root and find nothing.
+        row_task_path = row.get("task_path")
+        if row_task_path:
+            task_dataset_dir = Path(row_task_path)
+            task_metadata = _merge_task_toml_metadata(task_dataset_dir, task_metadata)
+        else:
+            task_dataset_dir = path
+
         tasks.append(
             Task(
                 id=str(row.get("id", idx)),
                 instruction=instruction,
                 metadata=task_metadata,
-                dataset_dir=path,
+                dataset_dir=task_dataset_dir,
                 sub_dir=None,
             )
         )
@@ -140,11 +156,50 @@ def _load_data_dataset(
         tasks=tasks,
         name=config.name,
         split=config.split,
-        harness_name=harness_name or config.default_agent or "simple",
+        harness_name=harness_name or config.default_agent or _default_harness_for(tasks),
         sandbox_backend=sandbox_backend,
         description=config.description,
         category=category or "custom",
     )
+
+
+def _merge_task_toml_metadata(task_dir: Path, base: dict) -> dict:
+    """Merge per-task ``task.toml`` metadata into *base*.
+
+    Same lifting logic as :func:`_load_task_from_dir` (workdir,
+    env_vars, agent_user, verifier_user, verifier_timeout,
+    agent_timeout, setup_commands, plus the full toml under its
+    section keys), but additive on top of an existing metadata dict.
+    Used by the row-with-task_path path so harbor-sourced rows pick
+    up per-task config without losing fields the materialiser put on
+    the row.
+    """
+    config_path = task_dir / "task.toml"
+    if not config_path.exists():
+        return base
+    try:
+        raw = tomllib.loads(config_path.read_text())
+    except Exception:
+        return base
+    merged = {**base, **raw}
+    env_section = raw.get("environment", {}) or {}
+    # Only set workdir when the task explicitly declares one. Otherwise
+    # downstream (``_setup_task_environment`` / ``ShellScriptEvaluator``
+    # / ``BaseCliHarness._cd_prefix``) leaves cwd alone and the
+    # Dockerfile's WORKDIR wins — required for harbor task families
+    # like swesmith whose base image expects ``/testbed`` and whose
+    # test.sh + pytest break when forced into ``/workspace``.
+    declared_workdir = env_section.get("workdir") or merged.get("workdir")
+    if declared_workdir is not None:
+        merged["workdir"] = declared_workdir
+    merged["env_vars"] = env_section.get("env", {}) or merged.get("env_vars", {}) or {}
+    merged["agent_user"] = raw.get("agent", {}).get("user", merged.get("agent_user"))
+    merged["verifier_user"] = raw.get("verifier", {}).get("user", merged.get("verifier_user"))
+    merged["verifier_timeout"] = raw.get("verifier", {}).get("timeout_sec", merged.get("verifier_timeout", 600.0))
+    merged["agent_timeout"] = raw.get("agent", {}).get("timeout_sec", merged.get("agent_timeout", 600.0))
+    rllm_section = raw.get("rllm", {}) or {}
+    merged["setup_commands"] = rllm_section.get("setup_commands", merged.get("setup_commands", [])) or []
+    return merged
 
 
 def _resolve_data_file(path: Path, config: DatasetConfig) -> Path:
@@ -283,6 +338,22 @@ def _build_metadata(row: dict, metadata_fields: list[str] | None) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _default_harness_for(tasks: list[Task]) -> str:
+    """Pick a sane default harness given the loaded tasks.
+
+    A task is "sandbox-style" when it (or its dataset dir) ships an
+    ``environment/`` directory — i.e. it expects a container plus a shell
+    verifier. Those tasks need a harness that can act inside the sandbox;
+    ``react`` (one-shot LLM call, no sandbox) would silently produce empty
+    output and let the verifier score the missing submission. Default to
+    ``opencode`` instead.
+    """
+    for task in tasks:
+        if (task.task_dir / "environment").is_dir() or (task.dataset_dir / "environment").is_dir():
+            return "opencode"
+    return "react"
+
+
 def _load_sandbox_dataset(
     path: Path,
     config: DatasetConfig,
@@ -302,7 +373,7 @@ def _load_sandbox_dataset(
         tasks=tasks,
         name=config.name,
         split=config.split,
-        harness_name=harness_name or config.default_agent or "react",
+        harness_name=harness_name or config.default_agent or _default_harness_for(tasks),
         sandbox_backend=sandbox_backend or config.default_sandbox,
         description=config.description,
         category="agentic",
@@ -320,7 +391,7 @@ def _load_single_task(
         tasks=[task],
         name=task.id,
         split="test",
-        harness_name=harness_name or "react",
+        harness_name=harness_name or _default_harness_for([task]),
         sandbox_backend=sandbox_backend,
         description=task.metadata.get("task", {}).get("description", "") if isinstance(task.metadata.get("task"), dict) else "",
         category="agentic",
@@ -341,7 +412,7 @@ def _load_auto_discover(
         tasks=tasks,
         name=path.name,
         split="test",
-        harness_name=harness_name or "react",
+        harness_name=harness_name or _default_harness_for(tasks),
         sandbox_backend=sandbox_backend,
         description=f"Auto-discovered tasks from {path.name}",
         category="agentic",
@@ -373,7 +444,11 @@ def _load_task_from_dir(
     # Lift commonly-used config into top-level metadata for the Runner
     metadata: dict = dict(raw)
     env_section = raw.get("environment", {}) or {}
-    metadata["workdir"] = env_section.get("workdir", "/workspace")
+    # Only set workdir when explicitly declared — see _merge_task_toml_metadata
+    # for the same rationale (Dockerfile WORKDIR vs forced /workspace).
+    declared_workdir = env_section.get("workdir")
+    if declared_workdir is not None:
+        metadata["workdir"] = declared_workdir
     metadata["env_vars"] = env_section.get("env", {}) or {}
     metadata["agent_user"] = raw.get("agent", {}).get("user")
     metadata["verifier_user"] = raw.get("verifier", {}).get("user")
