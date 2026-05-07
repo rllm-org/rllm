@@ -404,6 +404,10 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
             else:
                 data[config_key] = val
 
+    strip_vllm_fields = os.environ.get("RLLM_GATEWAY_STRIP_VLLM_FIELDS")
+    if strip_vllm_fields is not None:
+        data["strip_vllm_fields"] = strip_vllm_fields.lower() in {"1", "true", "yes", "on"}
+
     # 3. CLI args (highest priority)
     if getattr(args, "host", None) is not None:
         data["host"] = args.host
@@ -419,6 +423,8 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
         data["sampling_params_priority"] = args.sampling_params_priority
     if getattr(args, "model", None) is not None:
         data["model"] = args.model
+    if getattr(args, "strip_vllm_fields", None) is not None:
+        data["strip_vllm_fields"] = args.strip_vllm_fields
 
     # Workers from CLI --worker flags (WorkerConfig validator auto-splits URLs)
     worker_urls = getattr(args, "worker", None) or []
@@ -459,6 +465,21 @@ def main() -> None:
         type=str,
         default=None,
         help="If set, the gateway rewrites every request body's 'model' field to this value before forwarding.",
+    )
+    strip_group = parser.add_mutually_exclusive_group()
+    strip_group.add_argument(
+        "--strip-vllm-fields",
+        dest="strip_vllm_fields",
+        action="store_true",
+        default=None,
+        help="Strip vLLM-specific token fields from client-facing responses.",
+    )
+    strip_group.add_argument(
+        "--no-strip-vllm-fields",
+        dest="strip_vllm_fields",
+        action="store_false",
+        default=None,
+        help="Expose vLLM-specific token fields in client-facing responses.",
     )
 
     args = parser.parse_args()
