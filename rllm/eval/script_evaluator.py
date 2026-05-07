@@ -80,10 +80,16 @@ class ShellScriptEvaluator:
                 metadata={"error": f"verifier script {script_name} not found in {tests_dir}"},
             )
 
-        workdir = task.metadata.get("workdir", "/workspace")
+        # Only ``cd`` when the task explicitly declared a workdir.
+        # Otherwise the Dockerfile's WORKDIR wins — required for swesmith
+        # and similar harbor task families whose verifier scripts run
+        # ``git`` and ``pytest`` against ``/testbed`` (the image WORKDIR)
+        # and silently collect zero tests when forced into ``/workspace``.
+        workdir = task.metadata.get("workdir")
+        cd_prefix = f"cd {workdir} && " if workdir else ""
         try:
             self.sandbox.exec(
-                f"chmod +x /tests/{script_name} && cd {workdir} && /tests/{script_name}",
+                f"chmod +x /tests/{script_name} && {cd_prefix}/tests/{script_name}",
                 timeout=self.verifier_timeout,
                 user=v_user,
             )

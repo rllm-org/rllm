@@ -183,7 +183,15 @@ def _merge_task_toml_metadata(task_dir: Path, base: dict) -> dict:
         return base
     merged = {**base, **raw}
     env_section = raw.get("environment", {}) or {}
-    merged["workdir"] = env_section.get("workdir", merged.get("workdir", "/workspace"))
+    # Only set workdir when the task explicitly declares one. Otherwise
+    # downstream (``_setup_task_environment`` / ``ShellScriptEvaluator``
+    # / ``BaseCliHarness._cd_prefix``) leaves cwd alone and the
+    # Dockerfile's WORKDIR wins — required for harbor task families
+    # like swesmith whose base image expects ``/testbed`` and whose
+    # test.sh + pytest break when forced into ``/workspace``.
+    declared_workdir = env_section.get("workdir") or merged.get("workdir")
+    if declared_workdir is not None:
+        merged["workdir"] = declared_workdir
     merged["env_vars"] = env_section.get("env", {}) or merged.get("env_vars", {}) or {}
     merged["agent_user"] = raw.get("agent", {}).get("user", merged.get("agent_user"))
     merged["verifier_user"] = raw.get("verifier", {}).get("user", merged.get("verifier_user"))
@@ -436,7 +444,11 @@ def _load_task_from_dir(
     # Lift commonly-used config into top-level metadata for the Runner
     metadata: dict = dict(raw)
     env_section = raw.get("environment", {}) or {}
-    metadata["workdir"] = env_section.get("workdir", "/workspace")
+    # Only set workdir when explicitly declared — see _merge_task_toml_metadata
+    # for the same rationale (Dockerfile WORKDIR vs forced /workspace).
+    declared_workdir = env_section.get("workdir")
+    if declared_workdir is not None:
+        metadata["workdir"] = declared_workdir
     metadata["env_vars"] = env_section.get("env", {}) or {}
     metadata["agent_user"] = raw.get("agent", {}).get("user")
     metadata["verifier_user"] = raw.get("verifier", {}).get("user")
