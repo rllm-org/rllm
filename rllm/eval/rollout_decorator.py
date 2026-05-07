@@ -16,7 +16,7 @@ from functools import update_wrapper
 from typing import Any, overload
 
 from rllm.eval.types import EvalOutput
-from rllm.types import AgentConfig, Episode, Task, Trajectory
+from rllm.types import AgentConfig, Episode, Task, _coerce_to_episode
 
 logger = logging.getLogger(__name__)
 
@@ -25,32 +25,10 @@ logger = logging.getLogger(__name__)
 # Return-value coercion helpers
 # ---------------------------------------------------------------------------
 
-
-def _coerce_to_episode(result: Any, task: Task, traj_name: str) -> Episode:
-    """Convert a user function's return value into an Episode."""
-    if isinstance(result, Episode):
-        if result.task is None:
-            result.task = task.metadata
-        return result
-
-    if isinstance(result, list) and result and isinstance(result[0], Trajectory):
-        answer = ""
-        if result and result[-1].output:
-            answer = str(result[-1].output)
-        return Episode(task=task.metadata, trajectories=result, artifacts={"answer": answer})
-
-    if isinstance(result, str):
-        traj = Trajectory(name=traj_name, steps=[])
-        return Episode(task=task.metadata, trajectories=[traj], artifacts={"answer": result})
-
-    if isinstance(result, dict):
-        traj = Trajectory(name=traj_name, steps=[])
-        answer = result.get("answer", "")
-        return Episode(task=task.metadata, trajectories=[traj], artifacts={"answer": answer, **result})
-
-    # Fallback: stringify
-    traj = Trajectory(name=traj_name, steps=[])
-    return Episode(task=task.metadata, trajectories=[traj], artifacts={"answer": str(result)})
+# ``_coerce_to_episode`` is defined in ``rllm.types`` and shared with the
+# protocol-level wiring in :func:`rllm.types.run_agent_flow`, so decorated
+# functions and class-based AgentFlows go through the same normalization.
+__all__ = ["_coerce_to_episode"]
 
 
 def _coerce_to_eval_output(result: Any) -> EvalOutput:
@@ -165,21 +143,24 @@ def rollout(
     The decorated function must accept ``(task, config)`` where *task* is a
     :class:`Task` and *config* is an :class:`AgentConfig`.  It may return:
 
-    * a ``str`` — wrapped as the episode answer
-    * an :class:`Episode` — passed through
-    * a ``list[Trajectory]`` — wrapped in an Episode
-    * a ``dict`` — treated as episode artifacts
+    * an :class:`Episode` — passed through (use this for multi-trajectory flows
+      and when you want to set ``artifacts`` explicitly)
+    * a :class:`Trajectory` — wrapped in ``Episode(trajectories=[t])``
+    * ``None`` — framework builds an empty single-trajectory Episode;
+      gateway traces fill in the Steps during enrichment
 
     Examples::
 
         @rllm.rollout
-        def solver(task, config):
-            client = OpenAI(base_url=config.base_url, api_key="EMPTY")
-            resp = client.chat.completions.create(
+        async def solver(task, config):
+            client = AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")
+            await client.chat.completions.create(
                 model=config.model,
                 messages=[{"role": "user", "content": task.metadata["question"]}],
             )
-            return resp.choices[0].message.content
+            # Return None — the gateway captured the trace; the framework
+            # builds the Episode and the evaluator reads what it needs.
+            return None
 
         @rllm.rollout(name="reasoning", register="my-agent")
         def reasoning_agent(task, config):

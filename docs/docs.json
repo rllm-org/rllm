@@ -120,6 +120,7 @@
               "cookbooks/frozenlake",
               "cookbooks/math",
               "cookbooks/math_tool_agent",
+              "cookbooks/agent_frameworks",
               "cookbooks/deepcoder",
               "cookbooks/finqa",
               "cookbooks/geo3k",

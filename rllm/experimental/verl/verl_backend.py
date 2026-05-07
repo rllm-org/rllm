@@ -228,11 +228,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
         patch_verl_tensordict_jagged_layout()
 
-        # If SDK is enabled, instrument vLLM replicas before creating workers
-        sdk_enabled = self.full_config.rllm.get("sdk", {}).get("enable", False)
-        if sdk_enabled:
-            self._instrument_vllm_for_sdk()
-
         self._init_colocated_workers()
 
         assert self.async_rollout_manager is not None
@@ -255,12 +250,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         self.algorithm_config = kwargs.get("algorithm_config")
 
         return self.rollout_engine
-
-    def _instrument_vllm_for_sdk(self) -> None:
-        """Monkey-patch vLLM replicas to add logprob/token-id instrumentation for SDK trace collection."""
-        from rllm.experimental.verl.patch import patch_vllm_for_sdk
-
-        patch_vllm_for_sdk()
 
     def validate_config(self) -> None:
         """Validate verl-specific configuration settings."""
@@ -383,7 +372,9 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             so the registered mesh is ``"ref"``.
         """
         dp_sizes: list[int] = []
-        if self.use_reference_policy and self.ref_policy_wg.world_size != 0:
+        # ref_in_actor (LoRA): ref log-probs run on the actor mesh with
+        # no_lora_adapter=True, and the "ref" mesh is not registered.
+        if self.use_reference_policy and not self.ref_in_actor and self.ref_policy_wg.world_size != 0:
             dp_sizes.append(self._get_dp_size(self.ref_policy_wg, "ref"))
         if self.actor_rollout_wg.world_size != 0:
             dp_sizes.append(self._get_dp_size(self.actor_rollout_wg, "actor"))

@@ -1,8 +1,26 @@
-"""GatewayManager: manages the rllm-model-gateway lifecycle for training.
+"""GatewayManager + EvalGatewayManager: rllm-model-gateway lifecycle.
 
-Supports two execution modes:
+Two classes share most of the lifecycle (uvicorn-on-thread or subprocess,
+trace store, session API). They differ in how upstream workers are
+registered and what request-body injection the middleware applies.
+
+* :class:`GatewayManager` — training. Workers come from a verl/tinker
+  rollout engine via :meth:`start(rollout_engine)`. Injects ``logprobs``
+  and ``return_token_ids`` into request bodies (vLLM needs both for the
+  loss math downstream).
+
+* :class:`EvalGatewayManager(GatewayManager)` — eval. Wraps a static
+  upstream URL (vLLM endpoint, LiteLLM proxy, OpenAI-compatible server).
+  Disables vLLM-specific param injection because external providers 400
+  on ``return_token_ids``. Constructed with
+  ``EvalGatewayManager(upstream_url, model)`` and started with
+  ``.start()`` (no rollout engine).
+
+Modes:
+
 - 'process': subprocess via ``rllm-model-gateway`` CLI (for verl / distributed)
-- 'thread': background thread via ``create_app`` + uvicorn (for tinker / single-machine)
+- 'thread': background thread via ``create_app`` + uvicorn (for tinker /
+  single-machine / eval)
 
 For Tinker backends, an in-process handler is injected into the gateway
 (via ``local_handler``), avoiding the need for a separate HTTP backend server.
@@ -31,6 +49,28 @@ logger = logging.getLogger(__name__)
 _HEALTH_POLL_INTERVAL = 0.5
 _HEALTH_POLL_TIMEOUT = 30.0
 _TRACE_API_TIMEOUT = 600.0
+
+
+def _find_free_port() -> int:
+    """Ask the OS for a free TCP port on the loopback interface."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _normalize_worker_url(raw_url: str) -> str:
+    """Strip trailing ``/v1`` and trailing slashes from an upstream URL.
+
+    The gateway client always sends ``api_path="/v1"`` when registering a
+    worker, and the upstream's ``api_url`` is computed as
+    ``url + api_path``. Without this normalization, callers passing an
+    OpenAI-compatible URL like ``http://localhost:4000/v1`` would end up
+    forwarding to ``http://localhost:4000/v1/v1/chat/completions``.
+    """
+    url = raw_url.rstrip("/")
+    if url.endswith("/v1"):
+        url = url[: -len("/v1")]
+    return url
 
 
 def _get_routable_ip() -> str:
@@ -76,6 +116,11 @@ class GatewayManager:
     - 'process': subprocess.Popen (for verl / distributed)
     - 'thread': background thread via create_app + uvicorn (for tinker / single-machine)
     """
+
+    # Subclasses override these to flip vLLM-specific request-body injection
+    # off when the upstream isn't vLLM (e.g. OpenAI/Anthropic via LiteLLM).
+    add_logprobs: bool = True
+    add_return_token_ids: bool = True
 
     def __init__(self, config: DictConfig, mode: str = "thread") -> None:
         gw_cfg = config.rllm.get("gateway", {})
@@ -267,6 +312,8 @@ class GatewayManager:
             store_worker="sqlite" if self.db_path else "memory",
             sampling_params_priority=self.sampling_params_priority,
             model=self.model,
+            add_logprobs=self.add_logprobs,
+            add_return_token_ids=self.add_return_token_ids,
         )
         app = create_app(config=gw_config, local_handler=local_handler)
 
@@ -291,3 +338,78 @@ class GatewayManager:
             time.sleep(_HEALTH_POLL_INTERVAL)
 
         raise TimeoutError(f"Gateway thread did not start within {_HEALTH_POLL_TIMEOUT}s")
+
+
+# ---------------------------------------------------------------------------
+# EvalGatewayManager — eval-side gateway with a static upstream URL
+# ---------------------------------------------------------------------------
+
+
+class EvalGatewayManager(GatewayManager):
+    """Gateway pointing at a single static upstream URL (no rollout engine).
+
+    Used by ``rllm eval``: the upstream is either the user's ``--base-url``
+    (vLLM endpoint, OpenAI-compatible server) or the URL of a LiteLLM
+    proxy started by ``EvalProxyManager``.
+
+    Key differences vs the training-side :class:`GatewayManager`:
+
+    * vLLM-specific request-body injection (``logprobs``,
+      ``return_token_ids``) is OFF — external providers reject
+      ``return_token_ids`` as an unknown parameter.
+    * ``start()`` ignores any ``rollout_engine`` and registers the
+      upstream URL passed at construction. URLs are normalized via
+      :func:`_normalize_worker_url` (strips trailing ``/v1``).
+
+    Example::
+
+        gw = EvalGatewayManager(upstream_url=base_url, model="gpt-4o")
+        gw.start()
+        try:
+            ...
+        finally:
+            gw.stop()
+    """
+
+    add_logprobs = False
+    add_return_token_ids = False
+
+    def __init__(
+        self,
+        upstream_url: str,
+        model: str,
+        *,
+        host: str = "127.0.0.1",
+        port: int | None = None,
+        db_path: str | None = None,
+    ) -> None:
+        from omegaconf import OmegaConf
+
+        cfg = OmegaConf.create(
+            {
+                "rllm": {
+                    "gateway": {
+                        "host": host,
+                        "port": port if port is not None else _find_free_port(),
+                        "db_path": db_path,
+                    }
+                },
+                "model": {"name": model},
+            }
+        )
+        super().__init__(cfg, mode="thread")
+        self._upstream_urls: list[str] = [upstream_url]
+
+    def start(self, rollout_engine: RolloutEngine | None = None) -> None:  # type: ignore[override]
+        """Start gateway and register the static upstream URL(s).
+
+        ``rollout_engine`` is accepted for shape-compatibility with the
+        base class signature but ignored — this gateway has no engine.
+        """
+        if rollout_engine is not None:
+            logger.warning("EvalGatewayManager.start ignores `rollout_engine` argument")
+        self._start_thread()
+        for raw_url in self._upstream_urls:
+            url = _normalize_worker_url(raw_url)
+            worker_id = self.client.add_worker(url=url)
+            logger.info("Registered worker %s -> %s (raw=%s)", worker_id, url, raw_url)

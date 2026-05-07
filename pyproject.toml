@@ -63,7 +63,7 @@ eval-protocol = [
 ]
 
 all = [
-    "rllm[train,rewards,sdk,tools,eval-protocol]",
+    "rllm[train,rewards,tools,eval-protocol]",
 ]
 
 ui = [
@@ -90,19 +90,9 @@ verl = [
     "qwen-vl-utils",
 ]
 
-sdk = [
-    "aiohttp",
-    "fastapi",
-    "uvicorn",
-]
-
 tinker = [
     "tinker ; python_version >= '3.11'",
     "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook ; python_version >= '3.11'",
-]
-
-verifiers = [
-    "verifiers==0.1.9"
 ]
 
 opentelemetry = [
@@ -208,8 +198,6 @@ ignore = [
 "examples/countdown/prepare_countdown_data.py" = ["E501"]
 "examples/eval_protocol/prepare_frozen_lake_data.py" = ["E501"]
 "cookbooks/solver_judge_flow/solver_judge_flow.py" = ["E501"]
-"examples/sdk/solver_judge/solver_judge_flow_decorator.py" = ["E501"]
-"examples/sdk/solver_judge/solver_judge_flow_session.py" = ["E501"]
 "rllm/cli/main.py" = ["E501"]
 "rllm/eval/visualizer.py" = ["E501"]
 "rllm/experimental/rllm_telemetry/examples/experiment_comparison.py" = ["E501"]

@@ -183,7 +183,6 @@ class TaskRunner:
         config,
         workflow_class=None,
         workflow_args=None,
-        agent_run_func=None,
     ):
         """Execute the main PPO training workflow.
 
@@ -246,20 +245,7 @@ class TaskRunner:
 
         resource_pool_manager = self.init_resource_pool_mgr(config)
 
-        # if config.rllm.workflow.use_workflow:
-        if agent_run_func is not None:
-            print("IMPORTANT: Using AgentSdkTrainer")
-            from rllm.trainer.verl.agent_sdk_trainer import AgentSdkTrainer
-
-            trainer = AgentSdkTrainer(
-                config=config,
-                tokenizer=tokenizer,
-                role_worker_mapping=self.role_worker_mapping,
-                resource_pool_manager=resource_pool_manager,
-                ray_worker_group_cls=ray_worker_group_cls,
-                agent_run_func=agent_run_func,
-            )
-        elif workflow_class is not None:
+        if workflow_class is not None:
             workflow_args = workflow_args or {}
             if config.rllm.workflow.get("workflow_args") is not None:
                 for key, value in config.rllm.workflow.get("workflow_args").items():
@@ -283,11 +269,7 @@ class TaskRunner:
             )
 
         else:
-            raise ValueError(
-                "TaskRunner.run requires one of agent_run_func, workflow_class. "
-                "The legacy agent_class + env_class path (driven by AgentExecutionEngine) "
-                "has been removed; port your agent to a Workflow or AgentFlow."
-            )
+            raise ValueError("TaskRunner.run requires workflow_class. The legacy agent_class + env_class and agent_run_func paths have been removed; port your agent to a Workflow or AgentFlow.")
 
         # Apply NCCL dynamic batch sync patch (fixes verl#5750)
         from rllm.experimental.verl.patch import patch_verl_dynamic_batch_sync

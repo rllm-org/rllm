@@ -1,7 +1,8 @@
 """Materialize a catalog dataset into a self-contained benchmark directory.
 
 After materialization, ``~/.rllm/datasets/<name>/`` contains everything
-needed to run the dataset through the standard :class:`rllm.runner.Runner`:
+needed to run the dataset through ``rllm eval`` /
+:class:`rllm.engine.agentflow_engine.AgentFlowEngine`:
 
 ::
 

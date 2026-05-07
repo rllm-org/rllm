@@ -3,21 +3,36 @@ title: AgentFlow
 description: The protocol for authoring agents that run identically at eval time and at training time
 ---
 
-`AgentFlow` is the recommended way to author an agent in rLLM. An AgentFlow is a plain async function that takes a [`Task`](#task) and an [`AgentConfig`](#agentconfig) and returns an [`Episode`](#episode). The same function runs both for evaluation and for training — at training time the trainer routes `config.base_url` through a model gateway that captures token IDs and logprobs transparently, so the flow code itself doesn't change.
+`AgentFlow` is the recommended way to author an agent in rLLM. An AgentFlow is a plain async function that takes a [`Task`](#task) and an [`AgentConfig`](#agentconfig) and returns an [`Episode`](#episode), a single [`Trajectory`](#trajectory), or `None`. The same function runs both for evaluation and for training — at training time *and* at eval time the runner routes `config.base_url` through a model gateway that captures token IDs and logprobs transparently, so the flow code itself doesn't change.
 
 For a conceptual walkthrough see [AgentFlow & Evaluator](/core-concepts/agentflow-evaluator); for worked examples see [`cookbooks/`](https://github.com/rllm-org/rllm/tree/main/cookbooks).
+
+## Eval and training share one engine
+
+Both `rllm eval` and `rllm train` drive `rllm.engine.agentflow_engine.AgentFlowEngine`. The same `_run_single` loop is used end-to-end: gateway session → run flow → fetch traces → enrich Episode → evaluate. The eval-specific concerns (per-task verifier resolution, sandbox lifecycle) plug in via the engine's optional `TaskHooks` parameter:
+
+```python
+class TaskHooks(Protocol):
+    def setup(self, task: Task, agent_flow: AgentFlow, uid: str) -> TaskContext: ...
+```
+
+Eval installs `rllm.eval._hooks.EvalHooks`, which detects each task's `[verifier]` block, builds a sandbox if needed, and resolves a per-task evaluator. Training leaves `hooks=None` and uses a single engine-bound evaluator. After the refactor that introduced the unified engine, `rllm eval` returns Episodes whose Steps are populated from gateway traces — flows that `return None` work identically at eval and training time.
+
+For training agents that need a sandbox per rollout (sandboxed code agents, harbor tasks), wire the same hook style at trainer construction time. The engine handles per-rollout setup/teardown in a `try/finally` so retries get fresh sandboxes automatically.
 
 ## The protocol
 
 ```python
-from rllm.types import AgentFlow, AgentConfig, Episode, Task
+from rllm.types import AgentFlow, AgentConfig, Episode, Task, Trajectory
 
 @runtime_checkable
 class AgentFlow(Protocol):
-    def run(self, task: Task, config: AgentConfig) -> Episode: ...
+    def run(self, task: Task, config: AgentConfig) -> Episode | Trajectory | None: ...
 ```
 
 An implementation may provide either `run` (sync) or `arun` (async). The runner prefers `arun` when running inside an event loop. In practice you almost always write the async form.
+
+For single-agent flows, returning `None` is the simplest path — the framework builds an `Episode` with one `Trajectory`, and gateway-captured traces fill in the Steps. For multi-trajectory flows (e.g. solver / judge), return an explicit `Episode` with named trajectories so the trainer can group them for advantage computation.
 
 ## `@rllm.rollout` decorator
 
@@ -43,20 +58,19 @@ The decorator returns an `AgentFlowFn` object that exposes `.run()` (sync, block
 @rllm.rollout(name="solver", register="my_agent")   # also auto-registers under entry-point group
 ```
 
-The `name` is what shows up on `Trajectory.name` when the function returns a non-Episode (raw `str`, `dict`, or `list[Trajectory]`) and the decorator coerces it. When the function already returns an `Episode`, the trajectory names you set inside the function are preserved.
+The `name` is what shows up on `Trajectory.name` when the framework auto-builds a trajectory (i.e. when the function returns `None` or a `Trajectory` whose name is unset). It is also the role the trainer uses to group rollouts of the same task into a `TrajectoryGroup` for advantage computation, so it must be stable across rollouts.
 
 ### Return-value coercion
 
-The decorator accepts several return-value shapes for convenience:
+The same coercion applies whether you use `@rllm.rollout` or implement the `AgentFlow` protocol directly on a class — both go through `rllm.types._coerce_to_episode`.
 
-| Function returns | Decorator wraps as |
+| Function returns | Wrapped as |
 |---|---|
-| `Episode` | passed through unchanged |
-| `Trajectory` | wrapped in `Episode(trajectories=[t])` |
-| `list[Trajectory]` | wrapped in `Episode(trajectories=[…])` |
-| `str` / `dict` / anything else | wrapped in `Episode(trajectories=[Trajectory(name=…, output=…)])`, with the value placed on `output` |
+| `Episode` | passed through (multi-trajectory flows must use this) |
+| `Trajectory` | `Episode(trajectories=[t])`. The trajectory is left untouched — the evaluator parses whatever the user put on it. |
+| `None` | `Episode(trajectories=[Trajectory(name=…, steps=[])])`. Gateway traces fill in the Steps during enrichment; the evaluator reads what it needs from those steps (e.g. `step.model_response`, `step.chat_completions`). |
 
-Returning the explicit `Episode` is the canonical form — see any flow under `cookbooks/`.
+Anything else raises `TypeError`. The canonical patterns are: `return None` for single-agent flows where the gateway captures everything, and `return Episode(...)` when you need explicit `artifacts` or multiple named trajectories — see `cookbooks/solver_judge_flow/`.
 
 ## `Task`
 

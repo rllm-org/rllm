@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class VerlTaskRunner(TaskRunner):
     """Ray remote class for executing training with the unified trainer."""
 
-    def run(self, config, workflow_class: type[Workflow], workflow_args: dict, **kwargs):  # type: ignore
+    def run(self, config, workflow_class: type[Workflow], workflow_args: dict, hydra_overrides: list[str] | None = None, **kwargs):  # type: ignore
         import os
         import socket
         from pprint import pprint
@@ -28,11 +28,14 @@ class VerlTaskRunner(TaskRunner):
         from verl.utils.config import validate_config
         from verl.utils.fs import copy_to_local
 
+        from rllm.experimental.verl.utils import sync_config
+
         print(f"VerlTaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
-        pprint(OmegaConf.to_container(config))
         OmegaConf.register_new_resolver("mul", lambda x, y: int(x) * int(y))
+        sync_config(config, hydra_overrides=hydra_overrides)
         OmegaConf.resolve(config)
         config.trainer.use_legacy_worker_impl = "disable"
+        pprint(OmegaConf.to_container(config))
 
         actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
         self.add_ref_policy_worker(config, actor_rollout_cls)
@@ -116,6 +119,15 @@ class VerlTrainerLauncher(TrainerLauncher):
             ray_init_settings = get_ray_init_settings(self.config)
             ray.init(runtime_env=get_ppo_ray_runtime_env(), **ray_init_settings)
 
+        # Capture Hydra CLI overrides while we're still in the Hydra-decorated
+        # process; the Ray actor below cannot read HydraConfig itself.
+        try:
+            from hydra.core.hydra_config import HydraConfig
+
+            hydra_overrides = list(HydraConfig.get().overrides.task)
+        except (ValueError, AttributeError, ImportError):
+            hydra_overrides = []
+
         runner = VerlTaskRunner.remote()  # type: ignore
 
         ray.get(
@@ -124,6 +136,7 @@ class VerlTrainerLauncher(TrainerLauncher):
                 workflow_class=self.workflow_class,
                 workflow_args=self.workflow_args,
                 store=self.store,
+                hydra_overrides=hydra_overrides,
                 **self.kwargs,
             )
         )
