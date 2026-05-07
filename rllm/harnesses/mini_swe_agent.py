@@ -45,10 +45,16 @@ set -e
 # Noninteractive automatically when there's no TTY; Modal does not).
 export DEBIAN_FRONTEND=noninteractive
 if ! command -v mini-swe-agent >/dev/null 2>&1; then
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq && apt-get install -y -qq curl ca-certificates git python3 python3-venv
-    elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache curl bash ca-certificates git python3 py3-pip
+    # Only fall back to apt when curl is missing — swebench testbeds
+    # have expired Ubuntu jammy repo signatures, so unconditional
+    # ``apt-get update`` fails with GPG errors and stops the script
+    # before uv even gets a chance.
+    if ! command -v curl >/dev/null 2>&1; then
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq && apt-get install -y -qq curl ca-certificates git
+        elif command -v apk >/dev/null 2>&1; then
+            apk add --no-cache curl bash ca-certificates git
+        fi
     fi
     if ! command -v uv >/dev/null 2>&1; then
         curl -LsSf https://astral.sh/uv/install.sh | sh

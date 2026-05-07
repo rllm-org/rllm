@@ -90,7 +90,11 @@ def test_run_returns_none_so_gateway_drives_trajectory():
     assert result is None
 
 
-def test_run_execs_cli_against_agent_user_with_env_prefix():
+def test_run_execs_cli_against_agent_user_with_env_exported():
+    """Env vars must be ``export``ed (not inline ``K=V cmd`` prefix), because
+    invocations like ``cd /work && claude ...`` are compound commands and
+    inline assignments only bind to the first command — the auth env would
+    be set for ``cd`` and lost before the CLI runs."""
     h = OpenCodeHarness()
     sandbox = FakeSandbox()
     h.set_sandbox(sandbox)
@@ -101,8 +105,7 @@ def test_run_execs_cli_against_agent_user_with_env_prefix():
     invocation = sandbox.calls[-1]
     # Invocation runs as the agent user (None on the default image).
     assert invocation.user is None
-    # Env vars are prefixed onto the command, not exported by the harness.
-    assert "OPENAI_BASE_URL=" in invocation.command
+    assert "export OPENAI_BASE_URL=" in invocation.command
     assert "opencode --model=" in invocation.command
 
 

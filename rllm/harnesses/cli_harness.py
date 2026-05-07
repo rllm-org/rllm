@@ -80,12 +80,20 @@ class BaseCliHarness(SandboxedAgentFlow):
         timeout: float | None = None,
         env: dict[str, str] | None = None,
     ) -> str:
-        """Run *command* as the agent user, with *env* prepended."""
+        """Run *command* as the agent user, with *env* exported.
+
+        Uses ``export`` (not the inline ``K=V cmd`` prefix), because
+        invocations like ``cd /workspace && claude ...`` are compound
+        commands. Bash's inline assignment only applies to the *first*
+        command in the chain — ``ANTHROPIC_API_KEY`` would be set for
+        ``cd`` and gone by the time the CLI runs, leaving the agent
+        looking like it had no auth even though we passed it.
+        """
         if self.sandbox is None:
             raise RuntimeError(f"{type(self).__name__} requires a sandbox.")
         if env:
-            prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items() if v is not None)
-            command = f"{prefix} {command}"
+            exports = "; ".join(f"export {k}={shlex.quote(v)}" for k, v in env.items() if v is not None)
+            command = f"{exports}; {command}"
         return self.sandbox.exec(command, timeout=timeout, user=self.agent_user)
 
     @staticmethod

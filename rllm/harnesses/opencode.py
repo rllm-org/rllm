@@ -38,10 +38,15 @@ set -e
 # interactive packages.
 export DEBIAN_FRONTEND=noninteractive
 if ! command -v opencode >/dev/null 2>&1; then
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq && apt-get install -y -qq curl ca-certificates
-    elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache curl bash ca-certificates
+    # Only touch apt when curl is actually missing — running apt-get
+    # update unconditionally bombs on swebench testbeds where the
+    # Ubuntu jammy repo signatures have expired.
+    if ! command -v curl >/dev/null 2>&1; then
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq && apt-get install -y -qq curl ca-certificates
+        elif command -v apk >/dev/null 2>&1; then
+            apk add --no-cache curl bash ca-certificates
+        fi
     fi
     if ! command -v node >/dev/null 2>&1; then
         export NVM_DIR="$HOME/.nvm"
@@ -49,6 +54,7 @@ if ! command -v opencode >/dev/null 2>&1; then
         \. "$NVM_DIR/nvm.sh"
         nvm install 22
     fi
+    [ -s "$HOME/.nvm/nvm.sh" ] && \. "$HOME/.nvm/nvm.sh"
     npm install -g opencode-ai@latest
 fi
 opencode --version >/dev/null
