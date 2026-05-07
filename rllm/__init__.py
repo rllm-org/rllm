@@ -24,13 +24,6 @@ def __getattr__(name: str):
         _mod.Task = Task
         return Task
 
-    if name == "Runner":
-        from rllm.runner import Runner
-
-        _mod = sys.modules[__name__]
-        _mod.Runner = Runner
-        return Runner
-
     _agent_exports = {"BaseAgent", "Action", "Step", "Trajectory", "Episode"}
     if name in _agent_exports:
         from rllm.agents.agent import BaseAgent

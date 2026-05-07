@@ -3,9 +3,22 @@ title: AgentFlow
 description: The protocol for authoring agents that run identically at eval time and at training time
 ---
 
-`AgentFlow` is the recommended way to author an agent in rLLM. An AgentFlow is a plain async function that takes a [`Task`](#task) and an [`AgentConfig`](#agentconfig) and returns an [`Episode`](#episode), a single [`Trajectory`](#trajectory), or `None`. The same function runs both for evaluation and for training — at training time the trainer routes `config.base_url` through a model gateway that captures token IDs and logprobs transparently, so the flow code itself doesn't change.
+`AgentFlow` is the recommended way to author an agent in rLLM. An AgentFlow is a plain async function that takes a [`Task`](#task) and an [`AgentConfig`](#agentconfig) and returns an [`Episode`](#episode), a single [`Trajectory`](#trajectory), or `None`. The same function runs both for evaluation and for training — at training time *and* at eval time the runner routes `config.base_url` through a model gateway that captures token IDs and logprobs transparently, so the flow code itself doesn't change.
 
 For a conceptual walkthrough see [AgentFlow & Evaluator](/core-concepts/agentflow-evaluator); for worked examples see [`cookbooks/`](https://github.com/rllm-org/rllm/tree/main/cookbooks).
+
+## Eval and training share one engine
+
+Both `rllm eval` and `rllm train` drive `rllm.experimental.engine.agent_flow_engine.AgentFlowEngine`. The same `_run_single` loop is used end-to-end: gateway session → run flow → fetch traces → enrich Episode → evaluate. The eval-specific concerns (per-task verifier resolution, sandbox lifecycle) plug in via the engine's optional `TaskHooks` parameter:
+
+```python
+class TaskHooks(Protocol):
+    def setup(self, task: Task, agent_flow: AgentFlow, uid: str) -> TaskContext: ...
+```
+
+Eval installs `rllm.eval._hooks.EvalHooks`, which detects each task's `[verifier]` block, builds a sandbox if needed, and resolves a per-task evaluator. Training leaves `hooks=None` and uses a single engine-bound evaluator. After the refactor that introduced the unified engine, `rllm eval` returns Episodes whose Steps are populated from gateway traces — flows that `return None` work identically at eval and training time.
+
+For training agents that need a sandbox per rollout (sandboxed code agents, harbor tasks), wire the same hook style at trainer construction time. The engine handles per-rollout setup/teardown in a `try/finally` so retries get fresh sandboxes automatically.
 
 ## The protocol
 

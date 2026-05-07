@@ -1,16 +1,24 @@
-"""Runner: unified orchestrator for AgentFlow + Evaluator over a Task.
+"""Helpers for resolving per-task verifiers and building per-task sandboxes.
 
-Single code path for both data tasks (gsm8k-style rows) and sandbox tasks
-(Harbor-style task directories):
+Originally home to ``Runner``, the per-task driver for ``rllm eval``.
+``Runner`` has been folded into :class:`rllm.experimental.engine.agent_flow_engine.AgentFlowEngine`
+(driven by :class:`rllm.eval._hooks.EvalHooks`); the helpers here remain
+because both the eval hook and the legacy ``build_dataset_evaluator``
+entry point still call them:
 
-1. Read the task's verifier configuration.
-2. Build the sandbox if the task requires one.
-3. Let the AgentFlow run on the task — producing an Episode (1 or many trajectories).
-4. Resolve an Evaluator from the task config (or use ``evaluator_override``) and run it.
-5. Write rewards back onto the trajectories.
+* :func:`_detect_verifier` — read ``task.toml`` / ``dataset.toml`` and the
+  task filesystem layout to decide which verifier shape applies.
+* :func:`_resolve_evaluator` — construct an :class:`Evaluator` instance
+  (sandbox-shell, Python module, registered name, or ``module:attr``
+  import path) from that decision.
+* :func:`_create_sandbox_for_task` / :func:`_setup_task_environment` —
+  per-task sandbox lifecycle.
+* :func:`_adapt_legacy_evaluator` — wrap evaluators that expect
+  ``task: dict`` so they can be called with a :class:`Task` object.
 
-No ``episode.artifacts["_sandbox"]`` hack — sandbox-using evaluators
-carry their sandbox reference internally (constructed at resolve time).
+No public :class:`Runner` symbol; importers should switch to
+``rllm.experimental.engine.agent_flow_engine.AgentFlowEngine`` +
+``rllm.eval._hooks.EvalHooks``.
 """
 
 from __future__ import annotations
@@ -33,86 +41,6 @@ from rllm.sandbox.protocol import Sandbox
 from rllm.types import AgentConfig, AgentFlow, Episode, Evaluator, Task
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Runner
-# ---------------------------------------------------------------------------
-
-
-class Runner:
-    """Run an AgentFlow on a Task, then resolve and run its verifier.
-
-    Args:
-        agent_flow: The :class:`AgentFlow` to drive the task.
-        sandbox_backend: Optional override for the sandbox backend
-            (``"docker"``, ``"local"``, ``"modal"``, ...).
-        evaluator_override: If provided, bypass per-task verifier
-            resolution and use this :class:`Evaluator` for every task.
-            The CLI's ``--evaluator`` flag flows through here.
-    """
-
-    def __init__(
-        self,
-        agent_flow: AgentFlow,
-        sandbox_backend: str | None = None,
-        evaluator_override: Evaluator | None = None,
-    ):
-        self.agent_flow = agent_flow
-        self.sandbox_backend = sandbox_backend
-        self.evaluator_override = evaluator_override
-
-    async def run(self, task: Task, config: AgentConfig) -> Episode:
-        from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
-
-        # Skip per-task verifier detection when an override is provided —
-        # the override fully dictates scoring, so we shouldn't probe the
-        # task dir for verifier scripts (Harbor task dirs contain
-        # tests/test.sh + environment/ that the harbor trial runs itself).
-        if self.evaluator_override is not None:
-            verifier_kind, verifier_config = "override", {}
-            needs_sandbox = isinstance(self.agent_flow, SandboxedAgentFlow)
-        else:
-            verifier_kind, verifier_config = _detect_verifier(task)
-            needs_sandbox = _needs_sandbox(task, verifier_kind) or isinstance(self.agent_flow, SandboxedAgentFlow)
-
-        sandbox: Sandbox | None = None
-        try:
-            if needs_sandbox:
-                sandbox = _create_sandbox_for_task(task, self.sandbox_backend)
-                _setup_task_environment(task, sandbox)
-                if isinstance(self.agent_flow, SandboxedAgentFlow):
-                    self.agent_flow.set_sandbox(sandbox)
-                    self.agent_flow.on_sandbox_ready({"task_path": str(task.task_dir)}, config)
-
-            # AgentFlow runs the agent → Episode
-            episode = await _run_agent_flow(self.agent_flow, task, config)
-
-            # Evaluator: explicit override > per-task resolution
-            if self.evaluator_override is not None:
-                evaluator = _adapt_legacy_evaluator(self.evaluator_override)
-            else:
-                evaluator = _resolve_evaluator(task, sandbox, verifier_kind, verifier_config)
-            eval_output = evaluator.evaluate(task, episode)
-
-            # Write rewards back
-            for traj in episode.trajectories:
-                traj.reward = eval_output.reward
-                traj.signals = {s.name: s.value for s in eval_output.signals}
-            episode.is_correct = eval_output.is_correct
-            return episode
-        finally:
-            if sandbox is not None:
-                if isinstance(self.agent_flow, SandboxedAgentFlow):
-                    try:
-                        self.agent_flow.teardown_sandbox()
-                    except Exception:
-                        logger.exception("teardown_sandbox failed")
-                else:
-                    try:
-                        sandbox.close()
-                    except Exception:
-                        logger.exception("sandbox close failed")
 
 
 # ---------------------------------------------------------------------------

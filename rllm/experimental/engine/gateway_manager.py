@@ -1,11 +1,19 @@
-"""GatewayManager: manages the rllm-model-gateway lifecycle for training.
+"""GatewayManager: manages the rllm-model-gateway lifecycle for training and eval.
 
 Supports two execution modes:
 - 'process': subprocess via ``rllm-model-gateway`` CLI (for verl / distributed)
-- 'thread': background thread via ``create_app`` + uvicorn (for tinker / single-machine)
+- 'thread': background thread via ``create_app`` + uvicorn (for tinker / single-machine / eval)
 
 For Tinker backends, an in-process handler is injected into the gateway
 (via ``local_handler``), avoiding the need for a separate HTTP backend server.
+
+Two start paths share the lifecycle:
+
+* :meth:`start(rollout_engine)` — training. Worker URLs come from a verl/tinker
+  rollout engine; per-mode sampling params are extracted from the engine.
+* :meth:`start_static(worker_urls)` — eval (and any other "I just have one or
+  more upstream URLs" use case). No engine, no sampling params. Construct via
+  :meth:`for_eval(upstream_url, model)` for the common single-URL case.
 """
 
 from __future__ import annotations
@@ -31,6 +39,13 @@ logger = logging.getLogger(__name__)
 _HEALTH_POLL_INTERVAL = 0.5
 _HEALTH_POLL_TIMEOUT = 30.0
 _TRACE_API_TIMEOUT = 600.0
+
+
+def _find_free_port() -> int:
+    """Ask the OS for a free TCP port on the loopback interface."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def _get_routable_ip() -> str:
@@ -100,6 +115,49 @@ class GatewayManager:
         self._train_sampling_params: dict[str, Any] = {}
         self._val_sampling_params: dict[str, Any] = {}
 
+    @classmethod
+    def for_eval(
+        cls,
+        upstream_url: str,
+        model: str,
+        *,
+        host: str = "127.0.0.1",
+        port: int | None = None,
+        db_path: str | None = None,
+    ) -> GatewayManager:
+        """Construct a thread-mode gateway pointing at a single static upstream URL.
+
+        Used by ``rllm eval``: the upstream is either the user's ``--base-url``
+        (vLLM endpoint, OpenAI-compatible server) or the URL of a LiteLLM proxy
+        started by ``EvalProxyManager`` (for OpenAI/Anthropic providers).
+
+        Caller is responsible for the lifecycle:
+
+            gw = GatewayManager.for_eval(upstream_url=url, model="gpt-4o")
+            gw.start_static([url])
+            try:
+                ...
+            finally:
+                gw.stop()
+        """
+        from omegaconf import OmegaConf
+
+        cfg = OmegaConf.create(
+            {
+                "rllm": {
+                    "gateway": {
+                        "host": host,
+                        "port": port if port is not None else _find_free_port(),
+                        "db_path": db_path,
+                    }
+                },
+                "model": {"name": model},
+            }
+        )
+        gw = cls(cfg, mode="thread")
+        gw._eval_upstream_urls = [upstream_url]  # consumed by start_static() default arg
+        return gw
+
     @property
     def gateway_url(self) -> str:
         return f"http://{self.host}:{self.port}"
@@ -150,6 +208,27 @@ class GatewayManager:
         # Extract per-mode sampling params from the rollout engine
         self._train_sampling_params = getattr(rollout_engine, "train_sampling_params", {})
         self._val_sampling_params = getattr(rollout_engine, "val_sampling_params", {})
+
+    def start_static(self, worker_urls: list[str] | None = None) -> None:
+        """Start the gateway and register a fixed list of upstream worker URLs.
+
+        For eval and any other "single static upstream" use case where no
+        rollout engine is available. If ``worker_urls`` is omitted, falls back
+        to the URL passed to :meth:`for_eval`.
+        """
+        if worker_urls is None:
+            worker_urls = getattr(self, "_eval_upstream_urls", None)
+        if not worker_urls:
+            raise ValueError("start_static requires at least one worker URL — pass worker_urls or construct via GatewayManager.for_eval(upstream_url=...).")
+
+        if self.mode == "process":
+            self._start_process()
+        else:
+            self._start_thread()
+
+        for url in worker_urls:
+            worker_id = self.client.add_worker(url=url)
+            logger.info("Registered worker %s -> %s", worker_id, url)
 
     def stop(self) -> None:
         """Terminate the gateway (process or thread)."""
