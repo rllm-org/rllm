@@ -1,7 +1,7 @@
 """rLLM tasks: benchmark directory loader.
 
 After PR 2 the heavy lifting moved up to ``rllm.types`` (Task data model)
-and ``rllm.experimental.engine.agent_flow_engine`` (driven by
+and ``rllm.engine.agentflow_engine`` (driven by
 ``rllm.eval._hooks.EvalHooks`` for the eval path). This package keeps
 the benchmark-directory loader and the dataset config schema.
 

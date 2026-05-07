@@ -23,9 +23,9 @@ import pytest
 from rllm_model_gateway.models import TraceRecord
 
 import rllm
+from rllm.engine.agentflow_engine import AgentFlowEngine
 from rllm.eval._hooks import EvalHooks
 from rllm.eval.types import EvalOutput
-from rllm.experimental.engine.agent_flow_engine import AgentFlowEngine
 from rllm.types import AgentConfig, Episode, Task
 
 # ---------------------------------------------------------------------------
@@ -195,7 +195,7 @@ def test_eval_engine_runs_hook_teardown_on_success_and_failure():
 
     class _RecordingHooks:
         def setup(self, task, agent_flow, uid):
-            from rllm.experimental.engine.agent_flow_engine import TaskContext
+            from rllm.engine.agentflow_engine import TaskContext
 
             teardown_calls.append(f"setup-{uid}")
             return TaskContext(

@@ -2,7 +2,7 @@
 
 After materialization, ``~/.rllm/datasets/<name>/`` contains everything
 needed to run the dataset through ``rllm eval`` /
-:class:`rllm.experimental.engine.agent_flow_engine.AgentFlowEngine`:
+:class:`rllm.engine.agentflow_engine.AgentFlowEngine`:
 
 ::
 

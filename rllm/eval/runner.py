@@ -13,13 +13,15 @@ traces, exactly as they do at training time.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from rllm.eval._hooks import EvalHooks
 from rllm.eval.results import EvalItem, EvalResult
-from rllm.experimental.engine.agent_flow_engine import AgentFlowEngine
-from rllm.experimental.engine.gateway_manager import EvalGatewayManager, GatewayManager
 from rllm.types import AgentFlow, Evaluator
 from rllm.workflows.workflow import TerminationReason
+
+if TYPE_CHECKING:
+    from rllm.experimental.engine.gateway_manager import GatewayManager
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,13 @@ async def run_dataset(
 
     Returns ``(EvalResult, list[Episode])``.
     """
+    # Lazy imports — both modules pull in `rllm.eval.types` at import time,
+    # which loads the parent `rllm.eval` package and creates a circular
+    # import (rllm.eval.__init__ → rllm.eval.runner → here). Importing
+    # them inside the function breaks the cycle.
+    from rllm.engine.agentflow_engine import AgentFlowEngine
+    from rllm.experimental.engine.gateway_manager import EvalGatewayManager
+
     # Cap concurrency by the agent flow's hint, if any. The engine's
     # internal semaphore enforces this on the rollout side.
     effective_concurrency = concurrency

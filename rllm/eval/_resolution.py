@@ -2,7 +2,7 @@
 
 These were originally part of the ``rllm.runner.Runner`` per-task driver
 that drove ``rllm eval`` before eval was unified onto
-:class:`rllm.experimental.engine.agent_flow_engine.AgentFlowEngine`.
+:class:`rllm.engine.agentflow_engine.AgentFlowEngine`.
 ``Runner`` is gone; the helpers live here because:
 
 * :class:`rllm.eval._hooks.EvalHooks` calls them on every rollout to set

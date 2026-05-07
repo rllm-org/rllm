@@ -2,7 +2,7 @@
 
 After PR 2, both task-per-directory and rows-with-shared-verifier shapes
 return the new :class:`rllm.types.Task` abstraction. The CLI then runs
-each task through :class:`rllm.experimental.engine.agent_flow_engine.AgentFlowEngine`
+each task through :class:`rllm.engine.agentflow_engine.AgentFlowEngine`
 (driven by :class:`rllm.eval._hooks.EvalHooks` at eval time) — same code
 path for both.
 
