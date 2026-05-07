@@ -32,6 +32,7 @@ class VerlTaskRunner(TaskRunner):
 
         print(f"VerlTaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
         OmegaConf.register_new_resolver("mul", lambda x, y: int(x) * int(y))
+        sync_config(config, hydra_overrides=hydra_overrides)
         OmegaConf.resolve(config)
         sync_config(config, hydra_overrides=hydra_overrides)
         config.trainer.use_legacy_worker_impl = "disable"

@@ -33,8 +33,8 @@ _REWARD_PATHS = [
 class ShellScriptEvaluator:
     """Run a verifier script inside the sandbox, parse the reward file.
 
-    Constructed by :func:`rllm.runner._resolve_evaluator` once the
-    sandbox is alive — the evaluator carries its sandbox reference
+    Constructed by :func:`rllm.eval._resolution._resolve_evaluator` once
+    the sandbox is alive — the evaluator carries its sandbox reference
     internally instead of fishing it out of episode artifacts.
     """
 

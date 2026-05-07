@@ -85,8 +85,6 @@ def build_train_config(
             "validation": {"group_size": group_size},
             "data": {"train_batch_size": batch_size},
             "rllm": {
-                # model_name is read by SdkWorkflowFactory to register
-                # the model in the LiteLLM proxy
                 "model_name": model_name,
                 "trainer": {
                     "total_epochs": total_epochs,
@@ -211,7 +209,7 @@ def _run_train(
         else:
             from pathlib import Path as _Path
 
-            from rllm.runner import build_dataset_evaluator
+            from rllm.eval._resolution import build_dataset_evaluator
 
             evaluator = build_dataset_evaluator(_Path(benchmark).resolve())
             if evaluator is None:

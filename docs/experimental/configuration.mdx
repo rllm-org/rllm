@@ -263,11 +263,12 @@ defaults:
 For detailed semantics of Verl-native fields, see the
 [Verl configuration docs](https://verl.readthedocs.io/en/latest/examples/config.html).
 
-In rLLM, the `verl.yaml` mainly does three things:
+In rLLM, the `verl.yaml` only does two things:
 
-1. Sets a few required overrides for unified-trainer compatibility
-2. Marks selected native fields as required (`???`) so they can be provided by user/config composition
-3. Forwards native Verl fields into `rllm.*` common config for backward compatibility
+1. Sets a small number of required overrides for unified-trainer compatibility (e.g. `actor_rollout_ref.rollout.mode=async`, `actor.use_rollout_log_probs=True`).
+2. Pins one rllm-namespaced default that diverges from verl's (`rllm.algorithm.rollout_correction.bypass_mode=False`).
+
+Everything else — propagating values between the verl-native namespace and the `rllm.*` namespace — happens at runtime via `sync_config` in `rllm/experimental/verl/utils.py`.
 
 #### Key fields in `verl.yaml`
 
@@ -275,30 +276,62 @@ In rLLM, the `verl.yaml` mainly does three things:
 |---|---|---|---|
 | `actor_rollout_ref.rollout.mode` | `str` | `async` | Required mode for unified Verl backend |
 | `actor_rollout_ref.rollout.agent.num_workers` | `int` | `0` | Agent worker count |
-| `actor_rollout_ref.rollout.val_kwargs.n` | `int` | `???` | Validation rollout count |
+| `actor_rollout_ref.rollout.calculate_log_probs` | `bool` | `True` | Compute log-probs during rollout (needed for rollout-correction) |
+| `actor_rollout_ref.rollout.val_kwargs.do_sample` | `bool` | `True` | Use sampling during validation |
+| `actor_rollout_ref.actor.use_rollout_log_probs` | `bool` | `True` | Reuse rollout log-probs in the actor (bypass-mode default) |
 | `data.gen_batch_size` | `int` | `${mul:...}` | Generated batch size |
 | `data.return_multi_modal_inputs` | `bool` | `False` | Include multimodal inputs in data path |
-| `algorithm.adv_estimator` | `str` | `???` | Native algorithm estimator |
-| `algorithm.norm_adv_by_std_in_grpo` | `bool` | `???` | Native GRPO normalization |
-| `trainer.total_epochs` | `int` | `???` | Native epoch count |
-| `trainer.total_training_steps` | `int` | `???` | Native total-step budget |
-| `trainer.logger` | `list[str]` | `???` | Native logger list |
-| `trainer.project_name` | `str` | `???` | Project name |
-| `trainer.experiment_name` | `str` | `???` | Experiment name |
-| `trainer.test_freq` | `int` | `???` | Validation cadence |
-| `trainer.save_freq` | `int` | `???` | Save cadence |
-| `trainer.val_before_train` | `bool` | `???` | Validate before training |
-| `trainer.val_only` | `bool` | `???` | Validation-only mode |
+| `rllm.backend` | `str` | `verl` | Backend selector |
+| `rllm.algorithm.rollout_correction.bypass_mode` | `bool` | `False` | Verl-side default differs from rLLM's `null`; pinned here |
 
-#### Forwarding to common `rllm.*`
+All other shared knobs (`algorithm.adv_estimator`, `actor.kl_loss_coef`, `trainer.total_epochs`, …) live in their natural locations — verl-native keys come from `ppo_trainer.yaml`, rllm-namespace keys from `base.yaml` — and are reconciled at startup by `sync_config`.
 
-Verl backend forwards the following:
+#### Bidirectional config sync
 
-- `rllm.algorithm.{adv_estimator,norm_adv_by_std_in_grpo}`
-- `rllm.rollout.{n,n_val}`
-- `rllm.trainer.{total_epochs,total_batches,logger,project_name,experiment_name,test_freq,save_freq,val_before_train,val_only}`
+For a fixed table of "shared keys" (the same value, different paths in the two namespaces), `sync_config` mirrors the value between the verl-native side and the `rllm.*` side at trainer startup. New configs should use the `rllm.*` path. Existing Verl-style CLI overrides still work for backward compatibility, but they log a deprecation warning.
 
-It also extends Hydra search path with Verl configs:
+Per-key precedence:
+
+1. `rllm.*` value explicitly set on the Hydra CLI
+2. Verl-native value explicitly set on the Hydra CLI
+3. `rllm.*` value from `base.yaml` (when non-`null`)
+4. Verl-native value from `ppo_trainer.yaml`
+
+<Warning>
+  Verl-native shared-key CLI overrides are deprecated. If you set a shared key on the Verl-native side, rLLM will still sync it for now and log a warning. If both sides set conflicting values, the `rllm.*` value wins and rLLM logs a conflict warning. Passing an extra yaml/config group to override shared keys is not a supported migration path; pass shared values as individual Hydra overrides instead.
+</Warning>
+
+The shared-keys table:
+
+| Verl-native path | `rllm.*` path |
+|---|---|
+| `algorithm.adv_estimator` | `rllm.algorithm.adv_estimator` |
+| `algorithm.norm_adv_by_std_in_grpo` | `rllm.algorithm.norm_adv_by_std_in_grpo` |
+| `algorithm.rollout_correction.bypass_mode` | `rllm.algorithm.rollout_correction.bypass_mode` |
+| `algorithm.rollout_correction.rollout_is` | `rllm.algorithm.rollout_correction.tis_mode` |
+| `algorithm.rollout_correction.rollout_is_threshold` | `rllm.algorithm.rollout_correction.tis_cap` |
+| `actor_rollout_ref.actor.kl_loss_coef` | `rllm.algorithm.kl_beta` |
+| `actor_rollout_ref.actor.policy_loss.loss_mode` | `rllm.algorithm.loss_fn` |
+| `actor_rollout_ref.actor.loss_agg_mode` | `rllm.algorithm.loss_agg_mode` |
+| `actor_rollout_ref.actor.clip_ratio_high` | `rllm.algorithm.eps_clip_high` |
+| `actor_rollout_ref.rollout.n` | `rllm.rollout.n` |
+| `actor_rollout_ref.rollout.val_kwargs.n` | `rllm.rollout.n_val` |
+| `trainer.total_epochs` | `rllm.trainer.total_epochs` |
+| `trainer.total_training_steps` | `rllm.trainer.total_batches` |
+| `trainer.logger` | `rllm.trainer.logger` |
+| `trainer.project_name` | `rllm.trainer.project_name` |
+| `trainer.experiment_name` | `rllm.trainer.experiment_name` |
+| `trainer.test_freq` | `rllm.trainer.test_freq` |
+| `trainer.save_freq` | `rllm.trainer.save_freq` |
+| `trainer.val_before_train` | `rllm.trainer.val_before_train` |
+| `trainer.val_only` | `rllm.trainer.val_only` |
+
+Two extra rules sit alongside this table:
+
+- **`actor.use_kl_loss` is derived** from `kl_beta`: if you do not explicitly set `actor_rollout_ref.actor.use_kl_loss` on the CLI, `sync_config` sets it to `(kl_beta > 0)`. Setting `rllm.algorithm.kl_beta` also mirrors into `actor_rollout_ref.actor.kl_loss_coef`. Setting the Verl-native coefficient still backfills `rllm.algorithm.kl_beta` for now, with a deprecation warning.
+- **`clip_ratio` family.** `rllm.algorithm.eps_clip` mirrors to `actor_rollout_ref.actor.clip_ratio` and `actor_rollout_ref.actor.clip_ratio_low`. If `rllm.algorithm.eps_clip_high` is set, it mirrors to `actor_rollout_ref.actor.clip_ratio_high`; otherwise the upper bound mirrors `eps_clip`. Verl-native `clip_ratio`, `clip_ratio_low`, and `clip_ratio_high` still backfill the rLLM values for now when the rLLM side is not set, with deprecation warnings.
+
+It also extends the Hydra search path so `/ppo_trainer` resolves:
 
 ```yaml
 rllm:
@@ -308,71 +341,49 @@ rllm:
 
 ## Config forwarding mechanism
 
-The rLLM configuration system supports a **forwarding mechanism** that allows users familiar with a specific backend (Tinker or Verl) to specify configurations in their native format. These backend-specific configs are then automatically forwarded to the corresponding rLLM configs for backward compatibility.
+The Verl backend uses bidirectional sync (described above): for any shared key, the preferred path is `rllm.*`, while legacy Verl-native shared-key CLI overrides still work with deprecation warnings. The Tinker backend does its own one-way forwarding from native group-size settings into `rllm.rollout.{n,n_val}` (see "Tinker backend" above).
 
-### How it works
+### Example: set the preferred shared knob
 
-Backend-specific config files can override rLLM settings using Hydra's `oc.select` resolver. This mechanism:
+Set `adv_estimator` on the `rllm.*` side:
 
-1. First checks if a backend-specific config value is provided
-2. If provided, uses that value to populate the rLLM config
-3. If not provided, falls back to the rLLM default value
-
-### Example: Verl backend forwarding
-
-In `rllm/experimental/config/rllm/backend/verl.yaml`, Verl's native trainer configuration is forwarded to rLLM:
-
-```yaml
-# In Verl's native config format
-trainer:
-  total_epochs: 15
-  project_name: 'my-verl-project'
-  experiment_name: 'verl-experiment-1'
-
-# These are automatically forwarded to rLLM configs
-rllm:
-  trainer:
-    total_epochs: ${oc.select:trainer.total_epochs, 10}  # Uses 15 from above
-    project_name: ${oc.select:trainer.project_name, 'rllm-training'}  # Uses 'my-verl-project'
-    experiment_name: ${oc.select:trainer.experiment_name, 'default'}  # Uses 'verl-experiment-1'
+```bash
+python train.py rllm/backend=verl rllm.algorithm.adv_estimator=rloo
 ```
 
-In this example:
-- Users can specify `trainer.total_epochs` in Verl's native format
-- The value is automatically forwarded to `rllm.trainer.total_epochs`
-- If the Verl config is not specified, the rLLM default (10) is used
+A legacy Verl-native override still works for now, but logs a deprecation warning:
 
-### Example: Algorithm configuration forwarding
+```bash
+python train.py rllm/backend=verl algorithm.adv_estimator=rloo
+```
 
-Similarly, algorithm configurations can be forwarded:
+If both are set and conflict, the `rllm.*` value wins.
 
-```yaml
-# Backend-specific algorithm config
-algorithm:
-  adv_estimator: rloo
-  norm_adv_by_std_in_grpo: false
+### Example: KL-in-loss
 
-# Forwarded to rLLM
-rllm:
-  algorithm:
-    adv_estimator: ${oc.select:algorithm.adv_estimator, grpo}  # Uses 'rloo'
-    norm_adv_by_std_in_grpo: ${oc.select:algorithm.norm_adv_by_std_in_grpo, true}  # Uses false
+Setting `rllm.algorithm.kl_beta=0.01` is enough — `actor.kl_loss_coef` is mirrored and `actor.use_kl_loss` is auto-set to `True`:
+
+```bash
+python train.py rllm/backend=verl rllm.algorithm.kl_beta=0.01
+```
+
+The legacy Verl-native equivalent still works for now, but logs a deprecation warning:
+
+```bash
+python train.py rllm/backend=verl actor_rollout_ref.actor.kl_loss_coef=0.01
 ```
 
 ### Benefits
 
-This forwarding mechanism provides several benefits:
-
-- **Backward compatibility**: Users can continue using their familiar backend-specific config formats
-- **Gradual migration**: Projects can migrate to rLLM configs incrementally
-- **Flexibility**: Supports both backend-specific and rLLM-native configuration styles
-- **Consistency**: Ensures backend configs and rLLM configs stay synchronized
+- **Backward compatibility.** Existing scripts that override on the verl-native side continue to work while logging deprecation warnings; the rllm-side value is mirrored automatically.
+- **Backend portability.** New scripts can target the backend-agnostic `rllm.*` namespace and run on either Tinker or Verl with the same flags.
+- **Single source of truth at runtime.** No `oc.select` interpolation in the yaml; the merged config that goes to verl's workers and rLLM's trainer holds the same values on both sides.
 
 ## Configuration best practices
 
 1. **Use rLLM configs for new projects**: If starting from scratch, use the rLLM backend-agnostic configs for better portability across backends.
 
-2. **Leverage forwarding for migration**: If migrating from a specific backend, use the forwarding mechanism to maintain existing configs while gradually adopting rLLM conventions.
+2. **Use rLLM paths for shared knobs**: Existing Verl-native shared-key overrides still work for compatibility, but new configs should use `rllm.*`.
 
 3. **Check the unified config**: The `unified.yaml` file shows how all configs are combined and is useful for debugging configuration issues.
 

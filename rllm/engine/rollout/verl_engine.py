@@ -1,5 +1,6 @@
 import uuid
 
+import torch
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager, AsyncLLMServerManager
 from verl.workers.rollout.replica import TokenOutput
 
@@ -68,10 +69,13 @@ class VerlEngine(RolloutEngine):
 
         if any(msg.get("images", None) is not None and msg["role"] == "user" for msg in messages) and self.processor is not None:
             image_data = self.chat_parser.process_image_data(messages)  # list[PIL.Image.Image]
-            model_inputs = self.processor(text=[prompt], images=image_data)
+            model_inputs = self.processor(text=[prompt], images=image_data, return_tensors="pt")
             prompt_ids = model_inputs.pop("input_ids")[0]  # list[int]
             model_inputs.pop("attention_mask")
             multi_modal_inputs = dict(model_inputs)
+            grid_thw = multi_modal_inputs.get("image_grid_thw")
+            if grid_thw is not None:
+                multi_modal_inputs["images_seqlens"] = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0])
         else:
             image_data = None
             multi_modal_inputs = None

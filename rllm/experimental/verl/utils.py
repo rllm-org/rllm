@@ -59,11 +59,12 @@ _SHARED_KEYS: list[tuple[str, str]] = [
     ("trainer.val_before_train", "rllm.trainer.val_before_train"),
     ("trainer.val_only", "rllm.trainer.val_only"),
     ("trainer.total_epochs", "rllm.trainer.total_epochs"),
-    ("trainer.total_training_steps", "rllm.trainer.total_batches"),
     ("trainer.logger", "rllm.trainer.logger"),
     ("trainer.project_name", "rllm.trainer.project_name"),
     ("trainer.experiment_name", "rllm.trainer.experiment_name"),
 ]
+
+_TOTAL_TRAINING_STEPS_KEY: tuple[str, str] = ("trainer.total_training_steps", "rllm.trainer.total_batches")
 
 
 def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) -> None:
@@ -71,7 +72,9 @@ def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) ->
 
     Precedence per shared key: rllm CLI explicit > verl CLI explicit > rllm
     yaml default > verl yaml default. ``None`` rllm values are treated as
-    "no rllm default", letting verl's yaml default stand.
+    "no rllm default", letting verl's yaml default stand. Verl-native shared
+    CLI overrides still work for backward compatibility, but warn because
+    shared keys should be set through their rllm.* paths going forward.
 
     ``hydra_overrides`` is the list of CLI overrides captured in the main
     Hydra-decorated process (``HydraConfig.get().overrides.task``). It must be
@@ -82,22 +85,118 @@ def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) ->
     """
     explicit = _explicit_override_keys(hydra_overrides)
 
-    for verl_path, rllm_path in _SHARED_KEYS:
+    def warn_verl_override(verl_path: str, rllm_path: str, *, conflict: bool = False) -> None:
+        if conflict:
+            logger.warning(
+                "Verl-native shared config %s conflicts with %s; using %s. Setting shared rLLM/verl knobs through Verl-native paths is deprecated; use %s=... instead.",
+                verl_path,
+                rllm_path,
+                rllm_path,
+                rllm_path,
+            )
+            return
+        logger.warning(
+            "Verl-native shared config %s is deprecated and will be removed in a future release; use %s=... instead.",
+            verl_path,
+            rllm_path,
+        )
+
+    def maybe_warn_verl_override(verl_path: str, rllm_path: str, *, conflict: bool = False) -> None:
+        if verl_path in explicit:
+            warn_verl_override(verl_path, rllm_path, conflict=conflict)
+
+    def plain(value: Any) -> Any:
+        if OmegaConf.is_config(value):
+            return OmegaConf.to_container(value, resolve=False)
+        return value
+
+    def same(left: Any, right: Any) -> bool:
+        return plain(left) == plain(right)
+
+    def sync_pair(verl_path: str, rllm_path: str) -> None:
         if rllm_path in explicit:
-            OmegaConf.update(config, verl_path, OmegaConf.select(config, rllm_path), merge=False)
+            rllm_value = OmegaConf.select(config, rllm_path)
+            verl_value = OmegaConf.select(config, verl_path)
+            maybe_warn_verl_override(verl_path, rllm_path, conflict=not same(verl_value, rllm_value))
+            OmegaConf.update(config, verl_path, rllm_value, merge=False)
         elif verl_path in explicit:
+            maybe_warn_verl_override(verl_path, rllm_path)
             OmegaConf.update(config, rllm_path, OmegaConf.select(config, verl_path), merge=False)
         else:
             value = OmegaConf.select(config, rllm_path)
             if value is None:
-                continue
+                return
             OmegaConf.update(config, verl_path, value, merge=False)
+
+    def sync_total_training_steps() -> None:
+        verl_path, rllm_path = _TOTAL_TRAINING_STEPS_KEY
+
+        def to_verl(value: int | None) -> int | None:
+            return None if value is None or value <= 0 else value
+
+        def to_rllm(value: int | None) -> int:
+            return -1 if value is None else value
+
+        if rllm_path in explicit:
+            rllm_value = OmegaConf.select(config, rllm_path)
+            verl_value = OmegaConf.select(config, verl_path)
+            rllm_as_verl = to_verl(rllm_value)
+            maybe_warn_verl_override(verl_path, rllm_path, conflict=not same(verl_value, rllm_as_verl))
+            OmegaConf.update(config, verl_path, rllm_as_verl, merge=False)
+        elif verl_path in explicit:
+            maybe_warn_verl_override(verl_path, rllm_path)
+            OmegaConf.update(config, rllm_path, to_rllm(OmegaConf.select(config, verl_path)), merge=False)
+        else:
+            OmegaConf.update(config, verl_path, to_verl(OmegaConf.select(config, rllm_path)), merge=False)
+
+    def sync_clip_ratio() -> None:
+        eps_clip_path = "rllm.algorithm.eps_clip"
+        clip_ratio_path = "actor_rollout_ref.actor.clip_ratio"
+        clip_ratio_low_path = "actor_rollout_ref.actor.clip_ratio_low"
+
+        if eps_clip_path in explicit:
+            eps_clip = OmegaConf.select(config, eps_clip_path)
+            for verl_path in (clip_ratio_low_path, clip_ratio_path):
+                maybe_warn_verl_override(
+                    verl_path,
+                    eps_clip_path,
+                    conflict=not same(OmegaConf.select(config, verl_path), eps_clip),
+                )
+            OmegaConf.update(config, clip_ratio_path, eps_clip, merge=False)
+            OmegaConf.update(config, clip_ratio_low_path, eps_clip, merge=False)
+        elif clip_ratio_low_path in explicit:
+            maybe_warn_verl_override(clip_ratio_low_path, eps_clip_path)
+            if clip_ratio_path in explicit:
+                maybe_warn_verl_override(clip_ratio_path, eps_clip_path)
+            OmegaConf.update(config, eps_clip_path, OmegaConf.select(config, clip_ratio_low_path), merge=False)
+        elif clip_ratio_path in explicit:
+            maybe_warn_verl_override(clip_ratio_path, eps_clip_path)
+            OmegaConf.update(config, eps_clip_path, OmegaConf.select(config, clip_ratio_path), merge=False)
+        else:
+            eps_clip = OmegaConf.select(config, eps_clip_path)
+            if eps_clip is not None:
+                OmegaConf.update(config, clip_ratio_path, eps_clip, merge=False)
+                OmegaConf.update(config, clip_ratio_low_path, eps_clip, merge=False)
+
+        eps_clip = OmegaConf.select(config, eps_clip_path)
+        eps_clip_high = OmegaConf.select(config, "rllm.algorithm.eps_clip_high")
+        if eps_clip_high is None:
+            eps_clip_high = eps_clip
+        if eps_clip_high is not None:
+            OmegaConf.update(config, "actor_rollout_ref.actor.clip_ratio_high", eps_clip_high, merge=False)
+
+    for verl_path, rllm_path in _SHARED_KEYS:
+        sync_pair(verl_path, rllm_path)
+
+    sync_total_training_steps()
 
     # Derived verl-only keys
     if "actor_rollout_ref.actor.use_kl_loss" not in explicit:
-        kl_beta = config.rllm.algorithm.get("kl_beta", 0.0)
+        kl_beta = OmegaConf.select(config, "rllm.algorithm.kl_beta")
+        if kl_beta is None:
+            kl_beta = 0.0
         OmegaConf.update(config, "actor_rollout_ref.actor.use_kl_loss", kl_beta > 0, merge=False)
-
+        
     # Router replay: derive verl's rollout-side flag from the rllm mode (R3 records at rollout).
     router_replay_mode = config.rllm.algorithm.get("router_replay", "disabled")
     if router_replay_mode == "R3":
@@ -105,14 +204,7 @@ def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) ->
 
     # clip_ratio family: verl uses clip_ratio_{low,high} when set, else falls back to clip_ratio.
     # Mirror the effective low bound to/from rllm.algorithm.eps_clip.
-    if "actor_rollout_ref.actor.clip_ratio_low" in explicit:
-        OmegaConf.update(config, "rllm.algorithm.eps_clip", config.actor_rollout_ref.actor.clip_ratio_low, merge=False)
-    elif "actor_rollout_ref.actor.clip_ratio" in explicit:
-        OmegaConf.update(config, "rllm.algorithm.eps_clip", config.actor_rollout_ref.actor.clip_ratio, merge=False)
-    else:
-        eps_clip = config.rllm.algorithm.get("eps_clip", None)
-        if eps_clip is not None:
-            OmegaConf.update(config, "actor_rollout_ref.actor.clip_ratio", eps_clip, merge=False)
+    sync_clip_ratio()
 
 
 def save_checkpoint(

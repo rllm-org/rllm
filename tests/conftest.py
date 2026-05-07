@@ -84,15 +84,6 @@ if "openai" not in sys.modules:
         openai.OpenAI = OpenAI
         sys.modules["openai"] = openai
 
-        # Stub openai._models for rllm.sdk.chat.openai imports
-        openai_models = types.ModuleType("openai._models")
-
-        class _FinalRequestOptions:  # noqa: D401
-            pass
-
-        openai_models.FinalRequestOptions = _FinalRequestOptions
-        sys.modules["openai._models"] = openai_models
-
 
 # Many modules are optional / heavy (torch, transformers, ray, etc.).
 # For lightweight unit tests here, stub them out so imports succeed.

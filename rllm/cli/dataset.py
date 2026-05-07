@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import os
+
 import click
 from rich import box
 from rich.console import Console
@@ -217,8 +219,14 @@ def info(name: str):
         click.echo(f"  Eval split:     {catalog_entry.get('eval_split', 'N/A')}")
 
     if ds_info:
+        splits = ds_info.get("splits", {})
+        split_paths = [DatasetRegistry._resolve_path(s["path"]) for s in splits.values() if s.get("path")]
+        if split_paths:
+            location = os.path.commonpath(split_paths) if len(split_paths) > 1 else os.path.dirname(split_paths[0])
+            click.echo(f"  Location:       {location}")
+
         click.echo("\n  Local splits:")
-        for split, split_info in ds_info.get("splits", {}).items():
+        for split, split_info in splits.items():
             num = split_info.get("num_examples", "?")
             fields = split_info.get("fields", [])
             click.echo(f"    {split}: {num} examples")

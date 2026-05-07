@@ -171,7 +171,7 @@ class UnifiedTrainer:
         remote_runtime_cfg = self.rllm_config.get("remote_runtime", {})
 
         if agent_flow is not None and evaluator is not None:
-            from rllm.experimental.engine.agent_flow_engine import AgentFlowEngine
+            from rllm.engine.agentflow_engine import AgentFlowEngine
             from rllm.experimental.engine.gateway_manager import GatewayManager
 
             gateway_mode = "process" if kwargs.get("backend_name") == "verl" else "thread"
@@ -732,7 +732,11 @@ class UnifiedTrainer:
 
             for episode, data_source in zip(val_episodes, data_sources, strict=True):
                 for key, value in episode.metrics.items():
-                    workflow_metrics_by_source[data_source][key].append(float(value))
+                    # episode.metrics can contain non-numeric values -- skip in the workflow metrics.
+                    try:
+                        workflow_metrics_by_source[data_source][key].append(float(value))
+                    except (TypeError, ValueError):
+                        continue
 
             for key, value in reward_metrics.items():
                 val_metrics[f"val/{key}"].append(value)

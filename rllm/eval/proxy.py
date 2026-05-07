@@ -1,9 +1,5 @@
 """EvalProxyManager: LiteLLM proxy for external providers (OpenAI, etc.).
 
-Extends ``ProxyManager`` to generate a LiteLLM configuration that routes
-requests to an external provider, following the same pattern as
-``VerlProxyManager`` and ``TinkerProxyManager``.
-
 The caller controls the proxy lifecycle::
 
     pm = EvalProxyManager(provider="openai", model_name="gpt-4o", api_key="sk-...")
@@ -11,6 +7,10 @@ The caller controls the proxy lifecycle::
     base_url = pm.get_proxy_url()  # http://127.0.0.1:4000/v1
     # ... run eval ...
     pm.shutdown_proxy()
+
+This proxy is the bridge to commercial providers during ``rllm eval``. For
+training and for vLLM-backed eval, requests go through ``rllm-model-gateway``
+instead.
 """
 
 from __future__ import annotations
@@ -26,13 +26,84 @@ import time
 from typing import Any
 
 import requests
-
-from rllm.sdk.proxy.proxy_manager import ProxyManager
+import yaml
 
 logger = logging.getLogger(__name__)
 
 
-class EvalProxyManager(ProxyManager):
+class _ProxyManagerBase:
+    """LiteLLM proxy lifecycle helpers shared between subclasses."""
+
+    def __init__(
+        self,
+        proxy_host: str = "127.0.0.1",
+        proxy_port: int = 4000,
+        admin_token: str | None = None,
+    ) -> None:
+        self.proxy_host = proxy_host
+        self.proxy_port = proxy_port
+        self.admin_token = admin_token
+        self._proxy_process: subprocess.Popen | None = None
+
+    def _snapshot_config_to_file(self, config: dict[str, Any], directory: str | None = None) -> str | None:
+        base_dir = directory or os.getenv("RLLM_PROXY_CONFIG_DIR") or os.getcwd()
+        os.makedirs(base_dir, exist_ok=True)
+        snapshot_path = os.path.join(base_dir, "litellm_proxy_config_autogen.yaml")
+        with open(snapshot_path, "w") as f:
+            yaml.dump(config, f, default_flow_style=False)
+        logger.info("LiteLLM config snapshot written to %s", snapshot_path)
+        return snapshot_path
+
+    def reload_proxy_config(
+        self,
+        config: dict[str, Any],
+        reload_url: str | None = None,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        url = reload_url or f"http://{self.proxy_host}:{self.proxy_port}/admin/reload"
+        if config is None:
+            raise RuntimeError("LiteLLM config must be provided when reloading.")
+
+        payload = {"config_yaml": yaml.dump(config, default_flow_style=False)}
+
+        headers = {"Content-Type": "application/json"}
+        if self.admin_token:
+            token = self.admin_token if self.admin_token.lower().startswith("bearer ") else f"Bearer {self.admin_token}"
+            headers["Authorization"] = token
+
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            resp.raise_for_status()
+        except requests.exceptions.RequestException as exc:
+            raise RuntimeError(f"Failed to reload LiteLLM proxy via {url}: {exc}") from exc
+
+        try:
+            return resp.json()
+        except ValueError:
+            return {"status": "ok", "raw": resp.text}
+
+    def get_proxy_url(self, include_v1: bool = True) -> str:
+        base = f"http://{self.proxy_host}:{self.proxy_port}"
+        return f"{base}/v1" if include_v1 else base
+
+    def shutdown_proxy(self) -> None:
+        if self._proxy_process is None:
+            return
+
+        logger.info("Shutting down proxy subprocess...")
+        self._proxy_process.terminate()
+        try:
+            self._proxy_process.wait(timeout=5.0)
+            logger.info("Proxy shutdown gracefully")
+        except subprocess.TimeoutExpired:
+            logger.warning("Proxy did not terminate gracefully, forcing kill")
+            self._proxy_process.kill()
+            self._proxy_process.wait()
+
+        self._proxy_process = None
+
+
+class EvalProxyManager(_ProxyManagerBase):
     """Manages a LiteLLM proxy that routes to an external provider."""
 
     def __init__(
@@ -50,7 +121,6 @@ class EvalProxyManager(ProxyManager):
         self._stderr_path: str | None = None
 
     def _generate_litellm_config(self) -> dict[str, Any]:
-        """Generate LiteLLM configuration for the configured provider."""
         from rllm.eval.config import get_provider_info
 
         # Use the registry's litellm_prefix (e.g. "together_ai" for "together")
@@ -75,11 +145,9 @@ class EvalProxyManager(ProxyManager):
         }
 
     def build_proxy_config(self) -> dict[str, Any]:
-        """Return a fresh LiteLLM configuration."""
         return self._generate_litellm_config()
 
     def start_proxy_subprocess(self, config: dict[str, Any], **kwargs) -> str:
-        """Start LiteLLM proxy, capturing stderr for diagnostics on failure."""
         if self._proxy_process is not None:
             logger.warning("Proxy subprocess already running")
             return ""
@@ -91,7 +159,7 @@ class EvalProxyManager(ProxyManager):
         cmd = [
             sys.executable,
             "-m",
-            "rllm.sdk.proxy.litellm_server",
+            "rllm.eval._litellm_server",
             "--host",
             self.proxy_host,
             "--port",
@@ -144,7 +212,6 @@ class EvalProxyManager(ProxyManager):
         return snapshot_path
 
     def _wait_for_proxy(self, timeout: float = 30.0) -> None:
-        """Wait for proxy to start, with stderr-aware error reporting."""
         if self._proxy_process is None:
             raise RuntimeError("Proxy process not started")
 
@@ -170,7 +237,6 @@ class EvalProxyManager(ProxyManager):
         raise TimeoutError(f"Proxy server did not start within {timeout}s")
 
     def _read_stderr_tail(self, max_lines: int = 30) -> str:
-        """Read the last N lines from the stderr log file."""
         if not self._stderr_path or not os.path.exists(self._stderr_path):
             return ""
         try:
@@ -182,13 +248,11 @@ class EvalProxyManager(ProxyManager):
             return ""
 
     def _report_proxy_failure(self) -> None:
-        """Print stderr output to help diagnose proxy startup failures."""
         stderr_output = self._read_stderr_tail()
         if stderr_output:
             logger.error("Proxy stderr output:\n%s", stderr_output)
 
     def shutdown_proxy(self) -> None:
-        """Shutdown proxy and clean up stderr log."""
         super().shutdown_proxy()
         if self._stderr_path:
             try:

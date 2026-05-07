@@ -256,7 +256,7 @@ def _run_eval(
                     agent.max_concurrent = agent_metadata["sandbox_concurrency"]
 
         # Resolve evaluator: explicit --evaluator > catalog auto-resolve >
-        # catalog reward_fn > None. When ``evaluator`` is None the Runner
+        # catalog reward_fn > None. When ``evaluator`` is None ``EvalHooks``
         # falls back to per-task verifier resolution (works only when each
         # Task has its verifier config — i.e. materialised dir or harbor
         # task.toml).
@@ -440,10 +440,12 @@ def _run_eval(
             if _ui_callback is not None:
                 _ui_callback(episode)
 
-    # Single execution path: every Task goes through Runner. ``evaluator``
-    # (when set) overrides per-task verifier resolution; otherwise the
-    # Runner reads each Task's [verifier] config (materialised dataset
-    # dirs and harbor task dirs both supply this).
+    # Single execution path: every Task goes through ``AgentFlowEngine``
+    # via ``EvalHooks``. The engine fronts every LLM call with the rLLM
+    # model gateway (so flows that ``return None`` get their Steps
+    # populated from gateway-captured traces, exactly as in training).
+    # ``evaluator`` (when set) overrides per-task verifier resolution;
+    # otherwise ``EvalHooks`` reads each Task's [verifier] config.
     from rllm.eval.runner import run_dataset
 
     result, episodes = asyncio.run(
