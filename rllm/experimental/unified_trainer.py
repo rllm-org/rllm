@@ -732,7 +732,11 @@ class UnifiedTrainer:
 
             for episode, data_source in zip(val_episodes, data_sources, strict=True):
                 for key, value in episode.metrics.items():
-                    workflow_metrics_by_source[data_source][key].append(float(value))
+                    # episode.metrics can contain non-numeric values -- skip in the workflow metrics.
+                    try:
+                        workflow_metrics_by_source[data_source][key].append(float(value))
+                    except (TypeError, ValueError):
+                        continue
 
             for key, value in reward_metrics.items():
                 val_metrics[f"val/{key}"].append(value)
