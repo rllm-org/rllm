@@ -9,7 +9,7 @@ import asyncio
 import logging
 import uuid
 
-from rllm.experimental.engine.base import FlowEngine
+from rllm.engine.base import FlowEngine
 from rllm.experimental.engine.gateway_manager import GatewayManager
 from rllm.experimental.engine.remote_runtime.protocol import (
     RemoteAgentRuntime,

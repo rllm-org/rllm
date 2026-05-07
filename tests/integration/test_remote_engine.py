@@ -13,7 +13,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from rllm.experimental.engine.gateway_manager import GatewayManager
-from rllm.experimental.engine.remote_agent_flow_engine import RemoteAgentFlowEngine
+from rllm.experimental.engine.remote_agentflow_engine import RemoteAgentFlowEngine
 from rllm.experimental.engine.remote_runtime.agentcore_runtime import AgentCoreRuntime
 from rllm.experimental.engine.remote_runtime.protocol import RemoteRuntimeConfig
 from rllm.workflows.workflow import TerminationReason

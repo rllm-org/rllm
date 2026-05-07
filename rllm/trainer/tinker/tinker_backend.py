@@ -34,7 +34,7 @@ from rllm.types import Episode
 if TYPE_CHECKING:
     from transformers.tokenization_utils import PreTrainedTokenizer
 
-    from rllm.experimental.engine.base import FlowEngine
+    from rllm.engine.base import FlowEngine
     from rllm.experimental.unified_trainer import TrainerState
 
 logger = logging.getLogger(__name__)

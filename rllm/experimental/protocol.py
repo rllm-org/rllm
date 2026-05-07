@@ -20,7 +20,7 @@ from rllm.experimental.rollout import RolloutEngine
 from rllm.types import Episode
 
 if TYPE_CHECKING:
-    from rllm.experimental.engine.base import FlowEngine
+    from rllm.engine.base import FlowEngine
     from rllm.experimental.unified_trainer import TrainerState
 
 TDataset = TypeVar("TDataset", bound=Iterable)  # backend-specific dataset type

@@ -1,8 +1,9 @@
 """Common base for flow engines.
 
-A flow engine takes a list of task dicts and returns a list of training-ready
-``Episode`` objects.  The three concrete engines in this module
-(``WorkflowEngine``, ``AgentFlowEngine``, ``RemoteAgentFlowEngine``) differ in
+A flow engine takes a list of tasks (raw dicts or :class:`Task` objects) and
+returns a list of training-ready ``Episode`` objects.  The concrete engines —
+``AgentFlowEngine`` (``rllm.engine.agentflow_engine``), ``WorkflowEngine`` and
+``RemoteAgentFlowEngine`` (under ``rllm.experimental.engine``) — differ in
 *how* they execute a single task.
 
 This module factors that orchestration into ``FlowEngine`` so subclasses only
@@ -17,7 +18,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from tqdm import tqdm
 
@@ -65,7 +66,7 @@ class FlowEngine(ABC):
 
     async def execute_tasks(
         self,
-        tasks: list[dict],
+        tasks: list[Any],
         task_ids: list[str] | None = None,
         is_validation: bool = False,
         **kwargs,
@@ -73,7 +74,9 @@ class FlowEngine(ABC):
         """Run all tasks concurrently and return episodes in input order.
 
         Args:
-            tasks: Task dicts to process.
+            tasks: Tasks to process.  Subclasses decide what each element is:
+                workflow/remote engines pass plain ``dict`` task specs;
+                ``AgentFlowEngine`` accepts either ``dict`` or :class:`Task`.
             task_ids: Optional parallel list of task IDs; UUIDs are generated
                 when omitted.  Repeated IDs become rollout indices for the same
                 task (i.e. multiple rollouts of the same prompt).
@@ -158,7 +161,7 @@ class FlowEngine(ABC):
     @abstractmethod
     async def process_task_with_retry(
         self,
-        task: dict,
+        task: Any,
         task_id: str,
         rollout_idx: int,
         result_idx: int,

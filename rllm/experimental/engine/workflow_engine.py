@@ -6,7 +6,7 @@ from collections.abc import Callable, Coroutine
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
-from rllm.experimental.engine.base import FlowEngine
+from rllm.engine.base import FlowEngine
 from rllm.experimental.rollout import RolloutEngine
 from rllm.types import Episode
 from rllm.workflows.store import Store

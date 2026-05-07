@@ -189,7 +189,7 @@ class UnifiedTrainer:
             )
         elif remote_runtime_cfg.get("enabled", False):
             from rllm.experimental.engine.gateway_manager import GatewayManager
-            from rllm.experimental.engine.remote_agent_flow_engine import (
+            from rllm.experimental.engine.remote_agentflow_engine import (
                 RemoteAgentFlowEngine,
             )
             from rllm.experimental.engine.remote_runtime import (

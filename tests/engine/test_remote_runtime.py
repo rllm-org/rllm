@@ -7,7 +7,7 @@ from omegaconf import OmegaConf
 
 from rllm.agents.agent import Step, Trajectory
 from rllm.experimental.engine.gateway_manager import GatewayManager, _get_routable_ip
-from rllm.experimental.engine.remote_agent_flow_engine import _build_episode
+from rllm.experimental.engine.remote_agentflow_engine import _build_episode
 from rllm.experimental.engine.remote_runtime.agentcore_runtime import AgentCoreRuntime
 from rllm.experimental.engine.remote_runtime.protocol import (
     RemoteRuntimeConfig,
@@ -203,7 +203,7 @@ class TestBuildEpisodeWithTraces:
             elapsed=5.0,
         )
 
-        with patch("rllm.experimental.engine.remote_agent_flow_engine.trace_record_to_step") as mock_convert:
+        with patch("rllm.experimental.engine.remote_agentflow_engine.trace_record_to_step") as mock_convert:
             # Return Steps with proper token lengths
             mock_convert.side_effect = [_make_step(prompt_len=10 + i, response_len=20 + i) for i in range(3)]
             episode = _build_episode(traces, result, "task-1:0", {"prompt": "test"})
