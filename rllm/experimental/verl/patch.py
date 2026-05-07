@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 _VERL_DYNAMIC_BATCH_PATCHED = False
 _VERL_QWEN3_VL_DUMMY_INPLACE_PATCHED = False
 _VERL_TENSORDICT_JAGGED_PATCHED = False
+_VERL_ZMQ_JOBID_PATCHED = False
 
 
 # ---------------------------------------------------------------------------
@@ -261,10 +262,138 @@ def patch_verl_tensordict_jagged_layout() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Verl colocated weight-transfer IPC path: include Ray job id (backport PR #6246)
+# ---------------------------------------------------------------------------
+
+
+def patch_verl_zmq_jobid_path() -> None:
+    """Backport `volcengine/verl#6246` for the colocated weight-transfer IPC path.
+
+    Verl 0.7.1 (our pin) keys the ZMQ IPC socket on the GPU UUID alone:
+    ``/tmp/rl-colocate-zmq-<uuid>.sock``. Two independent verl jobs on the
+    same physical GPU — same user across runs OR different users on a
+    multi-tenant host — both bind() the same path; the second fails with
+    ``zmq.error.ZMQError: Address already in use`` on the first
+    ``update_weights`` call. On a host with sticky-bit ``/tmp``, a stale
+    socket left by another user trips the same error indefinitely because
+    libzmq's bind-time ``unlink()`` returns ``EACCES``.
+
+    PR #6246 (merged on verl main; not in any tagged release as of verl
+    0.7.1) prepends ``ray.get_runtime_context().get_job_id()`` to the path
+    on both the sender (``ServerAdapter`` in the Ray actor) and the
+    receiver (``vLLMColocateWorkerExtension._get_zmq_handle`` in the vLLM
+    mp-spawn worker subprocess), bridged by the ``VERL_RAY_JOB_ID`` env var.
+
+    vLLM in a Ray actor forces multiprocessing 'spawn'
+    (``vllm.utils.system_utils._maybe_force_spawn``), so a Python-level
+    monkey-patch of ``vLLMColocateWorkerExtension._get_zmq_handle`` in
+    the Ray actor never reaches the receiver — fresh interpreter, no
+    inherited module state. Instead, we redirect vLLM to import a
+    different class entirely: RLLMColocateWorkerExtension.
+
+    The redirect itself is done by patching ``AsyncEngineArgs.create_engine_config``
+    to swap ``self.worker_extension_cls`` just before ``parallel_config`` is built.
+    """
+    global _VERL_ZMQ_JOBID_PATCHED
+    if _VERL_ZMQ_JOBID_PATCHED:
+        return
+
+    # We MUST NOT import the verl rollout submodules here. Importing
+    # ``verl.workers.rollout.vllm_rollout`` triggers the package's
+    # ``__init__.py`` which loads vLLM internals, and vLLM platform init
+    # calls into CUDA (current_platform.get_device_uuid etc.) — that pins
+    # every Ray worker to GPU 0 because this function runs as
+    # ``runtime_env.worker_process_setup_hook`` BEFORE Ray sets the
+    # worker's CUDA_VISIBLE_DEVICES. The downstream symptom is FSDP init
+    # failing with "ncclInvalidUsage: Duplicate GPU detected".
+    #
+    # Defer patch application via a ``builtins.__import__`` wrapper that
+    # fires when the user actually imports the target modules — which
+    # happens after Ray has set CUDA_VISIBLE_DEVICES. Each patch is
+    # independent: the sender's actor process may never import the bridge
+    # module and vice versa, so we apply each one as soon as ITS own
+    # target class appears, using a per-class marker attribute to avoid
+    # re-wrapping. The wrapper uninstalls itself once all three classes
+    # in this process have been patched.
+    import builtins
+    import os
+    import sys
+
+    import ray
+
+    _VERL_FQN = "verl.workers.rollout.vllm_rollout.utils.vLLMColocateWorkerExtension"
+    _RLLM_FQN = "rllm.experimental.verl._vllm_zmq_extension.RLLMColocateWorkerExtension"
+    _MARK = "_rllm_zmq_jobid_patched"
+
+    _orig_import = builtins.__import__
+
+    def _try_apply():
+        # ``_orig=...`` default-arg trick captures each original callable
+        # at def time so the three closures don't all bind the last value
+        # of a shared loop variable.
+        m = sys.modules.get("verl.workers.rollout.vllm_rollout.vllm_rollout")
+        ServerAdapter = getattr(m, "ServerAdapter", None) if m is not None else None
+        if ServerAdapter is not None and not getattr(ServerAdapter, _MARK, False):
+
+            def _sa_init(self, *a, _orig=ServerAdapter.__init__, **kw):
+                _orig(self, *a, **kw)
+                job_id = ray.get_runtime_context().get_job_id()
+                self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{job_id}-{self.device_uuid}.sock"
+
+            ServerAdapter.__init__ = _sa_init
+            setattr(ServerAdapter, _MARK, True)
+
+        m = sys.modules.get("verl.workers.rollout.vllm_rollout.vllm_async_server")
+        vLLMHttpServer = getattr(m, "vLLMHttpServer", None) if m is not None else None
+        if vLLMHttpServer is not None and not getattr(vLLMHttpServer, _MARK, False):
+
+            def _hs_init(self, *a, _orig=vLLMHttpServer.__init__, **kw):
+                os.environ["VERL_RAY_JOB_ID"] = ray.get_runtime_context().get_job_id()
+                _orig(self, *a, **kw)
+
+            vLLMHttpServer.__init__ = _hs_init
+            setattr(vLLMHttpServer, _MARK, True)
+
+        m = sys.modules.get("vllm.engine.arg_utils")
+        AsyncEngineArgs = getattr(m, "AsyncEngineArgs", None) if m is not None else None
+        if AsyncEngineArgs is not None and not getattr(AsyncEngineArgs, _MARK, False):
+
+            def _cec(self, *a, _orig=AsyncEngineArgs.create_engine_config, **kw):
+                if getattr(self, "worker_extension_cls", "") == _VERL_FQN:
+                    self.worker_extension_cls = _RLLM_FQN
+                return _orig(self, *a, **kw)
+
+            AsyncEngineArgs.create_engine_config = _cec
+            setattr(AsyncEngineArgs, _MARK, True)
+
+        if (
+            ServerAdapter is not None
+            and getattr(ServerAdapter, _MARK, False)
+            and vLLMHttpServer is not None
+            and getattr(vLLMHttpServer, _MARK, False)
+            and AsyncEngineArgs is not None
+            and getattr(AsyncEngineArgs, _MARK, False)
+        ):
+            # All three landed — uninstall to drop per-import overhead.
+            builtins.__import__ = _orig_import
+            global _VERL_ZMQ_JOBID_PATCHED
+            _VERL_ZMQ_JOBID_PATCHED = True
+            logger.info("Patched zmq jobid path in verl and vLLM (backport of volcengine/verl#6246)")
+
+    def _wrapped_import(name, globals=None, locals=None, fromlist=(), level=0):
+        mod = _orig_import(name, globals, locals, fromlist, level)
+        _try_apply()
+        return mod
+
+    builtins.__import__ = _wrapped_import
+
+
+# ---------------------------------------------------------------------------
 # Worker-side entry point (used as Ray runtime_env worker_process_setup_hook)
 # ---------------------------------------------------------------------------
 
 _ALL_VERL_PATCHES = {
+    "patch_verl_zmq_jobid_path": patch_verl_zmq_jobid_path,
     "patch_verl_dynamic_batch_sync": patch_verl_dynamic_batch_sync,
     "patch_verl_qwen3_vl_dummy_inplace": patch_verl_qwen3_vl_dummy_inplace,
     "patch_verl_tensordict_jagged_layout": patch_verl_tensordict_jagged_layout,
