@@ -48,6 +48,21 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
+def _normalize_worker_url(raw_url: str) -> str:
+    """Strip trailing ``/v1`` and trailing slashes from an upstream URL.
+
+    The gateway client always sends ``api_path="/v1"`` when registering a
+    worker, and the upstream's ``api_url`` is computed as
+    ``url + api_path``. Without this normalization, callers passing an
+    OpenAI-compatible URL like ``http://localhost:4000/v1`` would end up
+    forwarding to ``http://localhost:4000/v1/v1/chat/completions``.
+    """
+    url = raw_url.rstrip("/")
+    if url.endswith("/v1"):
+        url = url[: -len("/v1")]
+    return url
+
+
 def _get_routable_ip() -> str:
     """Return the machine's routable IPv4 address.
 
@@ -214,7 +229,8 @@ class GatewayManager:
 
         For eval and any other "single static upstream" use case where no
         rollout engine is available. If ``worker_urls`` is omitted, falls back
-        to the URL passed to :meth:`for_eval`.
+        to the URL passed to :meth:`for_eval`. URLs are normalized via
+        :func:`_normalize_worker_url` (strips trailing ``/v1``).
         """
         if worker_urls is None:
             worker_urls = getattr(self, "_eval_upstream_urls", None)
@@ -226,9 +242,10 @@ class GatewayManager:
         else:
             self._start_thread()
 
-        for url in worker_urls:
+        for raw_url in worker_urls:
+            url = _normalize_worker_url(raw_url)
             worker_id = self.client.add_worker(url=url)
-            logger.info("Registered worker %s -> %s", worker_id, url)
+            logger.info("Registered worker %s -> %s (raw=%s)", worker_id, url, raw_url)
 
     def stop(self) -> None:
         """Terminate the gateway (process or thread)."""
