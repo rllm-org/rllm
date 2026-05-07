@@ -56,22 +56,24 @@ class DockerSandbox:
         stdout = (output[0] or b"").decode("utf-8", errors="replace")
         stderr = (output[1] or b"").decode("utf-8", errors="replace")
         if exit_code != 0:
-            # Surface enough context to debug verifier failures inside the
-            # container — the full pytest/setup log can be megabytes; show
-            # the last ~8KB of each stream which is where exit-causing
-            # errors live.
-            tail_chars = 8000
-            stderr_tail = stderr[-tail_chars:] if len(stderr) > tail_chars else stderr
-            stdout_tail = stdout[-tail_chars:] if len(stdout) > tail_chars else stdout
-            logger.warning(
+            # The raised message stays short — callers print it at WARNING
+            # for *every* failed verifier, and dumping kilobytes of pytest
+            # output for each agent that didn't solve a task spams the
+            # terminal. The full tail goes to ``logger.debug`` so it's
+            # available with ``--log-level=debug`` without polluting the
+            # default run.
+            short_tail = 600
+            err_tail = stderr[-short_tail:] if len(stderr) > short_tail else stderr
+            full_tail = 8000
+            logger.debug(
                 "Command failed (exit %d) in container %s: %s\nstdout (tail):\n%s\nstderr (tail):\n%s",
                 exit_code,
                 self.name,
                 command,
-                stdout_tail,
-                stderr_tail,
+                stdout[-full_tail:] if len(stdout) > full_tail else stdout,
+                stderr[-full_tail:] if len(stderr) > full_tail else stderr,
             )
-            raise RuntimeError(f"Command failed (exit {exit_code}) in container {self.name}: {command}\nstderr (tail):\n{stderr_tail}\nstdout (tail):\n{stdout_tail}")
+            raise RuntimeError(f"Command failed (exit {exit_code}) in container {self.name}: {command}\nstderr (tail):\n{err_tail}")
         return stdout
 
     def upload_file(self, local_path: str, remote_path: str) -> None:

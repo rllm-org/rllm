@@ -88,7 +88,11 @@ class ShellScriptEvaluator:
                 user=v_user,
             )
         except Exception as e:
-            logger.warning("Test script execution error for %s: %s", task.id, e)
+            # Verifier exit != 0 is the *expected* outcome when an agent
+            # didn't solve the task; the reward (read from reward.txt
+            # below) carries the signal. Log at debug so a benchmark of
+            # 100 unsolved tasks doesn't spam 100 multi-KB stack traces.
+            logger.debug("Verifier exited non-zero for %s: %s", task.id, e)
 
         # Read reward (as verifier — agent may not have read access)
         reward_paths = list(_REWARD_PATHS)
