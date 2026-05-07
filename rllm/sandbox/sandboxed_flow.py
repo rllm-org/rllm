@@ -1,14 +1,15 @@
 """SandboxedAgentFlow: base class for agents that need sandboxed execution environments.
 
-Lifecycle managed by :class:`rllm.runner.Runner`:
+Lifecycle managed by :class:`rllm.eval._hooks.EvalHooks` (which sits in
+front of :class:`rllm.experimental.engine.agent_flow_engine.AgentFlowEngine`):
 
-1. Runner creates a Sandbox via ``_create_sandbox_for_task`` and injects it
-   with ``set_sandbox()``, then calls ``on_sandbox_ready(task, config)``.
-2. Runner calls ``run(task, config)`` — the agent uses ``self.sandbox``.
-3. Runner resolves an Evaluator from the Task's verifier config (or uses
+1. The hook creates a Sandbox via ``_create_sandbox_for_task`` and injects
+   it with ``set_sandbox()``, then calls ``on_sandbox_ready(task, config)``.
+2. The engine calls ``run(task, config)`` — the agent uses ``self.sandbox``.
+3. The hook resolves an Evaluator from the Task's verifier config (or uses
    ``evaluator_override``) and runs ``evaluator.evaluate(task, episode)``.
-4. Runner calls ``teardown_sandbox()`` — guaranteed cleanup, no-op when the
-   sandbox was injected externally.
+4. The hook's teardown closure calls ``teardown_sandbox()`` — guaranteed
+   cleanup, no-op when the sandbox was injected externally.
 """
 
 from __future__ import annotations
@@ -74,8 +75,8 @@ class SandboxedAgentFlow(ABC):
         """Create and configure sandbox.
 
         Legacy entry point retained for callers that still build a sandbox
-        inside the agent flow. The :class:`rllm.runner.Runner` path uses
-        :meth:`set_sandbox` + :meth:`on_sandbox_ready` instead.
+        inside the agent flow. The :class:`rllm.eval._hooks.EvalHooks` path
+        uses :meth:`set_sandbox` + :meth:`on_sandbox_ready` instead.
         """
         image = self.get_image(task)
         task_id = task.get("instance_id", task.get("task_id", "unknown"))

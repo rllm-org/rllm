@@ -1,26 +1,27 @@
-"""run_dataset: parallel orchestration over a list of Tasks via Runner.
+"""run_dataset: drives :class:`AgentFlowEngine` over a list of Tasks for ``rllm eval``.
 
-Each Task flows through :class:`rllm.runner.Runner`, which resolves the
-verifier from the Task itself (or from ``evaluator_override``).
+Eval shares the same execution engine as training. The eval-specific
+concerns — per-task verifier resolution and per-task sandbox lifecycle —
+are encapsulated in :class:`rllm.eval._hooks.EvalHooks` and threaded into
+the engine via its :class:`TaskHooks` protocol.
+
+The gateway sits in front of every LLM call so flows that ``return None``
+(framework-cookbook style) get their Steps populated from gateway-captured
+traces, exactly as they do at training time.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from collections.abc import Callable
 
-from tqdm.asyncio import tqdm_asyncio
-
+from rllm.eval._hooks import EvalHooks
 from rllm.eval.results import EvalItem, EvalResult
-from rllm.types import AgentConfig, AgentFlow, Evaluator
+from rllm.experimental.engine.agent_flow_engine import AgentFlowEngine
+from rllm.experimental.engine.gateway_manager import EvalGatewayManager, GatewayManager
+from rllm.types import AgentFlow, Evaluator
+from rllm.workflows.workflow import TerminationReason
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Run a list of Tasks through Runner with concurrency
-# ---------------------------------------------------------------------------
 
 
 async def run_dataset(
@@ -33,75 +34,105 @@ async def run_dataset(
     sandbox_backend: str | None = None,
     agent_name: str = "",
     dataset_name: str = "unknown",
-    on_episode_complete: Callable | None = None,
+    on_episode_complete=None,
     evaluator_override: Evaluator | None = None,
+    gateway: GatewayManager | None = None,
 ) -> tuple[EvalResult, list]:
-    """Run a list of :class:`rllm.types.Task` objects through :class:`rllm.runner.Runner`.
+    """Run a list of :class:`rllm.types.Task` objects through :class:`AgentFlowEngine`.
 
-    Per-task: creates a fresh :class:`Runner`, optionally with a per-task
-    copy of the agent_flow (for sandboxed flows), and awaits its result.
-    Concurrency is bounded by ``min(concurrency, agent_flow.max_concurrent)``.
+    Per-task: the engine creates a gateway session, runs the agent flow
+    against the session URL, fetches traces, enriches the Episode, then
+    runs the per-task evaluator (or ``evaluator_override`` if set).
 
     Args:
-        evaluator_override: If provided, all tasks are scored with this
-            evaluator instead of their per-task verifier (CLI ``--evaluator``).
+        gateway: Optional pre-started gateway. When ``None``, this function
+            constructs an :class:`EvalGatewayManager` pointing at
+            ``base_url`` and tears it down on exit. When provided, the
+            caller owns the lifecycle (used by ``rllm.cli.eval`` so the
+            gateway can stay up across multiple runs).
+        evaluator_override: Bind a single evaluator to all tasks (CLI's
+            ``--evaluator`` flag). When ``None``, ``EvalHooks`` resolves a
+            per-task verifier from the task's ``[verifier]`` config.
 
     Returns ``(EvalResult, list[Episode])``.
     """
-    from rllm.runner import Runner
-    from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
-
+    # Cap concurrency by the agent flow's hint, if any. The engine's
+    # internal semaphore enforces this on the rollout side.
+    effective_concurrency = concurrency
     if hasattr(agent_flow, "max_concurrent"):
-        concurrency = min(concurrency, agent_flow.max_concurrent)
-    semaphore = asyncio.Semaphore(concurrency)
+        effective_concurrency = min(effective_concurrency, agent_flow.max_concurrent)
 
-    async def run_one(idx: int, task) -> tuple[EvalItem, object | None]:
-        async with semaphore:
-            # Per-task fresh agent_flow for sandboxed flows so sandbox state doesn't leak
-            af = agent_flow.create_instance() if isinstance(agent_flow, SandboxedAgentFlow) else agent_flow
-            runner = Runner(
-                agent_flow=af,
-                sandbox_backend=sandbox_backend,
-                evaluator_override=evaluator_override,
-            )
-            config = AgentConfig(
-                base_url=base_url,
-                model=model,
-                session_uid=f"eval-{idx}",
-            )
+    # Lifecycle: if the caller gave us a gateway, use it; otherwise build
+    # and tear down one ourselves (single-shot).
+    owned_gateway = gateway is None
+    if owned_gateway:
+        gateway = EvalGatewayManager(upstream_url=base_url, model=model)
+        gateway.start()
+
+    hooks = EvalHooks(evaluator_override=evaluator_override, sandbox_backend=sandbox_backend)
+
+    engine = AgentFlowEngine(
+        agent_flow=agent_flow,
+        evaluator=None,  # hooks resolve the per-task evaluator
+        gateway=gateway,
+        model=model,
+        n_parallel_tasks=effective_concurrency,
+        retry_limit=1,  # eval doesn't retry on flow errors
+        raise_on_error=False,  # capture per-task errors as error Episodes
+        hooks=hooks,
+    )
+
+    try:
+        # task_ids carry the original Task.id so GRPO-style grouping (if a
+        # downstream consumer wants it) is stable; the engine's session uid
+        # becomes f"{task.id}:0" which matches training's convention.
+        task_ids = [getattr(t, "id", None) or str(idx) for idx, t in enumerate(tasks)]
+        episodes = await engine.execute_tasks(tasks, task_ids=task_ids, is_validation=True)
+    finally:
+        engine.shutdown()
+        if owned_gateway:
             try:
-                episode = await runner.run(task, config)
-                # Pull the first signal map for reporting
-                signals: dict[str, float] = {}
-                if episode.trajectories:
-                    signals = dict(episode.trajectories[0].signals or {})
+                gateway.stop()
+            except Exception:
+                logger.exception("gateway.stop() raised; suppressing")
 
-                # Reward = primary trajectory's reward
-                reward = 0.0
-                if episode.trajectories:
-                    reward = episode.trajectories[0].reward or 0.0
+    # Aggregate per-task EvalItems for the report.
+    items: list[EvalItem] = []
+    surviving_episodes: list = []
+    for idx, episode in enumerate(episodes):
+        if episode is None:
+            items.append(EvalItem(idx=idx, reward=0.0, is_correct=False, error="missing episode"))
+            continue
 
-                if on_episode_complete is not None:
-                    try:
-                        on_episode_complete(idx, episode)
-                    except Exception:
-                        logger.debug("on_episode_complete callback error", exc_info=True)
+        error_msg = None
+        if episode.termination_reason == TerminationReason.ERROR:
+            err = (episode.metadata or {}).get("error") or {}
+            error_msg = err.get("message") if isinstance(err, dict) else str(err)
 
-                return (
-                    EvalItem(
-                        idx=idx,
-                        reward=reward,
-                        is_correct=bool(episode.is_correct),
-                        signals=signals,
-                    ),
-                    episode,
-                )
-            except Exception as e:
-                logger.warning("Error evaluating example %d: %s", idx, e)
-                return (EvalItem(idx=idx, reward=0.0, is_correct=False, error=str(e)), None)
+        signals: dict[str, float] = {}
+        if episode.trajectories:
+            signals = dict(episode.trajectories[0].signals or {})
 
-    task_coros = [run_one(i, t) for i, t in enumerate(tasks)]
-    results = await tqdm_asyncio.gather(*task_coros, desc="Evaluating")
-    items = [r[0] for r in results]
-    episodes = [r[1] for r in results if r[1] is not None]
-    return (EvalResult.from_items(dataset_name, model, agent_name, items), episodes)
+        reward = 0.0
+        if episode.trajectories and episode.trajectories[0].reward is not None:
+            reward = float(episode.trajectories[0].reward)
+
+        if on_episode_complete is not None:
+            try:
+                on_episode_complete(idx, episode)
+            except Exception:
+                logger.debug("on_episode_complete callback error", exc_info=True)
+
+        items.append(
+            EvalItem(
+                idx=idx,
+                reward=reward,
+                is_correct=bool(episode.is_correct),
+                signals=signals,
+                error=error_msg,
+            )
+        )
+        if error_msg is None:
+            surviving_episodes.append(episode)
+
+    return (EvalResult.from_items(dataset_name, model, agent_name, items), surviving_episodes)

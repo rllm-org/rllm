@@ -209,7 +209,7 @@ def _run_train(
         else:
             from pathlib import Path as _Path
 
-            from rllm.runner import build_dataset_evaluator
+            from rllm.eval._resolution import build_dataset_evaluator
 
             evaluator = build_dataset_evaluator(_Path(benchmark).resolve())
             if evaluator is None:
