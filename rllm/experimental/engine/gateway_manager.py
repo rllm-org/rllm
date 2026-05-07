@@ -118,6 +118,13 @@ class GatewayManager:
         # The gateway always pins ``body.model`` to whatever the trainer is serving
         self.model: str | None = config.get("model", {}).get("name", None)
         self.mode = mode
+        # vLLM-specific sampling param injection. Training (against vLLM) needs
+        # logprobs + token_ids in the response; eval against external providers
+        # (OpenAI / Anthropic via LiteLLM proxy) rejects these as unknown params.
+        # Default True for backward compatibility with the training path;
+        # ``for_eval`` flips it off.
+        self.add_logprobs: bool = bool(gw_cfg.get("add_logprobs", True))
+        self.add_return_token_ids: bool = bool(gw_cfg.get("add_return_token_ids", True))
 
         self._process: subprocess.Popen | None = None
         self._thread: threading.Thread | None = None
@@ -170,6 +177,11 @@ class GatewayManager:
             }
         )
         gw = cls(cfg, mode="thread")
+        # Eval upstreams (OpenAI/Anthropic via LiteLLM, or any vendor's
+        # OpenAI-compatible endpoint) reject vLLM-specific sampling params.
+        # The middleware's logprobs / return_token_ids injection has to be off.
+        gw.add_logprobs = False
+        gw.add_return_token_ids = False
         gw._eval_upstream_urls = [upstream_url]  # consumed by start_static() default arg
         return gw
 
@@ -363,6 +375,8 @@ class GatewayManager:
             store_worker="sqlite" if self.db_path else "memory",
             sampling_params_priority=self.sampling_params_priority,
             model=self.model,
+            add_logprobs=self.add_logprobs,
+            add_return_token_ids=self.add_return_token_ids,
         )
         app = create_app(config=gw_config, local_handler=local_handler)
 
