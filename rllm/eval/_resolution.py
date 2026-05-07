@@ -1,24 +1,17 @@
-"""Helpers for resolving per-task verifiers and building per-task sandboxes.
+"""Per-task verifier resolution + sandbox lifecycle helpers.
 
-Originally home to ``Runner``, the per-task driver for ``rllm eval``.
-``Runner`` has been folded into :class:`rllm.experimental.engine.agent_flow_engine.AgentFlowEngine`
-(driven by :class:`rllm.eval._hooks.EvalHooks`); the helpers here remain
-because both the eval hook and the legacy ``build_dataset_evaluator``
-entry point still call them:
+These were originally part of the ``rllm.runner.Runner`` per-task driver
+that drove ``rllm eval`` before eval was unified onto
+:class:`rllm.experimental.engine.agent_flow_engine.AgentFlowEngine`.
+``Runner`` is gone; the helpers live here because:
 
-* :func:`_detect_verifier` — read ``task.toml`` / ``dataset.toml`` and the
-  task filesystem layout to decide which verifier shape applies.
-* :func:`_resolve_evaluator` — construct an :class:`Evaluator` instance
-  (sandbox-shell, Python module, registered name, or ``module:attr``
-  import path) from that decision.
-* :func:`_create_sandbox_for_task` / :func:`_setup_task_environment` —
-  per-task sandbox lifecycle.
-* :func:`_adapt_legacy_evaluator` — wrap evaluators that expect
-  ``task: dict`` so they can be called with a :class:`Task` object.
+* :class:`rllm.eval._hooks.EvalHooks` calls them on every rollout to set
+  up the sandbox and resolve the per-task evaluator.
+* :func:`build_dataset_evaluator` is the train CLI's entry point for
+  resolving a single dataset-wide evaluator from a ``[verifier]`` block.
 
-No public :class:`Runner` symbol; importers should switch to
-``rllm.experimental.engine.agent_flow_engine.AgentFlowEngine`` +
-``rllm.eval._hooks.EvalHooks``.
+Module is private (``_resolution``) — external callers should go through
+:class:`rllm.eval._hooks.EvalHooks` or :func:`build_dataset_evaluator`.
 """
 
 from __future__ import annotations
@@ -38,7 +31,7 @@ from rllm.eval.module_evaluator import PythonModuleEvaluator, _coerce_eval_resul
 from rllm.eval.script_evaluator import ShellScriptEvaluator
 from rllm.eval.types import EvalOutput
 from rllm.sandbox.protocol import Sandbox
-from rllm.types import AgentConfig, AgentFlow, Episode, Evaluator, Task
+from rllm.types import Episode, Evaluator, Task
 
 logger = logging.getLogger(__name__)
 
@@ -280,22 +273,6 @@ def _safe_exec(sandbox: Sandbox, command: str, timeout: float | None = None, use
     except Exception as e:
         logger.debug("exec failed (suppressed): %s — %s", command[:200], e)
         return ""
-
-
-# ---------------------------------------------------------------------------
-# AgentFlow invocation
-# ---------------------------------------------------------------------------
-
-
-async def _run_agent_flow(agent: AgentFlow, task: Task, config: AgentConfig) -> Episode:
-    """Call agent.arun() if available, else agent.run() — adapter for sync/async."""
-    import asyncio
-
-    if hasattr(agent, "arun") and inspect.iscoroutinefunction(agent.arun):
-        return await agent.arun(task, config)
-
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, agent.run, task, config)
 
 
 # ---------------------------------------------------------------------------

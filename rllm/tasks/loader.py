@@ -2,7 +2,9 @@
 
 After PR 2, both task-per-directory and rows-with-shared-verifier shapes
 return the new :class:`rllm.types.Task` abstraction. The CLI then runs
-each task through :class:`rllm.runner.Runner` — same code path for both.
+each task through :class:`rllm.experimental.engine.agent_flow_engine.AgentFlowEngine`
+(driven by :class:`rllm.eval._hooks.EvalHooks` at eval time) — same code
+path for both.
 
 Three on-disk shapes recognised:
 
@@ -355,7 +357,7 @@ def _load_task_from_dir(
 
     The whole task.toml goes into ``metadata``. Convenience keys (workdir,
     agent_user, verifier_user, verifier_timeout, etc.) are also lifted to
-    top-level keys so :mod:`rllm.runner` can find them directly.
+    top-level keys so :mod:`rllm.eval._resolution` can find them directly.
     """
     config_path = task_dir / "task.toml"
     if config_path.exists():

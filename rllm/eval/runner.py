@@ -17,7 +17,7 @@ import logging
 from rllm.eval._hooks import EvalHooks
 from rllm.eval.results import EvalItem, EvalResult
 from rllm.experimental.engine.agent_flow_engine import AgentFlowEngine
-from rllm.experimental.engine.gateway_manager import GatewayManager
+from rllm.experimental.engine.gateway_manager import EvalGatewayManager, GatewayManager
 from rllm.types import AgentFlow, Evaluator
 from rllm.workflows.workflow import TerminationReason
 
@@ -46,7 +46,7 @@ async def run_dataset(
 
     Args:
         gateway: Optional pre-started gateway. When ``None``, this function
-            constructs one via :meth:`GatewayManager.for_eval` pointing at
+            constructs an :class:`EvalGatewayManager` pointing at
             ``base_url`` and tears it down on exit. When provided, the
             caller owns the lifecycle (used by ``rllm.cli.eval`` so the
             gateway can stay up across multiple runs).
@@ -66,8 +66,8 @@ async def run_dataset(
     # and tear down one ourselves (single-shot).
     owned_gateway = gateway is None
     if owned_gateway:
-        gateway = GatewayManager.for_eval(upstream_url=base_url, model=model)
-        gateway.start_static([base_url])
+        gateway = EvalGatewayManager(upstream_url=base_url, model=model)
+        gateway.start()
 
     hooks = EvalHooks(evaluator_override=evaluator_override, sandbox_backend=sandbox_backend)
 

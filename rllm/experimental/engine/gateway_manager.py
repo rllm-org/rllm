@@ -1,19 +1,29 @@
-"""GatewayManager: manages the rllm-model-gateway lifecycle for training and eval.
+"""GatewayManager + EvalGatewayManager: rllm-model-gateway lifecycle.
 
-Supports two execution modes:
+Two classes share most of the lifecycle (uvicorn-on-thread or subprocess,
+trace store, session API). They differ in how upstream workers are
+registered and what request-body injection the middleware applies.
+
+* :class:`GatewayManager` — training. Workers come from a verl/tinker
+  rollout engine via :meth:`start(rollout_engine)`. Injects ``logprobs``
+  and ``return_token_ids`` into request bodies (vLLM needs both for the
+  loss math downstream).
+
+* :class:`EvalGatewayManager(GatewayManager)` — eval. Wraps a static
+  upstream URL (vLLM endpoint, LiteLLM proxy, OpenAI-compatible server).
+  Disables vLLM-specific param injection because external providers 400
+  on ``return_token_ids``. Constructed with
+  ``EvalGatewayManager(upstream_url, model)`` and started with
+  ``.start()`` (no rollout engine).
+
+Modes:
+
 - 'process': subprocess via ``rllm-model-gateway`` CLI (for verl / distributed)
-- 'thread': background thread via ``create_app`` + uvicorn (for tinker / single-machine / eval)
+- 'thread': background thread via ``create_app`` + uvicorn (for tinker /
+  single-machine / eval)
 
 For Tinker backends, an in-process handler is injected into the gateway
 (via ``local_handler``), avoiding the need for a separate HTTP backend server.
-
-Two start paths share the lifecycle:
-
-* :meth:`start(rollout_engine)` — training. Worker URLs come from a verl/tinker
-  rollout engine; per-mode sampling params are extracted from the engine.
-* :meth:`start_static(worker_urls)` — eval (and any other "I just have one or
-  more upstream URLs" use case). No engine, no sampling params. Construct via
-  :meth:`for_eval(upstream_url, model)` for the common single-URL case.
 """
 
 from __future__ import annotations
@@ -107,6 +117,11 @@ class GatewayManager:
     - 'thread': background thread via create_app + uvicorn (for tinker / single-machine)
     """
 
+    # Subclasses override these to flip vLLM-specific request-body injection
+    # off when the upstream isn't vLLM (e.g. OpenAI/Anthropic via LiteLLM).
+    add_logprobs: bool = True
+    add_return_token_ids: bool = True
+
     def __init__(self, config: DictConfig, mode: str = "thread") -> None:
         gw_cfg = config.rllm.get("gateway", {})
         configured_host = gw_cfg.get("host", None)
@@ -118,13 +133,6 @@ class GatewayManager:
         # The gateway always pins ``body.model`` to whatever the trainer is serving
         self.model: str | None = config.get("model", {}).get("name", None)
         self.mode = mode
-        # vLLM-specific sampling param injection. Training (against vLLM) needs
-        # logprobs + token_ids in the response; eval against external providers
-        # (OpenAI / Anthropic via LiteLLM proxy) rejects these as unknown params.
-        # Default True for backward compatibility with the training path;
-        # ``for_eval`` flips it off.
-        self.add_logprobs: bool = bool(gw_cfg.get("add_logprobs", True))
-        self.add_return_token_ids: bool = bool(gw_cfg.get("add_return_token_ids", True))
 
         self._process: subprocess.Popen | None = None
         self._thread: threading.Thread | None = None
@@ -136,54 +144,6 @@ class GatewayManager:
         # Per-mode sampling params (extracted from rollout engine in start())
         self._train_sampling_params: dict[str, Any] = {}
         self._val_sampling_params: dict[str, Any] = {}
-
-    @classmethod
-    def for_eval(
-        cls,
-        upstream_url: str,
-        model: str,
-        *,
-        host: str = "127.0.0.1",
-        port: int | None = None,
-        db_path: str | None = None,
-    ) -> GatewayManager:
-        """Construct a thread-mode gateway pointing at a single static upstream URL.
-
-        Used by ``rllm eval``: the upstream is either the user's ``--base-url``
-        (vLLM endpoint, OpenAI-compatible server) or the URL of a LiteLLM proxy
-        started by ``EvalProxyManager`` (for OpenAI/Anthropic providers).
-
-        Caller is responsible for the lifecycle:
-
-            gw = GatewayManager.for_eval(upstream_url=url, model="gpt-4o")
-            gw.start_static([url])
-            try:
-                ...
-            finally:
-                gw.stop()
-        """
-        from omegaconf import OmegaConf
-
-        cfg = OmegaConf.create(
-            {
-                "rllm": {
-                    "gateway": {
-                        "host": host,
-                        "port": port if port is not None else _find_free_port(),
-                        "db_path": db_path,
-                    }
-                },
-                "model": {"name": model},
-            }
-        )
-        gw = cls(cfg, mode="thread")
-        # Eval upstreams (OpenAI/Anthropic via LiteLLM, or any vendor's
-        # OpenAI-compatible endpoint) reject vLLM-specific sampling params.
-        # The middleware's logprobs / return_token_ids injection has to be off.
-        gw.add_logprobs = False
-        gw.add_return_token_ids = False
-        gw._eval_upstream_urls = [upstream_url]  # consumed by start_static() default arg
-        return gw
 
     @property
     def gateway_url(self) -> str:
@@ -235,29 +195,6 @@ class GatewayManager:
         # Extract per-mode sampling params from the rollout engine
         self._train_sampling_params = getattr(rollout_engine, "train_sampling_params", {})
         self._val_sampling_params = getattr(rollout_engine, "val_sampling_params", {})
-
-    def start_static(self, worker_urls: list[str] | None = None) -> None:
-        """Start the gateway and register a fixed list of upstream worker URLs.
-
-        For eval and any other "single static upstream" use case where no
-        rollout engine is available. If ``worker_urls`` is omitted, falls back
-        to the URL passed to :meth:`for_eval`. URLs are normalized via
-        :func:`_normalize_worker_url` (strips trailing ``/v1``).
-        """
-        if worker_urls is None:
-            worker_urls = getattr(self, "_eval_upstream_urls", None)
-        if not worker_urls:
-            raise ValueError("start_static requires at least one worker URL — pass worker_urls or construct via GatewayManager.for_eval(upstream_url=...).")
-
-        if self.mode == "process":
-            self._start_process()
-        else:
-            self._start_thread()
-
-        for raw_url in worker_urls:
-            url = _normalize_worker_url(raw_url)
-            worker_id = self.client.add_worker(url=url)
-            logger.info("Registered worker %s -> %s (raw=%s)", worker_id, url, raw_url)
 
     def stop(self) -> None:
         """Terminate the gateway (process or thread)."""
@@ -401,3 +338,78 @@ class GatewayManager:
             time.sleep(_HEALTH_POLL_INTERVAL)
 
         raise TimeoutError(f"Gateway thread did not start within {_HEALTH_POLL_TIMEOUT}s")
+
+
+# ---------------------------------------------------------------------------
+# EvalGatewayManager — eval-side gateway with a static upstream URL
+# ---------------------------------------------------------------------------
+
+
+class EvalGatewayManager(GatewayManager):
+    """Gateway pointing at a single static upstream URL (no rollout engine).
+
+    Used by ``rllm eval``: the upstream is either the user's ``--base-url``
+    (vLLM endpoint, OpenAI-compatible server) or the URL of a LiteLLM
+    proxy started by ``EvalProxyManager``.
+
+    Key differences vs the training-side :class:`GatewayManager`:
+
+    * vLLM-specific request-body injection (``logprobs``,
+      ``return_token_ids``) is OFF — external providers reject
+      ``return_token_ids`` as an unknown parameter.
+    * ``start()`` ignores any ``rollout_engine`` and registers the
+      upstream URL passed at construction. URLs are normalized via
+      :func:`_normalize_worker_url` (strips trailing ``/v1``).
+
+    Example::
+
+        gw = EvalGatewayManager(upstream_url=base_url, model="gpt-4o")
+        gw.start()
+        try:
+            ...
+        finally:
+            gw.stop()
+    """
+
+    add_logprobs = False
+    add_return_token_ids = False
+
+    def __init__(
+        self,
+        upstream_url: str,
+        model: str,
+        *,
+        host: str = "127.0.0.1",
+        port: int | None = None,
+        db_path: str | None = None,
+    ) -> None:
+        from omegaconf import OmegaConf
+
+        cfg = OmegaConf.create(
+            {
+                "rllm": {
+                    "gateway": {
+                        "host": host,
+                        "port": port if port is not None else _find_free_port(),
+                        "db_path": db_path,
+                    }
+                },
+                "model": {"name": model},
+            }
+        )
+        super().__init__(cfg, mode="thread")
+        self._upstream_urls: list[str] = [upstream_url]
+
+    def start(self, rollout_engine: RolloutEngine | None = None) -> None:  # type: ignore[override]
+        """Start gateway and register the static upstream URL(s).
+
+        ``rollout_engine`` is accepted for shape-compatibility with the
+        base class signature but ignored — this gateway has no engine.
+        """
+        if rollout_engine is not None:
+            logger.warning("EvalGatewayManager.start ignores `rollout_engine` argument")
+        self._start_thread()
+        for raw_url in self._upstream_urls:
+            url = _normalize_worker_url(raw_url)
+            worker_id = self.client.add_worker(url=url)
+            logger.info("Registered worker %s -> %s (raw=%s)", worker_id, url, raw_url)

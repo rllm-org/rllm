@@ -37,9 +37,11 @@ class Task:
     """A single problem instance.
 
     Pure data — describes itself (instruction, metadata) and points at the
-    directory where its verifier lives. The :class:`rllm.runner.Runner`
-    reads the task config and resolves the appropriate :class:`Evaluator`
-    at run time.
+    directory where its verifier lives.
+    :class:`rllm.experimental.engine.agent_flow_engine.AgentFlowEngine`
+    (driven by :class:`rllm.eval._hooks.EvalHooks` at eval time) reads
+    the task config and resolves the appropriate :class:`Evaluator` at
+    run time.
 
     Two physical shapes both produce ``Task`` instances:
 

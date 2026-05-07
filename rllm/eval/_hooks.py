@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from rllm.runner import (
+from rllm.eval._resolution import (
     _adapt_legacy_evaluator,
     _create_sandbox_for_task,
     _detect_verifier,

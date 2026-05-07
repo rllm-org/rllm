@@ -23,9 +23,9 @@ from pathlib import Path
 import pytest
 
 from rllm.eval._hooks import EvalHooks
+from rllm.eval._resolution import build_dataset_evaluator
 from rllm.eval.types import EvalOutput
-from rllm.runner import _run_agent_flow, build_dataset_evaluator
-from rllm.types import AgentConfig, Episode, Step, Task, Trajectory
+from rllm.types import AgentConfig, Episode, Step, Task, Trajectory, run_agent_flow
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -78,7 +78,7 @@ def _run_through_hooks(agent_flow, task: Task, config: AgentConfig, evaluator_ov
     hooks = EvalHooks(evaluator_override=evaluator_override)
     ctx = hooks.setup(task, agent_flow, "test-uid")
     try:
-        episode = asyncio.run(_run_agent_flow(agent_flow, task, config))
+        episode = asyncio.run(run_agent_flow(agent_flow, task, config))
         eval_output = ctx.evaluator.evaluate(task, episode)
         for traj in episode.trajectories:
             traj.reward = eval_output.reward
