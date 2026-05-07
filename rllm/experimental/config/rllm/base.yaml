@@ -148,6 +148,7 @@ gateway:
   store: memory       # "memory" (non-persistent) | "sqlite" (writes traces to disk)
   db_path: null       # Only used when store=sqlite; null → auto-resolved path (logged at startup)
   sampling_params_priority: session   # "session" | "client" — who wins when both set the same key
+  strip_vllm_fields: false  # false exposes vLLM token fields in client-facing responses
 
 # Async Training Configuration
 async_training:

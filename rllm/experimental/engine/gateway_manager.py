@@ -137,6 +137,7 @@ class GatewayManager:
 
         self.public_url, self.tunnel_backend = parse_tunnel(gw_cfg.get("tunnel", None))
         self.sampling_params_priority: str = gw_cfg.get("sampling_params_priority", "client")
+        self.strip_vllm_fields: bool = bool(gw_cfg.get("strip_vllm_fields", True))
         # The gateway always pins ``body.model`` to whatever the trainer is serving
         self.model: str | None = config.get("model", {}).get("name", None)
         self.mode = mode
@@ -313,6 +314,8 @@ class GatewayManager:
             cmd.extend(["--sampling-params-priority", self.sampling_params_priority])
         if self.model:
             cmd.extend(["--model", self.model])
+        if not self.strip_vllm_fields:
+            cmd.append("--no-strip-vllm-fields")
 
         logger.info("Starting gateway subprocess: %s", " ".join(cmd))
         # Inherit parent's stdout/stderr so gateway logs are visible for debugging.
@@ -351,6 +354,7 @@ class GatewayManager:
             model=self.model,
             add_logprobs=self.add_logprobs,
             add_return_token_ids=self.add_return_token_ids,
+            strip_vllm_fields=self.strip_vllm_fields,
         )
         app = create_app(config=gw_config, local_handler=local_handler)
 

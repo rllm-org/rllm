@@ -180,6 +180,38 @@ class TestProxy:
         assert "stop_reason" not in choice
 
     @pytest.mark.asyncio
+    async def test_chat_completions_preserves_vllm_fields_when_strip_disabled(self, mock_vllm: MockVLLMServer):
+        """strip_vllm_fields=False should expose token fields to the client."""
+        config = GatewayConfig(
+            store_worker="memory",
+            workers=[{"url": f"{mock_vllm.url}/v1", "worker_id": "w0"}],
+            health_check_interval=999,
+            strip_vllm_fields=False,
+        )
+        app = create_app(config)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as no_strip_client:
+            resp = await no_strip_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "mock-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["prompt_token_ids"] == [1, 2, 3, 4, 5]
+        assert data["prompt_logprobs"] is None
+        choice = data["choices"][0]
+        assert choice["token_ids"] == [10, 11, 12]
+        assert choice["stop_reason"] is None
+        assert "logprobs" not in choice
+
+    @pytest.mark.asyncio
     async def test_chat_completions_with_session(self, client: httpx.AsyncClient):
         """POST /sessions/{sid}/v1/chat/completions — should proxy and capture trace."""
         resp = await client.post(
@@ -253,6 +285,38 @@ class TestProxy:
 
 
 class TestStreamingProxy:
+    @pytest.mark.asyncio
+    async def test_streaming_preserves_vllm_fields_when_strip_disabled(self, mock_vllm: MockVLLMServer):
+        config = GatewayConfig(
+            store_worker="memory",
+            workers=[{"url": f"{mock_vllm.url}/v1", "worker_id": "w0"}],
+            health_check_interval=999,
+            strip_vllm_fields=False,
+        )
+        app = create_app(config)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as no_strip_client:
+            resp = await no_strip_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "mock-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": True,
+                },
+            )
+
+        assert resp.status_code == 200
+        chunks = [
+            json.loads(line[6:])
+            for line in resp.text.strip().split("\n")
+            if line.startswith("data: ") and line.strip() != "data: [DONE]"
+        ]
+        assert any(chunk.get("prompt_token_ids") == [1, 2, 3, 4, 5] for chunk in chunks)
+        assert any(choice.get("token_ids") for chunk in chunks for choice in chunk.get("choices", []))
+
     @pytest.mark.asyncio
     async def test_streaming_strips_vllm_fields(self, client: httpx.AsyncClient):
         """SSE chunks returned to agent must NOT contain vLLM-specific fields."""
