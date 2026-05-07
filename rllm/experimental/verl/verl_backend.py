@@ -618,8 +618,17 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             _send_actor_update(sub_batch, loss_name)
 
     def shutdown(self) -> None:
-        """Placeholder, just use the BackendProtocol's default shutdown method."""
-        pass
+        """Free GPU memory held by the rollout replicas.
+
+        Without this, a crash mid-training (or anywhere ``on_train_end``
+        does not get to run) leaves the vLLM replicas awake on every GPU,
+        holding tens of GB each until the Ray actors are torn down.
+        """
+        try:
+            if self.checkpoint_manager is not None:
+                self.checkpoint_manager.sleep_replicas()
+        except Exception:
+            logger.exception("VerlBackend.shutdown: sleep_replicas failed")
 
     # =========================================================================
     # Async hook methods - leverage RayPPOTrainer utilities where possible

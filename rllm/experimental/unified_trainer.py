@@ -320,10 +320,13 @@ class UnifiedTrainer:
         # we start from step (1 + original start batch index)
         trainer_state.global_step += 1
 
-        # Run the training loop
-        await self._fit_async(trainer_state)
-
-        await self.backend.on_train_end(trainer_state)
+        try:
+            await self._fit_async(trainer_state)
+        finally:
+            try:
+                await self.backend.on_train_end(trainer_state)
+            except Exception:
+                logger.exception(f"{self.backend.__class__.__name__}.on_train_end() failed during fit_async() cleanup")
 
     async def _fit_async(self, trainer_state: TrainerState) -> None:
         """Dispatch to sync or concurrent training based on config."""
