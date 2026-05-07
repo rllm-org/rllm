@@ -9,7 +9,7 @@ For a conceptual walkthrough see [AgentFlow & Evaluator](/core-concepts/agentflo
 
 ## Eval and training share one engine
 
-Both `rllm eval` and `rllm train` drive `rllm.experimental.engine.agent_flow_engine.AgentFlowEngine`. The same `_run_single` loop is used end-to-end: gateway session → run flow → fetch traces → enrich Episode → evaluate. The eval-specific concerns (per-task verifier resolution, sandbox lifecycle) plug in via the engine's optional `TaskHooks` parameter:
+Both `rllm eval` and `rllm train` drive `rllm.engine.agentflow_engine.AgentFlowEngine`. The same `_run_single` loop is used end-to-end: gateway session → run flow → fetch traces → enrich Episode → evaluate. The eval-specific concerns (per-task verifier resolution, sandbox lifecycle) plug in via the engine's optional `TaskHooks` parameter:
 
 ```python
 class TaskHooks(Protocol):

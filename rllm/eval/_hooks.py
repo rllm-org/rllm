@@ -34,7 +34,7 @@ from rllm.eval._resolution import (
 from rllm.types import Evaluator
 
 if TYPE_CHECKING:
-    from rllm.experimental.engine.agent_flow_engine import TaskContext
+    from rllm.engine.agentflow_engine import TaskContext
     from rllm.types import AgentFlow, Task
 
 logger = logging.getLogger(__name__)
@@ -64,7 +64,7 @@ class EvalHooks:
         self.sandbox_backend = sandbox_backend
 
     def setup(self, task: Task, agent_flow: AgentFlow, uid: str) -> TaskContext:
-        from rllm.experimental.engine.agent_flow_engine import TaskContext
+        from rllm.engine.agentflow_engine import TaskContext
         from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
 
         # Skip per-task verifier detection when an override is provided.

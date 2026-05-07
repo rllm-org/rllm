@@ -171,7 +171,7 @@ class UnifiedTrainer:
         remote_runtime_cfg = self.rllm_config.get("remote_runtime", {})
 
         if agent_flow is not None and evaluator is not None:
-            from rllm.experimental.engine.agent_flow_engine import AgentFlowEngine
+            from rllm.engine.agentflow_engine import AgentFlowEngine
             from rllm.experimental.engine.gateway_manager import GatewayManager
 
             gateway_mode = "process" if kwargs.get("backend_name") == "verl" else "thread"

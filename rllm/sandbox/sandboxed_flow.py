@@ -1,7 +1,7 @@
 """SandboxedAgentFlow: base class for agents that need sandboxed execution environments.
 
 Lifecycle managed by :class:`rllm.eval._hooks.EvalHooks` (which sits in
-front of :class:`rllm.experimental.engine.agent_flow_engine.AgentFlowEngine`):
+front of :class:`rllm.engine.agentflow_engine.AgentFlowEngine`):
 
 1. The hook creates a Sandbox via ``_create_sandbox_for_task`` and injects
    it with ``set_sandbox()``, then calls ``on_sandbox_ready(task, config)``.
