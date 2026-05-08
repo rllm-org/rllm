@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "swe-agent"
+version = "0.1.0"
+description = "Software-engineering agent cookbook for rLLM using mini-swe-agent and Modal sandboxes"
+requires-python = ">=3.10"
+dependencies = [
+    "rllm",
+    "openai",
+    "litellm",
+    "modal",
+    "python-dotenv",
+    "datasets",
+    "pandas",
+    "pyyaml",
+    "mini-swe-agent[full]",
+    "swebench",
+    "swesmith[validate] @ git+https://github.com/SWE-bench/SWE-smith.git",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["swe*"]
+exclude = ["swe.experimental*"]
+
+[tool.setuptools.package-data]
+"swe.config" = ["*.yaml"]
+
+# Plugin discovery: `rllm` CLI finds these by name.
+[project.entry-points."rllm.agents"]
+swe = "swe.agent_flow:SWEAgentFlow"
+
+[project.entry-points."rllm.evaluators"]
+swe = "swe.evaluator:SWEEvaluator"

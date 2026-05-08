@@ -1,0 +1,206 @@
+# Shared SWE evaluation configuration for mini-swe-agent v2
+# Used across SWE-bench Pro, SWE-bench Multilingual, SWE-smith, and related tasks.
+
+agent:
+  system_template: |
+    You are a helpful assistant that can interact with a computer shell to solve programming tasks.
+  instance_template: |
+    <task_description>
+    Consider the following task description:
+    {{task}}
+    </task_description>
+
+    <instructions>
+    # Task Instructions
+
+    ## Overview
+
+    You're a software engineer interacting continuously with a computer by submitting commands.
+    You'll be helping implement necessary changes to meet requirements in the task description.
+    Your task is specifically to make changes to non-test files in the current directory in order to fix the issue described in the task description in a way that is general and consistent with the codebase.
+    <IMPORTANT>This is an interactive process where you will think and issue ONE command, see the result, then think and issue your next command(s).</important>
+
+    For each turn, briefly state what you intend to check or change, then issue exactly one bash tool call. The tool's output will be shown to you in the next turn.
+
+    ## Important Boundaries
+
+    - MODIFY: Regular source files in {{cwd}}. If the correct fix genuinely requires a build, manifest, or configuration change (for example `Cargo.toml`, `go.mod`, `package.json`, `pom.xml`, `build.gradle`, `pyproject.toml`), you may modify it.
+    - DO NOT MODIFY: Existing tests just to make visible checks pass, or harness/submission files unrelated to the fix.
+    - Some PASS_TO_PASS (P2P) tests may be present and runnable in the workspace.
+    - Many evaluator tests are hidden or unavailable during patch generation. Passing visible tests is not enough by itself; fix the root cause and avoid overfitting to visible checks.
+
+    ## Required Workflow
+
+    1. Analyze the codebase by finding and reading relevant files to understand the task
+    2. Run any relevant existing tests that are available; if none are available, write a small reproduction or validation script
+    3. Edit the source code to implement the required changes
+    4. Run a language-appropriate build, compile step, or targeted test command to confirm the change is valid
+    5. Re-run your validation and check nearby edge cases; if it does not work, iterate on steps 3-5
+    6. Keep the final patch focused on the actual fix rather than only the visible checks
+
+    ## Editing Files
+
+    For simple single-line replacements, `sed -i 's/old/new/' file` is fine. For anything more complex (multi-line edits, special characters like brackets or quotes), use a Python script instead:
+    ```
+    python3 << 'PYEOF'
+    import pathlib
+    p = pathlib.Path("path/to/file.py")
+    text = p.read_text()
+    text = text.replace("old_code", "new_code")
+    p.write_text(text)
+    PYEOF
+    ```
+
+    Always verify your edit worked with `git diff` immediately after. If an edit didn't take effect, try a different approach — do not repeat the same command.
+
+    Do NOT use `git apply` or `applypatch` to apply changes — they are unreliable in this environment. Use `sed -i` or a Python script with `pathlib` as shown above.
+
+    ## Validation Guidance
+
+    - Prefer existing project-native test/build commands over inventing new workflows.
+    - **Python**: Use targeted `pytest` or a small `python3 -c` / script that imports the affected module.
+    - **Go**: Prefer targeted `go test` in the relevant package. If you create a test, put `_test.go` inside the package directory, not at repo root.
+    - **Rust**: Prefer targeted `cargo test` and `cargo build` / `cargo check`.
+    - **Java**: Prefer the repo's existing Maven or Gradle commands, such as targeted `mvn test` or `./gradlew test`.
+    - **PHP**: Prefer the repo's existing PHPUnit, Pest, or Composer-driven test commands, such as targeted `phpunit`, `pest`, or `composer test`.
+    - **C/C++**: Prefer the repo's existing build and test workflow, such as `cmake`, `ctest`, `make test`, or the project's native compiler/test commands.
+    - **JavaScript/TypeScript**: Prefer the repo's existing package-manager and test runner commands (`npm`, `pnpm`, `yarn`, `jest`, `vitest`, etc.) rather than introducing a new tool.
+    - If you create temporary validation files, do not include them in the final submitted patch.
+
+    ## Command Execution Rules
+
+    - Each tool call runs in a fresh subshell. `cd` and shell variables do not persist between turns. Use absolute paths, or chain with `&&` (e.g. `MY_VAR=val cd /path/to/dir && ...`).
+    - If a command fails twice with the same error, stop and try a different approach.
+
+    ## Environment Details
+
+    - You have a full Linux shell environment
+    - Always use non-interactive flags (-y, -f) for commands
+    - Avoid interactive tools like vi, nano, or any that require user input
+    - You can use bash commands or invoke any tool that is available in the environment
+    - You can also create new tools or scripts to help you with the task
+    - If a tool isn't available, you can also install it
+
+    ## Submission
+
+    When you've completed your work, you MUST submit your changes as a git patch.
+    Follow these steps IN ORDER, with SEPARATE commands:
+
+    Step 1: Create the patch file
+    Run `git diff HEAD -- path/to/file1 path/to/file2 > patch.txt` listing only the source files you modified.
+    Do NOT use `git add` or `git commit`. Do NOT include test files, scripts, or any files you created for testing.
+    Redirecting to `patch.txt` produces no stdout; that is expected and does not mean the patch is empty.
+
+    <IMPORTANT>
+    The patch must ONLY contain changes to the specific source files you modified to fix the issue.
+    List each modified source file explicitly in the `git diff HEAD` command — do NOT use `git diff HEAD` without file paths.
+    Do not submit file creations or changes to any of the following files:
+    - test files (e.g., `test_*.py`, `*_test.go`, `*_test.py`, `test_*.go`)
+    - reproduction scripts or helper tools you created
+    - installation, build, packaging, configuration, or setup scripts unless they are directly part of the issue you were fixing (you can assume that the environment is already set up for your client)
+    - binary or compiled files
+    </IMPORTANT>
+
+    Step 2: Verify your patch
+    Inspect patch.txt to confirm it only contains your intended changes and headers show `--- a/` and `+++ b/` paths.
+    Use `wc -c patch.txt` or `sed -n '1,120p' patch.txt` to verify it; do not infer anything from the empty stdout of the previous redirection command.
+
+    Step 3: Submit (EXACT command required)
+    You MUST execute this EXACT command to submit:
+
+    echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt
+
+    If the command fails (nonzero exit status), it will not submit.
+
+    <CRITICAL>
+    - Creating/viewing the patch and submitting it MUST be separate commands (not combined with &&).
+    - If you modify patch.txt after verifying, you SHOULD verify again before submitting.
+    - NEVER hand-write `patch.txt` or fabricate diff headers. It must come directly from `git diff`.
+    - If `git status` shows modified files but the `git diff HEAD ... > patch.txt` command printed nothing, inspect `patch.txt` directly or run `git diff HEAD -- path/to/file` without redirection before submitting.
+    - You CANNOT continue working (reading, editing, testing) in any way on this task after submitting.
+    </CRITICAL>
+    </instructions>
+  step_limit: 250
+  cost_limit: 3.0
+  # Context compaction
+  compaction_enabled: true
+  compaction_token_trigger: 28000    # ~85% of 32K context
+  compaction_keep_recent_turns: 1
+  compaction_summary_prompt: |
+    You are about to lose your prior conversation history. Write a self-contained handoff to your future self.
+    This is a context-compaction step, not a shell/tool step. Do not call tools. Do not emit <tool_call>, <function=...>, or <parameter=...>.
+    Begin with the literal sentence:
+
+      I am continuing this task from an earlier session. Here is what I know and what I will do next.
+
+    Then, summarize the conversation so far for continuation. Keep only:
+    - Problem understanding and root cause analysis
+    - Files inspected and modified (with paths)
+    - What edits were made and why
+    - Failed attempts and why they failed
+    - Current state and concrete next steps
+
+    Be specific. Cite line numbers and function names where they matter.
+    Do not reproduce raw tool output; describe what they said. Address only your future self.
+
+# Modal environment configuration via SWE-ReX
+environment:
+  environment_class: swerex_modal
+  cwd: "/testbed"
+  timeout: 120
+  interpreter: ["bash", "-c"]
+  env:
+    HOME: /root
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+    TQDM_DISABLE: '1'
+  # Modal-specific settings
+  startup_timeout: 600.0
+  runtime_timeout: 3600.0
+  deployment_timeout: 3600.0
+  install_pipx: true
+  modal_sandbox_kwargs: {}
+
+# Model configuration
+model:
+  observation_template: |
+    {%- if output.output | length < 2000 -%}
+    {
+      "returncode": {{ output.returncode }},
+      "output": {{ output.output | tojson }}
+      {%- if output.exception_info %}, "exception_info": {{ output.exception_info | tojson }}{% endif %}
+    }
+    {%- else -%}
+    {
+      "returncode": {{ output.returncode }},
+      "output_head": {{ output.output[:1000] | tojson }},
+      "output_tail": {{ output.output[-1000:] | tojson }},
+      "elided_chars": {{ output.output | length - 2000 }},
+      "warning": "Output too long."
+      {%- if output.exception_info %}, "exception_info": {{ output.exception_info | tojson }}{% endif %}
+    }
+    {%- endif -%}
+  format_error_template: |
+    Tool call error:
+
+    {{ error }}
+
+    Every response needs to use the 'bash' tool exactly once.
+    Call the bash tool with your command as the argument.
+
+    If you have completed your assignment, please consult the first message about how to
+    submit your solution (you will not be able to continue working on this task after that).
+  compaction_continuation_template: |
+    You are continuing from a compacted earlier session.
+
+    <compact_context>
+    {{ summary }}
+    </compact_context>
+  model_name: "anthropic/claude-sonnet-4-5-20250929"
+  model_kwargs:
+    drop_params: true
+    temperature: 1.0
+    chat_template_kwargs:
+      enable_thinking: true
