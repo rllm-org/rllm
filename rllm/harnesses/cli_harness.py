@@ -146,19 +146,68 @@ class BaseCliHarness(SandboxedAgentFlow):
 
         return os.environ.get(fallback_env_var, "sk-rllm-gateway")
 
+    # Provider slugs litellm understands as the request prefix. When the
+    # input prefix isn't one of these, we treat the whole input as a
+    # bare model id so HF-style names like ``Qwen/Qwen3.5-35B-A3B``
+    # don't end up shipped to litellm as ``provider="Qwen"`` (an unknown
+    # provider — litellm raises immediately and the agent never reaches
+    # the rllm gateway, so there are zero traces to enrich training on).
+    _LITELLM_PROVIDER_SLUGS = frozenset(
+        {
+            "openai",
+            "anthropic",
+            "azure",
+            "azure_openai",
+            "bedrock",
+            "vertex_ai",
+            "google",
+            "gemini",
+            "cohere",
+            "deepseek",
+            "groq",
+            "mistral",
+            "xai",
+            "perplexity",
+            "fireworks_ai",
+            "together_ai",
+            "anyscale",
+            "deepinfra",
+            "huggingface",
+            "ollama",
+            "replicate",
+            "openrouter",
+            "databricks",
+        }
+    )
+
     @classmethod
     def ensure_provider_prefix(cls, model_name: str) -> tuple[str, str, str]:
         """Return ``(provider, model_id, qualified_name)`` for *model_name*.
 
-        Accepts both bare names (``gpt-4o``) and pre-qualified names
-        (``openai/gpt-4o``); inference fills in the provider when missing.
+        Accepts bare names (``gpt-4o``), pre-qualified names
+        (``openai/gpt-4o``), and HF-style identifiers
+        (``Qwen/Qwen3.5-35B-A3B``). For HF-style inputs whose first
+        segment isn't a known LLM provider slug, the org is dropped and
+        the trailing model id is repromoted under an inferred routable
+        provider so litellm dispatches the call through the rllm
+        gateway (which pins ``body.model`` to whatever the trainer is
+        serving anyway). Keeping a single ``provider/model_id`` form is
+        important: mini-swe-agent + some litellm versions mis-parse
+        multi-slash names (``openai/Qwen/Qwen3.5-35B-A3B``).
         """
         if "/" in model_name:
-            provider, model_id = model_name.split("/", 1)
-        else:
-            provider = cls.infer_provider(model_name)
-            model_id = model_name
-        return provider, model_id, f"{provider}/{model_id}"
+            head, rest = model_name.split("/", 1)
+            if head.lower() in cls._LITELLM_PROVIDER_SLUGS:
+                return head, rest, model_name
+            # HF-style "<org>/<model>" — drop the org slug and re-infer
+            # the provider so litellm gets a clean ``provider/model_id``
+            # form. The org is informational only; the gateway routes
+            # by session URL, not body model.
+            model_id = rest
+            provider = cls.infer_provider(model_id)
+            return provider, model_id, f"{provider}/{model_id}"
+        provider = cls.infer_provider(model_name)
+        return provider, model_name, f"{provider}/{model_name}"
 
     def _container_url(self, url: str) -> str:
         """Rewrite host loopback addresses for in-container reachability.

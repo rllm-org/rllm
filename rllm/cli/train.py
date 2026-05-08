@@ -3,8 +3,10 @@
 ``rllm train <benchmark> --model <name> [OPTIONS]``
 
 Reuses the eval framework's dataset catalog, AgentFlows, and Evaluators to run
-RL training via the Tinker backend.  Uses ``AgentTrainer(backend="tinker",
-agent_flow=..., evaluator=...)`` with the AgentFlow + Evaluator path.
+RL training via the Tinker backend. Routes every rollout through
+``AgentFlowEngine`` (the same engine eval uses); for sandbox-style harnesses
+and harbor-sourced datasets, ``EvalHooks`` provides per-task sandbox lifecycle
+and per-task verifier resolution.
 """
 
 from __future__ import annotations
@@ -143,7 +145,7 @@ def _run_train(
     evaluator_name: str | None,
     model: str,
     train_dataset_name: str | None,
-    train_split: str,
+    train_split: str | None,
     val_dataset_name: str | None,
     val_split: str | None,
     max_examples: int | None,
@@ -225,10 +227,12 @@ def _run_train(
         # Datasets: pass the Task list as both train and val for now
         from rllm.data.dataset import Dataset as _Dataset
 
+        if train_split is None:
+            train_split = bench_result.split or "train"
         train_dataset = _Dataset(
             data=list(bench_result.tasks),
             name=bench_result.name,
-            split=bench_result.split or "train",
+            split=train_split,
         )
         if max_examples is not None and max_examples < len(train_dataset):
             train_dataset = train_dataset.select(range(max_examples))
@@ -283,29 +287,46 @@ def _run_train(
             console.print(f"  [error]Error loading agent '{agent_name}': {e}[/]")
             raise SystemExit(1) from None
 
+        _is_harbor_source = bool(catalog_entry) and catalog_entry.get("source", "").startswith("harbor:")
+        _is_harbor_agent = bool(agent_name) and agent_name.startswith("harbor:")
+
         # ---- Resolve evaluator ----
+        # ``harbor_reward_fn`` reads ``episode.artifacts['harbor_reward']``,
+        # which is only populated by HarborRuntime (``harbor:<scaffold>``).
+        # When a harbor-sourced dataset is run through an rllm-native harness
+        # (mini-swe-agent / opencode / oracle / …), the artifact is never set
+        # and the evaluator would always score zero. Skip the catalog
+        # evaluator in that case and let ``EvalHooks`` resolve a per-task
+        # verifier from the harbor task dir (typically ``tests/test.sh``).
         evaluator = None
-        evaluator_display = "N/A"
+        evaluator_display = "per-task (from task.toml/dataset.toml)"
         if evaluator_name is not None:
             try:
                 evaluator = load_evaluator(evaluator_name)
-                evaluator_display = evaluator_name
+                evaluator_display = f"{evaluator_name} (overrides per-task verifier)"
             except (KeyError, ImportError, AttributeError, TypeError) as e:
                 console.print(f"  [error]Error loading evaluator '{evaluator_name}': {e}[/]")
                 raise SystemExit(1) from None
         else:
-            evaluator = resolve_evaluator_from_catalog(benchmark)
-            if evaluator is not None:
-                reward_fn_name = catalog_entry.get("reward_fn", "") if catalog_entry else ""
-                evaluator_display = reward_fn_name or type(evaluator).__name__
-            elif catalog_entry and catalog_entry.get("reward_fn"):
-                try:
-                    evaluator = load_evaluator(catalog_entry["reward_fn"])
-                    evaluator_display = catalog_entry["reward_fn"]
-                except (KeyError, ImportError):
-                    pass
+            _harbor_reward_fn_skipped = _is_harbor_source and catalog_entry.get("reward_fn") == "harbor_reward_fn" and not _is_harbor_agent
+            if _harbor_reward_fn_skipped:
+                evaluator_display = "per-task (rllm runtime on harbor task)"
+            else:
+                evaluator = resolve_evaluator_from_catalog(benchmark)
+                if evaluator is not None:
+                    reward_fn_name = catalog_entry.get("reward_fn", "") if catalog_entry else ""
+                    evaluator_display = reward_fn_name or type(evaluator).__name__
+                elif catalog_entry and catalog_entry.get("reward_fn"):
+                    try:
+                        evaluator = load_evaluator(catalog_entry["reward_fn"])
+                        evaluator_display = catalog_entry["reward_fn"]
+                    except (KeyError, ImportError):
+                        pass
 
-        if evaluator is None:
+        # For non-harbor catalog datasets, training still requires a
+        # global evaluator (no per-task verifier files exist for HF rows).
+        # Harbor datasets fall back to per-task verifiers via EvalHooks.
+        if evaluator is None and not _is_harbor_source:
             console.print(f"  [error]No evaluator found for '{benchmark}'. Specify --evaluator explicitly.[/]")
             raise SystemExit(1)
 
@@ -313,13 +334,32 @@ def _run_train(
         train_ds_name = train_dataset_name or benchmark
         val_ds_name = val_dataset_name or benchmark
 
-        # Resolve val split from catalog if not provided
+        # Resolve train split from catalog if not provided. Prefer an
+        # explicit ``train_split`` field; otherwise harbor datasets
+        # (which only register their single ``eval_split``) need that
+        # split for training; for everything else the historical "train"
+        # default is correct.
+        if train_split is None:
+            train_catalog_entry = catalog.get("datasets", {}).get(train_ds_name) or (catalog_entry if train_ds_name == benchmark else None)
+            if train_catalog_entry and "train_split" in train_catalog_entry:
+                train_split = train_catalog_entry["train_split"]
+            elif train_catalog_entry and train_catalog_entry.get("source", "").startswith("harbor:"):
+                train_split = train_catalog_entry.get("eval_split", "default")
+            else:
+                train_split = "train"
+
+        # Resolve val split from catalog if not provided. Same fallback
+        # chain as train_split — including the on-the-fly harbor entry.
         if val_split is None:
-            val_catalog_entry = catalog.get("datasets", {}).get(val_ds_name)
+            val_catalog_entry = catalog.get("datasets", {}).get(val_ds_name) or (catalog_entry if val_ds_name == benchmark else None)
             val_split = val_catalog_entry.get("eval_split", "test") if val_catalog_entry else "test"
 
         # ---- Load training dataset ----
-        train_dataset = _load_or_pull_dataset(train_ds_name, train_split, catalog)
+        # Pass through the resolved catalog_entry so harbor datasets (which
+        # synthesize entries via ``resolve_harbor_catalog_entry`` and aren't
+        # written into ``catalog["datasets"]``) still get auto-pulled.
+        _entry_override = catalog_entry if (train_ds_name == benchmark) else None
+        train_dataset = _load_or_pull_dataset(train_ds_name, train_split, catalog, _entry_override)
         if train_dataset is None:
             console.print(f"  [error]Could not load training dataset '{train_ds_name}' split '{train_split}'.[/]")
             raise SystemExit(1)
@@ -328,8 +368,23 @@ def _run_train(
             train_dataset = train_dataset.select(range(max_examples))
 
         # ---- Load validation dataset ----
-        val_dataset = _load_or_pull_dataset(val_ds_name, val_split, catalog)
+        _val_entry_override = catalog_entry if (val_ds_name == benchmark) else None
+        val_dataset = _load_or_pull_dataset(val_ds_name, val_split, catalog, _val_entry_override)
         # val_dataset can be None — training will proceed without validation
+
+        # Harbor-sourced rows carry ``task_path`` pointing at each harbor
+        # task dir. Wrap rows as Task objects rooted at that path so the
+        # AgentFlowEngine + EvalHooks can resolve per-task verifiers
+        # (``tests/test.sh``) and per-task config (``task.toml``).
+        if _is_harbor_source:
+            from rllm.cli.eval import _dict_rows_to_tasks
+            from rllm.data.dataset import Dataset as _Dataset
+
+            train_tasks = _dict_rows_to_tasks(list(train_dataset.data))
+            train_dataset = _Dataset(data=train_tasks, name=train_ds_name, split=train_split)
+            if val_dataset is not None:
+                val_tasks = _dict_rows_to_tasks(list(val_dataset.data))
+                val_dataset = _Dataset(data=val_tasks, name=val_ds_name, split=val_split)
 
     # ---- Build config ----
     config = build_train_config(
@@ -347,39 +402,6 @@ def _run_train(
         output_dir=output_dir,
         config_file=config_file,
     )
-
-    # ---- Auto-configure Harbor remote runtime ----
-    is_harbor = catalog_entry and catalog_entry.get("source", "").startswith("harbor:")
-    if is_harbor:
-        from omegaconf import OmegaConf
-
-        # Extract the Harbor agent name from the "harbor:" prefix
-        harbor_agent = agent_name
-        if harbor_agent and harbor_agent.startswith("harbor:"):
-            harbor_agent = harbor_agent.removeprefix("harbor:")
-        elif harbor_agent is None:
-            harbor_agent = "mini-swe-agent"
-
-        config = OmegaConf.merge(
-            config,
-            OmegaConf.create(
-                {
-                    "rllm": {
-                        "remote_runtime": {
-                            "enabled": True,
-                            "backend": "harbor",
-                            "harbor": {
-                                "agent": harbor_agent,
-                            },
-                        },
-                    },
-                }
-            ),
-        )
-        # Harbor uses its own agent/evaluator pipeline, so clear the agent_flow/evaluator
-        # to route through RemoteAgentFlowEngine instead of AgentFlowEngine.
-        agent_flow = None
-        evaluator = None
 
     # ---- Wire UI logging ----
     if enable_ui:
@@ -424,11 +446,47 @@ def _run_train(
     console.print(Panel(table, title="[bold]rLLM Train[/]", border_style="cyan", expand=False))
     console.print()
 
+    # ---- Build hooks for sandbox / per-task verifier flows ----
+    # ``EvalHooks`` is required whenever a rollout needs (a) a fresh
+    # sandbox per task — without it, parallel ``SandboxedAgentFlow``
+    # rollouts clobber a shared ``self._sandbox`` slot — or (b) a
+    # per-task verifier (harbor task dirs carry their own
+    # ``tests/test.sh``; ``evaluator_override=None`` triggers detection).
+    from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
+
+    _is_harbor_source_for_hooks = bool(catalog_entry) and catalog_entry.get("source", "").startswith("harbor:")
+    needs_hooks = _is_harbor_source_for_hooks or isinstance(agent_flow, SandboxedAgentFlow)
+    hooks = None
+    if needs_hooks:
+        from rllm.eval._hooks import EvalHooks
+
+        hooks = EvalHooks(evaluator_override=evaluator)
+        # When hooks resolve the evaluator, leave the engine-bound
+        # evaluator unset so ``ctx.evaluator`` is the only scoring path.
+        evaluator = None
+
+        # Pin the gateway to loopback so docker sandboxes can reach it
+        # via the harness's ``host.docker.internal`` rewrite. The
+        # default ``_get_routable_ip()`` returns the host's LAN IP,
+        # which Docker Desktop containers can't reliably reach and
+        # which the harness's ``_container_url`` doesn't rewrite — so
+        # rollouts run, the agent's LLM calls dead-end, and the gateway
+        # captures no traces. Eval's gateway already defaults to
+        # ``127.0.0.1`` for the same reason.
+        from omegaconf import OmegaConf
+
+        if not config.rllm.get("gateway", {}).get("host"):
+            config = OmegaConf.merge(
+                config,
+                OmegaConf.create({"rllm": {"gateway": {"host": "127.0.0.1"}}}),
+            )
+
     # ---- Launch training ----
     trainer = AgentTrainer(
         backend="tinker",
         agent_flow=agent_flow,
         evaluator=evaluator,
+        hooks=hooks,
         config=config,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
@@ -436,15 +494,20 @@ def _run_train(
     trainer.train()
 
 
-def _load_or_pull_dataset(name: str, split: str, catalog: dict):
-    """Load a dataset, auto-pulling from HuggingFace if not cached."""
+def _load_or_pull_dataset(name: str, split: str, catalog: dict, catalog_entry_override: dict | None = None):
+    """Load a dataset, auto-pulling from HuggingFace/Harbor if not cached.
+
+    ``catalog_entry_override`` lets harbor entries resolved at runtime
+    (via :func:`resolve_harbor_catalog_entry`) drive the pull, since those
+    entries aren't written into ``catalog["datasets"]``.
+    """
     from rich.status import Status
 
     from rllm.data import DatasetRegistry
 
     dataset = DatasetRegistry.load_dataset(name, split)
     if dataset is None:
-        catalog_entry = catalog.get("datasets", {}).get(name)
+        catalog_entry = catalog_entry_override or catalog.get("datasets", {}).get(name)
         if catalog_entry:
             with Status(f"[dim]Pulling {name} from {catalog_entry['source']}...[/]", console=console):
                 pull_dataset(name, catalog_entry)
@@ -461,7 +524,7 @@ def _load_or_pull_dataset(name: str, split: str, catalog: dict):
 @click.argument("benchmark")
 # Dataset options
 @click.option("--train-dataset", default=None, help="Training dataset name (default: same as <benchmark>).")
-@click.option("--train-split", default="train", help="Training split (default: train).")
+@click.option("--train-split", default=None, help="Training split (default: catalog train_split, then 'train' if available, else eval_split).")
 @click.option("--val-dataset", default=None, help="Validation dataset name (default: same as <benchmark>).")
 @click.option("--val-split", default=None, help="Validation split (default: catalog eval_split).")
 @click.option("--max-examples", default=None, type=int, help="Limit training examples.")
@@ -488,7 +551,7 @@ def _load_or_pull_dataset(name: str, split: str, catalog: dict):
 def train_cmd(
     benchmark: str,
     train_dataset: str | None,
-    train_split: str,
+    train_split: str | None,
     val_dataset: str | None,
     val_split: str | None,
     max_examples: int | None,
