@@ -113,11 +113,13 @@ class VerlTrainerLauncher(TrainerLauncher):
             self.config.data.val_files = val_dataset.get_verl_data_path()
 
     def train(self):
+        own_ray = False
         if not ray.is_initialized():
             from rllm.trainer.ray_init_utils import get_ray_init_settings
 
             ray_init_settings = get_ray_init_settings(self.config)
             ray.init(runtime_env=get_ppo_ray_runtime_env(), **ray_init_settings)
+            own_ray = True
 
         # Capture Hydra CLI overrides while we're still in the Hydra-decorated
         # process; the Ray actor below cannot read HydraConfig itself.
@@ -128,15 +130,22 @@ class VerlTrainerLauncher(TrainerLauncher):
         except (ValueError, AttributeError, ImportError):
             hydra_overrides = []
 
-        runner = VerlTaskRunner.remote()  # type: ignore
+        try:
+            runner = VerlTaskRunner.remote()  # type: ignore
 
-        ray.get(
-            runner.run.remote(
-                config=self.config,
-                workflow_class=self.workflow_class,
-                workflow_args=self.workflow_args,
-                store=self.store,
-                hydra_overrides=hydra_overrides,
-                **self.kwargs,
+            ray.get(
+                runner.run.remote(
+                    config=self.config,
+                    workflow_class=self.workflow_class,
+                    workflow_args=self.workflow_args,
+                    store=self.store,
+                    hydra_overrides=hydra_overrides,
+                    **self.kwargs,
+                )
             )
-        )
+        finally:
+            if own_ray:
+                try:
+                    ray.shutdown()
+                except Exception:
+                    logger.exception("ray.shutdown during launcher cleanup failed")
