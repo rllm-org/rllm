@@ -146,9 +146,6 @@ if [ ! -e ~/.cache/huggingface/hub/models--Qwen--Qwen3.5-9B ] \
         ~/.cache/huggingface/hub/models--Qwen--Qwen3.5-9B
 fi
 
-export COLLAPSE_DEBUG_DIR=${COLLAPSE_DEBUG_DIR:-$COOKBOOK_DIR/collapse_debug/9b-megatron-h100}
-mkdir -p "$COLLAPSE_DEBUG_DIR"
-
 export NCCL_CUMEM_ENABLE=0
 # H100 nodes have no bond0 — eth0 is the only iface with a global IPv6.
 # Unconditional export overrides the devbox-shell preset and is propagated
@@ -194,7 +191,6 @@ if [ -z "$MODEL_PATH" ] || [ ! -d "$MODEL_PATH" ]; then
     exit 1
 fi
 MODEL_NAME="$MODEL_PATH"
-export COLLAPSE_DEBUG_TOKENIZER=${COLLAPSE_DEBUG_TOKENIZER:-$MODEL_NAME}
 
 # Parallelism for the two-node 16xH100 setup:
 # world size 16 / (TP=2 × CP=2 × PP=1) = DP=4.

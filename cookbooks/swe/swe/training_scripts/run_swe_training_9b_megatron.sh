@@ -101,18 +101,9 @@ if [ ! -e ~/.cache/huggingface/hub/models--Qwen--Qwen3.5-9B ] \
         ~/.cache/huggingface/hub/models--Qwen--Qwen3.5-9B
 fi
 
-# Collapse-merge debug dump: on every failed prefix-merge inside
-# rllm/experimental/verl/collapse.py, write a tokenizer-decoded report
-# to COLLAPSE_DEBUG_DIR. COLLAPSE_DEBUG_TOKENIZER pins the decoder to the
-# Qwen3.5 HF tokenizer (loaded via AutoTokenizer) regardless of what the
-# rollout engine passes through. The tokenizer path is set after MODEL_PATH
-# resolution below.
-export COLLAPSE_DEBUG_DIR=${COLLAPSE_DEBUG_DIR:-$COOKBOOK_DIR/collapse_debug/9b-megatron}
-mkdir -p "$COLLAPSE_DEBUG_DIR"
-
 export NCCL_CUMEM_ENABLE=0
 # verl propagates the driver's NCCL env to every actor via ray
-# runtime_env.env_vars (see external/rllm/rllm/trainer/verl/ray_runtime_env.py),
+# runtime_env.env_vars (see rllm/trainer/verl/ray_runtime_env.py),
 # so a wrong NCCL_SOCKET_IFNAME here will poison every worker. Auto-detect by
 # probing which interface owns a global IPv6 — bond0 on the older B200 fleet,
 # eth0 on the newer one. This overrides any inherited value from the shell.
@@ -150,7 +141,6 @@ if [ -z "$MODEL_PATH" ] || [ ! -d "$MODEL_PATH" ]; then
     exit 1
 fi
 MODEL_NAME="$MODEL_PATH"
-export COLLAPSE_DEBUG_TOKENIZER=${COLLAPSE_DEBUG_TOKENIZER:-$MODEL_NAME}
 
 if [[ "$RAY_ADDRESS" == ray://* ]]; then
     RAY_STATUS_LINE=$(
