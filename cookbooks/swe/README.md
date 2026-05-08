@@ -81,9 +81,10 @@ bash cookbooks/swe/scripts/setup_verl_vllm018_qwen35.sh
 
 The script installs the pinned Qwen3.5 stack used by these launchers:
 `torch==2.10.0+cu129`, `vllm==0.18.0`, `transformers==5.3.0`,
-Megatron-LM `core_v0.16.0`, `mbridge` `641a5a0`, `flash-attn==2.8.3`,
-TransformerEngine `release_v2.12`, Apex, `flash-linear-attention==0.4.1`,
-veRL, rLLM, the model gateway, and this cookbook.
+`megatron-core==0.18.0`, `megatron-bridge==0.4.0`,
+`flash-attn==2.8.3`, TransformerEngine `release_v2.12`, Apex,
+`flash-linear-attention==0.4.1`, veRL, rLLM, the model gateway, and this
+cookbook.
 
 Useful overrides:
 
