@@ -1,0 +1,87 @@
+# Numeric hyperparameters from run_swe_training_9b_megatron_h100.sh.
+# Paths, strings, booleans, and logging/runtime flags are intentionally omitted.
+
+cluster:
+  nnodes: 4
+  n_gpus_per_node: 8
+
+parallelism:
+  actor_tp: 4
+  actor_cp: 4
+  actor_pp: 1
+  rollout_tp: 1
+  expert_model_parallel_size: 1
+
+data:
+  train_max_samples: 1500
+  train_batch_size: 8
+  gen_batch_size: 8
+  max_prompt_length: 30720
+  max_response_length: 32768
+  filter_overlong_prompts_workers: 8
+
+actor:
+  optim:
+    lr: 1.0e-5
+    lr_warmup_steps: 20
+    clip_grad: 1.0
+  ppo:
+    mini_batch_size: 2
+    micro_batch_size_per_gpu: 1
+    epochs: 1
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.28
+    kl_loss_coef: 0.0
+    entropy_coeff: 0.0
+
+rollout:
+  max_model_len: 32768
+  gpu_memory_utilization: 0.3
+  log_prob_micro_batch_size_per_gpu: 1
+  n: 8
+  temperature: 1.0
+  top_p: 1.0
+  update_weights_bucket_megabytes: 6144
+
+ref:
+  log_prob_micro_batch_size_per_gpu: 1
+
+algorithm:
+  gamma: 1.0
+  lam: 1.0
+  rollout_correction:
+    rollout_is_threshold: 2.0
+    tis_cap: 2.0
+
+workflow:
+  n_parallel_tasks: 64
+  retry_limit: 1
+
+swe:
+  train:
+    step_limit: 200
+    agent_timeout: 600
+    command_timeout: 120
+    sandbox_timeout: 780
+    startup_jitter_s: 15.0
+  val:
+    step_limit: 300
+    agent_timeout: 900
+    command_timeout: 120
+    sandbox_timeout: 1020
+    startup_jitter_s: 30
+  compaction:
+    token_trigger: 18000
+    keep_recent_turns: 1
+  sandbox_retry_backoff:
+    min_s: 5.0
+    max_s: 10.0
+
+lora:
+  rank: 16
+  alpha: 32
+
+trainer:
+  total_epochs: 100
+  save_freq: 100
+  test_freq: 1000

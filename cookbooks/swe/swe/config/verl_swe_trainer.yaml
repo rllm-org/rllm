@@ -1,0 +1,166 @@
+defaults:
+  - rllm: base
+  - ppo_megatron_trainer
+  - _self_
+
+train_dataset: swe_smith
+val_dataset: swe_bench_multilingual
+train_max_samples: null
+val_max_samples: null
+
+swe:
+  cost_limit: 3.0
+  step_limit: 20
+  command_timeout: 60
+  workflow_timeout: 1200
+  sandbox_timeout: 1500
+  agent_timeout: 900
+  verbose: true
+  save_trajectories: false
+  save_rollout_trajectories: false
+  trajectory_save_pct: 1.0
+  trajectory_output_dir: null
+
+data:
+  gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
+  train_batch_size: 8
+  val_batch_size: 8
+  max_prompt_length: 12288
+  max_response_length: 4096
+  filter_overlong_prompts: true
+  filter_overlong_prompts_workers: 8
+  truncation: error
+
+actor_rollout_ref:
+  hybrid_engine: true
+  model:
+    path: Qwen/Qwen3-4B-Instruct-2507
+    use_shm: false
+    enable_gradient_checkpointing: true
+    use_remove_padding: true
+  actor:
+    strategy: megatron
+    optim:
+      lr: 1e-6
+    loss_agg_mode: token-mean
+    ppo_mini_batch_size: 8
+    ppo_micro_batch_size_per_gpu: 1
+    use_dynamic_bsz: false
+    use_kl_loss: false
+    clip_ratio_high: 0.28
+    kl_loss_coef: 0.001
+    kl_loss_type: low_var_kl
+    entropy_coeff: 0.0
+    megatron:
+      tensor_model_parallel_size: 2
+      pipeline_model_parallel_size: 1
+      param_offload: true
+      grad_offload: true
+      optimizer_offload: true
+  rollout:
+    agent:
+      num_workers: 0
+    name: vllm
+    mode: async
+    enforce_eager: false
+    temperature: 0.7
+    top_p: 0.95
+    gpu_memory_utilization: 0.6
+    tensor_model_parallel_size: 2
+    log_prob_micro_batch_size_per_gpu: 1
+    n: 4
+    val_kwargs:
+      do_sample: true
+      n: 1
+      temperature: 0.7
+      top_p: 0.95
+  ref:
+    log_prob_micro_batch_size_per_gpu: 1
+    megatron:
+      tensor_model_parallel_size: 2
+      pipeline_model_parallel_size: 1
+      param_offload: true
+
+critic:
+  strategy: megatron
+  ppo_mini_batch_size: 8
+  ppo_micro_batch_size_per_gpu: 1
+  megatron:
+    tensor_model_parallel_size: 2
+    pipeline_model_parallel_size: 1
+    param_offload: true
+    grad_offload: true
+    optimizer_offload: true
+
+algorithm:
+  adv_estimator: grpo
+  gamma: 1.0
+  lam: 0.95
+  norm_adv_by_std_in_grpo: true
+  kl_ctrl:
+    kl_coef: 0.001
+
+rllm:
+  rollout:
+    n: ${actor_rollout_ref.rollout.n}
+    n_val: ${actor_rollout_ref.rollout.val_kwargs.n}
+  workflow:
+    use_workflow: true
+    n_parallel_tasks: 16
+    retry_limit: 1
+    raise_on_error: false
+  disable_thinking: false
+  accumulate_reasoning: true
+  mask_truncated_samples: false
+  compact_filtering:
+    enable: false
+  rejection_sample:
+    enable: false
+    multiplier: 1
+  algorithm:
+    adv_estimator: ${algorithm.adv_estimator}
+    gamma: ${algorithm.gamma}
+    lam: ${algorithm.lam}
+    norm_adv_by_std_in_grpo: ${algorithm.norm_adv_by_std_in_grpo}
+    use_rllm: true
+  stepwise_advantage:
+    enable: true
+    mode: broadcast
+    norm_adv_by_std_in_grpo: true
+  trainer:
+    total_epochs: ${trainer.total_epochs}
+    total_batches: ${oc.select:trainer.total_training_steps, -1}
+    logger: ${trainer.logger}
+    project_name: ${trainer.project_name}
+    experiment_name: ${trainer.experiment_name}
+    test_freq: ${trainer.test_freq}
+    save_freq: ${trainer.save_freq}
+    val_before_train: ${trainer.val_before_train}
+    val_only: ${trainer.val_only}
+
+trainer:
+  total_epochs: 1
+  logger: ["console", "wandb"]
+  project_name: rllm-swe
+  experiment_name: swe-smith-qwen3-4b-verl
+  val_before_train: false
+  val_only: false
+  save_freq: 20
+  test_freq: 20
+  nnodes: 1
+  n_gpus_per_node: 8
+  default_hdfs_dir: null
+  default_local_dir: /tmp/turing-swe/checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  rollout_data_dir: /tmp/turing-swe/rollouts/${trainer.project_name}/${trainer.experiment_name}
+  validation_data_dir: /tmp/turing-swe/validation/${trainer.project_name}/${trainer.experiment_name}
+
+ray_task_runner:
+  num_cpus: 1
+  resources: {}
+
+hydra:
+  searchpath:
+    - pkg://rllm.experimental.config
+    - pkg://verl.trainer.config
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
