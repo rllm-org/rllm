@@ -2,8 +2,9 @@
 # Build the veRL + vLLM 0.18 environment used for Qwen3.5 SWE training.
 #
 # This script is intentionally explicit because Qwen3.5 support depends on a
-# narrow stack: torch 2.10/cu129, vLLM 0.18, transformers 5.3, Megatron, mbridge,
-# flash-linear-attention, flash-attn, TransformerEngine, and Apex.
+# narrow stack: torch 2.10/cu129, vLLM 0.18, transformers 5.3,
+# Megatron-Core 0.18, Megatron Bridge 0.4, flash-linear-attention, flash-attn,
+# TransformerEngine, and Apex.
 #
 # Default output:
 #   cookbooks/swe/.venv-verl-vllm018
@@ -91,10 +92,10 @@ uv pip install --python "$VENV_DIR/bin/python" vllm==0.18.0
 uv pip install --python "$VENV_DIR/bin/python" \
     transformers==5.3.0 pybind11 ninja nvidia-mathdx
 
-echo "[3/9] Installing Megatron-LM and mbridge"
+echo "[3/9] Installing Megatron-Core 0.18 and Megatron Bridge 0.4"
 uv pip install --python "$VENV_DIR/bin/python" --no-deps \
-    "git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.16.0" \
-    "git+https://github.com/ISEEKYAN/mbridge.git@641a5a0"
+    megatron-core==0.18.0 \
+    megatron-bridge==0.4.0
 
 echo "[4/9] Installing Python-level RL/runtime dependencies"
 uv pip install --python "$VENV_DIR/bin/python" \
@@ -173,8 +174,8 @@ if [ "$RUN_SMOKE_TEST" = "1" ]; then
 import torch
 import vllm
 import transformers
-import mbridge
-import megatron
+import megatron.core
+import megatron.bridge
 import flash_attn
 import apex
 import transformer_engine.pytorch as te
@@ -188,8 +189,8 @@ print(f"cuda available     : {torch.cuda.is_available()}")
 print(f"cuda devices       : {torch.cuda.device_count()}")
 print(f"vllm               : {vllm.__version__}")
 print(f"transformers       : {transformers.__version__}")
-print(f"mbridge            : {getattr(mbridge, '__version__', 'OK')}")
-print(f"megatron           : OK")
+print("megatron.core      : OK")
+print("megatron.bridge    : OK")
 print(f"flash_attn         : {flash_attn.__version__}")
 print("apex               : OK")
 print("transformer_engine : OK")
