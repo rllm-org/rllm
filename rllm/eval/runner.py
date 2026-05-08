@@ -2,8 +2,8 @@
 
 Eval shares the same execution engine as training. The eval-specific
 concerns — per-task verifier resolution and per-task sandbox lifecycle —
-are encapsulated in :class:`rllm.eval._hooks.EvalHooks` and threaded into
-the engine via its :class:`TaskHooks` protocol.
+are encapsulated in :class:`rllm.hooks.SandboxTaskHooks` and threaded
+into the engine via its :class:`TaskHooks` protocol.
 
 The gateway sits in front of every LLM call so flows that ``return None``
 (framework-cookbook style) get their Steps populated from gateway-captured
@@ -15,8 +15,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from rllm.eval._hooks import EvalHooks
 from rllm.eval.results import EvalItem, EvalResult
+from rllm.hooks import SandboxTaskHooks
 from rllm.types import AgentFlow, Evaluator
 from rllm.workflows.workflow import TerminationReason
 
@@ -53,8 +53,9 @@ async def run_dataset(
             caller owns the lifecycle (used by ``rllm.cli.eval`` so the
             gateway can stay up across multiple runs).
         evaluator_override: Bind a single evaluator to all tasks (CLI's
-            ``--evaluator`` flag). When ``None``, ``EvalHooks`` resolves a
-            per-task verifier from the task's ``[verifier]`` config.
+            ``--evaluator`` flag). When ``None``, ``SandboxTaskHooks``
+            resolves a per-task verifier from the task's ``[verifier]``
+            config.
 
     Returns ``(EvalResult, list[Episode])``.
     """
@@ -78,7 +79,7 @@ async def run_dataset(
         gateway = EvalGatewayManager(upstream_url=base_url, model=model)
         gateway.start()
 
-    hooks = EvalHooks(evaluator_override=evaluator_override, sandbox_backend=sandbox_backend)
+    hooks = SandboxTaskHooks(evaluator_override=evaluator_override, sandbox_backend=sandbox_backend)
 
     engine = AgentFlowEngine(
         agent_flow=agent_flow,

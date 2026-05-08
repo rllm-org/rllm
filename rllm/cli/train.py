@@ -374,17 +374,15 @@ def _run_train(
 
         # Harbor-sourced rows carry ``task_path`` pointing at each harbor
         # task dir. Wrap rows as Task objects rooted at that path so the
-        # AgentFlowEngine + EvalHooks can resolve per-task verifiers
-        # (``tests/test.sh``) and per-task config (``task.toml``).
+        # AgentFlowEngine + SandboxTaskHooks can resolve per-task
+        # verifiers (``tests/test.sh``) and per-task ``task.toml``.
         if _is_harbor_source:
-            from rllm.cli.eval import _dict_rows_to_tasks
             from rllm.data.dataset import Dataset as _Dataset
+            from rllm.data.dataset import _wrap_rows_as_tasks
 
-            train_tasks = _dict_rows_to_tasks(list(train_dataset.data))
-            train_dataset = _Dataset(data=train_tasks, name=train_ds_name, split=train_split)
+            train_dataset = _Dataset(data=_wrap_rows_as_tasks(list(train_dataset.data)), name=train_ds_name, split=train_split)
             if val_dataset is not None:
-                val_tasks = _dict_rows_to_tasks(list(val_dataset.data))
-                val_dataset = _Dataset(data=val_tasks, name=val_ds_name, split=val_split)
+                val_dataset = _Dataset(data=_wrap_rows_as_tasks(list(val_dataset.data)), name=val_ds_name, split=val_split)
 
     # ---- Build config ----
     config = build_train_config(
@@ -446,47 +444,17 @@ def _run_train(
     console.print(Panel(table, title="[bold]rLLM Train[/]", border_style="cyan", expand=False))
     console.print()
 
-    # ---- Build hooks for sandbox / per-task verifier flows ----
-    # ``EvalHooks`` is required whenever a rollout needs (a) a fresh
-    # sandbox per task — without it, parallel ``SandboxedAgentFlow``
-    # rollouts clobber a shared ``self._sandbox`` slot — or (b) a
-    # per-task verifier (harbor task dirs carry their own
-    # ``tests/test.sh``; ``evaluator_override=None`` triggers detection).
-    from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
-
-    _is_harbor_source_for_hooks = bool(catalog_entry) and catalog_entry.get("source", "").startswith("harbor:")
-    needs_hooks = _is_harbor_source_for_hooks or isinstance(agent_flow, SandboxedAgentFlow)
-    hooks = None
-    if needs_hooks:
-        from rllm.eval._hooks import EvalHooks
-
-        hooks = EvalHooks(evaluator_override=evaluator)
-        # When hooks resolve the evaluator, leave the engine-bound
-        # evaluator unset so ``ctx.evaluator`` is the only scoring path.
-        evaluator = None
-
-        # Pin the gateway to loopback so docker sandboxes can reach it
-        # via the harness's ``host.docker.internal`` rewrite. The
-        # default ``_get_routable_ip()`` returns the host's LAN IP,
-        # which Docker Desktop containers can't reliably reach and
-        # which the harness's ``_container_url`` doesn't rewrite — so
-        # rollouts run, the agent's LLM calls dead-end, and the gateway
-        # captures no traces. Eval's gateway already defaults to
-        # ``127.0.0.1`` for the same reason.
-        from omegaconf import OmegaConf
-
-        if not config.rllm.get("gateway", {}).get("host"):
-            config = OmegaConf.merge(
-                config,
-                OmegaConf.create({"rllm": {"gateway": {"host": "127.0.0.1"}}}),
-            )
-
     # ---- Launch training ----
+    # AgentTrainer auto-detects sandbox flows (SandboxedAgentFlow agent
+    # or harbor-sourced task dataset) and wires SandboxTaskHooks +
+    # gateway loopback. Pass evaluator only when the catalog binds a
+    # global one (math_reward_fn / harbor_reward_fn for harbor scaffolds);
+    # for harbor-on-rllm-native-harness, evaluator is None and hooks
+    # resolve a per-task verifier from each task's tests/test.sh.
     trainer = AgentTrainer(
         backend="tinker",
         agent_flow=agent_flow,
         evaluator=evaluator,
-        hooks=hooks,
         config=config,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
