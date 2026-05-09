@@ -333,7 +333,12 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         assert trainer_state.episodes is not None, "Episodes are not set"
         episodes: list[Episode] = trainer_state.episodes
         assert self.rollout_engine is not None, "rollout_engine is not initialized."
-        batch = transform_episodes_to_dataproto(episodes, self.rollout_engine, self.config.data.max_prompt_length, self.config.data.max_response_length)
+        # data.max_response_length is the per-turn generation cap at rollout
+        # time, but merged multi-turn responses concatenate [A0, obs1, A1, ...]
+        # and can grow up to the full context window - so using max_total_length to
+        # bound the sequence
+        max_total_length = self.config.data.max_prompt_length + self.config.data.max_response_length
+        batch = transform_episodes_to_dataproto(episodes, self.rollout_engine, self.config.data.max_prompt_length, max_total_length)
         # Lift per-batch merge metrics (batch/steps_per_traj,
         # batch/step_response_length) out of meta_info so they show up in
         # the standard trainer_state.metrics path. Same metric names the
