@@ -66,8 +66,8 @@ async def deepcoder_flow(task: Task, config: AgentConfig) -> Episode:
         resp = await client.chat.completions.create(
             model=config.model,
             messages=messages,
-            temperature=0.6,
-            max_tokens=16384,
+            temperature=config.sampling_params.get("temperature", 0.6),
+            max_tokens=config.sampling_params.get("max_tokens", 16384),
             timeout=600,
         )
         content = resp.choices[0].message.content or ""

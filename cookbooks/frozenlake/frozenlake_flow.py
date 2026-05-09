@@ -182,8 +182,8 @@ async def frozenlake_flow(task: Task, config: AgentConfig) -> Episode:
             resp = await client.chat.completions.create(
                 model=config.model,
                 messages=messages,
-                temperature=1.0,
-                max_tokens=2048,
+                temperature=config.sampling_params.get("temperature", 1.0),
+                max_tokens=config.sampling_params.get("max_tokens", 2048),
                 timeout=120,
             )
         except Exception as e:

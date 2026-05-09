@@ -151,7 +151,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             max_prompt_length=self.full_config.data.max_prompt_length,
             max_response_length=self.full_config.data.max_response_length,
             max_model_length=self.full_config.training.max_length,
-            sampling_params=self.full_config.sampling,
+            sampling_params=self.full_config.rllm.rollout,
             **self.full_config.rollout_engine,
             image_processor=image_processor,
         )
@@ -160,12 +160,15 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
     def validate_config(self) -> None:
         """Validate Tinker-specific configuration settings."""
         # Check for recommended sampling parameters
-        sampling_params = self.full_config.sampling
-        if sampling_params.get("temperature", 1.0) != 1.0 or sampling_params.get("top_p", 1.0) != 1.0:
-            logger.warning(
-                "Temperature and top_p are set away from 1.0, this is not recommended by Tinker and can cause mysterious issues with logprobs."
-                "See https://github.com/thinking-machines-lab/tinker-cookbook/pull/86 for discussion."
-            )
+        rollout_cfg = self.full_config.rllm.rollout
+        for split in ("train", "val"):
+            sp = rollout_cfg.get(split, {}) or {}
+            if sp.get("temperature", 1.0) != 1.0 or sp.get("top_p", 1.0) != 1.0:
+                logger.warning(
+                    "rllm.rollout.%s.{temperature,top_p} are set away from 1.0; this is not recommended by Tinker and can cause mysterious issues with logprobs. "
+                    "See https://github.com/thinking-machines-lab/tinker-cookbook/pull/86 for discussion.",
+                    split,
+                )
 
         # Validate num_minibatches (currently only support 1)
         if self.full_config.training.get("num_minibatches", 1) != 1:

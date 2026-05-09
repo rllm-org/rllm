@@ -186,6 +186,8 @@ class UnifiedTrainer:
                 retry_limit=self.rllm_config.workflow.retry_limit,
                 raise_on_error=self.rllm_config.workflow.get("raise_on_error", True),
                 episode_logger=self.episode_logger,
+                train_sampling_params=self.rllm_config.rollout.train,
+                val_sampling_params=self.rllm_config.rollout.val,
             )
         elif remote_runtime_cfg.get("enabled", False):
             from rllm.experimental.engine.gateway_manager import GatewayManager

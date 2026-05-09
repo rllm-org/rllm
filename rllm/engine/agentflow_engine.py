@@ -271,6 +271,8 @@ class AgentFlowEngine:
         raise_on_error: bool = True,
         episode_logger: EpisodeLogger | None = None,
         hooks: TaskHooks | None = None,
+        train_sampling_params: dict | None = None,
+        val_sampling_params: dict | None = None,
     ) -> None:
         if evaluator is None and hooks is None:
             raise ValueError("AgentFlowEngine requires either an `evaluator` (single evaluator, typical training) or `hooks` (per-task evaluator + setup/teardown, typical eval). Both cannot be None.")
@@ -284,6 +286,9 @@ class AgentFlowEngine:
         self.raise_on_error = raise_on_error
         self.episode_logger = episode_logger
         self.hooks = hooks
+        self.train_sampling_params = train_sampling_params
+        self.val_sampling_params = val_sampling_params
+
         self.executor = ThreadPoolExecutor(max_workers=n_parallel_tasks)
         self._semaphore = asyncio.Semaphore(n_parallel_tasks)
 
@@ -472,6 +477,7 @@ class AgentFlowEngine:
                     model=self.model,
                     session_uid=uid,
                     is_validation=is_validation,
+                    sampling_params=(self.train_sampling_params if not is_validation else self.val_sampling_params) or {},
                 )
 
                 # 3. Run agent flow (prefers arun if available, else run in executor).

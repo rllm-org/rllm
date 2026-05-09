@@ -25,11 +25,11 @@ async def solver_judge_flow(task: Task, config: AgentConfig) -> Episode:
     problem = _format_countdown_problem(task)
 
     # Step 1: Solver generates N solutions in parallel
-    solver_trajectories = await _generate_solutions(client, config.model, problem)
+    solver_trajectories = await _generate_solutions(client, config, problem)
 
     # Step 2: Judge selects the best solution
     solutions = [t.steps[0].action for t in solver_trajectories]
-    judge_trajectory = await _judge_solutions(client, config.model, problem, solutions)
+    judge_trajectory = await _judge_solutions(client, config, problem, solutions)
 
     selected = judge_trajectory.steps[0].action
     return Episode(
@@ -38,14 +38,14 @@ async def solver_judge_flow(task: Task, config: AgentConfig) -> Episode:
     )
 
 
-async def _generate_solutions(client: AsyncOpenAI, model: str, problem: str) -> list[Trajectory]:
+async def _generate_solutions(client: AsyncOpenAI, config: AgentConfig, problem: str) -> list[Trajectory]:
     async def _solve() -> Trajectory:
         messages = [{"role": "user", "content": f"{problem}. Output the final answer within <answer>...</answer>"}]
         response = await client.chat.completions.create(
-            model=model,
+            model=config.model,
             messages=messages,
-            temperature=1,
-            max_tokens=2048,
+            temperature=config.sampling_params.get("temperature", 1),
+            max_tokens=config.sampling_params.get("max_tokens", 2048),
         )
         content = response.choices[0].message.content or ""
         parsed = _parse_answer(content)
@@ -63,14 +63,14 @@ async def _generate_solutions(client: AsyncOpenAI, model: str, problem: str) -> 
     return await asyncio.gather(*(_solve() for _ in range(N_SOLUTIONS)))
 
 
-async def _judge_solutions(client: AsyncOpenAI, model: str, problem: str, solutions: list[str]) -> Trajectory:
+async def _judge_solutions(client: AsyncOpenAI, config: AgentConfig, problem: str, solutions: list[str]) -> Trajectory:
     prompt = _create_judge_prompt(problem, solutions)
     messages = [{"role": "user", "content": prompt}]
     response = await client.chat.completions.create(
-        model=model,
+        model=config.model,
         messages=messages,
-        temperature=1,
-        max_tokens=2048,
+        temperature=config.sampling_params.get("temperature", 1),
+        max_tokens=config.sampling_params.get("max_tokens", 2048),
     )
     content = response.choices[0].message.content or ""
     selected = _parse_judge_response(content, solutions)

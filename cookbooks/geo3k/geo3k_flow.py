@@ -46,8 +46,8 @@ async def geo3k_flow(task: Task, config: AgentConfig) -> Episode:
         response = await client.chat.completions.create(
             model=config.model,
             messages=messages,
-            temperature=0.6,
-            max_tokens=2048,
+            temperature=config.sampling_params.get("temperature", 0.6),
+            max_tokens=config.sampling_params.get("max_tokens", 2048),
         )
         response_text = response.choices[0].message.content or ""
     except Exception as e:

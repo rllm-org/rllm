@@ -29,10 +29,24 @@ workflow:
   retry_limit: 3
   raise_on_error: true
 
-# Rollout Configuration (note: this is just for logging purpose, the actual rollout configs are backend-specific)
+# Rollout Configuration. Backend-agnostic source of truth for sampling
+# parameters; ``rllm/experimental/verl/utils.py:sync_config`` mirrors
+# ``rollout.{train,val}.*`` into ``actor_rollout_ref.rollout`` and
+# ``actor_rollout_ref.rollout.val_kwargs`` respectively.
+# The AgentFlowEngine forwards ``rollout.train`` / ``rollout.val`` into
+# ``AgentConfig.sampling_params``, so AgentFlows read user-set sampling
+# values via ``config.sampling_params.get(...)``.
 rollout:
   n: 8
   n_val: 1  # number of validation samples per prompt
+  train:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+  val:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
 
 # Trainer Configuration
 trainer:

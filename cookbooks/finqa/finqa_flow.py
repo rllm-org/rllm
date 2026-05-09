@@ -114,8 +114,8 @@ async def finqa_flow(task: Task, config: AgentConfig) -> Episode:
                 model=config.model,
                 messages=messages,
                 tools=TOOL_SPECS,
-                temperature=0.6,
-                max_tokens=4096,
+                temperature=config.sampling_params.get("temperature", 0.6),
+                max_tokens=config.sampling_params.get("max_tokens", 4096),
                 timeout=300,
             )
         except Exception as e:

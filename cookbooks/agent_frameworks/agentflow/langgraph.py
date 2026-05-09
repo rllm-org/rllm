@@ -32,7 +32,7 @@ async def langgraph_math(task: Task, config: AgentConfig) -> None:
         model=config.model,
         base_url=config.base_url,
         api_key="EMPTY",
-        temperature=1.0,
+        temperature=config.sampling_params.get("temperature", 1.0),
     )
     agent = create_react_agent(llm, tools=[calculate], prompt=SYSTEM_PROMPT)
     await agent.ainvoke({"messages": [("user", task.instruction)]})

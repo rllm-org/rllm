@@ -420,6 +420,7 @@ class AgentConfig:
     session_uid: str
     metadata: dict = field(default_factory=dict)
     is_validation: bool = False
+    sampling_params: dict = field(default_factory=dict)
 
 
 @runtime_checkable

@@ -58,8 +58,8 @@ async def math_flow(task: Task, config: AgentConfig) -> Episode:
         resp = await client.chat.completions.create(
             model=config.model,
             messages=messages,
-            temperature=0.6,
-            max_tokens=8192,
+            temperature=config.sampling_params.get("temperature", 0.6),
+            max_tokens=config.sampling_params.get("max_tokens", 8192),
             timeout=300,
         )
         content = resp.choices[0].message.content or ""
