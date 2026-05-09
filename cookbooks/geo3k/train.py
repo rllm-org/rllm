@@ -8,7 +8,7 @@ Or with Hydra overrides:
 """
 
 import hydra
-from evaluator import geo3k_evaluator
+from geo3k_eval import geo3k_evaluator
 from geo3k_flow import geo3k_flow
 from omegaconf import DictConfig
 

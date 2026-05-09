@@ -5,7 +5,7 @@ The agent navigates a randomly-generated FrozenLake grid by emitting
 falls in a hole, or runs out of steps. The whole gym-env loop lives
 in this file — no dependency on ``rllm.environments``.
 
-Task metadata schema (see ``prepare_data.py``)::
+Task metadata schema (see ``prepare_frozenlake_data.py``)::
 
     {"seed": int, "size": int, "p": float, "is_slippery": bool, "max_steps": int}
 

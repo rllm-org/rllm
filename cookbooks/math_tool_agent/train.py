@@ -8,8 +8,8 @@ Or with Hydra overrides:
 """
 
 import hydra
-from evaluator import math_tool_evaluator
 from math_tool_agent import math_tool_agent
+from math_tool_eval import math_tool_evaluator
 from omegaconf import DictConfig
 
 from rllm.data.dataset import DatasetRegistry

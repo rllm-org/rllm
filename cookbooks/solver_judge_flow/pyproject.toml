@@ -10,11 +10,12 @@ requires-python = ">=3.10"
 dependencies = ["rllm", "openai"]
 
 [tool.setuptools]
-py-modules = ["solver_judge_flow", "evaluator"]
+# Top-level py-modules must be unique across installed cookbooks.
+py-modules = ["solver_judge_flow", "solver_judge_eval"]
 
 # Plugin discovery: rllm CLI finds these by name
 [project.entry-points."rllm.agents"]
-solver_judge = "solver_judge_flow:solver_judge_agent"
+solver_judge = "solver_judge_flow:solver_judge_flow"
 
 [project.entry-points."rllm.evaluators"]
-solver_judge_countdown = "evaluator:SolverJudgeCountdownEvaluator"
+solver_judge_countdown = "solver_judge_eval:solver_judge_countdown_evaluator"

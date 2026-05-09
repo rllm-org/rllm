@@ -7,7 +7,7 @@ and registers the train / val / test question splits with rLLM's
 
 Usage::
 
-    python cookbooks/finqa/prepare_data.py
+    python cookbooks/finqa/prepare_finqa_data.py
 """
 
 from __future__ import annotations

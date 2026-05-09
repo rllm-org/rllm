@@ -4,7 +4,7 @@
 # Prerequisites:
 #   1. Install rllm with tinker extras:   uv pip install -e ".[tinker]"
 #   2. Install this cookbook:              uv pip install --no-deps -e cookbooks/frozenlake
-#   3. Generate the dataset:               python cookbooks/frozenlake/prepare_data.py
+#   3. Generate the dataset:               python cookbooks/frozenlake/prepare_frozenlake_data.py
 
 set -euo pipefail
 

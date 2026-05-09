@@ -4,7 +4,7 @@
 # Prerequisites:
 #   1. Install rllm with verl extras:     uv pip install -e ".[verl]"
 #   2. Install this cookbook:              uv pip install --no-deps -e cookbooks/deepcoder
-#   3. Prepare the dataset:                python cookbooks/deepcoder/prepare_data.py
+#   3. Prepare the dataset:                python cookbooks/deepcoder/prepare_deepcoder_data.py
 
 set -euo pipefail
 

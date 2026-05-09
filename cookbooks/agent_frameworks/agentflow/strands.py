@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from calculator import safe_eval
 from openai import AsyncOpenAI
 from strands import Agent, tool
 from strands.models.openai import OpenAIModel
-from system_prompt import SYSTEM_PROMPT
 
 import rllm
 from rllm.types import AgentConfig, Task
+
+from ._calculator import safe_eval
+from ._system_prompt import SYSTEM_PROMPT
 
 
 @tool

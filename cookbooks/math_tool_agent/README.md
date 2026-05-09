@@ -93,7 +93,7 @@ pytest cookbooks/math_tool_agent/test.py -v
 | File | Description |
 |------|-------------|
 | `math_tool_agent.py` | `math_tool_agent` — multi-turn AgentFlow with calculator tool |
-| `evaluator.py` | `math_tool_evaluator` — numeric answer comparison |
+| `math_tool_eval.py` | `math_tool_evaluator` — numeric answer comparison |
 | `train.py` | Python API training script (Hydra config) |
 | `train_tinker.sh` | Tinker backend — single-machine training |
 | `train_verl.sh` | Verl backend — distributed multi-GPU training |

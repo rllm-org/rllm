@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from calculator import safe_eval
 from smolagents import OpenAIServerModel, ToolCallingAgent, tool
-from system_prompt import SYSTEM_PROMPT
 
 import rllm
 from rllm.types import AgentConfig, Task
+
+from ._calculator import safe_eval
+from ._system_prompt import SYSTEM_PROMPT
 
 
 @tool

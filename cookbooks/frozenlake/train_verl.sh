@@ -4,7 +4,7 @@
 # Prerequisites:
 #   1. Install rllm with verl extras:     uv pip install -e ".[verl]"
 #   2. Install this cookbook:              uv pip install --no-deps -e cookbooks/frozenlake
-#   3. Generate the dataset:               python cookbooks/frozenlake/prepare_data.py
+#   3. Generate the dataset:               python cookbooks/frozenlake/prepare_frozenlake_data.py
 
 set -euo pipefail
 

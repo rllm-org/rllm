@@ -1,6 +1,6 @@
 """Tests for geo3k flow."""
 
-from evaluator import geo3k_evaluator
+from geo3k_eval import geo3k_evaluator
 from geo3k_flow import _build_vlm_content, _detect_mime
 
 from rllm.types import Episode, Step, Trajectory

@@ -10,11 +10,12 @@ requires-python = ">=3.10"
 dependencies = ["rllm", "openai", "gymnasium>=0.29", "numpy"]
 
 [tool.setuptools]
-py-modules = ["frozenlake_flow", "evaluator", "prepare_data"]
+# Top-level py-modules must be unique across installed cookbooks.
+py-modules = ["frozenlake_flow", "frozenlake_eval", "prepare_frozenlake_data"]
 
 # Plugin discovery: `rllm` CLI finds these by name.
 [project.entry-points."rllm.agents"]
 frozenlake = "frozenlake_flow:frozenlake_flow"
 
 [project.entry-points."rllm.evaluators"]
-frozenlake = "evaluator:frozenlake_evaluator"
+frozenlake = "frozenlake_eval:frozenlake_evaluator"

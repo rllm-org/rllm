@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from agents import Agent, OpenAIChatCompletionsModel, Runner, function_tool
-from calculator import safe_eval
 from openai import AsyncOpenAI
-from system_prompt import SYSTEM_PROMPT
 
 import rllm
 from rllm.types import AgentConfig, Task
+
+from ._calculator import safe_eval
+from ._system_prompt import SYSTEM_PROMPT
 
 
 @function_tool

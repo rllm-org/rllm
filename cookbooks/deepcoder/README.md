@@ -40,9 +40,9 @@ rllm agent list      # should show "deepcoder"
 ## Dataset
 
 ```bash
-python cookbooks/deepcoder/prepare_data.py
+python cookbooks/deepcoder/prepare_deepcoder_data.py
 # Smoke-size run:
-python cookbooks/deepcoder/prepare_data.py --train-size 200 --test-size 50
+python cookbooks/deepcoder/prepare_deepcoder_data.py --train-size 200 --test-size 50
 ```
 
 This pulls `agentica-org/DeepCoder-Preview-Dataset` (primeintellect + taco + lcbv5 train; codeforces + lcbv5 test), normalizes the test schemas (TACO's nested dict → flat list), and registers `deepcoder/{train,test}` with `DatasetRegistry`.
@@ -104,8 +104,8 @@ pytest cookbooks/deepcoder/test.py -v
 | File | Description |
 |------|-------------|
 | `deepcoder_flow.py` | `deepcoder_flow` — multi-turn iterative-coding AgentFlow |
-| `evaluator.py` | `deepcoder_evaluator` — wraps `rllm.eval.reward_fns.code` |
-| `prepare_data.py` | Pull + normalize Deepcoder splits via `DatasetRegistry` |
+| `deepcoder_eval.py` | `deepcoder_evaluator` — wraps `rllm.eval.reward_fns.code` |
+| `prepare_deepcoder_data.py` | Pull + normalize Deepcoder splits via `DatasetRegistry` |
 | `train.py` | Python API training script (Hydra config) |
 | `train_tinker.sh` | Tinker backend — single-machine training |
 | `train_verl.sh` | Verl backend — distributed multi-GPU training |

@@ -9,7 +9,7 @@ Usage (from rllm repo root)::
 """
 
 import hydra
-from evaluator import frozenlake_evaluator
+from frozenlake_eval import frozenlake_evaluator
 from frozenlake_flow import frozenlake_flow
 from omegaconf import DictConfig
 
@@ -23,7 +23,7 @@ def main(config: DictConfig):
     val_dataset = DatasetRegistry.load_dataset("frozenlake", "test")
 
     if train_dataset is None or val_dataset is None:
-        raise RuntimeError("FrozenLake dataset not found. Run: python cookbooks/frozenlake/prepare_data.py")
+        raise RuntimeError("FrozenLake dataset not found. Run: python cookbooks/frozenlake/prepare_frozenlake_data.py")
 
     trainer = AgentTrainer(
         backend=config.rllm.get("backend", "tinker"),
