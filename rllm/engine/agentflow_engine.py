@@ -190,7 +190,9 @@ def enrich_episode_with_traces(
             # when agent_populates_steps is True.
             for agent_step in traj.steps:
                 step = training_steps[trace_idx]
-                # Preserve reward and done from agent's step
+                # Preserve agent-side fields (the trace doesn't carry these — it
+                # only holds the raw LLM call) -- action, reward, done
+                step.action = agent_step.action
                 step.reward = agent_step.reward
                 step.done = agent_step.done
                 trace_idx += 1
