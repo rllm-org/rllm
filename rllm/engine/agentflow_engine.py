@@ -191,10 +191,7 @@ def enrich_episode_with_traces(
             for agent_step in traj.steps:
                 step = training_steps[trace_idx]
                 # Preserve agent-side fields (the trace doesn't carry these — it
-                # only holds the raw LLM call). Without ``action`` here, eval
-                # paths that read ``traj.steps[-1].action`` (e.g. parsed
-                # ``<answer>...</answer>`` from the cookbook flows) silently see
-                # ``None`` and grade every rollout as wrong.
+                # only holds the raw LLM call) -- action, reward, done
                 step.action = agent_step.action
                 step.reward = agent_step.reward
                 step.done = agent_step.done
