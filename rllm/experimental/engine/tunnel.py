@@ -32,6 +32,24 @@ _TRYCF_URL_RE = re.compile(r"https?://[a-zA-Z0-9.-]+\.trycloudflare\.com")
 # before assuming the binary is misbehaving.
 _DEFAULT_READY_TIMEOUT = 30.0
 
+# How many times to retry the cloudflared spawn when the QuickTunnel
+# allocator endpoint returns a transient 5xx. Cloudflare's free-tier
+# QuickTunnel backend is intermittently flaky and recovers within
+# seconds; without retry the trainer dies on a transient blip.
+_DEFAULT_MAX_ATTEMPTS = 4
+
+
+# Patterns in cloudflared stderr that indicate a transient cloudflare-
+# side failure (vs. a permanent local misconfiguration).
+_TRANSIENT_PATTERNS = (
+    re.compile(r"500 Internal Server Error"),
+    re.compile(r"502 Bad Gateway"),
+    re.compile(r"503 Service Unavailable"),
+    re.compile(r"504 Gateway Timeout"),
+    re.compile(r"failed to unmarshal quick Tunnel"),
+    re.compile(r"failed to request quick Tunnel"),
+)
+
 
 class TunnelStartError(RuntimeError):
     """Raised when the tunnel subprocess can't be brought up."""
@@ -40,9 +58,16 @@ class TunnelStartError(RuntimeError):
 class CloudflaredTunnel:
     """Run ``cloudflared tunnel --url <upstream>`` and surface the public URL."""
 
-    def __init__(self, upstream_url: str, *, ready_timeout: float = _DEFAULT_READY_TIMEOUT) -> None:
+    def __init__(
+        self,
+        upstream_url: str,
+        *,
+        ready_timeout: float = _DEFAULT_READY_TIMEOUT,
+        max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+    ) -> None:
         self.upstream_url = upstream_url
         self.ready_timeout = ready_timeout
+        self.max_attempts = max_attempts
         self._proc: subprocess.Popen | None = None
         self._reader: threading.Thread | None = None
         self._public_url: str | None = None
@@ -59,16 +84,50 @@ class CloudflaredTunnel:
         return shutil.which("cloudflared") is not None
 
     def start(self) -> str:
-        """Spawn cloudflared and block until the public URL is published.
+        """Spawn cloudflared with retry on transient 5xx from Cloudflare.
 
         Returns the public ``https://*.trycloudflare.com`` URL on success.
-        Raises :class:`TunnelStartError` if cloudflared exits before
-        publishing a URL or if the URL doesn't appear within
-        ``ready_timeout``.
+        Retries the subprocess up to ``max_attempts`` times when
+        cloudflared exits with a recognised transient error (5xx from
+        the QuickTunnel allocator). Raises :class:`TunnelStartError` on
+        permanent failure (binary missing, all retries exhausted, or
+        timeout without any URL).
         """
         if not self.is_available():
             raise TunnelStartError("cloudflared binary not found on PATH. Install: brew install cloudflared")
 
+        last_error: TunnelStartError | None = None
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                return self._start_once()
+            except TunnelStartError as e:
+                last_error = e
+                tail = "\n".join(self._stderr_buffer[-20:])
+                if attempt < self.max_attempts and _is_transient(tail):
+                    backoff = min(2 ** (attempt - 1), 8)
+                    logger.warning(
+                        "cloudflared start attempt %d/%d failed (transient); retrying in %ds",
+                        attempt,
+                        self.max_attempts,
+                        backoff,
+                    )
+                    time.sleep(backoff)
+                    self._reset_state()
+                    continue
+                raise
+        # Should be unreachable; the loop either returns or raises.
+        assert last_error is not None
+        raise last_error
+
+    def _reset_state(self) -> None:
+        """Clear per-attempt state before a retry."""
+        self._proc = None
+        self._reader = None
+        self._public_url = None
+        self._url_event = threading.Event()
+        self._stderr_buffer = []
+
+    def _start_once(self) -> str:
         cmd = ["cloudflared", "tunnel", "--no-autoupdate", "--url", self.upstream_url]
         logger.info("Starting cloudflared tunnel: %s", " ".join(cmd))
 
@@ -133,3 +192,8 @@ class CloudflaredTunnel:
             self._reader.join(timeout=2)
         self._reader = None
         logger.info("Cloudflared tunnel stopped")
+
+
+def _is_transient(stderr_tail: str) -> bool:
+    """Whether a cloudflared stderr tail looks like a Cloudflare-side blip."""
+    return any(p.search(stderr_tail) for p in _TRANSIENT_PATTERNS)

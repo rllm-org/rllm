@@ -336,32 +336,36 @@ def _run_train(
         train_ds_name = train_dataset_name or benchmark
         val_ds_name = val_dataset_name or benchmark
 
+        # ---- Resolve catalog entries for train + val datasets ----
+        # User may pass ``--val-dataset harbor:<name>`` (or the raw
+        # ``<name>`` after a prior ``rllm dataset pull``). Harbor entries
+        # aren't written into ``catalog["datasets"]``, so look them up
+        # via ``resolve_harbor_catalog_entry`` as a fallback. Cache the
+        # benchmark's entry so we don't re-probe Harbor for it.
+        train_entry = _resolve_dataset_entry(train_ds_name, catalog, benchmark, catalog_entry)
+        val_entry = _resolve_dataset_entry(val_ds_name, catalog, benchmark, catalog_entry)
+
         # Resolve train split from catalog if not provided. Prefer an
         # explicit ``train_split`` field; otherwise harbor datasets
         # (which only register their single ``eval_split``) need that
         # split for training; for everything else the historical "train"
         # default is correct.
         if train_split is None:
-            train_catalog_entry = catalog.get("datasets", {}).get(train_ds_name) or (catalog_entry if train_ds_name == benchmark else None)
-            if train_catalog_entry and "train_split" in train_catalog_entry:
-                train_split = train_catalog_entry["train_split"]
-            elif train_catalog_entry and train_catalog_entry.get("source", "").startswith("harbor:"):
-                train_split = train_catalog_entry.get("eval_split", "default")
+            if train_entry and "train_split" in train_entry:
+                train_split = train_entry["train_split"]
+            elif train_entry and train_entry.get("source", "").startswith("harbor:"):
+                train_split = train_entry.get("eval_split", "default")
             else:
                 train_split = "train"
 
-        # Resolve val split from catalog if not provided. Same fallback
-        # chain as train_split — including the on-the-fly harbor entry.
+        # Resolve val split from catalog if not provided. Same chain.
         if val_split is None:
-            val_catalog_entry = catalog.get("datasets", {}).get(val_ds_name) or (catalog_entry if val_ds_name == benchmark else None)
-            val_split = val_catalog_entry.get("eval_split", "test") if val_catalog_entry else "test"
+            val_split = val_entry.get("eval_split", "test") if val_entry else "test"
 
         # ---- Load training dataset ----
-        # Pass through the resolved catalog_entry so harbor datasets (which
-        # synthesize entries via ``resolve_harbor_catalog_entry`` and aren't
-        # written into ``catalog["datasets"]``) still get auto-pulled.
-        _entry_override = catalog_entry if (train_ds_name == benchmark) else None
-        train_dataset = _load_or_pull_dataset(train_ds_name, train_split, catalog, _entry_override)
+        # Pass through the resolved catalog_entry so harbor datasets get
+        # auto-pulled even when their entry was synthesised at runtime.
+        train_dataset = _load_or_pull_dataset(train_ds_name, train_split, catalog, train_entry)
         if train_dataset is None:
             console.print(f"  [error]Could not load training dataset '{train_ds_name}' split '{train_split}'.[/]")
             raise SystemExit(1)
@@ -370,21 +374,22 @@ def _run_train(
             train_dataset = train_dataset.select(range(max_examples))
 
         # ---- Load validation dataset ----
-        _val_entry_override = catalog_entry if (val_ds_name == benchmark) else None
-        val_dataset = _load_or_pull_dataset(val_ds_name, val_split, catalog, _val_entry_override)
+        val_dataset = _load_or_pull_dataset(val_ds_name, val_split, catalog, val_entry)
         # val_dataset can be None — training will proceed without validation
 
         # Harbor-sourced rows carry ``task_path`` pointing at each harbor
         # task dir. Wrap rows as Task objects rooted at that path so the
         # AgentFlowEngine + SandboxTaskHooks can resolve per-task
         # verifiers (``tests/test.sh``) and per-task ``task.toml``.
-        if _is_harbor_source:
-            from rllm.data.dataset import Dataset as _Dataset
-            from rllm.data.dataset import _wrap_rows_as_tasks
+        # Train and val may be different harbor datasets — wrap
+        # independently based on each one's resolved catalog entry.
+        from rllm.data.dataset import Dataset as _Dataset
+        from rllm.data.dataset import _wrap_rows_as_tasks
 
+        if train_entry and train_entry.get("source", "").startswith("harbor:"):
             train_dataset = _Dataset(data=_wrap_rows_as_tasks(list(train_dataset.data)), name=train_ds_name, split=train_split)
-            if val_dataset is not None:
-                val_dataset = _Dataset(data=_wrap_rows_as_tasks(list(val_dataset.data)), name=val_ds_name, split=val_split)
+        if val_dataset is not None and val_entry and val_entry.get("source", "").startswith("harbor:"):
+            val_dataset = _Dataset(data=_wrap_rows_as_tasks(list(val_dataset.data)), name=val_ds_name, split=val_split)
 
     # ---- Build config ----
     config = build_train_config(
@@ -464,6 +469,28 @@ def _run_train(
         val_dataset=val_dataset,
     )
     trainer.train()
+
+
+def _resolve_dataset_entry(name: str, catalog: dict, benchmark: str | None = None, benchmark_entry: dict | None = None) -> dict | None:
+    """Resolve a dataset name to a catalog entry.
+
+    Order: (1) the bundled ``catalog["datasets"]`` dict; (2) the
+    benchmark's already-resolved entry when ``name == benchmark``;
+    (3) a Harbor registry probe for ``<name>`` (handles
+    ``--val-dataset swebench-verified`` where the user pulled it
+    earlier and just wants the eval_split looked up).
+    """
+    entry = catalog.get("datasets", {}).get(name)
+    if entry is not None:
+        return entry
+    if benchmark is not None and name == benchmark and benchmark_entry is not None:
+        return benchmark_entry
+    try:
+        from rllm.cli._pull import resolve_harbor_catalog_entry
+
+        return resolve_harbor_catalog_entry(name)
+    except Exception:
+        return None
 
 
 def _load_or_pull_dataset(name: str, split: str, catalog: dict, catalog_entry_override: dict | None = None):
