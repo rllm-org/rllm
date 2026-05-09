@@ -65,7 +65,11 @@ def _get_forwarded_env_vars():
     exclude_vars = set()
     for name in rllm_exclude:
         if "*" in name:  # denote a prefix match, e.g. "VLLM*"
-            forward_prefix.remove(name.replace("*", "_"))
+            prefix = name.replace("*", "_")
+            try:
+                forward_prefix.remove(prefix)
+            except ValueError:
+                pass
         else:
             exclude_vars.add(name)
 
