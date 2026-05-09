@@ -242,7 +242,7 @@ def _str_is_int(x: str) -> bool:
 def _str_to_int(x: str) -> int:
     x = x.replace(",", "")
     x = float(x)
-    return int(x)
+    return int(round(x))
 
 
 def _inject_implicit_mixed_number(step: str):
