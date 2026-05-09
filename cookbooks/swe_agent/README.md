@@ -68,6 +68,42 @@ That's the whole training script — same surface area as `cookbooks/math/train.
 
 Override any of these by passing `hooks=`, `evaluator=`, or `rllm.gateway.host=...` explicitly.
 
+## Modal mode (faster than local Docker)
+
+Local Docker on a laptop is the bottleneck on this workload — every rollout pays ~10–15 min for image pull + agent install + verifier setup. Modal Sandboxes let those run in parallel in Modal's cloud; each rollout's wall-clock stays the same but you can run 32–64 in parallel without hammering one Mac.
+
+```bash
+brew install cloudflared        # macOS — Linux/Win: see docs link below
+modal setup                     # first time only — opens browser for auth
+
+bash cookbooks/swe_agent/train_modal.sh
+```
+
+Equivalent CLI:
+
+```bash
+rllm train harbor:swesmith --agent mini-swe-agent \
+    --val-dataset swebench-verified \
+    --model Qwen/Qwen3-30B-A3B \
+    --batch-size 2 --group-size 4 \
+    --sandbox-backend modal \
+    --sandbox-concurrency 64
+```
+
+What `--sandbox-backend modal` triggers automatically:
+
+1. **Sandboxes run on Modal**, not Docker. `SandboxTaskHooks` passes `sandbox_backend="modal"` into `_create_sandbox_for_task`, which falls through to `ModalSandbox(image=task.metadata["docker_image"])`. Modal's `Image.from_registry()` pulls the swebench image from Docker Hub (cached across containers, so cold-start is one-time per image).
+2. **A cloudflared tunnel is spawned for the gateway.** The training gateway lives on `127.0.0.1:9090` on your laptop. Modal sandboxes can't reach that directly — they need a public URL. `AgentTrainer` detects `sandbox_backend=modal` (a non-local backend) and sets `rllm.gateway.tunnel="cloudflared"`. `GatewayManager.start()` runs `cloudflared tunnel --url http://127.0.0.1:9090`, scrapes the assigned `*.trycloudflare.com` URL, and stamps it onto `self.public_url`. The harness then ships that public URL into the sandbox via `OPENAI_API_BASE` so the in-container agent calls back to the gateway.
+3. **Concurrency raised** via `--sandbox-concurrency 64`. The default `max_concurrent=4` on `MiniSweAgentHarness` is right for one local Docker; Modal scales out and you want it higher.
+
+To use a fixed public URL (e.g. you're on a cloud GPU box already exposed at `https://my.host.com`), pass `rllm.gateway.public_url=https://my.host.com` and the tunnel auto-spawn skips.
+
+> **Cost**: Modal bills per sandbox-second. Each rollout holds a sandbox for ~10–15 min. With `--group-size 4 --batch-size 2 = 8 rollouts/step`, that's roughly 1–2 sandbox-hours per training step at the per-rollout pricing. On crashes the trainer's `atexit` hook terminates live `ModalSandbox` instances; on `kill -9` you may need `modal app stop rllm-sandbox`.
+
+> **Tunnel reachability**: cloudflared quick tunnels publish a URL immediately but DNS propagation takes 30–90 seconds. The first rollout may see a short DNS hiccup before settling.
+
+[Cloudflared install docs](https://developers.cloudflare.com/cloudflare-tunnel/downloads/)
+
 ## Cost knobs
 
 mini-swe-agent on a swebench task takes **~10–15 min wall-clock** (Docker image pull + agent install + LLM turns + pytest install + test run). With swebench-verified at 500 tasks and a default `test_freq=5`, every validation pass at default settings is ~75–125 hours. Use these to keep iteration short:
@@ -97,7 +133,8 @@ docker rm -f $(docker ps -q --filter name=rllm-sandbox)
 | File | Description |
 |------|-------------|
 | `train.py` | Hydra-driven Python training entry point |
-| `train_tinker.sh` | Convenience wrapper with the recommended Tinker overrides |
+| `train_tinker.sh` | Convenience wrapper with the recommended Tinker overrides (local Docker) |
+| `train_modal.sh` | Same recipe, swap to Modal sandboxes + cloudflared tunnel |
 | `README.md` | This file |
 
 No `pyproject.toml` — `mini-swe-agent` is a built-in harness in `rllm.harnesses`, no plugin discovery needed.

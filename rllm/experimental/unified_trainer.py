@@ -874,6 +874,37 @@ def _pin_gateway_host_loopback(config: DictConfig) -> DictConfig:
     )
 
 
+# Sandbox backends that run on the user's machine and can reach the
+# trainer's gateway via loopback (after the harness's host.docker.internal
+# rewrite). Anything else is "remote" and needs a publicly reachable URL.
+_LOCAL_SANDBOX_BACKENDS = {"docker", "local", "apple-container"}
+
+
+def _enable_tunnel_for_remote_sandbox(config: DictConfig, sandbox_backend: str | None) -> DictConfig:
+    """Auto-wire a cloudflared tunnel when sandboxes run off-host.
+
+    Modal/Daytona/E2B/Runloop sandboxes can't reach the trainer's
+    ``127.0.0.1:9090`` — they need a public URL. Set
+    ``rllm.gateway.tunnel="cloudflared"`` so :class:`GatewayManager`
+    spawns ``cloudflared tunnel --url <gateway_url>`` after start and
+    fills in ``rllm.gateway.public_url`` from the assigned
+    ``*.trycloudflare.com`` URL.
+
+    Skipped when ``public_url`` or a ``tunnel`` choice is already set
+    (the user knows their topology better) or when ``sandbox_backend``
+    is local.
+    """
+    if not sandbox_backend or sandbox_backend.lower() in _LOCAL_SANDBOX_BACKENDS:
+        return config
+    gw = config.rllm.get("gateway", {}) or {}
+    if gw.get("public_url") or gw.get("tunnel"):
+        return config
+    return OmegaConf.merge(
+        config,
+        OmegaConf.create({"rllm": {"gateway": {"tunnel": "cloudflared"}}}),
+    )
+
+
 class TrainerLauncher(ABC):
     """
     A unified agent trainer launcher that directly interfaces with the user script to launch training jobs.
@@ -920,6 +951,15 @@ class AgentTrainer:
     is pinned to ``127.0.0.1`` so docker containers can reach it via the
     harness's ``host.docker.internal`` rewrite. Pass ``hooks=`` or
     ``evaluator=`` explicitly to override the auto-wiring.
+
+    Args:
+        sandbox_backend: When wiring sandbox hooks, which backend to use
+            (``"docker"`` / ``"local"`` / ``"modal"`` / …). For remote
+            backends (modal, daytona, e2b, …) a cloudflared tunnel is
+            auto-spawned so containers can reach the gateway.
+        sandbox_concurrency: Override ``max_concurrent`` on a
+            :class:`SandboxedAgentFlow` agent. Useful for raising the
+            default ``4`` when running on a backend that scales out.
     """
 
     def __init__(
@@ -933,6 +973,8 @@ class AgentTrainer:
         agent_flow: Any = None,
         evaluator: Any = None,
         hooks: Any = None,
+        sandbox_backend: str | None = None,
+        sandbox_concurrency: int | None = None,
         store: Store | None = None,
         **kwargs,
     ):
@@ -944,8 +986,33 @@ class AgentTrainer:
             if _needs_sandbox_isolation(agent_flow, train_dataset, val_dataset):
                 from rllm.hooks import SandboxTaskHooks
 
-                hooks = SandboxTaskHooks()
+                hooks = SandboxTaskHooks(sandbox_backend=sandbox_backend)
                 config = _pin_gateway_host_loopback(config)
+                config = _enable_tunnel_for_remote_sandbox(config, sandbox_backend)
+
+        # Forward concurrency override onto a SandboxedAgentFlow so the
+        # engine and Modal both see the right ceiling. The harness ships
+        # with ``max_concurrent=4`` (docker default); on remote backends
+        # the user typically wants 32–256.
+        if agent_flow is not None and sandbox_concurrency is not None:
+            try:
+                from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
+
+                if isinstance(agent_flow, SandboxedAgentFlow):
+                    agent_flow.max_concurrent = sandbox_concurrency
+            except ImportError:
+                pass
+
+        # Forward sandbox_backend onto a SandboxedAgentFlow too, for
+        # parity with the eval CLI's ``agent.sandbox_backend = ...`` step.
+        if agent_flow is not None and sandbox_backend is not None:
+            try:
+                from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
+
+                if isinstance(agent_flow, SandboxedAgentFlow):
+                    agent_flow.sandbox_backend = sandbox_backend
+            except ImportError:
+                pass
 
         has_agent_flow = agent_flow is not None and (evaluator is not None or hooks is not None)
         remote_runtime_enabled = config.rllm.get("remote_runtime", {}).get("enabled", False)

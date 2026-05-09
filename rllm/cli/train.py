@@ -162,6 +162,8 @@ def _run_train(
     output_dir: str | None,
     config_file: str | None,
     enable_ui: bool = False,
+    sandbox_backend: str | None = None,
+    sandbox_concurrency: int | None = None,
 ):
     """Core training logic: resolve catalog, load data, build config, launch trainer."""
 
@@ -455,6 +457,8 @@ def _run_train(
         backend="tinker",
         agent_flow=agent_flow,
         evaluator=evaluator,
+        sandbox_backend=sandbox_backend,
+        sandbox_concurrency=sandbox_concurrency,
         config=config,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
@@ -516,6 +520,15 @@ def _load_or_pull_dataset(name: str, split: str, catalog: dict, catalog_entry_ov
 @click.option("--config", "config_file", default=None, type=click.Path(exists=True), help="YAML config file merged on top of base templates. CLI flags override it.")
 # UI logging options
 @click.option("--ui/--no-ui", "enable_ui", default=None, help="Enable/disable live UI logging. Default: auto-enabled when logged in (see 'rllm login').")
+# Sandbox options (sandboxed/harbor agents only — no-op for non-sandbox flows)
+@click.option(
+    "--sandbox-backend",
+    "sandbox_backend",
+    default=None,
+    type=click.Choice(["docker", "local", "modal", "daytona", "e2b", "runloop", "gke", "apple-container"], case_sensitive=False),
+    help="Sandbox backend for SandboxedAgentFlow harnesses (default: per-task or docker). Remote backends auto-spawn a cloudflared tunnel for the gateway.",
+)
+@click.option("--sandbox-concurrency", "sandbox_concurrency", default=None, type=int, help="Override max concurrent sandboxes (default: agent's max_concurrent — usually 4).")
 def train_cmd(
     benchmark: str,
     train_dataset: str | None,
@@ -539,6 +552,8 @@ def train_cmd(
     output_dir: str | None,
     config_file: str | None,
     enable_ui: bool | None,
+    sandbox_backend: str | None,
+    sandbox_concurrency: int | None,
 ):
     """Train a model on a benchmark dataset using RL."""
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
@@ -578,4 +593,6 @@ def train_cmd(
         output_dir=output_dir,
         config_file=config_file,
         enable_ui=enable_ui,
+        sandbox_backend=sandbox_backend,
+        sandbox_concurrency=sandbox_concurrency,
     )

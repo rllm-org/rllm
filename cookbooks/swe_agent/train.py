@@ -42,6 +42,12 @@ def main(config: DictConfig):
     AgentTrainer(
         backend=config.rllm.get("backend", "tinker"),
         agent_flow=load_agent("mini-swe-agent"),
+        # Override these via Hydra: ``+sandbox_backend=modal +sandbox_concurrency=64``.
+        # Remote backends (modal/daytona/e2b/...) auto-spawn a cloudflared
+        # tunnel so containers can reach the gateway. Local docker uses
+        # the harness's host.docker.internal rewrite as before.
+        sandbox_backend=config.rllm.get("sandbox_backend"),
+        sandbox_concurrency=config.rllm.get("sandbox_concurrency"),
         config=config,
         train_dataset=train_dataset,
         val_dataset=val_dataset,

@@ -129,6 +129,7 @@ class GatewayManager:
         self.port: int = gw_cfg.get("port", 9090)
         self.db_path: str | None = gw_cfg.get("db_path", None)
         self.public_url: str | None = gw_cfg.get("public_url", None)
+        self.tunnel_backend: str | None = gw_cfg.get("tunnel", None)
         self.sampling_params_priority: str = gw_cfg.get("sampling_params_priority", "client")
         # The gateway always pins ``body.model`` to whatever the trainer is serving
         self.model: str | None = config.get("model", {}).get("name", None)
@@ -140,6 +141,7 @@ class GatewayManager:
         self._local_handler: Any = None  # in-process handler for tinker
         self._client: GatewayClient | None = None
         self._async_client: AsyncGatewayClient | None = None
+        self._tunnel: Any = None  # CloudflaredTunnel when tunnel_backend is set
 
         # Per-mode sampling params (extracted from rollout engine in start())
         self._train_sampling_params: dict[str, Any] = {}
@@ -196,8 +198,37 @@ class GatewayManager:
         self._train_sampling_params = getattr(rollout_engine, "train_sampling_params", {})
         self._val_sampling_params = getattr(rollout_engine, "val_sampling_params", {})
 
+        # Bring up a tunnel after the gateway is healthy. Remote
+        # sandboxes (Modal/Daytona/E2B/...) can't reach loopback, so
+        # AgentTrainer auto-sets ``rllm.gateway.tunnel="cloudflared"``
+        # when ``sandbox_backend`` isn't local. The harness's session URL
+        # threads through ``self.public_url`` (see ``get_session_url``),
+        # so flipping ``self.public_url`` here makes every subsequent
+        # rollout use the tunneled URL automatically.
+        if self.tunnel_backend and not self.public_url:
+            self._start_tunnel()
+
+    def _start_tunnel(self) -> None:
+        """Start a public-URL tunnel pointing at the gateway."""
+        backend = (self.tunnel_backend or "").lower()
+        if backend != "cloudflared":
+            raise ValueError(f"Unsupported gateway tunnel backend: {self.tunnel_backend!r}. Supported: 'cloudflared'.")
+
+        from rllm.experimental.engine.tunnel import CloudflaredTunnel
+
+        tunnel = CloudflaredTunnel(self.gateway_url)
+        self.public_url = tunnel.start()
+        self._tunnel = tunnel
+
     def stop(self) -> None:
         """Terminate the gateway (process or thread)."""
+        if self._tunnel is not None:
+            try:
+                self._tunnel.stop()
+            except Exception:
+                logger.exception("Error stopping cloudflared tunnel")
+            self._tunnel = None
+
         if self._client is not None:
             self._client.close()
             self._client = None
