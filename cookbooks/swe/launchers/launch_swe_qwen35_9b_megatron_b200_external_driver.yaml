@@ -31,6 +31,7 @@ arnold:
     RLLM_SWE_OUTPUT_DIR: /tmp/rllm_swe_outputs
     MODEL_PATH: /mnt/hdfs/model_path
     RLLM_SWE_MODE: cluster_only
+    ARNOLD_NETWORK_TOPOLOGY: SAME_NETMINIPOD
     RAY_BACKEND_LOG_LEVEL: info
     RAY_DEDUP_LOGS: "0"
     RAY_LOG_TO_DRIVER: "1"
