@@ -128,7 +128,7 @@ agent:
   compaction_keep_recent_turns: 1
   compaction_summary_prompt: |
     You are about to lose your prior conversation history. Write a self-contained handoff to your future self.
-    This is a context-compaction step, not a shell/tool step. Do not call tools. Do not emit <tool_call>, <function=...>, or <parameter=...>.
+    This is a context-compaction step, not a shell/tool step. DO NOT CALL TOOLS. Do not emit <tool_call>, <function=...>, or <parameter=...>.
     Begin with the literal sentence:
 
       I am continuing this task from an earlier session. Here is what I know and what I will do next.
@@ -141,7 +141,7 @@ agent:
     - Current state and concrete next steps
 
     Be specific. Cite line numbers and function names where they matter.
-    Do not reproduce raw tool output; describe what they said. Address only your future self.
+    Do not reproduce raw tool output. Address only your future self.
 
 # Modal environment configuration via SWE-ReX
 environment:
