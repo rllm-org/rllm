@@ -61,6 +61,22 @@ class MaxResponseLengthExceeded(RuntimeError):
     """Raised when generation stops because the response token limit was reached."""
 
 
+def _extract_compaction_summary(text: str) -> str:
+    """Strip ``<think>...</think>`` and any ``<tool_call>...`` from a
+    compaction completion.
+
+    The directive tells the model not to call tools, but Qwen3.5 sometimes
+    ignores it and continues with a tool call after closing thinking. With
+    the previous ``text.split("</think>")[-1]`` extractor that whole
+    ``<tool_call>...</tool_call>`` block became the "summary" and was
+    injected into the post-compaction conversation as a user message —
+    contaminating downstream training and rendering.
+    """
+    body = text.split("</think>")[-1]
+    body = body.split("<tool_call>", 1)[0]
+    return body.strip()
+
+
 def _ensure_minisweagent_imports():
     global _BASH_TOOL, _parse_toolcall_actions, _format_toolcall_observation_messages, _FormatError
     if _BASH_TOOL is not None:
@@ -344,9 +360,14 @@ class OpenAIClientModel:
         """
         self._log(f"Summarize context: {len(messages)} messages")
 
+        # Wrap the directive in <tool_response> so Qwen3.5's reverse scan
+        # for last_query_index skips it, preserving <think> blocks on every
+        # prior assistant. A bare user message here strips thinking from all
+        # past turns (same failure mode as the format_error path).
+        directive_message = tool_response_user_message(summary_prompt)
         summary_messages = [
             self._api_message(msg) for msg in messages
-        ] + [{"role": "user", "content": summary_prompt}]
+        ] + [directive_message]
 
         try:
             response = self.client.chat.completions.create(
@@ -374,7 +395,7 @@ class OpenAIClientModel:
         else:
             text = choice.message.content or ""
 
-        summary = text.split("</think>")[-1].strip()
+        summary = _extract_compaction_summary(text)
         content = Template(self.config.compaction_continuation_template).render(summary=summary)
         self._log(f"Summary response: {len(text)} chars, compacted to {len(summary)} chars")
 

@@ -171,7 +171,7 @@ class ProgressLoggingAgent(DefaultAgent):
             "kind": "summarizer",
             "messages": [
                 *[{k: v for k, v in m.items() if k != "extra"} for m in summarizer_input],
-                {"role": "user", "content": self._compaction_summary_prompt},
+                tool_response_user_message(self._compaction_summary_prompt),
                 summary_msg,
             ],
         })
