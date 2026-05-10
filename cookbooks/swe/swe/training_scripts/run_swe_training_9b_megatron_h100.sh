@@ -84,7 +84,9 @@
 #
 #    NNODES=2|4                       (default 2 — must match cluster size)
 #    NGPUS_PER_NODE=8                 (default 8)
-#    ACTOR_TP=2 ACTOR_PP=1 ACTOR_CP=2 (Megatron parallelism — DP = world / TPxPPxCP)
+#    ACTOR_TP=4 ACTOR_PP=1 ACTOR_CP=1 (Megatron parallelism — DP = world / TPxPPxCP)
+#    ACTOR_LR_WARMUP_STEPS=20         (set to 0 for one-step smoke tests)
+#    RLLM_RAY_MASTER_PORT_RANGE=25000:25100  (avoid ephemeral-port collisions)
 #    ROLLOUT_TP=1                     (vLLM tensor parallelism)
 #    LOGGER='[console,wandb]'|'[console]'
 #
@@ -127,8 +129,10 @@ export RLLM_RUN_TASK_RUNNER_LOCAL=${RLLM_RUN_TASK_RUNNER_LOCAL:-1}
 export RAY_BACKEND_LOG_LEVEL=${RAY_BACKEND_LOG_LEVEL:-info}
 export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
 export RAY_LOG_TO_DRIVER=${RAY_LOG_TO_DRIVER:-1}
+export RLLM_RAY_MASTER_PORT_RANGE=${RLLM_RAY_MASTER_PORT_RANGE:-25000:25100}
 export WANDB_MODE=${WANDB_MODE:-online}
 export HF_HOME=${HF_HOME:-/tmp/hf_cache}
+export OPENAI_API_KEY=${OPENAI_API_KEY:-EMPTY}
 export PYTHONFAULTHANDLER=${PYTHONFAULTHANDLER:-1}
 export VERL_LOGGING_LEVEL=${VERL_LOGGING_LEVEL:-INFO}
 export VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL:-INFO}
@@ -192,15 +196,16 @@ if [ -z "$MODEL_PATH" ] || [ ! -d "$MODEL_PATH" ]; then
 fi
 MODEL_NAME="$MODEL_PATH"
 
-# Parallelism for the two-node 16xH100 setup:
-# world size 16 / (TP=2 × CP=2 × PP=1) = DP=4.
+# Parallelism for the H100 setup:
+# Qwen3.5 Gated DeltaNet does not support context parallelism yet.
 ACTOR_TP=${ACTOR_TP:-4}
-ACTOR_CP=${ACTOR_CP:-4}
+ACTOR_CP=${ACTOR_CP:-1}
 ACTOR_PP=${ACTOR_PP:-1}
 ROLLOUT_TP=${ROLLOUT_TP:-1}
 MODEL_MAX_TOKENS=${MODEL_MAX_TOKENS:-4096}
 NNODES=${NNODES:-4}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
+ACTOR_LR_WARMUP_STEPS=${ACTOR_LR_WARMUP_STEPS:-20}
 LOGGER=${LOGGER:-"[console,wandb]"}
 SWE_STEP_LIMIT=${SWE_STEP_LIMIT:-200}
 SWE_AGENT_TIMEOUT=${SWE_AGENT_TIMEOUT:-600}
@@ -214,7 +219,8 @@ SWE_VAL_SANDBOX_TIMEOUT=${SWE_VAL_SANDBOX_TIMEOUT:-1020}
 SWE_VAL_STARTUP_JITTER_S=${SWE_VAL_STARTUP_JITTER_S:-30}
 DEFAULT_TRAJ_DIR="$COOKBOOK_DIR/trajectories/\${trainer.experiment_name}"
 TRAJECTORY_OUTPUT_DIR=${TRAJ_DIR:-$DEFAULT_TRAJ_DIR}
-ROLLOUT_CORRECTION_IS=${ROLLOUT_CORRECTION_IS:-token}
+ROLLOUT_CORRECTION_BYPASS=${ROLLOUT_CORRECTION_BYPASS:-true}
+ROLLOUT_CORRECTION_IS=${ROLLOUT_CORRECTION_IS:-null}
 ROLLOUT_CORRECTION_IS_THRESHOLD=${ROLLOUT_CORRECTION_IS_THRESHOLD:-2.0}
 
 LORA_ARGS=(
@@ -267,6 +273,8 @@ python -u -m swe.scripts.train_swe_verl \
     \
     ++trainer.use_legacy_worker_impl=disable \
     actor_rollout_ref.actor.strategy=megatron \
+    actor_rollout_ref.actor.megatron.use_mbridge=true \
+    actor_rollout_ref.actor.megatron.vanilla_mbridge=false \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${ACTOR_TP} \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${ACTOR_PP} \
     actor_rollout_ref.actor.megatron.context_parallel_size=${ACTOR_CP} \
@@ -279,7 +287,7 @@ python -u -m swe.scripts.train_swe_verl \
     actor_rollout_ref.actor.megatron.grad_offload=true \
     actor_rollout_ref.actor.megatron.optimizer_offload=true \
     actor_rollout_ref.actor.optim.lr=1e-5 \
-    ++actor_rollout_ref.actor.optim.lr_warmup_steps=20 \
+    ++actor_rollout_ref.actor.optim.lr_warmup_steps=${ACTOR_LR_WARMUP_STEPS} \
     actor_rollout_ref.actor.ppo_mini_batch_size=2 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.ppo_epochs=1 \
@@ -313,6 +321,8 @@ python -u -m swe.scripts.train_swe_verl \
     \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     ++actor_rollout_ref.ref.strategy=megatron \
+    actor_rollout_ref.ref.megatron.use_mbridge=true \
+    actor_rollout_ref.ref.megatron.vanilla_mbridge=false \
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${ACTOR_TP} \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${ACTOR_PP} \
     actor_rollout_ref.ref.megatron.context_parallel_size=${ACTOR_CP} \
@@ -322,7 +332,7 @@ python -u -m swe.scripts.train_swe_verl \
     algorithm.norm_adv_by_std_in_grpo=false \
     algorithm.gamma=1.0 \
     algorithm.lam=1.0 \
-    algorithm.rollout_correction.bypass_mode=true \
+    algorithm.rollout_correction.bypass_mode=${ROLLOUT_CORRECTION_BYPASS} \
     algorithm.rollout_correction.rollout_is=${ROLLOUT_CORRECTION_IS} \
     algorithm.rollout_correction.rollout_is_threshold=${ROLLOUT_CORRECTION_IS_THRESHOLD} \
     \
@@ -331,7 +341,7 @@ python -u -m swe.scripts.train_swe_verl \
     rllm.workflow.n_parallel_tasks=64 \
     rllm.workflow.retry_limit=1 \
     rllm.workflow.raise_on_error=false \
-    rllm.algorithm.rollout_correction.bypass_mode=true \
+    rllm.algorithm.rollout_correction.bypass_mode=${ROLLOUT_CORRECTION_BYPASS} \
     rllm.algorithm.rollout_correction.tis_mode=${ROLLOUT_CORRECTION_IS} \
     rllm.algorithm.rollout_correction.tis_cap=${ROLLOUT_CORRECTION_IS_THRESHOLD} \
     \

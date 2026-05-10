@@ -96,6 +96,17 @@ PY
 TRAINING_SCRIPT="$COOKBOOK_DIR/swe/training_scripts/run_swe_training_9b_megatron.sh"
 if [ "${RLLM_SWE_MODE:-smoke}" = "smoke" ]; then
     export LOGGER=${LOGGER:-"[console]"}
+    export ACTOR_LR_WARMUP_STEPS="${ACTOR_LR_WARMUP_STEPS:-0}"
+    export SWE_STEP_LIMIT="${SWE_STEP_LIMIT:-24}"
+    export SWE_AGENT_TIMEOUT="${SWE_AGENT_TIMEOUT:-180}"
+    export SWE_COMMAND_TIMEOUT="${SWE_COMMAND_TIMEOUT:-60}"
+    export SWE_SANDBOX_TIMEOUT="${SWE_SANDBOX_TIMEOUT:-240}"
+    export SWE_STARTUP_JITTER_S="${SWE_STARTUP_JITTER_S:-0}"
+    export SWE_VAL_STEP_LIMIT="${SWE_VAL_STEP_LIMIT:-24}"
+    export SWE_VAL_AGENT_TIMEOUT="${SWE_VAL_AGENT_TIMEOUT:-180}"
+    export SWE_VAL_COMMAND_TIMEOUT="${SWE_VAL_COMMAND_TIMEOUT:-60}"
+    export SWE_VAL_SANDBOX_TIMEOUT="${SWE_VAL_SANDBOX_TIMEOUT:-240}"
+    export SWE_VAL_STARTUP_JITTER_S="${SWE_VAL_STARTUP_JITTER_S:-0}"
     exec bash "$TRAINING_SCRIPT" \
         train_max_samples="${RLLM_SWE_SMOKE_TRAIN_SAMPLES:-16}" \
         val_max_samples="${RLLM_SWE_SMOKE_VAL_SAMPLES:-4}" \

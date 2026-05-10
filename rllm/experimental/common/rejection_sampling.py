@@ -183,6 +183,12 @@ def apply_rejection_sampling_and_filtering(
 
     metrics = state.metrics
 
+    if config.mode == "none":
+        metrics.groups_before_filter += len(groups)
+        metrics.groups_after_filter += len(groups)
+        update_episode_metrics(episodes, metrics)
+        return groups, episodes, metrics.to_dict()
+
     # Step 1: Filter groups and episodes based on config
     filtered_groups, dropped_groups = filter_groups(groups, config, metrics)
     filtered_episodes = filter_episodes(episodes, dropped_groups)
@@ -191,10 +197,7 @@ def apply_rejection_sampling_and_filtering(
     update_episode_metrics(filtered_episodes, metrics)
 
     # Step 3: Apply mode-specific logic (TODO(listar2000): implement a group-level rejection sampling)
-    if config.mode == "none":
-        # No rejection, just return filtered groups with metrics
-        return filtered_groups, filtered_episodes, metrics.to_dict()
-    elif config.mode == "episode":  # Episode-level: accumulate until we have enough partial solves
+    if config.mode == "episode":  # Episode-level: accumulate until we have enough partial solves
         state.accumulated_groups.extend(filtered_groups)
         state.accumulated_episodes.extend(filtered_episodes)
 

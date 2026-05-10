@@ -99,10 +99,11 @@ uv pip install --python "$VENV_DIR/bin/python" vllm==0.18.0
 uv pip install --python "$VENV_DIR/bin/python" \
     transformers==5.3.0 pybind11 ninja nvidia-mathdx
 
-echo "[3/9] Installing Megatron-Core 0.17 and Megatron Bridge 0.4"
+echo "[3/9] Installing Megatron-Core 0.17 and mbridge"
 uv pip install --python "$VENV_DIR/bin/python" --no-deps \
     megatron-core==0.17.0 \
-    megatron-bridge==0.4.0
+    megatron-bridge==0.4.0 \
+    mbridge==0.15.1
 
 echo "[4/9] Installing Python-level RL/runtime dependencies"
 uv pip install --python "$VENV_DIR/bin/python" \
@@ -136,6 +137,7 @@ uv pip install --python "$VENV_DIR/bin/python" \
     pyyaml \
     pandas \
     openai \
+    aiosqlite \
     "mini-swe-agent[full]" \
     swebench \
     "swesmith[validate] @ git+https://github.com/SWE-bench/SWE-smith.git"
@@ -214,6 +216,7 @@ import transformer_engine.pytorch as te
 import verl
 import rllm
 import swe
+import aiosqlite
 
 print("--- versions ---")
 print(f"torch              : {torch.__version__}")
@@ -229,6 +232,7 @@ print("transformer_engine : OK")
 print(f"verl               : {getattr(verl, '__version__', 'OK')}")
 print(f"rllm               : {getattr(rllm, '__version__', 'OK')}")
 print("swe cookbook       : OK")
+print("aiosqlite          : OK")
 
 if torch.cuda.is_available():
     from flash_attn import flash_attn_func

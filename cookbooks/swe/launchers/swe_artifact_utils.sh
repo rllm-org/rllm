@@ -19,22 +19,60 @@ artifact_dir() {
 }
 
 setup_b200_driver_libs() {
-    local real_libcuda=/usr/lib/x86_64-linux-gnu/libcuda.so.1
+    local real_libcuda=""
     local real_nvml_lib=""
+    local driver_lib_dir=/tmp/rllm_swe_driver_libs
     local f
+    for f in /usr/lib/x86_64-linux-gnu/libcuda.so.*; do
+        if [ -f "$f" ] && [ -s "$f" ] && [ ! -L "$f" ]; then
+            real_libcuda="$f"
+        fi
+    done
     for f in /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.*; do
         if [ -f "$f" ] && [ -s "$f" ] && [ ! -L "$f" ]; then
             real_nvml_lib="$f"
-            break
         fi
     done
-    if [ -f "$real_libcuda" ] && [ -s "$real_libcuda" ]; then
+    mkdir -p "$driver_lib_dir"
+    if [ -n "$real_libcuda" ]; then
+        ln -sfn "$real_libcuda" "$driver_lib_dir/libcuda.so.1"
+        ln -sfn "$real_libcuda" "$driver_lib_dir/libcuda.so"
+    fi
+    if [ -n "$real_nvml_lib" ]; then
+        ln -sfn "$real_nvml_lib" "$driver_lib_dir/libnvidia-ml.so.1"
+        ln -sfn "$real_nvml_lib" "$driver_lib_dir/libnvidia-ml.so"
+    fi
+
+    export LD_LIBRARY_PATH="$driver_lib_dir:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+    if [ -f "$driver_lib_dir/libcuda.so.1" ]; then
         if [ -n "$real_nvml_lib" ]; then
-            export LD_PRELOAD="$real_libcuda:$real_nvml_lib${LD_PRELOAD:+:$LD_PRELOAD}"
+            export LD_PRELOAD="$driver_lib_dir/libcuda.so.1:$driver_lib_dir/libnvidia-ml.so.1${LD_PRELOAD:+:$LD_PRELOAD}"
         else
-            export LD_PRELOAD="$real_libcuda${LD_PRELOAD:+:$LD_PRELOAD}"
+            export LD_PRELOAD="$driver_lib_dir/libcuda.so.1${LD_PRELOAD:+:$LD_PRELOAD}"
         fi
-        export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+    elif [ -n "$real_nvml_lib" ]; then
+        export LD_PRELOAD="$driver_lib_dir/libnvidia-ml.so.1${LD_PRELOAD:+:$LD_PRELOAD}"
+    fi
+}
+
+install_runtime_wheels() {
+    local artifacts wheel_dir
+    local specs=()
+    artifacts="$(artifact_dir)"
+    wheel_dir="$artifacts/wheels"
+    if [ ! -d "$wheel_dir" ]; then
+        return 0
+    fi
+
+    if compgen -G "$wheel_dir/aiosqlite-*.whl" >/dev/null; then
+        specs+=("aiosqlite==0.22.1")
+    fi
+    if compgen -G "$wheel_dir/mbridge-*.whl" >/dev/null; then
+        specs+=("mbridge==0.15.1")
+    fi
+
+    if [ "${#specs[@]}" -gt 0 ]; then
+        python -m pip install --no-index --find-links "$wheel_dir" "${specs[@]}"
     fi
 }
 
@@ -48,6 +86,7 @@ restore_verl_venv() {
     fi
     export VIRTUAL_ENV=/tmp/verl_venv
     export PATH="$VIRTUAL_ENV/bin:$PATH"
+    install_runtime_wheels
 }
 
 restore_qwen35_cache() {
@@ -58,7 +97,7 @@ restore_qwen35_cache() {
         export TRANSFORMERS_OFFLINE=1
         return
     fi
-    if [ -d /mnt/hdfs/model_path ]; then
+    if [ -f /mnt/hdfs/model_path/config.json ]; then
         export MODEL_PATH=${MODEL_PATH:-/mnt/hdfs/model_path}
         export HF_HOME=${HF_HOME:-/tmp/hf_cache}
         export HF_HUB_OFFLINE=1

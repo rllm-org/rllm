@@ -19,11 +19,6 @@ from swe.utils import close_env
 
 ensure_bootstrapped()
 
-from swe.tasks.swebench_multilingual import grade_swebench_multilingual
-from swe.tasks.swebench_pro import grade_swebench_pro
-from swe.tasks.swesmith import grade_swesmith
-from swe.tasks.swe_rebench_v2 import grade_swe_rebench_v2
-
 
 class SWEEvaluator:
     """Scores SWE Episodes by routing to the correct dataset grader."""
@@ -93,14 +88,22 @@ class SWEEvaluator:
         """Run the dataset-specific grader. Executed in a thread pool."""
         eval_type = task["eval_type"]
         if eval_type == "swebench_pro":
+            from swe.tasks.swebench_pro import grade_swebench_pro
+
             return grade_swebench_pro(
                 task, patch, self.dockerhub_username, self.scripts_dir, self.verbose,
             )
         elif eval_type == "swesmith":
+            from swe.tasks.swesmith import grade_swesmith
+
             return grade_swesmith(task, patch, self._create_env, self.verbose)
         elif eval_type == "swe_rebench_v2":
+            from swe.tasks.swe_rebench_v2 import grade_swe_rebench_v2
+
             return grade_swe_rebench_v2(task, env, patch, self.verbose)
         elif eval_type == "swebench":
+            from swe.tasks.swebench_multilingual import grade_swebench_multilingual
+
             return grade_swebench_multilingual(task, env, patch, self.verbose)
         else:
             raise ValueError(f"Unsupported eval_type: {eval_type}")

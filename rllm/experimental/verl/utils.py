@@ -66,6 +66,30 @@ _SHARED_KEYS: list[tuple[str, str]] = [
 _TOTAL_TRAINING_STEPS_KEY: tuple[str, str] = ("trainer.total_training_steps", "rllm.trainer.total_batches")
 
 
+def _parse_master_port_range(value: Any) -> list[int] | None:
+    """Parse a Ray worker-group master port range.
+
+    veRL's Ray worker group probes a free port and then releases the probe
+    socket before torch.distributed rank 0 binds TCPStore. Keeping this range
+    outside the OS ephemeral range avoids common time-of-check/time-of-use
+    collisions with concurrent worker startup sockets.
+    """
+    if value in (None, ""):
+        return None
+    if OmegaConf.is_config(value):
+        value = OmegaConf.to_container(value, resolve=True)
+    if isinstance(value, str):
+        parts = [p.strip() for p in value.replace(":", ",").split(",") if p.strip()]
+    else:
+        parts = list(value)
+    if len(parts) != 2:
+        raise ValueError(f"Expected two endpoints for master port range, got: {value!r}")
+    start, end = (int(parts[0]), int(parts[1]))
+    if not (0 < start < end <= 65535):
+        raise ValueError(f"Invalid master port range: {start}:{end}")
+    return [start, end]
+
+
 def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) -> None:
     """Keep verl-native and rllm-namespaced config in sync.
 
@@ -363,6 +387,12 @@ def build_wg_kwargs(config: DictConfig, device_name: str) -> dict[str, Any]:
     wg_kwargs: dict[str, Any] = {"device_name": device_name}
     if OmegaConf.select(config.trainer, "ray_wait_register_center_timeout") is not None:
         wg_kwargs["ray_wait_register_center_timeout"] = config.trainer.ray_wait_register_center_timeout
+    master_port_range = _parse_master_port_range(
+        OmegaConf.select(config.trainer, "ray_master_port_range")
+        or os.environ.get("RLLM_RAY_MASTER_PORT_RANGE")
+    )
+    if master_port_range is not None:
+        wg_kwargs["master_port_range"] = master_port_range
     if OmegaConf.select(config, "global_profiler.steps") is not None:
         wg_kwargs["profile_steps"] = OmegaConf.select(config, "global_profiler.steps")
         if OmegaConf.select(config, "global_profiler.tool") == "nsys":

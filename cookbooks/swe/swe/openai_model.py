@@ -15,6 +15,7 @@ model gateway.
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any
 
@@ -138,17 +139,21 @@ class OpenAIClientModel:
         self.config = OpenAIClientModelConfig(**cfg)
         self.verbose = verbose
 
+        normalized_base_url = base_url.rstrip("/").lower()
+        official_openai_api = normalized_base_url in {
+            "https://api.openai.com",
+            "https://api.openai.com/v1",
+        }
         client_kwargs: dict[str, Any] = {"base_url": base_url}
         if api_key is not None:
             client_kwargs["api_key"] = api_key
+        elif not official_openai_api:
+            client_kwargs["api_key"] = os.environ.get("OPENAI_API_KEY", "EMPTY")
         self.client = OpenAI(**client_kwargs)
 
         self.model_name = model_name
         self.base_url = base_url.rstrip("/")
-        self._official_openai_api = self.base_url.lower() in {
-            "https://api.openai.com",
-            "https://api.openai.com/v1",
-        }
+        self._official_openai_api = official_openai_api
         self._allow_extra_body = not self._official_openai_api
         self.tokenizer = None
 
