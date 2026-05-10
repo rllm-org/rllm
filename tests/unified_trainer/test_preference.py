@@ -128,7 +128,6 @@ class TestAlgorithmConfigDPO:
                         "objective": "dpo",
                         "adv_estimator": "grpo",
                         "norm_adv_by_std_in_grpo": False,
-                        "use_rllm": False,
                         "use_precomputed_advantage": False,
                         "loss_fn": None,
                         "lr_schedule": "constant",
@@ -147,7 +146,10 @@ class TestAlgorithmConfigDPO:
             }
         )
 
-        algorithm_config = AlgorithmConfig.from_config(cfg)
+        algorithm_config = AlgorithmConfig.from_config(
+            cfg.rllm.algorithm,
+            stepwise_advantage_mode=cfg.rllm.stepwise_advantage.mode,
+        )
 
         assert algorithm_config.objective == TrainingObjective.DPO
         assert algorithm_config.dpo.beta == 0.2
