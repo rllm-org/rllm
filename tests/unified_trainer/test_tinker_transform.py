@@ -1,8 +1,8 @@
-"""
-Tests for trajectory_to_datums function in rllm.trainer.tinker.transform.
-
-These tests verify that trajectories are correctly converted to Tinker Datum objects,
-especially the logic for merging consecutive steps that share a prefix relationship.
+"""Tests for ``trajectory_to_datums``: verifying the Datum-builder wrapper
+on top of the shared step merge. The merge logic itself (prefix detection,
+chunk handling, mask/logprob/advantage interleaving) is tested in
+``test_step_merge.py``; this file focuses on the Datum payload — dtypes,
+lengths, mask/logprob/advantage values after the right-shift.
 """
 
 from typing import Literal
@@ -12,11 +12,7 @@ import tinker
 from tinker.types import ImageChunk
 
 from rllm.agents.agent import Step, Trajectory
-from rllm.trainer.tinker.transform import (
-    _flatten_token_input,
-    _is_prefix,
-    trajectory_to_datums,
-)
+from rllm.trainer.tinker.transform import trajectory_to_datums
 
 # =============================================================================
 # Helper Functions
@@ -73,127 +69,6 @@ def verify_datum_structure(datum: tinker.Datum):
     advantages_len = len(loss_fn_inputs["advantages"].data)
     mask_len = len(loss_fn_inputs["mask"].data)
     assert target_len == logprobs_len == advantages_len == mask_len, f"Length mismatch: target={target_len}, logprobs={logprobs_len}, advantages={advantages_len}, mask={mask_len}"
-
-
-# =============================================================================
-# Tests for _is_prefix
-# =============================================================================
-
-
-class TestIsPrefix:
-    """Tests for the _is_prefix helper function."""
-
-    def test_basic_prefix_cases(self):
-        """Test basic prefix relationships with plain int lists."""
-        # Empty is prefix of anything
-        assert _is_prefix([], [1, 2, 3])
-        assert _is_prefix([], [])
-
-        # Identical sequences
-        assert _is_prefix([1, 2, 3], [1, 2, 3])
-
-        # Proper prefix
-        assert _is_prefix([1, 2], [1, 2, 3, 4])
-
-        # Not a prefix: different elements
-        assert not _is_prefix([1, 3], [1, 2, 3])
-
-        # Not a prefix: longer sequence
-        assert not _is_prefix([1, 2, 3, 4], [1, 2])
-
-    def test_prefix_with_encoded_text_chunks(self):
-        """Test prefix checking with EncodedTextChunk in sequences."""
-        chunk1 = tinker.EncodedTextChunk(tokens=[10, 20, 30])
-        chunk2 = tinker.EncodedTextChunk(tokens=[10, 20, 30])  # Same content, different object
-
-        # Same chunk object should match
-        assert _is_prefix([chunk1, 1, 2], [chunk1, 1, 2, 3, 4])
-
-        # Different chunk objects with same content won't match via object equality
-        # (unless tinker implements __eq__ for EncodedTextChunk)
-        seq1 = [chunk1, 1, 2]
-        seq2 = [chunk2, 1, 2, 3]
-        # This depends on how tinker implements equality; test both cases
-        result = _is_prefix(seq1, seq2)
-        # Just verify it returns a boolean without error
-        assert isinstance(result, bool)
-
-    def test_prefix_with_image_chunks(self):
-        """Test prefix checking with ImageChunk (non-text multimodal chunk)."""
-        img_chunk = make_image_chunk()
-
-        # Mixed sequence with image chunk
-        seq1 = [1, 2, img_chunk, 3]
-        seq2 = [1, 2, img_chunk, 3, 4, 5]
-        assert _is_prefix(seq1, seq2)
-
-        # Different image chunk (different data) should not match
-        img_chunk2 = make_image_chunk(data=b"image_data_2")
-        seq3 = [1, 2, img_chunk2, 3, 4, 5]
-        assert not _is_prefix(seq1, seq3)
-
-    def test_prefix_with_mixed_chunk_types(self):
-        """Test prefix with both EncodedTextChunk and ImageChunk."""
-        text_chunk = tinker.EncodedTextChunk(tokens=[10, 20])
-        img_chunk = make_image_chunk(expected_tokens=128)
-
-        seq1 = [text_chunk, 1, img_chunk, 2]
-        seq2 = [text_chunk, 1, img_chunk, 2, 3, 4]
-        assert _is_prefix(seq1, seq2)
-
-
-# =============================================================================
-# Tests for _flatten_token_input
-# =============================================================================
-
-
-class TestFlattenTokenInput:
-    """Tests for the _flatten_token_input helper function."""
-
-    def test_already_flat(self):
-        """Plain int list should remain unchanged."""
-        token_input = [1, 2, 3, 4]
-        assert _flatten_token_input(token_input) == [1, 2, 3, 4]
-
-    def test_empty_input(self):
-        """Empty input should return empty list."""
-        assert _flatten_token_input([]) == []
-
-    def test_encoded_text_chunk_is_flattened(self):
-        """EncodedTextChunk should be expanded to its tokens."""
-        chunk = tinker.EncodedTextChunk(tokens=[10, 20, 30])
-        token_input = [1, 2, chunk, 3]
-        flattened = _flatten_token_input(token_input)
-        assert flattened == [1, 2, 10, 20, 30, 3]
-
-    def test_multiple_encoded_text_chunks(self):
-        """Multiple EncodedTextChunks should all be flattened."""
-        chunk1 = tinker.EncodedTextChunk(tokens=[10, 20])
-        chunk2 = tinker.EncodedTextChunk(tokens=[30, 40])
-        token_input = [chunk1, 5, chunk2]
-        flattened = _flatten_token_input(token_input)
-        assert flattened == [10, 20, 5, 30, 40]
-
-    def test_image_chunk_is_preserved(self):
-        """
-        ImageChunk (non-EncodedTextChunk) should NOT be flattened.
-        It should be kept as-is in the sequence since it doesn't have .tokens.
-        """
-        img_chunk = make_image_chunk()
-        token_input = [1, 2, img_chunk, 3]
-        flattened = _flatten_token_input(token_input)
-        # ImageChunk should be preserved, not flattened
-        assert flattened == [1, 2, img_chunk, 3]
-
-    def test_mixed_chunks_partial_flatten(self):
-        """EncodedTextChunks are flattened, ImageChunks are preserved."""
-        text_chunk = tinker.EncodedTextChunk(tokens=[10, 20])
-        img_chunk = make_image_chunk(expected_tokens=128)
-
-        token_input = [text_chunk, 1, img_chunk, 2]
-        flattened = _flatten_token_input(token_input)
-        # text_chunk is flattened to [10, 20], img_chunk is preserved
-        assert flattened == [10, 20, 1, img_chunk, 2]
 
 
 # =============================================================================
@@ -485,7 +360,7 @@ class TestTrajectoryToDataEdgeCases:
         )
         trajectory = Trajectory(steps=[step])
 
-        with pytest.raises(AssertionError, match="length mismatch"):
+        with pytest.raises(AssertionError, match="advantage"):
             trajectory_to_datums(trajectory)
 
     def test_missing_logprobs_raises(self):
@@ -498,7 +373,7 @@ class TestTrajectoryToDataEdgeCases:
         )
         trajectory = Trajectory(steps=[step])
 
-        with pytest.raises(AssertionError, match="logprobs is empty"):
+        with pytest.raises(AssertionError, match="logprobs"):
             trajectory_to_datums(trajectory)
 
     def test_missing_advantage_raises(self):
@@ -511,7 +386,7 @@ class TestTrajectoryToDataEdgeCases:
         )
         trajectory = Trajectory(steps=[step])
 
-        with pytest.raises(AssertionError, match="advantage is None"):
+        with pytest.raises(AssertionError, match="advantage"):
             trajectory_to_datums(trajectory)
 
     def test_single_token_prompt_and_response(self):
