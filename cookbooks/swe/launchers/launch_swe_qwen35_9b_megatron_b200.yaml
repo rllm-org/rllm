@@ -1,0 +1,48 @@
+# python verl-recipes/tasks/arnold_launch.py --config submodules/rllm/cookbooks/swe/launchers/launch_swe_qwen35_9b_megatron_b200.yaml
+arnold:
+  region: i18n
+  group_name: mlsys_inference
+  cluster_name: cloudnative-useast1b
+  quota_pool: third_party_oci
+  image_url: aliyun-va-hub.byted.org/arnold/jason.wei:qwen35b200v5
+  job_name: swe_qwen35_9b_megatron_b200x16
+  namespace: /topic/2ebfba22254a08e7
+  uce_config: {}
+  roles:
+    - name: head
+      num: 1
+      cpu: 32
+      memory: 65536
+      gpuv: CPU_ONLY
+      ports: 20
+      queue_name: public_CPU
+    - name: worker
+      num: 2
+      gpu: 8
+      gpuv: NVIDIA_B200
+      ports: 20
+      queue_name: compute-598-useast1b-cloudnative-aioci-mlsys.inference-guarantee
+  hdfs_mount:
+    - hdfs_address: hdfs://harunava/home/byte_arnold_va_ssd/mlsys/models/Qwen3.5-9B
+      mount_path: /mnt/hdfs/model_path
+      mode: RO
+  envs:
+    RLLM_SWE_ARTIFACT_DIR: /opt/tiger/swe_runtime_image/artifacts
+    RLLM_SWE_OUTPUT_DIR: /tmp/rllm_swe_outputs
+    MODEL_PATH: /mnt/hdfs/model_path
+    RLLM_SWE_MODE: smoke
+    RLLM_SWE_REQUIRE_WANDB: "1"
+    RLLM_SWE_MODAL_PROBE_TOTAL: "12"
+    RLLM_SWE_MODAL_PROBE_CONCURRENCY: "6"
+    RAY_BACKEND_LOG_LEVEL: info
+    RAY_DEDUP_LOGS: "0"
+    RAY_LOG_TO_DRIVER: "1"
+    NCCL_DEBUG: INFO
+  local_envs:
+    - MODAL_TOKEN_ID
+    - MODAL_TOKEN_SECRET
+    - WANDB_API_KEY
+
+verl:
+  entrypoint: submodules/rllm/cookbooks/swe/launchers/arnold_entrypoint_swe_qwen35_9b_megatron.sh
+  ray_runtime_env: submodules/rllm/cookbooks/swe/launchers/ray_runtime_env_swe.yaml

@@ -1,0 +1,11 @@
+working_dir: "."
+py_executable: "bash submodules/rllm/cookbooks/swe/launchers/swe_ray_python.sh"
+env_vars:
+  HF_HOME: "/tmp/hf_cache"
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  RLLM_HOME: "/tmp/rllm_home"
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  CUDA_DEVICE_MAX_CONNECTIONS: "1"
+  NCCL_CUMEM_ENABLE: "0"
+  VLLM_DISABLE_COMPILE_CACHE: "1"

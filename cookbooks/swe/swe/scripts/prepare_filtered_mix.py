@@ -165,7 +165,7 @@ def prepare_filtered_mix(
     return all_tasks
 
 
-if __name__ == "__main__":
+def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare filtered mix of SWE-smith trajectory datasets")
     parser.add_argument("--max-per-dataset", type=int, default=300,
                         help="Max instances to sample from each source dataset (default: 300)")
@@ -187,3 +187,7 @@ if __name__ == "__main__":
         dataset_name=name,
         hard=args.hard,
     )
+
+
+if __name__ == "__main__":
+    main()
