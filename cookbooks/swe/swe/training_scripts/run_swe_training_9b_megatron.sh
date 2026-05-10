@@ -71,7 +71,7 @@ for f in /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.*; do
         break
     fi
 done
-if [ -f "$REAL_LIBCUDA" ]; then
+if [ -f "$REAL_LIBCUDA" ] && [ -s "$REAL_LIBCUDA" ]; then
     if [ -n "$REAL_NVML_LIB" ]; then
         export LD_PRELOAD="$REAL_LIBCUDA:$REAL_NVML_LIB${LD_PRELOAD:+:$LD_PRELOAD}"
     else

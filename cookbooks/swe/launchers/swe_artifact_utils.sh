@@ -28,7 +28,7 @@ setup_b200_driver_libs() {
             break
         fi
     done
-    if [ -f "$real_libcuda" ]; then
+    if [ -f "$real_libcuda" ] && [ -s "$real_libcuda" ]; then
         if [ -n "$real_nvml_lib" ]; then
             export LD_PRELOAD="$real_libcuda:$real_nvml_lib${LD_PRELOAD:+:$LD_PRELOAD}"
         else
