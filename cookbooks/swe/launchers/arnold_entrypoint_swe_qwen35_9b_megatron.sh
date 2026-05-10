@@ -19,12 +19,14 @@ echo "mode=${RLLM_SWE_MODE:-smoke}"
 echo "============================================================"
 
 if [ "${RLLM_SWE_MODE:-smoke}" = "cluster_only" ]; then
-    setup_b200_driver_libs
-    restore_verl_venv
-    restore_rllm_home
-else
-    restore_swe_artifacts
+    echo "Cluster-only mode: Arnold is holding the Ray cluster for an external SWE driver."
+    echo "External driver should connect through the Ray Client port exposed by the current head pod."
+    while true; do
+        sleep 3600
+    done
 fi
+
+restore_swe_artifacts
 export PYTHONUNBUFFERED=1
 export PYTHONFAULTHANDLER=1
 export HYDRA_FULL_ERROR=1
@@ -36,14 +38,6 @@ export TRAJ_DIR=${TRAJ_DIR:-$RLLM_SWE_OUTPUT_DIR/trajectories/\${trainer.experim
 export RLLM_RUN_TASK_RUNNER_LOCAL=1
 export RAY_ADDRESS=${RAY_ADDRESS:-auto}
 export LOGGER=${LOGGER:-"[console,wandb]"}
-
-if [ "${RLLM_SWE_MODE:-smoke}" = "cluster_only" ]; then
-    echo "Cluster-only mode: Arnold is holding the Ray cluster for an external SWE driver."
-    echo "External driver should connect with RAY_ADDRESS=ray://[<head_ipv6>]:10001."
-    while true; do
-        sleep 3600
-    done
-fi
 
 if [ -z "${MODAL_TOKEN_ID:-}" ] || [ -z "${MODAL_TOKEN_SECRET:-}" ]; then
     echo "Missing MODAL_TOKEN_ID or MODAL_TOKEN_SECRET." >&2
