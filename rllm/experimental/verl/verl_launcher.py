@@ -1,16 +1,22 @@
 import logging
+from importlib import import_module
 
 import ray
 from omegaconf import DictConfig
 
 from rllm.data import Dataset
 from rllm.experimental.unified_trainer import TrainerLauncher, UnifiedTrainer
-from rllm.experimental.verl.verl_backend import VerlBackend
 from rllm.trainer.verl.ray_runtime_env import get_ppo_ray_runtime_env
 from rllm.trainer.verl.train_agent_ppo import TaskRunner
 from rllm.workflows.workflow import Workflow
 
 logger = logging.getLogger(__name__)
+
+
+def _load_backend_cls(backend_cls_path: str):
+    module_name, class_name = backend_cls_path.split(":", 1)
+    module = import_module(module_name)
+    return getattr(module, class_name)
 
 
 @ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head
@@ -29,6 +35,9 @@ class VerlTaskRunner(TaskRunner):
         from verl.utils.fs import copy_to_local
 
         from rllm.experimental.verl.utils import sync_config
+
+        backend_cls_path = kwargs.pop("backend_cls_path", "rllm.experimental.verl.verl_backend:VerlBackend")
+        backend_cls = _load_backend_cls(backend_cls_path)
 
         print(f"VerlTaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
         OmegaConf.register_new_resolver("mul", lambda x, y: int(x) * int(y))
@@ -70,7 +79,7 @@ class VerlTaskRunner(TaskRunner):
         trainer = None
         try:
             trainer = UnifiedTrainer(
-                backend_cls=VerlBackend,
+                backend_cls=backend_cls,
                 config=config,
                 workflow_class=workflow_class,
                 train_dataset=None,
@@ -149,3 +158,11 @@ class VerlTrainerLauncher(TrainerLauncher):
                     ray.shutdown()
                 except Exception:
                     logger.exception("ray.shutdown during launcher cleanup failed")
+
+
+class VerlDPOTrainerLauncher(VerlTrainerLauncher):
+    """Verl trainer launcher that selects the DPO backend implementation."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs["backend_cls_path"] = "rllm.experimental.verl.dpo_backend:VerlDPOBackend"
+        super().__init__(*args, **kwargs)

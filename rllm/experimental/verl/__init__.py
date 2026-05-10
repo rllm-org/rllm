@@ -15,6 +15,7 @@ __all__ = [
     "update_dataproto_with_advantages",
     # backend
     "VerlBackend",
+    "VerlDPOBackend",
     # dataclass
     "AccumulatedData",
     "ProcessedStepData",
@@ -43,5 +44,10 @@ def __getattr__(name: str):
         from rllm.experimental.verl.verl_backend import VerlBackend
 
         return VerlBackend
+
+    if name == "VerlDPOBackend":
+        from rllm.experimental.verl.dpo_backend import VerlDPOBackend
+
+        return VerlDPOBackend
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

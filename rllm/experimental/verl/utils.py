@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from omegaconf import DictConfig, OmegaConf, open_dict
-from verl import DataProto
-from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
+
+if TYPE_CHECKING:
+    from verl import DataProto
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +191,9 @@ def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) ->
     sync_total_training_steps()
 
     # Derived verl-only keys
-    if "actor_rollout_ref.actor.use_kl_loss" not in explicit:
+    if "actor_rollout_ref.actor.use_kl_loss" not in explicit and OmegaConf.select(config, "rllm.backend") == "verl_dpo":
+        OmegaConf.update(config, "actor_rollout_ref.actor.use_kl_loss", True, merge=False)
+    elif "actor_rollout_ref.actor.use_kl_loss" not in explicit:
         kl_beta = OmegaConf.select(config, "rllm.algorithm.kl_beta")
         if kl_beta is None:
             kl_beta = 0.0
@@ -301,6 +304,8 @@ def balance_batch(
     Mutates ``batch`` in-place via ``batch.reorder()``. Mirrors the semantics of
     ``RayPPOTrainer._balance_batch``.
     """
+    from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
+
     attention_mask = batch.batch["attention_mask"]
     batch_size = attention_mask.shape[0]
     global_seqlen_lst = attention_mask.view(batch_size, -1).sum(-1)

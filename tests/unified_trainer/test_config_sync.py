@@ -196,6 +196,18 @@ def test_kl_beta_zero_disables_use_kl_loss(propagate):
     assert cfg.actor_rollout_ref.actor.use_kl_loss is False
 
 
+def test_verl_dpo_backend_keeps_reference_policy_with_zero_kl_beta(propagate):
+    cfg = _make_config()
+    cfg.rllm.backend = "verl_dpo"
+    cfg.rllm.algorithm.kl_beta = 0.0
+    cfg.actor_rollout_ref.actor.use_kl_loss = False
+
+    cfg = propagate(cfg)
+
+    assert cfg.actor_rollout_ref.actor.kl_loss_coef == 0.0
+    assert cfg.actor_rollout_ref.actor.use_kl_loss is True
+
+
 def test_kl_beta_positive_enables_use_kl_loss(propagate):
     cfg = _make_config()
     cfg.rllm.algorithm.kl_beta = 0.01

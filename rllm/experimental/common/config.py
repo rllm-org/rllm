@@ -193,36 +193,6 @@ class rLLMAdvantageEstimator(str, Enum):
         return cls.OTHER
 
 
-class TrainingObjective(str, Enum):
-    """Supported top-level training objectives in the experimental trainer."""
-
-    RL = "rl"
-    DPO = "dpo"
-
-
-class DPOPairingStrategy(str, Enum):
-    """Supported pairing strategies for DPO preference construction."""
-
-    BEST_WORST = "best_worst"
-
-
-@dataclass
-class DPOConfig:
-    """Configuration for strict, on-policy DPO pair construction."""
-
-    beta: float = 0.1
-    pairing_strategy: DPOPairingStrategy | str = DPOPairingStrategy.BEST_WORST
-    min_reward_gap: float = 0.0
-    drop_ties: bool = True
-
-    def __post_init__(self) -> None:
-        self.pairing_strategy = DPOPairingStrategy(self.pairing_strategy)
-        if self.beta <= 0:
-            raise ValueError(f"DPO beta must be positive, got {self.beta}")
-        if self.min_reward_gap < 0:
-            raise ValueError(f"DPO min_reward_gap must be non-negative, got {self.min_reward_gap}")
-
-
 @dataclass
 class AlgorithmConfig:
     """Configuration for algorithm parameters.
@@ -237,7 +207,6 @@ class AlgorithmConfig:
     ``estimator_map`` and the loss function goes into ``loss_fn_map``.
     """
 
-    objective: TrainingObjective | str = TrainingObjective.RL
     use_rllm: bool | None = None  # Deprecated
     estimator: rLLMAdvantageEstimator = rLLMAdvantageEstimator.GRPO
     estimator_map: dict[str, rLLMAdvantageEstimator | str | tuple] = field(default_factory=dict)
@@ -250,8 +219,6 @@ class AlgorithmConfig:
     # advantage computation (GRPO/REINFORCE). Steps missing advantages default to 0.0.
     # When False (default), always compute advantages normally.
     use_precomputed_advantage: bool = False
-    # Configuration for preference-pair construction in DPO mode.
-    dpo: DPOConfig = field(default_factory=DPOConfig)
     # Global loss function (backend-specific values; null = backend default)
     loss_fn: str | None = None
     lr_schedule: Literal["linear", "cosine", "constant"] = "constant"
@@ -283,13 +250,6 @@ class AlgorithmConfig:
                 stacklevel=2,
             )
 
-        dpo_cfg = algorithm_config.get("dpo", {})
-        if isinstance(dpo_cfg, DictConfig):
-            dpo_kwargs = OmegaConf.to_container(dpo_cfg, resolve=True)
-        elif dpo_cfg is None:
-            dpo_kwargs = {}
-        else:
-            dpo_kwargs = dict(dpo_cfg)
         rc_section = algorithm_config.get("rollout_correction", {})
         rollout_correction = RolloutCorrectionConfig(
             tis_mode=rc_section.get("tis_mode", None),
@@ -297,13 +257,11 @@ class AlgorithmConfig:
             tis_cap=rc_section.get("tis_cap", 2.0),
         )
         return cls(
-            objective=algorithm_config.get("objective", TrainingObjective.RL.value),
             estimator=rLLMAdvantageEstimator(algorithm_config.adv_estimator),
             estimator_map=estimator_map or {},
             stepwise_advantage_mode=stepwise_advantage_mode,
             norm_adv_by_std_in_grpo=algorithm_config.get("norm_adv_by_std_in_grpo", True),
             use_precomputed_advantage=algorithm_config.get("use_precomputed_advantage", False),
-            dpo=DPOConfig(**dpo_kwargs),
             loss_fn=algorithm_config.get("loss_fn", None),
             lr_schedule=algorithm_config.get("lr_schedule", "constant"),
             warmup_steps_ratio=algorithm_config.get("warmup_steps_ratio", 0.0),
@@ -316,14 +274,6 @@ class AlgorithmConfig:
         )
 
     def __post_init__(self):
-        self.objective = TrainingObjective(self.objective)
-        if not isinstance(self.dpo, DPOConfig):
-            if isinstance(self.dpo, DictConfig):
-                dpo_kwargs = OmegaConf.to_container(self.dpo, resolve=True)
-            else:
-                dpo_kwargs = dict(self.dpo)
-            self.dpo = DPOConfig(**dpo_kwargs)
-
         if self.use_rllm is not None:
             from warnings import warn
 
@@ -360,6 +310,3 @@ class AlgorithmConfig:
                 stacklevel=2,
             )
             self.stepwise_advantage_mode = "broadcast"
-
-        if self.objective == TrainingObjective.DPO and self.use_precomputed_advantage:
-            raise ValueError("DPO objective cannot be combined with use_precomputed_advantage=True")

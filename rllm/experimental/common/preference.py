@@ -3,10 +3,33 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from statistics import fmean
 
-from rllm.experimental.common.config import DPOConfig, DPOPairingStrategy
 from rllm.types import Trajectory, TrajectoryGroup
+
+
+class DPOPairingStrategy(str, Enum):
+    """Supported pairing strategies for DPO preference construction."""
+
+    BEST_WORST = "best_worst"
+
+
+@dataclass
+class DPOConfig:
+    """Configuration for strict, on-policy DPO pair construction."""
+
+    beta: float = 0.1
+    pairing_strategy: DPOPairingStrategy | str = DPOPairingStrategy.BEST_WORST
+    min_reward_gap: float = 0.0
+    drop_ties: bool = True
+
+    def __post_init__(self) -> None:
+        self.pairing_strategy = DPOPairingStrategy(self.pairing_strategy)
+        if self.beta <= 0:
+            raise ValueError(f"DPO beta must be positive, got {self.beta}")
+        if self.min_reward_gap < 0:
+            raise ValueError(f"DPO min_reward_gap must be non-negative, got {self.min_reward_gap}")
 
 
 @dataclass

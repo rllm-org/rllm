@@ -9,17 +9,14 @@ from rllm.experimental.common.config import (
     AlgorithmConfig,
     AsyncTrainingConfig,
     CompactFilteringConfig,
-    DPOConfig,
-    DPOPairingStrategy,
     RejectionSamplingConfig,
     RolloutCorrectionConfig,
-    TrainingObjective,
     TransformConfig,
     rLLMAdvantageEstimator,
 )
 from rllm.experimental.common.metrics import reduce_metrics_by_trajectory_name, reduce_metrics_lists
 from rllm.experimental.common.performance import marked_timer, simple_timer
-from rllm.experimental.common.preference import PreferencePair, build_preference_pairs
+from rllm.experimental.common.preference import DPOConfig, DPOPairingStrategy, PreferencePair, build_preference_pairs
 from rllm.experimental.common.rejection_sampling import (
     RejectionSamplingMetrics,
     RejectionSamplingState,
@@ -38,7 +35,6 @@ __all__ = [
     "AlgorithmConfig",
     "DPOConfig",
     "DPOPairingStrategy",
-    "TrainingObjective",
     # Transform pipeline
     "transform_episodes_to_trajectory_groups",
     "TransformConfig",

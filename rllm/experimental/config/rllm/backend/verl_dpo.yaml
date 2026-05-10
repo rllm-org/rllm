@@ -1,0 +1,35 @@
+# @package _global_
+
+# Verl-specific DPO backend. Preference-pair construction is shared, but the
+# DPO logprob/loss/update path is owned by ``VerlDPOBackend``.
+
+defaults:
+  - /rllm/backend/verl
+  - _self_
+
+actor_rollout_ref:
+  actor:
+    use_rollout_log_probs: false
+    # Verl uses this knob to decide whether to initialize a reference policy.
+    # The DPO backend injects its own loss, so this does not enable PPO KL loss.
+    use_kl_loss: true
+    kl_loss_coef: 0.0
+    shuffle: false
+  rollout:
+    calculate_log_probs: false
+
+trainer:
+  balance_batch: false
+
+rllm:
+  backend: verl_dpo
+  mask_truncated_samples: false
+  dpo:
+    beta: 0.1
+    pairing_strategy: best_worst
+    min_reward_gap: 0.0
+    drop_ties: true
+  algorithm:
+    rollout_correction:
+      bypass_mode: null
+      tis_mode: null

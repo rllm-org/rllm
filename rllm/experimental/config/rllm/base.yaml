@@ -48,7 +48,6 @@ trainer:
 
 # Algorithm Configuration
 algorithm:
-  objective: rl  # [rl, dpo]
   adv_estimator: grpo # [grpo, reinforce, reinforce_plus_plus_baseline, rloo]
   norm_adv_by_std_in_grpo: true
   use_rllm: null  # deprecated, unified trainer only support rllm advantage estimators
@@ -63,11 +62,6 @@ algorithm:
     bypass_mode: null     # true = pi_old = pi_rollout, false = pi_old is computed (null = backend default)
     tis_mode: null        # null = disabled, "token" or "sequence" = TIS importance sampling level
     tis_cap: 2.0          # Upper clamp on TIS importance weight
-  dpo:
-    beta: 0.1
-    pairing_strategy: best_worst
-    min_reward_gap: 0.0
-    drop_ties: true
 
 # Stepwise advantage
 # TODO(listar2000): deprecate the `per_step` mode and refactor this config.
