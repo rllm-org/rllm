@@ -57,7 +57,7 @@ algorithm:
   kl_beta: 0.0            # KL penalty coefficient
   eps_clip: 0.2           # PPO clip epsilon
   eps_clip_high: null     # Asymmetric upper clip bound (null = symmetric)
-  router_replay: false    # Router Replay (R3): replay MoE expert routing from inference during training
+  router_replay: disabled # Router Replay: "disabled" | "R2" (training-side record) | "R3" (rollout-side record)
   rollout_correction:
     bypass_mode: null     # true = pi_old = pi_rollout, false = pi_old is computed (null = backend default)
     tis_mode: null        # null = disabled, "token" or "sequence" = TIS importance sampling level
