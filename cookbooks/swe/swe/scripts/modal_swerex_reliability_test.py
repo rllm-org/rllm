@@ -262,7 +262,10 @@ def main() -> int:
             print(line, flush=True)
 
     summary = summarize(records)
-    print(json.dumps({"event": "summary", **summary}, sort_keys=True), flush=True)
+    summary_record = {"event": "summary", **summary}
+    with out_path.open("a") as out:
+        out.write(json.dumps(summary_record, sort_keys=True) + "\n")
+    print(json.dumps(summary_record, sort_keys=True), flush=True)
     print(f"wrote {out_path}", flush=True)
     return 0 if summary["failed"] == 0 else 1
 
