@@ -104,6 +104,7 @@ def _maybe_pin_task_runner_to_head():
         for key in (
             "HF_TOKEN",
             "HUGGING_FACE_HUB_TOKEN",
+            "OPENAI_API_KEY",
             "WANDB_API_KEY",
             "MODAL_TOKEN_ID",
             "MODAL_TOKEN_SECRET",
