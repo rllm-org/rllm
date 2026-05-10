@@ -81,10 +81,10 @@ bash cookbooks/swe/scripts/setup_verl_vllm018_qwen35.sh
 
 The script installs the pinned Qwen3.5 stack used by these launchers:
 `torch==2.10.0+cu129`, `vllm==0.18.0`, `transformers==5.3.0`,
-`megatron-core==0.18.0`, `megatron-bridge==0.4.0`,
+`megatron-core==0.17.0`, `megatron-bridge==0.4.0`,
 `flash-attn==2.8.3`, TransformerEngine `release_v2.12`, Apex,
-`flash-linear-attention==0.4.1`, veRL, rLLM, the model gateway, and this
-cookbook.
+`flash-linear-attention==0.4.1`, NVIDIA ModelOpt, veRL, rLLM, the model
+gateway, and this cookbook.
 
 Useful overrides:
 
@@ -92,12 +92,22 @@ Useful overrides:
 VENV_ROOT=/path/to/venv-root bash cookbooks/swe/scripts/setup_verl_vllm018_qwen35.sh
 VERL_PATH=/path/to/verl bash cookbooks/swe/scripts/setup_verl_vllm018_qwen35.sh
 MAX_JOBS=64 bash cookbooks/swe/scripts/setup_verl_vllm018_qwen35.sh
+FLASH_ATTN_CUDA_ARCHS=100 bash cookbooks/swe/scripts/setup_verl_vllm018_qwen35.sh
+NVTE_CUDA_ARCHS=100 bash cookbooks/swe/scripts/setup_verl_vllm018_qwen35.sh
 RUN_SMOKE_TEST=0 bash cookbooks/swe/scripts/setup_verl_vllm018_qwen35.sh
 ```
 
 The source builds require a CUDA toolkit with `nvcc` on `PATH`; on the current
 H100/B200 nodes `/usr/local/cuda/bin` is the expected source. The script unsets
 `PYTHONPATH` while building so host packages do not leak into the venv.
+For B200-only builds, keep `FLASH_ATTN_CUDA_ARCHS=100` and
+`NVTE_CUDA_ARCHS=100`; the package defaults also compile older architectures
+and are much slower.
+
+On some B200 images, `ldconfig` resolves `libcuda.so.1` from the CUDA compat
+directory before the real driver library. That makes Torch report CUDA error
+803 even though `nvidia-smi` works. The setup and training scripts now prefer
+`/usr/lib/x86_64-linux-gnu/libcuda.so.1` when it exists.
 
 ## Data
 

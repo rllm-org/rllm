@@ -3,7 +3,7 @@
 #
 # This script is intentionally explicit because Qwen3.5 support depends on a
 # narrow stack: torch 2.10/cu129, vLLM 0.18, transformers 5.3,
-# Megatron-Core 0.18, Megatron Bridge 0.4, flash-linear-attention, flash-attn,
+# Megatron-Core 0.17, Megatron Bridge 0.4, flash-linear-attention, flash-attn,
 # TransformerEngine, and Apex.
 #
 # Default output:
@@ -17,6 +17,8 @@
 #   VENV_DIR=/path/to/.venv bash cookbooks/swe/scripts/setup_verl_vllm018_qwen35.sh
 #   VERL_PATH=/path/to/verl bash cookbooks/swe/scripts/setup_verl_vllm018_qwen35.sh
 #   MAX_JOBS=64 bash cookbooks/swe/scripts/setup_verl_vllm018_qwen35.sh
+#   FLASH_ATTN_CUDA_ARCHS=100 bash cookbooks/swe/scripts/setup_verl_vllm018_qwen35.sh
+#   NVTE_CUDA_ARCHS=100 bash cookbooks/swe/scripts/setup_verl_vllm018_qwen35.sh
 #   RUN_SMOKE_TEST=0 bash cookbooks/swe/scripts/setup_verl_vllm018_qwen35.sh
 
 set -euo pipefail
@@ -36,6 +38,9 @@ VERL_VERSION="${VERL_VERSION:-0.7.1}"
 CACHE_DIR="${CACHE_DIR:-/tmp}"
 MAX_JOBS="${MAX_JOBS:-32}"
 TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0;10.0}"
+FLASH_ATTN_CUDA_ARCHS="${FLASH_ATTN_CUDA_ARCHS:-100}"
+NVCC_THREADS="${NVCC_THREADS:-2}"
+NVTE_CUDA_ARCHS="${NVTE_CUDA_ARCHS:-100}"
 RUN_SMOKE_TEST="${RUN_SMOKE_TEST:-1}"
 
 export UV_CACHE_DIR="${UV_CACHE_DIR:-$CACHE_DIR/uv_cache}"
@@ -72,6 +77,8 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     echo "gpu       : $(nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader | head -1)"
 fi
 echo "arch list : $TORCH_CUDA_ARCH_LIST"
+echo "flash arch: $FLASH_ATTN_CUDA_ARCHS"
+echo "te arch   : $NVTE_CUDA_ARCHS"
 echo "max jobs  : $MAX_JOBS"
 echo "==========================================="
 
@@ -92,9 +99,9 @@ uv pip install --python "$VENV_DIR/bin/python" vllm==0.18.0
 uv pip install --python "$VENV_DIR/bin/python" \
     transformers==5.3.0 pybind11 ninja nvidia-mathdx
 
-echo "[3/9] Installing Megatron-Core 0.18 and Megatron Bridge 0.4"
+echo "[3/9] Installing Megatron-Core 0.17 and Megatron Bridge 0.4"
 uv pip install --python "$VENV_DIR/bin/python" --no-deps \
-    megatron-core==0.18.0 \
+    megatron-core==0.17.0 \
     megatron-bridge==0.4.0
 
 echo "[4/9] Installing Python-level RL/runtime dependencies"
@@ -112,6 +119,11 @@ uv pip install --python "$VENV_DIR/bin/python" \
     pytest-asyncio \
     tensordict \
     hydra-core \
+    nvidia-modelopt \
+    pulp \
+    scipy \
+    hatchling \
+    editables \
     datasets \
     accelerate \
     "ray[default]" \
@@ -134,7 +146,27 @@ export NCCL_ROOT="$NVIDIA_SITE_PACKAGES/nccl"
 export CPATH="$NCCL_ROOT/include:${CPATH:-}"
 export LIBRARY_PATH="$NCCL_ROOT/lib:${LIBRARY_PATH:-}"
 export LD_LIBRARY_PATH="$NCCL_ROOT/lib:${LD_LIBRARY_PATH:-}"
-export TORCH_CUDA_ARCH_LIST MAX_JOBS
+export TORCH_CUDA_ARCH_LIST MAX_JOBS FLASH_ATTN_CUDA_ARCHS NVCC_THREADS NVTE_CUDA_ARCHS
+
+# Some B200 images put CUDA compat libcuda ahead of the real driver in
+# ldconfig. Torch 2.10+cu129 fails with error 803 in that state; prefer the
+# worker's real driver library when it exists.
+REAL_LIBCUDA=/usr/lib/x86_64-linux-gnu/libcuda.so.1
+REAL_NVML_LIB=""
+for f in /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.*; do
+    if [ -f "$f" ] && [ -s "$f" ] && [ ! -L "$f" ]; then
+        REAL_NVML_LIB="$f"
+        break
+    fi
+done
+if [ -f "$REAL_LIBCUDA" ]; then
+    if [ -n "$REAL_NVML_LIB" ]; then
+        export LD_PRELOAD="$REAL_LIBCUDA:$REAL_NVML_LIB${LD_PRELOAD:+:$LD_PRELOAD}"
+    else
+        export LD_PRELOAD="$REAL_LIBCUDA${LD_PRELOAD:+:$LD_PRELOAD}"
+    fi
+    export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
+fi
 
 echo "[6/9] Building NVIDIA Apex"
 "$VENV_DIR/bin/python" -m pip install -v --no-build-isolation \
@@ -225,8 +257,9 @@ Recommended runtime exports for training:
   export TRITON_CACHE_DIR=\${TRITON_CACHE_DIR:-/tmp/triton_cache}
   export XDG_CACHE_HOME=\${XDG_CACHE_HOME:-/tmp/xdg_cache}
   export TORCH_EXTENSIONS_DIR=\${TORCH_EXTENSIONS_DIR:-/tmp/torch_extensions}
+  export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcuda.so.1\${LD_PRELOAD:+:\$LD_PRELOAD}
   export CPATH="$NCCL_ROOT/include:\${CPATH:-}"
-  export LD_LIBRARY_PATH="$NCCL_ROOT/lib:\${LD_LIBRARY_PATH:-}"
+  export LD_LIBRARY_PATH="$NCCL_ROOT/lib:/usr/lib/x86_64-linux-gnu:\${LD_LIBRARY_PATH:-}"
 
 Then run:
   bash "$COOKBOOK_DIR/swe/training_scripts/run_swe_training_9b_megatron.sh"

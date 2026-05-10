@@ -59,8 +59,29 @@ if [ -d "$VIRTUAL_ENV/lib/python3.12/site-packages/nvidia" ]; then
     export LD_LIBRARY_PATH="${NVIDIA_SITE_LIBS}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
 
-# ---- CUDA Forward Compat (if not already set) ----
-if [ -z "${LD_LIBRARY_PATH:-}" ] || [[ ! "$LD_LIBRARY_PATH" == *"cuda-compat"* ]]; then
+# ---- CUDA driver library selection ----
+# Some B200 images put CUDA compat libcuda ahead of the real driver in
+# ldconfig. Torch 2.10+cu129 fails with CUDA error 803 in that state, so prefer
+# the worker's real driver library when it is available.
+REAL_LIBCUDA=/usr/lib/x86_64-linux-gnu/libcuda.so.1
+REAL_NVML_LIB=""
+for f in /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.*; do
+    if [ -f "$f" ] && [ -s "$f" ] && [ ! -L "$f" ]; then
+        REAL_NVML_LIB="$f"
+        break
+    fi
+done
+if [ -f "$REAL_LIBCUDA" ]; then
+    if [ -n "$REAL_NVML_LIB" ]; then
+        export LD_PRELOAD="$REAL_LIBCUDA:$REAL_NVML_LIB${LD_PRELOAD:+:$LD_PRELOAD}"
+    else
+        export LD_PRELOAD="$REAL_LIBCUDA${LD_PRELOAD:+:$LD_PRELOAD}"
+    fi
+    export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+fi
+
+# ---- CUDA Forward Compat fallback ----
+if [ ! -f "$REAL_LIBCUDA" ] && { [ -z "${LD_LIBRARY_PATH:-}" ] || [[ ! "$LD_LIBRARY_PATH" == *"cuda-compat"* ]]; }; then
     COMPAT=/tmp/cuda-compat-13/usr/local/cuda-13.0/compat
     if [ -f "$COMPAT/libcuda.so" ]; then
         export CUDA_HOME=$VIRTUAL_ENV/lib/python3.12/site-packages/nvidia/cu13
@@ -171,6 +192,9 @@ SWE_VAL_SANDBOX_TIMEOUT=${SWE_VAL_SANDBOX_TIMEOUT:-1020}
 SWE_VAL_STARTUP_JITTER_S=${SWE_VAL_STARTUP_JITTER_S:-30}
 MODEL_MAX_TOKENS=${MODEL_MAX_TOKENS:-4096}
 DEFAULT_TRAJ_DIR="$COOKBOOK_DIR/trajectories/\${trainer.experiment_name}"
+CHECKPOINT_ROOT=${CHECKPOINT_ROOT:-/tmp/turing-swe/checkpoints}
+MAIN_CHECKPOINT_DIR=${MAIN_CHECKPOINT_DIR:-$CHECKPOINT_ROOT/swe-verl-9b-megatron/qwen35-9b-swe-smith}
+LORA_CHECKPOINT_DIR=${LORA_CHECKPOINT_DIR:-$CHECKPOINT_ROOT/swe-verl-9b-megatron-lora/qwen35-9b-swe-smith-lora-r16}
 TRAJECTORY_OUTPUT_DIR=${TRAJ_DIR:-$DEFAULT_TRAJ_DIR}
 ROLLOUT_CORRECTION_IS=${ROLLOUT_CORRECTION_IS:-token}
 ROLLOUT_CORRECTION_IS_THRESHOLD=${ROLLOUT_CORRECTION_IS_THRESHOLD:-2.0}
@@ -187,7 +211,7 @@ LORA_ARGS=(
     actor_rollout_ref.ref.megatron.vanilla_mbridge=false
     trainer.project_name=swe-verl-9b-megatron-lora
     trainer.experiment_name=qwen35-9b-swe-smith-megatron-lora-r16
-    trainer.default_local_dir=/tmp/turing-swe/checkpoints/swe-verl-9b-megatron-lora/qwen35-9b-swe-smith-lora-r16
+    trainer.default_local_dir="$LORA_CHECKPOINT_DIR"
     ++trainer.hf_repo_id=JWei05/qwen35-9b-swe-smith-megatron-lora-r16
 )
 
@@ -200,6 +224,7 @@ echo "Dataset:  swe_smith_filtered_mix"
 echo "Topology: ${NNODES} node(s) × ${NGPUS_PER_NODE} GPU  |  Megatron TP=${ACTOR_TP} CP=${ACTOR_CP} PP=${ACTOR_PP}  |  vLLM TP=${ROLLOUT_TP}"
 echo "SWE:      train steps=${SWE_STEP_LIMIT} timeout=${SWE_AGENT_TIMEOUT}s cmd=${SWE_COMMAND_TIMEOUT}s sandbox=${SWE_SANDBOX_TIMEOUT}s jitter=${SWE_STARTUP_JITTER_S}s max_tokens=${MODEL_MAX_TOKENS}"
 echo "SWE val:  steps=${SWE_VAL_STEP_LIMIT} timeout=${SWE_VAL_AGENT_TIMEOUT}s cmd=${SWE_VAL_COMMAND_TIMEOUT}s sandbox=${SWE_VAL_SANDBOX_TIMEOUT}s jitter=${SWE_VAL_STARTUP_JITTER_S}s"
+echo "Ckpt:     $MAIN_CHECKPOINT_DIR"
 echo "Traj:     save=${SAVE_TRAJ:-false} dir=${TRAJECTORY_OUTPUT_DIR}"
 echo "Logger:   $LOGGER"
 echo "Ray:      $RAY_STATUS_LINE"
@@ -323,7 +348,7 @@ python -u -m swe.scripts.train_swe_verl \
     trainer.test_freq=1000 \
     trainer.val_before_train=false \
     ++rllm.trainer.val_before_train=false \
-    trainer.default_local_dir=/tmp/turing-swe/checkpoints/swe-verl-9b-megatron/qwen35-9b-swe-smith \
+    trainer.default_local_dir="$MAIN_CHECKPOINT_DIR" \
     +trainer.hf_repo_id=JWei05/qwen35-9b-swe-smith-megatron \
     trainer.nnodes=${NNODES} \
     trainer.n_gpus_per_node=${NGPUS_PER_NODE} \
