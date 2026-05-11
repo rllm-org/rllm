@@ -76,6 +76,39 @@ install_runtime_wheels() {
     fi
 }
 
+repair_verl_venv_python() {
+    local pyvenv_cfg="$VIRTUAL_ENV/pyvenv.cfg"
+    local pyhome=""
+    local candidate=""
+
+    if [ -f "$pyvenv_cfg" ]; then
+        pyhome="$(awk -F' = ' '$1 == "home" {print $2}' "$pyvenv_cfg" | tail -1)"
+    fi
+
+    if [ -n "$pyhome" ] && [ -x "$pyhome/python3.12" ]; then
+        candidate="$pyhome/python3.12"
+    elif [ -n "$pyhome" ] && [ -x "$pyhome/python3" ]; then
+        candidate="$pyhome/python3"
+    elif [ -x /usr/bin/python3.12 ]; then
+        candidate=/usr/bin/python3.12
+    elif [ -x /usr/local/bin/python3.12 ]; then
+        candidate=/usr/local/bin/python3.12
+    fi
+
+    if [ ! -x "$VIRTUAL_ENV/bin/python" ] && [ -n "$candidate" ]; then
+        ln -sfn "$candidate" "$VIRTUAL_ENV/bin/python"
+        ln -sfn python "$VIRTUAL_ENV/bin/python3"
+        ln -sfn python "$VIRTUAL_ENV/bin/python3.12"
+    fi
+
+    if [ ! -x "$VIRTUAL_ENV/bin/python" ]; then
+        echo "Unable to restore executable Python for $VIRTUAL_ENV." >&2
+        echo "pyvenv_cfg=$pyvenv_cfg pyhome=$pyhome" >&2
+        ls -l "$VIRTUAL_ENV/bin/python"* >&2 || true
+        exit 127
+    fi
+}
+
 restore_verl_venv() {
     local artifacts
     artifacts="$(artifact_dir)"
@@ -86,6 +119,7 @@ restore_verl_venv() {
     fi
     export VIRTUAL_ENV=/tmp/verl_venv
     export PATH="$VIRTUAL_ENV/bin:$PATH"
+    repair_verl_venv_python
     install_runtime_wheels
 }
 
