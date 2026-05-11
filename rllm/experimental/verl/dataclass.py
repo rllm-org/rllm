@@ -20,6 +20,7 @@ class ProcessedStepData:
     multi_modal_inputs: dict = field(default_factory=dict)  # Optional multimodal inputs (e.g., image_grid_thw for Qwen-VL)
     advantage: float | list[float] | None = None
     logprobs: list[float] | None = None  # Per-token rollout log probs for importance sampling
+    routing_matrices: torch.Tensor | None = None  # (response_len, num_layers, topk) int tensor for R3 router replay
 
 
 @dataclass
@@ -65,6 +66,10 @@ class AccumulatedData:
     # Rollout log probs (parallel to tensor lists, only populated when available)
     rollout_logprobs: list[torch.Tensor] = field(default_factory=list)
 
+    # Routing matrices for R3 router replay (parallel to tensor lists, only populated when available).
+    # Each entry is shape (response_len, num_layers, topk).
+    routing_matrices: list[torch.Tensor] = field(default_factory=list)
+
     def add_step(
         self,
         step_data: ProcessedStepData,
@@ -96,6 +101,9 @@ class AccumulatedData:
 
         if step_data.logprobs is not None and len(step_data.logprobs) > 0:
             self.rollout_logprobs.append(torch.tensor(step_data.logprobs, dtype=torch.float32))
+
+        if step_data.routing_matrices is not None:
+            self.routing_matrices.append(step_data.routing_matrices)
 
     def __len__(self) -> int:
         """Return the total number of batch rows accumulated."""

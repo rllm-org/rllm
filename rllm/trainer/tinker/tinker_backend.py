@@ -174,6 +174,10 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         if self.full_config.training.get("num_minibatches", 1) != 1:
             logger.warning(f"Only num_minibatches=1 is fully tested for TinkerBackend, current num_minibatches={self.full_config.training.num_minibatches}")
 
+        router_replay_mode = self.full_config.rllm.algorithm.get("router_replay", "disabled")
+        if router_replay_mode != "disabled":
+            raise ValueError(f"router_replay={router_replay_mode!r} is not supported by the Tinker backend.")
+
     def get_dataloader(self, dataset: Dataset | None, trainer_state: TrainerState) -> Iterable:
         """Get dataloader for the given dataset.
 
