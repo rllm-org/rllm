@@ -253,19 +253,34 @@ _TIMING_PHASES_DISPLAY: tuple[tuple[str, str], ...] = (
 
 
 def _format_timing_breakdown(metrics: dict[str, float]) -> str:
-    """Compact ``" in 882s (setup=72s agent=312s verifier=489s)"`` line.
+    """Compact per-rollout timing summary.
 
-    Returns the empty string when no phase timings are present (so the
-    "Rollout completed" log still works for engines that bypassed
-    ``_run_single`` — e.g. the no-hooks training default before this
-    instrumentation landed).
+    Format::
+
+        " in 1187s (setup=16s agent=1162s [llm=1100s/15t] verifier=9s teardown=0s)"
+
+    The ``agent`` phase is annotated with ``[llm=Ts/Nt]`` when traces
+    are available so an operator can tell at a glance whether agent
+    time is LLM-bound (Tinker latency) or tool-exec-bound (in-container
+    bash). Returns the empty string when no phase timings are present
+    (so the "Rollout completed" log still works for engines that
+    bypassed ``_run_single`` — e.g. workflow-based training).
     """
     total = metrics.get("time/rollout_s")
     if total is None:
         return ""
     parts: list[str] = []
     for label, key in _TIMING_PHASES_DISPLAY:
-        if key in metrics:
+        if key not in metrics:
+            continue
+        if label == "agent":
+            llm_s = metrics.get("time/agent_llm_s")
+            n_turns = metrics.get("n_turns")
+            if llm_s is not None and n_turns is not None and n_turns > 0:
+                parts.append(f"agent={metrics[key]:.0f}s [llm={llm_s:.0f}s/{int(n_turns)}t]")
+            else:
+                parts.append(f"agent={metrics[key]:.0f}s")
+        else:
             parts.append(f"{label}={metrics[key]:.0f}s")
     inner = f" ({' '.join(parts)})" if parts else ""
     return f" in {total:.0f}s{inner}"
