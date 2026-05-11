@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# SWE veRL Training — Qwen3.5-9B (dense), Megatron-Core (TP=2 CP=1 PP=1), hard test
+# SWE veRL Training — Qwen3.5-9B (dense), Megatron-Core (TP=2 CP=2 PP=1), hard test
 # 1:1 port of run_swe_training_9b.sh (FSDP2) except for parallelism.
 #
 # Env knobs:
 #   NNODES=1|2           (default 2)
 #   NGPUS_PER_NODE=8     (default 8)
-#   ACTOR_TP=2 ACTOR_CP=1 ACTOR_PP=1 ROLLOUT_TP=1  (Megatron parallelism)
+#   ACTOR_TP=2 ACTOR_CP=2 ACTOR_PP=1 ROLLOUT_TP=1  (Megatron parallelism)
 #   ACTOR_LR_WARMUP_STEPS=20  (set to 0 for one-step smoke tests)
 #   ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU=1  (B200 full-token safe default)
 #   RLLM_RAY_MASTER_PORT_RANGE=25000:25100  (avoid ephemeral-port collisions)
+#   RLLM_VLLM_PORT_BASE=46000 RLLM_VLLM_PORT_STRIDE=100  (per-rollout vLLM ports)
 #   LOGGER='[console, wandb]' or '[console]'  (default "[console, wandb]")
 set -euo pipefail
 
@@ -104,6 +105,8 @@ export RAY_CLIENT_RECONNECT_GRACE_PERIOD=${RAY_CLIENT_RECONNECT_GRACE_PERIOD:-30
 export RAY_CLIENT_MAX_CONNECTION_TIMEOUT_S=${RAY_CLIENT_MAX_CONNECTION_TIMEOUT_S:-60}
 export RAY_PREFLIGHT_TIMEOUT_S=${RAY_PREFLIGHT_TIMEOUT_S:-90}
 export RLLM_RAY_MASTER_PORT_RANGE=${RLLM_RAY_MASTER_PORT_RANGE:-25000:25100}
+export RLLM_VLLM_PORT_BASE=${RLLM_VLLM_PORT_BASE:-46000}
+export RLLM_VLLM_PORT_STRIDE=${RLLM_VLLM_PORT_STRIDE:-100}
 export WANDB_MODE=${WANDB_MODE:-online}
 export HF_HOME=${HF_HOME:-/tmp/hf_cache}
 export RLLM_GATEWAY_HEALTH_TIMEOUT=${RLLM_GATEWAY_HEALTH_TIMEOUT:-180}
@@ -176,13 +179,13 @@ else
     RAY_STATUS_LINE=$(ray status 2>&1 | head -1) || RAY_STATUS_LINE="<unavailable>"
 fi
 
-# Parallelism for the two-node 16xB200 setup:
-# Qwen3.5 Gated DeltaNet does not support context parallelism yet, so
-# world size 16 / (TP=2 × CP=1 × PP=1) = DP=8.
+# Parallelism for the two-node 16xB200 setup. Qwen3.5 context parallelism
+# requires Megatron Gated DeltaNet THD support and remove-padding enabled.
 ACTOR_TP=${ACTOR_TP:-2}
-ACTOR_CP=${ACTOR_CP:-1}
+ACTOR_CP=${ACTOR_CP:-2}
 ACTOR_PP=${ACTOR_PP:-1}
 ROLLOUT_TP=${ROLLOUT_TP:-1}
+MODEL_USE_REMOVE_PADDING=${MODEL_USE_REMOVE_PADDING:-true}
 NNODES=${NNODES:-2}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 ACTOR_LR_WARMUP_STEPS=${ACTOR_LR_WARMUP_STEPS:-20}
@@ -248,7 +251,7 @@ python -u -m swe.scripts.train_swe_verl \
     train_max_samples=1500 \
     actor_rollout_ref.model.path="$MODEL_NAME" \
     actor_rollout_ref.model.enable_gradient_checkpointing=true \
-    actor_rollout_ref.model.use_remove_padding=false \
+    actor_rollout_ref.model.use_remove_padding=${MODEL_USE_REMOVE_PADDING} \
     +model.name="$MODEL_NAME" \
     \
     data.train_batch_size=16 \

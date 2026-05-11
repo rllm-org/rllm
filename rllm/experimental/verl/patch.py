@@ -7,12 +7,16 @@ them multiple times is safe.
 from __future__ import annotations
 
 import logging
+import os
+from contextvars import ContextVar
+from functools import wraps
 
 logger = logging.getLogger(__name__)
 
 _VERL_DYNAMIC_BATCH_PATCHED = False
 _VERL_QWEN3_VL_DUMMY_INPLACE_PATCHED = False
 _VERL_TENSORDICT_JAGGED_PATCHED = False
+_VERL_VLLM_SERVER_PORT_RANGES_PATCHED = False
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +265,130 @@ def patch_verl_tensordict_jagged_layout() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Verl/vLLM async rollout: assign per-replica local port ranges
+# ---------------------------------------------------------------------------
+
+
+def _clear_vllm_env_cache() -> None:
+    """Ensure vLLM sees env vars set immediately before engine startup."""
+    try:
+        import vllm.envs as vllm_envs
+
+        disable_envs_cache = getattr(vllm_envs, "disable_envs_cache", None)
+        if callable(disable_envs_cache):
+            disable_envs_cache()
+        elif hasattr(vllm_envs.__getattr__, "cache_clear"):
+            vllm_envs.__getattr__.cache_clear()
+    except Exception:
+        logger.debug("Could not clear vLLM env cache", exc_info=True)
+
+
+def patch_verl_vllm_server_port_ranges() -> None:
+    """Give each colocated vLLM rollout server a deterministic port range.
+
+    vLLM's V1 multiprocess executor chooses a local TCPStore port with
+    ``get_open_port()``, then the spawned worker binds it later. When many
+    async rollout replicas start together, the free-port check can race and a
+    worker may fail with ``EADDRINUSE`` before training begins.
+
+    If ``RLLM_VLLM_PORT_BASE`` is set, patch veRL's async server so each
+    replica sets ``VLLM_PORT`` to a unique range start before constructing the
+    vLLM engine. vLLM then scans upward from that per-replica start port,
+    avoiding cross-replica collisions while preserving vLLM's normal fallback
+    behavior inside each range.
+    """
+    global _VERL_VLLM_SERVER_PORT_RANGES_PATCHED
+    if _VERL_VLLM_SERVER_PORT_RANGES_PATCHED:
+        return
+
+    if not os.environ.get("RLLM_VLLM_PORT_BASE"):
+        _VERL_VLLM_SERVER_PORT_RANGES_PATCHED = True
+        return
+
+    try:
+        from verl.workers.rollout.vllm_rollout import vllm_async_server
+    except (ImportError, AttributeError):
+        logger.debug("veRL vLLM async server is unavailable; skipping RLLM_VLLM_PORT_BASE patch", exc_info=True)
+        _VERL_VLLM_SERVER_PORT_RANGES_PATCHED = True
+        return
+
+    server_cls = getattr(vllm_async_server, "vLLMHttpServer", None)
+    async_llm = getattr(vllm_async_server, "AsyncLLM", None)
+    if server_cls is None or async_llm is None or not hasattr(async_llm, "from_vllm_config"):
+        logger.debug("veRL vLLM async server API is unavailable; skipping RLLM_VLLM_PORT_BASE patch")
+        _VERL_VLLM_SERVER_PORT_RANGES_PATCHED = True
+        return
+
+    original_run_server = server_cls.run_server
+    original_from_vllm_config = async_llm.from_vllm_config
+    current_vllm_port: ContextVar[str | None] = ContextVar("rllm_vllm_port", default=None)
+
+    @wraps(original_from_vllm_config)
+    def from_vllm_config_with_port_range(cls, *args, **kwargs):
+        port = current_vllm_port.get()
+        if port is None:
+            return original_from_vllm_config(*args, **kwargs)
+
+        previous = os.environ.get("VLLM_PORT")
+        os.environ["VLLM_PORT"] = port
+        _clear_vllm_env_cache()
+        try:
+            return original_from_vllm_config(*args, **kwargs)
+        finally:
+            if previous is None:
+                os.environ.pop("VLLM_PORT", None)
+            else:
+                os.environ["VLLM_PORT"] = previous
+            _clear_vllm_env_cache()
+
+    async_llm.from_vllm_config = classmethod(from_vllm_config_with_port_range)
+
+    async def patched_run_server(self, args):
+        required_attrs = ("replica_rank", "node_rank", "nnodes")
+        missing_attrs = [name for name in required_attrs if not hasattr(self, name)]
+        if missing_attrs:
+            raise RuntimeError(
+                "Cannot assign unique vLLM port range: vLLMHttpServer is missing "
+                f"{missing_attrs}. Disable RLLM_VLLM_PORT_BASE or update the patch for this veRL version."
+            )
+
+        try:
+            base = int(os.environ["RLLM_VLLM_PORT_BASE"])
+            stride = int(os.environ.get("RLLM_VLLM_PORT_STRIDE", "100"))
+            replica_rank = int(self.replica_rank)
+            node_rank = int(self.node_rank)
+            nnodes = int(self.nnodes)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Invalid vLLM port-range settings. Expected integer RLLM_VLLM_PORT_BASE, "
+                "RLLM_VLLM_PORT_STRIDE, replica_rank, node_rank, and nnodes."
+            ) from exc
+        if stride <= 0 or nnodes <= 0:
+            raise RuntimeError(f"Invalid vLLM port range dimensions: {stride=} {nnodes=}")
+
+        port = str(base + ((replica_rank * nnodes + node_rank) * stride))
+        logger.info(
+            "Using VLLM_PORT=%s for vLLM async server replica_rank=%s node_rank=%s "
+            "(base=%s stride=%s nnodes=%s)",
+            port,
+            replica_rank,
+            node_rank,
+            base,
+            stride,
+            nnodes,
+        )
+        token = current_vllm_port.set(port)
+        try:
+            return await original_run_server(self, args)
+        finally:
+            current_vllm_port.reset(token)
+
+    server_cls.run_server = patched_run_server
+    _VERL_VLLM_SERVER_PORT_RANGES_PATCHED = True
+    logger.info("Patched veRL vLLM async server to support per-replica RLLM_VLLM_PORT_BASE ranges")
+
+
+# ---------------------------------------------------------------------------
 # Worker-side entry point (used as Ray runtime_env worker_process_setup_hook)
 # ---------------------------------------------------------------------------
 
@@ -268,6 +396,7 @@ _ALL_VERL_PATCHES = {
     "patch_verl_dynamic_batch_sync": patch_verl_dynamic_batch_sync,
     "patch_verl_qwen3_vl_dummy_inplace": patch_verl_qwen3_vl_dummy_inplace,
     "patch_verl_tensordict_jagged_layout": patch_verl_tensordict_jagged_layout,
+    "patch_verl_vllm_server_port_ranges": patch_verl_vllm_server_port_ranges,
 }
 
 
