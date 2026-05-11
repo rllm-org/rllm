@@ -123,6 +123,62 @@ restore_verl_venv() {
     install_runtime_wheels
 }
 
+restore_megatron_cp2_overlay() {
+    local artifacts overlay site_packages
+    local candidate
+
+    artifacts="$(artifact_dir)"
+    overlay="${RLLM_SWE_MEGATRON_OVERLAY:-}"
+    if [ -z "$overlay" ]; then
+        for candidate in \
+            "$artifacts/megatron_core_0.18.0_829a7b78d.tar.gz" \
+            /mnt/hdfs/rllm_swe_artifacts/megatron_core_0.18.0_829a7b78d.tar.gz; do
+            if [ -s "$candidate" ]; then
+                overlay="$candidate"
+                break
+            fi
+        done
+    fi
+
+    site_packages="$VIRTUAL_ENV/lib/python3.12/site-packages"
+    if [ -n "$overlay" ] && [ -s "$overlay" ]; then
+        echo "Restoring Megatron CP2 overlay from $overlay"
+        rm -rf "$site_packages/megatron" "$site_packages"/megatron_core-*.dist-info
+        tar -C "$site_packages" -xzf "$overlay"
+        find "$site_packages/megatron" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+    fi
+
+    "$VIRTUAL_ENV/bin/python" - <<'PY'
+from pathlib import Path
+import importlib.metadata as md
+import os
+import sys
+
+required = os.environ.get("RLLM_SWE_REQUIRE_MEGATRON_CP2", "").lower() in {"1", "true", "yes"}
+try:
+    version = md.version("megatron-core")
+except md.PackageNotFoundError:
+    version = ""
+
+site = Path(os.environ["VIRTUAL_ENV"]) / "lib/python3.12/site-packages"
+tf_config = site / "megatron/core/transformer/transformer_config.py"
+text = tf_config.read_text(errors="ignore") if tf_config.exists() else ""
+old_assert = "Gated delta net does not support context parallel" in text
+has_provider_attr = "overlap_dispatch_backward_with_experts_wgrad" in text
+ok = version.startswith("0.18.0") and not old_assert and has_provider_attr
+print(
+    "megatron_cp2_check "
+    f"version={version or '<missing>'} "
+    f"old_assert={old_assert} "
+    f"has_provider_attr={has_provider_attr} "
+    f"ok={ok}",
+    flush=True,
+)
+if required and not ok:
+    sys.exit("Megatron CP2 overlay is required but the active package is not CP2-capable")
+PY
+}
+
 restore_qwen35_cache() {
     local artifacts
     if [ -n "${MODEL_PATH:-}" ] && [ -d "$MODEL_PATH" ]; then
@@ -165,6 +221,7 @@ restore_rllm_home() {
 restore_swe_artifacts() {
     setup_b200_driver_libs
     restore_verl_venv
+    restore_megatron_cp2_overlay
     restore_qwen35_cache
     restore_rllm_home
 }

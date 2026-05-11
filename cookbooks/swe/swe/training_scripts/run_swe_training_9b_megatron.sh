@@ -10,6 +10,7 @@
 #   ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU=1  (B200 full-token safe default)
 #   RLLM_RAY_MASTER_PORT_RANGE=25000:25100  (avoid ephemeral-port collisions)
 #   RLLM_VLLM_PORT_BASE=46000 RLLM_VLLM_PORT_STRIDE=100  (per-rollout vLLM ports)
+#   ROLLOUT_DISTRIBUTED_EXECUTOR_BACKEND=uni  (avoid multi-node TCPStore collisions)
 #   LOGGER='[console, wandb]' or '[console]'  (default "[console, wandb]")
 set -euo pipefail
 
@@ -107,6 +108,7 @@ export RAY_PREFLIGHT_TIMEOUT_S=${RAY_PREFLIGHT_TIMEOUT_S:-90}
 export RLLM_RAY_MASTER_PORT_RANGE=${RLLM_RAY_MASTER_PORT_RANGE:-25000:25100}
 export RLLM_VLLM_PORT_BASE=${RLLM_VLLM_PORT_BASE:-46000}
 export RLLM_VLLM_PORT_STRIDE=${RLLM_VLLM_PORT_STRIDE:-100}
+export RLLM_RAY_NOSET_CUDA_VISIBLE_DEVICES=${RLLM_RAY_NOSET_CUDA_VISIBLE_DEVICES:-1}
 export WANDB_MODE=${WANDB_MODE:-online}
 export HF_HOME=${HF_HOME:-/tmp/hf_cache}
 export RLLM_GATEWAY_HEALTH_TIMEOUT=${RLLM_GATEWAY_HEALTH_TIMEOUT:-180}
@@ -185,6 +187,8 @@ ACTOR_TP=${ACTOR_TP:-2}
 ACTOR_CP=${ACTOR_CP:-2}
 ACTOR_PP=${ACTOR_PP:-1}
 ROLLOUT_TP=${ROLLOUT_TP:-1}
+ROLLOUT_SKIP_MM_PROFILING=${ROLLOUT_SKIP_MM_PROFILING:-true}
+ROLLOUT_DISTRIBUTED_EXECUTOR_BACKEND=${ROLLOUT_DISTRIBUTED_EXECUTOR_BACKEND:-uni}
 MODEL_USE_REMOVE_PADDING=${MODEL_USE_REMOVE_PADDING:-true}
 NNODES=${NNODES:-2}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
@@ -235,6 +239,7 @@ echo "Repo:     $MODEL_REPO"
 echo "Dataset:  swe_smith_filtered_mix"
 echo "Topology: ${NNODES} node(s) × ${NGPUS_PER_NODE} GPU  |  Megatron TP=${ACTOR_TP} CP=${ACTOR_CP} PP=${ACTOR_PP}  |  vLLM TP=${ROLLOUT_TP}"
 echo "Actor:    ppo_micro_batch_size_per_gpu=${ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU} lr_warmup_steps=${ACTOR_LR_WARMUP_STEPS}"
+echo "Rollout:  distributed_executor_backend=${ROLLOUT_DISTRIBUTED_EXECUTOR_BACKEND} skip_mm_profiling=${ROLLOUT_SKIP_MM_PROFILING}"
 echo "SWE:      train steps=${SWE_STEP_LIMIT} timeout=${SWE_AGENT_TIMEOUT}s cmd=${SWE_COMMAND_TIMEOUT}s sandbox=${SWE_SANDBOX_TIMEOUT}s jitter=${SWE_STARTUP_JITTER_S}s max_tokens=${MODEL_MAX_TOKENS}"
 echo "SWE val:  steps=${SWE_VAL_STEP_LIMIT} timeout=${SWE_VAL_AGENT_TIMEOUT}s cmd=${SWE_VAL_COMMAND_TIMEOUT}s sandbox=${SWE_VAL_SANDBOX_TIMEOUT}s jitter=${SWE_VAL_STARTUP_JITTER_S}s"
 echo "Ckpt:     $MAIN_CHECKPOINT_DIR"
@@ -312,6 +317,8 @@ python -u -m swe.scripts.train_swe_verl \
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=6144 \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.enable_auto_tool_choice=true \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.tool_call_parser=qwen3_coder \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.skip_mm_profiling=${ROLLOUT_SKIP_MM_PROFILING} \
+    ++actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=${ROLLOUT_DISTRIBUTED_EXECUTOR_BACKEND} \
     \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
     ++actor_rollout_ref.ref.strategy=megatron \

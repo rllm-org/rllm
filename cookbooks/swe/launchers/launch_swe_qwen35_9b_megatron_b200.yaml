@@ -4,7 +4,7 @@ arnold:
   group_name: mlsys_inference
   cluster_name: cloudnative-useast1b
   quota_pool: third_party_oci
-  image_url: aliyun-va-hub.byted.org/arnold/jason.wei:qwen35b200baseplainenvcodepy2
+  image_url: aliyun-va-hub.byted.org/arnold/jason.wei:qwen35b200baseplainenvcodepy3
   job_name: swe_qwen35_9b_megatron_b200x16
   namespace: /topic/2ebfba22254a08e7
   uce_config: {}
