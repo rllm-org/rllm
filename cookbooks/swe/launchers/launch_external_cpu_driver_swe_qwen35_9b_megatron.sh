@@ -98,8 +98,16 @@ set -x
 
 export RAY_ADDRESS="${ARNOLD_RAY_ADDRESS:-${RAY_ADDRESS:-auto}}"
 export RLLM_RUN_TASK_RUNNER_LOCAL=1
+export RLLM_RAY_WORKING_DIR="${RLLM_RAY_WORKING_DIR:-$RLLM_ROOT}"
 export NNODES="${NNODES:-2}"
 export NGPUS_PER_NODE="${NGPUS_PER_NODE:-8}"
+export ACTOR_TP="${ACTOR_TP:-2}"
+export ACTOR_CP="${ACTOR_CP:-2}"
+export ACTOR_PP="${ACTOR_PP:-1}"
+export ROLLOUT_TP="${ROLLOUT_TP:-1}"
+export MODEL_USE_REMOVE_PADDING="${MODEL_USE_REMOVE_PADDING:-true}"
+export RLLM_VLLM_PORT_BASE="${RLLM_VLLM_PORT_BASE:-46000}"
+export RLLM_VLLM_PORT_STRIDE="${RLLM_VLLM_PORT_STRIDE:-100}"
 export LOGGER="${LOGGER:-[console]}"
 export RLLM_SWE_OUTPUT_DIR="${RLLM_SWE_OUTPUT_DIR:-/tmp/rllm_swe_outputs_external}"
 if [ "${RLLM_SWE_DRIVER_MODE:-smoke}" = "smoke" ]; then
@@ -163,7 +171,10 @@ if [ "${RLLM_SWE_DRIVER_MODE:-smoke}" = "smoke" ]; then
         ++trainer.total_training_steps="${RLLM_SWE_SMOKE_STEPS:-1}" \
         trainer.total_epochs=1 \
         trainer.save_freq=1000 \
-        trainer.test_freq=1000
+        trainer.test_freq=1000 \
+        trainer.val_before_train=false \
+        ++rllm.trainer.val_before_train=false \
+        "$@"
 fi
 
 cd "$COOKBOOK_DIR"

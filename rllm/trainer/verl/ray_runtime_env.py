@@ -21,6 +21,23 @@ PPO_RAY_RUNTIME_ENV = {
     },
 }
 
+DEFAULT_RLLM_WORKING_DIR_EXCLUDES = [
+    ".git/**",
+    ".pytest_cache/**",
+    "__pycache__/**",
+    "*.pyc",
+    ".venv/**",
+    ".venv-*/**",
+    "venv/**",
+    "wandb/**",
+    "outputs/**",
+    "checkpoints/**",
+    "cookbooks/swe/.venv*/**",
+    "cookbooks/swe/wandb/**",
+    "cookbooks/swe/outputs/**",
+    "cookbooks/swe/checkpoints/**",
+]
+
 FORWARD_PREFIXES = [
     "VLLM_",
     "SGL_",
@@ -95,6 +112,12 @@ def get_ppo_ray_runtime_env():
     except (json.JSONDecodeError, TypeError):
         job_runtime_env = {}
 
+    working_dir = os.environ.get("RLLM_RAY_WORKING_DIR")
+    use_rllm_working_dir = bool(working_dir and job_runtime_env.get("working_dir") is None)
+    if use_rllm_working_dir:
+        rel_pythonpath = ".:cookbooks/swe"
+        env["PYTHONPATH"] = f"{rel_pythonpath}:{env['PYTHONPATH']}" if env.get("PYTHONPATH") else rel_pythonpath
+
     # Pop keys that the job config sets — let the job config's values win during ray.init merge
     for key in job_runtime_env.get("env_vars", {}) or {}:
         env.pop(key, None)
@@ -102,7 +125,14 @@ def get_ppo_ray_runtime_env():
     runtime_env = {"env_vars": env}
     # Only set working_dir=None when the job config doesn't specify one (avoid merge conflict)
     if job_runtime_env.get("working_dir") is None:
-        runtime_env["working_dir"] = None
+        runtime_env["working_dir"] = working_dir if working_dir else None
+    if use_rllm_working_dir and job_runtime_env.get("excludes") is None:
+        excludes = os.environ.get("RLLM_RAY_WORKING_DIR_EXCLUDES")
+        runtime_env["excludes"] = (
+            [item.strip() for item in excludes.split(",") if item.strip()]
+            if excludes
+            else DEFAULT_RLLM_WORKING_DIR_EXCLUDES
+        )
     # Apply rLLM's verl patches (PR #5881 backport, dynamic-batch sync, etc.) on every
     # Ray worker process so the patches take effect inside FSDP workers — driver-side
     # monkey-patches do not propagate. The hook function is lazy and idempotent.
