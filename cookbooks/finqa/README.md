@@ -58,7 +58,7 @@ rllm agent list      # should show "finqa"
 ## Dataset
 
 ```bash
-python cookbooks/finqa/prepare_data.py
+python cookbooks/finqa/prepare_finqa_data.py
 ```
 
 This will:
@@ -130,7 +130,7 @@ pytest cookbooks/finqa/test.py -v
 | `finqa_tools.py` | The four tools as plain functions + OpenAI tool specs |
 | `finqa_eval.py` | `finqa_evaluator` — judge-LLM correctness + table-access bonus |
 | `finqa_constants.py` | Path constants (data, prompts) |
-| `prepare_data.py` | HF download + register train / val / test splits |
+| `prepare_finqa_data.py` | HF download + register train / val / test splits |
 | `train.py` | Python API training script (Hydra config) |
 | `train_tinker.sh` | Tinker backend — single-machine LoRA training |
 | `train_verl.sh` | Verl backend — distributed multi-GPU training |

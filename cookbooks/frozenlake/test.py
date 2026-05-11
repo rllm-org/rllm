@@ -7,7 +7,7 @@ import pytest
 # Skip the whole module if gymnasium isn't installed (optional dep).
 gymnasium = pytest.importorskip("gymnasium")
 
-from evaluator import frozenlake_evaluator  # noqa: E402
+from frozenlake_eval import frozenlake_evaluator  # noqa: E402
 from frozenlake_flow import (  # noqa: E402
     _is_solvable,
     generate_random_map,

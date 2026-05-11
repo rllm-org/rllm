@@ -6,9 +6,9 @@ and normalizes them into rows the cookbook's flow + evaluator can consume.
 
 Usage::
 
-    python cookbooks/deepcoder/prepare_data.py
+    python cookbooks/deepcoder/prepare_deepcoder_data.py
     # or, faster smoke run:
-    python cookbooks/deepcoder/prepare_data.py --train-size 200 --test-size 50
+    python cookbooks/deepcoder/prepare_deepcoder_data.py --train-size 200 --test-size 50
 """
 
 from __future__ import annotations

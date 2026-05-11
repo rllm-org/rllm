@@ -23,7 +23,7 @@ def main(config: DictConfig):
     val_dataset = DatasetRegistry.load_dataset("finqa", "val")
 
     if train_dataset is None or val_dataset is None:
-        raise RuntimeError("FinQA dataset not found. Run: python cookbooks/finqa/prepare_data.py")
+        raise RuntimeError("FinQA dataset not found. Run: python cookbooks/finqa/prepare_finqa_data.py")
 
     trainer = AgentTrainer(
         backend=config.rllm.get("backend", "tinker"),

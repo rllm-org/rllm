@@ -93,7 +93,7 @@ rllm eval geo3k \
 | File | Description |
 |------|-------------|
 | `geo3k_flow.py` | `Geo3KFlow` — AgentFlow implementation (VLM single-turn solver) |
-| `evaluator.py` | `Geo3KEvaluator` — math answer grading with `\boxed{}` extraction |
+| `geo3k_eval.py` | `geo3k_evaluator` — math answer grading with `\boxed{}` extraction |
 | `train.py` | Python API training script (Hydra config) |
 | `train_tinker.sh` | Tinker backend — single-machine training |
 | `train_verl.sh` | Verl backend — distributed multi-GPU training |

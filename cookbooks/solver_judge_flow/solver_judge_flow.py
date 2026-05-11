@@ -22,7 +22,7 @@ N_SOLUTIONS = 2
 async def solver_judge_flow(task: Task, config: AgentConfig) -> Episode:
     """AgentFlow: solver generates N solutions, judge picks the best."""
     client = AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")
-    problem = task.instruction
+    problem = _format_countdown_problem(task)
 
     # Step 1: Solver generates N solutions in parallel
     solver_trajectories = await _generate_solutions(client, config.model, problem)
@@ -45,7 +45,7 @@ async def _generate_solutions(client: AsyncOpenAI, model: str, problem: str) -> 
             model=model,
             messages=messages,
             temperature=1,
-            max_tokens=1000,
+            max_tokens=2048,
         )
         content = response.choices[0].message.content or ""
         parsed = _parse_answer(content)
@@ -70,7 +70,7 @@ async def _judge_solutions(client: AsyncOpenAI, model: str, problem: str, soluti
         model=model,
         messages=messages,
         temperature=1,
-        max_tokens=1000,
+        max_tokens=2048,
     )
     content = response.choices[0].message.content or ""
     selected = _parse_judge_response(content, solutions)
@@ -87,6 +87,21 @@ async def _judge_solutions(client: AsyncOpenAI, model: str, problem: str, soluti
 
 
 # -- Parsing helpers --------------------------------------------------------
+
+
+def _format_countdown_problem(task: Task) -> str:
+    """Render the countdown task into a natural-language problem statement.
+
+    The countdown DatasetRegistry transform returns only ``{target, nums,
+    data_source}`` (no ``question`` field), so ``task.instruction`` is empty
+    and the flow has to format the prompt itself from metadata.
+    """
+    md = task.metadata or {}
+    target = md.get("target")
+    nums = md.get("nums")
+    if target is None or nums is None:
+        return str(task.instruction or "")
+    return f"Using the numbers {list(nums)}, write an arithmetic expression that evaluates to {target}. Each number must be used exactly once and only +, -, *, / are allowed."
 
 
 def _parse_answer(response: str) -> str:

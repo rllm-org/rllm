@@ -17,7 +17,7 @@ dependencies = [
 
 [tool.setuptools]
 # Top-level py-modules must be unique across installed cookbooks.
-py-modules = ["finqa_flow", "finqa_eval", "finqa_tools", "finqa_constants", "prepare_data"]
+py-modules = ["finqa_flow", "finqa_eval", "finqa_tools", "finqa_constants", "prepare_finqa_data"]
 
 [tool.setuptools.package-data]
 "*" = ["prompts/*.txt"]

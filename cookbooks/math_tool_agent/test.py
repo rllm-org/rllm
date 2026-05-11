@@ -1,7 +1,7 @@
 """Tests for the math tool agent cookbook."""
 
-from evaluator import math_tool_evaluator
 from math_tool_agent import _extract_answer, _safe_eval
+from math_tool_eval import math_tool_evaluator
 
 from rllm.types import Episode, Step, Trajectory
 

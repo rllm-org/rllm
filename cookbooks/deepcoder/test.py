@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from evaluator import deepcoder_evaluator
+from deepcoder_eval import deepcoder_evaluator
 
 from rllm.types import Episode, Step, Trajectory
 

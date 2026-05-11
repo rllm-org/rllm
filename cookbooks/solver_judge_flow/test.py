@@ -1,6 +1,6 @@
 """Tests for solver-judge flow."""
 
-from evaluator import solver_judge_countdown_evaluator
+from solver_judge_eval import solver_judge_countdown_evaluator
 from solver_judge_flow import _parse_answer, _parse_judge_response
 
 from rllm.types import Episode, Step, Trajectory

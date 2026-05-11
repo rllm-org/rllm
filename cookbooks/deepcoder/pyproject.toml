@@ -10,11 +10,12 @@ requires-python = ">=3.10"
 dependencies = ["rllm", "openai", "datasets"]
 
 [tool.setuptools]
-py-modules = ["deepcoder_flow", "evaluator", "prepare_data"]
+# Top-level py-modules must be unique across installed cookbooks.
+py-modules = ["deepcoder_flow", "deepcoder_eval", "prepare_deepcoder_data"]
 
 # Plugin discovery: `rllm` CLI finds these by name.
 [project.entry-points."rllm.agents"]
 deepcoder = "deepcoder_flow:deepcoder_flow"
 
 [project.entry-points."rllm.evaluators"]
-deepcoder = "evaluator:deepcoder_evaluator"
+deepcoder = "deepcoder_eval:deepcoder_evaluator"

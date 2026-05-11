@@ -6,8 +6,8 @@ inside the AgentFlow, so the dataset itself stays tiny.
 
 Usage::
 
-    python cookbooks/frozenlake/prepare_data.py
-    python cookbooks/frozenlake/prepare_data.py --train-size 5000 --test-size 200
+    python cookbooks/frozenlake/prepare_frozenlake_data.py
+    python cookbooks/frozenlake/prepare_frozenlake_data.py --train-size 5000 --test-size 200
 """
 
 from __future__ import annotations

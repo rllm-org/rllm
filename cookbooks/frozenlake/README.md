@@ -45,9 +45,9 @@ rllm agent list      # should show "frozenlake"
 The dataset is procedurally generated — there's nothing to download. Run once:
 
 ```bash
-python cookbooks/frozenlake/prepare_data.py
+python cookbooks/frozenlake/prepare_frozenlake_data.py
 # or, with custom sizes:
-python cookbooks/frozenlake/prepare_data.py --train-size 5000 --test-size 200 --slippery
+python cookbooks/frozenlake/prepare_frozenlake_data.py --train-size 5000 --test-size 200 --slippery
 ```
 
 This registers `frozenlake/{train,test}` with `DatasetRegistry`.
@@ -120,8 +120,8 @@ pytest cookbooks/frozenlake/test.py -v
 | File | Description |
 |------|-------------|
 | `frozenlake_flow.py` | `frozenlake_flow` — multi-turn AgentFlow over a gym env |
-| `evaluator.py` | `frozenlake_evaluator` — reward = won? 1 : 0 |
-| `prepare_data.py` | Generate + register the train/test splits |
+| `frozenlake_eval.py` | `frozenlake_evaluator` — reward = won? 1 : 0 |
+| `prepare_frozenlake_data.py` | Generate + register the train/test splits |
 | `train.py` | Python API training script (Hydra config) |
 | `train_tinker.sh` | Tinker backend — single-machine training |
 | `train_verl.sh` | Verl backend — distributed multi-GPU training |

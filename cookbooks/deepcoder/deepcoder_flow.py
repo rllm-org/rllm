@@ -8,7 +8,7 @@ multi-turn revise/feedback loop. The full assistant response is stored
 in ``episode.artifacts["answer"]`` so the evaluator can pull the last
 fenced code block out exactly the way :class:`RewardCodeFn` expects.
 
-Task metadata schema (produced by ``prepare_data.py``)::
+Task metadata schema (produced by ``prepare_deepcoder_data.py``)::
 
     {
         "question": str,       # full problem statement (system + problem text)

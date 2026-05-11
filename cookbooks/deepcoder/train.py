@@ -9,8 +9,8 @@ Usage (from rllm repo root)::
 """
 
 import hydra
+from deepcoder_eval import deepcoder_evaluator
 from deepcoder_flow import deepcoder_flow
-from evaluator import deepcoder_evaluator
 from omegaconf import DictConfig
 
 from rllm.data.dataset import DatasetRegistry
@@ -23,7 +23,7 @@ def main(config: DictConfig):
     val_dataset = DatasetRegistry.load_dataset("deepcoder", "test")
 
     if train_dataset is None or val_dataset is None:
-        raise RuntimeError("Deepcoder dataset not found. Run: python cookbooks/deepcoder/prepare_data.py")
+        raise RuntimeError("Deepcoder dataset not found. Run: python cookbooks/deepcoder/prepare_deepcoder_data.py")
 
     trainer = AgentTrainer(
         backend=config.rllm.get("backend", "tinker"),

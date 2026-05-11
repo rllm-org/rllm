@@ -8,8 +8,8 @@ Or with Hydra overrides:
 """
 
 import hydra
-from evaluator import solver_judge_countdown_evaluator
 from omegaconf import DictConfig
+from solver_judge_eval import solver_judge_countdown_evaluator
 from solver_judge_flow import solver_judge_flow
 
 from rllm.data.dataset import DatasetRegistry

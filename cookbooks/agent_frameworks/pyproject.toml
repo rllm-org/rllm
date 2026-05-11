@@ -30,7 +30,10 @@ all = [
 ]
 
 [tool.setuptools]
-py-modules = ["calculator", "evaluator", "system_prompt"]
+# Top-level py-modules must be unique across installed cookbooks
+# (entry-point packages share the same `sys.path`). Use distinct
+# names per cookbook (e.g. `frameworks_eval`, not `evaluator`).
+py-modules = ["frameworks_eval"]
 packages = ["agentflow"]
 
 # Each framework flow registers under its own name; install only the
@@ -44,4 +47,4 @@ smolagents_math = "agentflow.smolagents:smolagents_math"
 strands_math = "agentflow.strands:strands_math"
 
 [project.entry-points."rllm.evaluators"]
-math_evaluator = "evaluator:math_evaluator"
+math_evaluator = "frameworks_eval:math_evaluator"
