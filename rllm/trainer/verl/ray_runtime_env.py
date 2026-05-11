@@ -105,6 +105,11 @@ def get_ppo_ray_runtime_env():
     """
     env = PPO_RAY_RUNTIME_ENV.get("env_vars", {}).copy()
     env.update(_get_forwarded_env_vars())
+    if os.environ.get("RLLM_RAY_NOSET_CUDA_VISIBLE_DEVICES", "").lower() in {"1", "true", "yes"}:
+        # Let Ray assign accelerator ids but keep all local GPUs visible to the
+        # worker. veRL's Worker uses the assigned id as LOCAL_RANK in this mode,
+        # which avoids CUDA-visible-device remapping issues in NCCL/FSDP2 paths.
+        env["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
 
     # Parse the job-submission runtime_env (if launched via `ray job submit`)
     try:
