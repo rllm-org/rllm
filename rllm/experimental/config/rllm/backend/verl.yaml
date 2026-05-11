@@ -12,21 +12,28 @@ defaults:
 
 actor_rollout_ref:
   actor:
-    use_rollout_log_probs: True
+    use_rollout_log_probs: true
   rollout:
     mode: async
     agent:
       num_workers: 0
-    calculate_log_probs: True
+    calculate_log_probs: true
     val_kwargs:
-      do_sample: True
+      do_sample: true
 
 data:
   gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
-  return_multi_modal_inputs: False
+  return_multi_modal_inputs: false
+  max_prompt_length: 30720
+  max_response_length: 2048
 
 rllm:
   backend: verl
   algorithm:
     rollout_correction:
-      bypass_mode: False
+      bypass_mode: false
+  rollout:
+    train:
+      max_tokens: ${data.max_response_length}
+    val:
+      max_tokens: ${data.max_response_length}

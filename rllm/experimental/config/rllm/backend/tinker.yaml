@@ -60,7 +60,6 @@ data:
   val_files: null
   max_prompt_length: 30720
   max_response_length: 2048
-  train_batch_size: 32
   val_batch_size: 32
 
 # Overriding the rLLM-common config with Tinker-specific ones
@@ -70,6 +69,10 @@ rllm:
   rollout:
     n: ${oc.select:training.group_size, 8}
     n_val: ${oc.select:validation.group_size, 1}
+    train:
+      max_tokens: ${data.max_response_length}
+    val:
+      max_tokens: ${data.max_response_length}
   algorithm:
     rollout_correction:
-      bypass_mode: True
+      bypass_mode: true
