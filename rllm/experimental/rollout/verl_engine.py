@@ -124,9 +124,18 @@ class VerlEngine(RolloutEngine):
 
     @override
     def assemble_model_output(self, token_input: TokenInput, token_output: TokenOutput, **kwargs) -> ModelOutput:
+        # TITOCompleter calls this with just (token_input, token_output) — no kwargs.
+        # In that path, ``token_input`` IS the prompt (the completer manages the
+        # buffer manually), so default ``prompt_ids = token_input`` so downstream
+        # transform logic (which reads ``model_output.prompt_ids``) still works.
+        # The non-TITO ``_get_model_response`` path explicitly passes
+        # ``prompt_ids=...`` to override this default with the "logical" prompt
+        # (i.e. without any engine-internal prepends).
         prompt_ids = kwargs.pop("prompt_ids", None)
+        if prompt_ids is None:
+            prompt_ids = list(token_input)
         multi_modal_inputs = kwargs.pop("multi_modal_inputs", None)
-        prompt_length = len(prompt_ids) if prompt_ids is not None else 0
+        prompt_length = len(prompt_ids)
 
         token_output = cast(VerlTokenOutput, token_output)
         completion_ids = token_output.token_ids

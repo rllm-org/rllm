@@ -40,6 +40,13 @@ class ToolParser(ABC):
             elif "qwen" in model_name or "r2e" in model_name or "deepswe" in model_name or "qwen" in tokenizer_cls:
                 print(f"Using QwenToolParser for {tokenizer.name_or_path}")
                 return QwenToolParser()
+            elif "llama" in model_name or "llama" in tokenizer_cls:
+                # Order matters: the deepseek+llama check above matches first
+                # for DeepSeek R1 distill models that ship with a Llama
+                # tokenizer but use R1 wire format. Plain Llama Instruct
+                # models (3.1 / 3.2 / 3.3) land here.
+                print(f"Using LlamaToolParser for {tokenizer.name_or_path}")
+                return LlamaToolParser()
         # TODO: add verfication to check equivalence of the parser with that from HuggingFace
         raise ValueError(f"No tool parser found for {tokenizer.name_or_path}")
 
@@ -182,6 +189,129 @@ Output format for tool calls:
 // Additional tool calls follow the same format
 <｜tool▁calls▁end｜>
 """
+
+
+class LlamaToolParser(ToolParser):
+    """Tool parser for Llama 3.1 / 3.2 / 3.3 Instruct chat templates.
+
+    Llama 3.2 emits a bare JSON object as the assistant message body when
+    calling a tool — no `<|python_tag|>` prefix, no XML wrapper. The EOT
+    token (`<|eot_id|>`) delimits the turn. Field name is ``parameters``
+    (Llama convention), not ``arguments`` (OpenAI convention).
+
+        <|start_header_id|>assistant<|end_header_id|>\\n\\n
+        {"name": "calculate", "parameters": {"expression": "2+3"}}
+        <|eot_id|>
+
+    Llama 3.1 and 3.3 prefix the JSON with `<|python_tag|>`; we strip it
+    transparently in ``parse()`` so the same parser handles both wire
+    formats. ``arguments`` is accepted as a fallback field name (some
+    fine-tunes use OpenAI-shape).
+    """
+
+    PYTHON_TAG = "<|python_tag|>"
+
+    def __init__(self):
+        # No XML-style delimiters — assistant header + eot frame the call.
+        # tool_call_begin/end are exposed so the chat parser can compose
+        # uniformly with the Qwen/R1 patterns, but they're empty here.
+        self.tool_call_begin = ""
+        self.tool_call_end = ""
+        self.tool_output_begin = ""
+        self.tool_output_end = ""
+
+    def parse(self, model_response: str) -> list[ToolCall]:
+        """Extract tool calls from the raw assistant body.
+
+        Strategy: strip an optional ``<|python_tag|>`` prefix, then look
+        for the first top-level JSON object that has a ``name`` field.
+        Returns ``[]`` if no parseable tool call is found.
+        """
+        text = model_response.strip()
+        if text.startswith(self.PYTHON_TAG):
+            text = text[len(self.PYTHON_TAG) :].lstrip()
+
+        body = self._extract_first_json_object(text)
+        if body is None:
+            return []
+
+        try:
+            obj = json.loads(body)
+        except json.JSONDecodeError:
+            return []
+
+        if not isinstance(obj, dict) or "name" not in obj:
+            return []
+
+        args = obj.get("parameters")
+        if args is None:
+            args = obj.get("arguments", {})
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = {}
+        if not isinstance(args, dict):
+            args = {}
+        return [ToolCall(name=obj["name"], arguments=args)]
+
+    @staticmethod
+    def _extract_first_json_object(text: str) -> str | None:
+        """Return the byte span of the first balanced ``{...}`` block in ``text``,
+        or ``None`` if no balanced object is found. Tolerates trailing junk
+        (e.g. the model continues with prose after the JSON closes)."""
+        start = text.find("{")
+        if start < 0:
+            return None
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(text)):
+            c = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+                continue
+            if c == '"':
+                in_str = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+        return None
+
+    def get_tool_prompt(self, tools_schema: str) -> str:
+        """Returns Llama-flavored tool guidance for injection into the system
+        message. This is a *fallback* used when the chat-template path
+        cannot delegate to HuggingFace's apply_chat_template directly.
+
+        The official Llama 3.2 chat_template injects tools as part of the
+        first user message with a longer preamble, but for parser-level
+        composition this concise system-prompt form is the rLLM convention
+        (matches Qwen / R1 shape). Full HF-byte-equality is tracked under
+        Phase B of G2.7 and is not required for the math_tool_agent path,
+        which targets Qwen.
+        """
+        return f"""
+
+# Tools
+
+You may call one or more functions to assist with the user query.
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+{tools_schema}
+</tools>
+
+To call a function, respond with a JSON object on its own line, no surrounding text:
+{{"name": <function-name>, "parameters": <args-json-object>}}
+""".rstrip()
 
 
 class QwenToolParser(ToolParser):

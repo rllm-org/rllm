@@ -10,7 +10,6 @@ The name `completer` is inspired by `tinker_cookbook`.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import field
 from typing import TYPE_CHECKING, Any
 
 from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
@@ -74,11 +73,6 @@ class TITOCompleter(Completer):
 
     chat_parser: ChatTemplateParser
     tokenizer: Tokenizer
-    # stateful data taht this completer tracks over `complete` calls
-    _prev_messages_str: str = ""  # the messages after applying chat template
-    _prev_token_input: TokenInput = field(default_factory=list)
-    _n_completions: int = 0
-    _n_prefixes: int = 0
 
     def __init__(self, rollout_engine: RolloutEngine):
         super().__init__(rollout_engine)
@@ -91,9 +85,14 @@ class TITOCompleter(Completer):
             raise ValueError("The rollout engine must have a chat parser and a tokenizer. For Tinker engine, make sure you have set bypass_render_with_parser=True.")
         self.tokenizer = rollout_engine.tokenizer
         self.chat_parser = rollout_engine.chat_parser
+        # stateful data the completer tracks over `complete` calls
+        self._prev_messages_str: str = ""
+        self._prev_token_input: TokenInput = []
+        self._n_completions: int = 0
+        self._n_prefixes: int = 0
 
-    def _parse_message_delta(self, messages: list[dict]) -> tuple[bool, TokenInput]:
-        cur_messages_str = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, accumulate_reasoning=True)
+    def _parse_message_delta(self, messages: list[dict], tools: list | None = None) -> tuple[bool, TokenInput]:
+        cur_messages_str = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, accumulate_reasoning=True, tools=tools)
         # check if the previous message string is a prefix of the current message string
         if len(self._prev_messages_str) > 0 and cur_messages_str.startswith(self._prev_messages_str):
             message_str_delta = cur_messages_str[len(self._prev_messages_str) :]
@@ -106,7 +105,13 @@ class TITOCompleter(Completer):
         return is_prefix, token_input_delta
 
     async def complete(self, messages: list[dict], action_hook: Callable[[ModelOutput], Any] | None = None, **kwargs) -> Step:
-        is_prefix, token_input_delta = self._parse_message_delta(messages)
+        # ``tools`` is a parser-time kwarg, not an engine-time kwarg — extract it
+        # so the chat parser injects the tool prompt into the system message.
+        # Without this, the model receives no tool definitions and the rollout
+        # path silently converges to "the model never calls tools".
+        tools = kwargs.pop("tools", None)
+
+        is_prefix, token_input_delta = self._parse_message_delta(messages, tools=tools)
 
         # current token input should be the previous token input plus the token input delta
         curr_token_input = self._prev_token_input + token_input_delta
@@ -116,8 +121,6 @@ class TITOCompleter(Completer):
 
         action = action_hook(model_output) if action_hook is not None else None
 
-        # update the previous messages and token input
-        self._prev_messages_str = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, accumulate_reasoning=True)
         # backend-specific handling for retrieving the completion ids
         if hasattr(curr_token_output, "token_ids"):  # Verl
             curr_completion_ids: list[int] = curr_token_output.token_ids  # type: ignore[assignment]
@@ -125,10 +128,22 @@ class TITOCompleter(Completer):
             curr_completion_ids: list[int] = curr_token_output.tokens
         else:
             raise ValueError(f"Unsupported token output type: {type(curr_token_output)}")
+
+        # update the previous messages and token input
+        # KEEP _prev_messages_str and _prev_token_input in sync: both must reflect the state
+        # *after* the just-generated assistant turn. _prev_token_input gets the model's
+        # verbatim completion ids appended; _prev_messages_str gets the decoded form of
+        # those same ids appended. Without this, the next turn's delta string would
+        # re-introduce the assistant body that's already baked into _prev_token_input as
+        # token IDs, producing a double-count (see tmp/parser_prefix_tests/REPORT.md
+        # §"Pathway 3" for the original symptom: +30 tokens of drift per asst turn).
+        completion_str = self.tokenizer.decode(curr_completion_ids, skip_special_tokens=False)
+        self._prev_messages_str = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, accumulate_reasoning=True, tools=tools) + completion_str
+        self._prev_token_input = curr_token_input + curr_completion_ids
+
         # update the number of completions and prefixes
         self._n_completions += 1
         self._n_prefixes += int(is_prefix)
-        self._prev_token_input = curr_token_input + curr_completion_ids
         return Step.from_model_output(model_output, messages, action)  # type: ignore
 
     def reset(self):

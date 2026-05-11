@@ -1,29 +1,58 @@
+from rllm.parser.chat_template import (
+    ChatTemplateParser,
+    DeepseekQwenChatTemplateParser,
+    DeepSeekV32ExpChatTemplateParser,
+    HarmonyChatTemplateParser,
+    KimiK2ThinkingChatTemplateParser,
+    LlamaChatTemplateParser,
+    QwenChatTemplateParser,
+)
+from rllm.parser.messages import (
+    AssistantMessage,
+    ContentBlock,
+    FunctionCall,
+    ImageUrlBlock,
+    Message,
+    MessageList,
+    Messages,
+    MessageSnapshot,
+    SystemMessage,
+    TextBlock,
+    ToolCallDict,
+    ToolMessage,
+    UserMessage,
+    from_openai,
+    to_openai,
+)
 from rllm.parser.tool_parser import QwenToolParser, R1ToolParser, ToolParser
 
 __all__ = [
+    "AssistantMessage",
     "ChatTemplateParser",
+    "ContentBlock",
+    "DeepSeekV32ExpChatTemplateParser",
     "DeepseekQwenChatTemplateParser",
-    "QwenChatTemplateParser",
+    "FunctionCall",
+    "HarmonyChatTemplateParser",
+    "ImageUrlBlock",
+    "KimiK2ThinkingChatTemplateParser",
     "LlamaChatTemplateParser",
-    "ToolParser",
-    "R1ToolParser",
+    "Message",
+    "MessageList",
+    "MessageSnapshot",
+    "Messages",
+    "QwenChatTemplateParser",
     "QwenToolParser",
+    "R1ToolParser",
+    "SystemMessage",
+    "TextBlock",
+    "ToolCallDict",
+    "ToolMessage",
+    "ToolParser",
+    "UserMessage",
+    "from_openai",
+    "to_openai",
 ]
-
-
-def __getattr__(name):
-    _chat_template_classes = {
-        "ChatTemplateParser",
-        "DeepseekQwenChatTemplateParser",
-        "LlamaChatTemplateParser",
-        "QwenChatTemplateParser",
-    }
-    if name in _chat_template_classes:
-        import importlib
-
-        mod = importlib.import_module("rllm.parser.chat_template_parser")
-        return getattr(mod, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 PARSER_REGISTRY = {
