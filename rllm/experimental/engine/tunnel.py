@@ -23,7 +23,16 @@ import subprocess
 import threading
 import time
 
+from rich.console import Console
+
 logger = logging.getLogger(__name__)
+
+# User-visible status — the cloudflared subprocess logs go to its own
+# stderr at DEBUG-ish level; we surface a tight summary on the trainer's
+# stdout so the operator can tell at a glance whether the tunnel is up
+# and what the public URL is. Stays in lockstep with eval/train's
+# console style (no theme to keep this module standalone).
+_status = Console()
 
 # Cloudflared prints the assigned URL on stderr inside an ASCII frame.
 _TRYCF_URL_RE = re.compile(r"https?://[a-zA-Z0-9.-]+\.trycloudflare\.com")
@@ -94,17 +103,24 @@ class CloudflaredTunnel:
         timeout without any URL).
         """
         if not self.is_available():
+            _status.print("[bold red]✗[/] cloudflared not found on PATH. Install: [bold]brew install cloudflared[/]")
             raise TunnelStartError("cloudflared binary not found on PATH. Install: brew install cloudflared")
 
+        _status.print(f"  [cyan]…[/] Starting cloudflared tunnel for [bold]{self.upstream_url}[/]")
         last_error: TunnelStartError | None = None
         for attempt in range(1, self.max_attempts + 1):
             try:
-                return self._start_once()
+                url = self._start_once()
+                _status.print(f"  [bold green]✓[/] Tunnel ready: [bold]{url}[/]  [dim](DNS propagation ~30-90s)[/]")
+                return url
             except TunnelStartError as e:
                 last_error = e
                 tail = "\n".join(self._stderr_buffer[-20:])
                 if attempt < self.max_attempts and _is_transient(tail):
                     backoff = min(2 ** (attempt - 1), 8)
+                    _status.print(
+                        f"  [yellow]![/] cloudflared transient failure (attempt {attempt}/{self.max_attempts}); retrying in {backoff}s",
+                    )
                     logger.warning(
                         "cloudflared start attempt %d/%d failed (transient); retrying in %ds",
                         attempt,
@@ -114,6 +130,7 @@ class CloudflaredTunnel:
                     time.sleep(backoff)
                     self._reset_state()
                     continue
+                _status.print(f"  [bold red]✗[/] cloudflared failed after {attempt} attempt(s): {e}")
                 raise
         # Should be unreachable; the loop either returns or raises.
         assert last_error is not None

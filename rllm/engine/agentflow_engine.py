@@ -453,6 +453,7 @@ class AgentFlowEngine:
 
     async def _run_single(self, task_obj: Task, task_dict: dict, uid: str, is_validation: bool = False) -> Episode:
         """Run one full per-task pipeline: flow → fetch traces → enrich → evaluate."""
+        loop = asyncio.get_event_loop()
         raw_episode, ctx = await self._run_flow_only(
             task_obj=task_obj,
             task_dict=task_dict,
@@ -470,8 +471,14 @@ class AgentFlowEngine:
                 ctx=ctx,
             )
         finally:
+            # Teardown runs Modal's blocking terminate()/detach() — offload
+            # so the event loop isn't blocked for other concurrent
+            # rollouts and Modal doesn't warn about sync-in-async.
             if ctx is not None:
-                ctx.run_teardown()
+                try:
+                    await loop.run_in_executor(self.executor, ctx.run_teardown)
+                except Exception:
+                    logger.exception("[%s] task teardown failed; continuing", uid)
 
     async def _run_flow_only(
         self,
@@ -487,9 +494,24 @@ class AgentFlowEngine:
         responsible for running ``ctx.run_teardown()`` after
         enrich+evaluate.
         """
+        loop = asyncio.get_event_loop()
+
+        # Hook setup (eval: sandbox + per-task verifier resolution).
+        # Run on the executor: ``SandboxTaskHooks.setup`` makes blocking
+        # I/O (Modal Sandbox.create, docker build, image pulls) that
+        # otherwise stalls the event loop and prevents other concurrent
+        # rollouts from progressing. Modal explicitly warns when its
+        # blocking API is called from inside an async loop; offloading
+        # to a worker thread also silences that.
         ctx: TaskContext | None = None
         if self.hooks is not None:
-            ctx = self.hooks.setup(task_obj, self.agent_flow, uid)
+            ctx = await loop.run_in_executor(
+                self.executor,
+                self.hooks.setup,
+                task_obj,
+                self.agent_flow,
+                uid,
+            )
 
         try:
             session_url = self.gateway.get_session_url(uid)
@@ -514,9 +536,12 @@ class AgentFlowEngine:
         except BaseException:
             # Tear down per-attempt resources on failure; success path
             # defers teardown until after enrich+evaluate completes.
+            # Offloaded to the executor to mirror ``_run_single``'s
+            # success-path teardown: Modal's blocking ``terminate()`` /
+            # ``detach()`` would warn about sync-in-async otherwise.
             if ctx is not None:
                 try:
-                    ctx.run_teardown()
+                    await loop.run_in_executor(self.executor, ctx.run_teardown)
                 except Exception:
                     logger.exception("[%s] hook teardown failed during error recovery", uid)
             raise
