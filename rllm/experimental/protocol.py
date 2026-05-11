@@ -20,7 +20,7 @@ from rllm.experimental.rollout import RolloutEngine
 from rllm.types import Episode
 
 if TYPE_CHECKING:
-    from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
+    from rllm.engine.base import FlowEngine
     from rllm.experimental.unified_trainer import TrainerState
 
 TDataset = TypeVar("TDataset", bound=Iterable)  # backend-specific dataset type
@@ -89,15 +89,15 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
     async def generate_episodes(
         self,
         batch: TBatch,
-        agent_workflow_engine: UnifiedWorkflowEngine,
+        flow_engine: FlowEngine,
         is_validation: bool = False,
         **kwargs,
     ) -> list[Episode]:
-        """Generate episodes from the batch using the agent workflow engine.
+        """Generate episodes from the batch using the flow engine.
 
         Args:
             batch: The input batch.
-            agent_workflow_engine: The workflow engine to use.
+            flow_engine: The flow engine to use.
             is_validation: Whether the generation is for validation.
             **kwargs: Additional arguments.
 

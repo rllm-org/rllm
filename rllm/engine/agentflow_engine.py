@@ -21,14 +21,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import resource
-import uuid
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from tqdm import tqdm
-
+from rllm.engine.base import FlowEngine
 from rllm.eval.types import EvalOutput
 from rllm.experimental.engine.trace_converter import compute_step_metrics, trace_record_to_step
 from rllm.types import AgentConfig, Episode, Step, Task, Trajectory, run_agent_flow
@@ -259,8 +256,13 @@ def _raise_fd_limit(target: int = _MIN_FD_LIMIT) -> None:
         logger.warning("Could not raise file descriptor limit: %s", e)
 
 
-class AgentFlowEngine:
-    """Executes AgentFlows with gateway-mediated trace capture."""
+class AgentFlowEngine(FlowEngine):
+    """Executes AgentFlows with gateway-mediated trace capture.
+
+    Accepts either raw ``dict`` task specs (training path) or fully-constructed
+    :class:`Task` objects (eval path).  See :meth:`_run_single` for the
+    per-rollout lifecycle.
+    """
 
     def __init__(
         self,
@@ -277,14 +279,13 @@ class AgentFlowEngine:
         if evaluator is None and hooks is None:
             raise ValueError("AgentFlowEngine requires either an `evaluator` (single evaluator, typical training) or `hooks` (per-task evaluator + setup/teardown, typical eval). Both cannot be None.")
 
+        super().__init__(n_parallel_tasks=n_parallel_tasks, episode_logger=episode_logger)
         self.agent_flow = agent_flow
         self.evaluator = evaluator
         self.gateway = gateway
         self.model = model
-        self.n_parallel_tasks = n_parallel_tasks
         self.retry_limit = retry_limit
         self.raise_on_error = raise_on_error
-        self.episode_logger = episode_logger
         self.hooks = hooks
         self.executor = ThreadPoolExecutor(max_workers=n_parallel_tasks)
         self._semaphore = asyncio.Semaphore(n_parallel_tasks)
@@ -293,65 +294,11 @@ class AgentFlowEngine:
         # running many parallel agent flows with individual HTTP clients.
         _raise_fd_limit()
 
-        # Training step tracking (set by set_training_step)
-        self.current_step = 0
-        self.current_epoch = 0
-        self.current_mode = "train"
+    async def _pre_execute(self, *, is_validation: bool = False, **kwargs) -> None:
+        return None
 
-    def set_training_step(self, step: int, mode: str = "train", epoch: int = 0) -> None:
-        self.current_step = step
-        self.current_mode = mode
-        self.current_epoch = epoch
-
-    async def execute_tasks(
-        self,
-        tasks: list[dict | Task],
-        task_ids: list[str] | None = None,
-        is_validation: bool = False,
-        **kwargs,
-    ) -> list[Episode]:
-        """Run AgentFlows on a list of tasks; return enriched Episodes.
-
-        ``tasks`` may be raw dicts (training path; the engine wraps each
-        in a :class:`Task` internally) or fully-constructed :class:`Task`
-        objects (eval path; the engine uses them as-is). When ``task_ids``
-        is omitted, fresh UUIDs are assigned.
-
-        See :meth:`_run_single` for the per-rollout lifecycle.
-        """
-        if task_ids is None:
-            task_ids = [str(uuid.uuid4()) for _ in tasks]
-
-        task_id_counter: dict[str, int] = defaultdict(int)
-        results: list[Episode | None] = [None] * len(tasks)
-
-        futures = []
-        for idx, (task, task_id) in enumerate(zip(tasks, task_ids, strict=True)):
-            rollout_idx = task_id_counter[task_id]
-            task_id_counter[task_id] += 1
-            futures.append(self.process_task_with_retry(task, task_id, rollout_idx, idx, is_validation=is_validation))
-
-        with tqdm(total=len(tasks), desc="Generating trajectories") as pbar:
-            for future in asyncio.as_completed(futures):
-                task_id, rollout_idx, idx, episode = await future
-                results[idx] = episode
-                pbar.update(1)
-
-        ordered_results: list[Episode] = results  # type: ignore[assignment]
-
-        # Log episodes if logger is provided
-        if self.episode_logger is not None:
-            try:
-                self.episode_logger.log_episodes_batch(
-                    ordered_results,
-                    self.current_step,
-                    self.current_mode,
-                    self.current_epoch,
-                )
-            except Exception as e:
-                logger.error("Failed to log episodes: %s", e)
-
-        return ordered_results
+    async def _post_execute(self, *, is_validation: bool = False, **kwargs) -> None:
+        return None
 
     async def process_task_with_retry(
         self,
@@ -359,9 +306,12 @@ class AgentFlowEngine:
         task_id: str,
         rollout_idx: int,
         result_idx: int,
+        *,
         is_validation: bool = False,
+        **kwargs,
     ) -> tuple[str, int, int, Episode]:
         """Process a single task with retry logic."""
+        del kwargs  # AgentFlowEngine does not forward extra kwargs to the agent flow.
         # `task_for_episode` is what we stash on the resulting Episode's
         # `task` field for downstream consumers (logger, transform pipeline).
         # Callers historically rely on this being a dict; preserve that.
@@ -382,15 +332,7 @@ class AgentFlowEngine:
                     episode.id = uid
                     episode.task = task_for_episode
 
-                    # Display rewards
-                    reward_strs = []
-                    for traj in episode.trajectories:
-                        reward = "N/A"
-                        if traj.reward is not None:
-                            reward = f"{traj.reward:.1f}"
-                        elif len(traj.steps) > 0:
-                            reward = f"{traj.steps[-1].reward:.1f}"
-                        reward_strs.append(f"{traj.name}: {reward}")
+                    reward_strs = self.format_reward_strs(episode)
                     colorful_print(
                         f"[{uid}] Rollout completed. Rewards: [{', '.join(reward_strs)}], Termination: {episode.termination_reason}",
                         fg="green" if episode.is_correct else "yellow",
@@ -548,9 +490,3 @@ class AgentFlowEngine:
         finally:
             if ctx is not None:
                 ctx.run_teardown()
-
-    def shutdown(self) -> None:
-        """Shutdown the engine and cleanup resources."""
-        if self.executor is not None:
-            self.executor.shutdown(wait=True)
-            self.executor = None

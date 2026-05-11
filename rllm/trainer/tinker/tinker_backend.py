@@ -34,7 +34,7 @@ from rllm.types import Episode
 if TYPE_CHECKING:
     from transformers.tokenization_utils import PreTrainedTokenizer
 
-    from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
+    from rllm.engine.base import FlowEngine
     from rllm.experimental.unified_trainer import TrainerState
 
 logger = logging.getLogger(__name__)
@@ -217,20 +217,20 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
     async def generate_episodes(
         self,
         batch: Any,
-        agent_workflow_engine: UnifiedWorkflowEngine,
+        flow_engine: FlowEngine,
         is_validation: bool = False,
         **kwargs,
     ) -> list[Episode]:
-        """Generate episodes using the workflow engine.
+        """Generate episodes using the flow engine.
 
         For Tinker backend, this function handles:
         1. Building an interleaved batch (each task repeated `group_size` times)
         2. Setting the sampling client on the rollout engine
-        3. Executing tasks using the agent workflow engine
+        3. Executing tasks using the flow engine
 
         Args:
             batch: Input batch (list of task dicts from dataloader).
-            agent_workflow_engine: The workflow engine to use for episode generation.
+            flow_engine: The flow engine to use for episode generation.
             is_validation: Whether the generation is for validation.
             **kwargs: Additional arguments.
 
@@ -253,8 +253,8 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Extract task IDs
         task_ids = [item["uid"] for item in interleaved_batch]
 
-        # Execute tasks using the agent workflow engine (async)
-        episodes = await agent_workflow_engine.execute_tasks(interleaved_batch, task_ids, is_validation=is_validation, **kwargs)
+        # Execute tasks using the flow engine (async)
+        episodes = await flow_engine.execute_tasks(interleaved_batch, task_ids, is_validation=is_validation, **kwargs)
 
         return episodes
 

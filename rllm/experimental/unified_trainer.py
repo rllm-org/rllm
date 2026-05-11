@@ -36,7 +36,7 @@ from rllm.experimental.common.transform import (
     transform_episodes_to_trajectory_groups,
 )
 from rllm.experimental.common.visualization import print_metrics_table, visualize_trajectory_last_steps
-from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
+from rllm.experimental.engine.workflow_engine import WorkflowEngine
 from rllm.experimental.metrics import MetricsAggregator
 from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.rollout import RolloutEngine
@@ -161,7 +161,7 @@ class UnifiedTrainer:
         # Determine which engine path to use:
         # 1. agent_flow + evaluator → AgentFlowEngine (gateway-based, local)
         # 2. remote_runtime → RemoteAgentFlowEngine (gateway-based, remote)
-        # 3. workflow_class → UnifiedWorkflowEngine (direct)
+        # 3. workflow_class → WorkflowEngine (direct)
         self._gateway = None
         self._remote_runtime = None
 
@@ -177,7 +177,7 @@ class UnifiedTrainer:
             gateway_mode = "process" if kwargs.get("backend_name") == "verl" else "thread"
             self._gateway = GatewayManager(self.config, mode=gateway_mode)
 
-            self.agent_workflow_engine = AgentFlowEngine(
+            self.flow_engine = AgentFlowEngine(
                 agent_flow=agent_flow,
                 evaluator=evaluator,
                 gateway=self._gateway,
@@ -189,7 +189,7 @@ class UnifiedTrainer:
             )
         elif remote_runtime_cfg.get("enabled", False):
             from rllm.experimental.engine.gateway_manager import GatewayManager
-            from rllm.experimental.engine.remote_agent_flow_engine import (
+            from rllm.experimental.engine.remote_agentflow_engine import (
                 RemoteAgentFlowEngine,
             )
             from rllm.experimental.engine.remote_runtime import (
@@ -213,7 +213,7 @@ class UnifiedTrainer:
                 model_id=self.config.get("model", {}).get("name", "default"),
             )
 
-            self.agent_workflow_engine = RemoteAgentFlowEngine(
+            self.flow_engine = RemoteAgentFlowEngine(
                 runtime=self._remote_runtime,
                 gateway=self._gateway,
                 session_timeout=remote_runtime_config.session_timeout,
@@ -221,7 +221,7 @@ class UnifiedTrainer:
                 episode_logger=self.episode_logger,
             )
         else:
-            self.agent_workflow_engine = UnifiedWorkflowEngine(
+            self.flow_engine = WorkflowEngine(
                 workflow_cls=self.workflow_class,
                 workflow_args=self.workflow_args,
                 rollout_engine=rollout_engine,
@@ -300,10 +300,10 @@ class UnifiedTrainer:
         if self._remote_runtime is not None:
             self._remote_runtime.initialize()
 
-        # initialize the UnifiedWorkflowEngine (init the workflow pool)
+        # initialize the WorkflowEngine (init the workflow pool)
         # AgentFlowEngine and RemoteAgentFlowEngine don't need pool initialization
-        if hasattr(self.agent_workflow_engine, "initialize_pool"):
-            await self.agent_workflow_engine.initialize_pool()
+        if hasattr(self.flow_engine, "initialize_pool"):
+            await self.flow_engine.initialize_pool()
 
         trainer_state = TrainerState()
 
@@ -392,11 +392,11 @@ class UnifiedTrainer:
 
     async def _train_batch_async(self, batch: Any, trainer_state: TrainerState) -> None:
         """Train a batch (async implementation)."""
-        self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="train", epoch=trainer_state.epoch)
+        self.flow_engine.set_training_step(trainer_state.global_step, mode="train", epoch=trainer_state.epoch)
 
         # TODO(kylemontgomery1): episode generation should be backend-agnostic
         # stage 1: generate episodes (async) and collect metrics (sync)
-        trainer_state.episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, is_validation=False)
+        trainer_state.episodes = await self.backend.generate_episodes(batch, flow_engine=self.flow_engine, is_validation=False)
         if not trainer_state.has_episodes:
             return
 
@@ -457,7 +457,7 @@ class UnifiedTrainer:
     async def _fit_fully_async(self, trainer_state: TrainerState) -> None:
         """Fully-async generation + training with group-level streaming."""
         assert self.config.data.train_batch_size == 1, f"Async training requires train_batch_size=1, got {self.config.data.train_batch_size}"
-        assert not getattr(self.agent_workflow_engine, "raise_on_error", False), "Async training requires raise_on_error=False so that process_task_with_retry always returns an episode"
+        assert not getattr(self.flow_engine, "raise_on_error", False), "Async training requires raise_on_error=False so that process_task_with_retry always returns an episode"
         coord_config = SyncCoordinatorConfig(
             mini_batch_size=self.async_config.mini_batch_size,
             group_size=self.rllm_config.rollout.n,
@@ -515,7 +515,7 @@ class UnifiedTrainer:
             for epoch in range(self.rllm_config.trainer.total_epochs):
                 await self.backend.on_epoch_start(trainer_state)
                 train_dataloader = self.backend.get_dataloader(self.train_dataset, trainer_state)
-                self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="train", epoch=epoch)
+                self.flow_engine.set_training_step(trainer_state.global_step, mode="train", epoch=epoch)
 
                 for batch in train_dataloader:
                     task = batch[0]
@@ -529,7 +529,7 @@ class UnifiedTrainer:
                     for rollout_idx in range(group_size):
 
                         async def _run_rollout(t=task, tid=task_id, ridx=rollout_idx):
-                            _, _, _, episode = await self.agent_workflow_engine.process_task_with_retry(task=t, task_id=tid, rollout_idx=ridx, result_idx=0)
+                            _, _, _, episode = await self.flow_engine.process_task_with_retry(task=t, task_id=tid, rollout_idx=ridx, result_idx=0)
                             await buffer.add_episode(tid, episode)
 
                         t = asyncio.create_task(_run_rollout())
@@ -553,7 +553,7 @@ class UnifiedTrainer:
         fwd_bwd_group_size = self.async_config.fwd_bwd_group_size
         num_fwd_bwd_passes = mini_batch_size // fwd_bwd_group_size
         use_total_batches = self.rllm_config.trainer.get("total_batches", -1) > 0
-        rollout_engine = getattr(self.agent_workflow_engine, "rollout_engine", None)
+        rollout_engine = getattr(self.flow_engine, "rollout_engine", None)
 
         while True:
             trainer_state.reset_batch()
@@ -715,7 +715,7 @@ class UnifiedTrainer:
             return {}
         # manually manage the testing time
         test_begin = time.perf_counter()
-        self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="val", epoch=trainer_state.epoch)
+        self.flow_engine.set_training_step(trainer_state.global_step, mode="val", epoch=trainer_state.epoch)
 
         is_correct_lst, uid_lst, data_source_lst = [], [], []
         workflow_metrics_by_source = defaultdict(lambda: defaultdict(list))
@@ -723,7 +723,7 @@ class UnifiedTrainer:
         val_dataloader: Iterable = self.backend.get_dataloader(self.val_dataset, trainer_state)
         for batch in val_dataloader:
             # Generate episodes and transform to trajectory groups
-            val_episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, is_validation=True)
+            val_episodes = await self.backend.generate_episodes(batch, flow_engine=self.flow_engine, is_validation=True)
             val_trajectory_groups, _ = transform_episodes_to_trajectory_groups(val_episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook)
             reward_metrics = collect_reward_and_advantage_from_trajectory_groups(val_trajectory_groups, self.algorithm_config, collect_advantage=False)
 
@@ -784,8 +784,8 @@ class UnifiedTrainer:
         if hasattr(self, "_gateway") and self._gateway is not None:
             self._gateway.stop()
             self._gateway = None
-        if hasattr(self, "agent_workflow_engine") and self.agent_workflow_engine is not None:
-            self.agent_workflow_engine.shutdown()
+        if hasattr(self, "flow_engine") and self.flow_engine is not None:
+            self.flow_engine.shutdown()
         self.backend.shutdown()
 
         # Explicitly finish the logger to prevent hang in __del__ during garbage collection

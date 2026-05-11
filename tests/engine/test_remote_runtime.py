@@ -7,7 +7,7 @@ from omegaconf import OmegaConf
 
 from rllm.agents.agent import Step, Trajectory
 from rllm.experimental.engine.gateway_manager import GatewayManager, _get_routable_ip
-from rllm.experimental.engine.remote_agent_flow_engine import _build_episode, _error_episode
+from rllm.experimental.engine.remote_agentflow_engine import _build_episode
 from rllm.experimental.engine.remote_runtime.agentcore_runtime import AgentCoreRuntime
 from rllm.experimental.engine.remote_runtime.protocol import (
     RemoteRuntimeConfig,
@@ -15,6 +15,7 @@ from rllm.experimental.engine.remote_runtime.protocol import (
     TaskSubmission,
 )
 from rllm.experimental.engine.trace_converter import compute_step_metrics
+from rllm.types import Episode
 from rllm.workflows.workflow import TerminationReason
 
 # ---------------------------------------------------------------------------
@@ -59,6 +60,17 @@ def _make_step(prompt_len: int = 10, response_len: int = 20) -> Step:
     return Step(
         prompt_ids=list(range(prompt_len)),
         response_ids=list(range(response_len)),
+    )
+
+
+def _error_episode(uid: str, task: dict, error_message: str) -> Episode:
+    """Test fixture: minimal Episode shaped like one a failed remote task should produce."""
+    return Episode(
+        id=uid,
+        task=task,
+        is_correct=False,
+        termination_reason=TerminationReason.ERROR,
+        metadata={"error": {"message": error_message}},
     )
 
 
@@ -191,7 +203,7 @@ class TestBuildEpisodeWithTraces:
             elapsed=5.0,
         )
 
-        with patch("rllm.experimental.engine.remote_agent_flow_engine.trace_record_to_step") as mock_convert:
+        with patch("rllm.experimental.engine.remote_agentflow_engine.trace_record_to_step") as mock_convert:
             # Return Steps with proper token lengths
             mock_convert.side_effect = [_make_step(prompt_len=10 + i, response_len=20 + i) for i in range(3)]
             episode = _build_episode(traces, result, "task-1:0", {"prompt": "test"})
