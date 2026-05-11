@@ -9,6 +9,9 @@ Fixes:
 
 from __future__ import annotations
 
+import asyncio
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 
@@ -22,6 +25,75 @@ def apply_swerex_modal_minimal_patch(secret_name: str = "turing-swe-bench"):
 
     image_builder_cls = swerex_modal._ImageBuilder
     modal_deployment_cls = swerex_modal.ModalDeployment
+
+    def _read_positive_float_env(name: str, default: float) -> float:
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+
+        value = float(raw)
+        if value <= 0:
+            raise ValueError(f"{name} must be > 0, got {value}")
+        return value
+
+    def _run_coro_blocking(coro: Any) -> Any:
+        """Run a coroutine from sync code, including if an event loop exists."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(asyncio.run, coro).result()
+
+    # Patch 0: Bound Modal App.lookup.
+    # The upstream sync wrapper can block indefinitely in transient Modal
+    # control-plane stalls. Raise a normal timeout so the existing sandbox retry
+    # loop in agent_flow.py can move on instead of pinning a rollout thread.
+    def _init_with_bounded_lookup(
+        self: Any,
+        *,
+        logger: Any | None = None,
+        image: Any,
+        startup_timeout: float = 0.4,
+        runtime_timeout: float = 3600.0,
+        modal_sandbox_kwargs: dict[str, Any] | None = None,
+        install_pipx: bool = True,
+        deployment_timeout: float = 3600.0,
+    ) -> None:
+        self._image = image_builder_cls(install_pipx=install_pipx, logger=logger).auto(image)
+        self._runtime = None
+        self._startup_timeout = startup_timeout
+        self._sandbox = None
+        self._port = 8880
+        self.logger = logger or swerex_modal.get_logger("rex-deploy")
+
+        lookup_default = min(max(float(startup_timeout), 1.0), 60.0)
+        lookup_timeout = _read_positive_float_env(
+            "SWE_REX_MODAL_APP_LOOKUP_TIMEOUT_S",
+            _read_positive_float_env("SWE_REX_MODAL_CONTROL_TIMEOUT_S", lookup_default),
+        )
+
+        async def _lookup_app() -> Any:
+            return await asyncio.wait_for(
+                modal.App.lookup.aio("swe-rex", create_if_missing=True),
+                timeout=lookup_timeout,
+            )
+
+        try:
+            self._app = _run_coro_blocking(_lookup_app())
+        except TimeoutError as exc:
+            raise TimeoutError(f"Modal App.lookup timed out after {lookup_timeout:.1f}s") from exc
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(f"Modal App.lookup timed out after {lookup_timeout:.1f}s") from exc
+
+        self._user = swerex_modal._get_modal_user()
+        self._runtime_timeout = runtime_timeout
+        self._deployment_timeout = deployment_timeout
+        self._modal_kwargs = modal_sandbox_kwargs or {}
+        self._hooks = swerex_modal.CombinedDeploymentHook()
+
+    modal_deployment_cls.__init__ = _init_with_bounded_lookup  # type: ignore
 
     # Patch 1: Add GCR image support
     original_auto = image_builder_cls.auto
@@ -76,18 +148,29 @@ def apply_swerex_modal_minimal_patch(secret_name: str = "turing-swe-bench"):
         token = self._get_token()
 
         cmd = self._start_swerex_cmd(token)
-        self._sandbox = await modal.Sandbox.create.aio(
-            "/bin/sh",
-            "-c",
-            f"export PATH=\"$HOME/.local/bin:$PATH\" && {cmd}",
-            image=self._image,
-            timeout=int(self._deployment_timeout),
-            unencrypted_ports=[self._port],
-            app=self._app,
-            **self._modal_kwargs,
+        create_timeout = _read_positive_float_env(
+            "SWE_REX_MODAL_SANDBOX_CREATE_TIMEOUT_S",
+            _read_positive_float_env("SWE_REX_MODAL_CONTROL_TIMEOUT_S", max(float(self._startup_timeout), 1.0)),
+        )
+        self._sandbox = await asyncio.wait_for(
+            modal.Sandbox.create.aio(
+                "/bin/sh",
+                "-c",
+                f"export PATH=\"$HOME/.local/bin:$PATH\" && {cmd}",
+                image=self._image,
+                timeout=int(self._deployment_timeout),
+                unencrypted_ports=[self._port],
+                app=self._app,
+                **self._modal_kwargs,
+            ),
+            timeout=create_timeout,
         )
 
-        tunnels = await self._sandbox.tunnels.aio()
+        tunnels_timeout = _read_positive_float_env(
+            "SWE_REX_MODAL_TUNNELS_TIMEOUT_S",
+            _read_positive_float_env("SWE_REX_MODAL_CONTROL_TIMEOUT_S", min(max(float(self._startup_timeout), 1.0), 60.0)),
+        )
+        tunnels = await asyncio.wait_for(self._sandbox.tunnels.aio(), timeout=tunnels_timeout)
         tunnel = tunnels[self._port]
         elapsed = time.time() - t0
         log_url = await self.get_modal_log_url()

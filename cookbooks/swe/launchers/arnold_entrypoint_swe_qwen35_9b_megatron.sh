@@ -27,6 +27,15 @@ if [ "${RLLM_SWE_MODE:-smoke}" = "cluster_only" ]; then
 fi
 
 restore_swe_artifacts
+if [ "${RLLM_SWE_LINK_LOCAL_MODEL_PATH:-1}" = "1" ] \
+    && [ ! -d /mnt/hdfs/model_path ] \
+    && [ -d /tmp/hf_cache/hub/models--Qwen--Qwen3.5-9B/snapshots ]; then
+    MODEL_SNAPSHOT="$(find -L /tmp/hf_cache/hub/models--Qwen--Qwen3.5-9B/snapshots -mindepth 1 -maxdepth 1 -type d -print -quit)"
+    if [ -n "$MODEL_SNAPSHOT" ] && [ -d "$MODEL_SNAPSHOT" ]; then
+        sudo mkdir -p /mnt/hdfs 2>/dev/null || mkdir -p /mnt/hdfs
+        sudo ln -sfn "$MODEL_SNAPSHOT" /mnt/hdfs/model_path 2>/dev/null || ln -sfn "$MODEL_SNAPSHOT" /mnt/hdfs/model_path
+    fi
+fi
 export PYTHONUNBUFFERED=1
 export PYTHONFAULTHANDLER=1
 export HYDRA_FULL_ERROR=1
@@ -38,6 +47,30 @@ export TRAJ_DIR=${TRAJ_DIR:-$RLLM_SWE_OUTPUT_DIR/trajectories/\${trainer.experim
 export RLLM_RUN_TASK_RUNNER_LOCAL=1
 export RAY_ADDRESS=${RAY_ADDRESS:-auto}
 export LOGGER=${LOGGER:-"[console,wandb]"}
+export SWE_REX_MODAL_APP_LOOKUP_TIMEOUT_S="${SWE_REX_MODAL_APP_LOOKUP_TIMEOUT_S:-60}"
+export SWE_REX_MODAL_SANDBOX_CREATE_TIMEOUT_S="${SWE_REX_MODAL_SANDBOX_CREATE_TIMEOUT_S:-240}"
+export SWE_REX_MODAL_TUNNELS_TIMEOUT_S="${SWE_REX_MODAL_TUNNELS_TIMEOUT_S:-60}"
+
+if [ "${RLLM_SWE_MODE:-smoke}" = "external_ray_worker" ]; then
+    if [ -z "${EXTERNAL_RAY_HEAD_IP:-}" ]; then
+        echo "Missing EXTERNAL_RAY_HEAD_IP for external_ray_worker mode." >&2
+        exit 2
+    fi
+    nvidia-smi
+    "$VIRTUAL_ENV/bin/ray" stop --force || true
+    sleep 2
+    "$VIRTUAL_ENV/bin/ray" start \
+        --address="[${EXTERNAL_RAY_HEAD_IP}]:${EXTERNAL_RAY_HEAD_PORT:-6379}" \
+        --num-cpus="${RAY_WORKER_CPUS:-240}" \
+        --num-gpus="${RAY_WORKER_GPUS:-8}" \
+        --disable-usage-stats
+    "$VIRTUAL_ENV/bin/ray" status || true
+    echo "EXTERNAL_RAY_WORKER_READY host=$(hostname) role=${ARNOLD_ROLE:-unknown} head=${EXTERNAL_RAY_HEAD_IP}"
+    while true; do
+        "$VIRTUAL_ENV/bin/ray" status || true
+        sleep 300
+    done
+fi
 
 if [ -z "${MODAL_TOKEN_ID:-}" ] || [ -z "${MODAL_TOKEN_SECRET:-}" ]; then
     echo "Missing MODAL_TOKEN_ID or MODAL_TOKEN_SECRET." >&2

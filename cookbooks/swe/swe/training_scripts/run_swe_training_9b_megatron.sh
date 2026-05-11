@@ -7,6 +7,7 @@
 #   NGPUS_PER_NODE=8     (default 8)
 #   ACTOR_TP=2 ACTOR_CP=1 ACTOR_PP=1 ROLLOUT_TP=1  (Megatron parallelism)
 #   ACTOR_LR_WARMUP_STEPS=20  (set to 0 for one-step smoke tests)
+#   ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU=1  (B200 full-token safe default)
 #   RLLM_RAY_MASTER_PORT_RANGE=25000:25100  (avoid ephemeral-port collisions)
 #   LOGGER='[console, wandb]' or '[console]'  (default "[console, wandb]")
 set -euo pipefail
@@ -155,7 +156,7 @@ MODEL_REPO=${MODEL_REPO:-Qwen/Qwen3.5-9B}
 MODEL_CACHE_DIR=${MODEL_CACHE_DIR:-/tmp/hf_cache/hub/models--Qwen--Qwen3.5-9B}
 if [ -z "${MODEL_PATH:-}" ]; then
     if [ -d "$MODEL_CACHE_DIR/snapshots" ]; then
-        MODEL_PATH=$(find -L "$MODEL_CACHE_DIR/snapshots" -mindepth 1 -maxdepth 1 -type d | head -1)
+        MODEL_PATH=$(find -L "$MODEL_CACHE_DIR/snapshots" -mindepth 1 -maxdepth 1 -type d -print -quit)
     else
         MODEL_PATH=""
     fi
@@ -185,6 +186,7 @@ ROLLOUT_TP=${ROLLOUT_TP:-1}
 NNODES=${NNODES:-2}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 ACTOR_LR_WARMUP_STEPS=${ACTOR_LR_WARMUP_STEPS:-20}
+ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU=${ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU:-1}
 LOGGER=${LOGGER:-"[console,wandb]"}
 SWE_STEP_LIMIT=${SWE_STEP_LIMIT:-200}
 SWE_AGENT_TIMEOUT=${SWE_AGENT_TIMEOUT:-360}
@@ -229,6 +231,7 @@ echo "Model:    $MODEL_NAME"
 echo "Repo:     $MODEL_REPO"
 echo "Dataset:  swe_smith_filtered_mix"
 echo "Topology: ${NNODES} node(s) × ${NGPUS_PER_NODE} GPU  |  Megatron TP=${ACTOR_TP} CP=${ACTOR_CP} PP=${ACTOR_PP}  |  vLLM TP=${ROLLOUT_TP}"
+echo "Actor:    ppo_micro_batch_size_per_gpu=${ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU} lr_warmup_steps=${ACTOR_LR_WARMUP_STEPS}"
 echo "SWE:      train steps=${SWE_STEP_LIMIT} timeout=${SWE_AGENT_TIMEOUT}s cmd=${SWE_COMMAND_TIMEOUT}s sandbox=${SWE_SANDBOX_TIMEOUT}s jitter=${SWE_STARTUP_JITTER_S}s max_tokens=${MODEL_MAX_TOKENS}"
 echo "SWE val:  steps=${SWE_VAL_STEP_LIMIT} timeout=${SWE_VAL_AGENT_TIMEOUT}s cmd=${SWE_VAL_COMMAND_TIMEOUT}s sandbox=${SWE_VAL_SANDBOX_TIMEOUT}s jitter=${SWE_VAL_STARTUP_JITTER_S}s"
 echo "Ckpt:     $MAIN_CHECKPOINT_DIR"
@@ -273,7 +276,7 @@ python -u -m swe.scripts.train_swe_verl \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     ++actor_rollout_ref.actor.optim.lr_warmup_steps=${ACTOR_LR_WARMUP_STEPS} \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU} \
     actor_rollout_ref.actor.ppo_epochs=1 \
     actor_rollout_ref.actor.use_kl_loss=false \
     actor_rollout_ref.actor.kl_loss_coef=0.0 \

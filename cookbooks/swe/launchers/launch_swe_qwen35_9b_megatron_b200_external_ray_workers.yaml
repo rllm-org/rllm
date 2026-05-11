@@ -1,0 +1,59 @@
+# Launch only the 2x8 B200 worker side through Arnold.
+#
+# Usage:
+#   1. Reserve/start a Modal-good CPU Ray head.
+#   2. Export EXTERNAL_RAY_HEAD_IP to that CPU head IPv6 address.
+#   3. python verl-recipes/tasks/arnold_launch.py \
+#        --config submodules/rllm/cookbooks/swe/launchers/launch_swe_qwen35_9b_megatron_b200_external_ray_workers.yaml
+#   4. Mount the same writable HDFS checkpoint path on the CPU head at
+#      /mnt/hdfs/swe_checkpoints, or set CHECKPOINT_HDFS_URI for the CPU driver.
+#   5. On the CPU head, run:
+#        ARNOLD_RAY_ADDRESS=auto \
+#        bash submodules/rllm/cookbooks/swe/launchers/launch_external_cpu_driver_swe_qwen35_9b_megatron.sh
+arnold:
+  region: i18n
+  group_name: mlsys_inference
+  cluster_name: cloudnative-useast1b
+  quota_pool: third_party_oci
+  image_url: aliyun-va-hub.byted.org/arnold/jason.wei:qwen35b200baseplainenvcodepy2
+  job_name: swe_qwen35_9b_megatron_b200x16_external_ray_workers
+  namespace: /topic/2ebfba22254a08e7
+  enable_ray_on_arnold: false
+  skip_git_repo: true
+  use_robust_training: false
+  role_name: worker
+  gpu: 8
+  gpuv: NVIDIA_B200
+  num_instances: 2
+  port: 20
+  queue_name: compute-598-useast1b-cloudnative-aioci-mlsys.inference-guarantee
+  minipod: true
+  disable_over_cluster: false
+  min_hour: 1
+  skip_restart: true
+  uce_config: {}
+  hdfs_mount:
+    - hdfs_address: hdfs://harunava/home/byte_arnold_va_ssd/mlsys/models/Qwen3.5-9B
+      mount_path: /mnt/hdfs/model_path
+      mode: RO
+    - hdfs_address: hdfs://harunava/home/byte_arnold_va_ssd/mlsys/checkpoints/rllm_swe
+      mount_path: /mnt/hdfs/swe_checkpoints
+      mode: RW
+  envs:
+    REPO_ROOT: /opt/tiger/modelchef
+    RLLM_SWE_ARTIFACT_DIR: /opt/tiger/swe_runtime_image/artifacts
+    RLLM_SWE_OUTPUT_DIR: /tmp/rllm_swe_outputs
+    CHECKPOINT_ROOT: /mnt/hdfs/swe_checkpoints
+    MODEL_PATH: /mnt/hdfs/model_path
+    RLLM_SWE_MODE: external_ray_worker
+    ARNOLD_NETWORK_TOPOLOGY: SAME_NETMINIPOD
+    RAY_BACKEND_LOG_LEVEL: info
+    RAY_DEDUP_LOGS: "0"
+    RAY_LOG_TO_DRIVER: "1"
+    NCCL_DEBUG: INFO
+  local_envs:
+    - EXTERNAL_RAY_HEAD_IP
+
+verl:
+  entrypoint: submodules/rllm/cookbooks/swe/launchers/arnold_entrypoint_swe_qwen35_9b_megatron.sh
+  ray_runtime_env: submodules/rllm/cookbooks/swe/launchers/ray_runtime_env_swe.yaml
