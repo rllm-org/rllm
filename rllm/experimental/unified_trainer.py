@@ -177,6 +177,10 @@ class UnifiedTrainer:
             gateway_mode = "process" if kwargs.get("backend_name") == "verl" else "thread"
             self._gateway = GatewayManager(self.config, mode=gateway_mode)
 
+            # merge the data.max_response_length into the sampling_params; TODO(listar2000): refactor the data config group
+            training_sampling_params = self.rllm_config.rollout.train | {"max_tokens": self.config.data.max_response_length}
+            val_sampling_params = self.rllm_config.rollout.val | {"max_tokens": self.config.data.max_response_length}
+
             self.agent_workflow_engine = AgentFlowEngine(
                 agent_flow=agent_flow,
                 evaluator=evaluator,
@@ -186,8 +190,8 @@ class UnifiedTrainer:
                 retry_limit=self.rllm_config.workflow.retry_limit,
                 raise_on_error=self.rllm_config.workflow.get("raise_on_error", True),
                 episode_logger=self.episode_logger,
-                train_sampling_params=self.rllm_config.rollout.train,
-                val_sampling_params=self.rllm_config.rollout.val,
+                train_sampling_params=training_sampling_params,
+                val_sampling_params=val_sampling_params,
             )
         elif remote_runtime_cfg.get("enabled", False):
             from rllm.experimental.engine.gateway_manager import GatewayManager

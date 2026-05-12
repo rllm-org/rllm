@@ -32,8 +32,3 @@ rllm:
   algorithm:
     rollout_correction:
       bypass_mode: false
-  rollout:
-    train:
-      max_tokens: ${data.max_response_length}
-    val:
-      max_tokens: ${data.max_response_length}
