@@ -41,13 +41,15 @@ async def geo3k_flow(task: Task, config: AgentConfig) -> Episode:
         {"role": "user", "content": user_content},
     ]
 
+    # top_k is not a chat.completions parameter; drop it from the rollout sampling params.
+    sampling = {k: v for k, v in config.sampling_params.items() if k != "top_k"}
+
     response_text = ""
     try:
         response = await client.chat.completions.create(
             model=config.model,
             messages=messages,
-            temperature=config.sampling_params.get("temperature", 0.6),
-            max_tokens=config.sampling_params.get("max_tokens", 2048),
+            **sampling,
         )
         response_text = response.choices[0].message.content or ""
     except Exception as e:

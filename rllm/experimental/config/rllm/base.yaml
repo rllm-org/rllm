@@ -34,8 +34,9 @@ workflow:
 # ``rollout.{train,val}.*`` into ``actor_rollout_ref.rollout`` and
 # ``actor_rollout_ref.rollout.val_kwargs`` respectively.
 # The AgentFlowEngine forwards ``rollout.train`` / ``rollout.val`` into
-# ``AgentConfig.sampling_params``, so AgentFlows read user-set sampling
-# values via ``config.sampling_params.get(...)``.
+# ``AgentConfig.sampling_params``, so AgentFlows spread them straight into
+# their LLM calls (``**config.sampling_params``; ``top_k`` dropped for
+# OpenAI-compatible chat-completions clients that don't accept it).
 rollout:
   n: 8
   n_val: 1  # number of validation samples per prompt
