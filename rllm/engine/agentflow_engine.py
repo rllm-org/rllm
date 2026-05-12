@@ -244,6 +244,41 @@ def enrich_episode_with_traces(
     )
 
 
+# Top-level extension field the Tinker adapter stamps on a chat-
+# completion response when ``engine.get_model_response`` raised a
+# ``TerminationEvent`` (see ``rllm.experimental.engine.tinker_adapter``).
+_RLLM_TERMINATION_KEY = "rllm_termination_reason"
+
+
+def _is_termination_marker(trace: Any) -> bool:
+    """Whether *trace* is the graceful-termination marker (empty body)."""
+    raw = getattr(trace, "raw_response", None)
+    return isinstance(raw, dict) and bool(raw.get(_RLLM_TERMINATION_KEY))
+
+
+def _extract_termination_marker(traces: list[Any]) -> TerminationReason | None:
+    """Return the :class:`TerminationReason` from a marker trace, if any.
+
+    Scans from the tail (markers are by construction the *last* call in
+    the rollout) and returns the first one found. Unknown reason strings
+    fall back to ``UNKNOWN`` so we still surface "something terminated"
+    in batch metrics instead of silently flipping to ``ENV_DONE``.
+    """
+    for trace in reversed(traces):
+        raw = getattr(trace, "raw_response", None)
+        if not isinstance(raw, dict):
+            continue
+        reason_value = raw.get(_RLLM_TERMINATION_KEY)
+        if not reason_value:
+            continue
+        try:
+            return TerminationReason(reason_value)
+        except ValueError:
+            logger.warning("Unknown rllm_termination_reason %r — defaulting to UNKNOWN", reason_value)
+            return TerminationReason.UNKNOWN
+    return None
+
+
 _TIMING_PHASES_DISPLAY: tuple[tuple[str, str], ...] = (
     ("setup", "time/setup_s"),
     ("agent", "time/agent_s"),
@@ -529,6 +564,19 @@ class AgentFlowEngine:
         try:
             t = time.perf_counter()
             traces = await self.gateway.aget_traces(uid)
+
+            # Detect graceful-termination markers on the trace tail.
+            # The Tinker adapter stamps ``rllm_termination_reason`` on
+            # the raw response when the engine aborted (e.g.
+            # MAX_PROMPT_LENGTH_EXCEEDED at turn N) so the agent could
+            # finish cleanly instead of crashing on a 500. Drop the
+            # marker trace from enrichment — it carries empty token_ids
+            # by design and would trip strict mode — and remember the
+            # reason so we can stamp the episode below.
+            termination_reason: TerminationReason | None = _extract_termination_marker(traces)
+            if termination_reason is not None:
+                traces = [tr for tr in traces if not _is_termination_marker(tr)]
+
             timings["time/traces_s"] = time.perf_counter() - t
 
             enriched = await self._finish_episode(
@@ -539,6 +587,7 @@ class AgentFlowEngine:
                 task_dict=task_dict,
                 ctx=ctx,
                 _timings=timings,
+                termination_reason=termination_reason,
             )
             # Surface per-phase timings on the episode for the trainer's
             # batch aggregator (np.mean per metric key) to roll up.
@@ -649,12 +698,19 @@ class AgentFlowEngine:
         task_dict: dict,
         ctx: TaskContext | None,
         _timings: dict[str, float] | None = None,
+        termination_reason: TerminationReason | None = None,
     ) -> Episode:
         """Enrich the raw episode with traces, run the evaluator, apply rewards.
 
         When ``_timings`` is provided, records ``time/verifier_s`` (evaluator
         wall-clock including any in-sandbox ``tests/test.sh`` work) plus
         the LLM-vs-other split derived from ``TraceRecord.latency_ms``.
+
+        ``termination_reason``, when set, is stamped onto the episode
+        (e.g. a ``MAX_PROMPT_LENGTH_EXCEEDED`` marker extracted from
+        traces by the caller). Otherwise we fall through to the
+        engine-bound default of ``ENV_DONE`` when the agent didn't
+        already set one.
         """
         loop = asyncio.get_event_loop()
 
@@ -712,7 +768,9 @@ class AgentFlowEngine:
         for signal in eval_output.signals:
             enriched.metrics[signal.name] = signal.value
 
-        if enriched.termination_reason is None:
+        if termination_reason is not None:
+            enriched.termination_reason = termination_reason
+        elif enriched.termination_reason is None:
             enriched.termination_reason = TerminationReason.ENV_DONE
         return enriched
 
