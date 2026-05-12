@@ -14,7 +14,7 @@ import torch
 from omegaconf import DictConfig
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
-from verl.experimental.agent_loop.agent_loop import AgentLoopManager, AsyncLLMServerManager
+from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup, ResourcePoolManager
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo.core_algos import agg_loss
@@ -37,7 +37,7 @@ from rllm.experimental.common import (
 )
 from rllm.experimental.protocol import BackendProtocol
 from rllm.experimental.rollout import RolloutEngine, VerlEngine
-from rllm.experimental.verl import transform_episodes_to_dataproto, update_dataproto_with_advantages
+from rllm.experimental.verl import transform_episodes_to_dataproto, transform_trajectory_groups_to_dataproto, update_dataproto_with_advantages
 from rllm.experimental.verl.metrics import calculate_debug_metrics_compat
 from rllm.experimental.verl.utils import (
     balance_batch,
@@ -122,6 +122,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         self.tokenizer = tokenizer
         self.processor = processor
         self.full_config = config
+        self.is_separated = config.rllm.get("async_training", {}).get("enable", False)
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         self.use_reference_policy = need_reference_policy(config)
         self.use_prefix_grouper = config.actor_rollout_ref.actor.get("use_prefix_grouper", False)
@@ -208,6 +209,74 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         )
         self.checkpoint_manager.sleep_replicas()
 
+    def _init_separated_workers(self) -> None:
+        """Create training-side workers and standalone rollout servers for separated (async) mode.
+
+        Training workers are created via RayWorkerGroup on trainer GPUs.
+        Rollout servers are launched by FullyAsyncAgentLoopManager in standalone
+        mode (worker_group=None), using config.actor_rollout_ref.rollout.nnodes/n_gpus_per_node.
+        """
+        from rllm.experimental.verl.async_agent_loop import FullyAsyncAgentLoopManager
+
+        config = self.config
+        wg_kwargs = build_wg_kwargs(config, self.device_name)
+
+        self.resource_pool_manager.create_resource_pool()
+        resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
+
+        actor_role = Role.Actor
+        if Role.ActorRollout in self.role_worker_mapping:
+            actor_role = Role.ActorRollout
+        elif Role.Actor not in self.role_worker_mapping:
+            raise ValueError(f"Separated mode requires Role.Actor or Role.ActorRollout, got {self.role_worker_mapping.keys()}")
+
+        resource_pool = self.resource_pool_manager.get_resource_pool(actor_role)
+        resource_pool_to_cls[resource_pool][str(actor_role)] = RayClassWithInitArgs(
+            cls=self.role_worker_mapping[actor_role],
+            config=config.actor_rollout_ref,
+            role=str(actor_role),
+        )
+
+        if self.use_reference_policy and Role.RefPolicy in self.role_worker_mapping:
+            ref_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
+            resource_pool_to_cls[ref_pool][str(Role.RefPolicy)] = RayClassWithInitArgs(
+                self.role_worker_mapping[Role.RefPolicy],
+                config=config.actor_rollout_ref,
+                role=str(Role.RefPolicy),
+            )
+
+        all_wg = {}
+        for rp, class_dict in resource_pool_to_cls.items():
+            if not class_dict:
+                continue
+            worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
+            wg_dict = self.ray_worker_group_cls(resource_pool=rp, ray_cls_with_init=worker_dict_cls, **wg_kwargs)
+            all_wg.update(wg_dict.spawn(prefix_set=class_dict.keys()))
+
+        if self.use_reference_policy and not self.ref_in_actor:
+            if str(Role.RefPolicy) in all_wg:
+                self.ref_policy_wg = all_wg[str(Role.RefPolicy)]
+                self.ref_policy_wg.init_model()
+
+        self.actor_rollout_wg = all_wg[str(actor_role)]
+        self.actor_rollout_wg.init_model()
+
+        if self.ref_in_actor:
+            self.ref_policy_wg = self.actor_rollout_wg
+
+        # Standalone rollout servers (no worker_group; resources from rollout.nnodes/n_gpus_per_node)
+        self.async_rollout_manager = FullyAsyncAgentLoopManager.create(
+            config=config,
+            worker_group=None,
+        )
+
+        ckpt_cfg = omega_conf_to_dataclass(config.actor_rollout_ref.rollout.checkpoint_engine)
+        self.checkpoint_manager = CheckpointEngineManager(
+            config=ckpt_cfg,
+            trainer=self.actor_rollout_wg,
+            replicas=self.async_rollout_manager.rollout_replicas,
+        )
+
     # =========================================================================
     # BackendProtocol interface methods
     # =========================================================================
@@ -228,7 +297,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
         patch_verl_tensordict_jagged_layout()
 
-        self._init_colocated_workers()
+        if self.is_separated:
+            self._init_separated_workers()
+        else:
+            self._init_colocated_workers()
 
         assert self.async_rollout_manager is not None
 
@@ -238,7 +310,14 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             logger.warning("RayWorkerGroup.set_loss_fn not available — skipping custom loss injection")
 
         servers = zip(self.async_rollout_manager.server_addresses, self.async_rollout_manager.server_handles, strict=True)
-        server_manager = AsyncLLMServerManager(self.config, servers=servers, load_balancer_handle=self.async_rollout_manager.global_load_balancer)
+        if self.is_separated:
+            from rllm.experimental.verl.async_agent_loop import FullyAsyncLLMServerManager
+
+            server_manager = FullyAsyncLLMServerManager(self.config, servers=servers, load_balancer_handle=self.async_rollout_manager.global_load_balancer)
+        else:
+            from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
+
+            server_manager = AsyncLLMServerManager(self.config, servers=servers, load_balancer_handle=self.async_rollout_manager.global_load_balancer)
 
         self.rollout_engine = VerlEngine(
             config=self.config,
@@ -254,6 +333,12 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
     def validate_config(self) -> None:
         """Validate verl-specific configuration settings."""
         assert self.config.actor_rollout_ref.rollout.mode == "async", "Only async rollout mode is supported for VerlBackend"
+        if self.is_separated:
+            async_cfg = self.config.rllm.async_training
+            fwd_bwd = async_cfg.fwd_bwd_group_size if async_cfg.fwd_bwd_group_size is not None else async_cfg.mini_batch_size
+            assert fwd_bwd == async_cfg.mini_batch_size, (
+                f"VerlBackend requires async_training.fwd_bwd_group_size == mini_batch_size (got {async_cfg.fwd_bwd_group_size} vs {async_cfg.mini_batch_size})"
+            )
         if self.config.rllm.stepwise_advantage.mode != "broadcast":
             # automatically set the stepwise_advantage_mode to "broadcast", the warning is already shown in AlgorithmConfig.from_config
             self.config.rllm.stepwise_advantage.mode = "broadcast"
@@ -314,10 +399,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         batch = batch.repeat(repeat_times=repeat_times)
         # Step 2: execute tasks using the agent workflow engine (async)
         episodes = await self._execute_tasks_async(batch, agent_workflow_engine, is_validation=is_validation, **kwargs)
-        # Step 3: sleep the replicas to free kv_cache before weight sync (if free_cache_engine is enabled)
-        # Only sleep during training — validation doesn't update weights, so there's no wake_up call after it.
-        # Sleeping after validation would leave replicas asleep, causing CUDA illegal memory access on the next generation.
-        if not is_validation:
+        # Step 3: sleep the replicas to free kv_cache before weight sync (colocated only).
+        # Skip during validation (no weight sync follows) and in separated mode
+        # (rollout servers run on their own resources; sleeping is a separated-mode no-op).
+        if not is_validation and not self.is_separated:
             await self.checkpoint_manager.sleep_replicas()
         return episodes
 
@@ -335,24 +420,34 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         return episodes
 
     def transform_to_backend_batch(self, trainer_state: TrainerState, **kwargs) -> DataProto:
-        """Transform rllm-native data structures to verl DataProto format."""
-        assert trainer_state.episodes is not None, "Episodes are not set"
-        episodes: list[Episode] = trainer_state.episodes
+        """Transform rllm-native data structures to verl DataProto format.
+
+        Sync path receives ``episodes``; fully-async path (post-buffer) receives
+        ``trajectory_groups``.
+        """
         assert self.rollout_engine is not None, "rollout_engine is not initialized."
+        max_prompt_length = self.config.data.max_prompt_length
         # data.max_response_length is the per-turn generation cap at rollout
         # time, but merged multi-turn responses concatenate [A0, obs1, A1, ...]
-        # and can grow up to the full context window - so using max_total_length to
-        # bound the sequence
-        max_total_length = self.config.data.max_prompt_length + self.config.data.max_response_length
-        batch = transform_episodes_to_dataproto(episodes, self.rollout_engine, self.config.data.max_prompt_length, max_total_length)
-        # Lift per-batch merge metrics (batch/steps_per_traj,
-        # batch/step_response_length) out of meta_info so they show up in
-        # the standard trainer_state.metrics path. Same metric names the
-        # tinker backend logs, so dashboards work across both.
-        merge_metrics = batch.meta_info.pop("merge_metrics", None)
-        if merge_metrics:
-            trainer_state.metrics.update(merge_metrics)
-        return batch
+        # and can grow up to the full context window - so use max_total_length to
+        # bound the sequence.
+        max_total_length = max_prompt_length + self.config.data.max_response_length
+
+        if trainer_state.episodes is not None:
+            batch = transform_episodes_to_dataproto(trainer_state.episodes, self.rollout_engine, max_prompt_length, max_total_length)
+            # Lift per-batch merge metrics (batch/steps_per_traj,
+            # batch/step_response_length) out of meta_info so they show up in
+            # the standard trainer_state.metrics path. Same metric names the
+            # tinker backend logs, so dashboards work across both.
+            merge_metrics = batch.meta_info.pop("merge_metrics", None)
+            if merge_metrics:
+                trainer_state.metrics.update(merge_metrics)
+            return batch
+
+        assert trainer_state.trajectory_groups is not None, "Either episodes or trajectory_groups must be set"
+        batch = transform_trajectory_groups_to_dataproto(trainer_state.trajectory_groups, self.rollout_engine, max_prompt_length, max_total_length)
+        mode = self.algorithm_config.stepwise_advantage_mode if self.algorithm_config is not None else "broadcast"
+        return update_dataproto_with_advantages(batch, trainer_state.trajectory_groups, mode=mode)
 
     def _remove_padding(self, batch: DataProto) -> DataProto:
         """Removes padded steps from the batch"""
@@ -686,9 +781,10 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             with simple_timer("save_checkpoint", trainer_state.timing_dict):
                 save_checkpoint(self.config, self.global_steps, self.actor_rollout_wg, train_dataloader=self.train_dataloader)
 
-        # Weight synchronization
-        with simple_timer("update_weights", trainer_state.timing_dict):
-            await self.checkpoint_manager.update_weights(trainer_state.global_step)
+        # Weight synchronization (colocated only — separated mode syncs in on_policy_updated)
+        if not self.is_separated:
+            with simple_timer("update_weights", trainer_state.timing_dict):
+                await self.checkpoint_manager.update_weights(trainer_state.global_step)
 
         # Update metrics
         batch: DataProto = trainer_state.backend_batch  # type: ignore[attr-defined]
@@ -699,6 +795,12 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
         n_gpus = self.resource_pool_manager.get_n_gpus()
         metrics.update(compute_throughout_metrics(batch=batch, timing_raw=trainer_state.timing_dict, n_gpus=n_gpus))
+
+    async def on_policy_updated(self, trainer_state: TrainerState) -> None:
+        """Weight-sync hook for separated mode (called by the async pipeline)."""
+        if self.is_separated and self.checkpoint_manager is not None:
+            with simple_timer("weight_sync", trainer_state.timing_dict):
+                await self.checkpoint_manager.update_weights(trainer_state.weight_version)
 
     async def on_validation_start(self, trainer_state: TrainerState) -> bool:
         """Called at the start of validation."""

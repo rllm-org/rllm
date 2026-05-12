@@ -206,6 +206,25 @@ def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) ->
     # Mirror the effective low bound to/from rllm.algorithm.eps_clip.
     sync_clip_ratio()
 
+    # Async / separated mode toggles. Colocated needs hybrid_engine + naive ckpt;
+    # separated needs hybrid_engine=False + nccl ckpt + the async_training mini-batch sizing.
+    is_separated = config.rllm.get("async_training", {}).get("enable", False)
+    rollout = config.actor_rollout_ref.rollout
+    actor = config.actor_rollout_ref.actor
+    ckpt_backend = OmegaConf.select(rollout, "checkpoint_engine.backend")
+    if is_separated:
+        config.actor_rollout_ref.hybrid_engine = False
+        if ckpt_backend == "naive":
+            logger.info("Async training enabled; overriding checkpoint_engine.backend 'naive' → 'nccl' (naive is colocated-only).")
+            rollout.checkpoint_engine.backend = "nccl"
+        actor.ppo_mini_batch_size = config.rllm.async_training.mini_batch_size
+        config.async_training.partial_rollout = config.rllm.async_training.partial_rollout
+    else:
+        config.actor_rollout_ref.hybrid_engine = True
+        if ckpt_backend is not None and ckpt_backend != "naive":
+            logger.info(f"Sync training; overriding checkpoint_engine.backend '{ckpt_backend}' → 'naive' (hybrid engine requires naive).")
+            rollout.checkpoint_engine.backend = "naive"
+
 
 def save_checkpoint(
     config: DictConfig,
