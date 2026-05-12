@@ -437,6 +437,9 @@ def _run_train(
     table.add_row("Train data", f"[val]{train_ds_name}[/]  [dim]({train_split}, {len(train_dataset)} examples)[/]")
     val_info = f"[val]{val_ds_name}[/]  [dim]({val_split}, {len(val_dataset)} examples)[/]" if val_dataset else "[dim]None[/]"
     table.add_row("Val data", val_info)
+    sandbox_row = _describe_sandbox_routing(agent_flow, train_dataset, val_dataset, sandbox_backend, sandbox_concurrency)
+    if sandbox_row is not None:
+        table.add_row("Sandbox", sandbox_row)
     table.add_row("Group size", f"[dim]{group_size}[/]")
     table.add_row("Batch size", f"[dim]{batch_size}[/]")
     table.add_row("Learning rate", f"[dim]{lr}[/]")
@@ -469,6 +472,33 @@ def _run_train(
         val_dataset=val_dataset,
     )
     trainer.train()
+
+
+def _describe_sandbox_routing(
+    agent_flow,
+    train_dataset,
+    val_dataset,
+    sandbox_backend: str | None,
+    sandbox_concurrency: int | None,
+) -> str | None:
+    """One-line description of sandbox + gateway routing for the header.
+
+    Returns ``None`` when no sandbox is needed (non-sandboxed AgentFlow
+    on a non-harbor dataset — e.g. ``math`` agent on ``gsm8k``). Lets
+    the operator confirm, before the first rollout's 10-15 min Docker
+    bootstrap, whether they're actually on the backend they think they
+    are. Mirrors the auto-wire decision in :class:`AgentTrainer.__init__`.
+    """
+    from rllm.experimental.unified_trainer import _LOCAL_SANDBOX_BACKENDS, _needs_sandbox_isolation
+
+    if not _needs_sandbox_isolation(agent_flow, train_dataset, val_dataset):
+        return None
+
+    backend = (sandbox_backend or "docker").lower()
+    is_remote = backend not in _LOCAL_SANDBOX_BACKENDS
+    gateway_note = "cloudflared tunnel (auto-spawn)" if is_remote else "loopback (host.docker.internal)"
+    concurrency_note = f", concurrency={sandbox_concurrency}" if sandbox_concurrency is not None else ""
+    return f"[val]{backend}[/]  [dim]· gateway: {gateway_note}{concurrency_note}[/]"
 
 
 def _resolve_dataset_entry(name: str, catalog: dict, benchmark: str | None = None, benchmark_entry: dict | None = None) -> dict | None:
