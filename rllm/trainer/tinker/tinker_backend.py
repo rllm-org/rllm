@@ -163,8 +163,9 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         sampling_params = self.full_config.sampling
         if sampling_params.get("temperature", 1.0) != 1.0 or sampling_params.get("top_p", 1.0) != 1.0:
             logger.warning(
-                "Temperature and top_p are set away from 1.0, this is not recommended by Tinker and can cause mysterious issues with logprobs."
-                "See https://github.com/thinking-machines-lab/tinker-cookbook/pull/86 for discussion."
+                "Temperature and top_p are set away from 1.0, this is not recommended by Tinker "
+                "and can cause mysterious issues with logprobs. See "
+                "https://github.com/thinking-machines-lab/tinker-cookbook/pull/86 for discussion."
             )
 
         # Validate num_minibatches (currently only support 1)

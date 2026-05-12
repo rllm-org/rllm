@@ -8,7 +8,10 @@ so that downstream importance sampling and bypass mode work.
 
 from unittest.mock import MagicMock
 
+import pytest
 import torch
+
+pytest.importorskip("verl")
 
 from rllm.agents.agent import Episode, Step, Trajectory
 from rllm.experimental.rollout import ModelOutput

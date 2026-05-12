@@ -863,7 +863,7 @@ class AgentTrainer:
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
-        backend: Literal["verl", "tinker"] = "verl",
+        backend: Literal["verl", "verl_dpo", "tinker"] = "verl",
         agent_flow: Any = None,
         evaluator: Any = None,
         store: Store | None = None,
@@ -885,6 +885,18 @@ class AgentTrainer:
             from rllm.experimental.verl.verl_launcher import VerlTrainerLauncher
 
             self.launcher = VerlTrainerLauncher(
+                config=config,
+                workflow_class=workflow_class,
+                train_dataset=train_dataset,
+                val_dataset=val_dataset,
+                workflow_args=workflow_args,
+                store=store,
+                **kwargs,
+            )
+        elif backend == "verl_dpo":
+            from rllm.experimental.verl.verl_launcher import VerlDPOTrainerLauncher
+
+            self.launcher = VerlDPOTrainerLauncher(
                 config=config,
                 workflow_class=workflow_class,
                 train_dataset=train_dataset,
