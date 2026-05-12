@@ -187,3 +187,20 @@ class TestRolloutLogProbsPropagation:
         # All standard fields should still be present
         for key in ["input_ids", "attention_mask", "position_ids", "prompts", "responses", "response_mask", "traj_rewards", "step_rewards"]:
             assert key in batch.batch, f"Standard field '{key}' should be present"
+
+
+class TestAttentionMaskConstruction:
+    def test_attention_mask_uses_lengths_not_pad_token_values(self):
+        """Real pad_token_id tokens inside a sequence should remain attended."""
+        episodes = [
+            _make_episode(
+                prompt_ids=[11, 0, 12],
+                completion_ids=[0, 13],
+            )
+        ]
+        engine = _make_mock_rollout_engine(pad_token_id=0)
+
+        batch = transform_episodes_to_dataproto(episodes, engine, max_prompt_length=5, max_response_length=4)
+
+        assert batch.batch["input_ids"][0].tolist() == [0, 0, 11, 0, 12, 0, 13, 0, 0]
+        assert batch.batch["attention_mask"][0].tolist() == [False, False, True, True, True, True, True, False, False]
