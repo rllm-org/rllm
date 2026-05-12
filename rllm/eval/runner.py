@@ -39,6 +39,7 @@ async def run_dataset(
     on_episode_complete=None,
     evaluator_override: Evaluator | None = None,
     gateway: GatewayManager | None = None,
+    sampling_params: dict | None = None,
 ) -> tuple[EvalResult, list]:
     """Run a list of :class:`rllm.types.Task` objects through :class:`AgentFlowEngine`.
 
@@ -55,6 +56,11 @@ async def run_dataset(
         evaluator_override: Bind a single evaluator to all tasks (CLI's
             ``--evaluator`` flag). When ``None``, ``EvalHooks`` resolves a
             per-task verifier from the task's ``[verifier]`` config.
+        sampling_params: Sampling params forwarded to ``AgentConfig.sampling_params``
+            so flows can spread them into their LLM calls (``**config.sampling_params``),
+            mirroring the training path. Defaults to ``{"temperature": 1.0, "top_p": 1.0}``;
+            ``max_tokens`` is intentionally left unset so each flow falls back to the
+            server's default response budget.
 
     Returns ``(EvalResult, list[Episode])``.
     """
@@ -80,6 +86,8 @@ async def run_dataset(
 
     hooks = EvalHooks(evaluator_override=evaluator_override, sandbox_backend=sandbox_backend)
 
+    effective_sampling = dict(sampling_params) if sampling_params else {"temperature": 1.0, "top_p": 1.0}
+
     engine = AgentFlowEngine(
         agent_flow=agent_flow,
         evaluator=None,  # hooks resolve the per-task evaluator
@@ -89,6 +97,8 @@ async def run_dataset(
         retry_limit=1,  # eval doesn't retry on flow errors
         raise_on_error=False,  # capture per-task errors as error Episodes
         hooks=hooks,
+        train_sampling_params=effective_sampling,
+        val_sampling_params=effective_sampling,  # eval always runs as validation
     )
 
     try:
