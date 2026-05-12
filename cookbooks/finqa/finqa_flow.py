@@ -108,14 +108,16 @@ async def finqa_flow(task: Task, config: AgentConfig) -> Episode:
     steps: list[Step] = []
     final_response = ""
 
+    # top_k is not a chat.completions parameter; drop it from the rollout sampling params.
+    sampling = {k: v for k, v in config.sampling_params.items() if k != "top_k"}
+
     for turn in range(MAX_TURNS):
         try:
             resp = await client.chat.completions.create(
                 model=config.model,
                 messages=messages,
                 tools=TOOL_SPECS,
-                temperature=0.6,
-                max_tokens=4096,
+                **sampling,
                 timeout=300,
             )
         except Exception as e:

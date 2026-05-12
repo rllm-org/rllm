@@ -18,6 +18,8 @@ python -u train.py \
     data.val_batch_size=64 \
     data.max_prompt_length=8192 \
     data.max_response_length=4096 \
+    rllm.rollout.train.temperature=0.6 \
+    rllm.rollout.val.temperature=0.6 \
     rllm.trainer.total_epochs=1 \
     rllm.trainer.test_freq=20 \
     rllm.trainer.project_name=finqa \

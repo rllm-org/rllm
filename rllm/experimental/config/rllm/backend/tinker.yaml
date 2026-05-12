@@ -36,17 +36,6 @@ training:
 validation:
   group_size: ???
 
-# Sampling Configuration
-sampling:
-  train:
-    temperature: 1.0
-    top_p: 1.0
-    top_k: -1
-  val:
-    temperature: 1.0
-    top_p: 1.0
-    top_k: -1
-
 # Workflow Configuration (for workflow training mode)
 workflow:
   n_parallel_tasks: 256
@@ -83,4 +72,4 @@ rllm:
     n_val: ${oc.select:validation.group_size, 1}
   algorithm:
     rollout_correction:
-      bypass_mode: True
+      bypass_mode: true
