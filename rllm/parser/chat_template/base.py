@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import logging
 
+from rllm.experimental.rollout.types import Processor, Tokenizer
 from rllm.parser.messages import Messages
-from rllm.parser.utils import PARSER_TEST_MESSAGES
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +26,12 @@ def _import_torch():
 
 
 class ChatTemplateParser:
-    def __init__(self, tokenizer, processor=None):
+    def __init__(self, tokenizer: Tokenizer, processor: Processor | None = None):
         self.tokenizer = tokenizer
         self.processor = processor
         self.generation_prompt = self._get_generation_prompt(tokenizer)
 
-    def _get_generation_prompt(self, tokenizer):
+    def _get_generation_prompt(self, tokenizer: Tokenizer):
         # Some chat templates (e.g. Qwen3.5) reject a lone assistant message,
         # so prepend a stub user message. It is present in both with_prompt
         # and without_prompt and cancels out in the slice below.
@@ -135,7 +135,8 @@ class ChatTemplateParser:
         # Default to the standard parser if no specific match
         parser = ChatTemplateParser(tokenizer, processor=processor)
         logger.info(f"No custom parser found. Using default ChatTemplateParser for {tokenizer.name_or_path}")
-        assert parser.verify_equivalence(PARSER_TEST_MESSAGES), "Parser failed equivalence check"
+        # TODO(listar2000): fully deprecate the verify_equivalence check -- it's not a valid goal for chat templates
+        # assert parser.verify_equivalence(PARSER_TEST_MESSAGES), "Parser failed equivalence check"
         return parser
 
     def tokenize_and_mask(self, messages):

@@ -1,26 +1,13 @@
-"""``MathToolWorkflow`` — Workflow-based multi-turn math agent with calculator.
+"""
+MathToolWorkflow: Workflow-based multi-turn math agent with calculator tool.
 
-This is the workflow-pipeline counterpart of the agentflow-based
-``math_tool_agent`` in this cookbook. It uses the
-``rllm.experimental.rollout`` machinery directly:
+This workflow implements a pipeline-based version of the multi-turn math agent
+from this cookbook, corresponding to the agent defined in `math_tool_agent.py`.
+It leverages the `rllm.experimental.rollout` stack directly, with the following flow:
 
-    RolloutEngine  →  TITOCompleter  →  MessageList state
-                                          │
-                                          └─→ executes calculator tool inline,
-                                              feeds tool response back,
-                                              yields per-turn Steps,
-                                              commits a Trajectory.
+    RolloutEngine → TITOCompleter → MessageList state
 
-Step merging works because ``TITOCompleter`` accumulates ``_prev_token_input``
-across turns. Each turn's ``prompt_ids`` start where the previous turn's
-``prompt_ids + completion_ids`` left off — so the transform path can detect
-the prefix overlap and avoid re-encoding, which is what
-``batch/merge_compression_ratio > 1.0`` measures.
-
-The workflow expects a ``RolloutEngine`` that supports token-in-token-out
-(``supports_token_in_token_out=True``). Real backends: ``VerlEngine``,
-``TinkerEngine`` from ``rllm.experimental.rollout``. For local debugging,
-use the stub engine from ``tests/rollout/test_completer_extension.py``.
+This enables stepwise multi-turn math problem-solving with explicit calculator tool calls.
 """
 
 from __future__ import annotations
@@ -34,13 +21,9 @@ from typing import Any
 
 from rllm.parser.messages import MessageList
 from rllm.types import Episode, Trajectory
-from rllm.workflows.timing_mixin import TimingTrackingMixin
 from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflow
 
 logger = logging.getLogger(__name__)
-
-
-# ── Math-tool plumbing (mirrors math_tool_agent.py) ──────────────────────
 
 
 SYSTEM_PROMPT = """\
@@ -230,10 +213,7 @@ def _extract_answer(text: str) -> str:
     return ""
 
 
-# ── Workflow ─────────────────────────────────────────────────────────────
-
-
-class MathToolWorkflow(TimingTrackingMixin, Workflow):
+class MathToolWorkflow(Workflow):
     """Workflow that solves a math task via a multi-turn calculator-tool loop.
 
     The conversation state is a ``MessageList``. Each turn:
@@ -386,11 +366,6 @@ class MathToolWorkflow(TimingTrackingMixin, Workflow):
                 # Loop fell through max_turns without an assistant-only final turn.
                 pending_termination = TerminationEvent(TerminationReason.MAX_TURNS_EXCEEDED)
         finally:
-            # CRITICAL: commit whatever we have before any termination event
-            # propagates. If we skipped this, MAX_TURNS_EXCEEDED and
-            # MAX_RESPONSE_LENGTH_EXCEEDED would silently drop the entire
-            # trajectory; the rollout would consume H100 time but produce
-            # zero training rows for that task.
             self._finalize_trajectory(task, steps, final_text, expected_answer)
 
         if pending_termination is not None:

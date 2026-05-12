@@ -43,9 +43,9 @@ class Completer:
     def __init__(self, rollout_engine: RolloutEngine):
         self.rollout_engine = rollout_engine
 
-    async def complete(self, messages: list[dict], action_hook: Callable[[ModelOutput], Any] | None = None, **kwargs) -> Step:
+    async def complete(self, messages: list[dict], tools: list | None = None, action_hook: Callable[[ModelOutput], Any] | None = None, **kwargs) -> Step:
         """Complete the messages and return a single step."""
-        model_output: ModelOutput = await self.rollout_engine.get_model_response(messages, **kwargs)
+        model_output: ModelOutput = await self.rollout_engine.get_model_response(messages, tools=tools, **kwargs)
 
         # construct the step
         action = action_hook(model_output) if action_hook is not None else None
@@ -104,13 +104,7 @@ class TITOCompleter(Completer):
         token_input_delta: list[int] = self.tokenizer.encode(message_str_delta, add_special_tokens=False)
         return is_prefix, token_input_delta
 
-    async def complete(self, messages: list[dict], action_hook: Callable[[ModelOutput], Any] | None = None, **kwargs) -> Step:
-        # ``tools`` is a parser-time kwarg, not an engine-time kwarg — extract it
-        # so the chat parser injects the tool prompt into the system message.
-        # Without this, the model receives no tool definitions and the rollout
-        # path silently converges to "the model never calls tools".
-        tools = kwargs.pop("tools", None)
-
+    async def complete(self, messages: list[dict], tools: list | None = None, action_hook: Callable[[ModelOutput], Any] | None = None, **kwargs) -> Step:
         is_prefix, token_input_delta = self._parse_message_delta(messages, tools=tools)
 
         # current token input should be the previous token input plus the token input delta
@@ -130,14 +124,8 @@ class TITOCompleter(Completer):
             raise ValueError(f"Unsupported token output type: {type(curr_token_output)}")
 
         # update the previous messages and token input
-        # KEEP _prev_messages_str and _prev_token_input in sync: both must reflect the state
-        # *after* the just-generated assistant turn. _prev_token_input gets the model's
-        # verbatim completion ids appended; _prev_messages_str gets the decoded form of
-        # those same ids appended. Without this, the next turn's delta string would
-        # re-introduce the assistant body that's already baked into _prev_token_input as
-        # token IDs, producing a double-count (see tmp/parser_prefix_tests/REPORT.md
-        # §"Pathway 3" for the original symptom: +30 tokens of drift per asst turn).
         completion_str = self.tokenizer.decode(curr_completion_ids, skip_special_tokens=False)
+        # keep _prev_messages_str and _prev_token_input in sync: both must reflect the state *after* the just-generated assistant turn.
         self._prev_messages_str = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, accumulate_reasoning=True, tools=tools) + completion_str
         self._prev_token_input = curr_token_input + curr_completion_ids
 
