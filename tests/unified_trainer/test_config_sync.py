@@ -31,6 +31,11 @@ def _make_config():
                     "clip_ratio_low": 0.2,
                     "clip_ratio_high": 0.2,
                     "use_kl_loss": False,
+                    "optim": {
+                        "lr_scheduler_type": "constant",
+                        "lr_warmup_steps": -1,
+                        "lr_warmup_steps_ratio": 0.0,
+                    },
                 },
                 "rollout": {
                     "n": 1,
@@ -55,6 +60,9 @@ def _make_config():
                     "kl_beta": 0.0,
                     "loss_fn": None,
                     "loss_agg_mode": None,
+                    "lr_schedule": "constant",
+                    "warmup_steps": -1,
+                    "warmup_steps_ratio": 0.0,
                     "eps_clip": 0.2,
                     "eps_clip_high": None,
                     "rollout_correction": {
@@ -183,6 +191,72 @@ def test_sync_before_resolve_updates_interpolated_verl_paths(propagate):
     cfg = propagate(cfg, explicit_keys={"rllm.trainer.project_name", "rllm.trainer.experiment_name"})
     OmegaConf.resolve(cfg)
     assert cfg.trainer.default_local_dir == "checkpoints/project/experiment"
+
+
+# ---------------------------------------------------------------------------
+# LR schedule / warmup: rllm.algorithm ↔ verl actor optimizer
+# ---------------------------------------------------------------------------
+
+
+def test_rllm_lr_schedule_propagates_to_verl_optimizer(propagate):
+    cfg = _make_config()
+    cfg.rllm.algorithm.lr_schedule = "cosine"
+    cfg = propagate(cfg, explicit_keys={"rllm.algorithm.lr_schedule"})
+    assert cfg.actor_rollout_ref.actor.optim.lr_scheduler_type == "cosine"
+
+
+def test_verl_lr_scheduler_type_propagates_to_rllm_with_warning(propagate, caplog):
+    caplog.set_level(logging.WARNING, logger="rllm.experimental.verl.utils")
+    cfg = _make_config()
+    cfg.actor_rollout_ref.actor.optim.lr_scheduler_type = "cosine"
+    cfg = propagate(cfg, explicit_keys={"actor_rollout_ref.actor.optim.lr_scheduler_type"})
+    assert cfg.rllm.algorithm.lr_schedule == "cosine"
+    assert "actor_rollout_ref.actor.optim.lr_scheduler_type is deprecated" in caplog.text
+
+
+def test_lr_schedule_sync_does_not_validate_backend_values(propagate):
+    cfg = _make_config()
+    cfg.rllm.algorithm.lr_schedule = "linear"
+    cfg = propagate(cfg, explicit_keys={"rllm.algorithm.lr_schedule"})
+    assert cfg.actor_rollout_ref.actor.optim.lr_scheduler_type == "linear"
+
+
+def test_rllm_warmup_steps_propagates_to_verl_optimizer(propagate):
+    cfg = _make_config()
+    cfg.rllm.algorithm.warmup_steps = 25
+    cfg = propagate(cfg, explicit_keys={"rllm.algorithm.warmup_steps"})
+    assert cfg.actor_rollout_ref.actor.optim.lr_warmup_steps == 25
+
+
+def test_verl_warmup_steps_propagates_to_rllm_with_warning(propagate, caplog):
+    caplog.set_level(logging.WARNING, logger="rllm.experimental.verl.utils")
+    cfg = _make_config()
+    cfg.actor_rollout_ref.actor.optim.lr_warmup_steps = 25
+    cfg = propagate(cfg, explicit_keys={"actor_rollout_ref.actor.optim.lr_warmup_steps"})
+    assert cfg.rllm.algorithm.warmup_steps == 25
+    assert "actor_rollout_ref.actor.optim.lr_warmup_steps is deprecated" in caplog.text
+
+
+def test_rllm_warmup_steps_ratio_propagates_to_verl_optimizer(propagate):
+    cfg = _make_config()
+    cfg.rllm.algorithm.warmup_steps_ratio = 0.1
+    cfg = propagate(cfg, explicit_keys={"rllm.algorithm.warmup_steps_ratio"})
+    assert cfg.actor_rollout_ref.actor.optim.lr_warmup_steps_ratio == 0.1
+
+
+def test_zero_rllm_warmup_steps_keeps_verl_ratio_fallback(propagate):
+    cfg = _make_config()
+    cfg.rllm.algorithm.warmup_steps = 0
+    cfg.rllm.algorithm.warmup_steps_ratio = 0.1
+    cfg = propagate(
+        cfg,
+        explicit_keys={
+            "rllm.algorithm.warmup_steps",
+            "rllm.algorithm.warmup_steps_ratio",
+        },
+    )
+    assert cfg.actor_rollout_ref.actor.optim.lr_warmup_steps == 0
+    assert cfg.actor_rollout_ref.actor.optim.lr_warmup_steps_ratio == 0.1
 
 
 # ---------------------------------------------------------------------------

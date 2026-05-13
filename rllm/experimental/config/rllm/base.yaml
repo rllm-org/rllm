@@ -71,6 +71,9 @@ algorithm:
   use_precomputed_advantage: false # use pre-computed step.advantage from the workflow (e.g. distillation)
   loss_fn: null           # backend-specific values; null = backend default
   loss_agg_mode: null     # [null, token-mean, seq-mean-token-sum, seq-mean-token-mean]
+  lr_schedule: constant   # [constant, linear, cosine]
+  warmup_steps: -1        # Absolute optimizer-step warmup; <=0 uses warmup_steps_ratio
+  warmup_steps_ratio: 0.0 # Fractional warmup fallback
   kl_beta: 0.0            # KL penalty coefficient
   eps_clip: 0.2           # PPO clip epsilon
   eps_clip_high: null     # Asymmetric upper clip bound (null = symmetric)
