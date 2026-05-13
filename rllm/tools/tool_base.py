@@ -22,6 +22,9 @@ class ToolOutput:
     error: str | None = None
     metadata: dict | None = None
 
+    def to_dict(self):
+        return {"name": self.name, "output": self.output, "error": self.error, "metadata": self.metadata}
+
     def __str__(self) -> str:
         """Convert the tool output to a string representation."""
         if self.error:
