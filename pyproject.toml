@@ -95,6 +95,11 @@ tinker = [
     "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook ; python_version >= '3.11'",
 ]
 
+fireworks = [
+    "fireworks-ai[training]==1.2.0a65 ; python_version >= '3.11'",
+    "fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git@7163b526444da815e78c805b6c3a47ea20bb6872#subdirectory=training ; python_version >= '3.11'",
+]
+
 opentelemetry = [
     "opentelemetry-sdk",
 ]
