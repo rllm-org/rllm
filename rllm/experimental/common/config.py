@@ -222,6 +222,7 @@ class AlgorithmConfig:
     # Global loss function (backend-specific values; null = backend default)
     loss_fn: str | None = None
     lr_schedule: Literal["linear", "cosine", "constant"] = "constant"
+    warmup_steps: int = -1
     warmup_steps_ratio: float = 0.0
 
     # Custom loss / rollout correction fields (used by Fireworks backend with cookbook losses)
@@ -264,6 +265,7 @@ class AlgorithmConfig:
             use_precomputed_advantage=algorithm_config.get("use_precomputed_advantage", False),
             loss_fn=algorithm_config.get("loss_fn", None),
             lr_schedule=algorithm_config.get("lr_schedule", "constant"),
+            warmup_steps=algorithm_config.get("warmup_steps", -1),
             warmup_steps_ratio=algorithm_config.get("warmup_steps_ratio", 0.0),
             kl_beta=algorithm_config.get("kl_beta", 0.0),
             eps_clip=algorithm_config.get("eps_clip", 0.2),
