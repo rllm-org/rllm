@@ -290,6 +290,7 @@ class FireworksBackend(TinkerBackend):
         loss_fn = alg.get("loss_fn", None)
         loss_agg_mode = alg.get("loss_agg_mode", None)
         eps_clip_high = alg.get("eps_clip_high", None)
+        router_replay = alg.get("router_replay", "disabled")
         rc = alg.get("rollout_correction", {})
         tis_mode = rc.get("tis_mode", None)
         bypass_mode = rc.get("bypass_mode", True)
@@ -305,6 +306,9 @@ class FireworksBackend(TinkerBackend):
         if loss_agg_mode not in valid_loss_agg_modes:
             raise ValueError(f"rllm.algorithm.loss_agg_mode must be null, 'token-mean', 'seq-mean-token-sum', or 'seq-mean-token-mean' for the Fireworks backend, got {loss_agg_mode!r}")
         logger.info("Fireworks loss aggregation mode: %s", loss_agg_mode or "backend default")
+
+        if router_replay == "R2":
+            raise ValueError("rllm.algorithm.router_replay='R2' is not supported by the Fireworks backend; use 'R3' or 'disabled'.")
 
         # rollout_correction.tis_mode validation
         if tis_mode is not None and tis_mode not in ("token", "sequence"):
