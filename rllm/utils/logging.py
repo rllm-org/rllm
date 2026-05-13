@@ -2,7 +2,7 @@ import logging
 import os
 
 
-def get_log_level_from_env(env_var: str = "RLLM_LOG_LEVEL", default: str = "INFO") -> int:
+def get_log_level_from_env(env_var: str = "RLLM_LOG_LEVEL", default: str = "WARNING") -> int:
     default_level = getattr(logging, default.upper(), logging.INFO)
     level_name = os.getenv(env_var, default).upper()
     return getattr(logging, level_name, default_level)
@@ -10,10 +10,11 @@ def get_log_level_from_env(env_var: str = "RLLM_LOG_LEVEL", default: str = "INFO
 
 def configure_logging_from_env(
     env_var: str = "RLLM_LOG_LEVEL",
-    default: str = "INFO",
+    default: str = "WARNING",
 ) -> int:
-    """Set the rLLM logger level from RLLM_LOG_LEVEL."""
+    """Configure logging from RLLM_LOG_LEVEL."""
     level = get_log_level_from_env(env_var, default)
+    logging.basicConfig(format="%(levelname)s:%(asctime)s:%(message)s", level=level)
     logging.getLogger("rllm").setLevel(level)
     return level
 
