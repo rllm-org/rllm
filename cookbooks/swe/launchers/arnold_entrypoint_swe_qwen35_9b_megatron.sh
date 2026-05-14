@@ -67,6 +67,41 @@ if required and not ok:
 PY
 }
 
+check_rllm_model_gateway_for_arnold() {
+    "$VIRTUAL_ENV/bin/python" - <<'PY'
+import rllm_model_gateway
+
+print(f"rllm_model_gateway_ok path={rllm_model_gateway.__file__}", flush=True)
+PY
+}
+
+ensure_aiosqlite_for_gateway() {
+    local artifacts wheel_dir
+
+    if "$VIRTUAL_ENV/bin/python" - <<'PY'
+import aiosqlite
+
+print(f"aiosqlite_ok path={aiosqlite.__file__}", flush=True)
+PY
+    then
+        return 0
+    fi
+
+    artifacts="$(artifact_dir)"
+    wheel_dir="$artifacts/wheels"
+    if compgen -G "$wheel_dir/aiosqlite-*.whl" >/dev/null; then
+        "$VIRTUAL_ENV/bin/python" -m pip install --no-index --find-links "$wheel_dir" 'aiosqlite==0.22.1'
+    else
+        "$VIRTUAL_ENV/bin/python" -m pip install --no-cache-dir -i "${RLLM_SWE_PIP_INDEX_URL:-https://bytedpypi.byted.org/simple}" 'aiosqlite==0.22.1'
+    fi
+
+    "$VIRTUAL_ENV/bin/python" - <<'PY'
+import aiosqlite
+
+print(f"aiosqlite_ok path={aiosqlite.__file__}", flush=True)
+PY
+}
+
 echo "============================================================"
 echo "rLLM SWE Qwen3.5-9B Megatron Arnold entrypoint"
 echo "host=$(hostname) role=${ARNOLD_ROLE:-unknown} task=${ARNOLD_ID:-unknown}"
@@ -96,7 +131,7 @@ fi
 export PYTHONUNBUFFERED=1
 export PYTHONFAULTHANDLER=1
 export HYDRA_FULL_ERROR=1
-export PYTHONPATH="$COOKBOOK_DIR:$RLLM_ROOT:${PYTHONPATH:-}"
+export PYTHONPATH="$COOKBOOK_DIR:$RLLM_ROOT:$RLLM_ROOT/rllm-model-gateway/src:${PYTHONPATH:-}"
 export MODEL_PATH=${MODEL_PATH:-/mnt/hdfs/model_path}
 export RLLM_SWE_OUTPUT_DIR=${RLLM_SWE_OUTPUT_DIR:-/tmp/rllm_swe_outputs}
 export CHECKPOINT_ROOT=${CHECKPOINT_ROOT:-$RLLM_SWE_OUTPUT_DIR/checkpoints}
@@ -107,6 +142,9 @@ export LOGGER=${LOGGER:-"[console,wandb]"}
 export SWE_REX_MODAL_APP_LOOKUP_TIMEOUT_S="${SWE_REX_MODAL_APP_LOOKUP_TIMEOUT_S:-60}"
 export SWE_REX_MODAL_SANDBOX_CREATE_TIMEOUT_S="${SWE_REX_MODAL_SANDBOX_CREATE_TIMEOUT_S:-240}"
 export SWE_REX_MODAL_TUNNELS_TIMEOUT_S="${SWE_REX_MODAL_TUNNELS_TIMEOUT_S:-60}"
+
+ensure_aiosqlite_for_gateway
+check_rllm_model_gateway_for_arnold
 
 if [ "${RLLM_SWE_MODE:-smoke}" = "external_ray_worker" ]; then
     if [ -z "${EXTERNAL_RAY_HEAD_IP:-}" ]; then
@@ -157,9 +195,11 @@ SWE_REX_REMOTE_RETRIES=0 python -m swe.scripts.modal_swerex_reliability_test \
 
 python - "$PROBE_OUT" <<'PY'
 import json
+import os
 import sys
 
 path = sys.argv[1]
+expected_total = int(os.environ.get("RLLM_SWE_MODAL_PROBE_TOTAL", "12"))
 summary = None
 with open(path, encoding="utf-8") as handle:
     for line in handle:
@@ -171,7 +211,7 @@ if summary is None:
 p95 = summary.get("create_env_s", {}).get("p95")
 p50 = summary.get("create_env_s", {}).get("p50")
 ok = (
-    summary.get("ok") == summary.get("total") == 12
+    summary.get("ok") == summary.get("total") == expected_total
     and summary.get("failed") == 0
     and summary.get("transient_failed") == 0
     and p95 is not None
@@ -185,17 +225,22 @@ PY
 
 TRAINING_SCRIPT="$COOKBOOK_DIR/swe/training_scripts/run_swe_training_9b_megatron.sh"
 if [ "${RLLM_SWE_MODE:-smoke}" = "smoke" ]; then
+    smoke_extra_args=()
+    if [ -n "${RLLM_SWE_SMOKE_EXTRA_ARGS:-}" ]; then
+        # shellcheck disable=SC2206
+        smoke_extra_args=( ${RLLM_SWE_SMOKE_EXTRA_ARGS} )
+    fi
     export LOGGER=${LOGGER:-"[console]"}
     export ACTOR_LR_WARMUP_STEPS="${ACTOR_LR_WARMUP_STEPS:-0}"
     export SWE_STEP_LIMIT="${SWE_STEP_LIMIT:-24}"
-    export SWE_AGENT_TIMEOUT="${SWE_AGENT_TIMEOUT:-180}"
-    export SWE_COMMAND_TIMEOUT="${SWE_COMMAND_TIMEOUT:-60}"
-    export SWE_SANDBOX_TIMEOUT="${SWE_SANDBOX_TIMEOUT:-240}"
+    export SWE_AGENT_TIMEOUT="${SWE_AGENT_TIMEOUT:-900}"
+    export SWE_COMMAND_TIMEOUT="${SWE_COMMAND_TIMEOUT:-120}"
+    export SWE_SANDBOX_TIMEOUT="${SWE_SANDBOX_TIMEOUT:-1020}"
     export SWE_STARTUP_JITTER_S="${SWE_STARTUP_JITTER_S:-0}"
     export SWE_VAL_STEP_LIMIT="${SWE_VAL_STEP_LIMIT:-24}"
-    export SWE_VAL_AGENT_TIMEOUT="${SWE_VAL_AGENT_TIMEOUT:-180}"
-    export SWE_VAL_COMMAND_TIMEOUT="${SWE_VAL_COMMAND_TIMEOUT:-60}"
-    export SWE_VAL_SANDBOX_TIMEOUT="${SWE_VAL_SANDBOX_TIMEOUT:-240}"
+    export SWE_VAL_AGENT_TIMEOUT="${SWE_VAL_AGENT_TIMEOUT:-900}"
+    export SWE_VAL_COMMAND_TIMEOUT="${SWE_VAL_COMMAND_TIMEOUT:-120}"
+    export SWE_VAL_SANDBOX_TIMEOUT="${SWE_VAL_SANDBOX_TIMEOUT:-1020}"
     export SWE_VAL_STARTUP_JITTER_S="${SWE_VAL_STARTUP_JITTER_S:-0}"
     exec bash "$TRAINING_SCRIPT" \
         train_max_samples="${RLLM_SWE_SMOKE_TRAIN_SAMPLES:-16}" \
@@ -205,7 +250,18 @@ if [ "${RLLM_SWE_MODE:-smoke}" = "smoke" ]; then
         ++trainer.total_training_steps="${RLLM_SWE_SMOKE_STEPS:-1}" \
         trainer.total_epochs=1 \
         trainer.save_freq=1000 \
-        trainer.test_freq=1000
+        trainer.test_freq=1000 \
+        "${smoke_extra_args[@]}"
 fi
 
-exec bash "$TRAINING_SCRIPT"
+full_extra_args=()
+if [ -n "${RLLM_SWE_FULL_EXTRA_ARGS:-}" ]; then
+    # shellcheck disable=SC2206
+    full_extra_args=( ${RLLM_SWE_FULL_EXTRA_ARGS} )
+elif [ -n "${RLLM_SWE_SMOKE_EXTRA_ARGS:-}" ]; then
+    # Backward-compatible escape hatch used by the split Arnold CPU driver.
+    # shellcheck disable=SC2206
+    full_extra_args=( ${RLLM_SWE_SMOKE_EXTRA_ARGS} )
+fi
+
+exec bash "$TRAINING_SCRIPT" "${full_extra_args[@]}"
