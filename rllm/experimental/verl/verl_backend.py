@@ -460,6 +460,30 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             assert "rollout_log_probs" in batch.batch, "bypass_mode requires rollout_log_probs in batch"
             with simple_timer("old_log_probs", timing_dict):
                 batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
+
+            # Keep bypass semantics for training, but still run the actor
+            # forward pass once so debug metrics match the non-bypass path.
+            with simple_timer("old_log_probs_metrics", timing_dict):
+                tu.assign_non_tensor(batch_td, calculate_entropy=True, compute_loss=False)
+                output = self.actor_rollout_wg.compute_log_prob(batch_td)
+                log_probs = no_padding_2_padding(tu.get(output, "log_probs"), batch_td)
+                entropy = no_padding_2_padding(tu.get(output, "entropy"), batch_td)
+
+                response_masks = batch.batch["response_mask"]
+                loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
+                entropy_agg = agg_loss(loss_mat=entropy, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
+                metrics["actor/entropy"] = entropy_agg.detach().item()
+
+                debug_tensors = {
+                    "old_log_probs": log_probs.float(),
+                    "rollout_log_probs": batch.batch["rollout_log_probs"],
+                    "responses": batch.batch["responses"],
+                }
+                if "response_mask" in batch.batch:
+                    debug_tensors["response_mask"] = batch.batch["response_mask"]
+                elif "attention_mask" in batch.batch:
+                    debug_tensors["attention_mask"] = batch.batch["attention_mask"]
+                metrics.update(calculate_debug_metrics_compat(DataProto.from_dict(tensors=debug_tensors)))
         else:
             with simple_timer("old_log_probs", timing_dict):
                 tu.assign_non_tensor(batch_td, calculate_entropy=True, compute_loss=False)
