@@ -204,7 +204,7 @@ SWE_VAL_STEP_LIMIT=${SWE_VAL_STEP_LIMIT:-300}
 SWE_VAL_AGENT_TIMEOUT=${SWE_VAL_AGENT_TIMEOUT:-900}
 SWE_VAL_COMMAND_TIMEOUT=${SWE_VAL_COMMAND_TIMEOUT:-$SWE_COMMAND_TIMEOUT}
 SWE_VAL_SANDBOX_TIMEOUT=${SWE_VAL_SANDBOX_TIMEOUT:-1020}
-SWE_VAL_STARTUP_JITTER_S=${SWE_VAL_STARTUP_JITTER_S:-30}
+SWE_VAL_STARTUP_JITTER_S=${SWE_VAL_STARTUP_JITTER_S:-45}
 MODEL_MAX_TOKENS=${MODEL_MAX_TOKENS:-4096}
 DEFAULT_TRAJ_DIR="$COOKBOOK_DIR/trajectories/\${trainer.experiment_name}"
 CHECKPOINT_ROOT=${CHECKPOINT_ROOT:-/tmp/turing-swe/checkpoints}
@@ -212,9 +212,11 @@ MAIN_CHECKPOINT_DIR=${MAIN_CHECKPOINT_DIR:-$CHECKPOINT_ROOT/swe-verl-9b-megatron
 LORA_CHECKPOINT_DIR=${LORA_CHECKPOINT_DIR:-$CHECKPOINT_ROOT/swe-verl-9b-megatron-lora/qwen35-9b-swe-smith-lora-r16}
 TRAJECTORY_OUTPUT_DIR=${TRAJ_DIR:-$DEFAULT_TRAJ_DIR}
 ROLLOUT_CORRECTION_BYPASS=${ROLLOUT_CORRECTION_BYPASS:-true}
-ROLLOUT_CORRECTION_IS=${ROLLOUT_CORRECTION_IS:-null}
+ROLLOUT_CORRECTION_IS=${ROLLOUT_CORRECTION_IS:-"token"}
 ROLLOUT_CORRECTION_IS_THRESHOLD=${ROLLOUT_CORRECTION_IS_THRESHOLD:-2.0}
-SWE_N_PARALLEL_TASKS=${SWE_N_PARALLEL_TASKS:-128}
+SWE_N_PARALLEL_TASKS=${SWE_N_PARALLEL_TASKS:-300}
+HF_UPLOAD_CHECKPOINTS=${HF_UPLOAD_CHECKPOINTS:-false}
+HF_UPLOAD_REPO_ID=${HF_UPLOAD_REPO_ID:-JWei05/qwen35-9b-swe-smith-megatron}
 
 LORA_ARGS=(
     actor_rollout_ref.model.lora.type=lora
@@ -244,6 +246,7 @@ echo "Rollout:  distributed_executor_backend=${ROLLOUT_DISTRIBUTED_EXECUTOR_BACK
 echo "SWE:      train steps=${SWE_STEP_LIMIT} timeout=${SWE_AGENT_TIMEOUT}s cmd=${SWE_COMMAND_TIMEOUT}s sandbox=${SWE_SANDBOX_TIMEOUT}s jitter=${SWE_STARTUP_JITTER_S}s max_tokens=${MODEL_MAX_TOKENS}"
 echo "SWE val:  steps=${SWE_VAL_STEP_LIMIT} timeout=${SWE_VAL_AGENT_TIMEOUT}s cmd=${SWE_VAL_COMMAND_TIMEOUT}s sandbox=${SWE_VAL_SANDBOX_TIMEOUT}s jitter=${SWE_VAL_STARTUP_JITTER_S}s"
 echo "Ckpt:     $MAIN_CHECKPOINT_DIR"
+echo "HF upload: enabled=${HF_UPLOAD_CHECKPOINTS} repo=${HF_UPLOAD_REPO_ID}"
 echo "Traj:     save=${SAVE_TRAJ:-false} dir=${TRAJECTORY_OUTPUT_DIR}"
 echo "Logger:   $LOGGER"
 echo "Ray:      $RAY_STATUS_LINE"
@@ -370,11 +373,12 @@ python -u -m swe.scripts.train_swe_verl \
     \
     trainer.total_epochs=100 \
     trainer.save_freq=100 \
-    trainer.test_freq=1000 \
-    trainer.val_before_train=false \
-    ++rllm.trainer.val_before_train=false \
+    trainer.test_freq=10 \
+    trainer.val_before_train=true \
+    ++rllm.trainer.val_before_train=true \
     trainer.default_local_dir="$MAIN_CHECKPOINT_DIR" \
-    +trainer.hf_repo_id=JWei05/qwen35-9b-swe-smith-megatron \
+    +trainer.hf_repo_id=${HF_UPLOAD_REPO_ID} \
+    ++trainer.hf_upload=${HF_UPLOAD_CHECKPOINTS} \
     trainer.nnodes=${NNODES} \
     trainer.n_gpus_per_node=${NGPUS_PER_NODE} \
     "trainer.logger=${LOGGER}" \
