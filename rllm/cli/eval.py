@@ -79,6 +79,9 @@ def _run_eval(
     enable_ui: bool = False,
     save_episodes: bool = True,
     episodes_dir: str | None = None,
+    temperature: float = 1.0,
+    top_p: float = 1.0,
+    max_tokens: int | None = None,
 ):
     """Core eval logic, extracted for clean proxy lifecycle management."""
     from rllm.data import DatasetRegistry
@@ -459,6 +462,10 @@ def _run_eval(
     # otherwise ``EvalHooks`` reads each Task's [verifier] config.
     from rllm.eval.runner import run_dataset
 
+    sampling_params: dict = {"temperature": temperature, "top_p": top_p}
+    if max_tokens is not None:
+        sampling_params["max_tokens"] = max_tokens
+
     result, episodes = asyncio.run(
         run_dataset(
             tasks=list(dataset.data),
@@ -471,6 +478,7 @@ def _run_eval(
             dataset_name=getattr(dataset, "name", benchmark) or benchmark,
             on_episode_complete=on_episode_complete,
             evaluator_override=evaluator,
+            sampling_params=sampling_params,
         )
     )
 
@@ -535,6 +543,9 @@ def _run_eval(
 @click.option("--model", default=None, help="Model name to evaluate. Defaults to configured model from 'rllm setup'.")
 @click.option("--split", default=None, help="Dataset split (default: from catalog eval_split).")
 @click.option("--concurrency", default=64, type=int, help="Number of parallel requests.")
+@click.option("--temperature", default=1.0, type=float, help="Sampling temperature passed to the agent flow's LLM calls.")
+@click.option("--top-p", "top_p", default=1.0, type=float, help="Nucleus sampling top_p passed to the agent flow's LLM calls.")
+@click.option("--max-tokens", "max_tokens", default=None, type=int, help="Max response tokens per LLM call (default: server's own budget).")
 @click.option("--max-examples", default=None, type=int, help="Limit number of examples (for dev/testing).")
 @click.option("--task-indices", default=None, type=str, help="Comma-separated task indices to evaluate (e.g., '0', '3,7,12', '0-9').")
 @click.option("--output", "output_path", default=None, help="Output file path for results JSON.")
@@ -564,6 +575,9 @@ def eval_cmd(
     model: str | None,
     split: str | None,
     concurrency: int,
+    temperature: float,
+    top_p: float,
+    max_tokens: int | None,
     max_examples: int | None,
     task_indices: str | None,
     output_path: str | None,
@@ -674,6 +688,9 @@ def eval_cmd(
             enable_ui=enable_ui,
             save_episodes=save_episodes,
             episodes_dir=episodes_dir,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
         )
     finally:
         if proxy_manager is not None:
