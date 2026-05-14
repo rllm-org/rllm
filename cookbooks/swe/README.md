@@ -402,110 +402,225 @@ bash cookbooks/swe/swe/training_scripts/run_swe_training_9b_megatron.sh \
 
 ### ByteDance Arnold Launch
 
-There are three Arnold configs under `cookbooks/swe/launchers/`:
+Use Arnold launch for ByteDance-managed CPU and B200 allocation. In this mode
+Arnold starts the CPU Ray head, starts the B200 Ray workers, runs the Modal CPU
+probe on the selected CPU, restores the SWE runtime artifacts, and then launches
+the same `run_swe_training_9b_megatron.sh` training script.
+
+Experiment-specific changes should normally live in the Arnold YAML, not in the
+training script. Use Arnold `envs` for launcher-level knobs and
+`RLLM_SWE_FULL_EXTRA_ARGS` for Hydra overrides.
+
+Available configs under `cookbooks/swe/launchers/`:
 
 | Config | Use | Notes |
 |---|---|---|
-| `launch_swe_qwen35_9b_megatron_b200_external_ray_workers.yaml` | Recommended production path | Arnold launches only B200 workers; a Modal-good CPU Ray head is supplied externally. |
-| `launch_swe_qwen35_9b_megatron_b200.yaml` | Arnold smoke path | Arnold also selects the CPU head from `public_CPU`; the entrypoint probes Modal and fails fast on a bad CPU. |
-| `launch_swe_qwen35_9b_megatron_b200_external_driver.yaml` | Diagnostic cluster-hold path | Arnold creates a CPU+B200 cluster and holds it for an external driver to connect by Ray Client. |
+| `launch_swe_qwen35_9b_megatron_b200.yaml` | Main all-Arnold path | Arnold selects the CPU head and B200 workers. Use this as the base for full training. |
+| `launch_swe_qwen35_9b_megatron_b200_external_ray_workers.yaml` | Diagnostic path | Arnold launches only B200 workers; a manually managed CPU Ray head is supplied externally. |
+| `launch_swe_qwen35_9b_megatron_b200_external_driver.yaml` | Cluster-hold path | Arnold creates a CPU+B200 cluster and holds it for an external driver to connect by Ray Client. |
 
-The recommended path is external CPU plus Arnold B200 workers. This avoids
-letting Arnold pick the Modal-sensitive CPU driver while still using Arnold for
-B200 placement.
+#### All-Arnold Full Training
 
-1. Reserve a CPU worker outside Arnold, restore the runtime, log in to Modal and
-   W&B, and run the Modal probe above. If the CPU is bad, replace it before
-   launching B200 workers.
+The target production shape is one Arnold CPU head plus two 8-GPU B200 workers
+on `cloudnative-useast1b`:
 
-2. Start the CPU Ray head:
-
-```bash
-cd /path/to/rllm
-export RLLM_SWE_ARTIFACT_DIR=/path/to/rllm_swe_artifacts
-source cookbooks/swe/launchers/swe_artifact_utils.sh
-restore_swe_artifacts
-
-export EXTERNAL_RAY_HEAD_IP=REPLACE_WITH_MODAL_GOOD_CPU_IPV6
-ray stop --force || true
-ray start \
-  --head \
-  --node-ip-address="$EXTERNAL_RAY_HEAD_IP" \
-  --port=6379 \
-  --ray-client-server-port=10001 \
-  --dashboard-host=0.0.0.0 \
-  --num-cpus=32 \
-  --num-gpus=0 \
-  --disable-usage-stats
+```text
+CPU head: public_CPU
+B200 workers: 2 x 8 GPUs
+Cluster: cloudnative-useast1b
+B200 queue: compute-598-useast1b-cloudnative-aioci-mlsys.inference-guarantee
+Topology: ARNOLD_NETWORK_TOPOLOGY=SAME_NETMINIPOD
+Trainer shape: NNODES=2, NGPUS_PER_NODE=8
+Megatron shape: ACTOR_TP=2, ACTOR_CP=2, ACTOR_PP=1
+Rollout shape: ROLLOUT_TP=1
 ```
 
-3. From the ModelChef repo root, launch the Arnold B200 workers:
+Start from `launch_swe_qwen35_9b_megatron_b200.yaml` and set full-training
+environment values like this:
 
-```bash
-cd /path/to/modelchef
-export EXTERNAL_RAY_HEAD_IP=REPLACE_WITH_MODAL_GOOD_CPU_IPV6
-python verl-recipes/tasks/arnold_launch.py \
-  --config submodules/rllm/cookbooks/swe/launchers/launch_swe_qwen35_9b_megatron_b200_external_ray_workers.yaml
+```yaml
+arnold:
+  region: i18n
+  group_name: mlsys_inference
+  cluster_name: cloudnative-useast1b
+  quota_pool: third_party_oci
+  image_url: aliyun-va-hub.byted.org/arnold/jason.wei:qwen35b200baseplainenvcodepy4
+  job_name: swe_qwen35_9b_megatron_b200x16_full
+  namespace: /topic/2ebfba22254a08e7
+  use_robust_training: true
+  retry_times: 3
+  skip_restart: false
+  roles:
+    - name: head
+      num: 1
+      cpu: 32
+      memory: 65536
+      gpuv: CPU_ONLY
+      ports: 20
+      queue_name: public_CPU
+    - name: worker
+      num: 2
+      gpu: 8
+      gpuv: NVIDIA_B200
+      ports: 20
+      queue_name: compute-598-useast1b-cloudnative-aioci-mlsys.inference-guarantee
+  hdfs_mount:
+    - hdfs_address: hdfs://harunava/home/byte_arnold_va_ssd/mlsys/models/Qwen3.5-9B
+      mount_path: /mnt/hdfs/model_path
+      mode: RO
+    # Optional but recommended for long runs. Replace with a writable team/user
+    # HDFS path and set CHECKPOINT_ROOT to this mount path.
+    - hdfs_address: hdfs://harunava/home/<team-or-user>/rllm_swe_checkpoints
+      mount_path: /mnt/hdfs/swe_checkpoints
+      mode: RW
+  envs:
+    RLLM_SWE_ARTIFACT_DIR: /opt/tiger/swe_runtime_image/artifacts
+    RLLM_SWE_MEGATRON_OVERLAY: /opt/tiger/swe_runtime_image/artifacts/megatron_core_0.18.0_829a7b78d.tar.gz
+    RLLM_SWE_OUTPUT_DIR: /tmp/rllm_swe_outputs
+    CHECKPOINT_ROOT: /mnt/hdfs/swe_checkpoints
+    MODEL_PATH: /mnt/hdfs/model_path
+    MODEL_USE_REMOVE_PADDING: "true"
+    RLLM_SWE_MODE: full
+    RLLM_SWE_REQUIRE_WANDB: "1"
+    RLLM_SWE_REQUIRE_MEGATRON_CP2: "1"
+    RLLM_SWE_MODAL_PROBE_TOTAL: "12"
+    RLLM_SWE_MODAL_PROBE_CONCURRENCY: "6"
+    ARNOLD_NETWORK_TOPOLOGY: SAME_NETMINIPOD
+    LOGGER: "[console,wandb]"
+    WANDB_MODE: online
+    NNODES: "2"
+    NGPUS_PER_NODE: "8"
+    ACTOR_TP: "2"
+    ACTOR_CP: "2"
+    ACTOR_PP: "1"
+    ROLLOUT_TP: "1"
+    ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU: "1"
+    ACTOR_LR_WARMUP_STEPS: "20"
+    SWE_AGENT_TIMEOUT: "600"
+    SWE_COMMAND_TIMEOUT: "120"
+    SWE_SANDBOX_TIMEOUT: "800"
+    SWE_STARTUP_JITTER_S: "25.0"
+    SWE_N_PARALLEL_TASKS: "128"
+    ROLLOUT_CORRECTION_IS: "null"
+    RAY_BACKEND_LOG_LEVEL: info
+    RAY_DEDUP_LOGS: "0"
+    RAY_LOG_TO_DRIVER: "1"
+    NCCL_DEBUG: INFO
+    RLLM_SWE_FULL_EXTRA_ARGS: >-
+      ++trainer.total_training_steps=100
+      trainer.save_freq=10
+      trainer.test_freq=1000
+      trainer.val_before_train=false
+      ++rllm.trainer.val_before_train=false
+      actor_rollout_ref.model.use_remove_padding=true
+      rllm.workflow.n_parallel_tasks=128
+      actor_rollout_ref.rollout.n=8
+      rllm.algorithm.rollout_correction.tis_mode=null
+      algorithm.rollout_correction.rollout_is=null
+      trainer.project_name=swe-verl-9b-megatron
+      trainer.experiment_name=swe_qwen35_9b_megatron_b200x16_full
+  local_envs:
+    - MODAL_TOKEN_ID
+    - MODAL_TOKEN_SECRET
+    - WANDB_API_KEY
+
+verl:
+  entrypoint: submodules/rllm/cookbooks/swe/launchers/arnold_entrypoint_swe_qwen35_9b_megatron.sh
+  ray_runtime_env: submodules/rllm/cookbooks/swe/launchers/ray_runtime_env_swe.yaml
 ```
 
-The config requests two 8-GPU B200 instances from
-`cloudnative-useast1b` using the
-`compute-598-useast1b-cloudnative-aioci-mlsys.inference-guarantee` queue. The
-Arnold entrypoint restores artifacts, checks the Megatron CP2 overlay, and joins
-`[$EXTERNAL_RAY_HEAD_IP]:6379` as a Ray worker.
-
-4. On the CPU driver, wait until Ray sees 16 GPUs:
-
-```bash
-ray status
-python - <<'PY'
-import ray
-
-ray.init(address="auto")
-print(ray.cluster_resources())
-ray.shutdown()
-PY
-```
-
-5. Launch the external CPU driver:
-
-```bash
-cd /path/to/modelchef
-export ARNOLD_RAY_ADDRESS=auto
-export RLLM_SWE_DRIVER_MODE=full
-export RLLM_SWE_REQUIRE_WANDB=1
-export RLLM_SWE_REQUIRE_MEGATRON_CP2=1
-
-# Full external-driver runs require a writable HDFS checkpoint mount.
-export RLLM_SWE_OUTPUT_DIR=/tmp/rllm_swe_outputs
-export CHECKPOINT_ROOT=/mnt/hdfs/swe_checkpoints
-export CHECKPOINT_HDFS_URI=hdfs://harunava/home/${USER}/rllm_swe_checkpoints
-export TRAJ_DIR="$RLLM_SWE_OUTPUT_DIR/trajectories/\${trainer.experiment_name}"
-
-bash submodules/rllm/cookbooks/swe/launchers/launch_external_cpu_driver_swe_qwen35_9b_megatron.sh \
-  ++trainer.total_training_steps=100
-```
-
-For a smoke run through the same launcher, leave `RLLM_SWE_DRIVER_MODE=smoke`
-or unset it and pass the same one-step overrides shown in the normal Ray
-cluster section.
-
-The all-Arnold smoke config is still useful to test image and entrypoint
-validity:
+Launch from the ModelChef repo root:
 
 ```bash
 cd /path/to/modelchef
 export MODAL_TOKEN_ID=...
 export MODAL_TOKEN_SECRET=...
 export WANDB_API_KEY=...
+
 python verl-recipes/tasks/arnold_launch.py \
   --config submodules/rllm/cookbooks/swe/launchers/launch_swe_qwen35_9b_megatron_b200.yaml
 ```
 
-In this mode the Arnold entrypoint runs the Modal probe on the Arnold-selected
-CPU head. If the probe is bad, the job exits with `BAD_CPU_DRIVER` before
-training starts. This protects B200 time but can restart or fail repeatedly if
-Arnold keeps placing the head on CPUs with poor Modal/SWE-ReX network behavior.
+The entrypoint runs the Modal/SWE-ReX probe on the Arnold-selected CPU head
+before starting training. A CPU is accepted only when the dynamic probe passes
+with 12/12 successes, no transient failures, and `create_env_s.p95 <= 30s`. If
+the selected CPU is bad, the job exits early with `BAD_CPU_DRIVER`; relaunch so
+Arnold selects a different CPU. Do not spend B200 time on a CPU that fails this
+gate.
+
+For fast iteration, keep the same YAML but reduce the Arnold worker and trainer
+shape together:
+
+```yaml
+roles:
+  - name: worker
+    num: 1
+    gpu: 4
+    gpuv: NVIDIA_B200
+envs:
+  NNODES: "1"
+  NGPUS_PER_NODE: "4"
+```
+
+For a one-step smoke test, keep `RLLM_SWE_MODE=smoke` or override the full args
+to a small workload:
+
+```yaml
+envs:
+  RLLM_SWE_MODE: smoke
+  RLLM_SWE_SMOKE_STEPS: "1"
+  RLLM_SWE_SMOKE_TRAIN_SAMPLES: "16"
+  RLLM_SWE_SMOKE_VAL_SAMPLES: "4"
+  RLLM_SWE_SMOKE_ROLLOUT_N: "1"
+  RLLM_SWE_SMOKE_PARALLEL_TASKS: "4"
+```
+
+For long runs, set `trainer.save_freq` to a small value such as `5` or `10` and
+set `CHECKPOINT_ROOT` to a writable HDFS mount. Avoid relying on `/tmp` as the
+only copy of training state for multi-hour jobs.
+
+#### Changing Experiment Settings
+
+Do not edit `run_swe_training_9b_megatron.sh` for normal experiment variants.
+Change these in the Arnold YAML instead:
+
+```yaml
+envs:
+  NNODES: "2"
+  NGPUS_PER_NODE: "8"
+  ACTOR_TP: "2"
+  ACTOR_CP: "2"
+  SWE_N_PARALLEL_TASKS: "128"
+  SWE_AGENT_TIMEOUT: "600"
+  SWE_SANDBOX_TIMEOUT: "800"
+  RLLM_SWE_FULL_EXTRA_ARGS: >-
+    ++trainer.total_training_steps=100
+    trainer.save_freq=10
+    trainer.experiment_name=my_experiment
+    actor_rollout_ref.rollout.n=8
+    actor_rollout_ref.actor.optim.lr=1e-6
+```
+
+Only change the training script when a setting should become a new shared
+default or when new environment-variable plumbing is needed.
+
+#### External Ray Worker Diagnostics
+
+The external-Ray-worker config is still useful when debugging CPU placement or
+Ray behavior, but it is not the preferred end-state for ByteDance Arnold runs.
+Use it when you already have a known-good CPU Ray head and want Arnold to attach
+B200 workers to that head:
+
+```bash
+cd /path/to/modelchef
+export EXTERNAL_RAY_HEAD_IP=REPLACE_WITH_MODAL_GOOD_CPU_IPV6
+
+python verl-recipes/tasks/arnold_launch.py \
+  --config submodules/rllm/cookbooks/swe/launchers/launch_swe_qwen35_9b_megatron_b200_external_ray_workers.yaml
+```
+
+The manually managed CPU head must still pass the Modal probe described above
+before attaching B200 workers.
 
 ## Tests
 
