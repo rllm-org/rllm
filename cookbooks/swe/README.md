@@ -579,6 +579,28 @@ For long runs, set `trainer.save_freq` to a small value such as `5` or `10` and
 set `CHECKPOINT_ROOT` to a writable HDFS mount. Avoid relying on `/tmp` as the
 only copy of training state for multi-hour jobs.
 
+To mirror saved checkpoints to Hugging Face, enable the explicit HF upload
+switch and pass `HF_TOKEN` through Arnold. The upload runs after each local
+checkpoint save and writes the full `global_step_<N>` checkpoint folder to the
+repo under `checkpoints/<experiment_name>/global_step_<N>`. HDFS should still be
+the primary durable checkpoint sink; HF upload is just a simple mirror.
+
+```yaml
+envs:
+  HF_UPLOAD_CHECKPOINTS: "true"
+  HF_UPLOAD_REPO_ID: JWei05/qwen35-9b-swe-smith-megatron
+local_envs:
+  - HF_TOKEN
+```
+
+Equivalent Hydra overrides:
+
+```yaml
+RLLM_SWE_FULL_EXTRA_ARGS: >-
+  ++trainer.hf_upload=true
+  +trainer.hf_repo_id=JWei05/qwen35-9b-swe-smith-megatron
+```
+
 #### Changing Experiment Settings
 
 Do not edit `run_swe_training_9b_megatron.sh` for normal experiment variants.

@@ -14,6 +14,43 @@ from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_
 logger = logging.getLogger(__name__)
 
 
+def _as_bool(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _upload_checkpoint_to_hf(config: DictConfig, checkpoint_folder: str, global_steps: int) -> None:
+    if not _as_bool(OmegaConf.select(config, "trainer.hf_upload")):
+        return
+
+    repo_id = OmegaConf.select(config, "trainer.hf_repo_id")
+    if not repo_id:
+        raise ValueError("trainer.hf_upload=true requires trainer.hf_repo_id")
+
+    original_hf_offline = os.environ.get("HF_HUB_OFFLINE")
+    try:
+        os.environ["HF_HUB_OFFLINE"] = "0"
+        from huggingface_hub import HfApi
+
+        experiment_name = str(OmegaConf.select(config, "trainer.experiment_name") or "experiment")
+        path_in_repo = f"checkpoints/{experiment_name}/global_step_{global_steps}"
+        logger.info("Uploading checkpoint %s to hf://%s/%s", checkpoint_folder, repo_id, path_in_repo)
+        HfApi().upload_folder(
+            repo_id=str(repo_id),
+            folder_path=checkpoint_folder,
+            path_in_repo=path_in_repo,
+            commit_message=f"Upload checkpoint global_step_{global_steps}",
+        )
+    finally:
+        if original_hf_offline is None:
+            os.environ.pop("HF_HUB_OFFLINE", None)
+        else:
+            os.environ["HF_HUB_OFFLINE"] = original_hf_offline
+
+
 def _explicit_override_keys(hydra_overrides: list[str] | None = None) -> set[str]:
     """Return the set of dotted paths the user explicitly set on the Hydra CLI.
 
@@ -263,6 +300,7 @@ def save_checkpoint(
         latest_path = os.path.join(config.trainer.default_local_dir, "latest_checkpointed_iteration.txt")
         with open(latest_path, "w") as f:
             f.write(str(global_steps))
+        _upload_checkpoint_to_hf(config, local_global_step_folder, global_steps)
 
 
 def load_checkpoint(
