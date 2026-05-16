@@ -304,8 +304,7 @@ class AlgorithmConfig:
             warn(
                 "The `per_step` mode is deprecated in experimental unified trainer. "
                 "Set to `broadcast` mode automatically. Please either use the legacy "
-                "trainers (`agent_workflow_trainer` for `Verl` or "
-                "`tinker_workflow_trainer` for `Tinker`) with the `per_step` "
+                "`agent_workflow_trainer` (`Verl` only) with the `per_step` "
                 "configuration, or manually pass in a hook with the implementation "
                 "of `per_step` advantage computation logic.",
                 DeprecationWarning,
