@@ -57,27 +57,6 @@ class EnrichMismatchError(RuntimeError):
 
 
 @dataclass
-class _FlowResult:
-    """Phase-1 output: flow finished, no trace I/O yet.
-
-    Used to thread state from :meth:`AgentFlowEngine.process_task_with_retry`
-    through the batch trace fetch (phase 2) into per-task
-    :meth:`AgentFlowEngine._finish_episode` (phase 3).
-    """
-
-    task_id: str
-    rollout_idx: int
-    result_idx: int
-    uid: str
-    task_for_episode: Any
-    task_obj: Task
-    task_dict: dict
-    ctx: TaskContext | None
-    raw_episode: Episode | None
-    error: BaseException | None = None
-
-
-@dataclass
 class TaskContext:
     """Per-task state returned by :meth:`TaskHooks.setup`.
 
@@ -343,79 +322,56 @@ class AgentFlowEngine:
         objects (eval path; the engine uses them as-is). When ``task_ids``
         is omitted, fresh UUIDs are assigned.
 
-        Pipeline (four phases):
+        Pipeline:
 
-        1. **Flows** — run all agent flows in parallel with retry. Each task
-           completes its LLM calls and yields a raw (un-enriched) Episode.
-           See :meth:`process_task_with_retry` / :meth:`_run_flow_only`.
-        2. **Batch trace fetch** — one ``flush`` + one ``POST /traces/query``
-           for every session id, instead of per-task. See
-           :meth:`GatewayManager.aquery_traces`.
-        3. **Finish** — per-task enrich + evaluate in parallel (CPU-bound).
-           See :meth:`_finish_episode`.
-        4. **Batch delete** — one ``POST /sessions/batch_delete`` to clean
-           up the trace store.
+        1. **Per-task** — run flow + per-task trace fetch + enrich +
+           evaluate with retry, in parallel. Streamed via
+           ``asyncio.as_completed`` so the rollout-completed log lines
+           arrive incrementally as each task finishes.
+        2. **Batch delete** — one ``POST /sessions/batch_delete`` at the
+           end of the step to clean up the trace store.
+
+        Note: per-task trace fetches each cost flush + GET RTTs to the
+        gateway. We tried batching this into a single ``POST
+        /traces/query`` (see :meth:`GatewayManager.aquery_traces`), but
+        doing so gates evaluation on *all* flows completing, which
+        delays the per-task reward log into a noticeable burst at the
+        end of the step. The streaming UX is worth the trace-fetch
+        RTTs; the per-task ``adelete_session`` calls were the larger
+        cost and stay batched.
         """
         if task_ids is None:
             task_ids = [str(uuid.uuid4()) for _ in tasks]
 
         task_id_counter: dict[str, int] = defaultdict(int)
 
-        # ---- Phase 1: run flows (retry around the flow only) ----
-        flow_futures = []
+        futures = []
+        uids: list[str] = []
         for idx, (task, task_id) in enumerate(zip(tasks, task_ids, strict=True)):
             rollout_idx = task_id_counter[task_id]
             task_id_counter[task_id] += 1
-            flow_futures.append(self.process_task_with_retry(task, task_id, rollout_idx, idx, is_validation=is_validation))
+            uid = f"{task_id}:{rollout_idx}"
+            uids.append(uid)
+            futures.append(self.process_task_with_retry(task, task_id, rollout_idx, idx, is_validation=is_validation))
 
-        flow_results: list[_FlowResult] = []
-        with tqdm(total=len(tasks), desc="Generating trajectories") as pbar:
-            for future in asyncio.as_completed(flow_futures):
-                flow_results.append(await future)
-                pbar.update(1)
-
-        # ---- Phase 2: batch fetch traces for sessions with a successful flow ----
-        # Sessions whose flow errored out have no traces to enrich (raw_episode is None);
-        # they become error episodes in phase 3 without needing trace data.
-        session_ids = [r.uid for r in flow_results if r.raw_episode is not None]
-        try:
-            traces_by_uid = await self.gateway.aquery_traces(session_ids)
-        except Exception:
-            logger.exception("Batch trace fetch failed; falling back to per-task fetch")
-            traces_by_uid = {}
-
-        # ---- Phase 3: enrich + evaluate per task (parallel) ----
         results: list[Episode | None] = [None] * len(tasks)
-        finish_futures = []
-        for r in flow_results:
-            traces = traces_by_uid.get(r.uid) if r.raw_episode is not None else None
-            if traces is None and r.raw_episode is not None and r.uid in session_ids and not traces_by_uid:
-                # Batch fetch failed wholesale; per-task fallback for this session.
-                try:
-                    traces = await self.gateway.aget_traces(r.uid)
-                except Exception:
-                    logger.exception("[%s] per-task trace fetch fallback failed", r.uid)
-                    traces = []
-            finish_futures.append(self._finalize_one(r, traces or [], results))
-        if finish_futures:
-            # Stream per-task completion so the "Rollout completed" lines printed
-            # by _finalize_one arrive incrementally (matching the pre-refactor
-            # behavior) instead of dumping in one burst after asyncio.gather.
-            with tqdm(total=len(finish_futures), desc="Finalizing episodes") as pbar:
-                for fut in asyncio.as_completed(finish_futures):
-                    await fut
-                    pbar.update(1)
+        with tqdm(total=len(tasks), desc="Generating trajectories") as pbar:
+            for future in asyncio.as_completed(futures):
+                task_id, rollout_idx, result_idx, episode = await future
+                results[result_idx] = episode
+                pbar.update(1)
 
         ordered_results: list[Episode] = results  # type: ignore[assignment]
 
-        # ---- Phase 4: batch delete trace records to prevent unbounded store growth ----
-        if session_ids:
+        # Batch session delete at end of step to keep the trace store from
+        # growing unboundedly. One ``POST /sessions/batch_delete`` for all
+        # uids instead of N (flush + DELETE) RTTs.
+        if uids:
             try:
-                await self.gateway.adelete_sessions(session_ids)
+                await self.gateway.adelete_sessions(uids)
             except Exception:
                 logger.exception("Batch session delete failed; sessions may linger in the trace store")
 
-        # Log episodes if logger is provided
         if self.episode_logger is not None:
             try:
                 self.episode_logger.log_episodes_batch(
@@ -429,64 +385,6 @@ class AgentFlowEngine:
 
         return ordered_results
 
-    async def _finalize_one(self, flow_result: _FlowResult, traces: list[TraceRecord], out: list[Episode | None]) -> None:
-        """Phase 3 wrapper: build the final Episode and stash it at out[result_idx]."""
-        r = flow_result
-        try:
-            if r.raw_episode is None:
-                # Flow errored on the final retry attempt with raise_on_error=False.
-                assert r.error is not None
-                out[r.result_idx] = Episode(
-                    id=r.uid,
-                    task=r.task_for_episode,
-                    is_correct=False,
-                    termination_reason=TerminationReason.ERROR,
-                    metadata={"error": {"message": str(r.error)}},
-                )
-                return
-
-            try:
-                episode = await self._finish_episode(
-                    raw_episode=r.raw_episode,
-                    traces=traces,
-                    uid=r.uid,
-                    task_obj=r.task_obj,
-                    task_dict=r.task_dict,
-                    ctx=r.ctx,
-                )
-            except Exception as e:
-                logger.exception("[%s] enrich/evaluate failed", r.uid)
-                if self.raise_on_error:
-                    raise
-                out[r.result_idx] = Episode(
-                    id=r.uid,
-                    task=r.task_for_episode,
-                    is_correct=False,
-                    termination_reason=TerminationReason.ERROR,
-                    metadata={"error": {"message": str(e)}},
-                )
-                return
-
-            episode.id = r.uid
-            episode.task = r.task_for_episode
-
-            reward_strs = []
-            for traj in episode.trajectories:
-                reward = "N/A"
-                if traj.reward is not None:
-                    reward = f"{traj.reward:.1f}"
-                elif len(traj.steps) > 0:
-                    reward = f"{traj.steps[-1].reward:.1f}"
-                reward_strs.append(f"{traj.name}: {reward}")
-            colorful_print(
-                f"[{r.uid}] Rollout completed. Rewards: [{', '.join(reward_strs)}], Termination: {episode.termination_reason}",
-                fg="green" if episode.is_correct else "yellow",
-            )
-            out[r.result_idx] = episode
-        finally:
-            if r.ctx is not None:
-                r.ctx.run_teardown()
-
     async def process_task_with_retry(
         self,
         task: dict | Task,
@@ -494,15 +392,14 @@ class AgentFlowEngine:
         rollout_idx: int,
         result_idx: int,
         is_validation: bool = False,
-    ) -> _FlowResult:
-        """Run the agent flow with retry. Returns :class:`_FlowResult` —
-        :meth:`execute_tasks` does the trace fetch and evaluation in batch."""
-        # `task_for_episode` is what we stash on the resulting Episode's
-        # `task` field for downstream consumers (logger, transform pipeline).
-        # Callers historically rely on this being a dict; preserve that.
+    ) -> tuple[str, int, int, Episode]:
+        """Run the full per-task pipeline with retry.
+
+        Each attempt runs flow + trace fetch + enrich + evaluate. On
+        retry, stale traces from the prior attempt are cleared first so
+        the new attempt's enrich doesn't see a mix of trace records.
+        """
         task_for_episode = task.metadata if isinstance(task, Task) else task
-        # Normalize task once so error-episode bookkeeping has a Task object
-        # to stash even if the flow setup itself fails.
         from pathlib import Path
 
         if isinstance(task, Task):
@@ -518,61 +415,75 @@ class AgentFlowEngine:
             )
 
         async with self._semaphore:
-            last_error: BaseException | None = None
             for retry_attempt in range(1, self.retry_limit + 1):
                 uid = f"{task_id}:{rollout_idx}"
-                # Clear any traces from a prior failed attempt so the next
-                # batch trace fetch doesn't mix old attempt's traces with
-                # the new attempt's steps (positional match in enrich_episode
-                # would then corrupt data).
                 if retry_attempt > 1:
                     try:
                         await self.gateway.adelete_session(uid)
                     except Exception as cleanup_err:
                         logger.warning("[%s] failed to clear prior traces before retry: %s", uid, cleanup_err)
                 try:
-                    raw_episode, ctx = await self._run_flow_only(
-                        task_obj=task_obj,
-                        task_dict=task_dict,
-                        uid=uid,
-                        is_validation=is_validation,
+                    episode = await self._run_single(task_obj, task_dict, uid, is_validation=is_validation)
+                    episode.id = uid
+                    episode.task = task_for_episode
+
+                    reward_strs = []
+                    for traj in episode.trajectories:
+                        reward = "N/A"
+                        if traj.reward is not None:
+                            reward = f"{traj.reward:.1f}"
+                        elif len(traj.steps) > 0:
+                            reward = f"{traj.steps[-1].reward:.1f}"
+                        reward_strs.append(f"{traj.name}: {reward}")
+                    colorful_print(
+                        f"[{uid}] Rollout completed. Rewards: [{', '.join(reward_strs)}], Termination: {episode.termination_reason}",
+                        fg="green" if episode.is_correct else "yellow",
                     )
-                    return _FlowResult(
-                        task_id=task_id,
-                        rollout_idx=rollout_idx,
-                        result_idx=result_idx,
-                        uid=uid,
-                        task_for_episode=task_for_episode,
-                        task_obj=task_obj,
-                        task_dict=task_dict,
-                        ctx=ctx,
-                        raw_episode=raw_episode,
-                        error=None,
-                    )
+
+                    return task_id, rollout_idx, result_idx, episode
+
                 except Exception as e:
-                    last_error = e
                     logger.error("[%s] Attempt %d/%d failed: %r (type=%s)", uid, retry_attempt, self.retry_limit, e, type(e).__name__)
                     if retry_attempt < self.retry_limit:
                         continue
                     if self.raise_on_error:
                         raise
-                    # Flow failed on final attempt — return an error _FlowResult.
-                    # The hook ctx (if any) was already torn down by
-                    # _run_flow_only's except branch.
-                    return _FlowResult(
-                        task_id=task_id,
-                        rollout_idx=rollout_idx,
-                        result_idx=result_idx,
-                        uid=uid,
-                        task_for_episode=task_for_episode,
-                        task_obj=task_obj,
-                        task_dict=task_dict,
-                        ctx=None,
-                        raw_episode=None,
-                        error=last_error,
+                    return (
+                        task_id,
+                        rollout_idx,
+                        result_idx,
+                        Episode(
+                            id=uid,
+                            task=task_for_episode,
+                            is_correct=False,
+                            termination_reason=TerminationReason.ERROR,
+                            metadata={"error": {"message": str(e)}},
+                        ),
                     )
-            # Should not reach here, but satisfy type checker
+
             raise RuntimeError(f"[{task_id}:{rollout_idx}] Exhausted all retries")
+
+    async def _run_single(self, task_obj: Task, task_dict: dict, uid: str, is_validation: bool = False) -> Episode:
+        """Run one full per-task pipeline: flow → fetch traces → enrich → evaluate."""
+        raw_episode, ctx = await self._run_flow_only(
+            task_obj=task_obj,
+            task_dict=task_dict,
+            uid=uid,
+            is_validation=is_validation,
+        )
+        try:
+            traces = await self.gateway.aget_traces(uid)
+            return await self._finish_episode(
+                raw_episode=raw_episode,
+                traces=traces,
+                uid=uid,
+                task_obj=task_obj,
+                task_dict=task_dict,
+                ctx=ctx,
+            )
+        finally:
+            if ctx is not None:
+                ctx.run_teardown()
 
     async def _run_flow_only(
         self,
