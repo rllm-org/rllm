@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# Train solver-judge via train.py with Hydra overrides.
+# Train SolverJudgeWorkflow (legacy Workflow API) via the unified trainer + tinker backend.
 #
 # Prerequisites:
 #   1. Install rllm with tinker extras:  uv pip install -e ".[tinker]"
-#   2. Install this cookbook:             uv pip install --no-deps -e cookbooks/solver_judge_flow
-#   3. Pull the dataset:                  rllm dataset pull countdown
-#
-# To enable UI logging, append: rllm.trainer.logger=[console,ui]
+#   2. Pull the dataset:                  rllm dataset pull countdown
+#   3. Run from this cookbook dir:        cd cookbooks/workflow/solver_judge
 
 set -euo pipefail
 
@@ -21,7 +19,7 @@ python -u train.py \
     data.max_response_length=1024 \
     rllm.trainer.total_epochs=1 \
     rllm.trainer.test_freq=10 \
-    rllm.trainer.project_name=solver_judge \
+    rllm.trainer.project_name=solver_judge_workflow \
     rllm.trainer.experiment_name=qwen3-4b-instruct \
     rllm.trainer.logger=[console,ui] \
     "$@"

@@ -38,6 +38,16 @@ After installation, the agent and evaluator are discoverable by the CLI:
 rllm agent list    # should show "geo3k" as a plugin
 ```
 
+## VLM dependency note
+
+`Qwen/Qwen3-VL-30B-A3B-Instruct` (and the wider Qwen3-VL family) ships a `Qwen3VLVideoProcessor` that imports torchvision at load time. Even though the tinker rollout only uses the image side, `AutoProcessor.from_pretrained` will fail without it:
+
+```bash
+uv pip install torchvision
+```
+
+The tinker backend tries to load the processor lazily and fails fast with an actionable message if torchvision is missing — install it once before kicking off training.
+
 ## Dataset
 
 Pull the Geometry3K dataset (one-time):

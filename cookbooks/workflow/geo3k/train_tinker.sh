@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Train geo3k VLM geometry solver with the tinker (single-machine) backend.
+# Train Geo3KWorkflow (legacy Workflow API) via the unified trainer + tinker backend.
 #
 # Prerequisites:
 #   1. Install rllm with tinker extras:  uv pip install -e ".[tinker]"
-#   2. Install this cookbook:             uv pip install --no-deps -e cookbooks/geo3k
-#   3. Pull the dataset:                 rllm dataset pull geo3k
+#   2. Pull the dataset:                  rllm dataset pull geo3k
+#   3. Run from this cookbook dir:        cd cookbooks/workflow/geo3k
 
 set -euo pipefail
 
@@ -17,7 +17,7 @@ python -u train.py \
     rllm.rollout.val.temperature=0.6 \
     rllm.trainer.total_epochs=3 \
     rllm.trainer.test_freq=10 \
-    rllm.trainer.project_name=geo3k \
+    rllm.trainer.project_name=geo3k_workflow \
     rllm.trainer.experiment_name=qwen3-vl-30b-instruct \
     rllm.trainer.logger=[console,ui] \
     "$@"

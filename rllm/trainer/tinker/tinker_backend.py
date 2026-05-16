@@ -129,7 +129,11 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # we need to get it from `AutoTokenizer` since the `policy_trainer` has not been initialized yet
         self.tokenizer = AutoTokenizer.from_pretrained(self.full_config.model.name)
 
-        # Load image processor for vision-language models
+        # Load image processor for vision-language models.
+        # For VLM models, the tinker renderer requires an image_processor to
+        # render image content (otherwise it asserts deep inside the renderer
+        # on the first multimodal message). Fail fast here with an actionable
+        # message rather than silently leaving image_processor=None.
         image_processor = None
         model_name_lower = self.full_config.model.name.lower()
         if "vl" in model_name_lower or "vision" in model_name_lower:
@@ -137,11 +141,22 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
                 from transformers import AutoProcessor
 
                 processor = AutoProcessor.from_pretrained(self.full_config.model.name, trust_remote_code=True)
-                if hasattr(processor, "image_processor") and processor.image_processor is not None:
-                    image_processor = processor.image_processor
-                    logger.info(f"Loaded image_processor for VLM model: {self.full_config.model.name}")
+            except ImportError as e:
+                # Common case: Qwen3-VL needs torchvision for the video
+                # processor, even though we only use the image side.
+                raise RuntimeError(
+                    f"Failed to load AutoProcessor for VLM model {self.full_config.model.name!r}: {e}. "
+                    f"Install the missing dependency (e.g. `uv pip install torchvision` for Qwen3-VL) "
+                    f"and retry — the tinker renderer needs an image_processor."
+                ) from e
             except Exception as e:
-                logger.warning(f"Failed to load image_processor for VLM model: {e}")
+                raise RuntimeError(f"Failed to load AutoProcessor for VLM model {self.full_config.model.name!r}: {e}") from e
+
+            if hasattr(processor, "image_processor") and processor.image_processor is not None:
+                image_processor = processor.image_processor
+                logger.info(f"Loaded image_processor for VLM model: {self.full_config.model.name}")
+            else:
+                raise RuntimeError(f"AutoProcessor for {self.full_config.model.name!r} has no .image_processor attribute; this model isn't a VLM or transformers can't expose its image processor.")
 
         self.rollout_engine = TinkerEngine(
             base_url=self.full_config.tinker_base_url,
