@@ -250,6 +250,13 @@ class GatewayManager:
         await self.async_client.flush()
         return await self.async_client.delete_session(session_id)
 
+    async def adelete_sessions(self, session_ids: list[str]) -> int:
+        """Batch-delete many sessions in a single flush + request."""
+        if not session_ids:
+            return 0
+        await self.async_client.flush()
+        return await self.async_client.delete_sessions(session_ids)
+
     # -- Worker setup --------------------------------------------------------
 
     def _ensure_verl_engine_workers(self, rollout_engine: VerlEngine) -> list[str]:

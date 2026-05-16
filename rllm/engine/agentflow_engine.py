@@ -5,15 +5,15 @@ Single execution engine for both training and eval. Each rollout:
 1. ``hooks.setup(task, agent_flow, uid)`` runs (if hooks provided) — eval
    uses this to create a per-task sandbox + resolve a per-task verifier;
    training leaves hooks unset.
-2. A gateway session is created.
-3. The agent flow runs against the gateway session URL.
-4. Traces are fetched and the Episode is enriched with token-level Steps.
-5. The evaluator scores the enriched Episode (per-task evaluator from the
+2. The agent flow runs against the gateway session URL.
+3. Traces are fetched and the Episode is enriched with token-level Steps.
+4. The evaluator scores the enriched Episode (per-task evaluator from the
    hook context if hooks set; otherwise the engine-bound ``self.evaluator``).
-6. Reward is written back, gateway session deleted, hook teardown runs.
+5. Reward is written back; the hook context is torn down. Sessions are
+   batch-deleted from the trace store at the end of the step.
 
-Eval and training differ only in which hooks they install — the driver
-loop in :meth:`_run_single` is identical.
+Eval and training differ only in which hooks they install — the per-task
+pipeline in :meth:`_run_single` is identical.
 """
 
 from __future__ import annotations
@@ -322,29 +322,44 @@ class AgentFlowEngine:
         objects (eval path; the engine uses them as-is). When ``task_ids``
         is omitted, fresh UUIDs are assigned.
 
-        See :meth:`_run_single` for the per-rollout lifecycle.
+        Runs per-task pipelines (flow + trace fetch + enrich + evaluate)
+        in parallel, streamed via ``asyncio.as_completed`` so the
+        rollout-completed log lines arrive as each task finishes. One
+        ``POST /sessions/batch_delete`` at the end of the step cleans
+        up the trace store.
         """
         if task_ids is None:
             task_ids = [str(uuid.uuid4()) for _ in tasks]
 
         task_id_counter: dict[str, int] = defaultdict(int)
-        results: list[Episode | None] = [None] * len(tasks)
 
         futures = []
+        uids: list[str] = []
         for idx, (task, task_id) in enumerate(zip(tasks, task_ids, strict=True)):
             rollout_idx = task_id_counter[task_id]
             task_id_counter[task_id] += 1
+            uid = f"{task_id}:{rollout_idx}"
+            uids.append(uid)
             futures.append(self.process_task_with_retry(task, task_id, rollout_idx, idx, is_validation=is_validation))
 
+        results: list[Episode | None] = [None] * len(tasks)
         with tqdm(total=len(tasks), desc="Generating trajectories") as pbar:
             for future in asyncio.as_completed(futures):
-                task_id, rollout_idx, idx, episode = await future
-                results[idx] = episode
+                task_id, rollout_idx, result_idx, episode = await future
+                results[result_idx] = episode
                 pbar.update(1)
 
         ordered_results: list[Episode] = results  # type: ignore[assignment]
 
-        # Log episodes if logger is provided
+        # Batch session delete at end of step to keep the trace store from
+        # growing unboundedly. One ``POST /sessions/batch_delete`` for all
+        # uids instead of N (flush + DELETE) RTTs.
+        if uids:
+            try:
+                await self.gateway.adelete_sessions(uids)
+            except Exception:
+                logger.exception("Batch session delete failed; sessions may linger in the trace store")
+
         if self.episode_logger is not None:
             try:
                 self.episode_logger.log_episodes_batch(
@@ -366,28 +381,40 @@ class AgentFlowEngine:
         result_idx: int,
         is_validation: bool = False,
     ) -> tuple[str, int, int, Episode]:
-        """Process a single task with retry logic."""
-        # `task_for_episode` is what we stash on the resulting Episode's
-        # `task` field for downstream consumers (logger, transform pipeline).
-        # Callers historically rely on this being a dict; preserve that.
+        """Run the full per-task pipeline with retry.
+
+        Each attempt runs flow + trace fetch + enrich + evaluate. On
+        retry, stale traces from the prior attempt are cleared first so
+        the new attempt's enrich doesn't see a mix of trace records.
+        """
         task_for_episode = task.metadata if isinstance(task, Task) else task
+        from pathlib import Path
+
+        if isinstance(task, Task):
+            task_obj = task
+            task_dict = task.metadata
+        else:
+            task_dict = task
+            task_obj = Task(
+                id=str(task_id),
+                instruction=str(task.get("question", task.get("instruction", ""))),
+                metadata=task,
+                dataset_dir=Path("."),
+            )
+
         async with self._semaphore:
             for retry_attempt in range(1, self.retry_limit + 1):
                 uid = f"{task_id}:{rollout_idx}"
-                # Clear any traces from a prior failed attempt so the gateway
-                # doesn't mix old attempt's traces with the new attempt's steps
-                # (positional match in _enrich_episode would then corrupt data).
                 if retry_attempt > 1:
                     try:
                         await self.gateway.adelete_session(uid)
                     except Exception as cleanup_err:
                         logger.warning("[%s] failed to clear prior traces before retry: %s", uid, cleanup_err)
                 try:
-                    episode = await self._run_single(task, uid, is_validation=is_validation)
+                    episode = await self._run_single(task_obj, task_dict, uid, is_validation=is_validation)
                     episode.id = uid
                     episode.task = task_for_episode
 
-                    # Display rewards
                     reward_strs = []
                     for traj in episode.trajectories:
                         reward = "N/A"
@@ -407,11 +434,8 @@ class AgentFlowEngine:
                     logger.error("[%s] Attempt %d/%d failed: %r (type=%s)", uid, retry_attempt, self.retry_limit, e, type(e).__name__)
                     if retry_attempt < self.retry_limit:
                         continue
-
                     if self.raise_on_error:
                         raise
-
-                    # Return an error episode
                     return (
                         task_id,
                         rollout_idx,
@@ -425,135 +449,133 @@ class AgentFlowEngine:
                         ),
                     )
 
-            # Should not reach here, but satisfy type checker
-            raise RuntimeError(f"[{uid}] Exhausted all retries")
+            raise RuntimeError(f"[{task_id}:{rollout_idx}] Exhausted all retries")
 
-    async def _run_single(self, task: dict | Task, uid: str, is_validation: bool = False) -> Episode:
-        """Run a single AgentFlow rollout end-to-end.
-
-        Lifecycle (identical for training and eval):
-
-        1. ``hooks.setup`` runs (eval: build sandbox + resolve verifier).
-        2. Gateway session is created.
-        3. Agent flow runs against the gateway session URL.
-        4. Traces fetched and Episode enriched with token-level Steps.
-        5. Evaluator scores the enriched Episode (per-task from hook context
-           if hooks set; else the engine-bound ``self.evaluator``).
-        6. Reward + signals written back, gateway session deleted, hook
-           teardown runs (in ``finally``).
-        """
-        loop = asyncio.get_event_loop()
-        from pathlib import Path
-
-        # Normalize the task: callers may pass either a raw dict (training
-        # path) or a fully-constructed Task (eval path). We keep both
-        # representations because the original dict (when present) is what
-        # downstream code uses for `episode.task` and what dict-style
-        # evaluators expect to read from.
-        if isinstance(task, Task):
-            task_obj = task
-            task_dict = task.metadata
-        else:
-            task_dict = task
-            task_obj = Task(
-                id=str(uid),
-                instruction=str(task.get("question", task.get("instruction", ""))),
-                metadata=task,
-                dataset_dir=Path("."),
+    async def _run_single(self, task_obj: Task, task_dict: dict, uid: str, is_validation: bool = False) -> Episode:
+        """Run one full per-task pipeline: flow → fetch traces → enrich → evaluate."""
+        raw_episode, ctx = await self._run_flow_only(
+            task_obj=task_obj,
+            task_dict=task_dict,
+            uid=uid,
+            is_validation=is_validation,
+        )
+        try:
+            traces = await self.gateway.aget_traces(uid)
+            return await self._finish_episode(
+                raw_episode=raw_episode,
+                traces=traces,
+                uid=uid,
+                task_obj=task_obj,
+                task_dict=task_dict,
+                ctx=ctx,
             )
+        finally:
+            if ctx is not None:
+                ctx.run_teardown()
 
-        # Hook setup (eval: sandbox + per-task verifier resolution)
+    async def _run_flow_only(
+        self,
+        task_obj: Task,
+        task_dict: dict,
+        uid: str,
+        is_validation: bool = False,
+    ) -> tuple[Episode, TaskContext | None]:
+        """Run hook setup + the agent flow. Returns ``(raw_episode, ctx)``.
+
+        On flow failure, tears down the hook context (if any) and
+        re-raises so the caller can retry. On success, the caller is
+        responsible for running ``ctx.run_teardown()`` after
+        enrich+evaluate.
+        """
         ctx: TaskContext | None = None
         if self.hooks is not None:
             ctx = self.hooks.setup(task_obj, self.agent_flow, uid)
 
         try:
-            # 1. Create gateway session
-            await self.gateway.acreate_session(uid, is_validation=is_validation)
-            try:
-                session_url = self.gateway.get_session_url(uid)
+            session_url = self.gateway.get_session_url(uid)
 
-                # 2. Build config
-                config = AgentConfig(
-                    base_url=session_url,
-                    model=self.model,
-                    session_uid=uid,
-                    is_validation=is_validation,
-                    sampling_params=(self.train_sampling_params if not is_validation else self.val_sampling_params) or {},
-                )
+            config = AgentConfig(
+                base_url=session_url,
+                model=self.model,
+                session_uid=uid,
+                is_validation=is_validation,
+                sampling_params=(self.train_sampling_params if not is_validation else self.val_sampling_params) or {},
+            )
 
-                # 3. Run agent flow (prefers arun if available, else run in executor).
-                # The hook may return a per-task agent flow instance (eg. a
-                # SandboxedAgentFlow with the task's sandbox already injected);
-                # use it when present so parallel tasks don't share mutable
-                # ``self._sandbox`` state on the engine-bound ``self.agent_flow``.
-                flow_for_task = ctx.agent_flow if (ctx is not None and ctx.agent_flow is not None) else self.agent_flow
-                logger.debug("[%s] Starting agent flow at %s", uid, session_url)
-                episode = await run_agent_flow(flow_for_task, task_obj, config, executor=self.executor)
-                logger.debug("[%s] Agent flow completed, %d trajectories", uid, len(episode.trajectories))
-
-                # 4. Retrieve traces from gateway and enrich episode with token data.
-                # Eval (hooks set) doesn't require vLLM-style token IDs because
-                # the upstream may be any OpenAI-compatible endpoint; training
-                # (no hooks) needs them for loss math and treats missing IDs
-                # as a retry-worthy transient failure.
-                traces = await self.gateway.aget_traces(uid)
-                enriched = enrich_episode_with_traces(
-                    episode,
-                    traces,
-                    uid,
-                    task_dict,
-                    strict=self.hooks is None,
-                )
-
-                # 5. Evaluate the enriched Episode.
-                # Per-task evaluator from the hook context wins over the
-                # engine-bound evaluator. Hook-resolved evaluators receive
-                # the Task object; the engine-bound evaluator receives the
-                # raw task dict (training compatibility).
-                if ctx is not None:
-                    eval_output: EvalOutput = await loop.run_in_executor(
-                        self.executor,
-                        ctx.evaluator.evaluate,
-                        task_obj,
-                        enriched,
-                    )
-                else:
-                    assert self.evaluator is not None  # __init__ guarantees one of evaluator/hooks
-                    eval_output = await loop.run_in_executor(
-                        self.executor,
-                        self.evaluator.evaluate,
-                        task_dict,
-                        enriched,
-                    )
-
-                # Apply reward to trajectories that don't already have one.
-                # Evaluators for multi-trajectory flows (e.g. solver-judge) may set
-                # per-trajectory rewards directly on the episode; those are preserved.
-                for traj in enriched.trajectories:
-                    if traj.reward is None:
-                        traj.reward = eval_output.reward
-                    if not traj.signals:
-                        traj.signals = {s.name: s.value for s in eval_output.signals}
-                enriched.is_correct = eval_output.is_correct
-
-                # Attach eval metrics
-                enriched.metrics.update(eval_output.metadata)
-                for signal in eval_output.signals:
-                    enriched.metrics[signal.name] = signal.value
-
-                if enriched.termination_reason is None:
-                    enriched.termination_reason = TerminationReason.ENV_DONE
-                return enriched
-            finally:
-                # 6. Delete traces from gateway DB to prevent unbounded growth
-                try:
-                    await self.gateway.adelete_session(uid)
-                except Exception:
-                    logger.exception("[%s] gateway session delete failed; continuing", uid)
-        finally:
+            # The hook may return a per-task agent flow instance (eg. a
+            # SandboxedAgentFlow with the task's sandbox already injected);
+            # use it when present so parallel tasks don't share mutable
+            # ``self._sandbox`` state on the engine-bound ``self.agent_flow``.
+            flow_for_task = ctx.agent_flow if (ctx is not None and ctx.agent_flow is not None) else self.agent_flow
+            logger.debug("[%s] Starting agent flow at %s", uid, session_url)
+            episode = await run_agent_flow(flow_for_task, task_obj, config, executor=self.executor)
+            logger.debug("[%s] Agent flow completed, %d trajectories", uid, len(episode.trajectories))
+            return episode, ctx
+        except BaseException:
+            # Tear down per-attempt resources on failure; success path
+            # defers teardown until after enrich+evaluate completes.
             if ctx is not None:
-                ctx.run_teardown()
+                try:
+                    ctx.run_teardown()
+                except Exception:
+                    logger.exception("[%s] hook teardown failed during error recovery", uid)
+            raise
+
+    async def _finish_episode(
+        self,
+        raw_episode: Episode,
+        traces: list[TraceRecord],
+        uid: str,
+        task_obj: Task,
+        task_dict: dict,
+        ctx: TaskContext | None,
+    ) -> Episode:
+        """Enrich the raw episode with traces, run the evaluator, apply rewards."""
+        loop = asyncio.get_event_loop()
+
+        enriched = enrich_episode_with_traces(
+            raw_episode,
+            traces,
+            uid,
+            task_dict,
+            strict=self.hooks is None,
+        )
+
+        # Per-task evaluator from the hook context wins over the engine-bound
+        # evaluator. Hook-resolved evaluators receive the Task object; the
+        # engine-bound evaluator receives the raw task dict (training compat).
+        if ctx is not None:
+            eval_output: EvalOutput = await loop.run_in_executor(
+                self.executor,
+                ctx.evaluator.evaluate,
+                task_obj,
+                enriched,
+            )
+        else:
+            assert self.evaluator is not None  # __init__ guarantees one of evaluator/hooks
+            eval_output = await loop.run_in_executor(
+                self.executor,
+                self.evaluator.evaluate,
+                task_dict,
+                enriched,
+            )
+
+        # Evaluators for multi-trajectory flows (e.g. solver-judge) may set
+        # per-trajectory rewards directly on the episode; preserve those.
+        for traj in enriched.trajectories:
+            if traj.reward is None:
+                traj.reward = eval_output.reward
+            if not traj.signals:
+                traj.signals = {s.name: s.value for s in eval_output.signals}
+        enriched.is_correct = eval_output.is_correct
+
+        enriched.metrics.update(eval_output.metadata)
+        for signal in eval_output.signals:
+            enriched.metrics[signal.name] = signal.value
+
+        if enriched.termination_reason is None:
+            enriched.termination_reason = TerminationReason.ENV_DONE
+        return enriched
 
     def shutdown(self) -> None:
         """Shutdown the engine and cleanup resources."""

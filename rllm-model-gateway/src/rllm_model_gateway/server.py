@@ -244,6 +244,15 @@ def create_app(
         count = await sessions.delete_session(session_id)
         return {"deleted": count}
 
+    @app.post("/sessions/batch_delete")
+    async def batch_delete_sessions(request: Request):
+        body = await _safe_json(request)
+        session_ids = body.get("session_ids", [])
+        total = 0
+        for sid in session_ids:
+            total += await sessions.delete_session(sid)
+        return {"deleted": total}
+
     # -- Trace endpoints ---------------------------------------------------
 
     @app.get("/traces/{trace_id}")
