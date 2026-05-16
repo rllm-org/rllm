@@ -238,14 +238,21 @@ class GatewayManager:
     # -- Async session / trace API -------------------------------------------
 
     async def acreate_session(self, session_id: str, is_validation: bool = False) -> str:
-        """Return the session id without registering it on the gateway.
+        """Register a session on the gateway with the configured sampling params.
 
-        ``SessionRoutingMiddleware`` extracts the session id from the URL
-        path and tolerates unknown ids. Sampling params already flow into
-        every chat-completions call via ``AgentConfig.sampling_params``,
-        so the server-side per-session record is redundant.
+        Required by callers whose agent runs out-of-process and can't
+        plumb sampling params into each ``chat.completions.create`` call
+        itself — e.g. :class:`~rllm.experimental.engine.remote_agent_flow_engine.RemoteAgentFlowEngine`
+        (AgentCore / Harbor containers). For those callers,
+        ``SessionRoutingMiddleware`` injects the per-session params
+        server-side on each request matching this session id.
+
+        Callers that already spread sampling params into their own
+        chat-completions calls (e.g. :class:`AgentFlowEngine`) can skip
+        this entirely — the URL alone is enough.
         """
-        return session_id
+        sp = self._val_sampling_params if is_validation else self._train_sampling_params
+        return await self.async_client.create_session(session_id=session_id, sampling_params=sp or None)
 
     async def aget_traces(self, session_id: str) -> list[TraceRecord]:
         await self.async_client.flush(timeout=_TRACE_API_TIMEOUT)
