@@ -398,7 +398,13 @@ class AgentFlowEngine:
                     traces = []
             finish_futures.append(self._finalize_one(r, traces or [], results))
         if finish_futures:
-            await asyncio.gather(*finish_futures)
+            # Stream per-task completion so the "Rollout completed" lines printed
+            # by _finalize_one arrive incrementally (matching the pre-refactor
+            # behavior) instead of dumping in one burst after asyncio.gather.
+            with tqdm(total=len(finish_futures), desc="Finalizing episodes") as pbar:
+                for fut in asyncio.as_completed(finish_futures):
+                    await fut
+                    pbar.update(1)
 
         ordered_results: list[Episode] = results  # type: ignore[assignment]
 
