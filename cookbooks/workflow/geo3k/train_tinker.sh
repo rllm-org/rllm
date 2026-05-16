@@ -19,4 +19,5 @@ python -u train.py \
     rllm.trainer.test_freq=10 \
     rllm.trainer.project_name=geo3k_workflow \
     rllm.trainer.experiment_name=qwen3-vl-30b-instruct \
+    rllm.trainer.logger=[console,ui] \
     "$@"
