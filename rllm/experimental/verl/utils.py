@@ -50,7 +50,6 @@ _SHARED_KEYS: list[tuple[str, str]] = [
     ("actor_rollout_ref.actor.kl_loss_coef", "rllm.algorithm.kl_beta"),
     ("actor_rollout_ref.actor.policy_loss.loss_mode", "rllm.algorithm.loss_fn"),
     ("actor_rollout_ref.actor.loss_agg_mode", "rllm.algorithm.loss_agg_mode"),
-    ("actor_rollout_ref.actor.optim.lr_scheduler_type", "rllm.algorithm.lr_schedule"),
     ("actor_rollout_ref.actor.optim.lr_warmup_steps", "rllm.algorithm.warmup_steps"),
     ("actor_rollout_ref.actor.optim.lr_warmup_steps_ratio", "rllm.algorithm.warmup_steps_ratio"),
     ("actor_rollout_ref.actor.clip_ratio_high", "rllm.algorithm.eps_clip_high"),
@@ -204,9 +203,20 @@ def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) ->
         if eps_clip_high is not None:
             OmegaConf.update(config, "actor_rollout_ref.actor.clip_ratio_high", eps_clip_high, merge=False)
 
+    def sync_lr_schedule() -> None:
+        optim = OmegaConf.select(config, "actor_rollout_ref.actor.optim")
+        if optim is None:
+            return
+        # different training backends use a different config key
+        for key in ("lr_scheduler_type", "lr_decay_style", "decay_type"):
+            if key in optim:
+                sync_pair(f"actor_rollout_ref.actor.optim.{key}", "rllm.algorithm.lr_schedule")
+                return
+
     for verl_path, rllm_path in _SHARED_KEYS:
         sync_pair(verl_path, rllm_path)
 
+    sync_lr_schedule()
     sync_total_training_steps()
 
     # Derived verl-only keys
