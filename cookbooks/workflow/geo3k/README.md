@@ -19,6 +19,16 @@ For the equivalent example written against the newer `@rllm.rollout` AgentFlow p
 | `train_tinker.sh` | Tinker-backend launch (`rllm/backend=tinker`) |
 | `train_verl.sh` | Verl-backend launch (`rllm/backend=verl`) |
 
+## VLM dependency note
+
+`Qwen/Qwen3-VL-30B-A3B-Instruct` (and the wider Qwen3-VL family) ships a `Qwen3VLVideoProcessor` that imports torchvision at load time. Even though the tinker rollout only uses the image side, `AutoProcessor.from_pretrained` will fail without it:
+
+```bash
+uv pip install torchvision
+```
+
+The tinker backend tries to load the processor lazily and now fails fast with an actionable message if torchvision is missing — install it once before kicking off training.
+
 ## Data
 
 ```bash
