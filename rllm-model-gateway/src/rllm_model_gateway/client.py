@@ -212,24 +212,6 @@ class AsyncGatewayClient:
 
     # -- Trace retrieval ---------------------------------------------------
 
-    async def query_traces(
-        self,
-        session_ids: list[str],
-        since: float | None = None,
-        limit: int | None = None,
-    ) -> list[TraceRecord]:
-        """Batch-fetch traces for many sessions in a single round-trip."""
-        if not session_ids:
-            return []
-        body: dict[str, Any] = {"session_ids": list(session_ids)}
-        if since is not None:
-            body["since"] = since
-        if limit is not None:
-            body["limit"] = limit
-        resp = await self._http.post(f"{self.gateway_url}/traces/query", json=body)
-        resp.raise_for_status()
-        return [TraceRecord(**t) for t in resp.json()]
-
     async def get_session_traces(
         self,
         session_id: str,

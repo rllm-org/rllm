@@ -238,19 +238,6 @@ class GatewayManager:
     # -- Async session / trace API -------------------------------------------
 
     async def acreate_session(self, session_id: str, is_validation: bool = False) -> str:
-        """Register a session on the gateway with the configured sampling params.
-
-        Required by callers whose agent runs out-of-process and can't
-        plumb sampling params into each ``chat.completions.create`` call
-        itself — e.g. :class:`~rllm.experimental.engine.remote_agent_flow_engine.RemoteAgentFlowEngine`
-        (AgentCore / Harbor containers). For those callers,
-        ``SessionRoutingMiddleware`` injects the per-session params
-        server-side on each request matching this session id.
-
-        Callers that already spread sampling params into their own
-        chat-completions calls (e.g. :class:`AgentFlowEngine`) can skip
-        this entirely — the URL alone is enough.
-        """
         sp = self._val_sampling_params if is_validation else self._train_sampling_params
         return await self.async_client.create_session(session_id=session_id, sampling_params=sp or None)
 
@@ -258,23 +245,8 @@ class GatewayManager:
         await self.async_client.flush(timeout=_TRACE_API_TIMEOUT)
         return await self.async_client.get_session_traces(session_id)
 
-    async def aquery_traces(self, session_ids: list[str]) -> dict[str, list[TraceRecord]]:
-        """Batch-fetch traces for many sessions in a single flush + query.
-
-        Returns a dict keyed by ``session_id``. Sessions with no traces are
-        omitted from the returned dict (caller should default to ``[]``).
-        """
-        if not session_ids:
-            return {}
-        await self.async_client.flush(timeout=_TRACE_API_TIMEOUT)
-        traces = await self.async_client.query_traces(session_ids)
-        grouped: dict[str, list[TraceRecord]] = {}
-        for t in traces:
-            grouped.setdefault(t.session_id, []).append(t)
-        return grouped
-
     async def adelete_session(self, session_id: str) -> int:
-        """Delete a single session and its traces (used for retry cleanup)."""
+        """Delete a session and all its accumulated traces. Returns count removed."""
         await self.async_client.flush()
         return await self.async_client.delete_session(session_id)
 
