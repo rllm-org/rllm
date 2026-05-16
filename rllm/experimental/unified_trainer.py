@@ -178,8 +178,14 @@ class UnifiedTrainer:
             self._gateway = GatewayManager(self.config, mode=gateway_mode)
 
             # merge the data.max_response_length into the sampling_params; TODO(listar2000): refactor the data config group
-            training_sampling_params = self.rllm_config.rollout.train | {"max_tokens": self.config.data.max_response_length}
-            val_sampling_params = self.rllm_config.rollout.val | {"max_tokens": self.config.data.max_response_length}
+            training_sampling_params = {
+                **OmegaConf.to_container(self.rllm_config.rollout.train, resolve=True),
+                "max_tokens": self.config.data.max_response_length,
+            }
+            val_sampling_params = {
+                **OmegaConf.to_container(self.rllm_config.rollout.val, resolve=True),
+                "max_tokens": self.config.data.max_response_length,
+            }
 
             self.agent_workflow_engine = AgentFlowEngine(
                 agent_flow=agent_flow,

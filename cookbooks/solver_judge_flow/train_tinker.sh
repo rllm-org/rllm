@@ -14,7 +14,7 @@ python -u train.py \
     rllm/backend=tinker \
     model.name=Qwen/Qwen3-4B-Instruct-2507 \
     model.lora_rank=32 \
-    training.group_size=8 \
+    training.group_size=4 \
     data.train_batch_size=32 \
     data.val_batch_size=256 \
     data.max_prompt_length=4096 \
