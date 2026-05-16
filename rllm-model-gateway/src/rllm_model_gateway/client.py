@@ -199,7 +199,36 @@ class AsyncGatewayClient:
         resp.raise_for_status()
         return resp.json().get("deleted", 0)
 
+    async def delete_sessions(self, session_ids: list[str]) -> int:
+        """Batch-delete sessions (and their traces) in a single round-trip."""
+        if not session_ids:
+            return 0
+        resp = await self._http.post(
+            f"{self.gateway_url}/sessions/batch_delete",
+            json={"session_ids": list(session_ids)},
+        )
+        resp.raise_for_status()
+        return resp.json().get("deleted", 0)
+
     # -- Trace retrieval ---------------------------------------------------
+
+    async def query_traces(
+        self,
+        session_ids: list[str],
+        since: float | None = None,
+        limit: int | None = None,
+    ) -> list[TraceRecord]:
+        """Batch-fetch traces for many sessions in a single round-trip."""
+        if not session_ids:
+            return []
+        body: dict[str, Any] = {"session_ids": list(session_ids)}
+        if since is not None:
+            body["since"] = since
+        if limit is not None:
+            body["limit"] = limit
+        resp = await self._http.post(f"{self.gateway_url}/traces/query", json=body)
+        resp.raise_for_status()
+        return [TraceRecord(**t) for t in resp.json()]
 
     async def get_session_traces(
         self,

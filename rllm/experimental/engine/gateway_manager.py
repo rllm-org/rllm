@@ -238,17 +238,51 @@ class GatewayManager:
     # -- Async session / trace API -------------------------------------------
 
     async def acreate_session(self, session_id: str, is_validation: bool = False) -> str:
-        sp = self._val_sampling_params if is_validation else self._train_sampling_params
-        return await self.async_client.create_session(session_id=session_id, sampling_params=sp or None)
+        """Lazy session: no HTTP call.
+
+        ``SessionRoutingMiddleware`` extracts the session id from the URL path
+        and does not require the SessionManager to know about it ahead of
+        time. ``AgentConfig.sampling_params`` is already spread into every
+        ``chat.completions.create(**sampling)`` call by the agent flow, so
+        the per-session sampling-params record stored by the server-side
+        ``create_session`` is redundant.
+
+        Keeping this as a method (rather than removing it) preserves the
+        :class:`GatewayManager` API. Callers can drop the ``await`` site
+        without breaking anything; we keep it for backward compatibility.
+        """
+        return session_id
 
     async def aget_traces(self, session_id: str) -> list[TraceRecord]:
         await self.async_client.flush(timeout=_TRACE_API_TIMEOUT)
         return await self.async_client.get_session_traces(session_id)
 
+    async def aquery_traces(self, session_ids: list[str]) -> dict[str, list[TraceRecord]]:
+        """Batch-fetch traces for many sessions in a single flush + query.
+
+        Returns a dict keyed by ``session_id``. Sessions with no traces are
+        omitted from the returned dict (caller should default to ``[]``).
+        """
+        if not session_ids:
+            return {}
+        await self.async_client.flush(timeout=_TRACE_API_TIMEOUT)
+        traces = await self.async_client.query_traces(session_ids)
+        grouped: dict[str, list[TraceRecord]] = {}
+        for t in traces:
+            grouped.setdefault(t.session_id, []).append(t)
+        return grouped
+
     async def adelete_session(self, session_id: str) -> int:
-        """Delete a session and all its accumulated traces. Returns count removed."""
+        """Delete a single session and its traces (used for retry cleanup)."""
         await self.async_client.flush()
         return await self.async_client.delete_session(session_id)
+
+    async def adelete_sessions(self, session_ids: list[str]) -> int:
+        """Batch-delete many sessions in a single flush + request."""
+        if not session_ids:
+            return 0
+        await self.async_client.flush()
+        return await self.async_client.delete_sessions(session_ids)
 
     # -- Worker setup --------------------------------------------------------
 
