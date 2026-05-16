@@ -45,8 +45,20 @@ class Geo3KWorkflow(Workflow):
         image = task.get("image", task.get("images", None))
         if isinstance(image, list) and len(image) > 0:
             image = image[0]
-        if isinstance(image, dict) and "bytes" in image:
-            image = Image.open(BytesIO(image["bytes"]))
+        # Datasets serialize images in a few shapes:
+        #   - ``dict`` with ``"bytes"``/``"path"`` (HuggingFace `Image` feature),
+        #   - raw ``bytes`` (already encoded PNG/JPEG),
+        #   - already-opened ``PIL.Image.Image``,
+        #   - ``None`` (text-only row).
+        if isinstance(image, dict):
+            if image.get("bytes"):
+                image = Image.open(BytesIO(image["bytes"]))
+            elif image.get("path"):
+                image = Image.open(image["path"])
+            else:
+                image = None
+        elif isinstance(image, bytes):
+            image = Image.open(BytesIO(image))
         assert isinstance(image, Image.Image) or image is None, f"Image must be a PIL.Image.Image, but got {type(image)}"
 
         # Standard format: content is text, images is list[PIL.Image].
