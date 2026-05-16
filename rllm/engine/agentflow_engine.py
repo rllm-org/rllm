@@ -322,23 +322,11 @@ class AgentFlowEngine:
         objects (eval path; the engine uses them as-is). When ``task_ids``
         is omitted, fresh UUIDs are assigned.
 
-        Pipeline:
-
-        1. **Per-task** — run flow + per-task trace fetch + enrich +
-           evaluate with retry, in parallel. Streamed via
-           ``asyncio.as_completed`` so the rollout-completed log lines
-           arrive incrementally as each task finishes.
-        2. **Batch delete** — one ``POST /sessions/batch_delete`` at the
-           end of the step to clean up the trace store.
-
-        Note: per-task trace fetches each cost flush + GET RTTs to the
-        gateway. We tried batching this into a single ``POST
-        /traces/query`` (see :meth:`GatewayManager.aquery_traces`), but
-        doing so gates evaluation on *all* flows completing, which
-        delays the per-task reward log into a noticeable burst at the
-        end of the step. The streaming UX is worth the trace-fetch
-        RTTs; the per-task ``adelete_session`` calls were the larger
-        cost and stay batched.
+        Runs per-task pipelines (flow + trace fetch + enrich + evaluate)
+        in parallel, streamed via ``asyncio.as_completed`` so the
+        rollout-completed log lines arrive as each task finishes. One
+        ``POST /sessions/batch_delete`` at the end of the step cleans
+        up the trace store.
         """
         if task_ids is None:
             task_ids = [str(uuid.uuid4()) for _ in tasks]
