@@ -5,15 +5,15 @@ Single execution engine for both training and eval. Each rollout:
 1. ``hooks.setup(task, agent_flow, uid)`` runs (if hooks provided) — eval
    uses this to create a per-task sandbox + resolve a per-task verifier;
    training leaves hooks unset.
-2. A gateway session is created.
-3. The agent flow runs against the gateway session URL.
-4. Traces are fetched and the Episode is enriched with token-level Steps.
-5. The evaluator scores the enriched Episode (per-task evaluator from the
+2. The agent flow runs against the gateway session URL.
+3. Traces are fetched and the Episode is enriched with token-level Steps.
+4. The evaluator scores the enriched Episode (per-task evaluator from the
    hook context if hooks set; otherwise the engine-bound ``self.evaluator``).
-6. Reward is written back, gateway session deleted, hook teardown runs.
+5. Reward is written back; the hook context is torn down. Sessions are
+   batch-deleted from the trace store at the end of the step.
 
-Eval and training differ only in which hooks they install — the driver
-loop in :meth:`_run_single` is identical.
+Eval and training differ only in which hooks they install — the per-task
+pipeline in :meth:`_run_single` is identical.
 """
 
 from __future__ import annotations
@@ -480,24 +480,18 @@ class AgentFlowEngine:
         uid: str,
         is_validation: bool = False,
     ) -> tuple[Episode, TaskContext | None]:
-        """Phase 1: hook setup + agent flow. No trace fetch, no enrich, no evaluate.
+        """Run hook setup + the agent flow. Returns ``(raw_episode, ctx)``.
 
-        On flow failure, runs ``ctx.run_teardown()`` if a hook context was
-        created, then re-raises so :meth:`process_task_with_retry` can retry.
-        On success, returns the raw episode plus the hook context (caller is
-        responsible for running teardown after enrich+evaluate).
+        On flow failure, tears down the hook context (if any) and
+        re-raises so the caller can retry. On success, the caller is
+        responsible for running ``ctx.run_teardown()`` after
+        enrich+evaluate.
         """
         ctx: TaskContext | None = None
         if self.hooks is not None:
             ctx = self.hooks.setup(task_obj, self.agent_flow, uid)
 
         try:
-            # Fix (1): no acreate_session HTTP call. SessionRoutingMiddleware
-            # extracts the session id from the URL path and tolerates unknown
-            # sessions; sampling_params already flow into chat.completions
-            # via AgentConfig.sampling_params (spread by the agent flow as
-            # ``**sampling``), so the per-session params record stored by
-            # the server-side ``create_session`` is redundant.
             session_url = self.gateway.get_session_url(uid)
 
             config = AgentConfig(
@@ -536,7 +530,7 @@ class AgentFlowEngine:
         task_dict: dict,
         ctx: TaskContext | None,
     ) -> Episode:
-        """Phase 3: enrich raw episode with traces, run evaluator, apply rewards."""
+        """Enrich the raw episode with traces, run the evaluator, apply rewards."""
         loop = asyncio.get_event_loop()
 
         enriched = enrich_episode_with_traces(

@@ -238,18 +238,12 @@ class GatewayManager:
     # -- Async session / trace API -------------------------------------------
 
     async def acreate_session(self, session_id: str, is_validation: bool = False) -> str:
-        """Lazy session: no HTTP call.
+        """Return the session id without registering it on the gateway.
 
-        ``SessionRoutingMiddleware`` extracts the session id from the URL path
-        and does not require the SessionManager to know about it ahead of
-        time. ``AgentConfig.sampling_params`` is already spread into every
-        ``chat.completions.create(**sampling)`` call by the agent flow, so
-        the per-session sampling-params record stored by the server-side
-        ``create_session`` is redundant.
-
-        Keeping this as a method (rather than removing it) preserves the
-        :class:`GatewayManager` API. Callers can drop the ``await`` site
-        without breaking anything; we keep it for backward compatibility.
+        ``SessionRoutingMiddleware`` extracts the session id from the URL
+        path and tolerates unknown ids. Sampling params already flow into
+        every chat-completions call via ``AgentConfig.sampling_params``,
+        so the server-side per-session record is redundant.
         """
         return session_id
 
