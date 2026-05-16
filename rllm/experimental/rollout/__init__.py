@@ -4,12 +4,14 @@ from .rollout_engine import ModelOutput, RolloutEngine
 from .types import TinkerTokenInput, TinkerTokenOutput, TokenInput, Tokenizer, TokenOutput, VerlTokenInput, VerlTokenOutput
 
 if TYPE_CHECKING:
+    from .fireworks_engine import FireworksEngine
     from .tinker_engine import TinkerEngine
     from .verl_engine import VerlEngine
 
 __all__ = [
     "ModelOutput",
     "RolloutEngine",
+    "FireworksEngine",
     "TinkerEngine",
     "VerlEngine",
     # Token types
@@ -24,6 +26,10 @@ __all__ = [
 
 
 def __getattr__(name):
+    if name == "FireworksEngine":
+        from .fireworks_engine import FireworksEngine as _FireworksEngine
+
+        return _FireworksEngine
     if name == "TinkerEngine":
         from .tinker_engine import TinkerEngine as _TinkerEngine
 

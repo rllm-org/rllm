@@ -875,7 +875,7 @@ class AgentTrainer:
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
-        backend: Literal["verl", "tinker"] = "verl",
+        backend: Literal["verl", "tinker", "fireworks"] = "verl",
         agent_flow: Any = None,
         evaluator: Any = None,
         store: Store | None = None,
@@ -917,6 +917,20 @@ class AgentTrainer:
                 store=store,
                 **kwargs,
             )
+        elif backend == "fireworks":
+            from rllm.experimental.fireworks.fireworks_launcher import FireworksTrainerLauncher
+
+            self.launcher = FireworksTrainerLauncher(
+                config=config,
+                workflow_class=workflow_class,
+                train_dataset=train_dataset,
+                val_dataset=val_dataset,
+                workflow_args=workflow_args,
+                store=store,
+                **kwargs,
+            )
+        else:
+            raise ValueError(f"Unsupported backend: {backend}")
 
     def train(self):
         self.launcher.train()

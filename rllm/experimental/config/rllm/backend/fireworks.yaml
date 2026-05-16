@@ -1,0 +1,95 @@
+# @package _global_
+
+# Fireworks Backend Configuration for rLLM
+# This config is used when training agents with Fireworks backend
+# Unified configuration supporting both workflow and agent training modes
+
+# Fireworks-specific settings
+fireworks_base_url: "https://api.fireworks.ai"  # Fireworks service URL
+fuse_forward_backward_and_optim_step: false  # Must be false for Fireworks backend
+
+# Model Configuration
+model:
+  name: accounts/fireworks/models/qwen3-4b
+  lora_rank: 0         # LoRA rank 0 means no LoRA fine-tuning, which is compatible with Fireworks backend
+
+# Training Configuration (fireworks-specific)
+training:
+  group_size: ???  # Number of rollouts per prompt
+  learning_rate: 1e-5
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1e-8
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+  max_length: null  # Auto-derived from training shape if null
+  client_timeout: 1800  # Timeout for forward / forward_backward / optim_step calls (seconds)
+  resume_from_fireworks_job_id: null  # Source trainer job id for loading a DCP checkpoint
+  resume_from_dcp_checkpoint: null  # Explicit DCP name to load; null uses latest on the source/current job
+
+deployment:
+  deployment_id: "rllm-deploy-${now:%Y%m%d-%H%M%S}"
+  deployment_shape: null  # Auto-derived from training shape if null
+  deployment_region: null          # Region for deployment; falls back to training_infra.region
+  deployment_accelerator_type: null  # Accelerator for deployment; falls back to training_infra.accelerator_type
+  hot_load_bucket_type: FW_HOSTED  # Bucket type for hot-load snapshots
+  deployment_timeout_s: 5400       # Timeout for deployment creation/readiness (90 min)
+  deployment_extra_args: null      # Extra Helm args for the deployment
+  tokenizer_model: Qwen/Qwen3-4B
+  sample_timeout: 600              # HTTP read timeout for sampling completions (10 min)
+  disable_speculative_decoding: true  # Disable EAGLE speculation for hotload compatibility
+  replica_count: 1              # Pin deployment to a fixed replica count (null = 1)
+  extra_values: null               # Extra Helm values dict (e.g. {"priorityClass": "deployment"})
+
+hotload:
+  hot_load_timeout: 600            # Timeout for hotload_and_wait (seconds)
+  hot_load_before_training: false  # Push initial weights to deployment before first step
+  dcp_timeout: 2700                # Timeout for DCP save_state / load_state_with_optimizer (45 min)
+  warmup_after_hotload: true       # Send warmup request after hotloading to prime caches
+  warmup_max_retries: 10           # Max retries for post-hotload warmup
+  reset_prompt_cache: true         # Purge KV cache on deployment after hotloading weights
+
+training_infra:
+  training_shape_id: qwen3-4b-minimum-h200
+  ref_training_shape_id: null      # Shape for reference trainer; falls back to training_shape_id
+  region: null
+  custom_image_tag: null           # Custom Docker image tag
+  accelerator_type: null           # GPU type (auto-resolved from training shape)
+  accelerator_count: null          # Number of GPUs (auto-resolved from training shape)
+  skip_validations: false          # Skip control plane training shape validations
+  node_count: 1                    # Number of training nodes
+  extra_args: null                 # Extra CLI args for the trainer job
+
+# Validation Configuration
+validation:
+  group_size: ???
+
+# Rollout Engine Configuration
+rollout_engine:
+  reasoning_effort: "medium"
+  accumulate_reasoning: false
+  disable_thinking: false
+
+# Data Configuration
+data:
+  train_files: null
+  val_files: null
+  max_prompt_length: 2048
+  max_response_length: 2048
+  train_batch_size: 64
+  val_batch_size: -1
+
+# Overriding the rLLM-common config with Fireworks-specific ones
+# Only override if the algorithm values are not None, otherwise still use the rLLM-common config
+rllm:
+  backend: fireworks
+  rollout:
+    n: ${oc.select:training.group_size, 8}
+    n_val: ${oc.select:validation.group_size, 1}
+    train:
+      top_k: 0 # -1 is not accepted
+    val:
+      top_k: 0 # -1 is not accepted
+  algorithm:
+    rollout_correction:
+      bypass_mode: True
