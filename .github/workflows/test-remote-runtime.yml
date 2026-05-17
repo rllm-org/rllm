@@ -1,0 +1,46 @@
+name: Test remote runtime
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "rllm/experimental/engine/remote_runtime/**"
+      - "rllm/experimental/engine/remote_agent_flow_engine.py"
+      - "rllm/experimental/engine/gateway_manager.py"
+      - "rllm/experimental/engine/trace_converter.py"
+      - "rllm/utils/episode_logger.py"
+      - "rllm/types.py"
+      - "tests/engine/test_remote_runtime.py"
+      - ".github/workflows/test-remote-runtime.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "rllm/experimental/engine/remote_runtime/**"
+      - "rllm/experimental/engine/remote_agent_flow_engine.py"
+      - "rllm/experimental/engine/gateway_manager.py"
+      - "rllm/experimental/engine/trace_converter.py"
+      - "rllm/utils/episode_logger.py"
+      - "rllm/types.py"
+      - "tests/engine/test_remote_runtime.py"
+      - ".github/workflows/test-remote-runtime.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync --extra agentcore --extra dev
+
+      - name: Run remote runtime tests
+        run: uv run pytest tests/engine/test_remote_runtime.py -v
