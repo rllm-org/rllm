@@ -57,12 +57,7 @@ class AgentCoreRuntime(RemoteAgentRuntime):
         )
 
     async def _run_one(self, sub: TaskSubmission, timeout: float) -> RemoteTaskResult:
-        """Submit a single task and poll for its result.
-
-        Handles two failure modes:
-        - Transport-level: invoke_async or result_async raises (network, timeout)
-        - Application-level: @rollout_entrypoint returns status_code != 200
-        """
+        """Submit a single task and poll S3 for the result."""
         try:
             future = await self._client.invoke_async(
                 payload=sub.task,
@@ -71,22 +66,47 @@ class AgentCoreRuntime(RemoteAgentRuntime):
                 base_url=sub.inference_url,
                 model_id=self._model_id,
             )
-            result = await future.result_async(timeout=timeout)
         except Exception as e:
-            logger.error("Task %s failed: %s", sub.session_id, e)
+            logger.error("Task %s submission failed: %s", sub.session_id, e)
             return RemoteTaskResult(
                 finished=False,
                 session_id=sub.session_id,
                 task_id=sub.task_id,
                 error=str(e),
                 termination_reason=TerminationReason.ERROR,
+                elapsed=0.0,
+            )
+
+        try:
+            result = await future.result_async(timeout=timeout)
+        except asyncio.TimeoutError:
+            elapsed = future.elapsed()
+            logger.error("Task %s timed out after %.1fs", sub.session_id, elapsed)
+            return RemoteTaskResult(
+                finished=False,
+                session_id=sub.session_id,
+                task_id=sub.task_id,
+                error=f"Timeout after {elapsed:.1f}s",
+                termination_reason=TerminationReason.TIMEOUT,
+                elapsed=elapsed,
+            )
+        except Exception as e:
+            elapsed = future.elapsed()
+            logger.error("Task %s polling failed: %s", sub.session_id, e)
+            return RemoteTaskResult(
+                finished=False,
+                session_id=sub.session_id,
+                task_id=sub.task_id,
+                error=str(e),
+                termination_reason=TerminationReason.ERROR,
+                elapsed=elapsed,
             )
 
         # Check for application-level errors from @rollout_entrypoint in ART
         status_code = result.get("status_code")
         if status_code is not None and status_code != 200:
-            error_msg = result.get("stop_reason", "Unknown remote error")
-            logger.warning(
+            error_msg = result.get("stop_reason", "unknown remote error")
+            logger.error(
                 "Task %s returned status_code=%s: %s",
                 sub.session_id,
                 status_code,
