@@ -279,6 +279,51 @@ def _extract_termination_marker(traces: list[Any]) -> TerminationReason | None:
     return None
 
 
+def _summarize_llm_latencies(traces: list[Any], agent_s: float) -> tuple[float, float]:
+    """Return ``(llm_sum_s, llm_wall_s)`` summarising trace latencies.
+
+    ``llm_sum_s`` is the naive sum of ``TraceRecord.latency_ms / 1000``
+    across every call — equal to wall-clock for sequential agents,
+    greater than wall-clock for parallel-LLM agents (good signal).
+
+    ``llm_wall_s`` collapses the per-trace intervals
+    ``[timestamp - latency_ms/1000, timestamp]`` into a union and
+    returns its measure, bounded above by ``agent_s``. This is the
+    actual fraction of ``agent_s`` spent waiting on the model. If
+    timestamps aren't populated on the traces (older gateways),
+    falls back to ``min(llm_sum_s, agent_s)``.
+    """
+    if not traces:
+        return 0.0, 0.0
+
+    llm_sum_s = sum(getattr(tr, "latency_ms", 0.0) or 0.0 for tr in traces) / 1000.0
+
+    intervals: list[tuple[float, float]] = []
+    for tr in traces:
+        end = float(getattr(tr, "timestamp", 0.0) or 0.0)
+        dur = (getattr(tr, "latency_ms", 0.0) or 0.0) / 1000.0
+        if end > 0 and dur > 0:
+            intervals.append((end - dur, end))
+    if not intervals:
+        return llm_sum_s, min(llm_sum_s, agent_s)
+
+    # Merge overlapping intervals, sum lengths.
+    intervals.sort()
+    merged_total = 0.0
+    cur_start, cur_end = intervals[0]
+    for start, end in intervals[1:]:
+        if start <= cur_end:
+            cur_end = max(cur_end, end)
+        else:
+            merged_total += cur_end - cur_start
+            cur_start, cur_end = start, end
+    merged_total += cur_end - cur_start
+    # Wall-clock LLM time can't exceed agent_s by definition (the
+    # union is a subset of the agent phase). Clamp defensively in
+    # case of clock drift between gateway and engine.
+    return llm_sum_s, min(merged_total, agent_s) if agent_s > 0 else merged_total
+
+
 _TIMING_PHASES_DISPLAY: tuple[tuple[str, str], ...] = (
     ("setup", "time/setup_s"),
     ("agent", "time/agent_s"),
@@ -296,10 +341,17 @@ def _format_timing_breakdown(metrics: dict[str, float]) -> str:
 
     The ``agent`` phase is annotated with ``[llm=Ts/Nt]`` when traces
     are available so an operator can tell at a glance whether agent
-    time is LLM-bound (Tinker latency) or tool-exec-bound (in-container
-    bash). Returns the empty string when no phase timings are present
-    (so the "Rollout completed" log still works for engines that
-    bypassed ``_run_single`` — e.g. workflow-based training).
+    time is LLM-bound (model latency) or tool-exec-bound. ``T`` is
+    wall-clock LLM wait — the union of trace intervals, bounded by
+    ``agent_s``. For parallel-LLM agents (e.g. ``solver_judge_flow``
+    firing 3 calls concurrently) the *sum* of latencies can exceed
+    agent_s; when that's the case the annotation adds ``[||N]`` where
+    ``N = llm_sum / agent_s`` rounded to one decimal, indicating
+    the effective parallelism factor.
+
+    Returns the empty string when no phase timings are present (so the
+    "Rollout completed" log still works for engines that bypassed
+    ``_run_single`` — e.g. workflow-based training).
     """
     total = metrics.get("time/rollout_s")
     if total is None:
@@ -309,12 +361,19 @@ def _format_timing_breakdown(metrics: dict[str, float]) -> str:
         if key not in metrics:
             continue
         if label == "agent":
-            llm_s = metrics.get("time/agent_llm_s")
+            llm_wall = metrics.get("time/agent_llm_wall_s")
+            llm_sum = metrics.get("time/agent_llm_sum_s")
             n_turns = metrics.get("n_turns")
-            if llm_s is not None and n_turns is not None and n_turns > 0:
-                parts.append(f"agent={metrics[key]:.0f}s [llm={llm_s:.0f}s/{int(n_turns)}t]")
+            agent_s = metrics[key]
+            if llm_wall is not None and n_turns is not None and n_turns > 0:
+                pieces = [f"llm={llm_wall:.0f}s/{int(n_turns)}t"]
+                # If the sum-of-latencies exceeds the wall-clock the
+                # agent is parallelizing — surface the speedup factor.
+                if llm_sum is not None and agent_s > 0 and llm_sum > agent_s * 1.05:
+                    pieces.append(f"||{llm_sum / agent_s:.1f}x")
+                parts.append(f"agent={agent_s:.0f}s [{' '.join(pieces)}]")
             else:
-                parts.append(f"agent={metrics[key]:.0f}s")
+                parts.append(f"agent={agent_s:.0f}s")
         else:
             parts.append(f"{label}={metrics[key]:.0f}s")
     inner = f" ({' '.join(parts)})" if parts else ""
@@ -540,8 +599,13 @@ class AgentFlowEngine:
 
         Per-phase wall-clock timings are recorded into ``episode.metrics``
         under ``time/<phase>_s`` keys (``setup``, ``agent``, ``traces``,
-        ``verifier``, ``teardown``, ``rollout``) plus ``time/agent_llm_s``,
-        ``time/agent_other_s``, ``n_turns``. The trainer's batch-metrics
+        ``verifier``, ``teardown``, ``rollout``) plus
+        ``time/agent_llm_wall_s`` (wall-clock LLM wait via interval
+        union — the fraction of ``agent_s`` actually spent in the
+        model), ``time/agent_llm_sum_s`` (sum of ``TraceRecord.
+        latency_ms``; can exceed ``agent_s`` for parallel-LLM agents
+        like ``solver_judge_flow``), and ``n_turns``. The
+        trainer's batch-metrics
         aggregator (``np.mean`` over episodes) surfaces them as
         ``batch/time/<phase>_s`` rows so you can see where each batch's
         wall-clock went.
@@ -743,16 +807,29 @@ class AgentFlowEngine:
             )
         if _timings is not None:
             _timings["time/verifier_s"] = time.perf_counter() - t
-            # Split the agent phase into LLM wait vs everything-else.
-            # ``TraceRecord.latency_ms`` is recorded by the gateway around
-            # the upstream call (Tinker handler for training; LiteLLM
-            # proxy / vendor API for eval). Summing across the rollout
-            # is "time the agent spent waiting for the model"; the
-            # remainder is tool execs + harness CLI overhead.
-            _llm_latency_s = sum(getattr(tr, "latency_ms", 0.0) or 0.0 for tr in traces) / 1000.0
+            # Split the agent phase into LLM wait (wall-clock) vs the
+            # everything-else. Two numbers, because they answer different
+            # questions for sequential vs. parallel-LLM agents.
+            #
+            # ``time/agent_llm_sum_s`` is ``sum(TraceRecord.latency_ms)``
+            # — total LLM time across every call. For mini-swe-agent's
+            # 22 sequential turns this is roughly the wall-clock LLM
+            # cost. For solver-judge-style flows that fan out 3 parallel
+            # LLM calls inside one rollout, the sum can *exceed*
+            # ``agent_s`` (a positive signal: the agent overlapped its
+            # model calls, saving wall-clock).
+            #
+            # ``time/agent_llm_wall_s`` merges the per-trace intervals
+            # ``(t - latency_ms/1000, t)`` into a wall-clock union and
+            # bounds by ``agent_s``. This is the actual "fraction of
+            # agent_s spent waiting on the model" regardless of
+            # parallelism — the right thing to look at for "is this
+            # rollout LLM-bound?". Falls back to ``min(sum, agent_s)``
+            # when timestamps aren't populated.
             _agent_s = _timings.get("time/agent_s", 0.0)
-            _timings["time/agent_llm_s"] = _llm_latency_s
-            _timings["time/agent_other_s"] = max(0.0, _agent_s - _llm_latency_s)
+            _llm_sum_s, _llm_wall_s = _summarize_llm_latencies(traces, _agent_s)
+            _timings["time/agent_llm_sum_s"] = _llm_sum_s
+            _timings["time/agent_llm_wall_s"] = _llm_wall_s
             _timings["n_turns"] = float(len(traces))
 
         # Evaluators for multi-trajectory flows (e.g. solver-judge) may set
