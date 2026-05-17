@@ -120,12 +120,15 @@ class UnifiedTrainer:
     ):
         """Initialize the UnifiedTrainer.
 
-        Provide exactly one of ``workflow_class`` or (``agent_flow`` AND ``evaluator``).
+        Provide exactly one of ``workflow_class``, ``agent_flow`` (with either
+        ``evaluator`` or ``hooks``), or ``remote_runtime``. ``hooks`` lets each
+        rollout resolve its own per-task evaluator (see
+        :class:`rllm.eval._hooks.EvalHooks` for the sandbox/verifier flow).
         """
-        has_agent_flow = kwargs.get("agent_flow") is not None and kwargs.get("evaluator") is not None
+        has_agent_flow = kwargs.get("agent_flow") is not None and (kwargs.get("evaluator") is not None or kwargs.get("hooks") is not None)
         remote_runtime_enabled = config.rllm.get("remote_runtime", {}).get("enabled", False)
         if not has_agent_flow and not remote_runtime_enabled:
-            assert workflow_class is not None, "Either workflow_class, (agent_flow AND evaluator), or remote_runtime must be provided"
+            assert workflow_class is not None, "Either workflow_class, (agent_flow AND (evaluator OR hooks)), or remote_runtime must be provided"
 
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
@@ -167,10 +170,11 @@ class UnifiedTrainer:
 
         agent_flow = kwargs.get("agent_flow")
         evaluator = kwargs.get("evaluator")
+        hooks = kwargs.get("hooks")
 
         remote_runtime_cfg = self.rllm_config.get("remote_runtime", {})
 
-        if agent_flow is not None and evaluator is not None:
+        if agent_flow is not None and (evaluator is not None or hooks is not None):
             from rllm.engine.agentflow_engine import AgentFlowEngine
             from rllm.experimental.engine.gateway_manager import GatewayManager
 
@@ -198,6 +202,7 @@ class UnifiedTrainer:
                 episode_logger=self.episode_logger,
                 train_sampling_params=training_sampling_params,
                 val_sampling_params=val_sampling_params,
+                hooks=hooks,
             )
         elif remote_runtime_cfg.get("enabled", False):
             from rllm.experimental.engine.gateway_manager import GatewayManager
@@ -826,6 +831,49 @@ class UnifiedTrainer:
         return reduced_workflow_metrics, termination_counts
 
 
+def _needs_sandbox_isolation(agent_flow: Any, train_dataset: Any, val_dataset: Any) -> bool:
+    """Whether this run needs per-task sandbox isolation via SandboxTaskHooks.
+
+    True when the agent is a :class:`SandboxedAgentFlow` (so parallel
+    rollouts must each get a fresh ``_sandbox`` slot) or when any task
+    in the train/val dataset carries a ``task_path`` (harbor-sourced
+    datasets that root their verifiers in the task dir).
+    """
+    try:
+        from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
+
+        if isinstance(agent_flow, SandboxedAgentFlow):
+            return True
+    except ImportError:
+        pass
+
+    for ds in (train_dataset, val_dataset):
+        if ds is None or len(ds) == 0:
+            continue
+        first = ds[0]
+        # Tasks expose metadata; dicts may carry task_path directly.
+        meta = getattr(first, "metadata", None) or (first if isinstance(first, dict) else None)
+        if isinstance(meta, dict) and meta.get("task_path"):
+            return True
+    return False
+
+
+def _pin_gateway_host_loopback(config: DictConfig) -> DictConfig:
+    """Pin ``rllm.gateway.host=127.0.0.1`` if not explicitly set.
+
+    Default ``_get_routable_ip()`` returns the host's LAN IP, which the
+    harness's ``_container_url`` doesn't rewrite to
+    ``host.docker.internal`` — sandboxed agents would dead-end and the
+    gateway would capture zero traces. Eval already defaults to loopback.
+    """
+    if config.rllm.get("gateway", {}).get("host"):
+        return config
+    return OmegaConf.merge(
+        config,
+        OmegaConf.create({"rllm": {"gateway": {"host": "127.0.0.1"}}}),
+    )
+
+
 class TrainerLauncher(ABC):
     """
     A unified agent trainer launcher that directly interfaces with the user script to launch training jobs.
@@ -865,7 +913,13 @@ class AgentTrainer:
 
     This trainer will simply delegate the task to the corresponding launcher class.
 
-    Provide exactly one of ``workflow_class`` or (``agent_flow`` AND ``evaluator``).
+    Provide exactly one of ``workflow_class`` or ``agent_flow``. For
+    sandbox-style flows (a :class:`SandboxedAgentFlow` or a dataset whose
+    Tasks carry ``task_path`` metadata), ``hooks`` and ``evaluator`` are
+    auto-wired with :class:`rllm.hooks.SandboxTaskHooks` and the gateway
+    is pinned to ``127.0.0.1`` so docker containers can reach it via the
+    harness's ``host.docker.internal`` rewrite. Pass ``hooks=`` or
+    ``evaluator=`` explicitly to override the auto-wiring.
     """
 
     def __init__(
@@ -878,19 +932,33 @@ class AgentTrainer:
         backend: Literal["verl", "tinker"] = "verl",
         agent_flow: Any = None,
         evaluator: Any = None,
+        hooks: Any = None,
         store: Store | None = None,
         **kwargs,
     ):
-        has_agent_flow = agent_flow is not None and evaluator is not None
+        # Auto-wire sandbox hooks + gateway loopback when the flow needs
+        # per-task isolation. Detection: SandboxedAgentFlow agent OR a
+        # dataset whose first row is a Task with task_path metadata.
+        # Skip when the caller passed hooks/evaluator explicitly.
+        if agent_flow is not None and hooks is None and evaluator is None:
+            if _needs_sandbox_isolation(agent_flow, train_dataset, val_dataset):
+                from rllm.hooks import SandboxTaskHooks
+
+                hooks = SandboxTaskHooks()
+                config = _pin_gateway_host_loopback(config)
+
+        has_agent_flow = agent_flow is not None and (evaluator is not None or hooks is not None)
         remote_runtime_enabled = config.rllm.get("remote_runtime", {}).get("enabled", False)
         if not has_agent_flow and not remote_runtime_enabled:
-            assert workflow_class is not None, "Either workflow_class, (agent_flow AND evaluator), or remote_runtime must be provided"
+            assert workflow_class is not None, "Either workflow_class, (agent_flow AND (evaluator OR hooks)), or remote_runtime must be provided"
 
-        # Pass agent_flow and evaluator through kwargs for UnifiedTrainer
+        # Pass agent_flow, evaluator, and hooks through kwargs for UnifiedTrainer
         if agent_flow is not None:
             kwargs["agent_flow"] = agent_flow
         if evaluator is not None:
             kwargs["evaluator"] = evaluator
+        if hooks is not None:
+            kwargs["hooks"] = hooks
         kwargs["backend_name"] = backend
 
         if backend == "verl":
