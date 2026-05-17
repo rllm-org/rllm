@@ -128,7 +128,7 @@ class CloudflaredTunnel:
         for attempt in range(1, self.max_attempts + 1):
             try:
                 url = self._start_once()
-                _status.print(f"  [bold green]✓[/] Tunnel ready: [bold]{url}[/]  [dim](DNS propagation ~30-90s)[/]")
+                _status.print(f"  [bold green]✓[/] Tunnel ready: [bold]{url}[/]")
                 return url
             except TunnelStartError as e:
                 last_error = e
