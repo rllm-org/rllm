@@ -17,13 +17,8 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from rllm.experimental.rollout.tinker_engine import TinkerEngine
-from rllm.workflows.workflow import TerminationEvent
 
 logger = logging.getLogger(__name__)
-
-# Extension field on the chat-completion response that carries a
-# graceful TerminationEvent reason back to AgentFlowEngine.
-_RLLM_TERMINATION_KEY = "rllm_termination_reason"
 
 
 def _to_openai_tool_calls(tool_calls: list) -> list[dict[str, Any]]:
@@ -72,32 +67,7 @@ def create_tinker_handler(engine: TinkerEngine) -> Callable[[dict[str, Any]], Aw
         if request_body.get("max_completion_tokens") is not None:
             kwargs["max_completion_tokens"] = request_body["max_completion_tokens"]
 
-        try:
-            model_output = await engine.get_model_response(messages, **kwargs)
-        except TerminationEvent as te:
-            # Return a length-finish response so the agent stops cleanly
-            # instead of crashing on a 500. The marker field is read by
-            # AgentFlowEngine to stamp the episode's termination_reason.
-            reason_value = te.reason.value if hasattr(te.reason, "value") else str(te.reason)
-            logger.info("Tinker handler: graceful termination (%s)", reason_value)
-            return {
-                "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": request_body.get("model", getattr(engine, "model_name", "default")),
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": ""},
-                        "finish_reason": "length",
-                        "token_ids": [],
-                        "logprobs": {"content": []},
-                    }
-                ],
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-                "prompt_token_ids": [],
-                _RLLM_TERMINATION_KEY: reason_value,
-            }
+        model_output = await engine.get_model_response(messages, **kwargs)
 
         response_text = model_output.content or model_output.text or ""
         prompt_ids = list(model_output.prompt_ids) if model_output.prompt_ids else []

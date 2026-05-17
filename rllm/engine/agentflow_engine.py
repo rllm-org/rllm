@@ -244,32 +244,6 @@ def enrich_episode_with_traces(
     )
 
 
-# Mirrors the constant in rllm.experimental.engine.tinker_adapter.
-_RLLM_TERMINATION_KEY = "rllm_termination_reason"
-
-
-def _is_termination_marker(trace: Any) -> bool:
-    raw = getattr(trace, "raw_response", None)
-    return isinstance(raw, dict) and bool(raw.get(_RLLM_TERMINATION_KEY))
-
-
-def _extract_termination_marker(traces: list[Any]) -> TerminationReason | None:
-    """Return the trailing TerminationReason marker from traces, if any."""
-    for trace in reversed(traces):
-        raw = getattr(trace, "raw_response", None)
-        if not isinstance(raw, dict):
-            continue
-        reason_value = raw.get(_RLLM_TERMINATION_KEY)
-        if not reason_value:
-            continue
-        try:
-            return TerminationReason(reason_value)
-        except ValueError:
-            logger.warning("Unknown rllm_termination_reason %r — defaulting to UNKNOWN", reason_value)
-            return TerminationReason.UNKNOWN
-    return None
-
-
 def _summarize_llm_latencies(traces: list[Any], agentflow_s: float) -> tuple[float, float]:
     """Return ``(llm_sum_s, llm_wall_s)`` from trace latencies (sum and interval-union)."""
     if not traces:
@@ -573,13 +547,6 @@ class AgentFlowEngine:
         try:
             t = time.perf_counter()
             traces = await self.gateway.aget_traces(uid)
-
-            # Drop graceful-termination marker traces (empty token_ids
-            # would trip strict enrichment); stamp the episode below.
-            termination_reason: TerminationReason | None = _extract_termination_marker(traces)
-            if termination_reason is not None:
-                traces = [tr for tr in traces if not _is_termination_marker(tr)]
-
             timings["time/traces_s"] = time.perf_counter() - t
 
             enriched = await self._finish_episode(
@@ -590,7 +557,6 @@ class AgentFlowEngine:
                 task_dict=task_dict,
                 ctx=ctx,
                 _timings=timings,
-                termination_reason=termination_reason,
             )
             enriched.metrics.update(timings)
             result_holder["episode"] = enriched
@@ -678,13 +644,11 @@ class AgentFlowEngine:
         task_dict: dict,
         ctx: TaskContext | None,
         _timings: dict[str, float] | None = None,
-        termination_reason: TerminationReason | None = None,
     ) -> Episode:
         """Enrich the raw episode with traces, run the evaluator, apply rewards.
 
         Records ``time/evaluator_s``, ``time/agentflow_llm_{sum,wall}_s``, and
-        ``n_turns`` when ``_timings`` is provided. ``termination_reason``, when
-        set, is stamped onto the episode; otherwise defaults to ``ENV_DONE``.
+        ``n_turns`` when ``_timings`` is provided.
         """
         loop = asyncio.get_event_loop()
 
@@ -733,9 +697,7 @@ class AgentFlowEngine:
         for signal in eval_output.signals:
             enriched.metrics[signal.name] = signal.value
 
-        if termination_reason is not None:
-            enriched.termination_reason = termination_reason
-        elif enriched.termination_reason is None:
+        if enriched.termination_reason is None:
             enriched.termination_reason = TerminationReason.ENV_DONE
         return enriched
 
