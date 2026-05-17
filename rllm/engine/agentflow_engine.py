@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import resource
+import time
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -243,6 +244,76 @@ def enrich_episode_with_traces(
     )
 
 
+def _summarize_llm_latencies(traces: list[Any], agentflow_s: float) -> tuple[float, float]:
+    """Return ``(llm_sum_s, llm_wall_s)`` from trace latencies (sum and interval-union)."""
+    if not traces:
+        return 0.0, 0.0
+
+    llm_sum_s = sum(getattr(tr, "latency_ms", 0.0) or 0.0 for tr in traces) / 1000.0
+
+    intervals: list[tuple[float, float]] = []
+    for tr in traces:
+        end = float(getattr(tr, "timestamp", 0.0) or 0.0)
+        dur = (getattr(tr, "latency_ms", 0.0) or 0.0) / 1000.0
+        if end > 0 and dur > 0:
+            intervals.append((end - dur, end))
+    if not intervals:
+        return llm_sum_s, min(llm_sum_s, agentflow_s)
+
+    intervals.sort()
+    merged_total = 0.0
+    cur_start, cur_end = intervals[0]
+    for start, end in intervals[1:]:
+        if start <= cur_end:
+            cur_end = max(cur_end, end)
+        else:
+            merged_total += cur_end - cur_start
+            cur_start, cur_end = start, end
+    merged_total += cur_end - cur_start
+    return llm_sum_s, min(merged_total, agentflow_s) if agentflow_s > 0 else merged_total
+
+
+_TIMING_PHASES_DISPLAY: tuple[tuple[str, str], ...] = (
+    ("setup", "time/setup_s"),
+    ("agentflow", "time/agentflow_s"),
+    ("evaluator", "time/evaluator_s"),
+    ("teardown", "time/teardown_s"),
+)
+
+
+def _format_timing_breakdown(metrics: dict[str, float]) -> str:
+    """Compact per-rollout timing summary, e.g. ``setup=16s agentflow=1162s [llm=1100s/15 steps ||1.4x] evaluator=9s teardown=0s``.
+
+    The ``agentflow`` phase is annotated with ``[llm=Xs/N steps]`` (wall-clock
+    LLM wait, interval-union), plus ``||N.Nx`` when parallel LLM calls push
+    the sum past ``agentflow_s``. Empty when no timings present.
+    """
+    total = metrics.get("time/rollout_s")
+    if total is None:
+        return ""
+    parts: list[str] = []
+    for label, key in _TIMING_PHASES_DISPLAY:
+        if key not in metrics:
+            continue
+        if label == "agentflow":
+            llm_wall = metrics.get("time/agentflow_llm_wall_s")
+            llm_sum = metrics.get("time/agentflow_llm_sum_s")
+            n_turns = metrics.get("n_turns")
+            agentflow_s = metrics[key]
+            if llm_wall is not None and n_turns is not None and n_turns > 0:
+                step_label = "step" if int(n_turns) == 1 else "steps"
+                pieces = [f"llm={llm_wall:.0f}s/{int(n_turns)} {step_label}"]
+                if llm_sum is not None and agentflow_s > 0 and llm_sum > agentflow_s * 1.05:
+                    pieces.append(f"||{llm_sum / agentflow_s:.1f}x")
+                parts.append(f"agentflow={agentflow_s:.0f}s [{' '.join(pieces)}]")
+            else:
+                parts.append(f"agentflow={agentflow_s:.0f}s")
+        else:
+            parts.append(f"{label}={metrics[key]:.0f}s")
+    inner = f" ({' '.join(parts)})" if parts else ""
+    return f" in {total:.0f}s{inner}"
+
+
 def _raise_fd_limit(target: int = _MIN_FD_LIMIT) -> None:
     """Best-effort raise of the process soft file-descriptor limit.
 
@@ -423,8 +494,10 @@ class AgentFlowEngine:
                         elif len(traj.steps) > 0:
                             reward = f"{traj.steps[-1].reward:.1f}"
                         reward_strs.append(f"{traj.name}: {reward}")
+
+                    timing_str = _format_timing_breakdown(episode.metrics)
                     colorful_print(
-                        f"[{uid}] Rollout completed. Rewards: [{', '.join(reward_strs)}], Termination: {episode.termination_reason}",
+                        f"[{uid}] Rollout completed. Rewards: [{', '.join(reward_strs)}]{timing_str}, Termination: {episode.termination_reason}",
                         fg="green" if episode.is_correct else "yellow",
                     )
 
@@ -452,26 +525,55 @@ class AgentFlowEngine:
             raise RuntimeError(f"[{task_id}:{rollout_idx}] Exhausted all retries")
 
     async def _run_single(self, task_obj: Task, task_dict: dict, uid: str, is_validation: bool = False) -> Episode:
-        """Run one full per-task pipeline: flow → fetch traces → enrich → evaluate."""
+        """Run one full per-task pipeline: flow → fetch traces → enrich → evaluate.
+
+        Records ``time/<phase>_s`` for setup/agentflow/traces/evaluator/
+        teardown/rollout into ``episode.metrics``, plus
+        ``time/agentflow_llm_wall_s`` (interval-union),
+        ``time/agentflow_llm_sum_s`` (naive sum), and ``n_turns``.
+        """
+        loop = asyncio.get_event_loop()
+        timings: dict[str, float] = {}
+        rollout_start = time.perf_counter()
+        result_holder: dict[str, Episode] = {}
+
         raw_episode, ctx = await self._run_flow_only(
             task_obj=task_obj,
             task_dict=task_dict,
             uid=uid,
             is_validation=is_validation,
+            _timings=timings,
         )
         try:
+            t = time.perf_counter()
             traces = await self.gateway.aget_traces(uid)
-            return await self._finish_episode(
+            timings["time/traces_s"] = time.perf_counter() - t
+
+            enriched = await self._finish_episode(
                 raw_episode=raw_episode,
                 traces=traces,
                 uid=uid,
                 task_obj=task_obj,
                 task_dict=task_dict,
                 ctx=ctx,
+                _timings=timings,
             )
+            enriched.metrics.update(timings)
+            result_holder["episode"] = enriched
+            return enriched
         finally:
+            # Offload Modal's blocking terminate()/detach() to the executor.
             if ctx is not None:
-                ctx.run_teardown()
+                t = time.perf_counter()
+                try:
+                    await loop.run_in_executor(self.executor, ctx.run_teardown)
+                except Exception:
+                    logger.exception("[%s] task teardown failed; continuing", uid)
+                timings["time/teardown_s"] = time.perf_counter() - t
+            timings["time/rollout_s"] = time.perf_counter() - rollout_start
+            ep = result_holder.get("episode")
+            if ep is not None:
+                ep.metrics.update(timings)
 
     async def _run_flow_only(
         self,
@@ -479,17 +581,30 @@ class AgentFlowEngine:
         task_dict: dict,
         uid: str,
         is_validation: bool = False,
+        _timings: dict[str, float] | None = None,
     ) -> tuple[Episode, TaskContext | None]:
         """Run hook setup + the agent flow. Returns ``(raw_episode, ctx)``.
 
-        On flow failure, tears down the hook context (if any) and
-        re-raises so the caller can retry. On success, the caller is
-        responsible for running ``ctx.run_teardown()`` after
-        enrich+evaluate.
+        On flow failure, tears down ``ctx`` and re-raises. On success, the
+        caller owns ``ctx.run_teardown()``. Records ``time/setup_s`` and
+        ``time/agentflow_s`` when ``_timings`` is provided.
         """
+        loop = asyncio.get_event_loop()
+        if _timings is None:
+            _timings = {}
+
+        # Offload hook setup (blocking Modal/docker I/O) to the executor.
         ctx: TaskContext | None = None
         if self.hooks is not None:
-            ctx = self.hooks.setup(task_obj, self.agent_flow, uid)
+            t = time.perf_counter()
+            ctx = await loop.run_in_executor(
+                self.executor,
+                self.hooks.setup,
+                task_obj,
+                self.agent_flow,
+                uid,
+            )
+            _timings["time/setup_s"] = time.perf_counter() - t
 
         try:
             session_url = self.gateway.get_session_url(uid)
@@ -502,21 +617,20 @@ class AgentFlowEngine:
                 sampling_params=(self.train_sampling_params if not is_validation else self.val_sampling_params) or {},
             )
 
-            # The hook may return a per-task agent flow instance (eg. a
-            # SandboxedAgentFlow with the task's sandbox already injected);
-            # use it when present so parallel tasks don't share mutable
-            # ``self._sandbox`` state on the engine-bound ``self.agent_flow``.
+            # Prefer the per-task flow from the hook so parallel tasks don't
+            # share mutable sandbox state on the engine-bound flow.
             flow_for_task = ctx.agent_flow if (ctx is not None and ctx.agent_flow is not None) else self.agent_flow
             logger.debug("[%s] Starting agent flow at %s", uid, session_url)
+            t = time.perf_counter()
             episode = await run_agent_flow(flow_for_task, task_obj, config, executor=self.executor)
+            _timings["time/agentflow_s"] = time.perf_counter() - t
             logger.debug("[%s] Agent flow completed, %d trajectories", uid, len(episode.trajectories))
             return episode, ctx
         except BaseException:
-            # Tear down per-attempt resources on failure; success path
-            # defers teardown until after enrich+evaluate completes.
+            # Tear down on failure; success path defers teardown to the caller.
             if ctx is not None:
                 try:
-                    ctx.run_teardown()
+                    await loop.run_in_executor(self.executor, ctx.run_teardown)
                 except Exception:
                     logger.exception("[%s] hook teardown failed during error recovery", uid)
             raise
@@ -529,8 +643,13 @@ class AgentFlowEngine:
         task_obj: Task,
         task_dict: dict,
         ctx: TaskContext | None,
+        _timings: dict[str, float] | None = None,
     ) -> Episode:
-        """Enrich the raw episode with traces, run the evaluator, apply rewards."""
+        """Enrich the raw episode with traces, run the evaluator, apply rewards.
+
+        Records ``time/evaluator_s``, ``time/agentflow_llm_{sum,wall}_s``, and
+        ``n_turns`` when ``_timings`` is provided.
+        """
         loop = asyncio.get_event_loop()
 
         enriched = enrich_episode_with_traces(
@@ -541,9 +660,8 @@ class AgentFlowEngine:
             strict=self.hooks is None,
         )
 
-        # Per-task evaluator from the hook context wins over the engine-bound
-        # evaluator. Hook-resolved evaluators receive the Task object; the
-        # engine-bound evaluator receives the raw task dict (training compat).
+        # Hook-resolved evaluator wins; receives Task. Engine-bound takes the dict.
+        t = time.perf_counter()
         if ctx is not None:
             eval_output: EvalOutput = await loop.run_in_executor(
                 self.executor,
@@ -559,9 +677,15 @@ class AgentFlowEngine:
                 task_dict,
                 enriched,
             )
+        if _timings is not None:
+            _timings["time/evaluator_s"] = time.perf_counter() - t
+            _agentflow_s = _timings.get("time/agentflow_s", 0.0)
+            _llm_sum_s, _llm_wall_s = _summarize_llm_latencies(traces, _agentflow_s)
+            _timings["time/agentflow_llm_sum_s"] = _llm_sum_s
+            _timings["time/agentflow_llm_wall_s"] = _llm_wall_s
+            _timings["n_turns"] = float(len(traces))
 
-        # Evaluators for multi-trajectory flows (e.g. solver-judge) may set
-        # per-trajectory rewards directly on the episode; preserve those.
+        # Preserve per-trajectory rewards set by multi-trajectory evaluators.
         for traj in enriched.trajectories:
             if traj.reward is None:
                 traj.reward = eval_output.reward
