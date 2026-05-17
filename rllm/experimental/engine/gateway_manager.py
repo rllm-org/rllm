@@ -420,6 +420,8 @@ class EvalGatewayManager(GatewayManager):
         host: str = "127.0.0.1",
         port: int | None = None,
         db_path: str | None = None,
+        tunnel: str | None = None,
+        public_url: str | None = None,
     ) -> None:
         from omegaconf import OmegaConf
 
@@ -430,6 +432,8 @@ class EvalGatewayManager(GatewayManager):
                         "host": host,
                         "port": port if port is not None else _find_free_port(),
                         "db_path": db_path,
+                        "tunnel": tunnel,
+                        "public_url": public_url,
                     }
                 },
                 "model": {"name": model},
@@ -443,6 +447,12 @@ class EvalGatewayManager(GatewayManager):
 
         ``rollout_engine`` is accepted for shape-compatibility with the
         base class signature but ignored — this gateway has no engine.
+
+        After the worker is registered, brings up the tunnel (when
+        ``tunnel=`` was passed at construction). Eval runs against
+        remote sandbox backends (Modal/Daytona/E2B/...) need this for
+        the same reason training does — sandboxes in another network
+        can't reach the eval driver's loopback gateway.
         """
         if rollout_engine is not None:
             logger.warning("EvalGatewayManager.start ignores `rollout_engine` argument")
@@ -451,3 +461,6 @@ class EvalGatewayManager(GatewayManager):
             url = _normalize_worker_url(raw_url)
             worker_id = self.client.add_worker(url=url)
             logger.info("Registered worker %s -> %s (raw=%s)", worker_id, url, raw_url)
+
+        if self.tunnel_backend and not self.public_url:
+            self._start_tunnel()

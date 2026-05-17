@@ -34,6 +34,23 @@ logger = logging.getLogger(__name__)
 # console style (no theme to keep this module standalone).
 _status = Console()
 
+# Sandbox backends that run on the user's machine and can reach the
+# trainer's / eval driver's gateway via loopback (after the harness's
+# ``host.docker.internal`` rewrite). Anything else is "remote" and needs
+# a publicly reachable URL — i.e. a tunnel, or an explicitly configured
+# ``rllm.gateway.public_url``.
+LOCAL_SANDBOX_BACKENDS: frozenset[str] = frozenset({"docker", "local", "apple-container"})
+
+
+def is_local_sandbox_backend(name: str | None) -> bool:
+    """True for backends that share network with the gateway host."""
+    if not name:
+        # Treat ``None`` as local; nothing has explicitly asked for a
+        # remote backend yet (the engine's default is docker).
+        return True
+    return name.lower() in LOCAL_SANDBOX_BACKENDS
+
+
 # Cloudflared prints the assigned URL on stderr inside an ASCII frame.
 _TRYCF_URL_RE = re.compile(r"https?://[a-zA-Z0-9.-]+\.trycloudflare\.com")
 

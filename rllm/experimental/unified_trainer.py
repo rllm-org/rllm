@@ -874,10 +874,10 @@ def _pin_gateway_host_loopback(config: DictConfig) -> DictConfig:
     )
 
 
-# Sandbox backends that run on the user's machine and can reach the
-# trainer's gateway via loopback (after the harness's host.docker.internal
-# rewrite). Anything else is "remote" and needs a publicly reachable URL.
-_LOCAL_SANDBOX_BACKENDS = {"docker", "local", "apple-container"}
+# Re-export for callers that imported these from unified_trainer; the
+# canonical home is :mod:`rllm.experimental.engine.tunnel` (also used by
+# ``rllm.eval.runner`` so eval and training agree on the same predicate).
+from rllm.experimental.engine.tunnel import is_local_sandbox_backend  # noqa: E402
 
 
 def _enable_tunnel_for_remote_sandbox(config: DictConfig, sandbox_backend: str | None) -> DictConfig:
@@ -894,7 +894,7 @@ def _enable_tunnel_for_remote_sandbox(config: DictConfig, sandbox_backend: str |
     (the user knows their topology better) or when ``sandbox_backend``
     is local.
     """
-    if not sandbox_backend or sandbox_backend.lower() in _LOCAL_SANDBOX_BACKENDS:
+    if is_local_sandbox_backend(sandbox_backend):
         return config
     gw = config.rllm.get("gateway", {}) or {}
     if gw.get("public_url") or gw.get("tunnel"):
