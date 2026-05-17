@@ -17,8 +17,17 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from rllm.experimental.rollout.tinker_engine import TinkerEngine
+from rllm.workflows.workflow import TerminationEvent
 
 logger = logging.getLogger(__name__)
+
+# Top-level extension field stamped on the chat-completion response
+# when the engine raises a TerminationEvent (e.g. MAX_PROMPT_LENGTH_
+# EXCEEDED at turn N of a long agent loop). The rllm-side
+# AgentFlowEngine reads this off the trace's ``raw_response`` to set
+# the episode's ``termination_reason`` and to skip the strict
+# token-ids check on the empty marker trace.
+_RLLM_TERMINATION_KEY = "rllm_termination_reason"
 
 
 def _to_openai_tool_calls(tool_calls: list) -> list[dict[str, Any]]:
@@ -67,7 +76,36 @@ def create_tinker_handler(engine: TinkerEngine) -> Callable[[dict[str, Any]], Aw
         if request_body.get("max_completion_tokens") is not None:
             kwargs["max_completion_tokens"] = request_body["max_completion_tokens"]
 
-        model_output = await engine.get_model_response(messages, **kwargs)
+        try:
+            model_output = await engine.get_model_response(messages, **kwargs)
+        except TerminationEvent as te:
+            # Engine signaled a mid-rollout termination (prompt overflow,
+            # response cap, …). Surface a graceful OpenAI-shape response
+            # with ``finish_reason="length"`` so the agent (litellm-based
+            # CLIs like mini-swe-agent) stops cleanly instead of seeing
+            # an HTTP 500 from the gateway. The extension field below
+            # lets the rllm-side engine map the trace back to a proper
+            # ``TerminationReason`` for batch metrics.
+            reason_value = te.reason.value if hasattr(te.reason, "value") else str(te.reason)
+            logger.info("Tinker handler: graceful termination (%s) — returning empty length-finish response", reason_value)
+            return {
+                "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": request_body.get("model", getattr(engine, "model_name", "default")),
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": ""},
+                        "finish_reason": "length",
+                        "token_ids": [],
+                        "logprobs": {"content": []},
+                    }
+                ],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                "prompt_token_ids": [],
+                _RLLM_TERMINATION_KEY: reason_value,
+            }
 
         response_text = model_output.content or model_output.text or ""
         prompt_ids = list(model_output.prompt_ids) if model_output.prompt_ids else []
