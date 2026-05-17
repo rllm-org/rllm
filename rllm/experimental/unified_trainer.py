@@ -829,6 +829,23 @@ class UnifiedTrainer:
         return reduced_workflow_metrics, termination_counts
 
 
+from rllm.experimental.engine.tunnel import is_local_sandbox_backend  # noqa: E402
+
+
+def _enable_tunnel_for_remote_sandbox(config: DictConfig, sandbox_backend: str | None) -> DictConfig:
+    """Auto-wire ``rllm.gateway.tunnel="cloudflared"`` when sandboxes run off-host
+    and no tunnel/public_url is already set."""
+    if is_local_sandbox_backend(sandbox_backend):
+        return config
+    gw = config.rllm.get("gateway", {}) or {}
+    if gw.get("public_url") or gw.get("tunnel"):
+        return config
+    return OmegaConf.merge(
+        config,
+        OmegaConf.create({"rllm": {"gateway": {"tunnel": "cloudflared"}}}),
+    )
+
+
 class TrainerLauncher(ABC):
     """
     A unified agent trainer launcher that directly interfaces with the user script to launch training jobs.
@@ -873,6 +890,13 @@ class AgentTrainer:
     ``hooks`` and gateway loopback are auto-wired via
     :class:`rllm.hooks.SandboxTaskHooks`; pass ``hooks=`` or ``evaluator=``
     explicitly to override.
+
+    Args:
+        sandbox_backend: Backend for the auto-wired sandbox hooks
+            (``"docker"`` / ``"local"`` / ``"modal"`` / …). Remote backends
+            auto-spawn a cloudflared tunnel.
+        sandbox_concurrency: Override ``max_concurrent`` on a
+            :class:`SandboxedAgentFlow` agent.
     """
 
     def __init__(
@@ -886,6 +910,8 @@ class AgentTrainer:
         agent_flow: Any = None,
         evaluator: Any = None,
         hooks: Any = None,
+        sandbox_backend: str | None = None,
+        sandbox_concurrency: int | None = None,
         store: Store | None = None,
         **kwargs,
     ):
@@ -894,8 +920,22 @@ class AgentTrainer:
             from rllm.hooks import SandboxTaskHooks, needs_sandbox_isolation, pin_gateway_host_loopback
 
             if needs_sandbox_isolation(agent_flow, train_dataset, val_dataset):
-                hooks = SandboxTaskHooks()
+                hooks = SandboxTaskHooks(sandbox_backend=sandbox_backend)
                 config = pin_gateway_host_loopback(config)
+                config = _enable_tunnel_for_remote_sandbox(config, sandbox_backend)
+
+        # Forward concurrency + backend overrides onto a SandboxedAgentFlow.
+        if agent_flow is not None and (sandbox_concurrency is not None or sandbox_backend is not None):
+            try:
+                from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
+
+                if isinstance(agent_flow, SandboxedAgentFlow):
+                    if sandbox_concurrency is not None:
+                        agent_flow.max_concurrent = sandbox_concurrency
+                    if sandbox_backend is not None:
+                        agent_flow.sandbox_backend = sandbox_backend
+            except ImportError:
+                pass
 
         has_agent_flow = agent_flow is not None and (evaluator is not None or hooks is not None)
         remote_runtime_enabled = config.rllm.get("remote_runtime", {}).get("enabled", False)
