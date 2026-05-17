@@ -65,6 +65,7 @@ async def run_dataset(
     # them inside the function breaks the cycle.
     from rllm.engine.agentflow_engine import AgentFlowEngine
     from rllm.experimental.engine.gateway_manager import EvalGatewayManager
+    from rllm.experimental.engine.tunnel import is_local_sandbox_backend
 
     # Cap concurrency by the agent flow's hint, if any. The engine's
     # internal semaphore enforces this on the rollout side.
@@ -76,7 +77,13 @@ async def run_dataset(
     # and tear down one ourselves (single-shot).
     owned_gateway = gateway is None
     if owned_gateway:
-        gateway = EvalGatewayManager(upstream_url=base_url, model=model)
+        # When sandboxes run off-host (Modal, Daytona, E2B, ...) they
+        # can't reach the eval driver's loopback gateway. Auto-spawn a
+        # cloudflared tunnel so the in-sandbox harness POSTs back to
+        # ``gateway.public_url`` instead of ``host.docker.internal``.
+        # Same predicate as ``AgentTrainer`` uses on the training side.
+        gateway_tunnel = None if is_local_sandbox_backend(sandbox_backend) else "cloudflared"
+        gateway = EvalGatewayManager(upstream_url=base_url, model=model, tunnel=gateway_tunnel)
         gateway.start()
 
     hooks = SandboxTaskHooks(evaluator_override=evaluator_override, sandbox_backend=sandbox_backend)

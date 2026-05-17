@@ -13,16 +13,42 @@ and ``MODAL_TOKEN_SECRET`` environment variables.
 
 from __future__ import annotations
 
+import atexit
 import io
 import logging
 import os
 import tarfile
+import threading
 import time
+import weakref
 
 logger = logging.getLogger(__name__)
 
 # Default sandbox timeout: 30 minutes (Modal default is 5 min).
 _DEFAULT_TIMEOUT = 30 * 60
+
+# Live ModalSandbox instances. atexit hook below terminates anything
+# still in this set so a crashed trainer doesn't leak Modal containers
+# that bill for the full ``_DEFAULT_TIMEOUT`` before Modal kills them.
+_LIVE_SANDBOXES: weakref.WeakSet = weakref.WeakSet()
+_LIVE_LOCK = threading.Lock()
+
+
+def _terminate_all_live() -> None:
+    """atexit hook: terminate every still-alive ModalSandbox."""
+    with _LIVE_LOCK:
+        survivors = list(_LIVE_SANDBOXES)
+    if not survivors:
+        return
+    logger.warning("atexit: terminating %d unreleased Modal sandbox(es)", len(survivors))
+    for sb in survivors:
+        try:
+            sb.close()
+        except Exception:
+            logger.debug("atexit: error closing %s", getattr(sb, "name", "<unknown>"), exc_info=True)
+
+
+atexit.register(_terminate_all_live)
 
 
 class ModalSandbox:
@@ -80,6 +106,11 @@ class ModalSandbox:
 
         self._sandbox = modal.Sandbox.create(**create_kwargs)
         self._sandbox_id = self._sandbox.object_id
+
+        # Track for atexit cleanup. WeakSet so normal close() paths
+        # (which set _sandbox=None) don't keep us pinned.
+        with _LIVE_LOCK:
+            _LIVE_SANDBOXES.add(self)
 
         logger.info(
             "ModalSandbox %s created (id: %s, image: %s)",
@@ -215,6 +246,8 @@ class ModalSandbox:
             self._sandbox.detach()
         except Exception:
             pass
+        with _LIVE_LOCK:
+            _LIVE_SANDBOXES.discard(self)
         logger.info("ModalSandbox %s closed", self.name)
 
     def _exec_unchecked(self, command: str) -> str:
