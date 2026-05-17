@@ -5,9 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from omegaconf import OmegaConf
 
-from rllm.agents.agent import Step, Trajectory
 from rllm.experimental.engine.gateway_manager import GatewayManager, _get_routable_ip
-from rllm.experimental.engine.remote_agent_flow_engine import _build_episode, _error_episode
+from rllm.experimental.engine.remote_agent_flow_engine import _build_episode
 from rllm.experimental.engine.remote_runtime.agentcore_runtime import AgentCoreRuntime
 from rllm.experimental.engine.remote_runtime.protocol import (
     RemoteRuntimeConfig,
@@ -15,6 +14,7 @@ from rllm.experimental.engine.remote_runtime.protocol import (
     TaskSubmission,
 )
 from rllm.experimental.engine.trace_converter import compute_step_metrics
+from rllm.types import Step, Trajectory
 from rllm.workflows.workflow import TerminationReason
 
 # ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ def _make_step(prompt_len: int = 10, response_len: int = 20) -> Step:
 
 class TestRunOneSuccess:
     def test_success_with_reward(self):
-        """status_code=200 result -> RemoteTaskResult(success=True, reward=1.0)."""
+        """status_code=200 result -> RemoteTaskResult(finished=True, reward=1.0)."""
         runtime = _make_runtime()
         sub = _make_submission()
         future = _make_future(
@@ -80,11 +80,12 @@ class TestRunOneSuccess:
 
         result = asyncio.run(runtime._run_one(sub, timeout=300.0))
 
-        assert result.success is True
+        assert result.finished is True
         assert result.reward == 1.0
         assert result.session_id == "sess-1"
         assert result.task_id == "task-1"
         assert result.elapsed == 2.3
+        assert result.raw_result is not None
         assert result.raw_result["status_code"] == 200
 
     def test_success_reward_scalar(self):
@@ -96,13 +97,13 @@ class TestRunOneSuccess:
 
         result = asyncio.run(runtime._run_one(sub, timeout=300.0))
 
-        assert result.success is True
+        assert result.finished is True
         assert result.reward is None
 
 
 class TestRunOneErrorStatus:
     def test_error_status_500(self):
-        """status_code=500 result -> RemoteTaskResult(success=False, error=...)."""
+        """status_code=500 result -> RemoteTaskResult(finished=False, error=...)."""
         runtime = _make_runtime()
         sub = _make_submission()
         future = _make_future(
@@ -117,9 +118,10 @@ class TestRunOneErrorStatus:
 
         result = asyncio.run(runtime._run_one(sub, timeout=300.0))
 
-        assert result.success is False
-        assert "ZeroDivisionError" in result.error
+        assert result.finished is False
+        assert "ZeroDivisionError" in (result.error or "")
         assert result.elapsed == 3.0
+        assert result.raw_result is not None
         assert result.raw_result["status_code"] == 500
 
     def test_error_status_no_stop_reason(self):
@@ -131,34 +133,53 @@ class TestRunOneErrorStatus:
 
         result = asyncio.run(runtime._run_one(sub, timeout=300.0))
 
-        assert result.success is False
-        assert result.error == "Unknown remote error"
+        assert result.finished is False
+        assert result.error == "unknown remote error"
 
 
 class TestRunOneTransportError:
     def test_invoke_raises(self):
-        """invoke_async raising -> RemoteTaskResult(success=False)."""
+        """invoke_async raising -> RemoteTaskResult(finished=False)."""
         runtime = _make_runtime()
         sub = _make_submission()
         runtime._client.invoke_async = AsyncMock(side_effect=ConnectionError("network down"))
 
         result = asyncio.run(runtime._run_one(sub, timeout=300.0))
 
-        assert result.success is False
-        assert "network down" in result.error
+        assert result.finished is False
+        assert "network down" in (result.error or "")
 
-    def test_result_async_raises(self):
-        """result_async raising (timeout) -> RemoteTaskResult(success=False)."""
+    def test_result_async_timeout(self):
+        """asyncio.TimeoutError -> termination_reason=TIMEOUT."""
         runtime = _make_runtime()
         sub = _make_submission()
         future = AsyncMock()
-        future.result_async = AsyncMock(side_effect=TimeoutError("timed out"))
+        future.result_async = AsyncMock(side_effect=asyncio.TimeoutError())
+        future.elapsed = MagicMock(return_value=1.7)
         runtime._client.invoke_async = AsyncMock(return_value=future)
 
         result = asyncio.run(runtime._run_one(sub, timeout=1.0))
 
-        assert result.success is False
-        assert "timed out" in result.error
+        assert result.finished is False
+        assert result.termination_reason == TerminationReason.TIMEOUT
+        assert result.elapsed == 1.7
+        assert "Timeout after 1.7s" in (result.error or "")
+
+    def test_result_async_other_error(self):
+        """Non-timeout polling error -> termination_reason=ERROR."""
+        runtime = _make_runtime()
+        sub = _make_submission()
+        future = AsyncMock()
+        future.result_async = AsyncMock(side_effect=RuntimeError("S3 unreachable"))
+        future.elapsed = MagicMock(return_value=2.4)
+        runtime._client.invoke_async = AsyncMock(return_value=future)
+
+        result = asyncio.run(runtime._run_one(sub, timeout=1.0))
+
+        assert result.finished is False
+        assert result.termination_reason == TerminationReason.ERROR
+        assert result.elapsed == 2.4
+        assert "S3 unreachable" in (result.error or "")
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +205,7 @@ class TestBuildEpisodeWithTraces:
             traces.append(trace)
 
         result = RemoteTaskResult(
-            success=True,
+            finished=True,
             session_id="sess-1",
             task_id="task-1",
             reward=1.0,
@@ -200,6 +221,7 @@ class TestBuildEpisodeWithTraces:
         assert len(episode.trajectories[0].steps) == 3
         assert episode.trajectories[0].reward == 1.0
         assert episode.is_correct is True
+        assert episode.session_id == "sess-1"
         assert episode.metrics["num_trajectories"] == 1
         assert episode.metrics["steps_used"] == 3
         assert episode.metrics["steps_collected"] == 3
@@ -210,7 +232,7 @@ class TestBuildEpisodeNoTraces:
     def test_no_traces_with_reward(self):
         """No traces + reward -> empty-steps trajectory."""
         result = RemoteTaskResult(
-            success=True,
+            finished=True,
             session_id="sess-1",
             task_id="task-1",
             reward=0.5,
@@ -227,7 +249,7 @@ class TestBuildEpisodeNoTraces:
     def test_no_traces_no_reward(self):
         """No traces + no reward -> no trajectories."""
         result = RemoteTaskResult(
-            success=True,
+            finished=True,
             session_id="sess-1",
             task_id="task-1",
             reward=None,
@@ -237,16 +259,6 @@ class TestBuildEpisodeNoTraces:
 
         assert len(episode.trajectories) == 0
         assert episode.metrics["empty"] == 1
-
-
-class TestErrorEpisode:
-    def test_error_episode_fields(self):
-        """Error episode has termination_reason=ERROR."""
-        episode = _error_episode("task-1:0", {"prompt": "test"}, "something broke")
-
-        assert episode.is_correct is False
-        assert episode.termination_reason == TerminationReason.ERROR
-        assert episode.metadata["error"]["message"] == "something broke"
 
 
 # ---------------------------------------------------------------------------

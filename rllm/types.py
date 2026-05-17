@@ -322,6 +322,7 @@ class Episode(BaseModel):
     task: Any = None
     termination_reason: Any | None = None
     is_correct: bool = False
+    session_id: str | None = None
     trajectories: list[Trajectory] = Field(default_factory=list)
     artifacts: dict[str, Any] = Field(default_factory=dict)
     metrics: dict = Field(default_factory=dict)
@@ -357,6 +358,7 @@ class Episode(BaseModel):
             "task": _sanitize_task(self.task),
             "termination_reason": self.termination_reason.value if self.termination_reason is not None else None,
             "is_correct": bool(self.is_correct),
+            "session_id": self.session_id,
             "trajectories": [trajectory.to_dict() for trajectory in self.trajectories],
             "metrics": self.metrics,
             "info": self.info,
