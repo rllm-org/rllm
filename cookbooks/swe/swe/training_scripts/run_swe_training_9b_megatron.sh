@@ -178,7 +178,9 @@ if [[ "$RAY_ADDRESS" == ray://* ]]; then
         timeout "$RAY_PREFLIGHT_TIMEOUT_S" python -c 'import os, ray; ray.init(address=os.environ["RAY_ADDRESS"]); print(ray.cluster_resources()); ray.shutdown()' 2>&1 | tail -1
     ) || RAY_STATUS_LINE="<unavailable>"
 else
-    RAY_STATUS_LINE=$(ray status 2>&1 | head -1) || RAY_STATUS_LINE="<unavailable>"
+    RAY_STATUS_LINE=$(
+        timeout "$RAY_PREFLIGHT_TIMEOUT_S" ray status 2>&1 | head -1
+    ) || RAY_STATUS_LINE="<unavailable>"
 fi
 
 # Parallelism for the two-node 16xB200 setup. Qwen3.5 context parallelism
@@ -201,18 +203,22 @@ SWE_COMMAND_TIMEOUT=${SWE_COMMAND_TIMEOUT:-120}
 SWE_SANDBOX_TIMEOUT=${SWE_SANDBOX_TIMEOUT:-800}
 SWE_STARTUP_JITTER_S=${SWE_STARTUP_JITTER_S:-25.0}
 SWE_VAL_STEP_LIMIT=${SWE_VAL_STEP_LIMIT:-300}
-SWE_VAL_AGENT_TIMEOUT=${SWE_VAL_AGENT_TIMEOUT:-900}
+SWE_VAL_AGENT_TIMEOUT=${SWE_VAL_AGENT_TIMEOUT:-1200}
 SWE_VAL_COMMAND_TIMEOUT=${SWE_VAL_COMMAND_TIMEOUT:-$SWE_COMMAND_TIMEOUT}
-SWE_VAL_SANDBOX_TIMEOUT=${SWE_VAL_SANDBOX_TIMEOUT:-1020}
+SWE_VAL_SANDBOX_TIMEOUT=${SWE_VAL_SANDBOX_TIMEOUT:-1380}
 SWE_VAL_STARTUP_JITTER_S=${SWE_VAL_STARTUP_JITTER_S:-45}
 MODEL_MAX_TOKENS=${MODEL_MAX_TOKENS:-4096}
-DEFAULT_TRAJ_DIR="$COOKBOOK_DIR/trajectories/\${trainer.experiment_name}"
+DEFAULT_TRAJ_DIR="$COOKBOOK_DIR/trajectories/qwen35-9b-swe-smith-megatron"
 CHECKPOINT_ROOT=${CHECKPOINT_ROOT:-/tmp/turing-swe/checkpoints}
 MAIN_CHECKPOINT_DIR=${MAIN_CHECKPOINT_DIR:-$CHECKPOINT_ROOT/swe-verl-9b-megatron/qwen35-9b-swe-smith}
 LORA_CHECKPOINT_DIR=${LORA_CHECKPOINT_DIR:-$CHECKPOINT_ROOT/swe-verl-9b-megatron-lora/qwen35-9b-swe-smith-lora-r16}
 TRAJECTORY_OUTPUT_DIR=${TRAJ_DIR:-$DEFAULT_TRAJ_DIR}
 ROLLOUT_CORRECTION_BYPASS=${ROLLOUT_CORRECTION_BYPASS:-true}
-ROLLOUT_CORRECTION_IS=${ROLLOUT_CORRECTION_IS:-"token"}
+if [ "${ROLLOUT_CORRECTION_BYPASS}" = "true" ]; then
+    ROLLOUT_CORRECTION_IS=${ROLLOUT_CORRECTION_IS:-"null"}
+else
+    ROLLOUT_CORRECTION_IS=${ROLLOUT_CORRECTION_IS:-"token"}
+fi
 ROLLOUT_CORRECTION_IS_THRESHOLD=${ROLLOUT_CORRECTION_IS_THRESHOLD:-2.0}
 SWE_N_PARALLEL_TASKS=${SWE_N_PARALLEL_TASKS:-300}
 HF_UPLOAD_CHECKPOINTS=${HF_UPLOAD_CHECKPOINTS:-false}
@@ -296,7 +302,7 @@ python -u -m swe.scripts.train_swe_verl \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.calculate_entropy=true \
     actor_rollout_ref.actor.clip_ratio_low=0.2 \
-    actor_rollout_ref.actor.clip_ratio_high=0.2 \
+    actor_rollout_ref.actor.clip_ratio_high=0.28 \
     actor_rollout_ref.actor.optim.clip_grad=1.0 \
     actor_rollout_ref.actor.use_torch_compile=false \
     actor_rollout_ref.actor.use_dynamic_bsz=false \
@@ -372,7 +378,7 @@ python -u -m swe.scripts.train_swe_verl \
     +swe.model_return_token_ids=true \
     \
     trainer.total_epochs=100 \
-    trainer.save_freq=100 \
+    trainer.save_freq=25 \
     trainer.test_freq=10 \
     trainer.val_before_train=true \
     ++rllm.trainer.val_before_train=true \

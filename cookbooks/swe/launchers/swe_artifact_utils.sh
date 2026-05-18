@@ -58,22 +58,44 @@ setup_b200_driver_libs() {
 install_runtime_wheels() {
     local artifacts wheel_dir
     local specs=()
+    local missing_wheels=()
     artifacts="$(artifact_dir)"
     wheel_dir="$artifacts/wheels"
     if [ ! -d "$wheel_dir" ]; then
         return 0
     fi
 
-    if compgen -G "$wheel_dir/aiosqlite-*.whl" >/dev/null; then
-        specs+=("aiosqlite==0.22.1")
+    if ! "$VIRTUAL_ENV/bin/python" -c 'import aiosqlite' >/dev/null 2>&1; then
+        if compgen -G "$wheel_dir/aiosqlite-*.whl" >/dev/null; then
+            specs+=("aiosqlite==0.22.1")
+        else
+            missing_wheels+=("aiosqlite")
+        fi
     fi
-    if compgen -G "$wheel_dir/mbridge-*.whl" >/dev/null; then
-        specs+=("mbridge==0.15.1")
+
+    if ! "$VIRTUAL_ENV/bin/python" -c 'import mbridge' >/dev/null 2>&1; then
+        if compgen -G "$wheel_dir/mbridge-*.whl" >/dev/null; then
+            specs+=("mbridge==0.15.1")
+        else
+            missing_wheels+=("mbridge")
+        fi
+    fi
+
+    if [ "${#missing_wheels[@]}" -gt 0 ]; then
+        echo "Missing runtime wheel(s) in $wheel_dir: ${missing_wheels[*]}" >&2
+        return 1
     fi
 
     if [ "${#specs[@]}" -gt 0 ]; then
-        python -m pip install --no-index --find-links "$wheel_dir" "${specs[@]}"
+        "$VIRTUAL_ENV/bin/python" -m pip install --no-index --no-deps --find-links "$wheel_dir" "${specs[@]}"
     fi
+
+    "$VIRTUAL_ENV/bin/python" - <<'PY'
+import aiosqlite
+import mbridge
+
+print(f"runtime_wheels_ok aiosqlite={aiosqlite.__file__} mbridge={mbridge.__file__}", flush=True)
+PY
 }
 
 repair_verl_venv_python() {

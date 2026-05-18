@@ -189,8 +189,9 @@ This runbook covers two launch styles:
 
 - a normal Ray cluster where you already have one CPU driver and the B200 GPU
   workers allocated and reachable
-- ByteDance Arnold launch, preferably using Arnold only for B200 workers while
-  a pre-probed CPU driver owns Ray head, Modal, W&B, and checkpoints
+- ByteDance Arnold launch where Arnold allocates the CPU Ray head and B200
+  workers, probes the selected CPU for Modal/SWE-ReX connectivity, and then
+  starts training
 
 It intentionally starts after worker allocation. Use your normal MLX/Arnold
 reservation flow to get the CPU and B200 worker ids, then run the commands below
@@ -411,6 +412,10 @@ Experiment-specific changes should normally live in the Arnold YAML, not in the
 training script. Use Arnold `envs` for launcher-level knobs and
 `RLLM_SWE_FULL_EXTRA_ARGS` for Hydra overrides.
 
+The checked-in main YAML defaults to `RLLM_SWE_MODE=smoke` so a direct launch is
+a small sanity run. For full training, set `RLLM_SWE_MODE=full` and provide the
+full-run environment and Hydra overrides shown below.
+
 Available configs under `cookbooks/swe/launchers/`:
 
 | Config | Use | Notes |
@@ -500,7 +505,12 @@ arnold:
     SWE_COMMAND_TIMEOUT: "120"
     SWE_SANDBOX_TIMEOUT: "800"
     SWE_STARTUP_JITTER_S: "25.0"
-    SWE_N_PARALLEL_TASKS: "128"
+    SWE_N_PARALLEL_TASKS: "300"
+    SWE_VAL_STEP_LIMIT: "300"
+    SWE_VAL_AGENT_TIMEOUT: "1200"
+    SWE_VAL_SANDBOX_TIMEOUT: "1380"
+    HF_UPLOAD_CHECKPOINTS: "true"
+    HF_UPLOAD_REPO_ID: JWei05/qwen35-9b-swe-smith-megatron
     ROLLOUT_CORRECTION_IS: "null"
     RAY_BACKEND_LOG_LEVEL: info
     RAY_DEDUP_LOGS: "0"
@@ -508,12 +518,13 @@ arnold:
     NCCL_DEBUG: INFO
     RLLM_SWE_FULL_EXTRA_ARGS: >-
       ++trainer.total_training_steps=100
-      trainer.save_freq=10
-      trainer.test_freq=1000
-      trainer.val_before_train=false
-      ++rllm.trainer.val_before_train=false
+      trainer.save_freq=25
+      trainer.test_freq=10
+      trainer.val_before_train=true
+      ++rllm.trainer.val_before_train=true
+      val_max_samples=300
       actor_rollout_ref.model.use_remove_padding=true
-      rllm.workflow.n_parallel_tasks=128
+      rllm.workflow.n_parallel_tasks=300
       actor_rollout_ref.rollout.n=8
       rllm.algorithm.rollout_correction.tis_mode=null
       algorithm.rollout_correction.rollout_is=null
@@ -523,6 +534,7 @@ arnold:
     - MODAL_TOKEN_ID
     - MODAL_TOKEN_SECRET
     - WANDB_API_KEY
+    - HF_TOKEN
 
 verl:
   entrypoint: submodules/rllm/cookbooks/swe/launchers/arnold_entrypoint_swe_qwen35_9b_megatron.sh
@@ -560,6 +572,7 @@ roles:
 envs:
   NNODES: "1"
   NGPUS_PER_NODE: "4"
+  SWE_N_PARALLEL_TASKS: "128"
 ```
 
 For a one-step smoke test, keep `RLLM_SWE_MODE=smoke` or override the full args
@@ -575,9 +588,9 @@ envs:
   RLLM_SWE_SMOKE_PARALLEL_TASKS: "4"
 ```
 
-For long runs, set `trainer.save_freq` to a small value such as `5` or `10` and
-set `CHECKPOINT_ROOT` to a writable HDFS mount. Avoid relying on `/tmp` as the
-only copy of training state for multi-hour jobs.
+For long runs, keep `trainer.save_freq=25` or set it lower, and set
+`CHECKPOINT_ROOT` to a writable HDFS mount. Avoid relying on `/tmp` as the only
+copy of training state for multi-hour jobs.
 
 To mirror saved checkpoints to Hugging Face, enable the explicit HF upload
 switch and pass `HF_TOKEN` through Arnold. The upload runs after each local
@@ -598,7 +611,7 @@ Equivalent Hydra overrides:
 ```yaml
 RLLM_SWE_FULL_EXTRA_ARGS: >-
   ++trainer.hf_upload=true
-  +trainer.hf_repo_id=JWei05/qwen35-9b-swe-smith-megatron
+  ++trainer.hf_repo_id=JWei05/qwen35-9b-swe-smith-megatron
 ```
 
 #### Changing Experiment Settings
@@ -612,12 +625,15 @@ envs:
   NGPUS_PER_NODE: "8"
   ACTOR_TP: "2"
   ACTOR_CP: "2"
-  SWE_N_PARALLEL_TASKS: "128"
+  SWE_N_PARALLEL_TASKS: "300"
   SWE_AGENT_TIMEOUT: "600"
   SWE_SANDBOX_TIMEOUT: "800"
+  SWE_VAL_AGENT_TIMEOUT: "1200"
+  SWE_VAL_SANDBOX_TIMEOUT: "1380"
   RLLM_SWE_FULL_EXTRA_ARGS: >-
     ++trainer.total_training_steps=100
-    trainer.save_freq=10
+    trainer.save_freq=25
+    trainer.test_freq=10
     trainer.experiment_name=my_experiment
     actor_rollout_ref.rollout.n=8
     actor_rollout_ref.actor.optim.lr=1e-6
@@ -672,6 +688,7 @@ available.
 | `swe/scripts/prepare_filtered_mix.py` | Builds the SWE-smith filtered training mix |
 | `swe/scripts/modal_swerex_reliability_test.py` | Modal/SWE-ReX CPU-driver reliability probe |
 | `scripts/setup_verl_vllm018_qwen35.sh` | Builds the Qwen3.5 veRL/vLLM training venv |
+| `launchers/launch_swe_qwen35_9b_megatron_b200.yaml` | Main all-Arnold CPU-head plus B200-worker launch config |
 | `launchers/launch_swe_qwen35_9b_megatron_b200_external_ray_workers.yaml` | Arnold B200-worker-only launch config for an external CPU Ray head |
 | `launchers/launch_external_cpu_driver_swe_qwen35_9b_megatron.sh` | External CPU-driver launcher for Arnold worker clusters |
 | `launchers/arnold_entrypoint_swe_qwen35_9b_megatron.sh` | Arnold entrypoint for smoke, cluster-hold, and external-Ray-worker modes |

@@ -5,6 +5,7 @@ REPO_ROOT=${REPO_ROOT:-/opt/tiger/modelchef}
 RLLM_ROOT="$REPO_ROOT/submodules/rllm"
 COOKBOOK_DIR="$RLLM_ROOT/cookbooks/swe"
 SCRIPT_DIR="$COOKBOOK_DIR/launchers"
+export RLLM_ROOT
 
 cd "$REPO_ROOT"
 
@@ -75,6 +76,171 @@ print(f"rllm_model_gateway_ok path={rllm_model_gateway.__file__}", flush=True)
 PY
 }
 
+install_qwen35_mtp_export_hotfix() {
+    "$VIRTUAL_ENV/bin/python" - <<'PY'
+import os
+from pathlib import Path
+
+site = Path(os.environ["VIRTUAL_ENV"]) / "lib/python3.12/site-packages"
+path = site / "megatron/bridge/models/conversion/auto_bridge.py"
+marker = "rLLM_QWEN35_MTP_EXPORT_HOTFIX"
+text = path.read_text()
+if marker in text:
+    stale = "generator = _rllm_append_original_mtp_tensors(generator, self.hf_pretrained, cpu=cpu)"
+    fixed = "generator = _rllm_append_original_mtp_tensors(generator, self.hf_pretrained, cpu=locals().get('cpu', True))"
+    if stale in text:
+        path.write_text(text.replace(stale, fixed))
+        print(f"qwen35_mtp_export_hotfix=updated path={path}", flush=True)
+        raise SystemExit(0)
+    print("qwen35_mtp_export_hotfix=already_installed", flush=True)
+    raise SystemExit(0)
+
+helper = f'''
+# {marker}
+def _rllm_append_original_mtp_tensors(generator, hf_pretrained, cpu=True):
+    yielded = set()
+    for name, tensor in generator:
+        yielded.add(name)
+        yield name, tensor
+
+    try:
+        state = hf_pretrained.state
+        source = getattr(state, "source", None)
+        if source is not None:
+            keys = source.get_all_keys()
+        else:
+            keys = state._get_all_keys()
+    except Exception as exc:
+        print(f"qwen35_mtp_export_hotfix unable_to_list_mtp_keys: {{exc}}", flush=True)
+        return
+
+    mtp_keys = [key for key in keys if key.startswith("mtp.") and key not in yielded]
+    if not mtp_keys:
+        return
+
+    print(f"qwen35_mtp_export_hotfix appending {{len(mtp_keys)}} original MTP tensors", flush=True)
+    for key in mtp_keys:
+        try:
+            tensor = state[key]
+        except Exception as exc:
+            print(f"qwen35_mtp_export_hotfix failed_to_load {{key}}: {{exc}}", flush=True)
+            continue
+        if cpu and hasattr(tensor, "cpu"):
+            tensor = tensor.cpu()
+        yield key, tensor
+'''
+
+class_marker = "\n\nclass AutoBridge("
+if class_marker not in text:
+    raise SystemExit(f"Could not find AutoBridge class marker in {path}")
+text = text.replace(class_marker, "\n\n" + helper + class_marker, 1)
+
+needle = "        model_instance = self._get_model_instance(model)\n        quant_tensors = None\n"
+replacement = (
+    "        generator = _rllm_append_original_mtp_tensors(generator, self.hf_pretrained, cpu=locals().get('cpu', True))\n"
+    "        model_instance = self._get_model_instance(model)\n"
+    "        quant_tensors = None\n"
+)
+if needle not in text:
+    raise SystemExit(f"Could not find save_hf_weights insertion point in {path}")
+path.write_text(text.replace(needle, replacement, 1))
+print(f"qwen35_mtp_export_hotfix=installed path={path}", flush=True)
+PY
+}
+
+install_megatron_checkpoint_json_hotfix() {
+    "$VIRTUAL_ENV/bin/python" - <<'PY'
+import os
+from pathlib import Path
+
+site = Path(os.environ["VIRTUAL_ENV"]) / "lib/python3.12/site-packages"
+path = site / "verl/utils/checkpoint/megatron_checkpoint_manager.py"
+marker = "rLLM_MEGATRON_CHECKPOINT_JSON_HOTFIX"
+text = path.read_text()
+if marker in text:
+    print("megatron_checkpoint_json_hotfix=already_installed", flush=True)
+    raise SystemExit(0)
+
+helper = f'''
+# {marker}
+def _rllm_json_default(obj):
+    if hasattr(obj, "to_dict"):
+        return obj.to_dict()
+    if isinstance(obj, (torch.dtype, AttnBackend)):
+        return str(obj)
+    if hasattr(obj, "__dict__"):
+        return {{k: v for k, v in vars(obj).items() if not k.startswith("_")}}
+    return str(obj)
+'''
+
+needle = "\nclass MegatronCheckpointManager(BaseCheckpointManager):\n"
+if needle not in text:
+    raise SystemExit(f"Could not find checkpoint manager insertion point in {path}")
+text = text.replace(needle, "\n" + helper + needle, 1)
+
+old = "                    json.dump(transformer_config_dict, f, indent=2)"
+new = "                    json.dump(transformer_config_dict, f, indent=2, default=_rllm_json_default)"
+if old not in text:
+    raise SystemExit(f"Could not find transformer config json.dump in {path}")
+path.write_text(text.replace(old, new, 1))
+print(f"megatron_checkpoint_json_hotfix=installed path={path}", flush=True)
+PY
+}
+
+install_bypass_debug_metrics_hotfix() {
+    "$VIRTUAL_ENV/bin/python" - <<'PY'
+import os
+from pathlib import Path
+
+path = Path(os.environ["RLLM_ROOT"]) / "rllm/experimental/verl/verl_backend.py"
+text = path.read_text()
+if "old_log_probs_metrics" in text:
+    print("bypass_debug_metrics_hotfix=already_installed", flush=True)
+    raise SystemExit(0)
+
+old = '''        if bypass_mode:
+            assert "rollout_log_probs" in batch.batch, "bypass_mode requires rollout_log_probs in batch"
+            with simple_timer("old_log_probs", timing_dict):
+                batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
+        else:
+'''
+new = '''        if bypass_mode:
+            assert "rollout_log_probs" in batch.batch, "bypass_mode requires rollout_log_probs in batch"
+            with simple_timer("old_log_probs", timing_dict):
+                batch.batch["old_log_probs"] = batch.batch["rollout_log_probs"]
+
+            # Keep bypass semantics for training, but still run the actor
+            # forward pass once so debug metrics match the non-bypass path.
+            with simple_timer("old_log_probs_metrics", timing_dict):
+                tu.assign_non_tensor(batch_td, calculate_entropy=True, compute_loss=False)
+                output = self.actor_rollout_wg.compute_log_prob(batch_td)
+                log_probs = no_padding_2_padding(tu.get(output, "log_probs"), batch_td)
+                entropy = no_padding_2_padding(tu.get(output, "entropy"), batch_td)
+
+                response_masks = batch.batch["response_mask"]
+                loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
+                entropy_agg = agg_loss(loss_mat=entropy, loss_mask=response_masks, loss_agg_mode=loss_agg_mode)
+                metrics["actor/entropy"] = entropy_agg.detach().item()
+
+                debug_tensors = {
+                    "old_log_probs": log_probs.float(),
+                    "rollout_log_probs": batch.batch["rollout_log_probs"],
+                    "responses": batch.batch["responses"],
+                }
+                if "response_mask" in batch.batch:
+                    debug_tensors["response_mask"] = batch.batch["response_mask"]
+                elif "attention_mask" in batch.batch:
+                    debug_tensors["attention_mask"] = batch.batch["attention_mask"]
+                metrics.update(calculate_debug_metrics_compat(DataProto.from_dict(tensors=debug_tensors)))
+        else:
+'''
+if old not in text:
+    raise SystemExit(f"Could not find bypass metrics insertion point in {path}")
+path.write_text(text.replace(old, new, 1))
+print(f"bypass_debug_metrics_hotfix=installed path={path}", flush=True)
+PY
+}
+
 ensure_aiosqlite_for_gateway() {
     local artifacts wheel_dir
 
@@ -119,6 +285,9 @@ fi
 
 restore_swe_artifacts
 restore_megatron_cp2_overlay_for_arnold
+install_qwen35_mtp_export_hotfix
+install_megatron_checkpoint_json_hotfix
+install_bypass_debug_metrics_hotfix
 if [ "${RLLM_SWE_LINK_LOCAL_MODEL_PATH:-1}" = "1" ] \
     && [ ! -d /mnt/hdfs/model_path ] \
     && [ -d /tmp/hf_cache/hub/models--Qwen--Qwen3.5-9B/snapshots ]; then
@@ -183,7 +352,12 @@ ip route || true
 ip -6 route || true
 cat /etc/resolv.conf || true
 getent ahosts api.modal.com | head || true
-curl -sS -o /dev/null -w 'remote=%{remote_ip} connect=%{time_connect} total=%{time_total} code=%{http_code}\n' https://api.modal.com || true
+curl -sS \
+    --connect-timeout "${RLLM_SWE_MODAL_CURL_CONNECT_TIMEOUT_S:-10}" \
+    --max-time "${RLLM_SWE_MODAL_CURL_MAX_TIME_S:-30}" \
+    -o /dev/null \
+    -w 'remote=%{remote_ip} connect=%{time_connect} total=%{time_total} code=%{http_code}\n' \
+    https://api.modal.com || true
 
 cd "$COOKBOOK_DIR"
 PROBE_OUT="/tmp/modal_probe_${ARNOLD_TRIAL_ID:-unknown}_${ARNOLD_ID:-0}.jsonl"
