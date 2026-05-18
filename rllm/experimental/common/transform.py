@@ -162,9 +162,14 @@ def _get_transform_metrics(episodes: list[Episode], groups: list[TrajectoryGroup
     metrics[f"{prefix}/num_trajs_before_filter"] = group_sizes_before.sum()
     metrics[f"{prefix}/num_trajs_after_filter"] = group_sizes.sum()
     metrics[f"{prefix}/num_groups"] = len(groups)
-    metrics[f"{prefix}/avg_group_size"] = group_sizes.mean()
-    metrics[f"{prefix}/max_group_size"] = group_sizes.max()
-    metrics[f"{prefix}/min_group_size"] = group_sizes.min()
+    if len(group_sizes) == 0:
+        metrics[f"{prefix}/avg_group_size"] = 0.0
+        metrics[f"{prefix}/max_group_size"] = 0
+        metrics[f"{prefix}/min_group_size"] = 0
+    else:
+        metrics[f"{prefix}/avg_group_size"] = group_sizes.mean()
+        metrics[f"{prefix}/max_group_size"] = group_sizes.max()
+        metrics[f"{prefix}/min_group_size"] = group_sizes.min()
     return metrics
 
 

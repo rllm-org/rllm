@@ -33,6 +33,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _flatten_training_datums(training_datums: list[tinker.Datum] | dict[str, list[tinker.Datum]]) -> list[tinker.Datum]:
+    if isinstance(training_datums, dict):
+        return [datum for datums in training_datums.values() for datum in datums]
+    return training_datums
+
+
+def _record_training_datum_metrics(
+    metrics: dict,
+    training_datums: list[tinker.Datum] | dict[str, list[tinker.Datum]],
+) -> None:
+    flat_training_datums = _flatten_training_datums(training_datums)
+    metrics["train/num_sequences"] = len(flat_training_datums)
+    metrics["train/active_tokens"] = sum(int(sum(datum.loss_fn_inputs["mask"].data)) for datum in flat_training_datums)
+
+
 # Mapping from rLLMAdvantageEstimator to their default Tinker loss function (overriding is allowed through config)
 ADV_TO_LOSS_FN_AUTO_MAP = {
     rLLMAdvantageEstimator.REINFORCE: "importance_sampling",
@@ -250,6 +265,7 @@ class TinkerPolicyTrainer:
             trajectory_groups,
             algorithm_config=algorithm_config,
         )
+        _record_training_datum_metrics(adv_metrics, training_datums)
 
         # Forward-backward pass
         fwd_bwd_futures = await self._get_forward_backward_futures(
@@ -323,6 +339,7 @@ class TinkerPolicyTrainer:
             trajectory_groups,
             algorithm_config=self.algorithm_config,
         )
+        _record_training_datum_metrics(adv_metrics, training_datums)
 
         # Forward-backward and optimizer future together
         fwd_bwd_futures = await self._get_forward_backward_futures(
