@@ -732,7 +732,7 @@ class UnifiedTrainer:
         test_begin = time.perf_counter()
         self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="val", epoch=trainer_state.epoch)
 
-        is_correct_lst, uid_lst, data_source_lst = [], [], []
+        is_correct_lst, uid_lst, data_source_lst, termination_reason_lst = [], [], [], []
         workflow_metrics_by_source = defaultdict(lambda: defaultdict(list))
 
         val_dataloader: Iterable = self.backend.get_dataloader(self.val_dataset, trainer_state)
@@ -744,6 +744,14 @@ class UnifiedTrainer:
 
             is_correct_lst.extend([episode.is_correct for episode in val_episodes])
             uid_lst.extend([episode.task_id for episode in val_episodes])
+            termination_reason_lst.extend(
+                [
+                    episode.termination_reason.value
+                    if getattr(episode.termination_reason, "value", None) is not None
+                    else str(episode.termination_reason or TerminationReason.UNKNOWN.value)
+                    for episode in val_episodes
+                ]
+            )
 
             data_sources = [episode.info.get("data_source", "unknown") for episode in val_episodes]
             data_source_lst.extend(data_sources)
@@ -764,6 +772,8 @@ class UnifiedTrainer:
         is_correct_array = np.array(is_correct_lst)
         uid_array = np.array(uid_lst)
         data_source_array = np.array(data_source_lst)
+        termination_reason_array = np.array(termination_reason_lst)
+        known_termination_reasons = {reason.value for reason in TerminationReason}
 
         for data_source in np.unique(data_source_array):
             pass_rates = defaultdict(list)
@@ -771,12 +781,25 @@ class UnifiedTrainer:
             data_source_mask = data_source_array == data_source
             is_correct_data_source = is_correct_array[data_source_mask]
             uids_data_source = uid_array[data_source_mask]
+            termination_reasons_data_source = termination_reason_array[data_source_mask]
 
             for is_correct, uid in zip(is_correct_data_source, uids_data_source, strict=False):
                 pass_rates[uid].append(is_correct)
 
             val_metrics[f"val/{data_source}/pass@1"] = np.mean(is_correct_data_source)
             val_metrics[f"val/{data_source}/pass@{n_val_samples}"] = np.mean([1 if any(pass_rate) else 0 for pass_rate in pass_rates.values()])
+            termination_counts = Counter(termination_reasons_data_source)
+            termination_total = len(termination_reasons_data_source)
+            val_metrics[f"val/{data_source}/termination/total"] = termination_total
+            for reason in TerminationReason:
+                count = termination_counts.get(reason.value, 0)
+                val_metrics[f"val/{data_source}/termination/{reason.value}/count"] = count
+                val_metrics[f"val/{data_source}/termination/{reason.value}/rate"] = count / termination_total if termination_total else 0.0
+            for reason, count in termination_counts.items():
+                if reason in known_termination_reasons:
+                    continue
+                val_metrics[f"val/{data_source}/termination/{reason}/count"] = count
+                val_metrics[f"val/{data_source}/termination/{reason}/rate"] = count / termination_total if termination_total else 0.0
 
             # Add workflow metrics for this data source
             if data_source in workflow_metrics_by_source:
