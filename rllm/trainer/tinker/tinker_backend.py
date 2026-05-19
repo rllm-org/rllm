@@ -41,14 +41,9 @@ logger = logging.getLogger(__name__)
 
 
 def _build_interleave_batch(batch: list, group_size: int) -> tuple[list, list[str]]:
-    """Build an interleaved batch where each task is repeated `group_size` times.
-
-    Items may be raw dicts (HF-style training rows) or :class:`rllm.types.Task`
-    objects (sandbox/harbor rows that need a per-task ``dataset_dir``).
-    Returns ``(interleaved_batch, task_ids)`` where every group of
-    ``group_size`` consecutive items shares one task_id, so GRPO grouping
-    sees one prompt with N rollouts.
-    """
+    """Interleave each task ``group_size`` times; return ``(batch, task_ids)``
+    with one shared uid per group for GRPO grouping. Items may be dicts or
+    :class:`rllm.types.Task` objects."""
     interleave_batch: list = []
     task_ids: list[str] = []
     for batch_item in batch:

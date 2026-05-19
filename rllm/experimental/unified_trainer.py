@@ -120,10 +120,8 @@ class UnifiedTrainer:
     ):
         """Initialize the UnifiedTrainer.
 
-        Provide exactly one of ``workflow_class``, ``agent_flow`` (with either
-        ``evaluator`` or ``hooks``), or ``remote_runtime``. ``hooks`` lets each
-        rollout resolve its own per-task evaluator (see
-        :class:`rllm.eval._hooks.EvalHooks` for the sandbox/verifier flow).
+        Provide exactly one of ``workflow_class``, ``agent_flow`` (with
+        ``evaluator`` or ``hooks``), or ``remote_runtime``.
         """
         has_agent_flow = kwargs.get("agent_flow") is not None and (kwargs.get("evaluator") is not None or kwargs.get("hooks") is not None)
         remote_runtime_enabled = config.rllm.get("remote_runtime", {}).get("enabled", False)
@@ -870,13 +868,11 @@ class AgentTrainer:
 
     This trainer will simply delegate the task to the corresponding launcher class.
 
-    Provide exactly one of ``workflow_class`` or ``agent_flow``. For
-    sandbox-style flows (a :class:`SandboxedAgentFlow` or a dataset whose
-    Tasks carry ``task_path`` metadata), ``hooks`` and ``evaluator`` are
-    auto-wired with :class:`rllm.hooks.SandboxTaskHooks` and the gateway
-    is pinned to ``127.0.0.1`` so docker containers can reach it via the
-    harness's ``host.docker.internal`` rewrite. Pass ``hooks=`` or
-    ``evaluator=`` explicitly to override the auto-wiring.
+    Provide exactly one of ``workflow_class`` or ``agent_flow``. For sandbox-style
+    flows (``SandboxedAgentFlow`` agent or tasks with ``task_path`` metadata),
+    ``hooks`` and gateway loopback are auto-wired via
+    :class:`rllm.hooks.SandboxTaskHooks`; pass ``hooks=`` or ``evaluator=``
+    explicitly to override.
     """
 
     def __init__(
@@ -893,10 +889,7 @@ class AgentTrainer:
         store: Store | None = None,
         **kwargs,
     ):
-        # Auto-wire sandbox hooks + gateway loopback when the flow needs
-        # per-task isolation. Detection: SandboxedAgentFlow agent OR a
-        # dataset whose first row is a Task with task_path metadata.
-        # Skip when the caller passed hooks/evaluator explicitly.
+        # Auto-wire sandbox hooks + gateway loopback unless caller set hooks/evaluator.
         if agent_flow is not None and hooks is None and evaluator is None:
             from rllm.hooks import SandboxTaskHooks, needs_sandbox_isolation, pin_gateway_host_loopback
 
@@ -909,7 +902,6 @@ class AgentTrainer:
         if not has_agent_flow and not remote_runtime_enabled:
             assert workflow_class is not None, "Either workflow_class, (agent_flow AND (evaluator OR hooks)), or remote_runtime must be provided"
 
-        # Pass agent_flow, evaluator, and hooks through kwargs for UnifiedTrainer
         if agent_flow is not None:
             kwargs["agent_flow"] = agent_flow
         if evaluator is not None:

@@ -291,13 +291,8 @@ def _run_train(
         _is_harbor_agent = bool(agent_name) and agent_name.startswith("harbor:")
 
         # ---- Resolve evaluator ----
-        # ``harbor_reward_fn`` reads ``episode.artifacts['harbor_reward']``,
-        # which is only populated by HarborRuntime (``harbor:<scaffold>``).
-        # When a harbor-sourced dataset is run through an rllm-native harness
-        # (mini-swe-agent / opencode / oracle / …), the artifact is never set
-        # and the evaluator would always score zero. Skip the catalog
-        # evaluator in that case and let ``EvalHooks`` resolve a per-task
-        # verifier from the harbor task dir (typically ``tests/test.sh``).
+        # Harbor datasets on an rllm-native harness skip ``harbor_reward_fn``
+        # and fall back to per-task verifier resolution via SandboxTaskHooks.
         evaluator = None
         evaluator_display = "per-task (from task.toml/dataset.toml)"
         if evaluator_name is not None:
@@ -323,9 +318,6 @@ def _run_train(
                     except (KeyError, ImportError):
                         pass
 
-        # For non-harbor catalog datasets, training still requires a
-        # global evaluator (no per-task verifier files exist for HF rows).
-        # Harbor datasets fall back to per-task verifiers via EvalHooks.
         if evaluator is None and not _is_harbor_source:
             console.print(f"  [error]No evaluator found for '{benchmark}'. Specify --evaluator explicitly.[/]")
             raise SystemExit(1)
@@ -335,19 +327,10 @@ def _run_train(
         val_ds_name = val_dataset_name or benchmark
 
         # ---- Resolve catalog entries for train + val datasets ----
-        # User may pass ``--val-dataset harbor:<name>`` (or the raw
-        # ``<name>`` after a prior ``rllm dataset pull``). Harbor entries
-        # aren't written into ``catalog["datasets"]``, so look them up
-        # via ``resolve_harbor_catalog_entry`` as a fallback. Cache the
-        # benchmark's entry so we don't re-probe Harbor for it.
         train_entry = _resolve_dataset_entry(train_ds_name, catalog, benchmark, catalog_entry)
         val_entry = _resolve_dataset_entry(val_ds_name, catalog, benchmark, catalog_entry)
 
-        # Resolve train split from catalog if not provided. Prefer an
-        # explicit ``train_split`` field; otherwise harbor datasets
-        # (which only register their single ``eval_split``) need that
-        # split for training; for everything else the historical "train"
-        # default is correct.
+        # ---- Resolve train/val splits ----
         if train_split is None:
             if train_entry and "train_split" in train_entry:
                 train_split = train_entry["train_split"]
@@ -356,13 +339,10 @@ def _run_train(
             else:
                 train_split = "train"
 
-        # Resolve val split from catalog if not provided. Same chain.
         if val_split is None:
             val_split = val_entry.get("eval_split", "test") if val_entry else "test"
 
         # ---- Load training dataset ----
-        # Pass through the resolved catalog_entry so harbor datasets get
-        # auto-pulled even when their entry was synthesised at runtime.
         train_dataset = _load_or_pull_dataset(train_ds_name, train_split, catalog, train_entry)
         if train_dataset is None:
             console.print(f"  [error]Could not load training dataset '{train_ds_name}' split '{train_split}'.[/]")
@@ -375,12 +355,8 @@ def _run_train(
         val_dataset = _load_or_pull_dataset(val_ds_name, val_split, catalog, val_entry)
         # val_dataset can be None — training will proceed without validation
 
-        # Harbor-sourced rows carry ``task_path`` pointing at each harbor
-        # task dir. Wrap rows as Task objects rooted at that path so the
-        # AgentFlowEngine + SandboxTaskHooks can resolve per-task
-        # verifiers (``tests/test.sh``) and per-task ``task.toml``.
-        # Train and val may be different harbor datasets — wrap
-        # independently based on each one's resolved catalog entry.
+        # Wrap harbor rows as Tasks rooted at ``task_path`` for per-task
+        # verifier resolution.
         from rllm.data.dataset import Dataset as _Dataset
         from rllm.data.dataset import _wrap_rows_as_tasks
 
@@ -450,12 +426,6 @@ def _run_train(
     console.print()
 
     # ---- Launch training ----
-    # AgentTrainer auto-detects sandbox flows (SandboxedAgentFlow agent
-    # or harbor-sourced task dataset) and wires SandboxTaskHooks +
-    # gateway loopback. Pass evaluator only when the catalog binds a
-    # global one (math_reward_fn / harbor_reward_fn for harbor scaffolds);
-    # for harbor-on-rllm-native-harness, evaluator is None and hooks
-    # resolve a per-task verifier from each task's tests/test.sh.
     trainer = AgentTrainer(
         backend="tinker",
         agent_flow=agent_flow,
@@ -470,11 +440,8 @@ def _run_train(
 def _resolve_dataset_entry(name: str, catalog: dict, benchmark: str | None = None, benchmark_entry: dict | None = None) -> dict | None:
     """Resolve a dataset name to a catalog entry.
 
-    Order: (1) the bundled ``catalog["datasets"]`` dict; (2) the
-    benchmark's already-resolved entry when ``name == benchmark``;
-    (3) a Harbor registry probe for ``<name>`` (handles
-    ``--val-dataset swebench-verified`` where the user pulled it
-    earlier and just wants the eval_split looked up).
+    Order: ``catalog["datasets"][name]`` → ``benchmark_entry`` if
+    ``name == benchmark`` → Harbor registry probe.
     """
     entry = catalog.get("datasets", {}).get(name)
     if entry is not None:
@@ -492,9 +459,8 @@ def _resolve_dataset_entry(name: str, catalog: dict, benchmark: str | None = Non
 def _load_or_pull_dataset(name: str, split: str, catalog: dict, catalog_entry_override: dict | None = None):
     """Load a dataset, auto-pulling from HuggingFace/Harbor if not cached.
 
-    ``catalog_entry_override`` lets harbor entries resolved at runtime
-    (via :func:`resolve_harbor_catalog_entry`) drive the pull, since those
-    entries aren't written into ``catalog["datasets"]``.
+    ``catalog_entry_override`` drives the pull for runtime-resolved harbor
+    entries that aren't in ``catalog["datasets"]``.
     """
     from rich.status import Status
 

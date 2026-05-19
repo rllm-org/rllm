@@ -175,14 +175,8 @@ class Dataset:
 def _wrap_rows_as_tasks(rows: list[dict[str, Any]]) -> list:
     """Wrap dict rows as :class:`rllm.types.Task` objects.
 
-    Rows with a ``task_path`` field (harbor / sandbox-style) are rooted
-    at that path and their per-task ``task.toml`` metadata is merged in,
-    matching what :class:`rllm.tasks.loader.BenchmarkLoader` does for
-    materialized datasets. Other rows get ``dataset_dir=Path(".")``.
-
-    Imported lazily to avoid pulling ``rllm.types`` at module load time
-    (Dataset is constructed on the hot path of trainer init; Task pulls
-    pydantic).
+    Rows with ``task_path`` are rooted there and their ``task.toml``
+    metadata is merged in; other rows get ``dataset_dir=Path(".")``.
     """
     from pathlib import Path
 
@@ -532,17 +526,10 @@ class DatasetRegistry:
         Args:
             name: Name of the dataset to load
             split: Split name to load (e.g., 'train', 'test', 'default')
-            as_tasks: When True, wrap each row as a :class:`rllm.types.Task`.
-                Rows carrying a ``task_path`` field (harbor / sandbox-style
-                datasets) get rooted at that path so per-task ``task.toml``
-                metadata is merged in and downstream verifier resolution
-                (``tests/test.sh``) works against the right directory.
-                Other rows get ``dataset_dir=Path(".")``.
+            as_tasks: When True, wrap each row via :func:`_wrap_rows_as_tasks`.
 
         Returns:
-            Dataset: The loaded dataset or None if not found. When
-            ``as_tasks=True``, the dataset's ``data`` is a list of Task
-            objects; otherwise it's a list of dicts.
+            Dataset: The loaded dataset or None if not found.
         """
         registry = cls._load_registry()
         datasets = registry.get("datasets", {})
