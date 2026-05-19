@@ -234,6 +234,53 @@ def test_official_openai_api_does_not_receive_extra_body():
     assert "temperature" not in call
 
 
+def test_gateway_routed_openai_model_does_not_receive_extra_body():
+    response = FakeResponse(message=FakeMessage(content=None, tool_calls=[tool_call()]))
+    model = make_model(
+        response,
+        base_url="http://127.0.0.1:37659/sessions/example:0/v1",
+        model_name="gpt-5-mini",
+        model_config={
+            "model_kwargs": {
+                "temperature": 0.0,
+                "extra_body": {"chat_template_kwargs": {"enable_thinking": True}},
+                "chat_template_kwargs": {"enable_thinking": False},
+                "return_token_ids": True,
+            }
+        },
+    )
+
+    model.query([{"role": "user", "content": "hi"}])
+
+    call = model.client.chat.completions.calls[0]
+    assert "extra_body" not in call
+    assert "chat_template_kwargs" not in call
+    assert "return_token_ids" not in call
+    assert "temperature" not in call
+
+
+def test_local_gpt_alias_can_opt_into_extra_body():
+    response = FakeResponse(message=FakeMessage(content=None, tool_calls=[tool_call()]))
+    model = make_model(
+        response,
+        base_url="http://localhost:8000/v1",
+        model_name="gpt-oss-local",
+        model_config={
+            "allow_extra_body": True,
+            "model_kwargs": {
+                "chat_template_kwargs": {"enable_thinking": True},
+                "return_token_ids": True,
+            },
+        },
+    )
+
+    model.query([{"role": "user", "content": "hi"}])
+
+    call = model.client.chat.completions.calls[0]
+    assert call["extra_body"]["chat_template_kwargs"] == {"enable_thinking": True}
+    assert call["extra_body"]["return_token_ids"] is True
+
+
 def test_return_token_ids_is_opt_in_for_compatible_gateways():
     response = FakeResponse(message=FakeMessage(content=None, tool_calls=[tool_call()]))
     model = make_model(

@@ -102,6 +102,15 @@ def test_is_retryable_transport_error_filters_generic_exceptions():
     assert patch_mod._is_retryable_transport_error(patch_mod.aiohttp.ClientConnectionError("yes")) is True
 
 
+def test_is_retryable_transport_error_rejects_command_timeout():
+    patch_mod = importlib.import_module("swe.patches.swerex_remote_retry")
+    patch_mod = importlib.reload(patch_mod)
+
+    from swerex.exceptions import CommandTimeoutError
+
+    assert patch_mod._is_retryable_transport_error(CommandTimeoutError("command timed out")) is False
+
+
 def test_remote_retry_patch_reads_environment_overrides(monkeypatch):
     monkeypatch.setenv("SWE_REX_REMOTE_RETRIES", "5")
     monkeypatch.setenv("SWE_REX_REMOTE_SOCK_CONNECT_TIMEOUT_S", "12.5")

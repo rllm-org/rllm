@@ -126,6 +126,7 @@ Register datasets for rLLM training:
 python -m swe.prepare_rllm_data --dataset swe_smith --split train
 python -m swe.prepare_rllm_data --dataset swe_bench_multilingual --split test
 python -m swe.scripts.prepare_filtered_mix
+python -m swe.scripts.prepare_swe_smith_rebenchv2_mix --c-cpp-repeat-count 3 --manifest results/swe_smith_rebenchv2_mix_manifest.json
 ```
 
 `prepare_rllm_data.py` writes to rLLM's `DatasetRegistry`.
@@ -184,6 +185,15 @@ ROLLOUT_TP=1
 It also expects a local Qwen3.5-9B snapshot, the filtered SWE-smith training
 dataset in `DatasetRegistry`, Modal credentials for SWE-ReX sandboxes, and W&B
 credentials when `LOGGER` includes `wandb`.
+
+To train on a registered mixed dataset, set `TRAIN_DATASET`. For the
+SWE-smith + Rebench V2 mix, the preparation script names the dataset
+`swe_smith_rebenchv2_{size}` by default:
+
+```bash
+TRAIN_DATASET=swe_smith_rebenchv2_5136 \
+bash cookbooks/swe/swe/training_scripts/run_swe_training_9b_megatron.sh
+```
 
 This runbook covers two launch styles:
 

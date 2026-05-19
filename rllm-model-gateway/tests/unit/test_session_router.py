@@ -148,6 +148,17 @@ class TestHealthLoop:
     """Tests for the health check loop, including dead worker recovery."""
 
     @pytest.mark.asyncio
+    async def test_health_checks_can_be_disabled(self):
+        """health_check_interval <= 0 disables background health polling."""
+        router = SessionRouter(health_check_interval=0)
+        router.add_worker(_w("w1", "https://api.openai.com"))
+
+        await router.start_health_checks()
+
+        assert router._health_task is None
+        assert router.route("sess-1").url == "https://api.openai.com"
+
+    @pytest.mark.asyncio
     async def test_worker_marked_dead_after_threshold(self):
         """Worker should be marked dead after consecutive health check failures."""
         router = SessionRouter(health_check_interval=0.01, failure_threshold=2)

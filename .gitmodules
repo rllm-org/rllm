@@ -1,3 +1,6 @@
 [submodule "cookbooks/swe/external/SWE-bench_Pro-os"]
 	path = cookbooks/swe/external/SWE-bench_Pro-os
 	url = https://github.com/scaleapi/SWE-bench_Pro-os.git
+[submodule "cookbooks/swe/external/SWE-rebench-V2"]
+	path = cookbooks/swe/external/SWE-rebench-V2
+	url = https://github.com/SWE-rebench/SWE-rebench-V2.git

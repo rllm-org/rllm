@@ -179,6 +179,9 @@ class SessionRouter:
     # -- Health checks -----------------------------------------------------
 
     async def start_health_checks(self) -> None:
+        if self._health_interval <= 0:
+            logger.info("Worker health checks disabled")
+            return
         if self._health_task is not None:
             return
         self._http = httpx.AsyncClient(timeout=httpx.Timeout(5.0))

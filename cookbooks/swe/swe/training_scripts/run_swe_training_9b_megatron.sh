@@ -208,6 +208,8 @@ SWE_VAL_COMMAND_TIMEOUT=${SWE_VAL_COMMAND_TIMEOUT:-$SWE_COMMAND_TIMEOUT}
 SWE_VAL_SANDBOX_TIMEOUT=${SWE_VAL_SANDBOX_TIMEOUT:-1380}
 SWE_VAL_STARTUP_JITTER_S=${SWE_VAL_STARTUP_JITTER_S:-45}
 MODEL_MAX_TOKENS=${MODEL_MAX_TOKENS:-4096}
+TRAIN_DATASET=${TRAIN_DATASET:-swe_smith_filtered_mix}
+TRAIN_MAX_SAMPLES=${TRAIN_MAX_SAMPLES:-null}
 DEFAULT_TRAJ_DIR="$COOKBOOK_DIR/trajectories/qwen35-9b-swe-smith-megatron"
 CHECKPOINT_ROOT=${CHECKPOINT_ROOT:-/tmp/turing-swe/checkpoints}
 MAIN_CHECKPOINT_DIR=${MAIN_CHECKPOINT_DIR:-$CHECKPOINT_ROOT/swe-verl-9b-megatron/qwen35-9b-swe-smith}
@@ -245,7 +247,8 @@ echo "SWE veRL Training — Qwen3.5-9B (Megatron TP=${ACTOR_TP} CP=${ACTOR_CP} P
 echo "============================================================"
 echo "Model:    $MODEL_NAME"
 echo "Repo:     $MODEL_REPO"
-echo "Dataset:  swe_smith_filtered_mix"
+echo "Dataset:  $TRAIN_DATASET"
+echo "Train max samples: $TRAIN_MAX_SAMPLES"
 echo "Topology: ${NNODES} node(s) × ${NGPUS_PER_NODE} GPU  |  Megatron TP=${ACTOR_TP} CP=${ACTOR_CP} PP=${ACTOR_PP}  |  vLLM TP=${ROLLOUT_TP}"
 echo "Actor:    ppo_micro_batch_size_per_gpu=${ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU} lr_warmup_steps=${ACTOR_LR_WARMUP_STEPS}"
 echo "Rollout:  distributed_executor_backend=${ROLLOUT_DISTRIBUTED_EXECUTOR_BACKEND} skip_mm_profiling=${ROLLOUT_SKIP_MM_PROFILING}"
@@ -261,9 +264,9 @@ echo "============================================================"
 
 python -u -m swe.scripts.train_swe_verl \
     --config-name=verl_swe_trainer \
-    train_dataset=swe_smith_filtered_mix \
+    train_dataset="${TRAIN_DATASET}" \
     val_dataset=swe_bench_multilingual \
-    train_max_samples=1500 \
+    train_max_samples="${TRAIN_MAX_SAMPLES}" \
     actor_rollout_ref.model.path="$MODEL_NAME" \
     actor_rollout_ref.model.enable_gradient_checkpointing=true \
     actor_rollout_ref.model.use_remove_padding=${MODEL_USE_REMOVE_PADDING} \

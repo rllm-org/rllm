@@ -52,6 +52,12 @@ _REQUEST_KWARGS = {
 }
 _TOOL_REQUEST_KWARGS = {"parallel_tool_calls", "tool_choice"}
 _EXTRA_BODY_KEYS = ("chat_template_kwargs", "guided_decoding")
+_OPENAI_MODEL_PREFIXES = (
+    "gpt-",
+    "o1",
+    "o3",
+    "o4",
+)
 
 
 class MaxPromptLengthExceeded(RuntimeError):
@@ -94,6 +100,18 @@ def _ensure_minisweagent_imports():
     _FormatError = FormatError
 
 
+def _is_openai_model_name(model_name: str) -> bool:
+    """Return whether a model name targets OpenAI's hosted API family.
+
+    Eval requests go through the local rLLM gateway, so base_url may be a
+    localhost session URL even when the upstream is api.openai.com. In that
+    case the model name is the only local signal available to avoid sending
+    vLLM-specific request fields to OpenAI.
+    """
+    normalized = model_name.lower()
+    return normalized.startswith(_OPENAI_MODEL_PREFIXES)
+
+
 # -------------------------------------------------------------------
 # Config
 # -------------------------------------------------------------------
@@ -105,6 +123,7 @@ class OpenAIClientModelConfig(BaseModel):
 
     model_name: str = "unknown"
     tokenizer_name: str | None = None
+    allow_extra_body: bool | None = None
     model_kwargs: dict[str, Any] = Field(default_factory=dict)
     format_error_template: str = "{{ error }}"
     compaction_continuation_template: str = "{{ summary }}"
@@ -154,7 +173,11 @@ class OpenAIClientModel:
         self.model_name = model_name
         self.base_url = base_url.rstrip("/")
         self._official_openai_api = official_openai_api
-        self._allow_extra_body = not self._official_openai_api
+        self._hosted_openai_model = _is_openai_model_name(model_name)
+        if self.config.allow_extra_body is None:
+            self._allow_extra_body = not (self._official_openai_api or self._hosted_openai_model)
+        else:
+            self._allow_extra_body = bool(self.config.allow_extra_body) and not self._official_openai_api
         self.tokenizer = None
 
         self.cost = 0.0
@@ -172,7 +195,7 @@ class OpenAIClientModel:
                 continue
             if not include_tools and key in _TOOL_REQUEST_KWARGS:
                 continue
-            if self._official_openai_api and self.model_name.lower().startswith("gpt-5") and key == "temperature":
+            if self._hosted_openai_model and self.model_name.lower().startswith("gpt-5") and key == "temperature":
                 continue
             kwargs[key] = value
 

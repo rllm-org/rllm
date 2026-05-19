@@ -61,6 +61,11 @@ _RETRYABLE_ENDPOINTS = {
 
 def _is_retryable_transport_error(exc: Exception) -> bool:
     """Return True for connection setup errors worth retrying."""
+    from swerex.exceptions import CommandTimeoutError
+
+    if isinstance(exc, CommandTimeoutError):
+        return False
+
     return isinstance(
         exc,
         (
