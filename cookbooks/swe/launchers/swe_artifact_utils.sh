@@ -229,12 +229,20 @@ restore_qwen35_cache() {
 }
 
 restore_rllm_home() {
-    local artifacts
+    local artifacts rllm_home_tar
     artifacts="$(artifact_dir)"
+    rllm_home_tar="${RLLM_SWE_RLLM_HOME_TAR:-}"
+    if [ -z "$rllm_home_tar" ]; then
+        if [ -s /mnt/hdfs/rllm_swe_artifacts/rllm_home_swe_data.tar.gz ]; then
+            rllm_home_tar=/mnt/hdfs/rllm_swe_artifacts/rllm_home_swe_data.tar.gz
+        else
+            rllm_home_tar="$artifacts/rllm_home_swe_data.tar.gz"
+        fi
+    fi
     if [ ! -f /tmp/rllm_home/datasets/registry.json ]; then
-        test -s "$artifacts/rllm_home_swe_data.tar.gz"
+        test -s "$rllm_home_tar"
         rm -rf /tmp/rllm_home /tmp/.rllm
-        tar -C /tmp -xzf "$artifacts/rllm_home_swe_data.tar.gz"
+        tar -C /tmp -xzf "$rllm_home_tar"
         mv /tmp/.rllm /tmp/rllm_home
     fi
     export RLLM_HOME=/tmp/rllm_home

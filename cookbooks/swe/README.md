@@ -483,6 +483,9 @@ arnold:
     - hdfs_address: hdfs://harunava/home/byte_arnold_va_ssd/mlsys/models/Qwen3.5-9B
       mount_path: /mnt/hdfs/model_path
       mode: RO
+    - hdfs_address: hdfs://harunava/user/tiger/rllm_swe/artifacts
+      mount_path: /mnt/hdfs/rllm_swe_artifacts
+      mode: RO
     # Optional but recommended for long runs. Replace with a writable team/user
     # HDFS path and set CHECKPOINT_ROOT to this mount path.
     - hdfs_address: hdfs://harunava/home/<team-or-user>/rllm_swe_checkpoints
@@ -490,6 +493,7 @@ arnold:
       mode: RW
   envs:
     RLLM_SWE_ARTIFACT_DIR: /opt/tiger/swe_runtime_image/artifacts
+    RLLM_SWE_RLLM_HOME_TAR: /mnt/hdfs/rllm_swe_artifacts/rllm_home_swe_data.tar.gz
     RLLM_SWE_MEGATRON_OVERLAY: /opt/tiger/swe_runtime_image/artifacts/megatron_core_0.18.0_829a7b78d.tar.gz
     RLLM_SWE_OUTPUT_DIR: /tmp/rllm_swe_outputs
     CHECKPOINT_ROOT: /mnt/hdfs/swe_checkpoints
