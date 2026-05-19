@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import tempfile
 from typing import Any
 
 import torch
@@ -31,20 +33,42 @@ def _upload_checkpoint_to_hf(config: DictConfig, checkpoint_folder: str, global_
         raise ValueError("trainer.hf_upload=true requires trainer.hf_repo_id")
 
     original_hf_offline = os.environ.get("HF_HUB_OFFLINE")
+    upload_folder = checkpoint_folder
+    tmp_dir = None
     try:
+        hdfs_dir = OmegaConf.select(config, "trainer.default_hdfs_dir")
+        if hdfs_dir:
+            from verl.utils import hdfs_io
+
+            remote_actor_path = os.path.join(str(hdfs_dir), f"global_step_{global_steps}", "actor")
+            tmp_dir = tempfile.mkdtemp(
+                prefix=f"rllm_hf_upload_step_{global_steps}_",
+                dir=os.environ.get("RLLM_HF_UPLOAD_TMPDIR", "/tmp"),
+            )
+            upload_folder = os.path.join(tmp_dir, "actor")
+            hdfs_io.copy(remote_actor_path, upload_folder)
+            if not os.path.isdir(upload_folder):
+                raise RuntimeError(f"Failed to copy {remote_actor_path} for Hugging Face upload")
+
         os.environ["HF_HUB_OFFLINE"] = "0"
         from huggingface_hub import HfApi
 
         experiment_name = str(OmegaConf.select(config, "trainer.experiment_name") or "experiment")
         path_in_repo = f"checkpoints/{experiment_name}/global_step_{global_steps}"
-        logger.info("Uploading checkpoint %s to hf://%s/%s", checkpoint_folder, repo_id, path_in_repo)
+        logger.info("Uploading checkpoint %s to hf://%s/%s", upload_folder, repo_id, path_in_repo)
         HfApi().upload_folder(
             repo_id=str(repo_id),
-            folder_path=checkpoint_folder,
+            folder_path=upload_folder,
             path_in_repo=path_in_repo,
             commit_message=f"Upload checkpoint global_step_{global_steps}",
         )
+    except Exception:
+        if _as_bool(OmegaConf.select(config, "trainer.hf_upload_strict")) or _as_bool(os.environ.get("HF_UPLOAD_STRICT")):
+            raise
+        logger.exception("Checkpoint upload to Hugging Face failed; continuing because strict upload is disabled")
     finally:
+        if tmp_dir is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
         if original_hf_offline is None:
             os.environ.pop("HF_HUB_OFFLINE", None)
         else:
@@ -335,6 +359,7 @@ def save_checkpoint(
         async_save = ckpt_cfg.async_save
 
     if not async_save:
+        local_mkdir_safe(config.trainer.default_local_dir)
         latest_path = os.path.join(config.trainer.default_local_dir, "latest_checkpointed_iteration.txt")
         with open(latest_path, "w") as f:
             f.write(str(global_steps))

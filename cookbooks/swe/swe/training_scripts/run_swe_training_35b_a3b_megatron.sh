@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
-# SWE veRL Training — Qwen3.5-9B (dense), Megatron-Core (TP=2 CP=2 PP=1), hard test
-# 1:1 port of run_swe_training_9b.sh (FSDP2) except for parallelism.
+# SWE veRL Training — Qwen3.6-35B-A3B (MoE), Megatron-Core (TP=2 CP=2 PP=1), hard test
+# 35B-A3B variant of run_swe_training_9b_megatron.sh.
 #
 # Env knobs:
-#   NNODES=1|2           (default 2)
+#   NNODES=1|4           (default 4)
 #   NGPUS_PER_NODE=8     (default 8)
-#   ACTOR_TP=2 ACTOR_CP=2 ACTOR_PP=1 ROLLOUT_TP=1  (Megatron parallelism)
+#   ACTOR_TP=2 ACTOR_CP=2 ACTOR_PP=1 ACTOR_EP=1 ROLLOUT_TP=2  (Megatron/vLLM parallelism)
 #   ACTOR_LR_WARMUP_STEPS=20  (set to 0 for one-step smoke tests)
 #   ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU=1  (B200 full-token safe default)
 #   RLLM_RAY_MASTER_PORT_RANGE=25000:25100  (avoid ephemeral-port collisions)
 #   RLLM_VLLM_PORT_BASE=46000 RLLM_VLLM_PORT_STRIDE=100  (per-rollout vLLM ports)
 #   ROLLOUT_DISTRIBUTED_EXECUTOR_BACKEND=uni  (avoid multi-node TCPStore collisions)
-#   MODEL_ENABLE_THINKING=true|false  (Qwen chat-template thinking mode)
 #   LOGGER='[console, wandb]' or '[console]'  (default "[console, wandb]")
 #   CHECKPOINT_HDFS_DIR=hdfs://...  (durable checkpoint root for Arnold runs)
 set -euo pipefail
@@ -128,10 +127,10 @@ export TRANSFORMERS_OFFLINE=1
 # Expose the HF cache at the default location for Ray actors that don't
 # inherit HF_HOME.
 mkdir -p ~/.cache/huggingface/hub
-if [ ! -e ~/.cache/huggingface/hub/models--Qwen--Qwen3.5-9B ] \
-    && [ -d /tmp/hf_cache/hub/models--Qwen--Qwen3.5-9B ]; then
-    ln -sf /tmp/hf_cache/hub/models--Qwen--Qwen3.5-9B \
-        ~/.cache/huggingface/hub/models--Qwen--Qwen3.5-9B
+if [ ! -e ~/.cache/huggingface/hub/models--Qwen--Qwen3.6-35B-A3B ] \
+    && [ -d /tmp/hf_cache/hub/models--Qwen--Qwen3.6-35B-A3B ]; then
+    ln -sf /tmp/hf_cache/hub/models--Qwen--Qwen3.6-35B-A3B \
+        ~/.cache/huggingface/hub/models--Qwen--Qwen3.6-35B-A3B
 fi
 
 export NCCL_CUMEM_ENABLE=0
@@ -159,8 +158,8 @@ mkdir -p "$TRITON_CACHE_DIR" "$XDG_CACHE_HOME" "$TORCH_EXTENSIONS_DIR"
 # Required for Megatron comm/compute overlap
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
-MODEL_REPO=${MODEL_REPO:-Qwen/Qwen3.5-9B}
-MODEL_CACHE_DIR=${MODEL_CACHE_DIR:-/tmp/hf_cache/hub/models--Qwen--Qwen3.5-9B}
+MODEL_REPO=${MODEL_REPO:-Qwen/Qwen3.6-35B-A3B}
+MODEL_CACHE_DIR=${MODEL_CACHE_DIR:-/tmp/hf_cache/hub/models--Qwen--Qwen3.6-35B-A3B}
 if [ -z "${MODEL_PATH:-}" ]; then
     if [ -d "$MODEL_CACHE_DIR/snapshots" ]; then
         MODEL_PATH=$(find -L "$MODEL_CACHE_DIR/snapshots" -mindepth 1 -maxdepth 1 -type d -print -quit)
@@ -185,16 +184,17 @@ else
     ) || RAY_STATUS_LINE="<unavailable>"
 fi
 
-# Parallelism for the two-node 16xB200 setup. Qwen3.5 context parallelism
+# Parallelism for the four-node 32xB200 setup. Qwen3.6 context parallelism
 # requires Megatron Gated DeltaNet THD support and remove-padding enabled.
 ACTOR_TP=${ACTOR_TP:-2}
 ACTOR_CP=${ACTOR_CP:-2}
 ACTOR_PP=${ACTOR_PP:-1}
-ROLLOUT_TP=${ROLLOUT_TP:-1}
+ACTOR_EP=${ACTOR_EP:-1}
+ROLLOUT_TP=${ROLLOUT_TP:-2}
 ROLLOUT_SKIP_MM_PROFILING=${ROLLOUT_SKIP_MM_PROFILING:-true}
 ROLLOUT_DISTRIBUTED_EXECUTOR_BACKEND=${ROLLOUT_DISTRIBUTED_EXECUTOR_BACKEND:-uni}
 MODEL_USE_REMOVE_PADDING=${MODEL_USE_REMOVE_PADDING:-true}
-NNODES=${NNODES:-2}
+NNODES=${NNODES:-4}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 ACTOR_LR_WARMUP_STEPS=${ACTOR_LR_WARMUP_STEPS:-20}
 ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU=${ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU:-1}
@@ -210,30 +210,12 @@ SWE_VAL_COMMAND_TIMEOUT=${SWE_VAL_COMMAND_TIMEOUT:-$SWE_COMMAND_TIMEOUT}
 SWE_VAL_SANDBOX_TIMEOUT=${SWE_VAL_SANDBOX_TIMEOUT:-1380}
 SWE_VAL_STARTUP_JITTER_S=${SWE_VAL_STARTUP_JITTER_S:-45}
 MODEL_MAX_TOKENS=${MODEL_MAX_TOKENS:-4096}
-MODEL_ENABLE_THINKING=${MODEL_ENABLE_THINKING:-true}
-case "${MODEL_ENABLE_THINKING,,}" in
-    1|true|yes|on) MODEL_ENABLE_THINKING=true ;;
-    0|false|no|off) MODEL_ENABLE_THINKING=false ;;
-    *) echo "MODEL_ENABLE_THINKING must be boolean-like, got: $MODEL_ENABLE_THINKING" >&2; exit 1 ;;
-esac
-if [ -z "${RLLM_DISABLE_THINKING+x}" ]; then
-    if [ "$MODEL_ENABLE_THINKING" = "true" ]; then
-        RLLM_DISABLE_THINKING=false
-    else
-        RLLM_DISABLE_THINKING=true
-    fi
-fi
-case "${RLLM_DISABLE_THINKING,,}" in
-    1|true|yes|on) RLLM_DISABLE_THINKING=true ;;
-    0|false|no|off) RLLM_DISABLE_THINKING=false ;;
-    *) echo "RLLM_DISABLE_THINKING must be boolean-like, got: $RLLM_DISABLE_THINKING" >&2; exit 1 ;;
-esac
 TRAIN_DATASET=${TRAIN_DATASET:-swe_smith_rebenchv2_5136}
 TRAIN_MAX_SAMPLES=${TRAIN_MAX_SAMPLES:-null}
-DEFAULT_TRAJ_DIR="$COOKBOOK_DIR/trajectories/qwen35-9b-swe-smith-rebenchv2-megatron"
+DEFAULT_TRAJ_DIR="$COOKBOOK_DIR/trajectories/qwen36-35b-a3b-swe-smith-rebenchv2-megatron"
 CHECKPOINT_ROOT=${CHECKPOINT_ROOT:-/tmp/turing-swe/checkpoints}
-MAIN_CHECKPOINT_DIR=${MAIN_CHECKPOINT_DIR:-$CHECKPOINT_ROOT/swe-verl-9b-megatron/qwen35-9b-swe-smith}
-LORA_CHECKPOINT_DIR=${LORA_CHECKPOINT_DIR:-$CHECKPOINT_ROOT/swe-verl-9b-megatron-lora/qwen35-9b-swe-smith-lora-r16}
+MAIN_CHECKPOINT_DIR=${MAIN_CHECKPOINT_DIR:-$CHECKPOINT_ROOT/swe-verl-35b-a3b-megatron/qwen36-35b-a3b-swe-smith}
+LORA_CHECKPOINT_DIR=${LORA_CHECKPOINT_DIR:-$CHECKPOINT_ROOT/swe-verl-35b-a3b-megatron-lora/qwen36-35b-a3b-swe-smith-lora-r16}
 CHECKPOINT_HDFS_DIR=${CHECKPOINT_HDFS_DIR:-}
 TRAJECTORY_OUTPUT_DIR=${TRAJ_DIR:-$DEFAULT_TRAJ_DIR}
 ACTOR_USE_DIST_CHECKPOINTING=${ACTOR_USE_DIST_CHECKPOINTING:-true}
@@ -246,7 +228,7 @@ fi
 ROLLOUT_CORRECTION_IS_THRESHOLD=${ROLLOUT_CORRECTION_IS_THRESHOLD:-2.0}
 SWE_N_PARALLEL_TASKS=${SWE_N_PARALLEL_TASKS:-300}
 HF_UPLOAD_CHECKPOINTS=${HF_UPLOAD_CHECKPOINTS:-false}
-HF_UPLOAD_REPO_ID=${HF_UPLOAD_REPO_ID:-JWei05/qwen35-9b-swe-smith-megatron}
+HF_UPLOAD_REPO_ID=${HF_UPLOAD_REPO_ID:-JWei05/qwen36-35b-a3b-swe-smith-megatron}
 
 LORA_ARGS=(
     actor_rollout_ref.model.lora.type=lora
@@ -258,24 +240,23 @@ LORA_ARGS=(
     actor_rollout_ref.actor.megatron.use_mbridge=true
     actor_rollout_ref.actor.megatron.vanilla_mbridge=false
     actor_rollout_ref.ref.megatron.vanilla_mbridge=false
-    trainer.project_name=swe-verl-9b-megatron-lora
-    trainer.experiment_name=qwen35-9b-swe-smith-megatron-lora-r16
+    trainer.project_name=swe-verl-35b-a3b-megatron-lora
+    trainer.experiment_name=qwen36-35b-a3b-swe-smith-megatron-lora-r16
     trainer.default_local_dir="$LORA_CHECKPOINT_DIR"
-    ++trainer.hf_repo_id=JWei05/qwen35-9b-swe-smith-megatron-lora-r16
+    ++trainer.hf_repo_id=JWei05/qwen36-35b-a3b-swe-smith-megatron-lora-r16
 )
 
 echo "============================================================"
-echo "SWE veRL Training — Qwen3.5-9B (Megatron TP=${ACTOR_TP} CP=${ACTOR_CP} PP=${ACTOR_PP}) hard TEST"
+echo "SWE veRL Training — Qwen3.6-35B-A3B (Megatron TP=${ACTOR_TP} CP=${ACTOR_CP} PP=${ACTOR_PP}) hard TEST"
 echo "============================================================"
 echo "Model:    $MODEL_NAME"
 echo "Repo:     $MODEL_REPO"
 echo "Dataset:  $TRAIN_DATASET"
 echo "Train max samples: $TRAIN_MAX_SAMPLES"
-echo "Topology: ${NNODES} node(s) × ${NGPUS_PER_NODE} GPU  |  Megatron TP=${ACTOR_TP} CP=${ACTOR_CP} PP=${ACTOR_PP}  |  vLLM TP=${ROLLOUT_TP}"
+echo "Topology: ${NNODES} node(s) × ${NGPUS_PER_NODE} GPU  |  Megatron TP=${ACTOR_TP} CP=${ACTOR_CP} PP=${ACTOR_PP} EP=${ACTOR_EP}  |  vLLM TP=${ROLLOUT_TP}"
 echo "Actor:    ppo_micro_batch_size_per_gpu=${ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU} lr_warmup_steps=${ACTOR_LR_WARMUP_STEPS}"
 echo "Rollout:  distributed_executor_backend=${ROLLOUT_DISTRIBUTED_EXECUTOR_BACKEND} skip_mm_profiling=${ROLLOUT_SKIP_MM_PROFILING}"
 echo "SWE:      train steps=${SWE_STEP_LIMIT} timeout=${SWE_AGENT_TIMEOUT}s cmd=${SWE_COMMAND_TIMEOUT}s sandbox=${SWE_SANDBOX_TIMEOUT}s jitter=${SWE_STARTUP_JITTER_S}s max_tokens=${MODEL_MAX_TOKENS}"
-echo "Thinking: model_enable_thinking=${MODEL_ENABLE_THINKING} rllm_disable_thinking=${RLLM_DISABLE_THINKING}"
 echo "SWE val:  steps=${SWE_VAL_STEP_LIMIT} timeout=${SWE_VAL_AGENT_TIMEOUT}s cmd=${SWE_VAL_COMMAND_TIMEOUT}s sandbox=${SWE_VAL_SANDBOX_TIMEOUT}s jitter=${SWE_VAL_STARTUP_JITTER_S}s"
 echo "Ckpt:     $MAIN_CHECKPOINT_DIR"
 echo "Ckpt HDFS: ${CHECKPOINT_HDFS_DIR:-<none>}"
@@ -313,7 +294,7 @@ python -u -m swe.scripts.train_swe_verl \
     actor_rollout_ref.actor.megatron.context_parallel_size=${ACTOR_CP} \
     ++actor_rollout_ref.actor.megatron.override_transformer_config.calculate_per_token_loss=true \
     ++actor_rollout_ref.actor.megatron.override_transformer_config.mtp_num_layers=0 \
-    actor_rollout_ref.actor.megatron.expert_model_parallel_size=1 \
+    actor_rollout_ref.actor.megatron.expert_model_parallel_size=${ACTOR_EP} \
     actor_rollout_ref.actor.megatron.sequence_parallel=true \
     actor_rollout_ref.actor.megatron.use_distributed_optimizer=true \
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=${ACTOR_USE_DIST_CHECKPOINTING} \
@@ -378,10 +359,9 @@ python -u -m swe.scripts.train_swe_verl \
     algorithm.rollout_correction.rollout_is=${ROLLOUT_CORRECTION_IS} \
     algorithm.rollout_correction.rollout_is_threshold=${ROLLOUT_CORRECTION_IS_THRESHOLD} \
     \
-    ++rllm.gateway.db_path=/tmp/gateway_traces_9b_megatron.db \
+    ++rllm.gateway.db_path=/tmp/gateway_traces_35b_a3b_megatron.db \
     ++rllm.gateway.strip_vllm_fields=false \
     rllm.workflow.n_parallel_tasks=${SWE_N_PARALLEL_TASKS} \
-    rllm.disable_thinking=${RLLM_DISABLE_THINKING} \
     rllm.workflow.retry_limit=1 \
     rllm.workflow.raise_on_error=false \
     rllm.algorithm.rollout_correction.bypass_mode=${ROLLOUT_CORRECTION_BYPASS} \
@@ -408,7 +388,6 @@ python -u -m swe.scripts.train_swe_verl \
     +swe.sandbox_retry_backoff_max_s=15.0 \
     +swe.model_max_tokens=${MODEL_MAX_TOKENS} \
     +swe.model_return_token_ids=true \
-    +swe.model_enable_thinking=${MODEL_ENABLE_THINKING} \
     \
     trainer.total_epochs=100 \
     trainer.save_freq=25 \
@@ -422,6 +401,6 @@ python -u -m swe.scripts.train_swe_verl \
     trainer.nnodes=${NNODES} \
     trainer.n_gpus_per_node=${NGPUS_PER_NODE} \
     "trainer.logger=${LOGGER}" \
-    trainer.project_name=swe-verl-9b-megatron \
-    trainer.experiment_name=qwen35-9b-swe-smith-rebenchv2-megatron \
+    trainer.project_name=swe-verl-35b-a3b-megatron \
+    trainer.experiment_name=qwen36-35b-a3b-swe-smith-rebenchv2-megatron \
     "$@"

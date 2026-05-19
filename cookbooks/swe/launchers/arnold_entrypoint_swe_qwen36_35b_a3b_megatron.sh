@@ -333,7 +333,7 @@ PY
 }
 
 echo "============================================================"
-echo "rLLM SWE Qwen3.5-9B Megatron Arnold entrypoint"
+echo "rLLM SWE Qwen3.6-35B-A3B Megatron Arnold entrypoint"
 echo "host=$(hostname) role=${ARNOLD_ROLE:-unknown} task=${ARNOLD_ID:-unknown}"
 echo "artifact_dir=$(artifact_dir)"
 echo "mode=${RLLM_SWE_MODE:-smoke}"
@@ -347,7 +347,10 @@ if [ "${RLLM_SWE_MODE:-smoke}" = "cluster_only" ]; then
     done
 fi
 
-restore_swe_artifacts
+setup_b200_driver_libs
+restore_verl_venv
+restore_megatron_cp2_overlay
+restore_rllm_home
 restore_megatron_cp2_overlay_for_arnold
 install_qwen35_mtp_export_hotfix
 install_megatron_checkpoint_json_hotfix
@@ -355,8 +358,8 @@ install_megatron_initial_load_hotfix
 install_bypass_debug_metrics_hotfix
 if [ "${RLLM_SWE_LINK_LOCAL_MODEL_PATH:-1}" = "1" ] \
     && [ ! -d /mnt/hdfs/model_path ] \
-    && [ -d /tmp/hf_cache/hub/models--Qwen--Qwen3.5-9B/snapshots ]; then
-    MODEL_SNAPSHOT="$(find -L /tmp/hf_cache/hub/models--Qwen--Qwen3.5-9B/snapshots -mindepth 1 -maxdepth 1 -type d -print -quit)"
+    && [ -d /tmp/hf_cache/hub/models--Qwen--Qwen3.6-35B-A3B/snapshots ]; then
+    MODEL_SNAPSHOT="$(find -L /tmp/hf_cache/hub/models--Qwen--Qwen3.6-35B-A3B/snapshots -mindepth 1 -maxdepth 1 -type d -print -quit)"
     if [ -n "$MODEL_SNAPSHOT" ] && [ -d "$MODEL_SNAPSHOT" ]; then
         sudo mkdir -p /mnt/hdfs 2>/dev/null || mkdir -p /mnt/hdfs
         sudo ln -sfn "$MODEL_SNAPSHOT" /mnt/hdfs/model_path 2>/dev/null || ln -sfn "$MODEL_SNAPSHOT" /mnt/hdfs/model_path
@@ -367,6 +370,14 @@ export PYTHONFAULTHANDLER=1
 export HYDRA_FULL_ERROR=1
 export PYTHONPATH="$COOKBOOK_DIR:$RLLM_ROOT:$RLLM_ROOT/rllm-model-gateway/src:${PYTHONPATH:-}"
 export MODEL_PATH=${MODEL_PATH:-/mnt/hdfs/model_path}
+if [ ! -d "$MODEL_PATH" ]; then
+    echo "Missing Qwen3.6-35B-A3B model path: $MODEL_PATH" >&2
+    echo "Stage the model into the Arnold HDFS mount or set MODEL_PATH to a mounted local snapshot." >&2
+    exit 2
+fi
+export HF_HOME=${HF_HOME:-/tmp/hf_cache}
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
 export RLLM_SWE_OUTPUT_DIR=${RLLM_SWE_OUTPUT_DIR:-/tmp/rllm_swe_outputs}
 export CHECKPOINT_ROOT=${CHECKPOINT_ROOT:-$RLLM_SWE_OUTPUT_DIR/checkpoints}
 export TRAJ_DIR=${TRAJ_DIR:-$RLLM_SWE_OUTPUT_DIR/trajectories/\${trainer.experiment_name}}
@@ -463,7 +474,7 @@ if not ok:
     raise SystemExit("BAD_CPU_DRIVER")
 PY
 
-TRAINING_SCRIPT="$COOKBOOK_DIR/swe/training_scripts/run_swe_training_9b_megatron.sh"
+TRAINING_SCRIPT="$COOKBOOK_DIR/swe/training_scripts/run_swe_training_35b_a3b_megatron.sh"
 if [ "${RLLM_SWE_MODE:-smoke}" = "smoke" ]; then
     smoke_extra_args=()
     if [ -n "${RLLM_SWE_SMOKE_EXTRA_ARGS:-}" ]; then

@@ -16,7 +16,7 @@ from swe.environment import ensure_bootstrapped
 ensure_bootstrapped()
 
 from swe.agent_flow import ProgressLoggingAgent
-from swe.flow_config import add_flow_cli_args, flow_config_from_args
+from swe.flow_config import SWEAgentFlowConfig, add_flow_cli_args, flow_config_from_args
 from swe.openai_model import MaxPromptLengthExceeded, MaxResponseLengthExceeded, OpenAIClientModel
 from swe.utils import (
     build_error_details,
@@ -481,6 +481,24 @@ def test_model_return_token_ids_routes_to_model_kwargs():
     overrides = flow_config_from_args(args).model.as_model_config_overrides()
 
     assert overrides == {"model_kwargs": {"return_token_ids": True}}
+
+
+def test_model_enable_thinking_routes_to_chat_template_kwargs():
+    parser = argparse.ArgumentParser()
+    add_flow_cli_args(parser)
+    args = parser.parse_args(["--no-model_enable_thinking"])
+
+    overrides = flow_config_from_args(args).model.as_model_config_overrides()
+
+    assert overrides == {"model_kwargs": {"chat_template_kwargs": {"enable_thinking": False}}}
+
+
+def test_model_enable_thinking_from_hydra_config():
+    overrides = SWEAgentFlowConfig.from_config(
+        {"model_enable_thinking": False}
+    ).model.as_model_config_overrides()
+
+    assert overrides == {"model_kwargs": {"chat_template_kwargs": {"enable_thinking": False}}}
 
 
 @pytest.mark.parametrize(

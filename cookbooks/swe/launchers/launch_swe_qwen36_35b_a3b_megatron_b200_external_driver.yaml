@@ -1,11 +1,11 @@
-# python verl-recipes/tasks/arnold_launch.py --config submodules/rllm/cookbooks/swe/launchers/launch_swe_qwen35_9b_megatron_b200_external_driver.yaml
+# python verl-recipes/tasks/arnold_launch.py --config submodules/rllm/cookbooks/swe/launchers/launch_swe_qwen36_35b_a3b_megatron_b200_external_driver.yaml
 arnold:
   region: i18n
   group_name: mlsys_inference
   cluster_name: cloudnative-useast1b
   quota_pool: third_party_oci
   image_url: aliyun-va-hub.byted.org/arnold/jason.wei:qwen35b200baseplainenvcodepy4
-  job_name: swe_qwen35_9b_megatron_b200x16_external_driver
+  job_name: swe_qwen36_35b_a3b_megatron_b200x32_external_driver
   namespace: /topic/2ebfba22254a08e7
   uce_config: {}
   roles:
@@ -17,13 +17,13 @@ arnold:
       ports: 20
       queue_name: public_CPU
     - name: worker
-      num: 2
+      num: 4
       gpu: 8
       gpuv: NVIDIA_B200
       ports: 20
       queue_name: compute-598-useast1b-cloudnative-aioci-mlsys.inference-guarantee
   hdfs_mount:
-    - hdfs_address: hdfs://harunava/home/byte_arnold_va_ssd/mlsys/models/Qwen3.5-9B
+    - hdfs_address: hdfs://harunava/user/tiger/rllm_swe/models/Qwen3.6-35B-A3B
       mount_path: /mnt/hdfs/model_path
       mode: RO
     - hdfs_address: hdfs://harunava/user/tiger/rllm_swe/artifacts
@@ -34,6 +34,10 @@ arnold:
     RLLM_SWE_CODE_TAR: /mnt/hdfs/rllm_swe_artifacts/modelchef_code_qwen9b_qwen36_35b_20260520_071553.tar.gz
     RLLM_SWE_OUTPUT_DIR: /tmp/rllm_swe_outputs
     MODEL_PATH: /mnt/hdfs/model_path
+    NNODES: "4"
+    NGPUS_PER_NODE: "8"
+    ACTOR_EP: "1"
+    ROLLOUT_TP: "2"
     RLLM_SWE_MODE: cluster_only
     ARNOLD_NETWORK_TOPOLOGY: SAME_NETMINIPOD
     RAY_BACKEND_LOG_LEVEL: info
@@ -42,5 +46,5 @@ arnold:
     NCCL_DEBUG: INFO
 
 verl:
-  entrypoint: submodules/rllm/cookbooks/swe/launchers/arnold_entrypoint_swe_qwen35_9b_megatron.sh
+  entrypoint: submodules/rllm/cookbooks/swe/launchers/arnold_entrypoint_swe_qwen36_35b_a3b_megatron.sh
   ray_runtime_env: submodules/rllm/cookbooks/swe/launchers/ray_runtime_env_swe.yaml

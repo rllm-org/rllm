@@ -108,8 +108,8 @@ async def main():
     # Eval-appropriate defaults; all flags can still be overridden on the CLI.
     parser.set_defaults(
         cost_limit=50.0,
-        step_limit=50,
-        command_timeout=60,
+        step_limit=200,
+        command_timeout=120,
         sandbox_timeout=3600,
         agent_timeout=750,
         sandbox_retry_attempts=2,
@@ -205,12 +205,15 @@ async def main():
         patch = episode.artifacts["patch"]
         exit_status = episode.artifacts["exit_status"]
         messages = episode.artifacts["messages"]
+        termination_reason = episode.termination_reason
+        termination_reason = getattr(termination_reason, "value", termination_reason)
 
         result = {
             "instance_id": instance_id,
             "is_correct": episode.is_correct,
             "patch_length": len(patch),
             "exit_status": exit_status,
+            "termination_reason": str(termination_reason),
         }
         if patch:
             result["patch"] = patch

@@ -269,6 +269,16 @@ def _maybe_pin_task_runner_to_head():
                     )
                     _startup_log("UnifiedTrainer constructed; starting trainer.fit")
                     trainer.fit()
+                except Exception as exc:
+                    import traceback
+
+                    _startup_log(f"UnifiedTrainer failed: {type(exc).__name__}: {exc}")
+                    try:
+                        _startup_log(f"ray resources at failure={ray.available_resources()}")
+                    except Exception as ray_exc:
+                        _startup_log(f"ray resources unavailable at failure: {ray_exc}")
+                    traceback.print_exc()
+                    raise
                 finally:
                     if trainer is not None:
                         _startup_log("shutting down trainer")
@@ -399,6 +409,8 @@ def main(config: DictConfig):
         swe_config.setdefault("model_temperature", float(rollout_cfg.temperature))
     if "top_p" in rollout_cfg:
         swe_config.setdefault("model_top_p", float(rollout_cfg.top_p))
+    if "disable_thinking" in config.rllm:
+        swe_config.setdefault("model_enable_thinking", not bool(config.rllm.disable_thinking))
 
     print("=" * 60)
     print("SWE verl Training (AgentFlow + AgentTrainer)")

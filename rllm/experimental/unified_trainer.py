@@ -790,16 +790,20 @@ class UnifiedTrainer:
             val_metrics[f"val/{data_source}/pass@{n_val_samples}"] = np.mean([1 if any(pass_rate) else 0 for pass_rate in pass_rates.values()])
             termination_counts = Counter(termination_reasons_data_source)
             termination_total = len(termination_reasons_data_source)
-            val_metrics[f"val/{data_source}/termination/total"] = termination_total
+            termination_metric_prefixes = (f"val/{data_source}/termination", f"val/{data_source}/termination_reason")
+            for prefix in termination_metric_prefixes:
+                val_metrics[f"{prefix}/total"] = termination_total
             for reason in TerminationReason:
                 count = termination_counts.get(reason.value, 0)
-                val_metrics[f"val/{data_source}/termination/{reason.value}/count"] = count
-                val_metrics[f"val/{data_source}/termination/{reason.value}/rate"] = count / termination_total if termination_total else 0.0
+                for prefix in termination_metric_prefixes:
+                    val_metrics[f"{prefix}/{reason.value}/count"] = count
+                    val_metrics[f"{prefix}/{reason.value}/rate"] = count / termination_total if termination_total else 0.0
             for reason, count in termination_counts.items():
                 if reason in known_termination_reasons:
                     continue
-                val_metrics[f"val/{data_source}/termination/{reason}/count"] = count
-                val_metrics[f"val/{data_source}/termination/{reason}/rate"] = count / termination_total if termination_total else 0.0
+                for prefix in termination_metric_prefixes:
+                    val_metrics[f"{prefix}/{reason}/count"] = count
+                    val_metrics[f"{prefix}/{reason}/rate"] = count / termination_total if termination_total else 0.0
 
             # Add workflow metrics for this data source
             if data_source in workflow_metrics_by_source:

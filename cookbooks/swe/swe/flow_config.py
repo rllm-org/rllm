@@ -81,6 +81,7 @@ class ModelConfigOverrides:
     temperature: float | None = None
     top_p: float | None = None
     return_token_ids: bool | None = None
+    enable_thinking: bool | None = None
 
     def as_model_config_overrides(self) -> dict[str, Any]:
         """Return model config overrides for only non-None fields."""
@@ -94,6 +95,8 @@ class ModelConfigOverrides:
             }.items()
             if value is not None
         }
+        if self.enable_thinking is not None:
+            kwargs["chat_template_kwargs"] = {"enable_thinking": self.enable_thinking}
         return {"model_kwargs": kwargs} if kwargs else {}
 
 
@@ -187,6 +190,9 @@ def add_flow_cli_args(parser: argparse.ArgumentParser) -> None:
     g.add_argument("--model_return_token_ids", action=argparse.BooleanOptionalAction,
                    default=None,
                    help="Ask compatible vLLM/rLLM gateways to return completion token IDs.")
+    g.add_argument("--model_enable_thinking", action=argparse.BooleanOptionalAction,
+                   default=None,
+                   help="Set Qwen chat_template_kwargs.enable_thinking for compatible gateways.")
 
 
 def flow_config_from_args(args: argparse.Namespace) -> SWEAgentFlowConfig:
@@ -222,5 +228,6 @@ def flow_config_from_args(args: argparse.Namespace) -> SWEAgentFlowConfig:
             temperature=args.model_temperature,
             top_p=args.model_top_p,
             return_token_ids=args.model_return_token_ids,
+            enable_thinking=args.model_enable_thinking,
         ),
     )
