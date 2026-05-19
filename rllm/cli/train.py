@@ -5,7 +5,7 @@
 Reuses the eval framework's dataset catalog, AgentFlows, and Evaluators to run
 RL training via the Tinker backend. Routes every rollout through
 ``AgentFlowEngine`` (the same engine eval uses); for sandbox-style harnesses
-and harbor-sourced datasets, ``EvalHooks`` provides per-task sandbox lifecycle
+and harbor-sourced datasets, ``SandboxTaskHooks`` provides per-task sandbox lifecycle
 and per-task verifier resolution.
 """
 

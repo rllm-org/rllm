@@ -16,7 +16,7 @@ class TaskHooks(Protocol):
     def setup(self, task: Task, agent_flow: AgentFlow, uid: str) -> TaskContext: ...
 ```
 
-Eval installs `rllm.eval._hooks.EvalHooks`, which detects each task's `[verifier]` block, builds a sandbox if needed, and resolves a per-task evaluator. Training leaves `hooks=None` and uses a single engine-bound evaluator. After the refactor that introduced the unified engine, `rllm eval` returns Episodes whose Steps are populated from gateway traces — flows that `return None` work identically at eval and training time.
+Eval installs `rllm.hooks.SandboxTaskHooks`, which detects each task's `[verifier]` block, builds a sandbox if needed, and resolves a per-task evaluator. Training leaves `hooks=None` and uses a single engine-bound evaluator. After the refactor that introduced the unified engine, `rllm eval` returns Episodes whose Steps are populated from gateway traces — flows that `return None` work identically at eval and training time.
 
 For training agents that need a sandbox per rollout (sandboxed code agents, harbor tasks), wire the same hook style at trainer construction time. The engine handles per-rollout setup/teardown in a `try/finally` so retries get fresh sandboxes automatically.
 

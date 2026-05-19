@@ -2,8 +2,7 @@
 
 :class:`SandboxTaskHooks` is the canonical implementation, used by
 ``rllm eval`` and by :class:`rllm.experimental.unified_trainer.AgentTrainer`
-for sandbox-style harnesses on harbor task dirs. ``EvalHooks`` is a
-back-compat alias.
+for sandbox-style harnesses on harbor task dirs.
 """
 
 from __future__ import annotations
@@ -96,9 +95,6 @@ class SandboxTaskHooks:
         return TaskContext(evaluator=evaluator, agent_flow=ctx_flow, teardown=teardown)
 
 
-EvalHooks = SandboxTaskHooks
-
-
 def needs_sandbox_isolation(agent_flow: Any, train_dataset: Any, val_dataset: Any) -> bool:
     """True when ``agent_flow`` is a :class:`SandboxedAgentFlow` or any task carries ``task_path`` metadata."""
     try:
@@ -131,7 +127,6 @@ def pin_gateway_host_loopback(config: DictConfig) -> DictConfig:
 
 __all__ = [
     "SandboxTaskHooks",
-    "EvalHooks",
     "needs_sandbox_isolation",
     "pin_gateway_host_loopback",
 ]

@@ -2,7 +2,7 @@
 
 rLLM-native equivalent of Harbor's ``OracleAgent``. No LLM calls — the
 harness uploads the task's ``solution/`` directory into the sandbox the
-:class:`rllm.eval._hooks.EvalHooks` already built (from
+:class:`rllm.hooks.SandboxTaskHooks` already built (from
 ``environment/Dockerfile``, ``environment/setup.sh``, and
 ``[rllm].setup_commands``), executes ``solution/solve.sh``, and lets
 the per-task evaluator (typically :class:`ShellScriptEvaluator` for
