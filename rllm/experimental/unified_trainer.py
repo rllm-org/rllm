@@ -831,49 +831,6 @@ class UnifiedTrainer:
         return reduced_workflow_metrics, termination_counts
 
 
-def _needs_sandbox_isolation(agent_flow: Any, train_dataset: Any, val_dataset: Any) -> bool:
-    """Whether this run needs per-task sandbox isolation via SandboxTaskHooks.
-
-    True when the agent is a :class:`SandboxedAgentFlow` (so parallel
-    rollouts must each get a fresh ``_sandbox`` slot) or when any task
-    in the train/val dataset carries a ``task_path`` (harbor-sourced
-    datasets that root their verifiers in the task dir).
-    """
-    try:
-        from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
-
-        if isinstance(agent_flow, SandboxedAgentFlow):
-            return True
-    except ImportError:
-        pass
-
-    for ds in (train_dataset, val_dataset):
-        if ds is None or len(ds) == 0:
-            continue
-        first = ds[0]
-        # Tasks expose metadata; dicts may carry task_path directly.
-        meta = getattr(first, "metadata", None) or (first if isinstance(first, dict) else None)
-        if isinstance(meta, dict) and meta.get("task_path"):
-            return True
-    return False
-
-
-def _pin_gateway_host_loopback(config: DictConfig) -> DictConfig:
-    """Pin ``rllm.gateway.host=127.0.0.1`` if not explicitly set.
-
-    Default ``_get_routable_ip()`` returns the host's LAN IP, which the
-    harness's ``_container_url`` doesn't rewrite to
-    ``host.docker.internal`` — sandboxed agents would dead-end and the
-    gateway would capture zero traces. Eval already defaults to loopback.
-    """
-    if config.rllm.get("gateway", {}).get("host"):
-        return config
-    return OmegaConf.merge(
-        config,
-        OmegaConf.create({"rllm": {"gateway": {"host": "127.0.0.1"}}}),
-    )
-
-
 class TrainerLauncher(ABC):
     """
     A unified agent trainer launcher that directly interfaces with the user script to launch training jobs.
@@ -941,11 +898,11 @@ class AgentTrainer:
         # dataset whose first row is a Task with task_path metadata.
         # Skip when the caller passed hooks/evaluator explicitly.
         if agent_flow is not None and hooks is None and evaluator is None:
-            if _needs_sandbox_isolation(agent_flow, train_dataset, val_dataset):
-                from rllm.hooks import SandboxTaskHooks
+            from rllm.hooks import SandboxTaskHooks, needs_sandbox_isolation, pin_gateway_host_loopback
 
+            if needs_sandbox_isolation(agent_flow, train_dataset, val_dataset):
                 hooks = SandboxTaskHooks()
-                config = _pin_gateway_host_loopback(config)
+                config = pin_gateway_host_loopback(config)
 
         has_agent_flow = agent_flow is not None and (evaluator is not None or hooks is not None)
         remote_runtime_enabled = config.rllm.get("remote_runtime", {}).get("enabled", False)
