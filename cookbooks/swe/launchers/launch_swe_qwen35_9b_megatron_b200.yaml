@@ -31,7 +31,7 @@ arnold:
       mode: RO
   envs:
     RLLM_SWE_ARTIFACT_DIR: /opt/tiger/swe_runtime_image/artifacts
-    RLLM_SWE_CODE_TAR: /mnt/hdfs/rllm_swe_artifacts/modelchef_code_qwen9b_qwen36_35b_20260520_071553.tar.gz
+    RLLM_SWE_CODE_TAR: /mnt/hdfs/rllm_swe_artifacts/modelchef_code_qwen9b_qwen36_35b_latest.tar.gz
     RLLM_SWE_RLLM_HOME_TAR: /mnt/hdfs/rllm_swe_artifacts/rllm_home_swe_data.tar.gz
     RLLM_SWE_OUTPUT_DIR: /tmp/rllm_swe_outputs
     MODEL_PATH: /mnt/hdfs/model_path

@@ -43,7 +43,7 @@ arnold:
   envs:
     REPO_ROOT: /opt/tiger/modelchef
     RLLM_SWE_ARTIFACT_DIR: /opt/tiger/swe_runtime_image/artifacts
-    RLLM_SWE_CODE_TAR: /mnt/hdfs/rllm_swe_artifacts/modelchef_code_qwen9b_qwen36_35b_20260520_071553.tar.gz
+    RLLM_SWE_CODE_TAR: /mnt/hdfs/rllm_swe_artifacts/modelchef_code_qwen9b_qwen36_35b_latest.tar.gz
     RLLM_SWE_OUTPUT_DIR: /tmp/rllm_swe_outputs
     MODEL_PATH: /mnt/hdfs/model_path
     RLLM_SWE_MODE: external_ray_worker
