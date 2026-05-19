@@ -40,16 +40,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _build_interleave_batch(batch: list[dict], group_size: int) -> list[dict]:
-    """Build an interleaved batch where each task is repeated `group_size` times."""
-    interleave_batch = []
-    batch_with_uid = []
+def _build_interleave_batch(batch: list, group_size: int) -> tuple[list, list[str]]:
+    """Interleave each task ``group_size`` times; return ``(batch, task_ids)``
+    with one shared uid per group for GRPO grouping. Items may be dicts or
+    :class:`rllm.types.Task` objects."""
+    interleave_batch: list = []
+    task_ids: list[str] = []
     for batch_item in batch:
-        batch_with_uid.append({**batch_item, "uid": str(uuid.uuid4())})
-
-    for batch_item in batch_with_uid:
-        interleave_batch.extend([batch_item for _ in range(group_size)])
-    return interleave_batch
+        uid = str(uuid.uuid4())
+        for _ in range(group_size):
+            interleave_batch.append(batch_item)
+            task_ids.append(uid)
+    return interleave_batch, task_ids
 
 
 class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
@@ -266,10 +268,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             group_size = self.full_config.rllm.rollout.n_val
         else:
             group_size = self.full_config.rllm.rollout.n
-        interleaved_batch = _build_interleave_batch(batch, group_size)
-
-        # Extract task IDs
-        task_ids = [item["uid"] for item in interleaved_batch]
+        interleaved_batch, task_ids = _build_interleave_batch(batch, group_size)
 
         # Execute tasks using the agent workflow engine (async)
         episodes = await agent_workflow_engine.execute_tasks(interleaved_batch, task_ids, is_validation=is_validation, **kwargs)

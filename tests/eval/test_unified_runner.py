@@ -1,8 +1,8 @@
-"""Tests for per-task verifier resolution + sandbox lifecycle (now via EvalHooks).
+"""Tests for per-task verifier resolution + sandbox lifecycle (via SandboxTaskHooks).
 
 Originally tested ``rllm.runner.Runner``; ``Runner`` has been deleted in
-favor of ``AgentFlowEngine`` + ``rllm.eval._hooks.EvalHooks``. The same
-host-only verifier paths are now exercised through ``EvalHooks.setup``:
+favor of ``AgentFlowEngine`` + ``rllm.hooks.SandboxTaskHooks``. The same
+host-only verifier paths are now exercised through ``SandboxTaskHooks.setup``:
 
 - ``[verifier].name`` (registered reward fn)
 - ``[verifier].module`` (Python module verifier)
@@ -22,9 +22,9 @@ from pathlib import Path
 
 import pytest
 
-from rllm.eval._hooks import EvalHooks
 from rllm.eval._resolution import build_dataset_evaluator
 from rllm.eval.types import EvalOutput
+from rllm.hooks import SandboxTaskHooks
 from rllm.types import AgentConfig, Episode, Step, Task, Trajectory, run_agent_flow
 
 # ---------------------------------------------------------------------------
@@ -68,14 +68,14 @@ def _write_data_dataset(root: Path, *, verifier_block: str) -> Path:
 
 
 def _run_through_hooks(agent_flow, task: Task, config: AgentConfig, evaluator_override=None) -> Episode:
-    """Replicate the Runner.run lifecycle through EvalHooks for unit tests.
+    """Replicate the Runner.run lifecycle through SandboxTaskHooks for unit tests.
 
     Real eval goes through ``AgentFlowEngine``, which inserts the gateway
     between the flow and its LLM client. These tests skip the gateway
     (the StubAgent doesn't make LLM calls) and just exercise the hook's
     verifier resolution + reward writeback paths.
     """
-    hooks = EvalHooks(evaluator_override=evaluator_override)
+    hooks = SandboxTaskHooks(evaluator_override=evaluator_override)
     ctx = hooks.setup(task, agent_flow, "test-uid")
     try:
         episode = asyncio.run(run_agent_flow(agent_flow, task, config))

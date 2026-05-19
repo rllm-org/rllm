@@ -39,7 +39,7 @@ class Task:
     Pure data — describes itself (instruction, metadata) and points at the
     directory where its verifier lives.
     :class:`rllm.engine.agentflow_engine.AgentFlowEngine`
-    (driven by :class:`rllm.eval._hooks.EvalHooks` at eval time) reads
+    (driven by :class:`rllm.hooks.SandboxTaskHooks` at eval time) reads
     the task config and resolves the appropriate :class:`Evaluator` at
     run time.
 

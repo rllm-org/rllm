@@ -1,4 +1,4 @@
-"""End-to-end test for ``AgentFlowEngine`` in eval mode (with EvalHooks).
+"""End-to-end test for ``AgentFlowEngine`` in eval mode (with SandboxTaskHooks).
 
 The engine drives the same loop for training and eval — the difference is
 whether ``hooks`` are installed. This test verifies the eval path works:
@@ -6,8 +6,8 @@ whether ``hooks`` are installed. This test verifies the eval path works:
 1. A flow that ``return None``s.
 2. A fake gateway that captures whatever URL the flow's HTTP call would
    hit and returns canned ``TraceRecord`` objects on ``aget_traces``.
-3. ``EvalHooks`` with an ``evaluator_override`` so we don't need a real
-   verifier on disk.
+3. ``SandboxTaskHooks`` with an ``evaluator_override`` so we don't need a
+   real verifier on disk.
 4. Assert: the evaluator received an Episode with populated Steps (from
    the gateway traces), the reward was written back to the trajectory,
    and ``is_correct`` reflects the evaluator's verdict.
@@ -24,8 +24,8 @@ from rllm_model_gateway.models import TraceRecord
 
 import rllm
 from rllm.engine.agentflow_engine import AgentFlowEngine
-from rllm.eval._hooks import EvalHooks
 from rllm.eval.types import EvalOutput
+from rllm.hooks import SandboxTaskHooks
 from rllm.types import AgentConfig, Episode, Task
 
 # ---------------------------------------------------------------------------
@@ -119,7 +119,7 @@ def test_eval_engine_populates_steps_from_gateway_traces():
 
     gateway = _FakeGateway(response_per_uid={"task-0:0": r"The answer is \boxed{42}"})
     evaluator = _StubEvaluator(ground_truth="42")
-    hooks = EvalHooks(evaluator_override=evaluator)
+    hooks = SandboxTaskHooks(evaluator_override=evaluator)
 
     engine = AgentFlowEngine(
         agent_flow=fake_flow,
@@ -162,7 +162,7 @@ def test_eval_engine_populates_steps_from_gateway_traces():
 def test_eval_engine_marks_wrong_answer_incorrect():
     gateway = _FakeGateway(response_per_uid={"task-0:0": r"\boxed{99}"})
     evaluator = _StubEvaluator(ground_truth="42")
-    hooks = EvalHooks(evaluator_override=evaluator)
+    hooks = SandboxTaskHooks(evaluator_override=evaluator)
 
     engine = AgentFlowEngine(
         agent_flow=fake_flow,

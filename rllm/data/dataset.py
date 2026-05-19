@@ -172,6 +172,40 @@ class Dataset:
         return cls(data=data)
 
 
+def _wrap_rows_as_tasks(rows: list[dict[str, Any]]) -> list:
+    """Wrap dict rows as :class:`rllm.types.Task` objects.
+
+    Rows with ``task_path`` are rooted there and their ``task.toml``
+    metadata is merged in; other rows get ``dataset_dir=Path(".")``.
+    """
+    from pathlib import Path
+
+    from rllm.tasks.loader import _merge_task_toml_metadata
+    from rllm.types import Task
+
+    tasks: list[Task] = []
+    for idx, row in enumerate(rows):
+        instruction = row.get("instruction") or row.get("question") or ""
+        task_id = str(row.get("id") or row.get("task_id") or idx)
+        task_path = row.get("task_path")
+        if task_path:
+            dataset_dir = Path(task_path)
+            metadata = _merge_task_toml_metadata(dataset_dir, dict(row))
+        else:
+            dataset_dir = Path(".")
+            metadata = dict(row)
+        tasks.append(
+            Task(
+                id=task_id,
+                instruction=str(instruction),
+                metadata=metadata,
+                dataset_dir=dataset_dir,
+                sub_dir=None,
+            )
+        )
+    return tasks
+
+
 class DatasetRegistry:
     """A registry for datasets that manages storage and retrieval.
 
@@ -486,15 +520,16 @@ class DatasetRegistry:
         return Dataset(data=data_list, name=name, split=split)
 
     @classmethod
-    def load_dataset(cls, name: str, split: str = "default") -> Dataset | None:
+    def load_dataset(cls, name: str, split: str = "default", *, as_tasks: bool = False) -> Dataset | None:
         """Load a dataset from the registry.
 
         Args:
             name: Name of the dataset to load
             split: Split name to load (e.g., 'train', 'test', 'default')
+            as_tasks: When True, wrap each row via :func:`_wrap_rows_as_tasks`.
 
         Returns:
-            Dataset: The loaded dataset or None if not found
+            Dataset: The loaded dataset or None if not found.
         """
         registry = cls._load_registry()
         datasets = registry.get("datasets", {})
@@ -523,6 +558,9 @@ class DatasetRegistry:
             data = pl.read_parquet(dataset_path).to_dicts()
 
         logger.info(f"Loaded dataset '{name}' split '{split}' with {len(data)} examples.")
+
+        if as_tasks:
+            data = _wrap_rows_as_tasks(data)
 
         return Dataset(data=data, name=name, split=split)
 
