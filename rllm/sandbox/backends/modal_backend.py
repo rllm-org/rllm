@@ -27,9 +27,7 @@ logger = logging.getLogger(__name__)
 # Default sandbox timeout: 30 minutes (Modal default is 5 min).
 _DEFAULT_TIMEOUT = 30 * 60
 
-# Live ModalSandbox instances. atexit hook below terminates anything
-# still in this set so a crashed trainer doesn't leak Modal containers
-# that bill for the full ``_DEFAULT_TIMEOUT`` before Modal kills them.
+# atexit-tracked sandboxes; terminated on process exit to avoid leaks.
 _LIVE_SANDBOXES: weakref.WeakSet = weakref.WeakSet()
 _LIVE_LOCK = threading.Lock()
 
@@ -107,8 +105,6 @@ class ModalSandbox:
         self._sandbox = modal.Sandbox.create(**create_kwargs)
         self._sandbox_id = self._sandbox.object_id
 
-        # Track for atexit cleanup. WeakSet so normal close() paths
-        # (which set _sandbox=None) don't keep us pinned.
         with _LIVE_LOCK:
             _LIVE_SANDBOXES.add(self)
 

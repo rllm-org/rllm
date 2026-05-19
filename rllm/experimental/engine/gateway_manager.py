@@ -198,13 +198,6 @@ class GatewayManager:
         self._train_sampling_params = getattr(rollout_engine, "train_sampling_params", {})
         self._val_sampling_params = getattr(rollout_engine, "val_sampling_params", {})
 
-        # Bring up a tunnel after the gateway is healthy. Remote
-        # sandboxes (Modal/Daytona/E2B/...) can't reach loopback, so
-        # AgentTrainer auto-sets ``rllm.gateway.tunnel="cloudflared"``
-        # when ``sandbox_backend`` isn't local. The harness's session URL
-        # threads through ``self.public_url`` (see ``get_session_url``),
-        # so flipping ``self.public_url`` here makes every subsequent
-        # rollout use the tunneled URL automatically.
         if self.tunnel_backend and not self.public_url:
             self._start_tunnel()
 
@@ -443,16 +436,9 @@ class EvalGatewayManager(GatewayManager):
         self._upstream_urls: list[str] = [upstream_url]
 
     def start(self, rollout_engine: RolloutEngine | None = None) -> None:  # type: ignore[override]
-        """Start gateway and register the static upstream URL(s).
+        """Start gateway, register the static upstream URL(s), and bring up the tunnel if configured.
 
-        ``rollout_engine`` is accepted for shape-compatibility with the
-        base class signature but ignored — this gateway has no engine.
-
-        After the worker is registered, brings up the tunnel (when
-        ``tunnel=`` was passed at construction). Eval runs against
-        remote sandbox backends (Modal/Daytona/E2B/...) need this for
-        the same reason training does — sandboxes in another network
-        can't reach the eval driver's loopback gateway.
+        ``rollout_engine`` is accepted for shape-compatibility with the base class but ignored.
         """
         if rollout_engine is not None:
             logger.warning("EvalGatewayManager.start ignores `rollout_engine` argument")

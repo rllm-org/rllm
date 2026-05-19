@@ -77,11 +77,7 @@ async def run_dataset(
     # and tear down one ourselves (single-shot).
     owned_gateway = gateway is None
     if owned_gateway:
-        # When sandboxes run off-host (Modal, Daytona, E2B, ...) they
-        # can't reach the eval driver's loopback gateway. Auto-spawn a
-        # cloudflared tunnel so the in-sandbox harness POSTs back to
-        # ``gateway.public_url`` instead of ``host.docker.internal``.
-        # Same predicate as ``AgentTrainer`` uses on the training side.
+        # Auto-tunnel for off-host sandboxes (same predicate AgentTrainer uses).
         gateway_tunnel = None if is_local_sandbox_backend(sandbox_backend) else "cloudflared"
         gateway = EvalGatewayManager(upstream_url=base_url, model=model, tunnel=gateway_tunnel)
         gateway.start()

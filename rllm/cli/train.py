@@ -451,14 +451,7 @@ def _describe_sandbox_routing(
     sandbox_backend: str | None,
     sandbox_concurrency: int | None,
 ) -> str | None:
-    """One-line description of sandbox + gateway routing for the header.
-
-    Returns ``None`` when no sandbox is needed (non-sandboxed AgentFlow
-    on a non-harbor dataset — e.g. ``math`` agent on ``gsm8k``). Lets
-    the operator confirm, before the first rollout's 10-15 min Docker
-    bootstrap, whether they're actually on the backend they think they
-    are. Mirrors the auto-wire decision in :class:`AgentTrainer.__init__`.
-    """
+    """One-line description of sandbox + gateway routing for the header. Returns ``None`` when no sandbox is needed."""
     from rllm.experimental.engine.tunnel import is_local_sandbox_backend
     from rllm.hooks import needs_sandbox_isolation
 
@@ -543,7 +536,7 @@ def _load_or_pull_dataset(name: str, split: str, catalog: dict, catalog_entry_ov
 @click.option("--config", "config_file", default=None, type=click.Path(exists=True), help="YAML config file merged on top of base templates. CLI flags override it.")
 # UI logging options
 @click.option("--ui/--no-ui", "enable_ui", default=None, help="Enable/disable live UI logging. Default: auto-enabled when logged in (see 'rllm login').")
-# Sandbox options (sandboxed/harbor agents only — no-op for non-sandbox flows)
+# Sandbox options
 @click.option(
     "--sandbox-backend",
     "sandbox_backend",
