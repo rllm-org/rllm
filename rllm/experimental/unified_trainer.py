@@ -829,23 +829,6 @@ class UnifiedTrainer:
         return reduced_workflow_metrics, termination_counts
 
 
-from rllm.experimental.engine.tunnel import is_local_sandbox_backend  # noqa: E402
-
-
-def _enable_tunnel_for_remote_sandbox(config: DictConfig, sandbox_backend: str | None) -> DictConfig:
-    """Auto-wire ``rllm.gateway.tunnel="cloudflared"`` when sandboxes run off-host
-    and no tunnel is already set."""
-    if is_local_sandbox_backend(sandbox_backend):
-        return config
-    gw = config.rllm.get("gateway", {}) or {}
-    if gw.get("tunnel"):
-        return config
-    return OmegaConf.merge(
-        config,
-        OmegaConf.create({"rllm": {"gateway": {"tunnel": "cloudflared"}}}),
-    )
-
-
 class TrainerLauncher(ABC):
     """
     A unified agent trainer launcher that directly interfaces with the user script to launch training jobs.
@@ -917,12 +900,17 @@ class AgentTrainer:
     ):
         # Auto-wire sandbox hooks + gateway loopback unless caller set hooks/evaluator.
         if agent_flow is not None and hooks is None and evaluator is None:
-            from rllm.hooks import SandboxTaskHooks, needs_sandbox_isolation, pin_gateway_host_loopback
+            from rllm.hooks import (
+                SandboxTaskHooks,
+                enable_tunnel_for_remote_sandbox,
+                needs_sandbox_isolation,
+                pin_gateway_host_loopback,
+            )
 
             if needs_sandbox_isolation(agent_flow, train_dataset, val_dataset):
                 hooks = SandboxTaskHooks(sandbox_backend=sandbox_backend)
                 config = pin_gateway_host_loopback(config)
-                config = _enable_tunnel_for_remote_sandbox(config, sandbox_backend)
+                config = enable_tunnel_for_remote_sandbox(config, sandbox_backend)
 
         # Forward concurrency + backend overrides onto a SandboxedAgentFlow.
         if agent_flow is not None and (sandbox_concurrency is not None or sandbox_backend is not None):

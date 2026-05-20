@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from omegaconf import DictConfig, OmegaConf
 
+from rllm.experimental.engine.tunnel import is_local_sandbox_backend
 from rllm.types import Evaluator
 
 if TYPE_CHECKING:
@@ -125,8 +126,22 @@ def pin_gateway_host_loopback(config: DictConfig) -> DictConfig:
     )
 
 
+def enable_tunnel_for_remote_sandbox(config: DictConfig, sandbox_backend: str | None) -> DictConfig:
+    """Auto-wire ``rllm.gateway.tunnel="cloudflared"`` when sandboxes run off-host and no tunnel is already set."""
+    if is_local_sandbox_backend(sandbox_backend):
+        return config
+    gw = config.rllm.get("gateway", {}) or {}
+    if gw.get("tunnel"):
+        return config
+    return OmegaConf.merge(
+        config,
+        OmegaConf.create({"rllm": {"gateway": {"tunnel": "cloudflared"}}}),
+    )
+
+
 __all__ = [
     "SandboxTaskHooks",
     "needs_sandbox_isolation",
     "pin_gateway_host_loopback",
+    "enable_tunnel_for_remote_sandbox",
 ]
