@@ -834,11 +834,11 @@ from rllm.experimental.engine.tunnel import is_local_sandbox_backend  # noqa: E4
 
 def _enable_tunnel_for_remote_sandbox(config: DictConfig, sandbox_backend: str | None) -> DictConfig:
     """Auto-wire ``rllm.gateway.tunnel="cloudflared"`` when sandboxes run off-host
-    and no tunnel/public_url is already set."""
+    and no tunnel is already set."""
     if is_local_sandbox_backend(sandbox_backend):
         return config
     gw = config.rllm.get("gateway", {}) or {}
-    if gw.get("public_url") or gw.get("tunnel"):
+    if gw.get("tunnel"):
         return config
     return OmegaConf.merge(
         config,

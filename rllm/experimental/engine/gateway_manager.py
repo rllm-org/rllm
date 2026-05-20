@@ -128,8 +128,9 @@ class GatewayManager:
         self.host: str = configured_host if configured_host else _get_routable_ip()
         self.port: int = gw_cfg.get("port", 9090)
         self.db_path: str | None = gw_cfg.get("db_path", None)
-        self.public_url: str | None = gw_cfg.get("public_url", None)
-        self.tunnel_backend: str | None = gw_cfg.get("tunnel", None)
+        from rllm.experimental.engine.tunnel import parse_tunnel
+
+        self.public_url, self.tunnel_backend = parse_tunnel(gw_cfg.get("tunnel", None))
         self.sampling_params_priority: str = gw_cfg.get("sampling_params_priority", "client")
         # The gateway always pins ``body.model`` to whatever the trainer is serving
         self.model: str | None = config.get("model", {}).get("name", None)
@@ -202,10 +203,9 @@ class GatewayManager:
             self._start_tunnel()
 
     def _start_tunnel(self) -> None:
-        """Start a public-URL tunnel pointing at the gateway."""
-        backend = (self.tunnel_backend or "").lower()
-        if backend != "cloudflared":
-            raise ValueError(f"Unsupported gateway tunnel backend: {self.tunnel_backend!r}. Supported: 'cloudflared'.")
+        """Spawn the named tunnel backend and pin its public URL onto ``self.public_url``."""
+        if self.tunnel_backend != "cloudflared":
+            raise ValueError(f"Unsupported gateway tunnel backend: {self.tunnel_backend!r}. Supported: 'cloudflared', or pass an http(s):// URL.")
 
         from rllm.experimental.engine.tunnel import CloudflaredTunnel
 
@@ -414,7 +414,6 @@ class EvalGatewayManager(GatewayManager):
         port: int | None = None,
         db_path: str | None = None,
         tunnel: str | None = None,
-        public_url: str | None = None,
     ) -> None:
         from omegaconf import OmegaConf
 
@@ -426,7 +425,6 @@ class EvalGatewayManager(GatewayManager):
                         "port": port if port is not None else _find_free_port(),
                         "db_path": db_path,
                         "tunnel": tunnel,
-                        "public_url": public_url,
                     }
                 },
                 "model": {"name": model},

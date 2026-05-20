@@ -33,6 +33,19 @@ def is_local_sandbox_backend(name: str | None) -> bool:
     return name.lower() in LOCAL_SANDBOX_BACKENDS
 
 
+def parse_tunnel(value: str | None) -> tuple[str | None, str | None]:
+    """Split ``rllm.gateway.tunnel`` into ``(public_url, backend)``.
+
+    URLs (``http(s)://...``) pass through as ``public_url``; anything
+    else is treated as a backend name to spawn (e.g. ``"cloudflared"``).
+    """
+    if not value:
+        return None, None
+    if value.startswith(("http://", "https://")):
+        return value, None
+    return None, value.lower()
+
+
 _TRYCF_URL_RE = re.compile(r"https?://[a-zA-Z0-9.-]+\.trycloudflare\.com")
 _DEFAULT_READY_TIMEOUT = 30.0
 # Retry transient Cloudflare QuickTunnel allocator 5xx blips.
