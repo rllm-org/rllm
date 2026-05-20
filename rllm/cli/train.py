@@ -413,7 +413,8 @@ def _run_train(
     table.add_row("Train data", f"[val]{train_ds_name}[/]  [dim]({train_split}, {len(train_dataset)} examples)[/]")
     val_info = f"[val]{val_ds_name}[/]  [dim]({val_split}, {len(val_dataset)} examples)[/]" if val_dataset else "[dim]None[/]"
     table.add_row("Val data", val_info)
-    sandbox_row = _describe_sandbox_routing(agent_flow, train_dataset, val_dataset, sandbox_backend, sandbox_concurrency)
+    tunnel_cfg = (config.rllm.get("gateway", {}) or {}).get("tunnel")
+    sandbox_row = _describe_sandbox_routing(agent_flow, train_dataset, val_dataset, sandbox_backend, sandbox_concurrency, tunnel_cfg)
     if sandbox_row is not None:
         table.add_row("Sandbox", sandbox_row)
     table.add_row("Group size", f"[dim]{group_size}[/]")
@@ -450,16 +451,24 @@ def _describe_sandbox_routing(
     val_dataset,
     sandbox_backend: str | None,
     sandbox_concurrency: int | None,
+    tunnel: str | None = None,
 ) -> str | None:
     """One-line description of sandbox + gateway routing for the header. Returns ``None`` when no sandbox is needed."""
-    from rllm.experimental.engine.tunnel import is_local_sandbox_backend
+    from rllm.experimental.engine.tunnel import is_local_sandbox_backend, parse_tunnel
     from rllm.hooks import needs_sandbox_isolation
 
     if not needs_sandbox_isolation(agent_flow, train_dataset, val_dataset):
         return None
 
     backend = (sandbox_backend or "docker").lower()
-    gateway_note = "loopback (host.docker.internal)" if is_local_sandbox_backend(backend) else "cloudflared tunnel (auto-spawn)"
+    if is_local_sandbox_backend(backend):
+        gateway_note = "loopback (host.docker.internal)"
+    else:
+        public_url, tunnel_backend = parse_tunnel(tunnel)
+        if public_url:
+            gateway_note = f"public_url={public_url}"
+        else:
+            gateway_note = f"{tunnel_backend or 'cloudflared'} tunnel (auto-spawn)"
     concurrency_note = f", concurrency={sandbox_concurrency}" if sandbox_concurrency is not None else ""
     return f"[val]{backend}[/]  [dim]· gateway: {gateway_note}{concurrency_note}[/]"
 
