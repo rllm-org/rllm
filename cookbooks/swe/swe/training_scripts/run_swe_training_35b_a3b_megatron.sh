@@ -13,6 +13,7 @@
 #   ROLLOUT_DISTRIBUTED_EXECUTOR_BACKEND=uni  (avoid multi-node TCPStore collisions)
 #   LOGGER='[console, wandb]' or '[console]'  (default "[console, wandb]")
 #   CHECKPOINT_HDFS_DIR=hdfs://...  (durable checkpoint root for Arnold runs)
+#   ROUTER_REPLAY=disabled|R2|R3  (MoE router replay; R3 records routing during rollout)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -226,6 +227,11 @@ else
     ROLLOUT_CORRECTION_IS=${ROLLOUT_CORRECTION_IS:-"token"}
 fi
 ROLLOUT_CORRECTION_IS_THRESHOLD=${ROLLOUT_CORRECTION_IS_THRESHOLD:-2.0}
+ROUTER_REPLAY=${ROUTER_REPLAY:-disabled}
+case "$ROUTER_REPLAY" in
+    disabled|R2|R3) ;;
+    *) echo "ROUTER_REPLAY must be one of: disabled, R2, R3; got: $ROUTER_REPLAY" >&2; exit 1 ;;
+esac
 SWE_N_PARALLEL_TASKS=${SWE_N_PARALLEL_TASKS:-300}
 HF_UPLOAD_CHECKPOINTS=${HF_UPLOAD_CHECKPOINTS:-false}
 HF_UPLOAD_REPO_ID=${HF_UPLOAD_REPO_ID:-JWei05/qwen36-35b-a3b-swe-smith-megatron}
@@ -256,6 +262,7 @@ echo "Train max samples: $TRAIN_MAX_SAMPLES"
 echo "Topology: ${NNODES} node(s) × ${NGPUS_PER_NODE} GPU  |  Megatron TP=${ACTOR_TP} CP=${ACTOR_CP} PP=${ACTOR_PP} EP=${ACTOR_EP}  |  vLLM TP=${ROLLOUT_TP}"
 echo "Actor:    ppo_micro_batch_size_per_gpu=${ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU} lr_warmup_steps=${ACTOR_LR_WARMUP_STEPS}"
 echo "Rollout:  distributed_executor_backend=${ROLLOUT_DISTRIBUTED_EXECUTOR_BACKEND} skip_mm_profiling=${ROLLOUT_SKIP_MM_PROFILING}"
+echo "Router replay: $ROUTER_REPLAY"
 echo "SWE:      train steps=${SWE_STEP_LIMIT} timeout=${SWE_AGENT_TIMEOUT}s cmd=${SWE_COMMAND_TIMEOUT}s sandbox=${SWE_SANDBOX_TIMEOUT}s jitter=${SWE_STARTUP_JITTER_S}s max_tokens=${MODEL_MAX_TOKENS}"
 echo "SWE val:  steps=${SWE_VAL_STEP_LIMIT} timeout=${SWE_VAL_AGENT_TIMEOUT}s cmd=${SWE_VAL_COMMAND_TIMEOUT}s sandbox=${SWE_VAL_SANDBOX_TIMEOUT}s jitter=${SWE_VAL_STARTUP_JITTER_S}s"
 echo "Ckpt:     $MAIN_CHECKPOINT_DIR"
@@ -358,6 +365,7 @@ python -u -m swe.scripts.train_swe_verl \
     algorithm.rollout_correction.bypass_mode=${ROLLOUT_CORRECTION_BYPASS} \
     algorithm.rollout_correction.rollout_is=${ROLLOUT_CORRECTION_IS} \
     algorithm.rollout_correction.rollout_is_threshold=${ROLLOUT_CORRECTION_IS_THRESHOLD} \
+    algorithm.router_replay=${ROUTER_REPLAY} \
     \
     ++rllm.gateway.db_path=/tmp/gateway_traces_35b_a3b_megatron.db \
     ++rllm.gateway.strip_vllm_fields=false \
@@ -367,6 +375,7 @@ python -u -m swe.scripts.train_swe_verl \
     rllm.algorithm.rollout_correction.bypass_mode=${ROLLOUT_CORRECTION_BYPASS} \
     rllm.algorithm.rollout_correction.tis_mode=${ROLLOUT_CORRECTION_IS} \
     rllm.algorithm.rollout_correction.tis_cap=${ROLLOUT_CORRECTION_IS_THRESHOLD} \
+    rllm.algorithm.router_replay=${ROUTER_REPLAY} \
     \
     swe.save_trajectories=${SAVE_TRAJ:-false} \
     swe.trajectory_output_dir="${TRAJECTORY_OUTPUT_DIR}" \
