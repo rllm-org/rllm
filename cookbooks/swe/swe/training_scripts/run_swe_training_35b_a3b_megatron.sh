@@ -13,7 +13,7 @@
 #   ROLLOUT_DISTRIBUTED_EXECUTOR_BACKEND=uni  (avoid multi-node TCPStore collisions)
 #   LOGGER='[console, wandb]' or '[console]'  (default "[console, wandb]")
 #   CHECKPOINT_HDFS_DIR=hdfs://...  (durable checkpoint root for Arnold runs)
-#   ROUTER_REPLAY=disabled|R2|R3  (MoE router replay; R3 records routing during rollout)
+#   ROUTER_REPLAY=disabled|R2|R3  (default R3 for MoE router replay; R3 records routing during rollout)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -227,7 +227,7 @@ else
     ROLLOUT_CORRECTION_IS=${ROLLOUT_CORRECTION_IS:-"token"}
 fi
 ROLLOUT_CORRECTION_IS_THRESHOLD=${ROLLOUT_CORRECTION_IS_THRESHOLD:-2.0}
-ROUTER_REPLAY=${ROUTER_REPLAY:-disabled}
+ROUTER_REPLAY=${ROUTER_REPLAY:-R3}
 case "$ROUTER_REPLAY" in
     disabled|R2|R3) ;;
     *) echo "ROUTER_REPLAY must be one of: disabled, R2, R3; got: $ROUTER_REPLAY" >&2; exit 1 ;;
