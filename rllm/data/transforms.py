@@ -234,12 +234,32 @@ def hendrycks_math_transform(row: dict) -> dict:
 def countdown_transform(row: dict) -> dict:
     """Transform Countdown row to standard format.
 
-    Countdown has 'nums' (list of ints) and 'target' (int).
-    Already matches expected format but we add data_source.
+    The raw ``predibase/countdown`` rows carry only ``nums`` (list of ints)
+    and ``target`` (int). The dataset is registered with
+    ``instruction_field = "question"`` (and an ``instruction.md.tpl`` of
+    ``{{question}}``), so the transform must build a natural-language
+    ``question``; without it ``task.instruction`` renders empty and any
+    consumer reading ``task["question"]`` raises ``KeyError``. ``ground_truth``
+    is surfaced for parity with the other transforms; ``nums``/``target`` are
+    kept because ``countdown_reward_fn`` reads them directly.
+
+    The ``question`` wording matches ``examples/countdown/prepare_countdown_data.py``
+    so the ``train``/``test`` splits stay consistent with ``stage2``/``stage3``.
     """
+    target = row.get("target", 0)
+    nums = row.get("nums", [])
+    nums_str = ", ".join(map(str, nums))
+    question = (
+        f"Using the numbers {nums_str}, find a way to reach the target number {target}. "
+        "You can use basic arithmetic operations (+, -, *, /) and each number can only be "
+        "used once. Show your step-by-step calculation and output the final answer within "
+        "<answer>...</answer>, for example <answer> (1 + 2) / 3 </answer>."
+    )
     return {
-        "target": row.get("target", 0),
-        "nums": row.get("nums", []),
+        "question": question,
+        "ground_truth": str(target),
+        "target": target,
+        "nums": nums,
         "data_source": "countdown",
     }
 

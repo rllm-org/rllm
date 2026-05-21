@@ -30,7 +30,10 @@ class Solver:
             steps=[
                 Step(
                     chat_completions=messages + [{"role": "assistant", "content": output.content, "reasoning": output.reasoning}],
-                    thought=output.reasoning,
+                    # ModelOutput.reasoning is str | None — it is None for
+                    # non-thinking completions. Step.thought is a plain str,
+                    # so coalesce (matches the Step factory in rllm/types.py).
+                    thought=output.reasoning or "",
                     action=self._parse_solver_response(output.content),
                     model_output=output,
                 )
@@ -60,7 +63,7 @@ class Judge:
             steps=[
                 Step(
                     chat_completions=messages + [{"role": "assistant", "content": output.content, "reasoning": output.reasoning}],
-                    thought=output.reasoning,
+                    thought=output.reasoning or "",  # reasoning is None for non-thinking completions
                     action=self._parse_judge_response(output.content, solutions),
                     model_output=output,
                 )
