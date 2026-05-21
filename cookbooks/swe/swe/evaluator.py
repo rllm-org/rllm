@@ -12,9 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from rllm.eval.types import EvalOutput, Signal
 from rllm.types import Episode
-
 from swe.environment import create_env, default_scripts_dir, ensure_bootstrapped
-from swe.tasks.common import make_log
+from swe.tasks.common import grade_in_fresh_env
 from swe.utils import close_env
 
 ensure_bootstrapped()
@@ -63,11 +62,7 @@ class SWEEvaluator:
             if self._grading_pool is None:
                 self._grading_pool = ThreadPoolExecutor(max_workers=self._max_grading_workers)
 
-            try:
-                result = self._grading_pool.submit(self._grade, task, env, patch).result()
-            except Exception as e:
-                make_log(self.verbose)(f"Grading error: {type(e).__name__}: {e}")
-                return EvalOutput(reward=0.0, is_correct=False)
+            result = self._grading_pool.submit(self._grade, task, env, patch).result()
 
             signals = [
                 Signal(name=key, value=float(result[key]))
@@ -94,17 +89,17 @@ class SWEEvaluator:
                 task, patch, self.dockerhub_username, self.scripts_dir, self.verbose,
             )
         elif eval_type == "swesmith":
-            from swe.tasks.swesmith import grade_swesmith
+            from swe.tasks.swesmith import grade_swesmith_in_env
 
-            return grade_swesmith(task, patch, self._create_env, self.verbose)
+            return grade_in_fresh_env(self._create_env, task, grade_swesmith_in_env, patch, self.verbose)
         elif eval_type == "swe_rebench_v2":
-            from swe.tasks.swe_rebench_v2 import grade_swe_rebench_v2
+            from swe.tasks.swe_rebench_v2 import grade_swe_rebench_v2_in_env
 
-            return grade_swe_rebench_v2(task, env, patch, self.verbose)
+            return grade_in_fresh_env(self._create_env, task, grade_swe_rebench_v2_in_env, patch, self.verbose)
         elif eval_type == "swebench":
-            from swe.tasks.swebench_multilingual import grade_swebench_multilingual
+            from swe.tasks.swebench_multilingual import grade_swebench_multilingual_in_env
 
-            return grade_swebench_multilingual(task, env, patch, self.verbose)
+            return grade_in_fresh_env(self._create_env, task, grade_swebench_multilingual_in_env, patch, self.verbose)
         else:
             raise ValueError(f"Unsupported eval_type: {eval_type}")
 

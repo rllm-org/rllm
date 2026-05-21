@@ -11,17 +11,19 @@ Works identically for eval and training — the only difference is what
 * **Training**: the rllm model gateway (captures traces transparently)
 """
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import random
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from rllm.types import AgentConfig, Episode, Task, Trajectory
-
 from swe.environment import (
     create_env,
     ensure_bootstrapped,
@@ -40,6 +42,8 @@ from swe.openai_model import (
     MaxResponseLengthExceeded,
     OpenAIClientModel,
 )
+from swe.tasks.swe_rebench_v2 import setup_swe_rebench_v2_agent_env
+from swe.tasks.swebench_multilingual import setup_swebench_multilingual_agent_env
 from swe.tasks.swesmith import setup_swesmith_agent_env
 from swe.utils import (
     build_error_details,
@@ -47,6 +51,12 @@ from swe.utils import (
     close_env,
     tool_response_user_message,
 )
+
+AGENT_SANDBOX_SETUP = {
+    "swesmith": ("SWE-smith", setup_swesmith_agent_env),
+    "swe_rebench_v2": ("SWE-rebench V2", setup_swe_rebench_v2_agent_env),
+    "swebench": ("SWE-bench Multilingual", setup_swebench_multilingual_agent_env),
+}
 
 
 def _agent_exit_message(exit_status: str, submission: str = "") -> dict:
@@ -379,7 +389,7 @@ class SWEAgentFlow:
 
         Returns an Episode with:
         - One trajectory ("solver") with a Step per assistant message
-        - artifacts: patch, exit_status, env (if kept alive for grading)
+        - artifacts: patch, exit_status, env=None
         """
 
         data = self._task_data(task)
@@ -396,7 +406,6 @@ class SWEAgentFlow:
 
         env = None
         agent = None
-        keep_env_alive = data["eval_type"] in {"swebench", "swe_rebench_v2"}
 
         try:
             # --- Create sandbox (retry on transient Modal failures) ---
@@ -417,11 +426,13 @@ class SWEAgentFlow:
                     raise
             log(f"[{sid}] Sandbox ready in {time.monotonic() - env_start:.1f}s")
 
-            if data["eval_type"] == "swesmith":
+            setup_entry = AGENT_SANDBOX_SETUP.get(data["eval_type"])
+            if setup_entry is not None:
+                setup_label, setup_fn = setup_entry
                 setup_start = time.monotonic()
-                log(f"[{sid}] Preparing SWE-smith sandbox...")
-                setup_swesmith_agent_env(env, data, sid, log)
-                log(f"[{sid}] SWE-smith sandbox ready in {time.monotonic() - setup_start:.1f}s")
+                log(f"[{sid}] Preparing {setup_label} sandbox...")
+                setup_fn(env, data, sid, log)
+                log(f"[{sid}] {setup_label} sandbox ready in {time.monotonic() - setup_start:.1f}s")
 
             # --- Create model ---
             agent_config, model_config, _ = load_runtime_configs()
@@ -477,12 +488,6 @@ class SWEAgentFlow:
         # prompt_ids, completion_ids, and logprobs.
         trajectory = Trajectory(name="solver", steps=[])
 
-        # Keep env alive for graders that reuse the sandbox
-        return_env = None
-        if keep_env_alive and env is not None:
-            return_env = env
-            env = None  # prevent cleanup below
-
         # Classify termination reason from exit_status
         error_details = build_error_details(exit_status)
         termination_reason = classify_termination(exit_status)
@@ -492,7 +497,7 @@ class SWEAgentFlow:
             "exit_status": exit_status,
             "messages": messages,
             "segments": segments,
-            "env": return_env,
+            "env": None,
         }
 
         if env is not None:

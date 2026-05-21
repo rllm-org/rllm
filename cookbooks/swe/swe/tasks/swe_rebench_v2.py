@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
-"""SWE-rebench V2 grading.
+"""SWE-rebench V2 grading."""
 
-Applies test_patch in the agent's sandbox, runs test commands from
-install_config, and parses output with the dataset's own log parsers.
-"""
-
-import base64
 import importlib.util
 import os
 import re
@@ -14,12 +9,28 @@ from functools import lru_cache
 from pathlib import Path
 
 from swe.tasks.common import (
+    FAIL_TO_PASS,
+    KEY_INSTANCE_ID,
+    PASS_TO_PASS,
+    EvalType,
     PatchApplyError,
-    append_fatal_log, fatal_log_path,
-    make_log, parse_test_list, short_id as _short_id, zero_result,
-    KEY_INSTANCE_ID, FAIL_TO_PASS, PASS_TO_PASS,
-    ResolvedStatus, EvalType,
-    get_resolution_status, get_eval_tests_report,
+    ResolvedStatus,
+    append_fatal_log,
+    apply_patch_file,
+    fatal_log_path,
+    get_eval_tests_report,
+    get_resolution_status,
+    make_log,
+    parse_test_list,
+    reinitialize_git_repo,
+    reset_repo,
+    run_sandbox,
+    run_sandbox_with_retries,
+    write_file_b64,
+    zero_result,
+)
+from swe.tasks.common import (
+    short_id as _short_id,
 )
 
 _DATASET = "swe_rebench_v2"
@@ -71,55 +82,32 @@ def _load_name_to_parser() -> dict:
             sys.path.remove(repo_root)
 
 
-def _write_b64(env, path: str, content: str, cwd: str) -> None:
-    """Write content to a file in the sandbox via base64 to avoid shell escaping issues."""
-    encoded = base64.b64encode(content.encode()).decode()
-    chunk_size = 20000
-    for i in range(0, len(encoded), chunk_size):
-        chunk = encoded[i:i + chunk_size]
-        op = ">>" if i > 0 else ">"
-        env.execute({"command": f"echo -n '{chunk}' {op} {path}.b64"}, cwd=cwd, timeout=30)
-    env.execute({"command": f"base64 -d {path}.b64 > {path} && rm {path}.b64"}, cwd=cwd, timeout=30)
+def setup_swe_rebench_v2_agent_env(env, task: dict, short_id: str, log_fn=print) -> None:
+    """Prepare Rebench V2 agent sandbox at base_commit with git history hidden."""
+    working_dir = task["working_dir"]
+    try:
+        reset_repo(env, cwd=working_dir, ref=task["base_commit"], clean=True, runner=run_sandbox_with_retries)
+        reinitialize_git_repo(
+            env,
+            cwd=working_dir,
+            user_email="swe-rebench-v2@local",
+            user_name="swe-rebench-v2",
+            runner=run_sandbox_with_retries,
+        )
+        log_fn(f"[{short_id}] SWE-rebench V2 agent sandbox ready (git reinitialized)")
+    except Exception:
+        append_fatal_log(_DATASET, "setup_swe_rebench_v2_env", task, short_id, traceback.format_exc())
+        log_fn(f"[{short_id}] FATAL setup error: details appended to {fatal_log_path(_DATASET)}")
+        raise
 
 
-def _apply_patch(env, patch_path: str, cwd: str, sid: str, label: str, log) -> None:
-    """Apply a patch, trying clean apply first then falling back to --3way.
-
-    Raises PatchApplyError if both attempts fail so the caller can classify
-    the instance as invalid-patch and log to the dataset's invalid-patch file.
-    """
-    result = env.execute(
-        {"command": f"git apply -v {patch_path}"},
-        cwd=cwd, timeout=120,
-    )
-    if result.get("returncode", 0) == 0:
-        log(f"[{sid}] {label} applied cleanly: {result.get('output', '')[:200]}")
-        return
-
-    result = env.execute(
-        {"command": f"git apply -v --3way --recount --ignore-space-change --whitespace=nowarn {patch_path}"},
-        cwd=cwd, timeout=120,
-    )
-    if result.get("returncode", 0) == 0:
-        log(f"[{sid}] {label} applied (--3way): {result.get('output', '')[:200]}")
-        return
-
-    raise PatchApplyError(
-        f"[{sid}] {label} apply failed:\n{(result.get('output') or '')[:700]}"
-    )
-
-
-def grade_swe_rebench_v2(
+def grade_swe_rebench_v2_in_env(
     task: dict,
     env,
     patch: str,
     verbose: bool = False,
 ) -> dict:
-    """Grade a SWE-rebench V2 patch in the agent's sandbox.
-
-    Applies test_patch, runs test commands, parses output with the dataset's
-    log parsers, and computes F2P/P2P metrics.
-    """
+    """Grade a SWE-rebench V2 patch in a fresh grading sandbox."""
     _log = make_log(verbose)
 
     instance_id = task.get("instance_id", "unknown")
@@ -139,31 +127,54 @@ def grade_swe_rebench_v2(
     _log(f"[{sid}] Starting SWE-rebench V2 evaluation (parser={parser_name})...")
 
     try:
-        # Reset to base commit, clean untracked files, then reapply patches.
-        # Must use base_commit (not HEAD) because the agent may have committed.
-        # Must clean untracked files because the agent may have created new files.
-        base_commit = task.get("base_commit", "HEAD")
-        env.execute({"command": f"git reset --hard {base_commit}"}, cwd=working_dir, timeout=30)
-        env.execute({"command": "git clean -fd"}, cwd=working_dir, timeout=30)
-        _write_b64(env, "/tmp/agent_patch.diff", patch, working_dir)
-        _apply_patch(env, "/tmp/agent_patch.diff", working_dir, sid, "agent patch", _log)
+        # Fresh grading sandboxes are built with HEAD == base_commit; this mirrors
+        # external/SWE-rebench-V2/scripts/eval.py. Do not reuse this in agent sandboxes.
+        reset_repo(env, cwd=working_dir, ref="HEAD", clean=True, runner=run_sandbox_with_retries)
+        write_file_b64(env, path="/tmp/agent_patch.diff", content=patch, cwd=working_dir)
+        try:
+            apply_patch_file(
+                env,
+                patch_path="/tmp/agent_patch.diff",
+                cwd=working_dir,
+                short_id=sid,
+                label="agent patch",
+                log_fn=_log,
+            )
+        except PatchApplyError as exc:
+            invalid_path = fatal_log_path(_DATASET, kind="invalid_patch")
+            append_fatal_log(_DATASET, "invalid_model_patch", task, sid, str(exc), patch, kind="invalid_patch")
+            _log(f"[{sid}] Invalid patch; scoring 0.0 (logged to {invalid_path.name})")
+            return zero_result(
+                f2p_total=len(fail_to_pass),
+                p2p_total=len(pass_to_pass),
+                invalid_patch=True,
+                invalid_patch_reason=str(exc),
+            )
 
         if test_patch and test_patch.strip():
-            _write_b64(env, "/tmp/test_patch.diff", test_patch, working_dir)
-            _apply_patch(env, "/tmp/test_patch.diff", working_dir, sid, "test_patch", _log)
+            write_file_b64(env, path="/tmp/test_patch.diff", content=test_patch, cwd=working_dir)
+            try:
+                apply_patch_file(
+                    env,
+                    patch_path="/tmp/test_patch.diff",
+                    cwd=working_dir,
+                    short_id=sid,
+                    label="test_patch",
+                    log_fn=_log,
+                )
+            except PatchApplyError as exc:
+                raise RuntimeError(f"[{sid}] hidden test_patch failed to apply") from exc
 
         # Run test commands
         script = "set -e\n" + "\n".join(test_cmds)
         command = f"/bin/bash << 'SCRIPT_EOF'\n{script}\nSCRIPT_EOF"
-        result = env.execute({"command": command}, cwd=working_dir, timeout=600)
-        test_output = result.get("output", "")
+        result = run_sandbox(env, command, cwd=working_dir, timeout=600, check=False)
+        test_output = result["output"] or ""
 
         # Parse test output
         name_to_parser = _load_name_to_parser()
         if parser_name not in name_to_parser:
-            print(f"[{sid}] WARNING: Unknown log parser '{parser_name}', returning zero reward")
-            return {"reward": 0.0, "f2p_passed": 0, "f2p_total": len(fail_to_pass),
-                    "p2p_passed": 0, "p2p_total": len(pass_to_pass)}
+            raise KeyError(f"Unknown SWE-rebench V2 log parser: {parser_name!r}")
 
         parser_fn = name_to_parser[parser_name]
         test_status_map = parser_fn(test_output)
@@ -197,17 +208,7 @@ def grade_swe_rebench_v2(
             "p2p_total": len(normalized_p2p),
         }
 
-    except PatchApplyError as exc:
-        invalid_path = fatal_log_path(_DATASET, kind="invalid_patch")
-        append_fatal_log(_DATASET, "invalid_model_patch", task, sid, str(exc), patch, kind="invalid_patch")
-        _log(f"[{sid}] Invalid patch; scoring 0.0 (logged to {invalid_path.name})")
-        return zero_result(
-            f2p_total=len(fail_to_pass),
-            p2p_total=len(pass_to_pass),
-            invalid_patch=True,
-            invalid_patch_reason=str(exc),
-        )
     except Exception:
         append_fatal_log(_DATASET, "grade_swe_rebench_v2", task, sid, traceback.format_exc(), patch)
-        print(f"[{sid}] FATAL: details appended to {fatal_log_path(_DATASET)}")
-        return zero_result()
+        _log(f"[{sid}] FATAL: details appended to {fatal_log_path(_DATASET)}")
+        raise

@@ -1,28 +1,32 @@
 #!/usr/bin/env python3
 """SWE-smith grading using SWE-smith harness."""
 
-import base64
 import os
-import re
 import shlex
 import sys
 import time
 import traceback
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from swebench.harness.constants import FAIL_TO_PASS, PASS_TO_PASS
-from swebench.harness.grading import get_resolution_status, ResolvedStatus
+from swebench.harness.grading import ResolvedStatus, get_resolution_status
 
 from swe.tasks.common import (
+    InterpreterShutdown,
     PatchApplyError,
     append_fatal_log,
     fatal_log_path,
     make_log,
     normalize_task_test_lists,
-    short_id as _short_id,
+    reinitialize_git_repo,
+    run_sandbox_with_retries,
+    write_file_b64,
     zero_result,
+)
+from swe.tasks.common import (
+    short_id as _short_id,
 )
 
 _DATASET = "swesmith"
@@ -46,25 +50,6 @@ APT_INSTALL_TIMEOUT = 420
 APT_LOCK_WAIT_TIMEOUT = 600
 EVAL_SCRIPT_TIMEOUT = 600
 COMMAND_CHECK_TIMEOUT = 30
-
-# Transient failures we retry: Modal HTTP hiccups + apt lock / mirror sync issues.
-# See swe/scripts/analyze_swesmith_fatal_log.py for the taxonomy.
-_TRANSIENT_RE = re.compile(
-    r"Connection timeout to host|Response payload is not completed|ContentLengthError|"
-    r"Cannot connect to host|Command timed out after|ServerDisconnectedError|Server disconnected|ClientConnectorError|"
-    r"Could not get lock|Unable to acquire the dpkg frontend lock|Failed to fetch|"
-    r"Hash Sum mismatch|Mirror sync in progress"
-)
-
-# Interpreter shutdown race inside Modal's ThreadPoolExecutor: the driver
-# process is exiting, atexit has already shut the pool down, and in-flight
-# env.execute() calls fail to submit. This is not a sandbox/model error.
-_SHUTDOWN_RE = re.compile(r"cannot schedule new futures after interpreter shutdown")
-
-
-class InterpreterShutdown(RuntimeError):
-    """Raised when env.execute fails because the interpreter is tearing down."""
-
 
 @lru_cache(maxsize=1)
 def _load_swesmith_components():
@@ -106,45 +91,11 @@ def _load_swesmith_components():
 
 def _exec(env, cmd: str, *, cwd: str, timeout: int, check: bool = True, retries: int = 4) -> dict[str, Any]:
     """Run a sandbox command; retry on transient Modal/apt failures."""
-    for attempt in range(retries):
-        can_retry = attempt + 1 < retries
-        try:
-            res = env.execute({"command": cmd}, cwd=cwd, timeout=timeout)
-        except Exception as exc:
-            signal = f"{type(exc).__name__}: {exc}"
-            if _SHUTDOWN_RE.search(signal):
-                raise InterpreterShutdown(signal) from exc
-            if can_retry and _TRANSIENT_RE.search(signal):
-                time.sleep(2 ** attempt)
-                continue
-            raise RuntimeError(
-                f"Command failed: {cmd}\ncwd={cwd}\ntimeout={timeout}s\n{signal}"
-            ) from exc
-
-        out = res.get("output", "") or ""
-        if not check or res.get("returncode", 1) == 0:
-            return res
-        if can_retry and _TRANSIENT_RE.search(out):
-            time.sleep(2 ** attempt)
-            continue
-        raise RuntimeError(f"Command failed: {cmd}\n{out[:500]}")
-
-    raise RuntimeError(f"Command failed: {cmd} (retry loop exhausted)")
+    return run_sandbox_with_retries(env, cmd, cwd=cwd, timeout=timeout, check=check, retries=retries)
 
 
 def _write_b64(env, *, path: str, content: str, cwd: str) -> None:
-    qpath = shlex.quote(path)
-    _exec(env, f"rm -f {qpath}", cwd=cwd, timeout=FILE_OP_TIMEOUT, check=False)
-    for i in range(0, len(content), 20000):
-        chunk = content[i : i + 20000]
-        enc = base64.b64encode(chunk.encode()).decode()
-        _exec(
-            env,
-            f"printf '%s' {shlex.quote(enc)} | base64 -d >> {qpath}",
-            cwd=cwd,
-            timeout=FILE_OP_TIMEOUT,
-            check=True,
-        )
+    write_file_b64(env, path=path, content=content, cwd=cwd, timeout=FILE_OP_TIMEOUT, runner=_exec)
 
 
 def _apply_patch(env, patch: str, working_dir: str, short_id: str) -> None:
@@ -153,17 +104,17 @@ def _apply_patch(env, patch: str, working_dir: str, short_id: str) -> None:
     q = "/tmp/agent_patch.diff"
 
     res = _exec(env, f"git apply -v {q}", cwd=working_dir, timeout=GIT_APPLY_TIMEOUT, check=False)
-    if res.get("returncode", 0) == 0:
+    if res["returncode"] == 0:
         return
 
     res = _exec(env, f"git apply --reject {q}", cwd=working_dir, timeout=GIT_APPLY_TIMEOUT, check=False)
-    if res.get("returncode", 0) != 0:
+    if res["returncode"] != 0:
         raise PatchApplyError(
-            f"[{short_id}] patch apply failed:\n{(res.get('output') or '')[:700]}"
+            f"[{short_id}] patch apply failed:\n{(res['output'] or '')[:700]}"
         )
 
     rej = _exec(env, "find . -type f -name '*.rej' -print -quit", cwd=working_dir, timeout=FILE_OP_TIMEOUT, check=False)
-    if (rej.get("output") or "").strip():
+    if (rej["output"] or "").strip():
         raise PatchApplyError(f"[{short_id}] patch partially applied (.rej present)")
 
 
@@ -188,7 +139,7 @@ def _ensure_python3(env, wd: str) -> None:
         "command -v python3 >/dev/null || command -v python >/dev/null",
         cwd=wd, timeout=COMMAND_CHECK_TIMEOUT, check=False, retries=2,
     )
-    if check.get("returncode", 1) == 0:
+    if check["returncode"] == 0:
         return
 
     # Wait for unattended-upgrades to release the apt lock (433/857 errors
@@ -218,13 +169,13 @@ def setup_swesmith_agent_env(env, task: dict, short_id: str, log_fn=print) -> No
         _fetch_and_checkout(env, wd, iid)
 
         # Reinitialize git so agent cannot recover tests from history
-        _exec(env, "rm -rf .git", cwd=wd, timeout=GIT_REINIT_TIMEOUT)
-        _exec(env, "git init", cwd=wd, timeout=GIT_REINIT_TIMEOUT)
-        _exec(env, "git config user.email 'swesmith@local'", cwd=wd, timeout=FILE_OP_TIMEOUT)
-        _exec(env, "git config user.name 'swesmith'", cwd=wd, timeout=FILE_OP_TIMEOUT)
-        _exec(env, "git config commit.gpgsign false", cwd=wd, timeout=FILE_OP_TIMEOUT, check=False)
-        _exec(env, "git add -A", cwd=wd, timeout=GIT_STAGE_TIMEOUT)
-        _exec(env, "git commit --allow-empty -m 'agent-start'", cwd=wd, timeout=GIT_STAGE_TIMEOUT)
+        reinitialize_git_repo(
+            env,
+            cwd=wd,
+            user_email="swesmith@local",
+            user_name="swesmith",
+            runner=_exec,
+        )
 
         _ensure_python3(env, wd)
 
@@ -365,20 +316,3 @@ def grade_swesmith_in_env(
             append_fatal_log(_DATASET, "grade_swesmith", task, sid, traceback.format_exc(), patch)
         _log(f"[{sid}] FATAL: details appended to {fatal_log_path(_DATASET)}")
         raise
-
-
-def grade_swesmith(
-    task: dict,
-    patch: str,
-    env_factory: Callable[[dict], Any],
-    verbose: bool = False,
-) -> dict:
-    """Create a fresh grading sandbox and evaluate a SWE-smith patch."""
-    env = env_factory(task)
-    try:
-        return grade_swesmith_in_env(task, env, patch, verbose)
-    finally:
-        try:
-            env.close()
-        except Exception:
-            pass
