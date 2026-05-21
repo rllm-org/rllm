@@ -127,7 +127,12 @@ class GatewayManager:
         configured_host = gw_cfg.get("host", None)
         self.host: str = configured_host if configured_host else _get_routable_ip()
         self.port: int = gw_cfg.get("port", 9090)
+        self.store: str = gw_cfg.get("store", "memory")
         self.db_path: str | None = gw_cfg.get("db_path", None)
+        if self.store not in ("memory", "sqlite"):
+            raise ValueError(f"rllm.gateway.store must be 'memory' or 'sqlite', got {self.store!r}")
+        if self.store == "memory" and self.db_path:
+            raise ValueError("rllm.gateway.db_path is set but store='memory'; set store='sqlite' or clear db_path")
         from rllm.experimental.engine.tunnel import parse_tunnel
 
         self.public_url, self.tunnel_backend = parse_tunnel(gw_cfg.get("tunnel", None))
@@ -301,6 +306,7 @@ class GatewayManager:
             "--port",
             str(self.port),
         ]
+        cmd.extend(["--store", self.store])
         if self.db_path:
             cmd.extend(["--db-path", self.db_path])
         if self.sampling_params_priority != "client":
@@ -340,7 +346,7 @@ class GatewayManager:
             host="0.0.0.0",
             port=self.port,
             db_path=self.db_path,
-            store_worker="sqlite" if self.db_path else "memory",
+            store_worker=self.store,
             sampling_params_priority=self.sampling_params_priority,
             model=self.model,
             add_logprobs=self.add_logprobs,

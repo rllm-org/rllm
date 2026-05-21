@@ -111,7 +111,7 @@ class GatewayConfig(BaseModel):
     port: int = 9090
     workers: list[WorkerConfig] = Field(default_factory=list)
     db_path: str | None = None
-    store_worker: str = "sqlite"
+    store_worker: str = "memory"
     add_logprobs: bool = True
     add_return_token_ids: bool = True
     strip_vllm_fields: bool = True
