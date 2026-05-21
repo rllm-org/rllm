@@ -4,24 +4,42 @@ import time
 from collections import defaultdict
 from typing import Any
 
+from rllm_model_gateway.store.sqlite_store import _compute_has_error
+
 
 class MemoryTraceStore:
-    """Ephemeral in-memory store.  Useful for tests and short-lived processes."""
+    """Ephemeral in-memory store. Useful for tests and short-lived processes.
+
+    The session index is keyed by ``(session_id, run_id)`` so the same
+    session_id can coexist across runs without collision (e.g. eval-0
+    from two concurrent eval invocations).
+    """
 
     def __init__(self) -> None:
         # trace_id -> data dict
         self._traces: dict[str, dict[str, Any]] = {}
         # trace_id -> created_at
         self._timestamps: dict[str, float] = {}
-        # session_id -> list[trace_id]  (insertion order)
-        self._session_index: dict[str, list[str]] = defaultdict(list)
+        # trace_id -> (session_id, run_id) — denormalized for query_traces
+        self._trace_meta: dict[str, tuple[str, str]] = {}
+        # (session_id, run_id) -> list[trace_id]  (insertion order)
+        self._session_index: dict[tuple[str, str], list[str]] = defaultdict(list)
+        # run_id -> {metadata, started_at, ended_at}
+        self._runs: dict[str, dict[str, Any]] = {}
 
-    async def store_trace(self, trace_id: str, session_id: str, data: dict[str, Any]) -> None:
+    async def store_trace(
+        self,
+        trace_id: str,
+        session_id: str,
+        data: dict[str, Any],
+        run_id: str = "",
+    ) -> None:
         now = time.time()
         self._traces[trace_id] = data
         if trace_id not in self._timestamps:
             self._timestamps[trace_id] = now
-        idx = self._session_index[session_id]
+        self._trace_meta[trace_id] = (session_id, run_id or "")
+        idx = self._session_index[(session_id, run_id or "")]
         if trace_id not in idx:
             idx.append(trace_id)
 
@@ -33,41 +51,163 @@ class MemoryTraceStore:
         session_id: str,
         since: float | None = None,
         limit: int | None = None,
+        *,
+        run_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        ids = self._session_index.get(session_id, [])
         results: list[dict[str, Any]] = []
-        for tid in ids:
-            ts = self._timestamps.get(tid, 0.0)
-            if since is not None and ts < since:
+        for (sid, rid), tids in self._session_index.items():
+            if sid != session_id:
                 continue
-            data = self._traces.get(tid)
-            if data is not None:
-                results.append(data)
+            if run_id is not None and rid != run_id:
+                continue
+            for tid in tids:
+                ts = self._timestamps.get(tid, 0.0)
+                if since is not None and ts < since:
+                    continue
+                data = self._traces.get(tid)
+                if data is not None:
+                    results.append(data)
         if limit is not None:
             results = results[:limit]
         return results
 
-    async def delete_session(self, session_id: str) -> int:
-        ids = self._session_index.pop(session_id, [])
-        # Collect trace_ids referenced by other sessions
-        referenced: set[str] = set()
-        for sid, tids in self._session_index.items():
-            referenced.update(tids)
+    async def query_traces(
+        self,
+        *,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        model: str | None = None,
+        harness: str | None = None,
+        has_error: bool | None = None,
+        latency_min: float | None = None,
+        latency_max: float | None = None,
+        since: float | None = None,
+        until: float | None = None,
+        limit: int | None = 200,
+        order: str = "DESC",
+    ) -> list[dict[str, Any]]:
+        if order not in ("ASC", "DESC"):
+            raise ValueError(f"order must be ASC or DESC, got {order!r}")
+        rows: list[tuple[float, dict[str, Any]]] = []
+        for tid, data in self._traces.items():
+            sid, rid = self._trace_meta.get(tid, ("", ""))
+            if run_id is not None and rid != run_id:
+                continue
+            if session_id is not None and sid != session_id:
+                continue
+            if model is not None and (data.get("model") or "") != model:
+                continue
+            if harness is not None and data.get("harness") != harness:
+                continue
+            if has_error is not None and bool(_compute_has_error(data)) != has_error:
+                continue
+            lat = float(data.get("latency_ms") or 0)
+            if latency_min is not None and lat < latency_min:
+                continue
+            if latency_max is not None and lat > latency_max:
+                continue
+            ts = self._timestamps.get(tid, 0.0)
+            if since is not None and ts <= since:
+                continue
+            if until is not None and ts >= until:
+                continue
+            row = dict(data)
+            row["_created_at"] = ts
+            rows.append((ts, row))
+
+        rows.sort(key=lambda r: r[0], reverse=(order == "DESC"))
+        out = [r[1] for r in rows]
+        if limit is not None:
+            out = out[:limit]
+        return out
+
+    async def count_traces(
+        self,
+        *,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        model: str | None = None,
+        harness: str | None = None,
+        has_error: bool | None = None,
+        latency_min: float | None = None,
+        latency_max: float | None = None,
+        since: float | None = None,
+        until: float | None = None,
+    ) -> int:
+        rows = await self.query_traces(
+            run_id=run_id,
+            session_id=session_id,
+            model=model,
+            harness=harness,
+            has_error=has_error,
+            latency_min=latency_min,
+            latency_max=latency_max,
+            since=since,
+            until=until,
+            limit=None,
+        )
+        return len(rows)
+
+    async def facets(self) -> dict[str, list[str]]:
+        models: set[str] = set()
+        harnesses: set[str] = set()
+        runs: set[str] = set()
+        for tid, data in self._traces.items():
+            m = data.get("model") or ""
+            if m:
+                models.add(m)
+            h = data.get("harness")
+            if h:
+                harnesses.add(h)
+            _, rid = self._trace_meta.get(tid, ("", ""))
+            if rid:
+                runs.add(rid)
+        return {
+            "models": sorted(models),
+            "harnesses": sorted(harnesses),
+            "runs": sorted(runs),
+        }
+
+    async def delete_session(
+        self,
+        session_id: str,
+        *,
+        run_id: str | None = None,
+    ) -> int:
+        keys_to_delete: list[tuple[str, str]] = []
+        for key in list(self._session_index.keys()):
+            sid, rid = key
+            if sid != session_id:
+                continue
+            if run_id is not None and rid != run_id:
+                continue
+            keys_to_delete.append(key)
+
         deleted = 0
-        for tid in ids:
-            if tid not in referenced:
-                self._traces.pop(tid, None)
-                self._timestamps.pop(tid, None)
-                deleted += 1
+        for key in keys_to_delete:
+            ids = self._session_index.pop(key, [])
+            referenced: set[str] = set()
+            for tids in self._session_index.values():
+                referenced.update(tids)
+            for tid in ids:
+                if tid not in referenced:
+                    self._traces.pop(tid, None)
+                    self._timestamps.pop(tid, None)
+                    self._trace_meta.pop(tid, None)
+                    deleted += 1
         return deleted
 
     async def list_sessions(
         self,
         since: float | None = None,
         limit: int | None = None,
+        *,
+        run_id: str | None = None,
     ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
-        for sid, tids in self._session_index.items():
+        for (sid, rid), tids in self._session_index.items():
+            if run_id is not None and rid != run_id:
+                continue
             if not tids:
                 continue
             timestamps = [self._timestamps[t] for t in tids if t in self._timestamps]
@@ -79,12 +219,58 @@ class MemoryTraceStore:
             results.append(
                 {
                     "session_id": sid,
+                    "run_id": rid,
                     "trace_count": len(tids),
                     "first_trace_at": first_at,
                     "last_trace_at": max(timestamps),
                 }
             )
         results.sort(key=lambda r: r["first_trace_at"], reverse=True)
+        if limit is not None:
+            results = results[:limit]
+        return results
+
+    async def register_run(
+        self,
+        run_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        existing = self._runs.get(run_id)
+        if existing is None:
+            self._runs[run_id] = {
+                "metadata": dict(metadata or {}),
+                "started_at": time.time(),
+                "ended_at": None,
+            }
+        else:
+            # Idempotent: refresh metadata, clear ended_at, keep started_at.
+            existing["metadata"] = dict(metadata or {})
+            existing["ended_at"] = None
+
+    async def end_run(self, run_id: str) -> None:
+        info = self._runs.get(run_id)
+        if info is not None and info.get("ended_at") is None:
+            info["ended_at"] = time.time()
+
+    async def list_runs(
+        self,
+        since: float | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for rid, info in self._runs.items():
+            started = info["started_at"]
+            if since is not None and started < since:
+                continue
+            results.append(
+                {
+                    "run_id": rid,
+                    "started_at": started,
+                    "ended_at": info["ended_at"],
+                    "metadata": dict(info["metadata"]),
+                }
+            )
+        results.sort(key=lambda r: r["started_at"], reverse=True)
         if limit is not None:
             results = results[:limit]
         return results
