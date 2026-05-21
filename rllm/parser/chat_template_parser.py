@@ -3,6 +3,7 @@ import logging
 import re
 from copy import deepcopy
 
+from rllm.parser.base import BaseParser, ParsedCompletion
 from rllm.tools.tool_base import Tool, ToolCall, ToolOutput
 
 from .utils import PARSER_TEST_MESSAGES
@@ -19,11 +20,40 @@ def _import_torch():
         raise ImportError("ChatTemplateParser.tokenize_and_mask requires PyTorch. Install with: pip install rllm[train]") from err
 
 
-class ChatTemplateParser:
+class ChatTemplateParser(BaseParser):
+    """Legacy message->token backend: messages -> string (chat template) ->
+    token ids (tokenizer). Implements the :class:`BaseParser` contract so it
+    is interchangeable with :class:`~rllm.parser.renderer_parser.RendererParser`.
+    """
+
     def __init__(self, tokenizer, processor=None):
         self.tokenizer = tokenizer
         self.processor = processor
         self.generation_prompt = self._get_generation_prompt(tokenizer)
+
+    # --- BaseParser contract -------------------------------------------------
+
+    def render(self, messages, *, tools=None, add_generation_prompt=False, **kwargs) -> list[int]:
+        """Render messages to token ids: ``parse`` to a string, then encode.
+
+        ``**kwargs`` (e.g. ``accumulate_reasoning``, ``reasoning_effort``) is
+        forwarded to :meth:`parse`. ``is_first_msg=True`` since ``render``
+        always renders a full conversation from the start.
+        """
+        prompt = self.parse(messages, add_generation_prompt=add_generation_prompt, is_first_msg=True, tools=tools or [], **kwargs)
+        return self.tokenizer.encode(prompt, add_special_tokens=False)
+
+    def get_stop_token_ids(self) -> list[int]:
+        """Token ids that end an assistant turn.
+
+        Uses the parser's ``stop_sequences`` when defined (Qwen, Harmony),
+        otherwise the tokenizer's ``eos_token_id``.
+        """
+        stop = getattr(self, "stop_sequences", None)
+        if stop:
+            return list(stop)
+        eos = getattr(self.tokenizer, "eos_token_id", None)
+        return [eos] if eos is not None else []
 
     def _get_generation_prompt(self, tokenizer):
         # Some chat templates (e.g. Qwen3.5) reject a lone assistant message,
@@ -118,7 +148,7 @@ class ChatTemplateParser:
                 return LlamaChatTemplateParser(tokenizer)
             elif "gpt-oss" in model_name or "imo" in model_name:
                 logger.info(f"Using HarmonyChatTemplateParser for {tokenizer.name_or_path}")
-                return HarmonyChatTemplateParser()
+                return HarmonyChatTemplateParser(tokenizer)
             elif "kimi-k2" in model_name:
                 logger.info(f"Using KimiK2ThinkingChatTemplateParser for {tokenizer.name_or_path}")
                 return KimiK2ThinkingChatTemplateParser(tokenizer)
@@ -364,11 +394,7 @@ class DeepseekQwenChatTemplateParser(ChatTemplateParser):
         else:
             tool_calls = []
 
-        return {
-            "content": content,
-            "reasoning": reasoning,
-            "tool_calls": tool_calls,
-        }
+        return ParsedCompletion(content=content, reasoning=reasoning, tool_calls=tool_calls)
 
 
 class QwenChatTemplateParser(ChatTemplateParser):
@@ -569,11 +595,7 @@ class QwenChatTemplateParser(ChatTemplateParser):
         else:
             tool_calls = []
 
-        return {
-            "content": content,
-            "reasoning": reasoning,
-            "tool_calls": tool_calls,
-        }
+        return ParsedCompletion(content=content, reasoning=reasoning, tool_calls=tool_calls)
 
     def process_image_data(self, messages):
         from qwen_vl_utils import fetch_image
@@ -659,6 +681,9 @@ class HarmonyChatTemplateParser(ChatTemplateParser):
             load_harmony_encoding,
         )
 
+        # Kept so the inherited BaseParser.render (parse -> encode) works;
+        # for gpt-oss the HF tokenizer is the harmony-compatible encoding.
+        self.tokenizer = tokenizer
         self.enc = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
         self.generation_prompt = "<|start|>assistant"
         self.stop_sequences = [200002, 199999, 200012]  # <|endoftext|>, <|return|>, <|call|>
@@ -864,11 +889,7 @@ class HarmonyChatTemplateParser(ChatTemplateParser):
             elif channel == "final":
                 final += content
 
-        return {
-            "content": final,
-            "reasoning": analysis,
-            "tool_calls": tool_calls,
-        }
+        return ParsedCompletion(content=final, reasoning=analysis, tool_calls=tool_calls)
 
 
 class DeepSeekV32ExpChatTemplateParser(ChatTemplateParser):
@@ -957,11 +978,7 @@ class DeepSeekV32ExpChatTemplateParser(ChatTemplateParser):
 
         # TODO: handle tool calls
 
-        return {
-            "content": content,
-            "reasoning": reasoning,
-            "tool_calls": [],
-        }
+        return ParsedCompletion(content=content, reasoning=reasoning, tool_calls=[])
 
 
 class KimiK2ThinkingChatTemplateParser(ChatTemplateParser):
@@ -1056,8 +1073,4 @@ class KimiK2ThinkingChatTemplateParser(ChatTemplateParser):
                 reasoning = ""
                 content = completion_text.strip()
 
-        return {
-            "content": content,
-            "reasoning": reasoning,
-            "tool_calls": [],
-        }
+        return ParsedCompletion(content=content, reasoning=reasoning, tool_calls=[])

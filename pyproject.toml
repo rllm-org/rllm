@@ -88,11 +88,16 @@ verl = [
     "vllm==0.17.0",
     "flash-attn==2.8.1",
     "qwen-vl-utils",
+    # Token-native message rendering (RendererParser). Pinned to the 0.1.x
+    # line: a renderer's value is byte-exact token identity, so a 0.2 bump
+    # could shift token output and must be vetted before adoption.
+    "renderers>=0.1.7,<0.2.0",
 ]
 
 tinker = [
     "tinker ; python_version >= '3.11'",
     "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook ; python_version >= '3.11'",
+    "renderers>=0.1.7,<0.2.0",
 ]
 
 opentelemetry = [

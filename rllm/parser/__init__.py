@@ -1,10 +1,15 @@
+from rllm.parser.base import BaseParser, ParsedCompletion, ParserSession
 from rllm.parser.tool_parser import QwenToolParser, R1ToolParser, ToolParser
 
 __all__ = [
+    "BaseParser",
+    "ParsedCompletion",
+    "ParserSession",
     "ChatTemplateParser",
     "DeepseekQwenChatTemplateParser",
     "QwenChatTemplateParser",
     "LlamaChatTemplateParser",
+    "RendererParser",
     "ToolParser",
     "R1ToolParser",
     "QwenToolParser",
@@ -23,6 +28,13 @@ def __getattr__(name):
 
         mod = importlib.import_module("rllm.parser.chat_template_parser")
         return getattr(mod, name)
+    # RendererParser is imported lazily so ``import rllm.parser`` does not
+    # require the optional ``renderers`` package to be installed.
+    if name == "RendererParser":
+        import importlib
+
+        mod = importlib.import_module("rllm.parser.renderer_parser")
+        return mod.RendererParser
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

@@ -86,11 +86,15 @@ class TITOCompleter(Completer):
         if not self.rollout_engine.supports_token_in_token_out:
             cls_name = self.rollout_engine.__class__.__name__
             raise ValueError(f"The rollout engine {cls_name} does not support token-in-token-out")
-        # we also require the rollout engine has a chat parser and a tokenizer
-        if rollout_engine.chat_parser is None or rollout_engine.tokenizer is None:
-            raise ValueError("The rollout engine must have a chat parser and a tokenizer. For Tinker engine, make sure you have set bypass_render_with_parser=True.")
+        # the token-delta completer needs the chat-template parser's string
+        # `parse` for prefix detection, plus a tokenizer.
+        from rllm.parser import ChatTemplateParser
+
+        parser = rollout_engine.parser
+        if not isinstance(parser, ChatTemplateParser) or rollout_engine.tokenizer is None:
+            raise ValueError("The rollout engine must have a ChatTemplateParser and a tokenizer. Set parser_backend='chat_template' — the token-delta completer requires the chat-template parser.")
         self.tokenizer = rollout_engine.tokenizer
-        self.chat_parser = rollout_engine.chat_parser
+        self.chat_parser = parser
 
     def _parse_message_delta(self, messages: list[dict]) -> tuple[bool, TokenInput]:
         cur_messages_str = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, accumulate_reasoning=True)

@@ -316,8 +316,8 @@ Configure sampling parameters:
   Disable thinking tokens in responses
 </ParamField>
 
-<ParamField path="rollout_engine.bypass_render_with_parser" type="boolean" default="false">
-  Bypass renderer and use parser directly
+<ParamField path="rollout_engine.parser_backend" type="string" default="tinker">
+  Message-to-token backend: `"tinker"` uses the Tinker renderer; `"chat_template"` uses rLLM's `ChatTemplateParser`.
 </ParamField>
 
 ## Checkpointing

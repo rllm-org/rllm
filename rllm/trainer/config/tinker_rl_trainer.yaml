@@ -69,7 +69,7 @@ rollout_engine:
   reasoning_effort: "medium"
   accumulate_reasoning: false
   disable_thinking: false
-  bypass_render_with_parser: false
+  parser_backend: tinker  # message->token backend: "tinker" (Tinker renderer) | "chat_template" (ChatTemplateParser)
   renderer_name: null  # Override renderer name (null = auto-detect from model)
 
 # Data Configuration

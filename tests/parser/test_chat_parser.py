@@ -115,3 +115,30 @@ def test_qwen3_5_chat_template_parser():
     assert isinstance(parser, QwenChatTemplateParser)
     assert parser.generation_prompt
     assert parser.verify_equivalence(PARSER_TEST_MESSAGES)
+
+
+def test_chat_parser_satisfies_base_parser():
+    """ChatTemplateParser must honor the BaseParser contract so it is
+    interchangeable with RendererParser inside the rollout engines."""
+    from rllm.parser import BaseParser
+    from rllm.parser.base import ParsedCompletion
+
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
+    parser = ChatTemplateParser.get_parser(tokenizer)
+    assert isinstance(parser, BaseParser)
+
+    # render -> token ids
+    token_ids = parser.render(PARSER_TEST_MESSAGES, add_generation_prompt=True)
+    assert isinstance(token_ids, list)
+    assert len(token_ids) > 0 and all(isinstance(t, int) for t in token_ids)
+
+    # get_stop_token_ids -> non-empty list[int]
+    stop_ids = parser.get_stop_token_ids()
+    assert stop_ids and all(isinstance(t, int) for t in stop_ids)
+
+    # parse_completion -> ParsedCompletion, with dict-style back-compat access
+    completion = tokenizer.encode("<think>reasoning</think>answer", add_special_tokens=False)
+    parsed = parser.parse_completion(completion)
+    assert isinstance(parsed, ParsedCompletion)
+    assert parsed.content == "answer" == parsed["content"]
+    assert parsed.reasoning == "reasoning" == parsed.get("reasoning")

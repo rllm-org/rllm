@@ -2,7 +2,7 @@ import base64
 import json
 import logging
 import uuid
-from typing import cast
+from typing import Literal, cast
 
 import torch
 from omegaconf import DictConfig
@@ -11,14 +11,22 @@ from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
 
 from rllm.experimental.rollout.rollout_engine import ModelOutput, RolloutEngine
 from rllm.experimental.rollout.types import Processor, TokenInput, Tokenizer, TokenOutput, VerlTokenOutput
-from rllm.parser import ChatTemplateParser
+from rllm.parser import BaseParser, ChatTemplateParser
 from rllm.workflows import TerminationEvent, TerminationReason
 
 logger = logging.getLogger(__name__)
 
 
 class VerlEngine(RolloutEngine):
-    def __init__(self, config: DictConfig, server_manager: AsyncLLMServerManager, tokenizer: Tokenizer, processor: Processor | None = None, **kwargs):
+    def __init__(
+        self,
+        config: DictConfig,
+        server_manager: AsyncLLMServerManager,
+        tokenizer: Tokenizer,
+        processor: Processor | None = None,
+        parser_backend: Literal["chat_template", "renderer"] = "renderer",
+        **kwargs,
+    ):
         super().__init__()
         self.config = config
 
@@ -29,12 +37,34 @@ class VerlEngine(RolloutEngine):
 
         self.tokenizer = tokenizer
         self.processor = processor
-        self.chat_parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=config.get("rllm", {}).get("disable_thinking", False))
 
         self.max_prompt_length = config.data.max_prompt_length
         self.max_response_length = config.data.max_response_length
         self.accumulate_reasoning = config.get("rllm", {}).get("accumulate_reasoning", False)
         self.router_replay_mode = config.get("rllm", {}).get("algorithm", {}).get("router_replay", "disabled")
+
+        # Message -> token backend. Both satisfy the BaseParser contract, so
+        # the rest of the engine treats ``self.parser`` uniformly. "renderer"
+        # (default) renders messages straight to token ids via the
+        # `renderers` package, whose bridge_to_next_turn preserves token
+        # identity across multi-turn rollouts; "chat_template" uses the
+        # legacy chat-template-string path.
+        if parser_backend not in ("chat_template", "renderer"):
+            raise ValueError(f"VerlEngine parser_backend must be 'chat_template' or 'renderer', got {parser_backend!r}")
+        self.parser_backend = parser_backend
+        disable_thinking = config.get("rllm", {}).get("disable_thinking", False)
+        if parser_backend == "renderer":
+            # ``processor`` is set only for multimodal (VLM) runs; the
+            # renderer parser is text-only for now, so fail fast with a
+            # clear pointer rather than erroring deep in the rollout.
+            if processor is not None:
+                raise ValueError("parser_backend='renderer' does not support multimodal (VLM) models yet. Set rllm.parser_backend=chat_template for VLM training.")
+            from rllm.parser import RendererParser
+
+            self.parser: BaseParser = RendererParser.from_tokenizer(tokenizer, preserve_all_thinking=self.accumulate_reasoning)
+        else:
+            self.parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=disable_thinking)
+        logger.info(f"VerlEngine using parser_backend={parser_backend}")
 
         self.train_sampling_params = dict(
             temperature=0.0 if config.actor_rollout_ref.rollout.do_sample is False else config.actor_rollout_ref.rollout.temperature,
@@ -101,12 +131,16 @@ class VerlEngine(RolloutEngine):
         accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
         reasoning_effort = kwargs.pop("reasoning_effort", "medium")
 
-        prompt = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True, tools=tools, accumulate_reasoning=accumulate_reasoning, reasoning_effort=reasoning_effort)
-        request_prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)  # list[int]
+        has_images = self.processor is not None and any(msg.get("images", None) is not None and msg["role"] == "user" for msg in messages)
 
-        if any(msg.get("images", None) is not None and msg["role"] == "user" for msg in messages) and self.processor is not None:
-            assert hasattr(self.chat_parser, "process_image_data"), f"Chat parser cls {self.chat_parser.__class__.__name__} does not have process_image_data method"
-            image_data = self.chat_parser.process_image_data(messages)  # list[PIL.Image.Image]
+        if self.parser_backend == "chat_template" and has_images:
+            # Multimodal path needs the prompt string for the HF processor.
+            # In chat_template mode ``self.parser`` is concretely a
+            # ChatTemplateParser, so ``parse`` / ``process_image_data`` exist.
+            prompt = self.parser.parse(messages, add_generation_prompt=True, is_first_msg=True, tools=tools, accumulate_reasoning=accumulate_reasoning, reasoning_effort=reasoning_effort)
+            request_prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)  # list[int]
+            assert hasattr(self.parser, "process_image_data"), f"Chat parser cls {self.parser.__class__.__name__} does not have process_image_data method"
+            image_data = self.parser.process_image_data(messages)  # list[PIL.Image.Image]
             # Below we mirrors verl's ``agent_loop._compute_multi_modal_inputs``
             model_inputs = self.processor(text=[prompt], images=image_data, return_tensors="pt")
             prompt_ids = model_inputs.pop("input_ids")[0]  # list[int]
@@ -117,9 +151,11 @@ class VerlEngine(RolloutEngine):
             if grid_thw is not None:
                 multi_modal_inputs["images_seqlens"] = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0])
         else:
+            # Text-only — uniform across both parser backends.
+            request_prompt_ids = self.parser.render(messages, tools=tools, add_generation_prompt=True, accumulate_reasoning=accumulate_reasoning, reasoning_effort=reasoning_effort)  # list[int]
+            prompt_ids = request_prompt_ids
             image_data = None
             multi_modal_inputs = None
-            prompt_ids = request_prompt_ids
 
         token_output: TokenOutput = await self.get_token_output_from_token_input(token_input=request_prompt_ids, image_data=image_data, **kwargs)
         extra_kwargs = dict(prompt_ids=prompt_ids, multi_modal_inputs=multi_modal_inputs)
@@ -137,8 +173,7 @@ class VerlEngine(RolloutEngine):
         finish_reason = token_output.stop_reason
 
         completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
-        # TODO: implement parse_completion for the standard parser
-        parsed_output = self.chat_parser.parse_completion(completion_ids)
+        parsed = self.parser.parse_completion(completion_ids)
 
         # R3 router replay: encode rollout-side routed_experts as [shape_header_json, base64_blob]
         routing_matrices = None
@@ -149,9 +184,9 @@ class VerlEngine(RolloutEngine):
 
         return ModelOutput(
             text=completion_text,
-            content=parsed_output["content"],
-            reasoning=parsed_output["reasoning"],
-            tool_calls=parsed_output["tool_calls"],
+            content=parsed.content,
+            reasoning=parsed.reasoning,
+            tool_calls=parsed.tool_calls,
             prompt_ids=prompt_ids,
             completion_ids=completion_ids,
             multi_modal_inputs=multi_modal_inputs,
