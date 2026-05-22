@@ -145,6 +145,7 @@ Under the hood:
 - [SETA](https://github.com/camel-ai/seta) — Scaling environments for terminal agents [![Stars](https://img.shields.io/github/stars/camel-ai/seta)](https://github.com/camel-ai/seta)
 - [LLM-in-Sandbox](https://github.com/llm-in-sandbox/llm-in-sandbox) — Building general agents by running LLMs in a sandbox [![Stars](https://img.shields.io/github/stars/llm-in-sandbox/llm-in-sandbox)](https://github.com/llm-in-sandbox/llm-in-sandbox)
 - [Vision-DeepResearch](https://github.com/Osilly/Vision-DeepResearch) — The first long-horizon multimodal deep-research MLLM [![Stars](https://img.shields.io/github/stars/Osilly/Vision-DeepResearch)](https://github.com/Osilly/Vision-DeepResearch)
+- [OpenSearch-VL](https://github.com/shawn0728/OpenSearch-VL) - An Open Recipe for Frontier Multimodal Search Agents [![Stars](https://img.shields.io/github/stars/shawn0728/OpenSearch-VL)](https://github.com/shawn0728/OpenSearch-VL)
 - [Cogito, Ergo Ludo](https://www.arxiv.org/abs/2509.25052) — An agent that learns to play by reasoning and planning
 - [Cut the Bill, Keep the Turns](https://agate-slipper-ef0.notion.site/Cut-the-Bill-Keep-the-Turns-Affordable-Multi-Turn-Search-RL-003f78214a4d451fb06f453d084e666c) — Affordable multi-turn search RL
 - [Experiential Reinforcement Learning](https://arxiv.org/abs/2602.13949) — Experience-reflection-consolidation loop for RL with sparse rewards
