@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 from typing import Any
 
@@ -14,6 +15,62 @@ from verl import DataProto
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 
 logger = logging.getLogger(__name__)
+
+
+def _get_hdfs_bin(hdfs_io) -> str | None:
+    hdfs_bin = getattr(hdfs_io, "_HDFS_BIN_PATH", None) or shutil.which("hdfs")
+    if not hdfs_bin and os.path.exists("/opt/tiger/arnold/hdfs_client/hdfs"):
+        hdfs_bin = "/opt/tiger/arnold/hdfs_client/hdfs"
+    if hdfs_bin:
+        hdfs_io._HDFS_BIN_PATH = hdfs_bin
+    return hdfs_bin
+
+
+def _find_latest_hdfs_ckpt_path(hdfs_dir: str) -> str | None:
+    from verl.utils import hdfs_io
+
+    hdfs_bin = _get_hdfs_bin(hdfs_io)
+    if not hdfs_bin or not hdfs_io.exists(hdfs_dir):
+        return None
+
+    result = subprocess.run(
+        [hdfs_bin, "dfs", "-ls", hdfs_dir],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        logger.warning("Failed to list HDFS checkpoint dir %s: %s", hdfs_dir, result.stderr.strip())
+        return None
+
+    latest_step = -1
+    latest_path = None
+    for line in result.stdout.splitlines():
+        path = line.rsplit(maxsplit=1)[-1] if line.split() else ""
+        name = os.path.basename(path.rstrip("/"))
+        if not name.startswith("global_step_"):
+            continue
+        try:
+            step = int(name.removeprefix("global_step_"))
+        except ValueError:
+            continue
+        actor_path = os.path.join(path, "actor")
+        if step > latest_step and hdfs_io.exists(actor_path):
+            latest_step = step
+            latest_path = path
+    return latest_path
+
+
+def _copy_hdfs_checkpoint_to_local(hdfs_step_folder: str, local_root: str) -> str:
+    from verl.utils import hdfs_io
+
+    _get_hdfs_bin(hdfs_io)
+    os.makedirs(local_root, exist_ok=True)
+    local_step_folder = os.path.join(local_root, os.path.basename(hdfs_step_folder.rstrip("/")))
+    shutil.rmtree(local_step_folder, ignore_errors=True)
+    if not hdfs_io.copy(hdfs_step_folder, local_root):
+        raise RuntimeError(f"Failed to copy checkpoint from {hdfs_step_folder} to {local_root}")
+    return local_step_folder
 
 
 def _as_bool(value: Any) -> bool:
@@ -350,6 +407,12 @@ def save_checkpoint(
         local_mkdir_safe(local_global_step_folder)
         dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
         torch.save(train_dataloader.state_dict(), dataloader_local_path)
+        if config.trainer.default_hdfs_dir is not None:
+            from verl.utils import hdfs_io
+
+            dataloader_remote_path = os.path.join(config.trainer.default_hdfs_dir, f"global_step_{global_steps}", "data.pt")
+            if not hdfs_io.copy(dataloader_local_path, dataloader_remote_path):
+                raise RuntimeError(f"Failed to copy dataloader checkpoint to {dataloader_remote_path}")
 
     async_save = False
     ckpt_cfg = config.actor_rollout_ref.actor.get("checkpoint", {})
@@ -377,13 +440,15 @@ def load_checkpoint(
     if config.trainer.resume_mode == "disable":
         return 0
 
-    if config.trainer.default_hdfs_dir is not None:
-        raise NotImplementedError("load from hdfs is not implemented yet")
-
     checkpoint_folder = config.trainer.default_local_dir
     if not os.path.isabs(checkpoint_folder):
         checkpoint_folder = os.path.join(os.getcwd(), checkpoint_folder)
     global_step_folder = find_latest_ckpt_path(checkpoint_folder)
+    hdfs_step_folder = None
+    if config.trainer.default_hdfs_dir is not None:
+        hdfs_step_folder = _find_latest_hdfs_ckpt_path(config.trainer.default_hdfs_dir)
+        if hdfs_step_folder is not None:
+            global_step_folder = hdfs_step_folder
 
     if config.trainer.resume_mode == "auto":
         if global_step_folder is None:
@@ -393,8 +458,11 @@ def load_checkpoint(
         assert isinstance(config.trainer.resume_from_path, str), "resume ckpt must be str type"
         assert "global_step_" in config.trainer.resume_from_path, "resume ckpt must specify the global_steps"
         global_step_folder = config.trainer.resume_from_path
-        if not os.path.isabs(global_step_folder):
+        if not str(global_step_folder).startswith("hdfs://") and not os.path.isabs(global_step_folder):
             global_step_folder = os.path.join(os.getcwd(), global_step_folder)
+
+    if str(global_step_folder).startswith("hdfs://"):
+        global_step_folder = _copy_hdfs_checkpoint_to_local(global_step_folder, checkpoint_folder)
 
     print(f"Load from checkpoint folder: {global_step_folder}")
     global_steps = int(global_step_folder.split("global_step_")[-1])
@@ -488,10 +556,7 @@ def build_wg_kwargs(config: DictConfig, device_name: str) -> dict[str, Any]:
     wg_kwargs: dict[str, Any] = {"device_name": device_name}
     if OmegaConf.select(config.trainer, "ray_wait_register_center_timeout") is not None:
         wg_kwargs["ray_wait_register_center_timeout"] = config.trainer.ray_wait_register_center_timeout
-    master_port_range = _parse_master_port_range(
-        OmegaConf.select(config.trainer, "ray_master_port_range")
-        or os.environ.get("RLLM_RAY_MASTER_PORT_RANGE")
-    )
+    master_port_range = _parse_master_port_range(OmegaConf.select(config.trainer, "ray_master_port_range") or os.environ.get("RLLM_RAY_MASTER_PORT_RANGE"))
     if master_port_range is not None:
         wg_kwargs["master_port_range"] = master_port_range
     if OmegaConf.select(config, "global_profiler.steps") is not None:

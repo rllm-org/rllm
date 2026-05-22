@@ -53,6 +53,7 @@ setup_b200_driver_libs() {
     elif [ -n "$real_nvml_lib" ]; then
         export LD_PRELOAD="$driver_lib_dir/libnvidia-ml.so.1${LD_PRELOAD:+:$LD_PRELOAD}"
     fi
+    echo "b200_driver_libs real_libcuda=${real_libcuda:-<missing>} real_nvml_lib=${real_nvml_lib:-<missing>} ld_preload=${LD_PRELOAD:-<empty>}"
 }
 
 install_runtime_wheels() {
@@ -132,12 +133,29 @@ repair_verl_venv_python() {
 }
 
 restore_verl_venv() {
-    local artifacts
+    local artifacts venv_tar candidate
     artifacts="$(artifact_dir)"
     if [ ! -x /tmp/verl_venv/bin/python ]; then
-        test -s "$artifacts/verl_venv_920246.tar.gz"
+        venv_tar="${RLLM_SWE_VERL_VENV_TAR:-}"
+        if [ -z "$venv_tar" ]; then
+            for candidate in \
+                "$artifacts/verl_venv_920246.tar.gz" \
+                /opt/tiger/swe_runtime_image/artifacts/verl_venv_920246.tar.gz \
+                /mnt/hdfs/rllm_swe_artifacts/verl_venv_920246.tar.gz; do
+                if [ -s "$candidate" ]; then
+                    venv_tar="$candidate"
+                    break
+                fi
+            done
+        fi
+        if [ -z "$venv_tar" ] || [ ! -s "$venv_tar" ]; then
+            echo "Missing verl venv tar. RLLM_SWE_ARTIFACT_DIR=$artifacts RLLM_SWE_VERL_VENV_TAR=${RLLM_SWE_VERL_VENV_TAR:-<unset>}" >&2
+            ls -lh "$artifacts" /opt/tiger/swe_runtime_image/artifacts /mnt/hdfs/rllm_swe_artifacts 2>&1 | sed 's/^/artifact_ls /' >&2 || true
+            return 1
+        fi
+        echo "Restoring verl venv from $venv_tar"
         rm -rf /tmp/verl_venv
-        tar -C /tmp -xzf "$artifacts/verl_venv_920246.tar.gz"
+        tar -C /tmp -xzf "$venv_tar"
     fi
     export VIRTUAL_ENV=/tmp/verl_venv
     export PATH="$VIRTUAL_ENV/bin:$PATH"
@@ -249,9 +267,15 @@ restore_rllm_home() {
 }
 
 restore_swe_artifacts() {
+    echo "restore_swe_artifacts: setup_b200_driver_libs"
     setup_b200_driver_libs
+    echo "restore_swe_artifacts: restore_verl_venv"
     restore_verl_venv
+    echo "restore_swe_artifacts: restore_megatron_cp2_overlay"
     restore_megatron_cp2_overlay
+    echo "restore_swe_artifacts: restore_qwen35_cache"
     restore_qwen35_cache
+    echo "restore_swe_artifacts: restore_rllm_home"
     restore_rllm_home
+    echo "restore_swe_artifacts: done"
 }

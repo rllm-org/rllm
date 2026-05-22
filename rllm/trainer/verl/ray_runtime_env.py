@@ -36,6 +36,7 @@ DEFAULT_RLLM_WORKING_DIR_EXCLUDES = [
     "cookbooks/swe/wandb/**",
     "cookbooks/swe/outputs/**",
     "cookbooks/swe/checkpoints/**",
+    "cookbooks/swe/results/**",
 ]
 
 FORWARD_PREFIXES = [

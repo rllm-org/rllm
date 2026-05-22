@@ -10,11 +10,11 @@ val_max_samples: null
 
 swe:
   cost_limit: 3.0
-  step_limit: 20
-  command_timeout: 60
+  step_limit: 200
+  command_timeout: 120
   workflow_timeout: 1200
-  sandbox_timeout: 1500
-  agent_timeout: 900
+  sandbox_timeout: 900
+  agent_timeout: 720
   verbose: true
   save_trajectories: false
   save_rollout_trajectories: false
@@ -22,11 +22,11 @@ swe:
   trajectory_output_dir: null
 
 data:
-  gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
-  train_batch_size: 8
-  val_batch_size: 8
-  max_prompt_length: 12288
-  max_response_length: 4096
+  gen_batch_size: 16
+  train_batch_size: 16
+  val_batch_size: 300
+  max_prompt_length: 30720
+  max_response_length: 32768
   filter_overlong_prompts: true
   filter_overlong_prompts_workers: 8
   truncation: error
@@ -43,13 +43,13 @@ actor_rollout_ref:
     optim:
       lr: 1e-6
     loss_agg_mode: token-mean
-    ppo_mini_batch_size: 8
+    ppo_mini_batch_size: 16
     ppo_micro_batch_size_per_gpu: 1
     use_dynamic_bsz: false
     use_kl_loss: false
     clip_ratio_high: 0.28
-    kl_loss_coef: 0.001
-    kl_loss_type: low_var_kl
+    kl_loss_coef: 0.0
+    kl_loss_type: k1
     entropy_coeff: 0.0
     megatron:
       tensor_model_parallel_size: 2
@@ -62,20 +62,20 @@ actor_rollout_ref:
       num_workers: 0
     name: vllm
     mode: async
-    enforce_eager: false
-    temperature: 0.7
-    top_p: 0.95
-    gpu_memory_utilization: 0.6
+    enforce_eager: true
+    temperature: 1.0
+    top_p: 1.0
+    gpu_memory_utilization: 0.4
     tensor_model_parallel_size: 2
-    log_prob_micro_batch_size_per_gpu: 1
-    n: 4
+    log_prob_micro_batch_size_per_gpu: 4
+    n: 8
     val_kwargs:
       do_sample: true
       n: 1
       temperature: 0.7
       top_p: 0.95
   ref:
-    log_prob_micro_batch_size_per_gpu: 1
+    log_prob_micro_batch_size_per_gpu: 4
     megatron:
       tensor_model_parallel_size: 2
       pipeline_model_parallel_size: 1
@@ -95,8 +95,8 @@ critic:
 algorithm:
   adv_estimator: grpo
   gamma: 1.0
-  lam: 0.95
-  norm_adv_by_std_in_grpo: true
+  lam: 1.0
+  norm_adv_by_std_in_grpo: false
   kl_ctrl:
     kl_coef: 0.001
 
@@ -106,7 +106,7 @@ rllm:
     n_val: ${actor_rollout_ref.rollout.val_kwargs.n}
   workflow:
     use_workflow: true
-    n_parallel_tasks: 16
+    n_parallel_tasks: 300
     retry_limit: 1
     raise_on_error: false
   disable_thinking: false

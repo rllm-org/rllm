@@ -78,9 +78,12 @@ def _maybe_pin_task_runner_to_head():
             return
 
         ray_address = os.environ.get("RAY_ADDRESS", "")
-        if run_task_runner_local and ray_address and "://" not in ray_address and ray_address != "auto":
+        use_ray_client = _env_flag("RLLM_USE_RAY_CLIENT", True)
+        if use_ray_client and run_task_runner_local and ray_address and "://" not in ray_address and ray_address != "auto":
             host = ray_address.rsplit(":", 1)[0]
-            os.environ["RAY_ADDRESS"] = f"ray://{host}:10001"
+            host = os.environ.get("RLLM_RAY_CLIENT_HOST", host)
+            client_port = os.environ.get("RLLM_RAY_CLIENT_PORT", "10001")
+            os.environ["RAY_ADDRESS"] = f"ray://{host}:{client_port}"
             _startup_log(
                 "RLLM_RUN_TASK_RUNNER_LOCAL=1: using Ray Client address "
                 f"{os.environ['RAY_ADDRESS']} for external CPU driver"
@@ -176,9 +179,11 @@ def _maybe_pin_task_runner_to_head():
                     use_critic=need_critic(config),
                 )
 
-                _startup_log(f"copy_to_local model path={config.actor_rollout_ref.model.path}")
+                driver_tokenizer_path = os.environ.get("RLLM_DRIVER_TOKENIZER_MODEL_PATH")
+                model_path_for_tokenizer = driver_tokenizer_path or config.actor_rollout_ref.model.path
+                _startup_log(f"copy_to_local tokenizer path={model_path_for_tokenizer}")
                 local_path = copy_to_local(
-                    config.actor_rollout_ref.model.path,
+                    model_path_for_tokenizer,
                     use_shm=config.actor_rollout_ref.model.get("use_shm", False),
                 )
                 _startup_log(f"copy_to_local done local_path={local_path}")

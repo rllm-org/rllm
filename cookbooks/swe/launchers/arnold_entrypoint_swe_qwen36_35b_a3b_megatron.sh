@@ -251,6 +251,102 @@ print(f"megatron_initial_load_hotfix=installed path={path}", flush=True)
 PY
 }
 
+install_megatron_save_checkpoint_no_grad_hotfix() {
+    "$VIRTUAL_ENV/bin/python" - <<'PY'
+import os
+from pathlib import Path
+
+path = Path(os.environ["VIRTUAL_ENV"]) / "lib/python3.12/site-packages/verl/workers/megatron_workers.py"
+marker = "rLLM_MEGATRON_SAVE_CHECKPOINT_NO_GRAD_HOTFIX"
+text = path.read_text()
+if marker in text:
+    print("megatron_save_checkpoint_no_grad_hotfix=already_installed", flush=True)
+    raise SystemExit(0)
+
+old = """    def save_checkpoint(self, checkpoint_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
+        if self._is_offload_param:
+            load_megatron_model_to_gpu(self.actor_module)
+        if self.checkpoint_mananager.checkpoint_config.async_save and self._is_offload_optimizer:
+"""
+new = f"""    def save_checkpoint(self, checkpoint_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
+        # {marker}
+        if self._is_offload_param:
+            load_megatron_model_to_gpu(self.actor_module, load_grad=False)
+        if self.checkpoint_mananager.checkpoint_config.async_save and self._is_offload_optimizer:
+"""
+if old not in text:
+    raise SystemExit(f"Could not find Megatron save_checkpoint load branch in {path}")
+path.write_text(text.replace(old, new, 1))
+print(f"megatron_save_checkpoint_no_grad_hotfix=installed path={path}", flush=True)
+PY
+}
+
+install_engine_megatron_save_checkpoint_no_grad_hotfix() {
+    "$VIRTUAL_ENV/bin/python" - <<'PY'
+import os
+from pathlib import Path
+
+path = Path(os.environ["VIRTUAL_ENV"]) / "lib/python3.12/site-packages/verl/workers/engine/megatron/transformer_impl.py"
+marker = "rLLM_ENGINE_MEGATRON_SAVE_CHECKPOINT_NO_GRAD_HOTFIX"
+text = path.read_text()
+if marker in text:
+    print("engine_megatron_save_checkpoint_no_grad_hotfix=already_installed", flush=True)
+    raise SystemExit(0)
+
+old = """        origin_module_device = get_megatron_module_device(self.module)
+        if self._is_offload_param or origin_module_device == "cpu":
+            load_megatron_model_to_gpu(self.module, load_grad=True)
+        self.checkpoint_mananager.save_checkpoint(
+            local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
+        )
+        torch.distributed.barrier()
+        if self._is_offload_param:
+            offload_megatron_model_to_cpu(self.module)
+"""
+new = f"""        # {marker}
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else "unknown"
+        import os as _rllm_os
+        origin_module_device = get_megatron_module_device(self.module)
+        print(
+            "rllm_engine_save_checkpoint_start "
+            f"rank={{rank}} offload_param={{self._is_offload_param}} "
+            f"origin_module_device={{origin_module_device}} path={{local_path}} "
+            f"hdfs={{hdfs_path}} step={{global_step}}",
+            flush=True,
+        )
+        log_gpu_memory_usage("rllm engine save_checkpoint before load actor params", logger=logger)
+        if self._is_offload_param or origin_module_device == "cpu":
+            print(f"rllm_engine_save_checkpoint_before_load_model rank={{rank}}", flush=True)
+            load_megatron_model_to_gpu(self.module, load_grad=False)
+            torch.cuda.synchronize()
+            print(f"rllm_engine_save_checkpoint_after_load_model rank={{rank}}", flush=True)
+            log_gpu_memory_usage("rllm engine save_checkpoint after load actor params", logger=logger)
+        print(f"rllm_engine_save_checkpoint_before_manager rank={{rank}}", flush=True)
+        self.checkpoint_mananager.save_checkpoint(
+            local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep
+        )
+        print(f"rllm_engine_save_checkpoint_after_manager rank={{rank}}", flush=True)
+        if _rllm_os.environ.get("RLLM_ENGINE_SAVE_SKIP_POST_CLEANUP", "").strip().lower() in {{"1", "true", "yes", "on"}}:
+            print(f"rllm_engine_save_checkpoint_skip_post_cleanup rank={{rank}}", flush=True)
+            return
+        print(f"rllm_engine_save_checkpoint_before_post_barrier rank={{rank}}", flush=True)
+        torch.distributed.barrier()
+        print(f"rllm_engine_save_checkpoint_after_post_barrier rank={{rank}}", flush=True)
+        if self._is_offload_param:
+            if _rllm_os.environ.get("RLLM_ENGINE_SAVE_SKIP_POST_OFFLOAD", "1").strip().lower() in {{"1", "true", "yes", "on"}}:
+                print(f"rllm_engine_save_checkpoint_skip_post_offload rank={{rank}}", flush=True)
+                return
+            print(f"rllm_engine_save_checkpoint_before_post_offload rank={{rank}}", flush=True)
+            offload_megatron_model_to_cpu(self.module)
+            print(f"rllm_engine_save_checkpoint_after_post_offload rank={{rank}}", flush=True)
+"""
+if old not in text:
+    raise SystemExit(f"Could not find engine Megatron save_checkpoint hook point in {path}")
+path.write_text(text.replace(old, new, 1))
+print(f"engine_megatron_save_checkpoint_no_grad_hotfix=installed path={path}", flush=True)
+PY
+}
+
 install_bypass_debug_metrics_hotfix() {
     "$VIRTUAL_ENV/bin/python" - <<'PY'
 import os
@@ -355,6 +451,8 @@ restore_megatron_cp2_overlay_for_arnold
 install_qwen35_mtp_export_hotfix
 install_megatron_checkpoint_json_hotfix
 install_megatron_initial_load_hotfix
+install_megatron_save_checkpoint_no_grad_hotfix
+install_engine_megatron_save_checkpoint_no_grad_hotfix
 install_bypass_debug_metrics_hotfix
 if [ "${RLLM_SWE_LINK_LOCAL_MODEL_PATH:-1}" = "1" ] \
     && [ ! -d /mnt/hdfs/model_path ] \
@@ -475,6 +573,24 @@ if not ok:
 PY
 
 TRAINING_SCRIPT="$COOKBOOK_DIR/swe/training_scripts/run_swe_training_35b_a3b_megatron.sh"
+"$VIRTUAL_ENV/bin/python" - "$TRAINING_SCRIPT" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+replacements = {
+    "'actor_rollout_ref.actor.checkpoint.save_contents=[model,optimizer,extra]'": "'actor_rollout_ref.actor.checkpoint.save_contents=[model,extra]'",
+    "'actor_rollout_ref.actor.checkpoint.load_contents=[model,optimizer,extra]'": "'actor_rollout_ref.actor.checkpoint.load_contents=[model,extra]'",
+}
+changed = False
+for old, new in replacements.items():
+    if old in text:
+        text = text.replace(old, new)
+        changed = True
+path.write_text(text)
+print(f"swe_training_checkpoint_contents_model_extra path={path} changed={changed}", flush=True)
+PY
 if [ "${RLLM_SWE_MODE:-smoke}" = "smoke" ]; then
     smoke_extra_args=()
     if [ -n "${RLLM_SWE_SMOKE_EXTRA_ARGS:-}" ]; then

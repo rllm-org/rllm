@@ -203,7 +203,7 @@ SWE_STEP_LIMIT=${SWE_STEP_LIMIT:-200}
 SWE_AGENT_TIMEOUT=${SWE_AGENT_TIMEOUT:-720}
 SWE_COMMAND_TIMEOUT=${SWE_COMMAND_TIMEOUT:-120}
 SWE_SANDBOX_TIMEOUT=${SWE_SANDBOX_TIMEOUT:-900}
-SWE_STARTUP_JITTER_S=${SWE_STARTUP_JITTER_S:-25.0}
+SWE_STARTUP_JITTER_S=${SWE_STARTUP_JITTER_S:-30}
 SWE_VAL_STEP_LIMIT=${SWE_VAL_STEP_LIMIT:-300}
 SWE_VAL_AGENT_TIMEOUT=${SWE_VAL_AGENT_TIMEOUT:-1200}
 SWE_VAL_COMMAND_TIMEOUT=${SWE_VAL_COMMAND_TIMEOUT:-$SWE_COMMAND_TIMEOUT}
@@ -299,6 +299,7 @@ python -u -m swe.scripts.train_swe_verl \
     \
     data.train_batch_size=16 \
     data.gen_batch_size=16 \
+    data.val_batch_size=300 \
     data.max_prompt_length=30720 \
     data.max_response_length=32768 \
     data.filter_overlong_prompts=true \
@@ -336,8 +337,8 @@ python -u -m swe.scripts.train_swe_verl \
     actor_rollout_ref.actor.use_torch_compile=false \
     actor_rollout_ref.actor.use_dynamic_bsz=false \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=32768 \
-    'actor_rollout_ref.actor.checkpoint.save_contents=[model,optimizer,extra]' \
-    'actor_rollout_ref.actor.checkpoint.load_contents=[model,optimizer,extra]' \
+    'actor_rollout_ref.actor.checkpoint.save_contents=[model,extra]' \
+    'actor_rollout_ref.actor.checkpoint.load_contents=[model,extra]' \
     \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.mode=async \
@@ -353,6 +354,7 @@ python -u -m swe.scripts.train_swe_verl \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=49152 \
     actor_rollout_ref.rollout.calculate_log_probs=true \
     actor_rollout_ref.rollout.n=8 \
+    actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.temperature=1.0 \
     actor_rollout_ref.rollout.top_p=1.0 \
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=6144 \
@@ -380,6 +382,7 @@ python -u -m swe.scripts.train_swe_verl \
     \
     ++rllm.gateway.db_path=/tmp/gateway_traces_9b_megatron.db \
     ++rllm.gateway.strip_vllm_fields=false \
+    rllm.rollout.n_val=1 \
     rllm.workflow.n_parallel_tasks=${SWE_N_PARALLEL_TASKS} \
     rllm.disable_thinking=${RLLM_DISABLE_THINKING} \
     rllm.workflow.retry_limit=1 \

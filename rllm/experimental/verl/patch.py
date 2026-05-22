@@ -367,21 +367,48 @@ def patch_verl_vllm_server_port_ranges() -> None:
             raise RuntimeError(f"Invalid vLLM port range dimensions: {stride=} {nnodes=}")
 
         port = str(base + ((replica_rank * nnodes + node_rank) * stride))
+        env_overrides: dict[str, str] = {}
+        if nnodes == 1:
+            # vLLM 0.18.x still creates several local TCPStore sockets with
+            # AF_INET. On IPv6 Ray clusters, get_ip() can advertise the node's
+            # IPv6 address while those stores listen on IPv4 only, causing
+            # startup to hang until the 600s c10d timeout. Single-node rollout
+            # replicas only need local engine communication, so force vLLM's
+            # internal host selection onto loopback while leaving the veRL HTTP
+            # server bound to the Ray node address.
+            env_overrides = {
+                "VLLM_HOST_IP": "127.0.0.1",
+                "VLLM_LOOPBACK_IP": "127.0.0.1",
+                "VLLM_DP_MASTER_IP": "127.0.0.1",
+            }
+
         logger.info(
             "Using VLLM_PORT=%s for vLLM async server replica_rank=%s node_rank=%s "
-            "(base=%s stride=%s nnodes=%s)",
+            "(base=%s stride=%s nnodes=%s env_overrides=%s)",
             port,
             replica_rank,
             node_rank,
             base,
             stride,
             nnodes,
+            sorted(env_overrides),
         )
+        previous_env = {key: os.environ.get(key) for key in env_overrides}
         token = current_vllm_port.set(port)
         try:
+            os.environ.update(env_overrides)
+            if env_overrides:
+                _clear_vllm_env_cache()
             return await original_run_server(self, args)
         finally:
             current_vllm_port.reset(token)
+            for key, previous in previous_env.items():
+                if previous is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = previous
+            if previous_env:
+                _clear_vllm_env_cache()
 
     server_cls.run_server = patched_run_server
     _VERL_VLLM_SERVER_PORT_RANGES_PATCHED = True
