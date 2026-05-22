@@ -145,7 +145,8 @@ gateway:
   tunnel: null        # Reach gateway from remote sandboxes. Either a backend name ("cloudflared")
                       # to auto-spawn a tunnel, or an http(s):// URL reachable from the sandbox
                       # (your own tailscale IP, bore/ngrok/frp URL, internal DNS, etc.).
-  db_path: null       # Defaults to temp file
+  store: memory       # "memory" (non-persistent) | "sqlite" (writes traces to disk)
+  db_path: null       # Only used when store=sqlite; null → auto-resolved path (logged at startup)
   sampling_params_priority: session   # "session" | "client" — who wins when both set the same key
 
 # Async Training Configuration

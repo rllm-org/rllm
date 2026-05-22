@@ -40,6 +40,7 @@ class SqliteTraceStore:
                 except (OSError, PermissionError):
                     db_dir = tempfile.gettempdir()
             db_path = os.path.join(db_dir, "gateway_traces.db")
+            logger.warning("Trace store: sqlite db_path not set, defaulting to %s", db_path)
         else:
             db_path = os.path.expanduser(db_path)
             db_dir = os.path.dirname(db_path)
