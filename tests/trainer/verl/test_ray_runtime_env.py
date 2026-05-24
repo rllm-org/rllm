@@ -172,6 +172,18 @@ def test_no_rllm_exclude_set():
     assert "CUDA_VISIBLE_DEVICES" in forwarded
 
 
+def test_forward_ray_noset_cuda_visible_devices_flag():
+    """Forward the specific Ray flag verl workers inspect for local-rank setup."""
+    test_env = {
+        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+    }
+
+    with patch.dict(os.environ, test_env, clear=True):
+        forwarded = _get_forwarded_env_vars()
+
+    assert forwarded["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] == "1"
+
+
 def test_empty_rllm_exclude():
     """Test behavior when RLLM_EXCLUDE is set but empty."""
     test_env = {

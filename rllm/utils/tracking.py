@@ -298,9 +298,9 @@ class TeeStream:
     def _send_buffer(self):
         if not self._log_buffer:
             return
-        from datetime import UTC, datetime
+        from datetime import datetime, timezone
 
-        now = datetime.now(UTC).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         logs = [{"session_id": self._session_id, "timestamp": now, "stream": self._stream_name, "message": line} for line in self._log_buffer]
         self._log_buffer = []
         self._last_flush = time.time()
@@ -480,6 +480,45 @@ class UILogger:
                 else:
                     self.logger.info(f"Sent {len(groups_payloads)} trajectory groups individually")
 
+    def _prepare_episode_payload(self, episode, step: int) -> dict[str, Any]:
+        """Convert an rllm Episode to the current rllm-ui episode schema."""
+        if hasattr(episode, "model_dump"):
+            try:
+                ep = episode.model_dump(mode="json")
+            except Exception:
+                ep = episode.model_dump(mode="python")
+        elif hasattr(episode, "to_dict"):
+            ep = episode.to_dict()
+        else:
+            ep = dict(episode)
+
+        ep["session_id"] = self.session_id
+        ep["session_type"] = self.session_type
+        ep["step"] = step
+        ep["episode_id"] = ep.pop("id", ep.get("episode_id"))
+        if isinstance(ep.get("task"), dict):
+            ep["task"] = {k: v for k, v in ep["task"].items() if k not in ("image", "images")}
+
+        # These training/runtime payloads can be large and are not accepted by
+        # the current rllm-ui AgentStep schema. Keep user-visible fields such as
+        # observation, thought, model_response, chat_completions, info,
+        # mc_return, and advantage top-level.
+        transient_step_fields = {
+            "prompt_ids",
+            "response_ids",
+            "logprobs",
+            "routing_matrices",
+            "model_output",
+            "weight_version",
+        }
+        for traj in ep.get("trajectories", []):
+            for step_data in traj.get("steps", []):
+                for key in transient_step_fields:
+                    step_data.pop(key, None)
+
+        serialized = json.dumps(ep, default=self._json_serializer)
+        return json.loads(serialized)
+
     def log(self, data, step, episodes=None, trajectory_groups=None):
         """Log metrics and optionally episodes/trajectory_groups.
 
@@ -506,43 +545,7 @@ class UILogger:
         episodes_payloads = None
         if episodes:
             try:
-                # The UI backend accepts the base Step schema:
-                # id, input, output, action, reward, done, metadata.
-                # Training Steps add extra fields (chat_completions, thought,
-                # model_response, observation, prompt_ids, etc.) that cause
-                # 500 errors. Fold useful extras into metadata so nothing
-                # is lost.
-                _BASE_STEP_KEYS = {"id", "input", "output", "action", "reward", "done", "metadata"}
-                _PROMOTE_TO_METADATA = {"thought", "model_response", "observation"}
-                episodes_payloads = []
-                for episode in episodes:
-                    ep = episode.model_dump(mode="json") if hasattr(episode, "model_dump") else episode.to_dict()
-                    ep["session_id"] = self.session_id
-                    ep["session_type"] = self.session_type
-                    ep["step"] = step
-                    ep["episode_id"] = ep.pop("id")
-                    for traj in ep.get("trajectories", []):
-                        for s in traj.get("steps", []):
-                            # Fold useful training fields into metadata
-                            meta = s.get("metadata") or {}
-                            for key in _PROMOTE_TO_METADATA:
-                                val = s.get(key)
-                                if val:
-                                    # Truncate large values (chat_completions
-                                    # can be huge for multi-turn agents)
-                                    if key == "chat_completions":
-                                        meta[key] = val[-3:]  # keep last 3 messages
-                                    else:
-                                        sval = str(val)
-                                        meta[key] = sval[:2000] if len(sval) > 2000 else val
-                            if meta:
-                                s["metadata"] = meta
-                            # Strip everything not in the base schema
-                            for key in list(s.keys()):
-                                if key not in _BASE_STEP_KEYS:
-                                    del s[key]
-                    serialized = json.dumps(ep, default=self._json_serializer)
-                    episodes_payloads.append(json.loads(serialized))
+                episodes_payloads = [self._prepare_episode_payload(episode, step) for episode in episodes]
                 self.logger.info(f"Queueing {len(episodes_payloads)} episodes to send to UI [step {step}]")
             except Exception as e:
                 self.logger.warning(f"Failed to serialize episodes: {e}")

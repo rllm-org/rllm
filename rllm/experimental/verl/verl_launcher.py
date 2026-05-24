@@ -116,10 +116,10 @@ class VerlTrainerLauncher(TrainerLauncher):
     def train(self):
         own_ray = False
         if not ray.is_initialized():
-            from rllm.trainer.ray_init_utils import get_ray_init_settings
+            from rllm.trainer.ray_init_utils import get_ray_init_settings, init_ray_with_safe_cwd
 
             ray_init_settings = get_ray_init_settings(self.config)
-            ray.init(runtime_env=get_ppo_ray_runtime_env(), **ray_init_settings)
+            init_ray_with_safe_cwd(runtime_env=get_ppo_ray_runtime_env(), **ray_init_settings)
             own_ray = True
 
         # Capture Hydra CLI overrides while we're still in the Hydra-decorated

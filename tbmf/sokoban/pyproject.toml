@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sokoban-agent"
+version = "0.1.0"
+description = "Multi-turn Sokoban agent plugin for rLLM (AgentFlow protocol)"
+requires-python = ">=3.10"
+dependencies = ["rllm", "openai", "numpy", "gym", "gym-sokoban"]
+
+[tool.setuptools]
+py-modules = ["sokoban_flow", "sokoban_eval", "sokoban_prompt", "prepare_sokoban_data"]
+
+[tool.setuptools.packages.find]
+include = ["sokoban_pkg*"]
+
+[project.entry-points."rllm.agents"]
+sokoban = "sokoban_flow:sokoban_flow"
+
+[project.entry-points."rllm.evaluators"]
+sokoban = "sokoban_eval:sokoban_evaluator"

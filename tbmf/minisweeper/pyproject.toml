@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "minisweeper-agent"
+version = "0.1.0"
+description = "Multi-turn MiniSweeper agent plugin for rLLM (AgentFlow protocol)"
+requires-python = ">=3.10"
+dependencies = ["rllm", "openai", "numpy"]
+
+[tool.setuptools]
+py-modules = ["minisweeper_flow", "minisweeper_eval", "minisweeper_prompt", "prepare_minisweeper_data"]
+
+[tool.setuptools.packages.find]
+include = ["minisweeper_pkg*"]
+
+[project.entry-points."rllm.agents"]
+minisweeper = "minisweeper_flow:minisweeper_flow"
+
+[project.entry-points."rllm.evaluators"]
+minisweeper = "minisweeper_eval:minisweeper_evaluator"

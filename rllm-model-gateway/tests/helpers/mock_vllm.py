@@ -117,7 +117,10 @@ def build_mock_vllm_app() -> FastAPI:
     """Create a minimal mock vLLM server that returns canned responses."""
     app = FastAPI()
     app.state.request_log: list[dict[str, Any]] = []
+    app.state.tokenize_log: list[dict[str, Any]] = []
     app.state._log_lock = threading.Lock()
+    app.state.tokenize_count = 5
+    app.state.max_model_len = 128
 
     @app.get("/health")
     async def health():
@@ -126,6 +129,18 @@ def build_mock_vllm_app() -> FastAPI:
     @app.get("/v1/models")
     async def models():
         return {"data": [{"id": "mock-model", "object": "model"}]}
+
+    @app.post("/tokenize")
+    async def tokenize(request: Request):
+        body = await request.json()
+        with app.state._log_lock:
+            app.state.tokenize_log.append(body)
+        count = int(app.state.tokenize_count)
+        return {
+            "count": count,
+            "max_model_len": int(app.state.max_model_len),
+            "tokens": list(range(count)),
+        }
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
@@ -234,6 +249,10 @@ class MockVLLMServer:
     @property
     def request_log(self) -> list[dict[str, Any]]:
         return self.app.state.request_log
+
+    @property
+    def tokenize_log(self) -> list[dict[str, Any]]:
+        return self.app.state.tokenize_log
 
     def start(self) -> None:
         if self.port == 0:

@@ -41,6 +41,10 @@ FORWARD_PREFIXES = [
     "RLLM_",
 ]
 
+FORWARD_EXACT = [
+    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+]
+
 
 def _get_forwarded_env_vars():
     """
@@ -73,7 +77,11 @@ def _get_forwarded_env_vars():
         else:
             exclude_vars.add(name)
 
-    forwarded = {k: v for k, v in os.environ.items() if any(k.startswith(p) for p in forward_prefix) and k not in exclude_vars}
+    forwarded = {
+        k: v
+        for k, v in os.environ.items()
+        if (any(k.startswith(p) for p in forward_prefix) or k in FORWARD_EXACT) and k not in exclude_vars
+    }
     return forwarded
 
 

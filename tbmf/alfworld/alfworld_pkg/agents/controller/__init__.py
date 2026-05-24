@@ -1,0 +1,4 @@
+from alfworld_pkg.agents.controller.oracle import OracleAgent
+from alfworld_pkg.agents.controller.oracle_astar import OracleAStarAgent
+from alfworld_pkg.agents.controller.mrcnn import MaskRCNNAgent
+from alfworld_pkg.agents.controller.mrcnn_astar import MaskRCNNAStarAgent

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alfworld-agent"
+version = "0.1.0"
+description = "Multi-turn ALFWorld household task agent plugin for rLLM (AgentFlow protocol)"
+requires-python = ">=3.10"
+dependencies = ["rllm", "openai", "textworld", "pyyaml"]
+
+[tool.setuptools]
+py-modules = ["alfworld_flow", "alfworld_eval", "prepare_alfworld_data"]
+
+[project.entry-points."rllm.agents"]
+alfworld = "alfworld_flow:alfworld_flow"
+
+[project.entry-points."rllm.evaluators"]
+alfworld = "alfworld_eval:alfworld_evaluator"

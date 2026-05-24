@@ -28,10 +28,10 @@ def main(config):
 def run_ppo_agent(config):
     # Check if Ray is not initialized
     if not ray.is_initialized():
-        from rllm.trainer.ray_init_utils import get_ray_init_settings
+        from rllm.trainer.ray_init_utils import get_ray_init_settings, init_ray_with_safe_cwd
 
         ray_init_settings = get_ray_init_settings(config)
-        ray.init(runtime_env=get_ppo_ray_runtime_env(), **ray_init_settings)
+        init_ray_with_safe_cwd(runtime_env=get_ppo_ray_runtime_env(), **ray_init_settings)
 
     runner_cls = ray.remote(num_cpus=1)(TaskRunner)
 

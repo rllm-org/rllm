@@ -45,6 +45,9 @@ def get_ray_init_settings(config: Any | None = None) -> dict[str, Any]:
       `address="auto"` to attach.
     - If none of the above applies, we return no `address`, so Ray will start a
       local cluster.
+    - For local clusters, the Ray dashboard is disabled by default. Training
+      runs do not require it, and dashboard agent ports are a common source of
+      collisions when repeated local jobs are launched on the same host.
     """
 
     settings: dict[str, Any] = {}
@@ -60,5 +63,37 @@ def get_ray_init_settings(config: Any | None = None) -> dict[str, Any]:
 
     if should_attach_to_existing_ray_cluster():
         settings["address"] = "auto"
+        return settings
 
+    settings.setdefault("include_dashboard", False)
     return settings
+
+
+def _local_ray_start_dir() -> Path:
+    return Path(os.getenv("RLLM_RAY_START_DIR", f"/tmp/rllm-ray-start-{os.getuid()}"))
+
+
+def init_ray_with_safe_cwd(*args: Any, **kwargs: Any):
+    """Initialize Ray without inheriting a slow shared-filesystem cwd.
+
+    Ray's raylet launches the runtime-env agent as a child process. On DolphinFS
+    workspaces that child can spend long enough initializing from the inherited
+    cwd that raylet gives up after 30s with "Runtime Env Agent timed out".
+    Start local Ray clusters from /tmp, then restore the driver's original cwd
+    so Hydra outputs and relative paths keep their existing behavior.
+    """
+
+    import ray
+
+    if kwargs.get("address"):
+        return ray.init(*args, **kwargs)
+
+    original_cwd = Path.cwd()
+    start_dir = _local_ray_start_dir()
+    start_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        os.chdir(start_dir)
+        return ray.init(*args, **kwargs)
+    finally:
+        os.chdir(original_cwd)

@@ -142,6 +142,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         self.checkpoint_manager: CheckpointEngineManager | None = None
         self.rollout_engine: VerlEngine | None = None
         self.algorithm_config: AlgorithmConfig | None = None
+        self._actor_model_needs_device_reload = False
 
         self.train_dataloader, self.val_dataloader, self.total_training_steps = create_dataloaders(
             config,
@@ -372,6 +373,21 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             worker_group._dispatch_info[mesh_name] = worker_group._query_dispatch_info(mesh_name)
         return max(worker_group._dispatch_info[mesh_name]) + 1
 
+    def _mark_actor_model_maybe_offloaded_by_weight_sync(self) -> None:
+        """Track Verl's naive weight sync, which manually offloads actor params."""
+        checkpoint_backend = self.config.actor_rollout_ref.rollout.checkpoint_engine.get("backend", "naive")
+        if checkpoint_backend == "naive":
+            self._actor_model_needs_device_reload = True
+
+    def _ensure_actor_model_on_device(self) -> None:
+        """Reload actor params after rollout weight sync before FSDP forwards."""
+        if not self._actor_model_needs_device_reload:
+            return
+        if self.actor_rollout_wg is None:
+            return
+        self.actor_rollout_wg.to("device", model=True, optimizer=False, grad=False)
+        self._actor_model_needs_device_reload = False
+
     def _get_aggregate_dp_size(self) -> int | None:
         """Compute the LCM of DP sizes across all active worker-group meshes.
 
@@ -436,6 +452,8 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         metrics = trainer_state.metrics
         timing_dict = trainer_state.timing_dict
         batch: DataProto = trainer_state.backend_batch  # type: ignore[assignment]
+
+        self._ensure_actor_model_on_device()
 
         # Balance the number of valid tokens across DP ranks.
         # NOTE: This usually changes the order of data in the `batch`,
@@ -578,6 +596,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         batch: DataProto = trainer_state.backend_batch  # type: ignore[assignment]
 
         if self.config.trainer.get("critic_warmup", 0) <= global_steps:
+            self._ensure_actor_model_on_device()
             with simple_timer("update_actor", trainer_state.timing_dict):
                 self._update_actor_with_loss_routing(batch, trainer_state)
 
@@ -672,6 +691,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         self.global_steps = trainer_state.global_step
         self.global_steps = load_checkpoint(self.config, self.actor_rollout_wg, train_dataloader=self.train_dataloader)
         await self.checkpoint_manager.update_weights(self.global_steps)
+        self._mark_actor_model_maybe_offloaded_by_weight_sync()
         # we need to set trainer's global_steps to sync with the loaded checkpoint
         trainer_state.global_step = self.global_steps
         trainer_state.epoch = self.global_steps // len(self.train_dataloader)
@@ -701,6 +721,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         # Weight synchronization
         with simple_timer("update_weights", trainer_state.timing_dict):
             await self.checkpoint_manager.update_weights(trainer_state.global_step)
+            self._mark_actor_model_maybe_offloaded_by_weight_sync()
 
         # Update metrics
         batch: DataProto = trainer_state.backend_batch  # type: ignore[attr-defined]

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "webshop-agent"
+version = "0.1.0"
+description = "Multi-turn WebShop agent plugin for rLLM (AgentFlow protocol)"
+requires-python = ">=3.10"
+dependencies = ["rllm", "openai", "numpy", "ray", "gym", "beautifulsoup4", "flask", "torch"]
+
+[tool.setuptools]
+py-modules = ["webshop_flow", "webshop_eval", "webshop_env", "prepare_webshop_data"]
+
+[project.entry-points."rllm.agents"]
+webshop = "webshop_flow:webshop_flow"
+
+[project.entry-points."rllm.evaluators"]
+webshop = "webshop_eval:webshop_evaluator"

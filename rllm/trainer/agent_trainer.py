@@ -80,10 +80,10 @@ class AgentTrainer:
         from rllm.trainer.verl.train_agent_ppo import TaskRunner
 
         if not ray.is_initialized():
-            from rllm.trainer.ray_init_utils import get_ray_init_settings
+            from rllm.trainer.ray_init_utils import get_ray_init_settings, init_ray_with_safe_cwd
 
             ray_init_settings = get_ray_init_settings(self.config)
-            ray.init(runtime_env=get_ppo_ray_runtime_env(), **ray_init_settings)
+            init_ray_with_safe_cwd(runtime_env=get_ppo_ray_runtime_env(), **ray_init_settings)
 
         runner_cls = ray.remote(num_cpus=1)(TaskRunner)
         runner = runner_cls.remote()
@@ -102,9 +102,10 @@ class AgentTrainer:
 
         if not ray.is_initialized():
             # TODO: check whether we need a separate function to retrieve the runtime environment (for fireworks)
+            from rllm.trainer.ray_init_utils import init_ray_with_safe_cwd
             from verl.trainer.constants_ppo import get_ppo_ray_runtime_env as get_fireworks_ray_runtime_env
 
-            ray.init(runtime_env=get_fireworks_ray_runtime_env(), num_cpus=self.config.ray_init.num_cpus)
+            init_ray_with_safe_cwd(runtime_env=get_fireworks_ray_runtime_env(), num_cpus=self.config.ray_init.num_cpus)
 
         # Lazy import to avoid requiring fireworks package for users who don't use it
         from rllm.trainer.verl.train_workflow_pipeline import PipelineTaskRunner

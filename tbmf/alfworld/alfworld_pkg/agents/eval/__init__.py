@@ -1,0 +1,3 @@
+from alfworld_pkg.agents.eval.evaluate_dagger import evaluate_dagger
+from alfworld_pkg.agents.eval.evaluate_vision_dagger import evaluate_vision_dagger
+from alfworld_pkg.agents.eval.evaluate_dqn import evaluate_dqn
