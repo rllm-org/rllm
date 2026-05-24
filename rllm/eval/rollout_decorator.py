@@ -62,10 +62,19 @@ class AgentFlowFn:
     :func:`run_agent_flow` can await it directly.
     """
 
-    def __init__(self, fn: Callable, *, name: str = "solver") -> None:
+    def __init__(
+        self,
+        fn: Callable,
+        *,
+        name: str = "solver",
+        prewarm: Callable | None = None,
+        prewarm_cleanup: Callable | None = None,
+    ) -> None:
         self._fn = fn
         self._name = name
         self._is_async = inspect.iscoroutinefunction(fn)
+        self.prewarm = prewarm
+        self.prewarm_cleanup = prewarm_cleanup
         update_wrapper(self, fn)
 
     def run(self, task: Task, config: AgentConfig) -> Episode:
@@ -129,7 +138,7 @@ def rollout(fn: Callable) -> AgentFlowFn: ...
 
 
 @overload
-def rollout(*, name: str = "solver", register: str | None = None) -> Callable[[Callable], AgentFlowFn]: ...
+def rollout(*, name: str = "solver", register: str | None = None, prewarm: Callable | None = None, prewarm_cleanup: Callable | None = None) -> Callable[[Callable], AgentFlowFn]: ...
 
 
 def rollout(
@@ -137,6 +146,8 @@ def rollout(
     *,
     name: str = "solver",
     register: str | None = None,
+    prewarm: Callable | None = None,
+    prewarm_cleanup: Callable | None = None,
 ) -> AgentFlowFn | Callable[[Callable], AgentFlowFn]:
     """Decorator that turns a function into an :class:`AgentFlow`.
 
@@ -174,7 +185,7 @@ def rollout(
     """
 
     def _decorator(fn: Callable) -> AgentFlowFn:
-        agent = AgentFlowFn(fn, name=name)
+        agent = AgentFlowFn(fn, name=name, prewarm=prewarm, prewarm_cleanup=prewarm_cleanup)
         if register is not None:
             from rllm.eval.agent_loader import register_agent
 

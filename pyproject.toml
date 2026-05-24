@@ -18,7 +18,7 @@ classifiers = [
 ]
 license = {file = "LICENSE"}
 dependencies = [
-    "rllm-model-gateway",
+    # "rllm-model-gateway",
     # CLI
     "click>=8.0",
     "rich>=13.9.4",

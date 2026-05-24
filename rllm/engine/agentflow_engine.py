@@ -32,6 +32,7 @@ from tqdm import tqdm
 
 from rllm.eval.types import EvalOutput
 from rllm.experimental.engine.trace_converter import compute_step_metrics, trace_record_to_step
+from rllm.experimental.prewarm import PrewarmStore
 from rllm.types import AgentConfig, Episode, Step, Task, Trajectory, run_agent_flow
 from rllm.utils import colorful_print
 from rllm.workflows.workflow import TerminationReason
@@ -346,6 +347,7 @@ class AgentFlowEngine:
         hooks: TaskHooks | None = None,
         train_sampling_params: dict | None = None,
         val_sampling_params: dict | None = None,
+        prewarm_store: PrewarmStore | None = None,
     ) -> None:
         if evaluator is None and hooks is None:
             raise ValueError("AgentFlowEngine requires either an `evaluator` (single evaluator, typical training) or `hooks` (per-task evaluator + setup/teardown, typical eval). Both cannot be None.")
@@ -361,6 +363,7 @@ class AgentFlowEngine:
         self.hooks = hooks
         self.train_sampling_params = train_sampling_params
         self.val_sampling_params = val_sampling_params
+        self.prewarm_store = prewarm_store
 
         self.executor = ThreadPoolExecutor(max_workers=n_parallel_tasks)
         self._semaphore = asyncio.Semaphore(n_parallel_tasks)
@@ -609,12 +612,17 @@ class AgentFlowEngine:
         try:
             session_url = self.gateway.get_session_url(uid)
 
+            metadata: dict[str, Any] = {}
+            if self.prewarm_store is not None:
+                metadata["_prewarm_store"] = self.prewarm_store
+
             config = AgentConfig(
                 base_url=session_url,
                 model=self.model,
                 session_uid=uid,
                 is_validation=is_validation,
                 sampling_params=(self.train_sampling_params if not is_validation else self.val_sampling_params) or {},
+                metadata=metadata,
             )
 
             # Prefer the per-task flow from the hook so parallel tasks don't

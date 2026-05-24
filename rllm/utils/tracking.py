@@ -335,35 +335,43 @@ class UILogger:
         self.logger = logging.getLogger(__name__)
         self.session_type = session_type
         from rllm.eval.config import load_ui_config
+        from urllib.parse import urlparse
 
         ui_config = load_ui_config()
         api_key = os.getenv("RLLM_API_KEY") or ui_config.get("ui_api_key")
-        ui_url = os.getenv("RLLM_UI_URL")
-        if not ui_url:
-            ui_url = "https://ui.rllm-project.com" if api_key else "http://localhost:3000"
-        self.ui_url = ui_url
-        headers = {}
-        if api_key:
-            headers["X-API-Key"] = api_key
-        self.client = httpx.Client(base_url=self.ui_url, timeout=5.0, headers=headers)
         self._heartbeat_stop = threading.Event()
+        self.session_id = None
+        self.client = None
+        self.ui_url = None
 
-        try:
-            # Create session with source metadata
-            response = self.client.post(
-                "/api/sessions",
-                json={"project": project_name, "experiment": experiment_name, "config": config, "source_metadata": source_metadata or {}, "session_type": session_type},
-            )
-            response.raise_for_status()
-            resp_data = response.json()
+        def _candidate_ui_urls() -> list[str]:
+            requested_ui_url = os.getenv("RLLM_UI_URL")
+            local_ui_url = os.getenv("RLLM_UI_URL_LOCAL", "http://localhost:3000")
+            remote_ui_url = os.getenv("RLLM_UI_URL_REMOTE", "http://33.236.207.54:3000")
+
+            if requested_ui_url:
+                candidates = [requested_ui_url]
+                parsed = urlparse(requested_ui_url)
+                if parsed.hostname in ("localhost", "127.0.0.1") and remote_ui_url not in candidates:
+                    candidates.append(remote_ui_url)
+                return candidates
+
+            if os.getenv("RLLM_UI_URL_LOCAL") or os.getenv("RLLM_UI_URL_REMOTE"):
+                return [local_ui_url, remote_ui_url]
+
+            if api_key:
+                return ["https://ui.rllm-project.com"]
+            return [local_ui_url, remote_ui_url]
+
+        def _install_session(client: httpx.Client, ui_url: str, resp_data: dict[str, Any]) -> None:
+            self.client = client
+            self.ui_url = ui_url
             self.session_id = resp_data.get("id") or resp_data.get("session_id")
             self.logger.info(f"UILogger initialized with session_id: {self.session_id}")
 
             # Build clickable session URL
             # For local dev, the frontend runs on a different port (default 5173)
             # than the API backend (default 3000). In production they share a domain.
-            from urllib.parse import urlparse
-
             parsed = urlparse(self.ui_url)
             if parsed.hostname in ("localhost", "127.0.0.1"):
                 frontend_base = f"{parsed.scheme}://localhost:5173"
@@ -399,9 +407,28 @@ class UILogger:
             self._original_stderr = sys.stderr
             sys.stdout = TeeStream(sys.stdout, self.client, self.session_id, "stdout")
             sys.stderr = TeeStream(sys.stderr, self.client, self.session_id, "stderr")
-        except Exception as e:
-            self.logger.warning(f"Failed to initialize UILogger: {e}")
-            self.session_id = None
+
+        last_error = None
+        for candidate_ui_url in _candidate_ui_urls():
+            headers = {}
+            if api_key:
+                headers["X-API-Key"] = api_key
+            client = httpx.Client(base_url=candidate_ui_url, timeout=5.0, headers=headers)
+            try:
+                response = client.post(
+                    "/api/sessions",
+                    json={"project": project_name, "experiment": experiment_name, "config": config, "source_metadata": source_metadata or {}, "session_type": session_type},
+                )
+                response.raise_for_status()
+                resp_data = response.json()
+                _install_session(client, candidate_ui_url, resp_data)
+                return
+            except Exception as e:
+                last_error = e
+                client.close()
+
+        self.logger.warning(f"Failed to initialize UILogger: {last_error}")
+        self.session_id = None
 
     def _heartbeat_loop(self):
         """Send heartbeat every 30 seconds until stopped."""

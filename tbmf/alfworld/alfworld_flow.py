@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import sys
+import tempfile
 import threading
 import time
 from functools import partial
@@ -231,6 +232,39 @@ def parse_action(response: str) -> str | None:
 # waiters before the first ready rollout can even open its LLM HTTP connection.
 _ENV_INIT_THREAD_LOCK = threading.Lock()
 _ENV_INIT_ASYNC_LOCKS: dict[int, asyncio.Lock] = {}
+_ALFWORLD_TMPDIR_CONFIGURED = False
+_ALFWORLD_TMPDIR_LOCK = threading.Lock()
+
+
+def _default_alfworld_tmpdir() -> str:
+    repo_root = os.path.abspath(os.path.join(_PKG_DIR, "..", ".."))
+    return os.path.join(repo_root, "outputs", "alfworld_tmp")
+
+
+def _configure_alfworld_tmpdir() -> str:
+    """Force TextWorld/FastDownward temp files away from Ray's temp space."""
+    global _ALFWORLD_TMPDIR_CONFIGURED
+
+    with _ALFWORLD_TMPDIR_LOCK:
+        tmpdir = (
+            os.environ.get("ALFWORLD_TMPDIR")
+            or os.environ.get("RLLM_ALFWORLD_TMPDIR")
+            or os.environ.get("RLLM_TMPDIR")
+            or _default_alfworld_tmpdir()
+        )
+        tmpdir = os.path.abspath(os.path.expanduser(tmpdir))
+        os.makedirs(tmpdir, exist_ok=True)
+
+        os.environ["ALFWORLD_TMPDIR"] = tmpdir
+        os.environ["TMPDIR"] = tmpdir
+        os.environ["TEMP"] = tmpdir
+        os.environ["TMP"] = tmpdir
+        tempfile.tempdir = tmpdir
+
+        if not _ALFWORLD_TMPDIR_CONFIGURED:
+            logger.info("ALFWorld tempfile directory configured: %s", tmpdir)
+            _ALFWORLD_TMPDIR_CONFIGURED = True
+        return tmpdir
 
 
 def _env_concurrency_limit() -> int:
@@ -361,6 +395,7 @@ def _init_textworld_env(game_file: str, max_steps: int = 50):
 
     Returns (env, obs, info) after reset.
     """
+    _configure_alfworld_tmpdir()
     _patch_textworld_parsers()
 
     import textworld.gym
@@ -404,11 +439,37 @@ def _close_env(env) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Prewarming
+# ---------------------------------------------------------------------------
+
+
+def _prewarm_alfworld(task: Task):
+    """Pre-initialize a TextWorld env for prewarming."""
+    meta = task.metadata or {}
+    game_file = meta.get("game_file")
+    if not game_file:
+        return None
+    max_steps = int(meta.get("max_steps", 50))
+    return _init_textworld_env(game_file, max_steps)
+
+
+def _cleanup_alfworld_prewarm(prewarmed):
+    """Close an env that was prewarmed but never consumed."""
+    if prewarmed is None:
+        return
+    env, _, _ = prewarmed
+    try:
+        env.close()
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # AgentFlow
 # ---------------------------------------------------------------------------
 
 
-@rllm.rollout(name="alfworld")
+@rllm.rollout(name="alfworld", prewarm=_prewarm_alfworld, prewarm_cleanup=_cleanup_alfworld_prewarm)
 async def alfworld_flow(task: Task, config: AgentConfig) -> Episode:
     """Drive the ALFWorld TextWorld env with an LLM until termination."""
     meta = task.metadata or {}
@@ -422,16 +483,26 @@ async def alfworld_flow(task: Task, config: AgentConfig) -> Episode:
     env = None
     env_step_s = 0.0
     uid = config.session_uid or task.id
-    t = time.perf_counter()
-    logger.info("alfworld rollout %s: env init start game=%s max_steps=%d", uid, os.path.basename(game_file), max_steps)
-    env, initial_obs, admissible_commands = await _run_env_init(_init_textworld_env, game_file, max_steps)
-    env_init_s = time.perf_counter() - t
-    logger.info(
-        "alfworld rollout %s: env init done in %.2fs admissible_commands=%d",
-        uid,
-        env_init_s,
-        len(admissible_commands),
-    )
+
+    # Check for prewarmed environment
+    prewarm_store = (config.metadata or {}).get("_prewarm_store")
+    prewarmed = prewarm_store.pop(uid) if prewarm_store else None
+
+    if prewarmed is not None:
+        env, initial_obs, admissible_commands = prewarmed
+        env_init_s = 0.0
+        logger.info("alfworld rollout %s: using prewarmed env game=%s", uid, os.path.basename(game_file))
+    else:
+        t = time.perf_counter()
+        logger.info("alfworld rollout %s: env init start game=%s max_steps=%d", uid, os.path.basename(game_file), max_steps)
+        env, initial_obs, admissible_commands = await _run_env_init(_init_textworld_env, game_file, max_steps)
+        env_init_s = time.perf_counter() - t
+        logger.info(
+            "alfworld rollout %s: env init done in %.2fs admissible_commands=%d",
+            uid,
+            env_init_s,
+            len(admissible_commands),
+        )
 
     try:
         client = AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")
