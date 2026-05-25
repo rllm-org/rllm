@@ -32,7 +32,7 @@ class UnifiedWorkflowEngine:
         workflow_args: dict,
         rollout_engine: RolloutEngine,
         config: DictConfig | None = None,
-        n_parallel_tasks: int = 128,
+        n_parallel_tasks: int = 256,
         retry_limit: int = 3,
         raise_on_error: bool = True,
         episode_logger: EpisodeLogger | None = None,

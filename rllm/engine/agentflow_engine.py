@@ -339,7 +339,7 @@ class AgentFlowEngine:
         evaluator: Evaluator | None,
         gateway: GatewayManager,
         model: str,
-        n_parallel_tasks: int = 128,
+        n_parallel_tasks: int = 256,
         retry_limit: int = 3,
         raise_on_error: bool = True,
         episode_logger: EpisodeLogger | None = None,

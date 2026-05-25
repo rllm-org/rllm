@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from alfworld_eval import alfworld_evaluator
-from alfworld_flow import _run_env_init, parse_action
+from alfworld_flow import parse_action
+import alfworld_ray_env
 
 from rllm.types import Episode, Step, Trajectory
 
@@ -51,32 +51,27 @@ def test_parse_action_empty_block():
     assert parse_action(text) is None
 
 
-def test_env_init_lock_does_not_starve_default_executor():
+def test_ray_env_session_start_does_not_block_event_loop(monkeypatch):
     async def scenario():
-        loop = asyncio.get_running_loop()
-        loop.set_default_executor(ThreadPoolExecutor(max_workers=2))
-
         started = threading.Event()
         release = threading.Event()
 
-        def slow_init(name: str) -> str:
-            if name == "first":
-                started.set()
-                assert release.wait(timeout=2), "test did not release slow init"
-            return name
+        def slow_start(game_file: str, max_steps: int):
+            started.set()
+            assert release.wait(timeout=2), "test did not release slow Ray worker start"
+            return object(), "init-ref"
 
-        first = asyncio.create_task(_run_env_init(slow_init, "first"))
-        assert await asyncio.to_thread(started.wait, 2), "first init did not start"
+        monkeypatch.setattr(alfworld_ray_env, "_start_ray_worker", slow_start)
 
-        second = asyncio.create_task(_run_env_init(slow_init, "second"))
-        await asyncio.sleep(0.05)
+        task = asyncio.create_task(alfworld_ray_env.create_alfworld_env_session("game.tw-pddl", 50))
+        assert await asyncio.to_thread(started.wait, 2), "Ray worker start did not begin"
 
-        marker = await asyncio.wait_for(asyncio.to_thread(lambda: "executor-free"), timeout=0.5)
-        assert marker == "executor-free"
+        marker = await asyncio.wait_for(asyncio.sleep(0, result="event-loop-free"), timeout=0.5)
+        assert marker == "event-loop-free"
 
         release.set()
-        assert await first == "first"
-        assert await second == "second"
+        session = await task
+        assert session._init_ref == "init-ref"
 
     asyncio.run(scenario())
 

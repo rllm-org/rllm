@@ -18,29 +18,13 @@ import rllm
 from rllm.types import AgentConfig, Episode, Step, Task, Trajectory
 
 try:
-    from .alfworld_flow import (
-        _close_env,
-        _cleanup_alfworld_prewarm,
-        _env_step,
-        _init_textworld_env,
-        _prewarm_alfworld,
-        _run_env_init,
-        _run_env_io,
-        parse_action,
-    )
+    from .alfworld_flow import parse_action
     from .alfworld_prompt import get_alfworld_prompt
+    from .alfworld_ray_env import create_alfworld_env_session
 except ImportError:
-    from alfworld_flow import (
-        _close_env,
-        _cleanup_alfworld_prewarm,
-        _env_step,
-        _init_textworld_env,
-        _prewarm_alfworld,
-        _run_env_init,
-        _run_env_io,
-        parse_action,
-    )
+    from alfworld_flow import parse_action
     from alfworld_prompt import get_alfworld_prompt
+    from alfworld_ray_env import create_alfworld_env_session
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +47,7 @@ def _format_history(history: list[dict], obs_length: int = _OBS_LENGTH) -> str:
     return "\n".join(lines)
 
 
-@rllm.rollout(name="alfworld_step", prewarm=_prewarm_alfworld, prewarm_cleanup=_cleanup_alfworld_prewarm)
+@rllm.rollout(name="alfworld_step")
 async def alfworld_step_flow(task: Task, config: AgentConfig) -> Episode:
     """Drive the ALFWorld TextWorld env with step-independent LLM calls."""
     meta = task.metadata or {}
@@ -74,22 +58,15 @@ async def alfworld_step_flow(task: Task, config: AgentConfig) -> Episode:
     max_steps = int(meta.get("max_steps", 50))
     task_type = meta.get("task_type", "unknown")
 
-    env = None
+    env_session = None
     env_step_s = 0.0
     uid = config.session_uid or task.id
 
-    # Check for prewarmed environment
-    prewarm_store = (config.metadata or {}).get("_prewarm_store")
-    prewarmed = prewarm_store.pop(uid) if prewarm_store else None
-
-    if prewarmed is not None:
-        env, initial_obs, admissible_commands = prewarmed
-        env_init_s = 0.0
-        logger.info("alfworld_step rollout %s: using prewarmed env game=%s", uid, os.path.basename(game_file))
-    else:
+    try:
         t = time.perf_counter()
         logger.info("alfworld_step rollout %s: env init start game=%s max_steps=%d", uid, os.path.basename(game_file), max_steps)
-        env, initial_obs, admissible_commands = await _run_env_init(_init_textworld_env, game_file, max_steps)
+        env_session = await create_alfworld_env_session(game_file, max_steps)
+        initial_obs, admissible_commands = await env_session.initial_state()
         env_init_s = time.perf_counter() - t
         logger.info(
             "alfworld_step rollout %s: env init done in %.2fs admissible_commands=%d",
@@ -98,7 +75,6 @@ async def alfworld_step_flow(task: Task, config: AgentConfig) -> Episode:
             len(admissible_commands),
         )
 
-    try:
         client = AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")
         sampling = {k: v for k, v in config.sampling_params.items() if k != "top_k"}
 
@@ -161,7 +137,7 @@ async def alfworld_step_flow(task: Task, config: AgentConfig) -> Episode:
 
             # Execute action in environment
             t = time.perf_counter()
-            observation, won, done, admissible_commands = await _run_env_io(_env_step, env, action_str)
+            observation, won, done, admissible_commands = await env_session.step(action_str)
             env_step_s += time.perf_counter() - t
 
             # Append to history
@@ -171,9 +147,9 @@ async def alfworld_step_flow(task: Task, config: AgentConfig) -> Episode:
                 break
 
     finally:
-        if env is not None:
+        if env_session is not None:
             try:
-                await _run_env_io(_close_env, env)
+                await env_session.close()
             except Exception:
                 pass
 
@@ -188,6 +164,7 @@ async def alfworld_step_flow(task: Task, config: AgentConfig) -> Episode:
             "turns": len(steps),
             "last_action": last_action,
             "task_type": task_type,
+            "env_backend": "ray",
         },
         is_correct=won,
     )

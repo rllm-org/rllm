@@ -10,7 +10,7 @@ requires-python = ">=3.10"
 dependencies = ["rllm", "openai", "textworld", "pyyaml"]
 
 [tool.setuptools]
-py-modules = ["alfworld_flow", "alfworld_eval", "prepare_alfworld_data"]
+py-modules = ["alfworld_flow", "alfworld_ray_env", "alfworld_eval", "prepare_alfworld_data"]
 
 [project.entry-points."rllm.agents"]
 alfworld = "alfworld_flow:alfworld_flow"
