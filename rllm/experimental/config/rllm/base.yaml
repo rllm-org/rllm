@@ -160,12 +160,6 @@ async_training:
   episode_offload_dir: null       # NVMe offload dir for pending episodes (null = disabled)
   trajectory_group_offload_dir: null  # NVMe offload dir for queued task batches (null = disabled)
 
-# Environment Prewarming Configuration
-# When enabled, pre-initializes environments for the next batch during GPU
-# training, overlapping env init with policy updates to reduce cold start.
-prewarm:
-  enable: false
-
 # Episode Logging Configuration
 episode_logging:
   log_episodes: false

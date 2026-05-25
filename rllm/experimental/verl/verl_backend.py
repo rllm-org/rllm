@@ -307,8 +307,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         if isinstance(batch, dict):
             batch = DataProto.from_single_dict(batch)
 
-        if "task_ids" not in batch.non_tensor_batch:
-            batch.non_tensor_batch["task_ids"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
+        batch.non_tensor_batch["task_ids"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
         if is_validation:
             repeat_times = self.full_config.rllm.rollout.n_val
         else:
@@ -696,16 +695,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         # we need to set trainer's global_steps to sync with the loaded checkpoint
         trainer_state.global_step = self.global_steps
         trainer_state.epoch = self.global_steps // len(self.train_dataloader)
-
-    def prepare_tasks_for_prewarm(self, batch: Any) -> tuple[list[dict], list[str], int] | None:
-        """Extract tasks from a batch for environment prewarming."""
-        if isinstance(batch, dict):
-            batch = DataProto.from_single_dict(batch)
-        tasks = batch.non_tensor_batch["extra_info"].tolist()
-        task_ids = [str(uuid.uuid4()) for _ in range(len(batch.batch))]
-        batch.non_tensor_batch["task_ids"] = np.array(task_ids, dtype=object)
-        repeat_times = self.full_config.rllm.rollout.n
-        return tasks, task_ids, repeat_times
 
     async def on_batch_start(self, trainer_state: TrainerState) -> None:
         """Called at the start of each batch."""

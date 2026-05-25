@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 from omegaconf import DictConfig
 
@@ -208,14 +208,6 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
     async def on_policy_updated(self, trainer_state: TrainerState) -> None:
         """Hook called immediately after update_policy() for weight sync."""
         pass
-
-    def prepare_tasks_for_prewarm(self, batch: Any) -> tuple[list[dict], list[str], int] | None:
-        """Extract tasks from a batch for environment prewarming.
-
-        Returns (tasks, task_ids, repeat_times) or None if not supported.
-        The trainer calls this to know what to prewarm before the batch runs.
-        """
-        return None
 
     async def on_validation_start(self, trainer_state: TrainerState) -> bool:
         """Hook method called at the start of validation.

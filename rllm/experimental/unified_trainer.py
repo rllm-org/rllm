@@ -165,8 +165,6 @@ class UnifiedTrainer:
         # 3. workflow_class → UnifiedWorkflowEngine (direct)
         self._gateway = None
         self._remote_runtime = None
-        self._prewarm_store = None
-        self._prewarm_task: asyncio.Task | None = None
 
         agent_flow = kwargs.get("agent_flow")
         evaluator = kwargs.get("evaluator")
@@ -177,7 +175,6 @@ class UnifiedTrainer:
         if agent_flow is not None and (evaluator is not None or hooks is not None):
             from rllm.engine.agentflow_engine import AgentFlowEngine
             from rllm.experimental.engine.gateway_manager import GatewayManager
-            from rllm.experimental.prewarm import PrewarmStore
 
             gateway_mode = "process" if kwargs.get("backend_name") == "verl" else "thread"
             self._gateway = GatewayManager(self.config, mode=gateway_mode)
@@ -192,12 +189,6 @@ class UnifiedTrainer:
                 "max_tokens": self.config.data.max_response_length,
             }
 
-            prewarm_enabled = self.rllm_config.get("prewarm", {}).get("enable", False)
-            prewarm_cleanup_fn = getattr(agent_flow, "prewarm_cleanup", None)
-            self._prewarm_store: PrewarmStore | None = (
-                PrewarmStore(cleanup_fn=prewarm_cleanup_fn) if prewarm_enabled and getattr(agent_flow, "prewarm", None) else None
-            )
-
             self.agent_workflow_engine = AgentFlowEngine(
                 agent_flow=agent_flow,
                 evaluator=evaluator,
@@ -210,7 +201,6 @@ class UnifiedTrainer:
                 train_sampling_params=training_sampling_params,
                 val_sampling_params=val_sampling_params,
                 hooks=hooks,
-                prewarm_store=self._prewarm_store,
             )
         elif remote_runtime_cfg.get("enabled", False):
             from rllm.experimental.engine.gateway_manager import GatewayManager
@@ -309,93 +299,6 @@ class UnifiedTrainer:
             source_metadata=source_metadata,
         )
 
-    def _print_training_summary(self, total_steps: int, steps_per_epoch: int):
-        """Print a human-readable training configuration summary before training starts."""
-        config = self.config
-        rllm_config = self.rllm_config
-
-        model_path = OmegaConf.select(config, "actor_rollout_ref.model.path") or OmegaConf.select(config, "model.name", default="N/A")
-
-        lora_rank = OmegaConf.select(config, "actor_rollout_ref.model.lora.rank", default=0) or 0
-        if lora_rank <= 0:
-            lora_rank = OmegaConf.select(config, "actor_rollout_ref.model.lora_rank", default=0) or 0
-        lora_adapter_path = OmegaConf.select(config, "actor_rollout_ref.model.lora_adapter_path", default=None)
-        if lora_rank <= 0:
-            lora_rank = OmegaConf.select(config, "model.lora_rank", default=0) or 0
-        use_lora = lora_rank > 0 or lora_adapter_path is not None
-
-        train_size = len(self.train_dataset) if self.train_dataset else "N/A"
-        val_size = len(self.val_dataset) if self.val_dataset else "N/A"
-        train_batch_size = OmegaConf.select(config, "data.train_batch_size", default="N/A")
-        val_batch_size = OmegaConf.select(config, "data.val_batch_size", default="N/A")
-
-        rollout_n = rllm_config.rollout.n
-        effective_rollouts = (train_batch_size * rollout_n) if isinstance(train_batch_size, int) else "N/A"
-
-        total_epochs = rllm_config.trainer.total_epochs
-        save_freq = rllm_config.trainer.save_freq
-        test_freq = rllm_config.trainer.test_freq
-        val_before_train = rllm_config.trainer.get("val_before_train", False)
-
-        max_prompt_len = OmegaConf.select(config, "data.max_prompt_length", default="N/A")
-        max_response_len = OmegaConf.select(config, "data.max_response_length", default="N/A")
-
-        adv_estimator = rllm_config.algorithm.adv_estimator
-        loss_agg_mode = OmegaConf.select(config, "actor_rollout_ref.actor.loss_agg_mode", default=None) or rllm_config.algorithm.get("loss_agg_mode", "N/A")
-
-        n_gpus = OmegaConf.select(config, "trainer.n_gpus_per_node", default="N/A")
-        nnodes = OmegaConf.select(config, "trainer.nnodes", default=1)
-        tp_size = OmegaConf.select(config, "actor_rollout_ref.rollout.tensor_model_parallel_size", default=1)
-
-        ckpt_local_dir = OmegaConf.select(config, "trainer.default_local_dir", default=None)
-        ckpt_hdfs_dir = OmegaConf.select(config, "trainer.default_hdfs_dir", default=None)
-        episode_log_dir = rllm_config.episode_logging.get("episode_log_dir", None) if rllm_config.episode_logging.get("log_episodes", False) else None
-        hydra_output_dir = OmegaConf.select(config, "hydra.run.dir", default=None)
-
-        sep = "=" * 70
-        lines = [
-            f"\n{sep}",
-            "  TRAINING CONFIGURATION SUMMARY",
-            sep,
-            f"  Model:            {model_path}",
-            f"  LoRA:             {'Enabled (rank=' + str(lora_rank) + ')' if use_lora else 'Disabled (full fine-tuning)'}",
-        ]
-        if lora_adapter_path:
-            lines.append(f"  LoRA Adapter:     {lora_adapter_path}")
-        lines += [
-            f"  TP Size:          {tp_size}",
-            "  ---",
-            f"  Train Dataset:    {train_size} samples",
-            f"  Val Dataset:      {val_size} samples",
-            f"  Train Batch Size: {train_batch_size}",
-            f"  Val Batch Size:   {val_batch_size}",
-            "  ---",
-            f"  Total Epochs:     {total_epochs}",
-            f"  Steps/Epoch:      {steps_per_epoch}",
-            f"  Total Steps:      {total_steps}",
-            f"  Rollout N:        {rollout_n} (effective rollouts/step: {effective_rollouts})",
-            "  ---",
-            f"  Max Prompt Len:   {max_prompt_len}",
-            f"  Max Response Len: {max_response_len}",
-            "  ---",
-            f"  Algorithm:        {adv_estimator}",
-            f"  Loss Agg Mode:    {loss_agg_mode}",
-            f"  Save Freq:        every {save_freq} steps",
-            f"  Val Freq:         every {test_freq} steps",
-            f"  Val Before Train: {val_before_train}",
-            "  ---",
-            f"  GPUs/Node:        {n_gpus}",
-            f"  Nodes:            {nnodes}",
-            f"  Total GPUs:       {n_gpus * nnodes if isinstance(n_gpus, int) and isinstance(nnodes, int) else 'N/A'}",
-            "  ---",
-            f"  Checkpoint Dir:   {ckpt_local_dir or 'N/A'}",
-            f"  Remote Ckpt Dir:  {ckpt_hdfs_dir or 'None (local only)'}",
-            f"  Episode Log Dir:  {episode_log_dir or 'Disabled'}",
-            f"  Output Dir:       {hydra_output_dir or 'N/A'}",
-            f"{sep}\n",
-        ]
-        print("\n".join(lines))
-
     # =========================================================================
     # Main training loop methods
     # =========================================================================
@@ -418,16 +321,6 @@ class UnifiedTrainer:
             await self.agent_workflow_engine.initialize_pool()
 
         trainer_state = TrainerState()
-
-        total_steps = getattr(self.backend, "total_training_steps", None)
-        train_dl = getattr(self.backend, "train_dataloader", None)
-        steps_per_epoch = len(train_dl) if train_dl is not None else 0
-        if total_steps is None and steps_per_epoch > 0:
-            total_steps = steps_per_epoch * self.rllm_config.trainer.total_epochs
-        self._print_training_summary(
-            total_steps=total_steps or 0,
-            steps_per_epoch=steps_per_epoch,
-        )
 
         await self.backend.on_train_start(trainer_state)
 
@@ -479,17 +372,12 @@ class UnifiedTrainer:
             trainer_state.epoch = epoch
             await self.backend.on_epoch_start(trainer_state)
 
-            dataloader_iter = iter(train_dataloader)
-            current_batch = next(dataloader_iter, None)
-
-            while current_batch is not None:
-                next_batch = next(dataloader_iter, None)
-
+            for batch in train_dataloader:
                 trainer_state.reset_batch()
 
                 await self.backend.on_batch_start(trainer_state)
                 with simple_timer("step", trainer_state.timing_dict):
-                    await self._train_batch_with_prewarm(current_batch, next_batch, trainer_state)
+                    await self._train_batch_async(batch, trainer_state)
                 await self.backend.on_batch_end(trainer_state)
 
                 print_metrics_table(trainer_state.metrics, trainer_state.global_step)
@@ -510,118 +398,12 @@ class UnifiedTrainer:
                     await self._validate_async(trainer_state)
 
                 trainer_state.global_step += 1
-                current_batch = next_batch
 
             await self.backend.on_epoch_end(trainer_state)
-
-        # Cleanup any remaining prewarmed resources
-        if self._prewarm_store is not None:
-            self._prewarm_store.clear()
 
         # final validation after training
         if self.rllm_config.trainer.test_freq > 0:
             await self._validate_async(trainer_state)
-
-    async def _train_batch_with_prewarm(self, batch: Any, next_batch: Any | None, trainer_state: TrainerState) -> None:
-        """Train a batch while prewarming environments for the next batch."""
-        self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="train", epoch=trainer_state.epoch)
-
-        # Stage 1: generate episodes (rollout)
-        trainer_state.episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, is_validation=False)
-
-        # Kick off prewarming for next batch (overlaps with stages 2-7)
-        self._start_prewarm(next_batch)
-
-        if not trainer_state.has_episodes:
-            return
-
-        # Stages 2-7: same as _train_batch_async
-        workflow_metrics, termination_counts = self._collect_workflow_metrics_from_episodes(trainer_state.episodes)
-        for key, value in workflow_metrics.items():
-            trainer_state.metrics[f"batch/{key}"] = np.mean(value)
-
-        total_counts = max(sum(termination_counts.values()), 1)
-        for r in TerminationReason:
-            trainer_state.metrics[f"batch/termination_reason/{r.value}"] = termination_counts[r.value] / total_counts
-
-        trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(trainer_state.episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook)
-        trainer_state.trajectory_groups = trajectory_groups
-        trainer_state.metrics.update(transform_metrics)
-
-        filtered_groups, filtered_episodes, rs_metrics = apply_rejection_sampling_and_filtering(
-            trainer_state.episodes,
-            trainer_state.trajectory_groups,
-            self.rs_config,
-            trainer_state.rs_state,
-        )
-        trainer_state.metrics.update(rs_metrics)
-        trainer_state.trajectory_groups = filtered_groups
-        trainer_state.episodes = filtered_episodes
-        if not trainer_state.has_trajectory_groups:
-            return
-
-        backend_batch = self.backend.transform_to_backend_batch(trainer_state)
-        trainer_state.backend_batch = backend_batch
-
-        await self.backend.process_backend_batch(trainer_state)
-        assert trainer_state.has_backend_batch, "Backend batch is not transformed or processed successfully"
-
-        await self.backend.compute_advantages(trainer_state, self.algorithm_config)
-        await self.backend.update_policy(trainer_state)
-
-        if self.tokenizer is not None:
-            visualize_trajectory_last_steps(
-                trainer_state.trajectory_groups,
-                tokenizer=self.tokenizer,
-                max_steps_to_visualize=2,
-                show_workflow_metadata=True,
-            )
-
-    def _start_prewarm(self, next_batch: Any | None) -> None:
-        """Start prewarming environments for the next batch as a background task."""
-        if next_batch is None or self._prewarm_store is None:
-            return
-
-        agent_flow = getattr(self.agent_workflow_engine, "agent_flow", None)
-        prewarm_fn = getattr(agent_flow, "prewarm", None)
-        if prewarm_fn is None:
-            return
-
-        prepared = self.backend.prepare_tasks_for_prewarm(next_batch)
-        if prepared is None:
-            return
-
-        tasks, task_ids, repeat_times = prepared
-
-        # Cancel any still-running prewarm from a previous step
-        if self._prewarm_task is not None and not self._prewarm_task.done():
-            self._prewarm_task.cancel()
-
-        # Clear any unconsumed entries from the previous batch (resource leak prevention)
-        remaining = len(self._prewarm_store)
-        if remaining > 0:
-            logger.warning("Clearing %d unconsumed prewarmed envs from previous batch", remaining)
-            self._prewarm_store.clear()
-
-        self._prewarm_task = asyncio.create_task(
-            self._run_prewarm_and_log(tasks, task_ids, repeat_times, prewarm_fn)
-        )
-
-    async def _run_prewarm_and_log(
-        self,
-        tasks: list[dict],
-        task_ids: list[str],
-        repeat_times: int,
-        prewarm_fn,
-    ) -> None:
-        """Run prewarm and log the result."""
-        from rllm.experimental.prewarm import run_prewarm
-
-        result = await run_prewarm(tasks, task_ids, repeat_times, prewarm_fn, self._prewarm_store)
-        logger.info(
-            "Prewarm completed: %d/%d envs in %.1fs (%d failed)",
-            result.completed, result.total, result.elapsed_s, result.failed,
-        )
 
     async def _train_batch_async(self, batch: Any, trainer_state: TrainerState) -> None:
         """Train a batch (async implementation)."""
