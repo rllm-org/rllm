@@ -268,10 +268,7 @@ class DaytonaSandbox:
         Uses ``python3 + urllib`` because slim Python images don't ship
         ``curl`` or ``wget``.
         """
-        health_cmd = (
-            f"python3 -c \"import urllib.request; "
-            f"urllib.request.urlopen('http://127.0.0.1:{port}/health', timeout=2)\""
-        )
+        health_cmd = f"python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:{port}/health', timeout=2)\""
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
