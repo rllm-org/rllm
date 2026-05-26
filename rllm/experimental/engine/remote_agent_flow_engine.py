@@ -192,7 +192,7 @@ def _build_episode(
     metrics["empty"] = int(len(traces) == 0)
     metrics["steps_collected"] = len(traces)
 
-    is_correct = bool(result.reward and result.reward > 0)
+    is_correct = bool(result.reward and result.reward >= 1.0)
 
     return Episode(
         id=uid,
