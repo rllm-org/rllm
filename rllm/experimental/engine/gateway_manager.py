@@ -276,7 +276,7 @@ class GatewayManager:
 
     async def adelete_session(self, session_id: str) -> int:
         """Delete a session and all its accumulated traces. Returns count removed."""
-        await self.async_client.flush()
+        await self.async_client.flush(timeout=_TRACE_API_TIMEOUT)
         return await self.async_client.delete_session(session_id)
 
     async def adelete_sessions(self, session_ids: list[str]) -> int:

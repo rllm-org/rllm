@@ -140,7 +140,10 @@ class RemoteAgentFlowEngine:
                 episode.metadata["error"] = error_info
 
             # Delete traces from gateway DB to prevent unbounded growth
-            await self.gateway.adelete_session(session_id)
+            try:
+                await self.gateway.adelete_session(session_id)
+            except Exception as e:
+                logger.warning("[%s] Failed to delete session (non-fatal): %s", uid, e)
 
             return task_id, rollout_idx, result_idx, episode
 
