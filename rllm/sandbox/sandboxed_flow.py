@@ -136,5 +136,9 @@ def create_sandbox(backend: str, name: str, image: str, **kwargs) -> Sandbox:
         from rllm.sandbox.backends.modal_backend import ModalSandbox
 
         return ModalSandbox(name=name, **kwargs)
+    elif backend == "daytona":
+        from rllm.sandbox.backends.daytona import DaytonaSandbox
+
+        return DaytonaSandbox(name=name, image=image, **kwargs)
     else:
-        raise ValueError(f"Unknown sandbox backend: {backend}. Available: docker, local, modal")
+        raise ValueError(f"Unknown sandbox backend: {backend}. Available: docker, local, modal, daytona")
