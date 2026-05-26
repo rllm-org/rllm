@@ -1,8 +1,7 @@
 """Generate and register Sokoban train/test datasets.
 
-Rows contain deterministic generation parameters matching the LaMer Sokoban
-main experiment configuration. The actual room is regenerated inside
-``sokoban_flow`` from each row's seed and environment settings.
+Rows contain pre-generated puzzle states matching the LaMer Sokoban main
+experiment configuration, so training/eval do not regenerate rooms at reset.
 """
 
 from __future__ import annotations
@@ -11,6 +10,7 @@ import argparse
 
 import numpy as np
 
+from env_service.sokoban import SokobanEnv
 from rllm.data.dataset import DatasetRegistry
 
 
@@ -44,6 +44,7 @@ def _row(
     actions_per_turn: int,
     max_turns: int,
     env_seed: int,
+    puzzle_state: dict,
 ) -> dict:
     h, w = dim_room
     return {
@@ -61,9 +62,39 @@ def _row(
         "mode": LAMER_SOKOBAN_CONFIG["mode"],
         "lamer_env_seed": int(env_seed),
         "lamer_config_source": "LaMer/examples/sokoban/*_sokoban_qwen3_4b.sh and LaMer/scripts/prepare_example_data.sh",
+        "puzzle_state": puzzle_state,
+        "solution_length": len(puzzle_state.get("action_sequence", [])),
         "index": int(idx),
         "question": f"Sokoban puzzle ({h}x{w}, boxes={num_boxes}, seed={seed})",
     }
+
+
+def _generate_puzzle_state(
+    *,
+    seed: int,
+    mode: str,
+    dim_room: tuple[int, int],
+    num_boxes: int,
+    max_steps: int,
+    search_depth: int,
+    min_steps: int,
+    max_sol_steps: int,
+) -> dict:
+    env = SokobanEnv(
+        mode=mode,
+        dim_room=dim_room,
+        num_boxes=num_boxes,
+        max_steps=max_steps,
+        search_depth=search_depth,
+        min_steps=min_steps,
+        max_sol_steps=max_sol_steps,
+        seed=seed,
+    )
+    try:
+        env.reset()
+        return env.export_puzzle_state()
+    finally:
+        env.close()
 
 
 def prepare_sokoban_data(
@@ -83,23 +114,37 @@ def prepare_sokoban_data(
 
     def _split(n: int, offset: int, split: str, rng: np.random.RandomState, low: int, high: int) -> list[dict]:
         seeds = rng.randint(low, high, size=n)
-        return [
-            _row(
-                idx=offset + i,
-                seed=int(seeds[i]),
-                split=split,
+        rows = []
+        for i in range(n):
+            seed = int(seeds[i])
+            puzzle_state = _generate_puzzle_state(
+                seed=seed,
+                mode=LAMER_SOKOBAN_CONFIG["mode"],
                 dim_room=dim_room,
                 num_boxes=num_boxes,
                 max_steps=max_steps,
                 search_depth=search_depth,
                 min_steps=min_steps,
                 max_sol_steps=max_sol_steps,
-                actions_per_turn=actions_per_turn,
-                max_turns=max_turns,
-                env_seed=env_seed if split == "train" else env_seed + 1000,
             )
-            for i in range(n)
-        ]
+            rows.append(
+                _row(
+                    idx=offset + i,
+                    seed=seed,
+                    split=split,
+                    dim_room=dim_room,
+                    num_boxes=num_boxes,
+                    max_steps=max_steps,
+                    search_depth=search_depth,
+                    min_steps=min_steps,
+                    max_sol_steps=max_sol_steps,
+                    actions_per_turn=actions_per_turn,
+                    max_turns=max_turns,
+                    env_seed=env_seed if split == "train" else env_seed + 1000,
+                    puzzle_state=puzzle_state,
+                )
+            )
+        return rows
 
     train_rows = _split(
         train_size,

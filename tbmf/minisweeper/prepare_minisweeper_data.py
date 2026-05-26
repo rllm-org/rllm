@@ -1,7 +1,7 @@
 """Generate and register MiniSweeper train/test datasets.
 
-Rows contain deterministic generation parameters matching the LaMer
-Minesweeper main experiment configuration.
+Rows contain pre-generated puzzle states matching the LaMer Minesweeper main
+experiment configuration, so training/eval do not regenerate boards at reset.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import argparse
 
 import numpy as np
 
+from env_service.minesweeper import MineSweeperEnv
 from rllm.data.dataset import DatasetRegistry
 
 
@@ -36,6 +37,7 @@ def _row(
     max_steps: int,
     max_turns: int,
     env_seed: int,
+    puzzle_state: dict,
 ) -> dict:
     return {
         "uid": f"minisweeper_{idx:06d}_{seed}_{board_size}_{n_mines}",
@@ -49,9 +51,19 @@ def _row(
         "max_turns": int(max_turns),
         "lamer_env_seed": int(env_seed),
         "lamer_config_source": "LaMer/examples/minesweeper/*_minesweeper_qwen3_4b.sh and LaMer/scripts/prepare_example_data.sh",
+        "puzzle_state": puzzle_state,
         "index": int(idx),
         "question": f"MiniSweeper puzzle (board={board_size}x{board_size}, mines={n_mines}, seed={seed})",
     }
+
+
+def _generate_puzzle_state(*, seed: int, board_size: int, n_mines: int, board_type: str) -> dict:
+    env = MineSweeperEnv(board_size=board_size, n_mines=n_mines, board_type=board_type, seed=seed)
+    try:
+        env.reset()
+        return env.export_puzzle_state()
+    finally:
+        env.close()
 
 
 def prepare_minisweeper_data(
@@ -68,19 +80,29 @@ def prepare_minisweeper_data(
 
     def _split(n: int, offset: int, split: str, rng: np.random.RandomState, low: int, high: int) -> list[dict]:
         seeds = rng.randint(low, high, size=n)
-        return [
-            _row(
-                idx=offset + i,
-                seed=int(seeds[i]),
-                split=split,
+        rows = []
+        for i in range(n):
+            seed = int(seeds[i])
+            puzzle_state = _generate_puzzle_state(
+                seed=seed,
                 board_size=board_size,
                 n_mines=n_mines,
-                max_steps=max_steps,
-                max_turns=max_turns,
-                env_seed=env_seed if split == "train" else env_seed + 1000,
+                board_type=LAMER_MINISWEEPER_CONFIG["board_type"],
             )
-            for i in range(n)
-        ]
+            rows.append(
+                _row(
+                    idx=offset + i,
+                    seed=seed,
+                    split=split,
+                    board_size=board_size,
+                    n_mines=n_mines,
+                    max_steps=max_steps,
+                    max_turns=max_turns,
+                    env_seed=env_seed if split == "train" else env_seed + 1000,
+                    puzzle_state=puzzle_state,
+                )
+            )
+        return rows
 
     train_rows = _split(
         train_size,

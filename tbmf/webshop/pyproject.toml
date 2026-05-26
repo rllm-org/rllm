@@ -10,10 +10,13 @@ requires-python = ">=3.10"
 dependencies = ["rllm", "openai", "numpy", "ray", "gym", "beautifulsoup4", "flask", "torch"]
 
 [tool.setuptools]
-py-modules = ["webshop_flow", "webshop_eval", "webshop_env", "prepare_webshop_data"]
+py-modules = ["webshop_prompt", "prepare_webshop_data", "webshop_env"]
+
+[tool.setuptools.packages.find]
+include = ["flow*", "eval*", "train*", "webshop_pkg*"]
 
 [project.entry-points."rllm.agents"]
-webshop = "webshop_flow:webshop_flow"
+webshop = "flow.webshop_flow:webshop_flow"
 
 [project.entry-points."rllm.evaluators"]
-webshop = "webshop_eval:webshop_evaluator"
+webshop = "eval.webshop_eval:webshop_evaluator"

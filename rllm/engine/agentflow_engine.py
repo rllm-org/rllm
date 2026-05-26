@@ -393,11 +393,11 @@ class AgentFlowEngine:
         objects (eval path; the engine uses them as-is). When ``task_ids``
         is omitted, fresh UUIDs are assigned.
 
-        Runs per-task pipelines (flow + trace fetch + enrich + evaluate)
-        in parallel, streamed via ``asyncio.as_completed`` so the
-        rollout-completed log lines arrive as each task finishes. One
-        ``POST /sessions/batch_delete`` at the end of the step cleans
-        up the trace store.
+        Each per-task pipeline (flow + trace fetch + enrich + evaluate)
+        runs in parallel. With ``sync_traces=True`` (default for
+        MemoryStore), traces are persisted inline during LLM response
+        handling, so trace fetch after flow completion is instant and
+        never blocks other rollouts' LLM requests.
         """
         if task_ids is None:
             task_ids = [str(uuid.uuid4()) for _ in tasks]
@@ -423,11 +423,10 @@ class AgentFlowEngine:
         ordered_results: list[Episode] = results  # type: ignore[assignment]
 
         # Batch session delete at end of step to keep the trace store from
-        # growing unboundedly. One ``POST /sessions/batch_delete`` for all
-        # uids instead of N (flush + DELETE) RTTs.
+        # growing unboundedly.
         if uids:
             try:
-                await self.gateway.adelete_sessions(uids)
+                await self.gateway.async_client.delete_sessions(uids)
             except Exception:
                 logger.exception("Batch session delete failed; sessions may linger in the trace store")
 
@@ -546,7 +545,7 @@ class AgentFlowEngine:
         )
         try:
             t = time.perf_counter()
-            traces = await self.gateway.aget_traces(uid)
+            traces = await self.gateway.aget_traces_no_flush(uid)
             timings["time/traces_s"] = time.perf_counter() - t
 
             enriched = await self._finish_episode(

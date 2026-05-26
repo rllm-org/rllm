@@ -274,6 +274,10 @@ class GatewayManager:
         await self.async_client.flush(timeout=_TRACE_API_TIMEOUT)
         return await self.async_client.get_session_traces(session_id)
 
+    async def aget_traces_no_flush(self, session_id: str) -> list[TraceRecord]:
+        """Fetch traces without flushing. Safe when sync_traces=True (MemoryStore)."""
+        return await self.async_client.get_session_traces(session_id)
+
     async def adelete_session(self, session_id: str) -> int:
         """Delete a session and all its accumulated traces. Returns count removed."""
         await self.async_client.flush()
@@ -351,6 +355,7 @@ class GatewayManager:
             model=self.model,
             add_logprobs=self.add_logprobs,
             add_return_token_ids=self.add_return_token_ids,
+            sync_traces=(self.store == "memory"),
         )
         app = create_app(config=gw_config, local_handler=local_handler)
 

@@ -10,13 +10,13 @@ requires-python = ">=3.10"
 dependencies = ["rllm", "openai", "numpy", "gym", "gym-sokoban"]
 
 [tool.setuptools]
-py-modules = ["sokoban_flow", "sokoban_eval", "sokoban_prompt", "prepare_sokoban_data"]
+py-modules = ["sokoban_prompt", "prepare_sokoban_data"]
 
 [tool.setuptools.packages.find]
-include = ["sokoban_pkg*"]
+include = ["flow*", "eval*", "train*", "sokoban_pkg*"]
 
 [project.entry-points."rllm.agents"]
-sokoban = "sokoban_flow:sokoban_flow"
+sokoban = "flow.sokoban_flow:sokoban_flow"
 
 [project.entry-points."rllm.evaluators"]
-sokoban = "sokoban_eval:sokoban_evaluator"
+sokoban = "eval.sokoban_eval:sokoban_evaluator"

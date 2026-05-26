@@ -524,9 +524,6 @@ class ReverseProxy:
 
                 latency_ms = (time.perf_counter() - t0) * 1000
                 # Build trace from accumulated chunks.
-                # NOTE: We use create_task instead of await because this
-                # finally block may run during GeneratorExit, where await
-                # on real async I/O (e.g. aiosqlite) is not reliable.
                 if session_id and chunks:
                     trace = build_trace_record_from_chunks(
                         session_id,
@@ -535,15 +532,25 @@ class ReverseProxy:
                         latency_ms,
                         metadata=trace_metadata,
                     )
-                    task = asyncio.create_task(
-                        self._safe_store(
-                            trace.trace_id,
-                            trace.session_id,
-                            trace.model_dump(),
+                    if self.sync_traces:
+                        # MemoryStore writes are ~instant; persist inline so
+                        # flush is always a no-op and traces are immediately
+                        # available without blocking other rollouts.
+                        await self.store.store_trace(
+                            trace.trace_id, trace.session_id, trace.model_dump()
                         )
-                    )
-                    self._pending_traces.add(task)
-                    task.add_done_callback(self._pending_traces.discard)
+                    else:
+                        # For real-IO stores (sqlite) use fire-and-forget to
+                        # avoid blocking during GeneratorExit.
+                        task = asyncio.create_task(
+                            self._safe_store(
+                                trace.trace_id,
+                                trace.session_id,
+                                trace.model_dump(),
+                            )
+                        )
+                        self._pending_traces.add(task)
+                        task.add_done_callback(self._pending_traces.discard)
 
         return StreamingResponse(
             event_generator(),
