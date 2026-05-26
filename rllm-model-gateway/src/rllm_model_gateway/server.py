@@ -148,12 +148,27 @@ def create_app(
             )
         )
 
+    # Load tokenizer for cumulative token mode
+    tokenizer = None
+    if config.cumulative_token_mode:
+        if not config.tokenizer_path:
+            raise ValueError("cumulative_token_mode=True requires tokenizer_path to be set in GatewayConfig (path to a HuggingFace tokenizer).")
+        try:
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path)
+            logger.info("Loaded tokenizer from %s for cumulative token mode", config.tokenizer_path)
+        except ImportError as err:
+            raise ImportError("cumulative_token_mode requires the 'transformers' package. Install it with: pip install transformers") from err
+
     proxy = ReverseProxy(
         router=router,
         store=store,
         strip_vllm=config.strip_vllm_fields,
         sync_traces=config.sync_traces,
         local_handler=local_handler,
+        cumulative_token_mode=config.cumulative_token_mode,
+        tokenizer=tokenizer,
     )
     sessions = SessionManager(store)
 
@@ -241,6 +256,7 @@ def create_app(
 
     @app.delete("/sessions/{session_id}")
     async def delete_session(session_id: str):
+        proxy._accumulators.pop(session_id, None)
         count = await sessions.delete_session(session_id)
         return {"deleted": count}
 
@@ -250,6 +266,7 @@ def create_app(
         session_ids = body.get("session_ids", [])
         total = 0
         for sid in session_ids:
+            proxy._accumulators.pop(sid, None)
             total += await sessions.delete_session(sid)
         return {"deleted": total}
 
@@ -428,6 +445,10 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
         data["sampling_params_priority"] = args.sampling_params_priority
     if getattr(args, "model", None) is not None:
         data["model"] = args.model
+    if getattr(args, "cumulative_token_mode", False):
+        data["cumulative_token_mode"] = True
+    if getattr(args, "tokenizer_path", None) is not None:
+        data["tokenizer_path"] = args.tokenizer_path
 
     # Workers from CLI --worker flags (WorkerConfig validator auto-splits URLs)
     worker_urls = getattr(args, "worker", None) or []
@@ -468,6 +489,18 @@ def main() -> None:
         type=str,
         default=None,
         help="If set, the gateway rewrites every request body's 'model' field to this value before forwarding.",
+    )
+    parser.add_argument(
+        "--cumulative-token-mode",
+        action="store_true",
+        default=False,
+        help="Enable cumulative token mode for drift-free multi-turn RL training.",
+    )
+    parser.add_argument(
+        "--tokenizer-path",
+        type=str,
+        default=None,
+        help="HuggingFace model name or path for tokenizer (required with --cumulative-token-mode).",
     )
 
     args = parser.parse_args()

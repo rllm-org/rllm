@@ -121,3 +121,5 @@ class GatewayConfig(BaseModel):
     sync_traces: bool = False
     sampling_params_priority: str = "client"
     model: str | None = None  # When set, overrides ``body.model``
+    cumulative_token_mode: bool = False
+    tokenizer_path: str | None = None  # Path to the model folder with tokenizer json files

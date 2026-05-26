@@ -18,11 +18,17 @@ from starlette.responses import Response, StreamingResponse
 from rllm_model_gateway.data_process import (
     build_trace_record,
     build_trace_record_from_chunks,
+    extract_completion_token_ids,
+    extract_prompt_token_ids,
     strip_vllm_fields,
 )
 from rllm_model_gateway.models import TraceRecord
 from rllm_model_gateway.session_router import SessionRouter
 from rllm_model_gateway.store.base import TraceStore
+from rllm_model_gateway.token_accumulator import (
+    TokenAccumulator,
+    extract_new_user_content,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +85,8 @@ class ReverseProxy:
         sync_traces: bool = False,
         max_retries: int = 2,
         local_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+        cumulative_token_mode: bool = False,
+        tokenizer: Any = None,
     ) -> None:
         self.router = router
         self.store = store
@@ -86,8 +94,17 @@ class ReverseProxy:
         self.sync_traces = sync_traces
         self.max_retries = max_retries
         self.local_handler = local_handler
+        self.cumulative_token_mode = cumulative_token_mode
+        self.tokenizer = tokenizer
         self._http: httpx.AsyncClient | None = None
         self._pending_traces: set[asyncio.Task[None]] = set()
+        self._accumulators: dict[str, TokenAccumulator] = {}
+
+    def _get_accumulator(self, session_id: str) -> TokenAccumulator:
+        """Return the TokenAccumulator for *session_id*, creating if needed."""
+        if session_id not in self._accumulators:
+            self._accumulators[session_id] = TokenAccumulator(self.tokenizer)
+        return self._accumulators[session_id]
 
     async def start(self) -> None:
         self._http = httpx.AsyncClient(
@@ -127,6 +144,28 @@ class ReverseProxy:
             request_body = {}
 
         is_stream = request_body.get("stream", False)
+
+        # Cumulative token mode interception: if enabled and past first turn,
+        # rewrite to /v1/completions with pre-tokenized prompt to avoid drift.
+        if self.cumulative_token_mode and session_id and request.url.path.endswith("/chat/completions"):
+            acc = self._get_accumulator(session_id)
+            if acc.should_rewrite():
+                messages = request_body.get("messages", [])
+                if not acc.is_cumulative(messages):
+                    # Message history diverged — reset and fall through to
+                    # normal chat path (treated as fresh turn-0).
+                    acc.reset()
+                else:
+                    user_content = extract_new_user_content(messages, acc.message_count)
+                    if user_content is not None:
+                        return await self._handle_cumulative_turn(
+                            request,
+                            request_body,
+                            session_id,
+                            acc,
+                            user_content,
+                            originally_requested_logprobs,
+                        )
 
         if is_stream:
             return await self._handle_streaming(request, body, request_body, session_id, originally_requested_logprobs)
@@ -180,6 +219,16 @@ class ReverseProxy:
             trace = build_trace_record(session_id, request_body, response_body, latency_ms)
             await self._persist(trace)
 
+            # Ingest first turn into accumulator for cumulative token mode
+            if self.cumulative_token_mode and request.url.path.endswith("/chat/completions"):
+                acc = self._get_accumulator(session_id)
+                if acc.turn_count == 0:
+                    prompt_ids = extract_prompt_token_ids(response_body)
+                    completion_ids = extract_completion_token_ids(response_body)
+                    if prompt_ids or completion_ids:
+                        acc.ingest_turn(prompt_ids, completion_ids)
+                        acc.update_prefix(request_body.get("messages", []))
+
         # Sanitise response
         needs_strip_vllm = self.strip_vllm
         needs_strip_logprobs = not originally_requested_logprobs
@@ -195,6 +244,250 @@ class ReverseProxy:
             content=json.dumps(sanitized),
             status_code=status_code,
             media_type="application/json",
+        )
+
+    # ------------------------------------------------------------------
+    # Cumulative token mode
+    # ------------------------------------------------------------------
+
+    async def _handle_cumulative_turn(
+        self,
+        request: Request,
+        request_body: dict[str, Any],
+        session_id: str,
+        acc: TokenAccumulator,
+        user_content: str,
+        originally_requested_logprobs: bool = False,
+    ) -> Response:
+        """Rewrite chat/completions to /v1/completions with pre-tokenized prompt.
+
+        Respects the original stream setting: if the client requested streaming,
+        we stream from vLLM and translate completions chunks to chat format in
+        real-time.
+        """
+        is_stream = request_body.get("stream", False)
+
+        # Build prompt from cumulative token state
+        token_ids = acc.build_next_prompt(user_content)
+
+        # Construct completions request: forward everything except chat-specific fields
+        completions_body = {k: v for k, v in request_body.items() if k not in ("messages", "stream", "stream_options")}
+        completions_body["prompt"] = token_ids
+        completions_body["add_special_tokens"] = False
+
+        if is_stream:
+            return await self._handle_cumulative_streaming(request, request_body, completions_body, session_id, acc, token_ids)
+        return await self._handle_cumulative_non_streaming(
+            request,
+            request_body,
+            completions_body,
+            session_id,
+            acc,
+            token_ids,
+            originally_requested_logprobs,
+        )
+
+    async def _handle_cumulative_non_streaming(
+        self,
+        request: Request,
+        request_body: dict[str, Any],
+        completions_body: dict[str, Any],
+        session_id: str,
+        acc: TokenAccumulator,
+        token_ids: list[int],
+        originally_requested_logprobs: bool = False,
+    ) -> Response:
+        """Non-streaming cumulative turn: send non-streaming to vLLM, return JSON."""
+        t0 = time.perf_counter()
+
+        worker = self.router.route(session_id)
+        url = self._build_url(worker.api_url, "/v1/completions", "")
+        headers = self._forward_headers(request)
+        raw_body = json.dumps(completions_body).encode()
+        try:
+            resp = await self._send_with_retry(
+                method="POST",
+                url=url,
+                content=raw_body,
+                headers=headers,
+            )
+            content = resp.content
+            status_code = resp.status_code
+        finally:
+            self.router.release(worker.url)
+
+        try:
+            response_body = json.loads(content)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            response_body = {}
+
+        latency_ms = (time.perf_counter() - t0) * 1000
+
+        prompt_token_ids = extract_prompt_token_ids(response_body) or token_ids
+        completion_token_ids = extract_completion_token_ids(response_body)
+
+        acc.ingest_turn(prompt_token_ids, completion_token_ids)
+        acc.update_prefix(request_body.get("messages", []))
+
+        # Translate to chat format
+        choices = response_body.get("choices") or []
+        if choices:
+            first_choice = choices[0]
+            first_choice["message"] = {"role": "assistant", "content": first_choice.pop("text", "")}
+        response_body["object"] = "chat.completion"
+
+        if session_id and response_body:
+            trace = build_trace_record(session_id, request_body, response_body, latency_ms)
+            await self._persist(trace)
+
+        sanitized = response_body
+        if isinstance(response_body, dict) and response_body:
+            if self.strip_vllm:
+                sanitized = strip_vllm_fields(response_body)
+            if not originally_requested_logprobs:
+                sanitized = _strip_logprobs(sanitized)
+
+        return Response(
+            content=json.dumps(sanitized),
+            status_code=status_code,
+            media_type="application/json",
+        )
+
+    async def _handle_cumulative_streaming(
+        self,
+        request: Request,
+        request_body: dict[str, Any],
+        completions_body: dict[str, Any],
+        session_id: str,
+        acc: TokenAccumulator,
+        token_ids: list[int],
+    ) -> StreamingResponse:
+        """Streaming cumulative turn: stream from vLLM, translate chunks to chat format."""
+        completions_body["stream"] = True
+
+        worker = self.router.route(session_id)
+        url = self._build_url(worker.api_url, "/v1/completions", "")
+        headers = self._forward_headers(request)
+        raw_body = json.dumps(completions_body).encode()
+
+        assert self._http is not None
+        upstream = self._http.stream(
+            method="POST",
+            url=url,
+            content=raw_body,
+            headers=headers,
+        )
+        retry_client: httpx.AsyncClient | None = None
+        try:
+            resp = await upstream.__aenter__()
+        except (httpx.ReadError, httpx.ConnectError, httpx.RemoteProtocolError, httpx.TimeoutException) as first_exc:
+            logger.warning(
+                "Cumulative streaming connection error to %s (type=%s). Retrying.",
+                url,
+                type(first_exc).__name__,
+            )
+            retry_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(timeout=None),
+                limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
+                follow_redirects=True,
+            )
+            retry_upstream = retry_client.stream(
+                method="POST",
+                url=url,
+                content=raw_body,
+                headers=headers,
+            )
+            try:
+                resp = await retry_upstream.__aenter__()
+                upstream = retry_upstream
+            except Exception:
+                await retry_client.aclose()
+                self.router.release(worker.url)
+                raise
+
+        t0 = time.perf_counter()
+        chunks: list[dict[str, Any]] = []
+
+        async def event_generator():
+            try:
+                first_chunk_sent = False
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        if line:
+                            yield line + "\n"
+                        continue
+
+                    data_str = line[6:].strip()
+                    if data_str == "[DONE]":
+                        yield "data: [DONE]\n\n"
+                        continue
+
+                    try:
+                        chunk = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+
+                    chunks.append(chunk)
+
+                    # Translate completions chunk → chat chunk
+                    choices = chunk.get("choices", [])
+                    chat_chunk: dict[str, Any] = {
+                        "id": chunk.get("id", ""),
+                        "object": "chat.completion.chunk",
+                        "created": chunk.get("created", 0),
+                        "model": chunk.get("model", ""),
+                        "choices": [],
+                    }
+                    if choices:
+                        c = choices[0]
+                        delta: dict[str, Any] = {}
+                        if not first_chunk_sent:
+                            delta["role"] = "assistant"
+                            first_chunk_sent = True
+                        text = c.get("text", "")
+                        if text:
+                            delta["content"] = text
+                        chat_chunk["choices"] = [
+                            {
+                                "index": 0,
+                                "delta": delta,
+                                "finish_reason": c.get("finish_reason"),
+                            }
+                        ]
+                    elif not chunk.get("usage"):
+                        # Empty chunk with no usage either — nothing to forward
+                        continue
+
+                    if chunk.get("usage"):
+                        chat_chunk["usage"] = chunk["usage"]
+
+                    sanitized = strip_vllm_fields(chat_chunk) if self.strip_vllm else chat_chunk
+                    yield f"data: {json.dumps(sanitized)}\n\n"
+
+            finally:
+                await upstream.__aexit__(None, None, None)
+                if retry_client is not None:
+                    await retry_client.aclose()
+                self.router.release(worker.url)
+
+                # Ingest accumulated token data
+                if chunks:
+                    latency_ms = (time.perf_counter() - t0) * 1000
+                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms)
+                    prompt_ids = trace.prompt_token_ids or token_ids
+                    completion_ids = trace.completion_token_ids
+
+                    acc.ingest_turn(prompt_ids, completion_ids)
+                    acc.update_prefix(request_body.get("messages", []))
+
+                    task = asyncio.create_task(self._safe_store(trace.trace_id, trace.session_id, trace.model_dump()))
+                    self._pending_traces.add(task)
+                    task.add_done_callback(self._pending_traces.discard)
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            status_code=resp.status_code,
         )
 
     # ------------------------------------------------------------------
@@ -316,6 +609,16 @@ class ReverseProxy:
                     )
                     self._pending_traces.add(task)
                     task.add_done_callback(self._pending_traces.discard)
+
+                    # Ingest first turn into accumulator for cumulative token mode
+                    if self.cumulative_token_mode:
+                        acc = self._get_accumulator(session_id)
+                        if acc.turn_count == 0:
+                            prompt_ids = trace.prompt_token_ids
+                            completion_ids = trace.completion_token_ids
+                            if prompt_ids or completion_ids:
+                                acc.ingest_turn(prompt_ids, completion_ids)
+                                acc.update_prefix(request_body.get("messages", []))
 
         return StreamingResponse(
             event_generator(),
