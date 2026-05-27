@@ -11,8 +11,11 @@ from unittest.mock import MagicMock
 import torch
 
 from rllm.agents.agent import Episode, Step, Trajectory
+from rllm.experimental.common.config import CompactFilteringConfig, TransformConfig
+from rllm.experimental.common.transform import transform_episodes_to_trajectory_groups
 from rllm.experimental.rollout import ModelOutput
 from rllm.experimental.verl.transform import transform_episodes_to_dataproto
+from rllm.workflows.workflow import TerminationReason
 
 
 def _make_mock_rollout_engine(pad_token_id: int = 0):
@@ -44,6 +47,24 @@ def _make_episode(
     )
     trajectory = Trajectory(steps=[step], reward=reward)
     return Episode(id=episode_id, trajectories=[trajectory], is_correct=reward > 0)
+
+
+def test_transform_metrics_handle_all_filtered_groups():
+    episodes = [Episode(id=f"task:{i}", trajectories=[], termination_reason=TerminationReason.TIMEOUT) for i in range(2)]
+    cf_config = CompactFilteringConfig(enable=True, mask_timeout=True)
+
+    groups, metrics = transform_episodes_to_trajectory_groups(
+        episodes,
+        TransformConfig(),
+        cf_config,
+    )
+
+    assert groups == []
+    assert metrics["groups/num_groups"] == 0
+    assert metrics["groups/num_trajs_after_filter"] == 0
+    assert metrics["groups/avg_group_size"] == 0.0
+    assert metrics["groups/max_group_size"] == 0
+    assert metrics["groups/min_group_size"] == 0
 
 
 class TestRolloutLogProbsPropagation:
