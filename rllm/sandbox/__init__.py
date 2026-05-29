@@ -45,7 +45,11 @@ def create_sandbox_orchestrator(config: SandboxConfig) -> Any:
         from rllm.sandbox.backends.modal_backend import create_modal_sandbox
 
         factory = create_modal_sandbox
+    elif backend == "daytona":
+        from rllm.sandbox.backends.daytona import create_daytona_sandbox
+
+        factory = create_daytona_sandbox
     else:
-        raise ValueError(f"Unknown sandbox backend: {backend!r}. Supported: local, docker, modal, agentcore")
+        raise ValueError(f"Unknown sandbox backend: {backend!r}. Supported: local, docker, modal, daytona, agentcore")
 
     return SandboxOrchestrator(sandbox_factory=factory, config=config)
