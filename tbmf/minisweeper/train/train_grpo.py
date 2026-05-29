@@ -1,12 +1,12 @@
-"""LaMer MiniSweeper training with multi-pass validation.
+"""GRPO MiniSweeper training with multi-pass validation.
 
-Train: multi-episode LaMer rollouts (N episodes + reflection).
+Train: single-episode GRPO rollouts.
 Val pass 1 (single_episode): standard GRPO flow -> pass@1/pass@4.
 Val pass 2 (multi_episode): LaMer 3-episode flow -> success_at1/2/3 (runs once per task).
 
 Usage::
 
-    python3 -m tbmf.minisweeper.train.train_lamer rllm/backend=verl
+    python3 -m tbmf.minisweeper.train.train_grpo rllm/backend=verl
 """
 
 import hydra
@@ -38,7 +38,7 @@ def _build_multi_pass(config: DictConfig):
     multi_ep_enabled = val_cfg.get("multi_episode", {}).get("enabled", True)
 
     mp_config = MultiPassConfig(
-        train_flow=minisweeper_lamer_flow,
+        train_flow=minisweeper_flow,
         train_evaluator=minisweeper_evaluator,
         val_passes=[
             ValidationPass("single_episode", minisweeper_flow, minisweeper_evaluator, enabled=single_ep_enabled),

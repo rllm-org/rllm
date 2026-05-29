@@ -149,7 +149,7 @@ async def sokoban_flow(task: Task, config: AgentConfig) -> Episode:
     t = time.perf_counter()
     session = await create_env_session(
         SokobanEnv,
-        session_mode="ray_pool",
+        session_mode="local",
         mode=mode,
         dim_room=dim_room,
         num_boxes=num_boxes,

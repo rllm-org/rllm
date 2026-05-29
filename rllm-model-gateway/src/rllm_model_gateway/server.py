@@ -154,6 +154,7 @@ def create_app(
         strip_vllm=config.strip_vllm_fields,
         sync_traces=config.sync_traces,
         local_handler=local_handler,
+        max_prompt_length=config.max_prompt_length,
     )
     sessions = SessionManager(store)
 
@@ -428,6 +429,8 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
         data["sampling_params_priority"] = args.sampling_params_priority
     if getattr(args, "model", None) is not None:
         data["model"] = args.model
+    if getattr(args, "max_prompt_length", None) is not None:
+        data["max_prompt_length"] = args.max_prompt_length
 
     # Workers from CLI --worker flags (WorkerConfig validator auto-splits URLs)
     worker_urls = getattr(args, "worker", None) or []
@@ -469,17 +472,24 @@ def main() -> None:
         default=None,
         help="If set, the gateway rewrites every request body's 'model' field to this value before forwarding.",
     )
+    parser.add_argument(
+        "--max-prompt-length",
+        type=int,
+        default=None,
+        help="If set, reject requests whose prompt exceeds this token count with max_prompt_length_exceeded.",
+    )
 
     args = parser.parse_args()
     config = _load_config(args)
 
     logging.basicConfig(level=getattr(logging, config.log_level.upper(), logging.INFO))
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     app = create_app(config)
 
     import uvicorn
 
-    uvicorn.run(app, host=config.host, port=config.port, log_level=config.log_level.lower())
+    uvicorn.run(app, host=config.host, port=config.port, log_level=config.log_level.lower(), access_log=False)
 
 
 if __name__ == "__main__":

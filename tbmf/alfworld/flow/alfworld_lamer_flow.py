@@ -94,7 +94,7 @@ async def alfworld_lamer_flow(task: Task, config: AgentConfig) -> Episode:
 
         # --- PLAY PHASE ---
         t = time.perf_counter()
-        session = await create_env_session(AlfWorldEnv, session_mode="ray_pool", game_file=game_file, max_steps=max_steps)
+        session = await create_env_session(AlfWorldEnv, session_mode="ray", game_file=game_file, max_steps=max_steps)
         initial_obs, info = await session.reset()
         admissible_commands = info.get("admissible_commands", [])
         env_init_s += time.perf_counter() - t

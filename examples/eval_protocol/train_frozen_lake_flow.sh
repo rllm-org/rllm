@@ -25,7 +25,6 @@ python3 -m examples.eval_protocol.train_frozen_lake_flow \
     actor_rollout_ref.hybrid_engine=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.strategy=fsdp2 \
-    actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-sum-norm \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=8 \
     actor_rollout_ref.actor.use_dynamic_bsz=True \

@@ -106,6 +106,7 @@ class ReverseProxy:
         sync_traces: bool = False,
         max_retries: int = 2,
         local_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+        max_prompt_length: int | None = None,
     ) -> None:
         self.router = router
         self.store = store
@@ -113,6 +114,7 @@ class ReverseProxy:
         self.sync_traces = sync_traces
         self.max_retries = max_retries
         self.local_handler = local_handler
+        self.max_prompt_length = max_prompt_length
         self._http: httpx.AsyncClient | None = None
         self._pending_traces: set[asyncio.Task[None]] = set()
 
@@ -198,6 +200,15 @@ class ReverseProxy:
             "remaining_tokens": remaining,
             "max_tokens_key": max_tokens_key,
         }
+
+        if self.max_prompt_length and prompt_tokens > self.max_prompt_length:
+            context_metadata["termination_reason"] = _MAX_PROMPT_LENGTH_EXCEEDED
+            body = self._build_context_error_body(
+                request_body=request_body,
+                tokenized=tokenize_body_resp,
+                metadata=context_metadata,
+            )
+            return raw_body, request_body, {_CONTEXT_BUDGET_METADATA_KEY: context_metadata}, body, 400
 
         if remaining <= 0:
             context_metadata["termination_reason"] = _MAX_PROMPT_LENGTH_EXCEEDED

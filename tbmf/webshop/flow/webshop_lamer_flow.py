@@ -269,5 +269,5 @@ async def webshop_lamer_flow(task: Task, config: AgentConfig) -> Episode:
             "num_episodes": num_episodes,
             "traj_gamma": traj_gamma,
         },
-        is_correct=won_any,
+        is_correct=lamer.won_any,
     )

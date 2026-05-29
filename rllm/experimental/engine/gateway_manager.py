@@ -139,6 +139,7 @@ class GatewayManager:
         self.sampling_params_priority: str = gw_cfg.get("sampling_params_priority", "client")
         # The gateway always pins ``body.model`` to whatever the trainer is serving
         self.model: str | None = config.get("model", {}).get("name", None)
+        self.max_prompt_length: int | None = config.get("data", {}).get("max_prompt_length", None)
         self.mode = mode
 
         self._process: subprocess.Popen | None = None
@@ -317,6 +318,8 @@ class GatewayManager:
             cmd.extend(["--sampling-params-priority", self.sampling_params_priority])
         if self.model:
             cmd.extend(["--model", self.model])
+        if self.max_prompt_length:
+            cmd.extend(["--max-prompt-length", str(self.max_prompt_length)])
 
         logger.info("Starting gateway subprocess: %s", " ".join(cmd))
         # Inherit parent's stdout/stderr so gateway logs are visible for debugging.
@@ -346,6 +349,8 @@ class GatewayManager:
         from rllm_model_gateway.models import GatewayConfig
         from rllm_model_gateway.server import create_app
 
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+
         gw_config = GatewayConfig(
             host="0.0.0.0",
             port=self.port,
@@ -356,6 +361,7 @@ class GatewayManager:
             add_logprobs=self.add_logprobs,
             add_return_token_ids=self.add_return_token_ids,
             sync_traces=(self.store == "memory"),
+            max_prompt_length=self.max_prompt_length,
         )
         app = create_app(config=gw_config, local_handler=local_handler)
 
@@ -364,6 +370,7 @@ class GatewayManager:
             host="0.0.0.0",
             port=self.port,
             log_level="warning",
+            access_log=False,
         )
         server = uvicorn.Server(uvi_config)
         self._server = server

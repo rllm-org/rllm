@@ -35,7 +35,7 @@ MODEL_PATH=/mnt/dolphinfs/ssd_pool/docker/user/hadoop-nlp-sh02/hadoop-aipnlp/LA/
 
 echo "which python: $(which python3)"
 
-CUDA_VISIBLE_DEVICES=0,1 python3 -m tbmf.alfworld.train \
+CUDA_VISIBLE_DEVICES=0,1 python3 -m tbmf.alfworld.train.train_grpo \
     rllm/backend=verl \
     algorithm.adv_estimator=grpo \
     algorithm.norm_adv_by_std_in_grpo=true \

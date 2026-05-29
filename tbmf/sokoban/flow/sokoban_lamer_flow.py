@@ -23,11 +23,11 @@ from rllm.types import AgentConfig, Episode, Step, Task, Trajectory
 
 try:
     from ..prepare_sokoban_data import LAMER_SOKOBAN_CONFIG
-    from ..sokoban_prompt import get_sokoban_prompt, SOKOBAN_PLAY_PROMPT
+    from ..sokoban_prompt import get_sokoban_prompt, parse_reflection, SOKOBAN_PLAY_PROMPT
     from .sokoban_flow import parse_actions, _parse_dim_room, _ACTION_LABELS, _ACTION_COUNT_WORDS
 except (ImportError, ValueError):
     from prepare_sokoban_data import LAMER_SOKOBAN_CONFIG
-    from sokoban_prompt import get_sokoban_prompt, SOKOBAN_PLAY_PROMPT
+    from sokoban_prompt import get_sokoban_prompt, parse_reflection, SOKOBAN_PLAY_PROMPT
     from flow.sokoban_flow import parse_actions, _parse_dim_room, _ACTION_LABELS, _ACTION_COUNT_WORDS
 
 logger = logging.getLogger(__name__)
@@ -64,26 +64,30 @@ def _build_observation_prompt(
     reflection_type: str,
     action_is_valid: bool = True,
 ) -> str:
+    """Build user message for a given turn.
+
+    Aligned with the reference LaMer implementation: the first episode's prompt
+    is identical to single-episode GRPO. Only episode 2+ injects past
+    trajectory/reflection context. Rules are always in the system message only.
+    """
     word = _ACTION_COUNT_WORDS.get(actions_per_turn, str(actions_per_turn))
+    remaining = max(max_turns - turn, 0)
 
     if turn == 0:
-        prompt = get_sokoban_prompt(
-            phase="play",
-            turn_idx=0,
-            traj_idx=ep_idx,
-            init_observation=observation,
-            curr_traj="",
-            past_traj=lamer.past_traj_actions,
-            reflection=lamer.reflections,
-            num_actions_per_turn=actions_per_turn,
-            reflection_type=reflection_type,
+        header = "The initial state of the game is:"
+        cross_ep_context = ""
+        if ep_idx > 0:
+            cross_ep_context = parse_reflection(ep_idx, lamer.past_traj_actions, lamer.reflections, reflection_type)
+            cross_ep_context += f"\nCurrently you're on trial #{ep_idx + 1}, starting from the initial state."
+
+        return (
+            f"{header}\n{observation}\n"
+            f"{cross_ep_context}\n"
+            f"You have {remaining} turns remaining including this one.\n"
+            f"Now it's your turn to make moves (choose the next {word} actions)."
         )
-        remaining = max(max_turns - turn, 0)
-        prompt += f"\n\nYou have {remaining} turns remaining including this one."
-        return prompt
 
     header = f"Current observation (turn {turn}):"
-    remaining = max(max_turns - turn, 0)
     retry = ""
     if not action_is_valid:
         retry = (

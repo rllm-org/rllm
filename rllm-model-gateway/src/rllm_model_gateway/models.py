@@ -121,3 +121,4 @@ class GatewayConfig(BaseModel):
     sync_traces: bool = False
     sampling_params_priority: str = "client"
     model: str | None = None  # When set, overrides ``body.model``
+    max_prompt_length: int | None = None  # When set, rejects prompts exceeding this token count

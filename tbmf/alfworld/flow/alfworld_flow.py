@@ -130,7 +130,7 @@ async def alfworld_flow(task: Task, config: AgentConfig) -> Episode:
 
     t = time.perf_counter()
     logger.info("alfworld rollout %s: env init start game=%s max_steps=%d", uid, os.path.basename(game_file), max_steps)
-    session = await create_env_session(AlfWorldEnv, session_mode="ray_pool", game_file=game_file, max_steps=max_steps)
+    session = await create_env_session(AlfWorldEnv, session_mode="ray", game_file=game_file, max_steps=max_steps)
     initial_obs, info = await session.reset()
     admissible_commands = info.get("admissible_commands", [])
     env_init_s = time.perf_counter() - t

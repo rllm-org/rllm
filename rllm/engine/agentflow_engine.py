@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import resource
+import sys
 import time
 import uuid
 from collections import defaultdict
@@ -163,6 +164,25 @@ def enrich_episode_with_traces(
                 n_agent_steps,
             )
             training_steps = training_steps[:n_agent_steps]
+
+    # Multi-episode flows (e.g. LaMer) can have failed LLM calls mid-flow:
+    # the gateway captures the trace (with empty completion_token_ids) but the
+    # agent catches the exception and doesn't record a Step.  These "phantom"
+    # traces are scattered (not just trailing), so the above cleanup misses
+    # them.  When the excess count exactly matches the number of
+    # empty-completion traces, drop them to restore positional alignment.
+    if agent_populates_steps and len(training_steps) > n_agent_steps:
+        excess = len(training_steps) - n_agent_steps
+        n_empty_compl = sum(1 for s in training_steps if not s.model_output.completion_ids)
+        if excess == n_empty_compl and n_empty_compl > 0:
+            logger.warning(
+                "[%s] dropping %d scattered phantom trace(s) with empty completion_ids; "
+                "keeping %d aligned with agent_steps",
+                uid,
+                n_empty_compl,
+                n_agent_steps,
+            )
+            training_steps = [s for s in training_steps if s.model_output.completion_ids]
 
     empty_prompt = sum(1 for s in training_steps if not s.model_output.prompt_ids)
     empty_compl = sum(1 for s in training_steps if not s.model_output.completion_ids)
@@ -414,11 +434,25 @@ class AgentFlowEngine:
             futures.append(self.process_task_with_retry(task, task_id, rollout_idx, idx, is_validation=is_validation))
 
         results: list[Episode | None] = [None] * len(tasks)
-        with tqdm(total=len(tasks), desc="Generating trajectories") as pbar:
+        # Suppress noisy per-request logs that drown the progress bar
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+        progress_log_every = max(1, (len(tasks) + 99) // 100)
+        with tqdm(
+            total=len(tasks),
+            desc="Generating trajectories",
+            file=sys.stdout,
+            dynamic_ncols=True,
+            mininterval=1.0,
+        ) as pbar:
             for future in asyncio.as_completed(futures):
                 task_id, rollout_idx, result_idx, episode = await future
                 results[result_idx] = episode
                 pbar.update(1)
+                if not sys.stdout.isatty() and (
+                    pbar.n == len(tasks) or pbar.n % progress_log_every == 0
+                ):
+                    tqdm.write(str(pbar), file=sys.stdout)
 
         ordered_results: list[Episode] = results  # type: ignore[assignment]
 

@@ -5,6 +5,7 @@ Each advantage estimator will return a tuple of (advantages, returns).
 """
 
 import logging
+import re
 from collections import defaultdict
 from collections.abc import Callable
 
@@ -17,6 +18,14 @@ from rllm.utils.logging import DuplicateLoggingFilter
 
 logger = logging.getLogger(__name__)
 logger.addFilter(DuplicateLoggingFilter())  # prevent duplicate logging messages
+
+_STRUCTURAL_SUFFIX_RE = re.compile(r'_(ep\d+|reflect\d+)$')
+
+
+def _extract_metric_suffix(group_role: str) -> str | None:
+    """Extract structural suffix (ep0, reflect0) from group_role, stripping env prefix and mode suffix (_step)."""
+    m = _STRUCTURAL_SUFFIX_RE.search(group_role)
+    return m.group(1) if m else None
 
 
 RLLM_ADV_ESTIMATOR_REGISTRY: dict[str, Callable] = {}
@@ -213,20 +222,45 @@ def collect_reward_and_advantage_from_trajectory_groups(
                     for step in traj.steps:
                         step.advantage = float(advantage)
 
-    # reduce metrics by group
+    # Reduce metrics. Metric keys strip the environment prefix (carried by experiment_name),
+    # emitting canonical reward/mean plus per-suffix detail (reward/ep0/mean, reward/reflect0/mean).
     final_metrics = {}
+
+    all_rewards = []
+    for rewards in rewards_by_role.values():
+        all_rewards.extend(rewards)
+    if all_rewards:
+        final_metrics["reward/mean"] = np.mean(all_rewards)
+        final_metrics["reward/std"] = np.std(all_rewards)
+        final_metrics["reward/max"] = np.max(all_rewards)
+        final_metrics["reward/min"] = np.min(all_rewards)
+
     for group_role, rewards in rewards_by_role.items():
-        final_metrics[f"reward/{group_role}/mean"] = np.mean(rewards)
-        final_metrics[f"reward/{group_role}/std"] = np.std(rewards)
-        final_metrics[f"reward/{group_role}/max"] = np.max(rewards)
-        final_metrics[f"reward/{group_role}/min"] = np.min(rewards)
+        suffix = _extract_metric_suffix(group_role)
+        if suffix is not None:
+            final_metrics[f"reward/{suffix}/mean"] = np.mean(rewards)
+            final_metrics[f"reward/{suffix}/std"] = np.std(rewards)
+            final_metrics[f"reward/{suffix}/max"] = np.max(rewards)
+            final_metrics[f"reward/{suffix}/min"] = np.min(rewards)
 
     if collect_advantage:
+        all_advantages = []
+        for advantages in advantages_by_role.values():
+            all_advantages.extend(advantages)
+        if all_advantages:
+            final_metrics["advantage/mean"] = np.mean(all_advantages)
+            final_metrics["advantage/std"] = np.std(all_advantages)
+            final_metrics["advantage/max"] = np.max(all_advantages)
+            final_metrics["advantage/min"] = np.min(all_advantages)
+            final_metrics["advantage/fraction_zero"] = np.sum(np.abs(np.array(all_advantages)) < 1e-8) / len(all_advantages)
+
         for group_role, advantages in advantages_by_role.items():
-            final_metrics[f"advantage/{group_role}/mean"] = np.mean(advantages)
-            final_metrics[f"advantage/{group_role}/std"] = np.std(advantages)
-            final_metrics[f"advantage/{group_role}/max"] = np.max(advantages)
-            final_metrics[f"advantage/{group_role}/min"] = np.min(advantages)
-            final_metrics[f"advantage/{group_role}/fraction_zero"] = np.sum(np.abs(advantages) < 1e-8) / len(advantages)
+            suffix = _extract_metric_suffix(group_role)
+            if suffix is not None:
+                final_metrics[f"advantage/{suffix}/mean"] = np.mean(advantages)
+                final_metrics[f"advantage/{suffix}/std"] = np.std(advantages)
+                final_metrics[f"advantage/{suffix}/max"] = np.max(advantages)
+                final_metrics[f"advantage/{suffix}/min"] = np.min(advantages)
+                final_metrics[f"advantage/{suffix}/fraction_zero"] = np.sum(np.abs(np.array(advantages)) < 1e-8) / len(advantages)
 
     return final_metrics

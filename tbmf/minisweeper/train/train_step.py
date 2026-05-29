@@ -1,6 +1,9 @@
-"""Train the step-based (non-cumulative) MiniSweeper agent.
+"""Step GRPO MiniSweeper training with single-pass validation.
 
-Usage from the rllm repo root::
+Train: step-based non-cumulative rollouts.
+Val: same step flow, single episode evaluation.
+
+Usage::
 
     python3 -m tbmf.minisweeper.train.train_step rllm/backend=tinker
 """
@@ -15,8 +18,27 @@ except (ImportError, ValueError):
     from eval.minisweeper_eval import minisweeper_evaluator
     from flow.minisweeper_step_flow import minisweeper_step_flow
 
+try:
+    from .multi_pass import MultiPassConfig, MultiPassEvaluator, MultiPassFlow, ValidationPass
+except (ImportError, ValueError):
+    from multi_pass import MultiPassConfig, MultiPassEvaluator, MultiPassFlow, ValidationPass
+
 from rllm.data.dataset import DatasetRegistry
 from rllm.experimental.unified_trainer import AgentTrainer
+
+
+def _build_multi_pass(config: DictConfig):
+    val_cfg = config.get("rllm", {}).get("validation", {}).get("passes", {})
+    single_ep_enabled = val_cfg.get("single_episode", {}).get("enabled", True)
+
+    mp_config = MultiPassConfig(
+        train_flow=minisweeper_step_flow,
+        train_evaluator=minisweeper_evaluator,
+        val_passes=[
+            ValidationPass("single_episode", minisweeper_step_flow, minisweeper_evaluator, enabled=single_ep_enabled),
+        ],
+    )
+    return MultiPassFlow(mp_config), MultiPassEvaluator(mp_config)
 
 
 @hydra.main(config_path="pkg://rllm.experimental.config", config_name="unified", version_base=None)
@@ -25,14 +47,14 @@ def main(config: DictConfig):
     val_dataset = DatasetRegistry.load_dataset("minisweeper", "test")
 
     if train_dataset is None or val_dataset is None:
-        raise RuntimeError(
-            "MiniSweeper dataset not found. Run: python3 tbmf/minisweeper/prepare_minisweeper_data.py"
-        )
+        raise RuntimeError("MiniSweeper dataset not found. Run: python3 tbmf/minisweeper/prepare_minisweeper_data.py")
+
+    flow, evaluator = _build_multi_pass(config)
 
     trainer = AgentTrainer(
         backend=config.rllm.get("backend", "tinker"),
-        agent_flow=minisweeper_step_flow,
-        evaluator=minisweeper_evaluator,
+        agent_flow=flow,
+        evaluator=evaluator,
         config=config,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
