@@ -50,6 +50,16 @@ rollout:
     top_p: 1.0
     top_k: -1
     max_tokens: 2048
+  chat_template:
+    parser_backend: rllm   # rllm | vllm | sglang | tinker
+    reasoning_parser_name: null  # vllm/sglang only: e.g. "deepseek_r1", "qwen3"
+    tool_parser_name: null  # vllm/sglang only: e.g. "deepseek_v3", "qwen3_coder"
+    renderer_name: null  # tinker only; auto-detected from model name if null
+    disable_thinking: ${...disable_thinking}  # rllm only: disable thinking
+    accumulate_reasoning: ${...accumulate_reasoning}  # rllm only: accumulate reasoning
+    reasoning_effort: high  # rllm only: low, medium, high (gpt-oss)
+    chat_template_path: null  # path to a custom chat template file
+    backend_init_kwargs: {}  # backend-specific parser initialization kwargs
 
 # Trainer Configuration
 trainer:

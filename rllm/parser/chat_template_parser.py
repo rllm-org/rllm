@@ -5,21 +5,13 @@ from copy import deepcopy
 
 from rllm.tools.tool_base import Tool, ToolCall, ToolOutput
 
-from .utils import PARSER_TEST_MESSAGES
+from .base import BaseChatParser, ParsedCompletion, RenderedPrompt
+from .utils import PARSER_TEST_MESSAGES, normalize_tools
 
 logger = logging.getLogger(__name__)
 
 
-def _import_torch():
-    try:
-        import torch
-
-        return torch
-    except ImportError as err:
-        raise ImportError("ChatTemplateParser.tokenize_and_mask requires PyTorch. Install with: pip install rllm[train]") from err
-
-
-class ChatTemplateParser:
+class ChatTemplateParser(BaseChatParser):
     def __init__(self, tokenizer, processor=None):
         self.tokenizer = tokenizer
         self.processor = processor
@@ -38,14 +30,23 @@ class ChatTemplateParser:
 
         return generation_prompt
 
-    def parse(self, messages, add_generation_prompt=False, is_first_msg=False, **kwargs) -> str:
-        if self.processor is not None:
-            return self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt)
-        else:
-            return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt)
+    def render_messages(self, messages, add_generation_prompt=False, is_first_msg=False, **kwargs) -> RenderedPrompt:
+        prompt = self.parse(messages, add_generation_prompt=add_generation_prompt, is_first_msg=is_first_msg, **kwargs)
+        token_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
+        return RenderedPrompt(token_ids=token_ids, text=prompt)
 
-    def parse_completion(self, completion_ids: list[int]):
-        raise NotImplementedError("ChatTemplateParser does not support parse_completion")
+    def parse(self, messages, add_generation_prompt=False, is_first_msg=False, **kwargs) -> str:
+        if "tools" in kwargs and kwargs["tools"] is not None:
+            kwargs["tools"] = normalize_tools(kwargs["tools"])
+
+        if self.processor is not None:
+            return self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt, **kwargs)
+        else:
+            return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt, **kwargs)
+
+    def parse_completion(self, completion_ids: list[int]) -> ParsedCompletion:
+        completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=True)
+        return ParsedCompletion(content=completion_text, reasoning="", tool_calls=[])
 
     def verify_equivalence(self, messages, verbose=True):
         """Verify that parsing messages together is equivalent to parsing them individually.
@@ -84,13 +85,12 @@ class ChatTemplateParser:
         return is_equivalent
 
     @classmethod
-    def get_parser(cls, tokenizer, processor=None, disable_thinking=False) -> "ChatTemplateParser":
-        """Factory method to get the appropriate parser based on a string identifier.
+    def get_parser(cls, tokenizer, processor=None, **kwargs) -> "ChatTemplateParser":
+        """Factory method to infer the appropriate parser based on the tokenizer.
 
         Args:
-            parser_type (str): String identifier for the parser type
             tokenizer: The tokenizer to use with the parser
-            disable_thinking: Whether generation prompt will disable thinking.
+            processor: Optional processor for multimodal models
 
         Returns:
             ChatTemplateParser: An instance of the requested parser
@@ -102,26 +102,28 @@ class ChatTemplateParser:
         if isinstance(tokenizer.name_or_path, str):
             model_name = tokenizer.name_or_path.lower()
             tokenizer_cls = tokenizer.__class__.__name__.lower()
+            disable_thinking = kwargs.get("disable_thinking", False)
+            accumulate_reasoning = kwargs.get("accumulate_reasoning", False)
             logger.info(f"model_name: {model_name}, tokenizer_cls: {tokenizer_cls}")
             if any(x in model_name for x in ("deepseek", "deepscaler", "deepcoder")) and ("llama" in tokenizer_cls or "distill-qwen" in model_name):
                 if "deepseek-math-v2" in model_name or "deepseek-v3.2-exp" in model_name:
                     logger.info(f"Using DeepSeekV32ExpChatTemplateParser for {tokenizer.name_or_path}")
-                    return DeepSeekV32ExpChatTemplateParser(tokenizer, disable_thinking=disable_thinking)
+                    return DeepSeekV32ExpChatTemplateParser(tokenizer, disable_thinking=disable_thinking, accumulate_reasoning=accumulate_reasoning)
                 else:
                     logger.info(f"Using DeepseekQwenChatTemplateParser for {tokenizer.name_or_path}")
-                    return DeepseekQwenChatTemplateParser(tokenizer, disable_thinking=disable_thinking)
+                    return DeepseekQwenChatTemplateParser(tokenizer, disable_thinking=disable_thinking, accumulate_reasoning=accumulate_reasoning)
             elif "qwen" in model_name or "r2e" in model_name or "deepswe" in model_name or "qwen" in tokenizer_cls:
                 logger.info(f"Using QwenChatTemplateParser for {tokenizer.name_or_path}")
-                return QwenChatTemplateParser(tokenizer, processor=processor, disable_thinking=disable_thinking)
+                return QwenChatTemplateParser(tokenizer, processor=processor, disable_thinking=disable_thinking, accumulate_reasoning=accumulate_reasoning)
             elif "llama" in model_name:
                 logger.info(f"Using LlamaChatTemplateParser for {tokenizer.name_or_path}")
                 return LlamaChatTemplateParser(tokenizer)
             elif "gpt-oss" in model_name or "imo" in model_name:
                 logger.info(f"Using HarmonyChatTemplateParser for {tokenizer.name_or_path}")
-                return HarmonyChatTemplateParser()
+                return HarmonyChatTemplateParser(accumulate_reasoning=accumulate_reasoning, reasoning_effort=kwargs.get("reasoning_effort", "high"))
             elif "kimi-k2" in model_name:
                 logger.info(f"Using KimiK2ThinkingChatTemplateParser for {tokenizer.name_or_path}")
-                return KimiK2ThinkingChatTemplateParser(tokenizer)
+                return KimiK2ThinkingChatTemplateParser(tokenizer, accumulate_reasoning=accumulate_reasoning)
 
         # Default to the standard parser if no specific match
         parser = ChatTemplateParser(tokenizer, processor=processor)
@@ -129,66 +131,13 @@ class ChatTemplateParser:
         assert parser.verify_equivalence(PARSER_TEST_MESSAGES), "Parser failed equivalence check"
         return parser
 
-    def tokenize_and_mask(self, messages):
-        try:
-            last_assistant_idx = max(i for i, msg in enumerate(messages) if msg["role"] == "assistant")
-        except ValueError:
-            raise ValueError("No assistant message found in chat_completions") from None
-
-        prompt = self.parse(messages[:last_assistant_idx], is_first_msg=True, add_generation_prompt=True, accumulate_reasoning=False)
-        prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
-
-        response = self.parse([messages[last_assistant_idx]], is_first_msg=False, add_generation_prompt=False, accumulate_reasoning=True)
-        response = response[len(self.generation_prompt) :].rstrip("\n")  # handle qwen trailing newline from eot token
-        response_ids = self.tokenizer.encode(response, add_special_tokens=False)
-        response_mask = [1] * len(response_ids)
-
-        torch = _import_torch()
-        prompt_ids = torch.tensor(prompt_ids, dtype=torch.long)
-        response_ids = torch.tensor(response_ids, dtype=torch.long)
-        response_mask = torch.tensor(response_mask, dtype=torch.long)
-
-        return prompt_ids, response_ids, response_mask
-
-    def tokenize_and_mask_cumulative(self, messages):
-        response_ids = []
-        response_mask = []
-
-        try:
-            first_assistant_idx = next(i for i, msg in enumerate(messages) if msg["role"] == "assistant")
-        except StopIteration:
-            raise ValueError("No assistant message found in chat_completions") from None
-
-        prompt = self.parse(messages[:first_assistant_idx], is_first_msg=True, add_generation_prompt=True, accumulate_reasoning=False)
-        prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
-
-        for i in range(first_assistant_idx, len(messages)):
-            is_asst = messages[i]["role"] == "assistant"
-            if is_asst:
-                response = self.parse([messages[i]], is_first_msg=False, add_generation_prompt=False, accumulate_reasoning=True)
-                response = response[len(self.generation_prompt) :]
-                ids = self.tokenizer.encode(response, add_special_tokens=False)
-                response_ids.extend(ids)
-                response_mask.extend([1] * len(ids))
-            else:
-                response = self.parse([messages[i]], is_first_msg=False, add_generation_prompt=True, accumulate_reasoning=False)
-                ids = self.tokenizer.encode(response, add_special_tokens=False)
-                response_ids.extend(ids)
-                response_mask.extend([0] * len(ids))
-
-        torch = _import_torch()
-        prompt_ids = torch.tensor(prompt_ids, dtype=torch.long)
-        response_ids = torch.tensor(response_ids, dtype=torch.long)
-        response_mask = torch.tensor(response_mask, dtype=torch.long)
-
-        return prompt_ids, response_ids, response_mask
-
 
 class DeepseekQwenChatTemplateParser(ChatTemplateParser):
-    def __init__(self, tokenizer, disable_thinking=False):
+    def __init__(self, tokenizer, disable_thinking=False, accumulate_reasoning=False):
         super().__init__(tokenizer)
 
         self.disable_thinking = disable_thinking
+        self.accumulate_reasoning = accumulate_reasoning
         self.bos_token = tokenizer.bos_token
         self.eos_token = tokenizer.eos_token
         self.system_token = ""
@@ -203,7 +152,9 @@ class DeepseekQwenChatTemplateParser(ChatTemplateParser):
 
         self.tool_parser = R1ToolParser()
 
-    def parse(self, messages: list[dict], add_generation_prompt: bool = False, is_first_msg: bool = False, tools: list[Tool | dict] = None, accumulate_reasoning: bool = False, **kwargs) -> str:
+    def parse(self, messages: list[dict], add_generation_prompt: bool = False, is_first_msg: bool = False, tools: list[Tool | dict] = None, accumulate_reasoning=None, **kwargs) -> str:
+        if accumulate_reasoning is None:
+            accumulate_reasoning = self.accumulate_reasoning
         tools = tools or []
         tools_prompt_str = ""
         if tools:
@@ -260,7 +211,9 @@ class DeepseekQwenChatTemplateParser(ChatTemplateParser):
     def parse_user(self, message):
         return self.user_token + message["content"]
 
-    def parse_assistant(self, message, accumulate_reasoning=False):
+    def parse_assistant(self, message, accumulate_reasoning=None):
+        if accumulate_reasoning is None:
+            accumulate_reasoning = self.accumulate_reasoning
         content = (message.get("content", None) or "").strip()
         reasoning = (message.get("reasoning", None) or "").strip()
         tool_calls = message.get("tool_calls", None) or []
@@ -372,9 +325,10 @@ class DeepseekQwenChatTemplateParser(ChatTemplateParser):
 
 
 class QwenChatTemplateParser(ChatTemplateParser):
-    def __init__(self, tokenizer, processor=None, disable_thinking=False):
+    def __init__(self, tokenizer, processor=None, disable_thinking=False, accumulate_reasoning=False):
         super().__init__(tokenizer, processor=processor)
         self.disable_thinking = disable_thinking
+        self.accumulate_reasoning = accumulate_reasoning
         self.bos_token = tokenizer.bos_token
         self.eos_token = tokenizer.eos_token
         self.eot_token = "<|im_end|>\n"
@@ -393,7 +347,9 @@ class QwenChatTemplateParser(ChatTemplateParser):
 
         self.tool_parser = QwenToolParser()
 
-    def parse(self, messages: list[dict], add_generation_prompt: bool = False, is_first_msg: bool = False, tools: list[Tool] = None, accumulate_reasoning: bool = False, **kwargs) -> str:
+    def parse(self, messages: list[dict], add_generation_prompt: bool = False, is_first_msg: bool = False, tools: list[Tool] = None, accumulate_reasoning=None, **kwargs) -> str:
+        if accumulate_reasoning is None:
+            accumulate_reasoning = self.accumulate_reasoning
         tools = tools or []
         tools_prompt_str = ""
         if tools:
@@ -454,7 +410,9 @@ class QwenChatTemplateParser(ChatTemplateParser):
 
         return self.user_token + message["content"] + self.eot_token
 
-    def parse_assistant(self, message, accumulate_reasoning=False):
+    def parse_assistant(self, message, accumulate_reasoning=None):
+        if accumulate_reasoning is None:
+            accumulate_reasoning = self.accumulate_reasoning
         content = (message.get("content", None) or "").strip()
         reasoning = (message.get("reasoning", None) or "").strip()
         tool_calls = message.get("tool_calls", None) or []
@@ -653,7 +611,7 @@ class LlamaChatTemplateParser(ChatTemplateParser):
 class HarmonyChatTemplateParser(ChatTemplateParser):
     builtin_tool_prefixes = ("browser", "python")
 
-    def __init__(self, tokenizer=None):
+    def __init__(self, accumulate_reasoning=False, reasoning_effort="high"):
         from openai_harmony import (
             HarmonyEncodingName,
             load_harmony_encoding,
@@ -662,6 +620,8 @@ class HarmonyChatTemplateParser(ChatTemplateParser):
         self.enc = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
         self.generation_prompt = "<|start|>assistant"
         self.stop_sequences = [200002, 199999, 200012]  # <|endoftext|>, <|return|>, <|call|>
+        self.accumulate_reasoning = accumulate_reasoning
+        self.reasoning_effort = reasoning_effort
 
     def parse(self, messages, add_generation_prompt=False, is_first_msg=False, **kwargs) -> str:
         return self.parse_prompt_from_messages(messages, add_generation_prompt=add_generation_prompt, is_first_msg=is_first_msg, **kwargs)
@@ -747,7 +707,7 @@ class HarmonyChatTemplateParser(ChatTemplateParser):
 
         if is_first_msg:
             # 1. system prompt
-            reasoning_effort = ReasoningEffort(kwargs.get("reasoning_effort", "medium").capitalize())
+            reasoning_effort = ReasoningEffort(kwargs.get("reasoning_effort", self.reasoning_effort).capitalize())
             system_message = SystemContent.new().with_reasoning_effort(reasoning_effort)
             for tool in builtin_tools:
                 tool_name = self._tool_name(tool)
@@ -816,8 +776,8 @@ class HarmonyChatTemplateParser(ChatTemplateParser):
                 raise NotImplementedError(f"Unsupported message role: {message['role']}")
 
         conv = Conversation.from_messages(harmony_messages)
-        accumulate_thinking = kwargs.get("accumulate_thinking", False)
-        config = RenderConversationConfig(auto_drop_analysis=not accumulate_thinking)
+        accumulate_reasoning = kwargs.get("accumulate_reasoning", self.accumulate_reasoning)
+        config = RenderConversationConfig(auto_drop_analysis=not accumulate_reasoning)
         prompt_ids: list[int] = self.enc.render_conversation(conv, config)
 
         try:
@@ -872,9 +832,10 @@ class HarmonyChatTemplateParser(ChatTemplateParser):
 
 
 class DeepSeekV32ExpChatTemplateParser(ChatTemplateParser):
-    def __init__(self, tokenizer, disable_thinking=False):
-        self.tokenizer = tokenizer
+    def __init__(self, tokenizer, disable_thinking=False, accumulate_reasoning=False):
+        super().__init__(tokenizer)
         self.disable_thinking = disable_thinking
+        self.accumulate_reasoning = accumulate_reasoning
         self.bos_token = "<｜begin▁of▁sentence｜>"
         self.eos_token = "<｜end▁of▁sentence｜>"
         self.system_token = ""
@@ -885,9 +846,12 @@ class DeepSeekV32ExpChatTemplateParser(ChatTemplateParser):
         else:
             self.generation_prompt = self.assistant_token + "<think>"
 
-    def parse(self, messages, add_generation_prompt=False, is_first_msg=False, tools: list[Tool | dict] = None, accumulate_reasoning: bool = False, **kwargs) -> str:
+    def parse(self, messages, add_generation_prompt=False, is_first_msg=False, tools: list[Tool | dict] = None, accumulate_reasoning=None, **kwargs) -> str:
         if tools:
             raise NotImplementedError("Tools are not supported yet")
+
+        if accumulate_reasoning is None:
+            accumulate_reasoning = self.accumulate_reasoning
 
         result = ""
 
@@ -917,7 +881,9 @@ class DeepSeekV32ExpChatTemplateParser(ChatTemplateParser):
     def parse_user(self, message):
         return self.user_token + message["content"]
 
-    def parse_assistant(self, message, accumulate_reasoning=False):
+    def parse_assistant(self, message, accumulate_reasoning=None):
+        if accumulate_reasoning is None:
+            accumulate_reasoning = self.accumulate_reasoning
         reasoning = message.get("reasoning", None)
         content = message.get("content", None)
 
@@ -965,9 +931,10 @@ class DeepSeekV32ExpChatTemplateParser(ChatTemplateParser):
 
 
 class KimiK2ThinkingChatTemplateParser(ChatTemplateParser):
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer, accumulate_reasoning=False):
         super().__init__(tokenizer)
         self.tokenizer = tokenizer
+        self.accumulate_reasoning = accumulate_reasoning
         self.eos_token = "<|im_end|>"
         self.user_token = "<|im_user|>"
         self.assistant_token = "<|im_assistant|>"
@@ -975,9 +942,12 @@ class KimiK2ThinkingChatTemplateParser(ChatTemplateParser):
         self.middle_token = "<|im_middle|>"
         self.generation_prompt = f"{self.assistant_token}assistant{self.middle_token}"
 
-    def parse(self, messages: list[dict], add_generation_prompt: bool = False, is_first_msg: bool = False, tools: list = None, accumulate_reasoning: bool = False, **kwargs) -> str:
+    def parse(self, messages: list[dict], add_generation_prompt: bool = False, is_first_msg: bool = False, tools: list = None, accumulate_reasoning=None, **kwargs) -> str:
         if tools:
             raise NotImplementedError("Tools are not supported yet")
+
+        if accumulate_reasoning is None:
+            accumulate_reasoning = self.accumulate_reasoning
 
         result = ""
 
@@ -1010,7 +980,9 @@ class KimiK2ThinkingChatTemplateParser(ChatTemplateParser):
         content = message.get("content", "")
         return f"{self.user_token}user{self.middle_token}{content}{self.eos_token}"
 
-    def parse_assistant(self, message, accumulate_reasoning=False):
+    def parse_assistant(self, message, accumulate_reasoning=None):
+        if accumulate_reasoning is None:
+            accumulate_reasoning = self.accumulate_reasoning
         content = message.get("content", "")
         reasoning = message.get("reasoning", "")
 
