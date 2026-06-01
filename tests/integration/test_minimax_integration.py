@@ -25,16 +25,16 @@ class TestMiniMaxIntegration:
 
     @requires_minimax
     def test_minimax_litellm_config_generation(self):
-        """Verify LiteLLM config is correctly generated for MiniMax M2.7."""
+        """Verify LiteLLM config is correctly generated for MiniMax M3."""
         pm = EvalProxyManager(
             provider="minimax",
-            model_name="MiniMax-M2.7",
+            model_name="MiniMax-M3",
             api_key=MINIMAX_API_KEY,
         )
         config = pm.build_proxy_config()
 
         entry = config["model_list"][0]
-        assert entry["litellm_params"]["model"] == "minimax/MiniMax-M2.7"
+        assert entry["litellm_params"]["model"] == "minimax/MiniMax-M3"
         assert entry["litellm_params"]["api_key"] == MINIMAX_API_KEY
 
     @requires_minimax
@@ -45,24 +45,24 @@ class TestMiniMaxIntegration:
         original = RllmConfig(
             provider="minimax",
             api_keys={"minimax": MINIMAX_API_KEY},
-            model="MiniMax-M2.7",
+            model="MiniMax-M3",
         )
         save_config(original)
 
         loaded = load_config()
         assert loaded.provider == "minimax"
-        assert loaded.model == "MiniMax-M2.7"
+        assert loaded.model == "MiniMax-M3"
         assert loaded.api_key == MINIMAX_API_KEY
         assert loaded.is_configured()
         assert loaded.validate() == []
 
     @requires_minimax
     def test_minimax_litellm_completion(self):
-        """Verify MiniMax M2.7 responds via LiteLLM completion (no proxy)."""
+        """Verify MiniMax M3 responds via LiteLLM completion (no proxy)."""
         import litellm
 
         response = litellm.completion(
-            model="minimax/MiniMax-M2.7",
+            model="minimax/MiniMax-M3",
             messages=[{"role": "user", "content": "Say hello in one word."}],
             api_key=MINIMAX_API_KEY,
             max_tokens=16,
