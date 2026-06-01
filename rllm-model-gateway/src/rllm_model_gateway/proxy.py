@@ -27,7 +27,7 @@ from rllm_model_gateway.session_router import SessionRouter
 from rllm_model_gateway.store.base import TraceStore
 from rllm_model_gateway.token_accumulator import (
     TokenAccumulator,
-    extract_new_user_content,
+    extract_new_messages,
 )
 
 logger = logging.getLogger(__name__)
@@ -86,7 +86,7 @@ class ReverseProxy:
         max_retries: int = 2,
         local_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
         cumulative_token_mode: bool = False,
-        tokenizer: Any = None,
+        renderer: Any = None,
     ) -> None:
         self.router = router
         self.store = store
@@ -95,7 +95,7 @@ class ReverseProxy:
         self.max_retries = max_retries
         self.local_handler = local_handler
         self.cumulative_token_mode = cumulative_token_mode
-        self.tokenizer = tokenizer
+        self.renderer = renderer
         self._http: httpx.AsyncClient | None = None
         self._pending_traces: set[asyncio.Task[None]] = set()
         self._accumulators: dict[str, TokenAccumulator] = {}
@@ -103,7 +103,7 @@ class ReverseProxy:
     def _get_accumulator(self, session_id: str) -> TokenAccumulator:
         """Return the TokenAccumulator for *session_id*, creating if needed."""
         if session_id not in self._accumulators:
-            self._accumulators[session_id] = TokenAccumulator(self.tokenizer)
+            self._accumulators[session_id] = TokenAccumulator(self.renderer)
         return self._accumulators[session_id]
 
     async def start(self) -> None:
@@ -156,16 +156,23 @@ class ReverseProxy:
                     # normal chat path (treated as fresh turn-0).
                     acc.reset()
                 else:
-                    user_content = extract_new_user_content(messages, acc.message_count)
-                    if user_content is not None:
+                    new_messages = extract_new_messages(messages, acc.message_count)
+                    token_ids = None
+                    if new_messages:
+                        token_ids = acc.build_next_prompt(new_messages, tools=request_body.get("tools"))
+                    if token_ids is not None:
                         return await self._handle_cumulative_turn(
                             request,
                             request_body,
                             session_id,
                             acc,
-                            user_content,
+                            token_ids,
                             originally_requested_logprobs,
                         )
+                    # No new messages, or the renderer couldn't prove the
+                    # prefix-extension contract (e.g. DefaultRenderer, or an
+                    # assistant message in the new slice). Fall through to the
+                    # normal chat path.
 
         if is_stream:
             return await self._handle_streaming(request, body, request_body, session_id, originally_requested_logprobs)
@@ -256,10 +263,13 @@ class ReverseProxy:
         request_body: dict[str, Any],
         session_id: str,
         acc: TokenAccumulator,
-        user_content: str,
+        token_ids: list[int],
         originally_requested_logprobs: bool = False,
     ) -> Response:
         """Rewrite chat/completions to /v1/completions with pre-tokenized prompt.
+
+        ``token_ids`` is the full bridge-extended prompt for this turn, built
+        by ``acc.build_next_prompt`` in ``handle()``.
 
         Respects the original stream setting: if the client requested streaming,
         we stream from vLLM and translate completions chunks to chat format in
@@ -267,11 +277,8 @@ class ReverseProxy:
         """
         is_stream = request_body.get("stream", False)
 
-        # Build prompt from cumulative token state
-        token_ids = acc.build_next_prompt(user_content)
-
         # Construct completions request: forward everything except chat-specific fields
-        completions_body = {k: v for k, v in request_body.items() if k not in ("messages", "stream", "stream_options")}
+        completions_body = {k: v for k, v in request_body.items() if k not in ("messages", "stream", "stream_options", "tools", "tool_choice")}
         completions_body["prompt"] = token_ids
         completions_body["add_special_tokens"] = False
 

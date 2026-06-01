@@ -16,6 +16,8 @@ dependencies = [
     "pydantic>=2.0.0",
     "aiosqlite>=0.19.0",
     "PyYAML>=6.0",
+    "renderers>=0.1.7",
+    "transformers>=4.50.0",
 ]
 
 [project.optional-dependencies]

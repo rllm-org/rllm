@@ -7,8 +7,6 @@ Verifies that when cumulative_token_mode=True, the gateway:
 4. Stores traces with correct prompt_token_ids and completion_token_ids
 """
 
-from unittest.mock import MagicMock
-
 import openai
 import pytest
 from rllm_model_gateway import GatewayClient, GatewayConfig, create_app
@@ -17,51 +15,55 @@ from tests.helpers.gateway_server import GatewayServer
 from tests.helpers.mock_vllm import MockVLLMServer
 
 
-def _make_test_tokenizer():
-    """Create a mock tokenizer for testing cumulative mode without loading a real model.
+class _MockRendered:
+    """Stand-in for renderers.RenderedTokens (only .token_ids is consumed)."""
 
-    Uses the same scheme as test_token_accumulator.py:
-    - Special tokens: <|im_end|>=100, <|im_start|>=101, newline=10
-    - apply_chat_template with continue_final_message=True returns [101, 1, 10, 101, 2, 10, 50, 51]
-    - apply_chat_template with add_generation_prompt=True returns prefix + bridge + content
+    def __init__(self, token_ids):
+        self.token_ids = token_ids
+
+
+class _MockRenderer:
+    """Mimics renderers.Renderer.bridge_to_next_turn without loading a real model.
+
+    Bridge output = prev_prompt + prev_completion + deterministic extension:
+        [100, 10, 101, 1, 10] + content_ids + [100, 10, 101, 2, 10]
+    where content_ids = ord() of the first 3 chars of the last user message.
+
+    Returns None when new_messages is empty or contains an assistant turn —
+    mirroring renderers' reject_assistant_in_extension contract.
     """
-    tokenizer = MagicMock()
 
-    def _apply_chat_template(conversation, tokenize=False, **kwargs):
-        if kwargs.get("continue_final_message"):
-            return [101, 1, 10, 101, 2, 10, 50, 51]
-
-        if kwargs.get("add_generation_prompt"):
-            user_content = conversation[-1]["content"]
-            prefix = [101, 1, 10, 101, 2, 10, 50, 51]
-            content_ids = [ord(c) for c in user_content[:3]]
-            bridge = [100, 10, 101, 1, 10] + content_ids + [100, 10, 101, 2, 10]
-            return prefix + bridge
-
-        return []
-
-    tokenizer.apply_chat_template = _apply_chat_template
-    return tokenizer
+    def bridge_to_next_turn(self, prev_prompt_ids, prev_completion_ids, new_messages, *, tools=None):
+        if not new_messages or any(m.get("role") == "assistant" for m in new_messages):
+            return None
+        content = ""
+        for m in reversed(new_messages):
+            if m.get("role") == "user":
+                content = m.get("content", "")
+                break
+        content_ids = [ord(c) for c in content[:3]]
+        bridge = [100, 10, 101, 1, 10] + content_ids + [100, 10, 101, 2, 10]
+        return _MockRendered(list(prev_prompt_ids) + list(prev_completion_ids) + bridge)
 
 
 @pytest.fixture
 def cumulative_gateway(mock_vllm: MockVLLMServer):
-    """Gateway with cumulative_token_mode enabled using a mock tokenizer.
+    """Gateway with cumulative_token_mode enabled using a mock renderer.
 
-    Creates the app with cumulative_token_mode=False to avoid AutoTokenizer.from_pretrained,
-    then manually injects the mock tokenizer and enables cumulative mode on the proxy.
+    Creates the app with cumulative_token_mode=False to avoid building a real
+    renderer (which would load AutoTokenizer), then injects the mock renderer
+    and enables cumulative mode on the proxy.
     """
     config = GatewayConfig(
         store_worker="memory",
         workers=[{"url": f"{mock_vllm.url}/v1", "worker_id": "w0"}],
         health_check_interval=999,
         sync_traces=True,
-        cumulative_token_mode=False,  # Don't try to load real tokenizer
+        cumulative_token_mode=False,  # Don't try to build a real renderer
     )
     app = create_app(config)
-    # Inject mock tokenizer and enable cumulative mode
-    mock_tokenizer = _make_test_tokenizer()
-    app.state.proxy.tokenizer = mock_tokenizer
+    # Inject mock renderer and enable cumulative mode
+    app.state.proxy.renderer = _MockRenderer()
     app.state.proxy.cumulative_token_mode = True
 
     server = GatewayServer(app, port=0)
