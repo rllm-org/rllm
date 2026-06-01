@@ -703,14 +703,15 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             await self.checkpoint_manager.update_weights(trainer_state.global_step)
 
         # Update metrics
-        batch: DataProto = trainer_state.backend_batch  # type: ignore[attr-defined]
-        metrics = trainer_state.metrics
-        metrics.update({"training/global_step": trainer_state.global_step, "training/epoch": trainer_state.epoch})
-        metrics.update(compute_data_metrics(batch=batch, use_critic=False))
-        metrics.update(compute_timing_metrics(batch=batch, timing_raw=trainer_state.timing_dict))
+        if trainer_state.has_backend_batch:
+            batch: DataProto = trainer_state.backend_batch  # type: ignore[attr-defined]
+            metrics = trainer_state.metrics
+            metrics.update({"training/global_step": trainer_state.global_step, "training/epoch": trainer_state.epoch})
+            metrics.update(compute_data_metrics(batch=batch, use_critic=False))
+            metrics.update(compute_timing_metrics(batch=batch, timing_raw=trainer_state.timing_dict))
 
-        n_gpus = self.resource_pool_manager.get_n_gpus()
-        metrics.update(compute_throughout_metrics(batch=batch, timing_raw=trainer_state.timing_dict, n_gpus=n_gpus))
+            n_gpus = self.resource_pool_manager.get_n_gpus()
+            metrics.update(compute_throughout_metrics(batch=batch, timing_raw=trainer_state.timing_dict, n_gpus=n_gpus))
 
     async def on_validation_start(self, trainer_state: TrainerState) -> bool:
         """Called at the start of validation."""
