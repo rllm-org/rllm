@@ -260,6 +260,69 @@ class TestCumulativeTokenMode:
         assert "messages" in mock_vllm.request_log[2]
         assert "prompt" not in mock_vllm.request_log[2]
 
+    def test_declined_bridge_resets_and_reingests(self, cumulative_gateway):
+        """When the renderer declines a cumulative (non-divergent) turn, the
+        accumulator must reset so that turn is re-ingested on the chat path.
+
+        Regression: without the reset, the stale prefix drops the declined
+        turn's completion tokens from the next cumulative prompt, breaking the
+        prefix-extension invariant. A bridge can return None even when the
+        message prefix is cumulative (e.g. DefaultRenderer, or a slice the
+        renderer can't bridge).
+        """
+        server, mock_vllm = cumulative_gateway
+        gw_url = server.url
+
+        class _DecliningRenderer(_MockRenderer):
+            """Declines (returns None) when the new user message is 'DECLINE'."""
+
+            def bridge_to_next_turn(self, prev_prompt_ids, prev_completion_ids, new_messages, *, tools=None):
+                for m in reversed(new_messages):
+                    if m.get("role") == "user":
+                        if m.get("content") == "DECLINE":
+                            return None
+                        break
+                return super().bridge_to_next_turn(prev_prompt_ids, prev_completion_ids, new_messages, tools=tools)
+
+        server.app.state.proxy.renderer = _DecliningRenderer()
+        acc_store = server.app.state.proxy._accumulators
+
+        oai = openai.OpenAI(base_url=f"{gw_url}/sessions/cum-decline/v1", api_key="dummy")
+
+        # Turn 1 — seeds accumulator (prompt [1,2,3,4,5] + completion [10,11,12]).
+        oai.chat.completions.create(model="mock-model", messages=[{"role": "user", "content": "Hello"}])
+
+        # Turn 2 — cumulative prefix, but the renderer declines the bridge.
+        oai.chat.completions.create(
+            model="mock-model",
+            messages=[
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hello from mock!"},
+                {"role": "user", "content": "DECLINE"},
+            ],
+        )
+        # Declined -> chat path (not /v1/completions).
+        assert "messages" in mock_vllm.request_log[1]
+        assert "prompt" not in mock_vllm.request_log[1]
+        # Reset + re-ingest: prefix snapshot now reflects turn-2's 3 messages,
+        # not turn-1's single message (the bug leaves this at 1).
+        assert acc_store["cum-decline"].message_count == 3
+
+        # Turn 3 — cumulative extension resumes from the re-ingested turn-2 state.
+        oai.chat.completions.create(
+            model="mock-model",
+            messages=[
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hello from mock!"},
+                {"role": "user", "content": "DECLINE"},
+                {"role": "assistant", "content": "Hello from mock!"},
+                {"role": "user", "content": "More"},
+            ],
+        )
+        assert "prompt" in mock_vllm.request_log[2]
+        # Prompt extends the re-ingested turn-2 full sequence [1,2,3,4,5,10,11,12].
+        assert mock_vllm.request_log[2]["prompt"][:8] == [1, 2, 3, 4, 5, 10, 11, 12]
+
     def test_reset_then_resume_cumulative(self, cumulative_gateway):
         """After a reset, the next cumulative extension works normally again."""
         server, mock_vllm = cumulative_gateway

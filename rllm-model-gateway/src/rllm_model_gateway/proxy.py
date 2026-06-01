@@ -171,8 +171,11 @@ class ReverseProxy:
                         )
                     # No new messages, or the renderer couldn't prove the
                     # prefix-extension contract (e.g. DefaultRenderer, or an
-                    # assistant message in the new slice). Fall through to the
-                    # normal chat path.
+                    # assistant message in the new slice). Reset so this turn is
+                    # re-ingested as a fresh turn-0 on the chat path; otherwise
+                    # the stale prefix would drop this turn's completion tokens
+                    # from the next cumulative prompt and break prefix-extension.
+                    acc.reset()
 
         if is_stream:
             return await self._handle_streaming(request, body, request_body, session_id, originally_requested_logprobs)
