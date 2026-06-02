@@ -95,15 +95,20 @@ async def _judge_solutions(client: AsyncOpenAI, config: AgentConfig, problem: st
 def _format_countdown_problem(task: Task) -> str:
     """Render the countdown task into a natural-language problem statement.
 
-    The countdown DatasetRegistry transform returns only ``{target, nums,
-    data_source}`` (no ``question`` field), so ``task.instruction`` is empty
-    and the flow has to format the prompt itself from metadata.
+    The ``countdown`` DatasetRegistry transform emits a ``question`` field,
+    so ``task.instruction`` carries the problem statement — use it directly.
+    The metadata fallback (rebuilding the prompt from ``target``/``nums``)
+    keeps the flow working with countdown datasets registered before that
+    transform fix, when ``task.instruction`` came out empty.
     """
+    instruction = str(task.instruction or "").strip()
+    if instruction:
+        return instruction
     md = task.metadata or {}
     target = md.get("target")
     nums = md.get("nums")
     if target is None or nums is None:
-        return str(task.instruction or "")
+        return ""
     return f"Using the numbers {list(nums)}, write an arithmetic expression that evaluates to {target}. Each number must be used exactly once and only +, -, *, / are allowed."
 
 

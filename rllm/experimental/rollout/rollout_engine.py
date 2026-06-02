@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from rllm.experimental.rollout.types import TokenInput, Tokenizer, TokenOutput
-    from rllm.parser import ChatTemplateParser
+    from rllm.parser import BaseParser
     from rllm.tools.tool_base import ToolCall
 
 logger = logging.getLogger(__name__)
@@ -71,7 +71,7 @@ class ModelOutput:
 
 
 class RolloutEngine:
-    chat_parser: ChatTemplateParser | None = None
+    parser: BaseParser | None = None
     tokenizer: Tokenizer | None = None
     is_validation: bool = False  # flag enabled/disabled by AgentWorkflowEngine.execute_tasks
 

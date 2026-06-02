@@ -96,6 +96,12 @@ disable_thinking: False
 # Accumulate reasoning
 accumulate_reasoning: False
 
+# Message -> token parser backend (verl backend):
+# "renderer" (default; renders messages to token ids via the `renderers`
+# package, preserving token identity across multi-turn rollouts) |
+# "chat_template" (legacy chat-template-string path)
+parser_backend: renderer
+
 # Mask truncated samples
 mask_truncated_samples: False
 filter_token_mismatch: True

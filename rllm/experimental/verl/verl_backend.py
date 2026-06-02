@@ -245,6 +245,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             server_manager=server_manager,
             tokenizer=self.tokenizer,
             processor=self.processor,
+            parser_backend=self.config.rllm.get("parser_backend", "renderer"),
         )
 
         self.algorithm_config = kwargs.get("algorithm_config")

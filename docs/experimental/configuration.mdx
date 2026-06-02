@@ -122,6 +122,7 @@ Top-level flags for trajectory processing and filtering.
 |-----------|------|---------|-------------|
 | `disable_thinking` | `bool` | `False` | Whether to disable thinking tokens in responses |
 | `accumulate_reasoning` | `bool` | `False` | Whether to accumulate reasoning across steps |
+| `parser_backend` | `str` | `renderer` | Message-to-token backend for the verl backend: `renderer` (the `renderers` package) or `chat_template` (legacy `ChatTemplateParser`) |
 | `mask_truncated_samples` | `bool` | `False` | Whether to mask trajectories that were truncated |
 | `filter_token_mismatch` | `bool` | `True` | Whether to filter out trajectories with token mismatches |
 
@@ -235,7 +236,8 @@ This file contains:
 | `rollout_engine.reasoning_effort` | `str` | `medium` | Reasoning effort mode |
 | `rollout_engine.accumulate_reasoning` | `bool` | `false` | Whether to accumulate reasoning across steps |
 | `rollout_engine.disable_thinking` | `bool` | `false` | Whether to disable thinking tokens |
-| `rollout_engine.renderer_name` | `str \| null` | `null` | Optional renderer name |
+| `rollout_engine.parser_backend` | `str` | `tinker` | Message-to-token backend: `tinker` (Tinker renderer) or `chat_template` (`ChatTemplateParser`) |
+| `rollout_engine.renderer_name` | `str \| null` | `null` | Optional renderer name (used when `parser_backend=tinker`) |
 | `data.max_prompt_length` | `int` | `2048` | Max prompt length |
 | `data.max_response_length` | `int` | `2048` | Max response length |
 | `data.train_batch_size` | `int` | `64` | Train batch size |

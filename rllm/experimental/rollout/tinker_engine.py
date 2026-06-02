@@ -1,5 +1,5 @@
 import json
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import tinker
 from tinker.types import ModelInput
@@ -157,7 +157,7 @@ class TinkerEngine(RolloutEngine):
         max_response_length: int = 4096,
         max_model_length: int = 32768,
         sampling_params: dict | None = None,
-        bypass_render_with_parser: bool = True,  # default to True now
+        parser_backend: Literal["chat_template", "tinker"] = "tinker",
         processor: Processor | None = None,
         image_processor: ImageProcessor | None = None,
         disable_thinking: bool = False,
@@ -178,22 +178,26 @@ class TinkerEngine(RolloutEngine):
             max_response_length: Maximum response length in tokens
             max_model_length: Maximum total length (prompt + response) in tokens
             sampling_params: Default sampling parameters (temperature, top_p, etc.)
-            bypass_render_with_parser: If True, use ChatTemplateParser instead of Tinker's renderer
-            processor: Optional processor for multimodal models (used when bypass_render_with_parser=True)
-            image_processor: Optional image processor for vision-language models (used with renderer)
-            disable_thinking: Whether to disable thinking in generation prompt (used when bypass_render_with_parser=True)
-            accumulate_reasoning: Whether to accumulate reasoning (used when bypass_render_with_parser=True)
-            reasoning_effort: The effort level for reasoning (used when bypass_render_with_parser=True)
-            renderer_name: The name of the renderer to use (used when bypass_render_with_parser=True)
+            parser_backend: Which message->token backend to use. "tinker" (default)
+                uses the Tinker renderer; "chat_template" uses rLLM's
+                ChatTemplateParser.
+            processor: Optional processor for multimodal models (used when parser_backend="chat_template")
+            image_processor: Optional image processor for vision-language models (used with the Tinker renderer)
+            disable_thinking: Whether to disable thinking in generation prompt (used when parser_backend="chat_template")
+            accumulate_reasoning: Whether to accumulate reasoning (used when parser_backend="chat_template")
+            reasoning_effort: The effort level for reasoning (used when parser_backend="chat_template")
+            renderer_name: The name of the Tinker renderer to use (used when parser_backend="tinker")
         """
         super().__init__()
+        if parser_backend not in ("chat_template", "tinker"):
+            raise ValueError(f"TinkerEngine parser_backend must be 'chat_template' or 'tinker', got {parser_backend!r}")
         self.base_url = base_url
         self.model_name = model_name
         self.max_prompt_length = max_prompt_length
         self.max_response_length = max_response_length
         self.max_model_length = max_model_length - 1
         self.tokenizer = tokenizer
-        self.bypass_render_with_parser = bypass_render_with_parser
+        self.parser_backend = parser_backend
         self.accumulate_reasoning = accumulate_reasoning
         self.reasoning_effort = reasoning_effort
 
@@ -207,16 +211,13 @@ class TinkerEngine(RolloutEngine):
         # Pass image_processor for VLM support with Tinker renderer
         self.renderer = renderers.get_renderer(renderer_name, self.tokenizer, image_processor=image_processor)
 
-        if bypass_render_with_parser:
-            self.chat_parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=disable_thinking)
-            if hasattr(self.chat_parser, "stop_sequences") and self.chat_parser.stop_sequences:
-                self.stop_sequences = self.chat_parser.stop_sequences
-            elif hasattr(tokenizer, "eos_token_id") and tokenizer.eos_token_id:
-                self.stop_sequences = [tokenizer.eos_token_id]
-            else:
+        if parser_backend == "chat_template":
+            self.parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=disable_thinking)
+            self.stop_sequences = self.parser.get_stop_token_ids()
+            if not self.stop_sequences:
                 raise ValueError("No stop sequences found for tokenizer or chat parser")
         else:
-            self.chat_parser = None
+            self.parser = None
             self.stop_sequences = self.renderer.get_stop_sequences()
 
         # Sampling client will be set via set_sampling_client()
@@ -331,12 +332,12 @@ class TinkerEngine(RolloutEngine):
         sampled_sequence = cast(TinkerTokenOutput, token_output)
         response_tokens, logprobs = sampled_sequence.tokens, sampled_sequence.logprobs
 
-        if self.bypass_render_with_parser:
-            assert self.chat_parser is not None, "chat_parser must be set when bypass_render_with_parser=True"
-            parsed_output = self.chat_parser.parse_completion(response_tokens)
-            content = parsed_output.get("content", "")
-            reasoning = parsed_output.get("reasoning", "")
-            tool_calls = parsed_output.get("tool_calls", [])
+        if self.parser_backend == "chat_template":
+            assert self.parser is not None, "parser must be set when parser_backend='chat_template'"
+            parsed_output = self.parser.parse_completion(response_tokens)
+            content = parsed_output.content
+            reasoning = parsed_output.reasoning or ""
+            tool_calls = parsed_output.tool_calls
         else:
             assert isinstance(self.renderer, renderers.Renderer), "self.renderer must be a valid Tinker Renderer"
             response_message, _ = self.renderer.parse_response(response_tokens)
@@ -376,8 +377,8 @@ class TinkerEngine(RolloutEngine):
             **kwargs: Additional parameters including:
                 - application_id: Session/application ID for tracing
                 - enforce_max_prompt_length: Whether to enforce max prompt length
-                - tools: List of tools (used when bypass_render_with_parser=True)
-                - accumulate_reasoning: Whether to accumulate reasoning (used when bypass_render_with_parser=True)
+                - tools: List of tools (used when parser_backend="chat_template")
+                - accumulate_reasoning: Whether to accumulate reasoning (used when parser_backend="chat_template")
 
         Returns:
             ModelOutput with generated text and metadata
@@ -390,9 +391,9 @@ class TinkerEngine(RolloutEngine):
         accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
         reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
 
-        if self.bypass_render_with_parser:
+        if self.parser_backend == "chat_template":
             # Use ChatTemplateParser
-            prompt = self.chat_parser.parse(  # type: ignore
+            prompt = self.parser.parse(  # type: ignore
                 messages,
                 add_generation_prompt=True,
                 is_first_msg=True,

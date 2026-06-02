@@ -58,6 +58,14 @@ class TestCountdownTransform:
         assert result["nums"] == [2, 3, 5]
         assert result["data_source"] == "countdown"
 
+    def test_builds_question_and_ground_truth(self):
+        # The dataset is registered with instruction_field="question";
+        # the transform must surface a non-empty question + ground_truth.
+        result = countdown_transform({"target": 10, "nums": [2, 3, 5]})
+        assert "2, 3, 5" in result["question"]
+        assert "10" in result["question"]
+        assert result["ground_truth"] == "10"
+
 
 class TestHotpotQATransform:
     def test_basic_transform(self):
