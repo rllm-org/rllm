@@ -113,6 +113,72 @@ def stream_chunks():
     yield "data: [DONE]\n\n"
 
 
+def completions_stream_chunks(prompt_token_ids: list[int]):
+    """Yield SSE chunks for /v1/completions streaming format."""
+    chunks = [
+        {
+            "id": "cmpl-mock",
+            "object": "text_completion",
+            "model": "mock-model",
+            "prompt_token_ids": prompt_token_ids,
+            "choices": [
+                {
+                    "index": 0,
+                    "text": "Hello",
+                    "finish_reason": None,
+                    "stop_reason": None,
+                    "token_ids": [10],
+                    "logprobs": {
+                        "tokens": ["Hello"],
+                        "token_logprobs": [-0.5],
+                        "token_ids": [10],
+                    },
+                }
+            ],
+        },
+        {
+            "id": "cmpl-mock",
+            "object": "text_completion",
+            "model": "mock-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "text": " from mock!",
+                    "finish_reason": None,
+                    "stop_reason": None,
+                    "token_ids": [11, 12],
+                    "logprobs": {
+                        "tokens": [" from", " mock!"],
+                        "token_logprobs": [-0.3, -0.1],
+                        "token_ids": [11, 12],
+                    },
+                }
+            ],
+        },
+        {
+            "id": "cmpl-mock",
+            "object": "text_completion",
+            "model": "mock-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "text": "",
+                    "finish_reason": "stop",
+                    "stop_reason": None,
+                }
+            ],
+            "usage": {
+                "prompt_tokens": len(prompt_token_ids),
+                "completion_tokens": 3,
+                "total_tokens": len(prompt_token_ids) + 3,
+            },
+        },
+    ]
+    for chunk in chunks:
+        yield f"data: {json.dumps(chunk)}\n\n"
+    yield "data: [DONE]\n\n"
+
+
 def build_mock_vllm_app() -> FastAPI:
     """Create a minimal mock vLLM server that returns canned responses."""
     app = FastAPI()
@@ -142,7 +208,45 @@ def build_mock_vllm_app() -> FastAPI:
         body = await request.json()
         with app.state._log_lock:
             app.state.request_log.append(body)
-        return JSONResponse(content=MOCK_RESPONSE)
+
+        prompt = body.get("prompt", "")
+        if isinstance(prompt, list):
+            prompt_token_ids = prompt
+        else:
+            prompt_token_ids = [1, 2, 3, 4, 5]
+
+        if body.get("stream"):
+            return StreamingResponse(
+                completions_stream_chunks(prompt_token_ids),
+                media_type="text/event-stream",
+            )
+
+        completion_response = {
+            "id": "cmpl-mock",
+            "object": "text_completion",
+            "model": "mock-model",
+            "prompt_token_ids": prompt_token_ids,
+            "choices": [
+                {
+                    "index": 0,
+                    "text": "Hello from mock!",
+                    "finish_reason": "stop",
+                    "stop_reason": None,
+                    "token_ids": [10, 11, 12],
+                    "logprobs": {
+                        "tokens": ["Hello", " from", " mock!"],
+                        "token_logprobs": [-0.5, -0.3, -0.1],
+                        "token_ids": [10, 11, 12],
+                    },
+                }
+            ],
+            "usage": {
+                "prompt_tokens": len(prompt_token_ids),
+                "completion_tokens": 3,
+                "total_tokens": len(prompt_token_ids) + 3,
+            },
+        }
+        return JSONResponse(content=completion_response)
 
     return app
 

@@ -139,6 +139,14 @@ class GatewayManager:
         self.sampling_params_priority: str = gw_cfg.get("sampling_params_priority", "client")
         # The gateway always pins ``body.model`` to whatever the trainer is serving
         self.model: str | None = config.get("model", {}).get("name", None)
+
+        # Cumulative token mode: drift-free multi-turn token forwarding. The
+        # gateway loads the tokenizer from the served model path. renderers
+        # cannot infer the family from a local checkpoint path, so
+        # renderer_family must be set explicitly (e.g. "qwen3", "glm-5").
+        self.cumulative_token_mode: bool = gw_cfg.get("cumulative_token_mode", False)
+        self.renderer_family: str = gw_cfg.get("renderer_family", "auto")
+
         self.mode = mode
 
         self._process: subprocess.Popen | None = None
@@ -313,6 +321,10 @@ class GatewayManager:
             cmd.extend(["--sampling-params-priority", self.sampling_params_priority])
         if self.model:
             cmd.extend(["--model", self.model])
+        if self.cumulative_token_mode:
+            cmd.append("--cumulative-token-mode")
+            if self.renderer_family != "auto":
+                cmd.extend(["--renderer-family", self.renderer_family])
 
         logger.info("Starting gateway subprocess: %s", " ".join(cmd))
         # Inherit parent's stdout/stderr so gateway logs are visible for debugging.
@@ -351,6 +363,8 @@ class GatewayManager:
             model=self.model,
             add_logprobs=self.add_logprobs,
             add_return_token_ids=self.add_return_token_ids,
+            cumulative_token_mode=self.cumulative_token_mode,
+            renderer_family=self.renderer_family,
         )
         app = create_app(config=gw_config, local_handler=local_handler)
 
