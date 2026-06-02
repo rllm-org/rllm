@@ -48,12 +48,12 @@ From the rLLM repo root:
 ```bash
 uv pip install -e ".[verl,swe]"
 uv pip install -e cookbooks/swe
-git submodule update --init --recursive cookbooks/swe/external/SWE-bench_Pro-os
+git submodule update --init --recursive cookbooks/swe/external/SWE-bench_Pro-os cookbooks/swe/external/SWE-rebench-V2
 ```
 
-SWE-bench Pro is intentionally the only submodule in this cookbook. SWE-smith
-is installed as a package dependency. SWE-rebench V2 is optional; point
-`SWE_REBENCH_V2_PATH` at a local checkout before evaluating those tasks.
+SWE-bench Pro and SWE-rebench V2 are cookbook submodules. SWE-smith is
+installed as a package dependency. Set `SWE_REBENCH_V2_PATH` only when using an
+alternate local checkout for those tasks.
 
 Modal authentication is required for live rollouts and grading:
 
