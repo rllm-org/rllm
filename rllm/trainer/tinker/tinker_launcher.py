@@ -1,8 +1,8 @@
 from omegaconf import DictConfig
 
 from rllm.data import Dataset
-from rllm.experimental.unified_trainer import TrainerLauncher, UnifiedTrainer
 from rllm.trainer.tinker.tinker_backend import TinkerBackend
+from rllm.trainer.unified_trainer import TrainerLauncher, UnifiedTrainer
 from rllm.workflows.workflow import Workflow
 
 

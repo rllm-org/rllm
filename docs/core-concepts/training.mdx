@@ -25,7 +25,7 @@ Your AgentFlow and Evaluator code stays the same. The `AgentTrainer` handles the
 Pass an `agent_flow` and `evaluator` to `AgentTrainer`, then call `train()`:
 
 ```python
-from rllm.experimental.unified_trainer import AgentTrainer
+from rllm.trainer.unified_trainer import AgentTrainer
 from rllm.eval import load_agent, load_evaluator
 from rllm.cli.train import build_train_config
 from rllm.data import DatasetRegistry

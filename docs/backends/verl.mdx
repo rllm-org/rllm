@@ -23,10 +23,10 @@ rLLM drives verl from its own `UnifiedTrainer` rather than running verl's `RayPP
 - **No in-reward KL.** `algorithm.use_kl_in_reward=True` is rejected at startup. KL-in-loss is supported — setting `rllm.algorithm.kl_beta>0` (or `actor_rollout_ref.actor.kl_loss_coef>0`) automatically enables it; the loss term runs inside verl's actor worker.
 - **Async rollout only.** `actor_rollout_ref.rollout.mode` must be `async`.
 - **New EngineWorker path only.** `trainer.use_legacy_worker_impl` is forced to `disable`.
-- **Shared rLLM/Verl knobs.** rLLM keeps a small table of shared keys (e.g. `algorithm.adv_estimator ↔ rllm.algorithm.adv_estimator`, `actor.kl_loss_coef ↔ rllm.algorithm.kl_beta`, `actor.clip_ratio ↔ rllm.algorithm.eps_clip`) in sync at runtime. New configs should use `rllm.*`. Existing Verl-native shared-key CLI overrides still work, but they warn because that path is deprecated. If both sides conflict, the `rllm.*` value wins. See [Configuration](/experimental/configuration#bidirectional-config-sync) for the full list.
+- **Shared rLLM/Verl knobs.** rLLM keeps a small table of shared keys (e.g. `algorithm.adv_estimator ↔ rllm.algorithm.adv_estimator`, `actor.kl_loss_coef ↔ rllm.algorithm.kl_beta`, `actor.clip_ratio ↔ rllm.algorithm.eps_clip`) in sync at runtime. New configs should use `rllm.*`. Existing Verl-native shared-key CLI overrides still work, but they warn because that path is deprecated. If both sides conflict, the `rllm.*` value wins. See [Configuration](/training/configuration#bidirectional-config-sync) for the full list.
 
 <Note>
-  Need an estimator that requires a critic or per-token signal? See [Pre-computed advantages](/experimental/precompute-advantage) for writing per-token advantages directly in the workflow, and the [Advantage estimator](/experimental/advantage-estimator) page for registering a custom rLLM-native estimator (with a worked OPO port).
+  Need an estimator that requires a critic or per-token signal? See [Pre-computed advantages](/training/precompute-advantage) for writing per-token advantages directly in the workflow, and the [Advantage estimator](/training/advantage-estimator) page for registering a custom rLLM-native estimator (with a worked OPO port).
 </Note>
 
 ## Key Features
@@ -119,9 +119,9 @@ from math_flow import math_flow                # from cookbooks/math/
 from math_eval import math_evaluator           # from cookbooks/math/
 
 from rllm.data.dataset import DatasetRegistry
-from rllm.experimental.unified_trainer import AgentTrainer
+from rllm.trainer.unified_trainer import AgentTrainer
 
-@hydra.main(config_path="pkg://rllm.experimental.config", config_name="unified", version_base=None)
+@hydra.main(config_path="pkg://rllm.trainer.config.unified", config_name="unified", version_base=None)
 def main(config: DictConfig):
     train_dataset = DatasetRegistry.load_dataset("hendrycks_math", "train")
     test_dataset = DatasetRegistry.load_dataset("math500", "test")
@@ -173,7 +173,7 @@ python train_with_lora.py \
 
 ## Supported advantage estimators
 
-Advantages on the unified Verl backend are computed through rLLM's native estimator hook. The built-in estimators are `grpo`, `reinforce`, `reinforce_plus_plus_baseline`, and `rloo`. Verl's other estimators — `gae`, `reinforce_plus_plus` (proper), `remax`, `opo`, `grpo_passk`, `gpg`, `gdpo`, `optimal_token_baseline`, `tir_optimal_token_baseline` — are **not available out of the box** and the corresponding `algorithm.gamma` / `algorithm.lam` knobs are no longer wired through. To use one of those, register a custom estimator via the rLLM registry; see [Advantage estimator](/experimental/advantage-estimator) for the contract and a worked OPO port.
+Advantages on the unified Verl backend are computed through rLLM's native estimator hook. The built-in estimators are `grpo`, `reinforce`, `reinforce_plus_plus_baseline`, and `rloo`. Verl's other estimators — `gae`, `reinforce_plus_plus` (proper), `remax`, `opo`, `grpo_passk`, `gpg`, `gdpo`, `optimal_token_baseline`, `tir_optimal_token_baseline` — are **not available out of the box** and the corresponding `algorithm.gamma` / `algorithm.lam` knobs are no longer wired through. To use one of those, register a custom estimator via the rLLM registry; see [Advantage estimator](/training/advantage-estimator) for the contract and a worked OPO port.
 
 ## Configuration
 

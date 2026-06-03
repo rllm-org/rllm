@@ -4,15 +4,15 @@ on:
   push:
     branches: [main]
     paths:
-      - "rllm/experimental/engine/gateway_manager.py"
-      - "rllm/experimental/config/rllm/base.yaml"
+      - "rllm/gateway/manager.py"
+      - "rllm/trainer/config/unified/rllm/base.yaml"
       - "tests/engine/test_gateway_manager.py"
       - ".github/workflows/test-gateway-manager.yml"
   pull_request:
     branches: [main]
     paths:
-      - "rllm/experimental/engine/gateway_manager.py"
-      - "rllm/experimental/config/rllm/base.yaml"
+      - "rllm/gateway/manager.py"
+      - "rllm/trainer/config/unified/rllm/base.yaml"
       - "tests/engine/test_gateway_manager.py"
       - ".github/workflows/test-gateway-manager.yml"
   workflow_dispatch:

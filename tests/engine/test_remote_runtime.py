@@ -5,15 +5,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from omegaconf import OmegaConf
 
-from rllm.experimental.engine.gateway_manager import GatewayManager, _get_routable_ip
-from rllm.experimental.engine.remote_agent_flow_engine import _build_episode
-from rllm.experimental.engine.remote_runtime.agentcore_runtime import AgentCoreRuntime
-from rllm.experimental.engine.remote_runtime.protocol import (
+from rllm.engine.remote_agent_flow_engine import _build_episode
+from rllm.engine.remote_runtime.agentcore_runtime import AgentCoreRuntime
+from rllm.engine.remote_runtime.protocol import (
     RemoteRuntimeConfig,
     RemoteTaskResult,
     TaskSubmission,
 )
-from rllm.experimental.engine.trace_converter import compute_step_metrics
+from rllm.engine.trace_converter import compute_step_metrics
+from rllm.gateway.manager import GatewayManager, _get_routable_ip
 from rllm.types import Step, Trajectory
 from rllm.workflows.workflow import TerminationReason
 
@@ -212,7 +212,7 @@ class TestBuildEpisodeWithTraces:
             elapsed=5.0,
         )
 
-        with patch("rllm.experimental.engine.remote_agent_flow_engine.trace_record_to_step") as mock_convert:
+        with patch("rllm.engine.remote_agent_flow_engine.trace_record_to_step") as mock_convert:
             # Return Steps with proper token lengths
             mock_convert.side_effect = [_make_step(prompt_len=10 + i, response_len=20 + i) for i in range(3)]
             episode = _build_episode(traces, result, "task-1:0", {"prompt": "test"})

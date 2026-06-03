@@ -22,9 +22,9 @@ from omegaconf import DictConfig
 from transformers import AutoTokenizer
 
 from rllm.data import Dataset
-from rllm.experimental.common import AlgorithmConfig, simple_timer
-from rllm.experimental.protocol import BackendProtocol
-from rllm.experimental.rollout import RolloutEngine, TinkerEngine
+from rllm.engine.rollout import RolloutEngine, TinkerEngine
+from rllm.trainer.algorithms import AlgorithmConfig, simple_timer
+from rllm.trainer.backend_protocol import BackendProtocol
 from rllm.trainer.tinker.tinker_metrics_utils import (
     update_training_metrics,
 )
@@ -34,8 +34,8 @@ from rllm.types import Episode
 if TYPE_CHECKING:
     from transformers.tokenization_utils import PreTrainedTokenizer
 
-    from rllm.experimental.engine.unified_workflow_engine import UnifiedWorkflowEngine
-    from rllm.experimental.unified_trainer import TrainerState
+    from rllm.engine.unified_workflow_engine import UnifiedWorkflowEngine
+    from rllm.trainer.unified_trainer import TrainerState
 
 logger = logging.getLogger(__name__)
 

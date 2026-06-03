@@ -1,6 +1,6 @@
 # Geo3K (legacy Workflow API)
 
-Single-turn VLM geometry solver for the [Geometry3K](https://huggingface.co/datasets/hiyouga/geometry3k) dataset, built on the **legacy `Workflow` abstraction** (`rllm.workflows.workflow.Workflow` + `RolloutEngine` + `AgentWorkflowEngine`). The training side runs through the **unified trainer** (`rllm.experimental.unified_trainer.AgentTrainer`), which keeps the `workflow_class=...` interface while routing to the maintained backend launchers. The old `rllm.trainer.AgentTrainer(backend="tinker")` path has been removed.
+Single-turn VLM geometry solver for the [Geometry3K](https://huggingface.co/datasets/hiyouga/geometry3k) dataset, built on the **legacy `Workflow` abstraction** (`rllm.workflows.workflow.Workflow` + `RolloutEngine` + `AgentWorkflowEngine`). The training side runs through the **unified trainer** (`rllm.trainer.unified_trainer.AgentTrainer`), which keeps the `workflow_class=...` interface while routing to the maintained backend launchers. The old `rllm.trainer.AgentTrainer(backend="tinker")` path has been removed.
 
 For the equivalent example written against the newer `@rllm.rollout` AgentFlow protocol, see [`cookbooks/geo3k/`](../../geo3k/).
 

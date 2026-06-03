@@ -21,7 +21,7 @@ from rllm.types import AgentFlow, Evaluator
 from rllm.workflows.workflow import TerminationReason
 
 if TYPE_CHECKING:
-    from rllm.experimental.engine.gateway_manager import GatewayManager
+    from rllm.gateway.manager import GatewayManager
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +64,8 @@ async def run_dataset(
     # import (rllm.eval.__init__ → rllm.eval.runner → here). Importing
     # them inside the function breaks the cycle.
     from rllm.engine.agentflow_engine import AgentFlowEngine
-    from rllm.experimental.engine.gateway_manager import EvalGatewayManager
-    from rllm.experimental.engine.tunnel import is_local_sandbox_backend
+    from rllm.gateway.manager import EvalGatewayManager
+    from rllm.gateway.tunnel import is_local_sandbox_backend
 
     # Cap concurrency by the agent flow's hint, if any. The engine's
     # internal semaphore enforces this on the rollout side.

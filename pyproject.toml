@@ -201,7 +201,6 @@ ignore = [
 "rllm/cli/main.py" = ["E501"]
 "rllm/eval/visualizer.py" = ["E501"]
 "rllm/experimental/rllm_telemetry/examples/experiment_comparison.py" = ["E501"]
-"rllm/experimental/test_examples/opsd/math_opsd_workflow.py" = ["E501"]
 "rllm/harnesses/tools/file_editor_tool.py" = ["E501"]
 "rllm/rewards/math_reward.py" = ["E501"]
 "tests/integration/test_agentcore_runtime.py" = ["E501"]
@@ -213,7 +212,7 @@ where   = ["."]
 include = ["rllm", "rllm.*"]
 
 [tool.setuptools.package-data]
-rllm = ["trainer/config/*.yaml", "registry/*.json", "experimental/config/**/*.yaml"]
+rllm = ["trainer/config/*.yaml", "trainer/config/unified/**/*.yaml", "registry/*.json"]
 
 [tool.mypy]
 plugins = ["pydantic.mypy"]

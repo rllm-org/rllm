@@ -1,10 +1,17 @@
+import warnings
 from typing import Any, Literal
 
 from rllm.data import Dataset
 
 
 class AgentTrainer:
-    """Wrapper that runs PPO training over a Workflow.
+    """Legacy wrapper that runs PPO training over a Workflow.
+
+    .. deprecated::
+        Use :class:`rllm.trainer.unified_trainer.AgentTrainer` (also exported
+        as :class:`rllm.trainer.AgentTrainer`) instead. The unified trainer
+        supports ``verl`` and ``tinker`` backends and the same Workflow /
+        AgentFlow surface. The ``fireworks`` backend remains here for now.
 
     Plug in your agent via ``workflow_class`` — a
     :class:`rllm.workflows.workflow.Workflow` subclass driven by
@@ -14,15 +21,6 @@ class AgentTrainer:
 
     * ``verl`` (default): distributed PPO via the verl framework.
     * ``fireworks``: pipeline-based variant for the Fireworks workflow API.
-
-    For the tinker backend, use
-    :class:`rllm.experimental.unified_trainer.AgentTrainer` instead — the
-    legacy tinker workflow trainer was removed when its underlying
-    ``TinkerAgentTrainer`` was dropped from the codebase.
-
-    The legacy ``agent_class`` + ``env_class`` and ``agent_run_func`` (SDK)
-    paths have been removed. New agents should be authored as a Workflow or
-    as an AgentFlow (see ``cookbooks/``).
     """
 
     def __init__(
@@ -46,9 +44,17 @@ class AgentTrainer:
             train_dataset: Optional train dataset.
             val_dataset: Optional validation dataset.
             backend: Training backend (``'verl'`` | ``'fireworks'``). For
-                tinker, use :class:`rllm.experimental.unified_trainer.AgentTrainer`.
+                tinker, use :class:`rllm.trainer.unified_trainer.AgentTrainer`.
         """
-        assert backend in ("verl", "fireworks"), f"Unsupported backend: {backend}; must be one of ('verl', 'fireworks'). For tinker, use rllm.experimental.unified_trainer.AgentTrainer."
+        warnings.warn(
+            "rllm.trainer.agent_trainer.AgentTrainer is deprecated; use "
+            "rllm.trainer.AgentTrainer (rllm.trainer.unified_trainer.AgentTrainer) "
+            "instead. The unified trainer supports verl and tinker backends. "
+            "The fireworks backend is still served here for now.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        assert backend in ("verl", "fireworks"), f"Unsupported backend: {backend}; must be one of ('verl', 'fireworks'). For tinker, use rllm.trainer.unified_trainer.AgentTrainer."
         self.backend = backend
 
         if workflow_class is None:

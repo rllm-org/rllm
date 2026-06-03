@@ -19,7 +19,7 @@ def create_tinker_engine():
     import tinker
     from tinker_cookbook.tokenizer_utils import get_tokenizer
 
-    from rllm.experimental.rollout.tinker_engine import TinkerEngine
+    from rllm.engine.rollout.tinker_engine import TinkerEngine
 
     tokenizer = get_tokenizer(TINKER_MODEL_NAME)
     service_client = tinker.ServiceClient()
@@ -79,7 +79,7 @@ def tinker_gateway():
     """Start a gateway with a real TinkerEngine behind create_tinker_handler."""
     from rllm_model_gateway import GatewayConfig, create_app
 
-    from rllm.experimental.engine.tinker_adapter import create_tinker_handler
+    from rllm.gateway.tinker_adapter import create_tinker_handler
 
     engine = create_tinker_engine()
     handler = create_tinker_handler(engine)
@@ -179,7 +179,7 @@ class TestTinkerAdapterE2E:
         import openai
         from rllm_model_gateway import GatewayClient
 
-        from rllm.experimental.engine.trace_converter import trace_record_to_step
+        from rllm.engine.trace_converter import trace_record_to_step
 
         gw = GatewayClient(tinker_gateway.url)
         sid = gw.create_session(session_id="tinker-step")
@@ -273,7 +273,7 @@ class TestTinkerAdapterE2E:
         import openai
         from rllm_model_gateway import GatewayClient
 
-        from rllm.experimental.engine.trace_converter import trace_record_to_step
+        from rllm.engine.trace_converter import trace_record_to_step
 
         gw = GatewayClient(tinker_gateway.url)
         sid = gw.create_session(session_id="tinker-tools")

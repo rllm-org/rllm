@@ -154,7 +154,7 @@ Override this with `traj_grouping_hook` to control how trajectories are grouped:
 
 ```python
 from rllm.agents.agent import Episode, TrajectoryGroup
-from rllm.experimental.common.config import TransformConfig, CompactFilteringConfig
+from rllm.trainer.algorithms.config import TransformConfig, CompactFilteringConfig
 
 def my_grouping_hook(
     episodes: list[Episode],
@@ -191,7 +191,7 @@ def my_grouping_hook(
 Pass it to the trainer:
 
 ```python
-from rllm.experimental.unified_trainer import AgentTrainer
+from rllm.trainer.unified_trainer import AgentTrainer
 
 trainer = AgentTrainer(
     backend="tinker",
@@ -212,7 +212,7 @@ Your hook must return `TrajectoryGroup` objects with valid `group_id` and `traje
 In multi-agent workflows (e.g., solver-judge), different trajectory groups play different roles. You may want a different advantage estimator for each role:
 
 ```python
-from rllm.experimental.common.config import rLLMAdvantageEstimator
+from rllm.trainer.algorithms.config import rLLMAdvantageEstimator
 
 trainer = AgentTrainer(
     backend="tinker",
@@ -256,7 +256,7 @@ The advantage estimator registry (`RLLM_ADV_ESTIMATOR_REGISTRY`) uses a decorato
 
 ```python
 import numpy as np
-from rllm.experimental.common.advantage import register_rllm_adv_estimator
+from rllm.trainer.algorithms.advantage import register_rllm_adv_estimator
 
 @register_rllm_adv_estimator("median_baseline")
 def calculate_median_baseline_advantages(
@@ -320,7 +320,7 @@ def my_estimator(
 
 Each element in `rewards` is a 1-D array of trajectory rewards for one group. Return advantages and returns in the same list-of-arrays structure.
 
-`**kwargs` carries `traj_groups: list[TrajectoryGroup]`, aligned with `rewards`, so estimators that need per-trajectory metadata (response lengths, step counts) can read it via `kwargs.get("traj_groups")`. See [Advantage estimator](/experimental/advantage-estimator#worked-example-porting-opo-from-verl) for a worked example.
+`**kwargs` carries `traj_groups: list[TrajectoryGroup]`, aligned with `rewards`, so estimators that need per-trajectory metadata (response lengths, step counts) can read it via `kwargs.get("traj_groups")`. See [Advantage estimator](/training/advantage-estimator#worked-example-porting-opo-from-verl) for a worked example.
 
 ## What you cannot customize today
 
@@ -360,7 +360,7 @@ Want to change the training loop structure?
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Unified trainer" icon="code" href="/experimental/unified-trainer">
+  <Card title="Unified trainer" icon="code" href="/training/unified-trainer">
     Architecture of the 8-stage training pipeline
   </Card>
 

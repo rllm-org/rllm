@@ -1,7 +1,7 @@
 """Public per-task hooks for :class:`rllm.engine.agentflow_engine.AgentFlowEngine`.
 
 :class:`SandboxTaskHooks` is the canonical implementation, used by
-``rllm eval`` and by :class:`rllm.experimental.unified_trainer.AgentTrainer`
+``rllm eval`` and by :class:`rllm.trainer.unified_trainer.AgentTrainer`
 for sandbox-style harnesses on harbor task dirs.
 """
 
@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from omegaconf import DictConfig, OmegaConf
 
-from rllm.experimental.engine.tunnel import is_local_sandbox_backend
+from rllm.gateway.tunnel import is_local_sandbox_backend
 from rllm.types import Evaluator
 
 if TYPE_CHECKING:

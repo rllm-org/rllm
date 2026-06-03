@@ -386,10 +386,10 @@ from omegaconf import DictConfig
 from solver_judge_flow import solver_judge_flow
 
 from rllm.data.dataset import DatasetRegistry
-from rllm.experimental.unified_trainer import AgentTrainer
+from rllm.trainer.unified_trainer import AgentTrainer
 
 
-@hydra.main(config_path="pkg://rllm.experimental.config", config_name="unified", version_base=None)
+@hydra.main(config_path="pkg://rllm.trainer.config.unified", config_name="unified", version_base=None)
 def main(config: DictConfig):
     train_dataset = DatasetRegistry.load_dataset("countdown", "train")
     test_dataset = DatasetRegistry.load_dataset("countdown", "test")
@@ -485,7 +485,7 @@ For each batch of tasks:
 
 6. **Validate** — Periodically the trainer runs validation rollouts (without training) and reports `solver_acc` and `judge_acc` from the evaluator's `signals`.
 
-For the full details on the training pipeline, see the [unified trainer](/experimental/unified-trainer) reference. To customize advantage estimation per role, see the [advantage estimator](/experimental/advantage-estimator) reference.
+For the full details on the training pipeline, see the [unified trainer](/training/unified-trainer) reference. To customize advantage estimation per role, see the [advantage estimator](/training/advantage-estimator) reference.
 
 ---
 
@@ -495,10 +495,10 @@ For the full details on the training pipeline, see the [unified trainer](/experi
   <Card title="Cookbooks overview" icon="book" href="/cookbooks/overview">
     The full cookbook authoring guide and a tour of the other examples
   </Card>
-  <Card title="Unified trainer" icon="gears" href="/experimental/unified-trainer">
+  <Card title="Unified trainer" icon="gears" href="/training/unified-trainer">
     Deep dive into the training loop architecture and 8-stage batch pipeline
   </Card>
-  <Card title="Advantage estimator" icon="calculator" href="/experimental/advantage-estimator">
+  <Card title="Advantage estimator" icon="calculator" href="/training/advantage-estimator">
     Customize how advantages are computed per role
   </Card>
   <Card title="AgentFlow & Evaluator" icon="diagram-project" href="/core-concepts/agentflow-evaluator">

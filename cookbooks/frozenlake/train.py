@@ -14,10 +14,10 @@ from frozenlake_flow import frozenlake_flow
 from omegaconf import DictConfig
 
 from rllm.data.dataset import DatasetRegistry
-from rllm.experimental.unified_trainer import AgentTrainer
+from rllm.trainer.unified_trainer import AgentTrainer
 
 
-@hydra.main(config_path="pkg://rllm.experimental.config", config_name="unified", version_base=None)
+@hydra.main(config_path="pkg://rllm.trainer.config.unified", config_name="unified", version_base=None)
 def main(config: DictConfig):
     train_dataset = DatasetRegistry.load_dataset("frozenlake", "train")
     val_dataset = DatasetRegistry.load_dataset("frozenlake", "test")

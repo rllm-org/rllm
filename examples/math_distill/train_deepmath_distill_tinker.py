@@ -5,12 +5,12 @@ from transformers import AutoTokenizer
 
 from rllm.data.dataset import DatasetRegistry
 from rllm.engine.rollout.tinker_engine import TinkerEngine
-from rllm.experimental.unified_trainer import AgentTrainer
 from rllm.rewards.reward_fn import math_reward_fn
+from rllm.trainer.unified_trainer import AgentTrainer
 from rllm.workflows.distillation_workflow import DistillationWorkflow
 
 
-@hydra.main(config_path="pkg://rllm.experimental.config", config_name="unified", version_base=None)
+@hydra.main(config_path="pkg://rllm.trainer.config.unified", config_name="unified", version_base=None)
 def main(config: DictConfig):
     """Main training function for simple math distillation."""
     # Load datasets
@@ -22,12 +22,13 @@ def main(config: DictConfig):
     teacher_service_client = tinker.ServiceClient()
     teacher_sampling_client = teacher_service_client.create_sampling_client(base_model=teacher_model)
     teacher_engine = TinkerEngine(
+        base_url="",
         model_name=teacher_model,
         tokenizer=teacher_tokenizer,
         service_client=teacher_service_client,
-        sampling_client=teacher_sampling_client,
         bypass_render_with_parser=True,
     )
+    teacher_engine.set_sampling_client(teacher_sampling_client)
 
     trainer = AgentTrainer(
         workflow_class=DistillationWorkflow,

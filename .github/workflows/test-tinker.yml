@@ -4,14 +4,14 @@ on:
   push:
     branches: [main]
     paths:
-      - "rllm/experimental/rollout/**"
+      - "rllm/engine/rollout/**"
       - "rllm/trainer/tinker/**"
       - "tests/engine/test_tinker_engine.py"
       - ".github/workflows/test-tinker.yml"
   pull_request:
     branches: [main]
     paths:
-      - "rllm/experimental/rollout/**"
+      - "rllm/engine/rollout/**"
       - "rllm/trainer/tinker/**"
       - "tests/engine/test_tinker_engine.py"
       - ".github/workflows/test-tinker.yml"

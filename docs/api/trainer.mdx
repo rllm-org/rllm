@@ -7,27 +7,34 @@ The trainer module provides high-level APIs for training agents using reinforcem
 
 ## AgentTrainer
 
-Wrapper class for training agents with custom environments using various backends.
+Backend-agnostic wrapper for training agents with custom workflows or AgentFlows. As of the unified-trainer graduation, `rllm.trainer.AgentTrainer` resolves to `rllm.trainer.unified_trainer.AgentTrainer`.
 
 ```python
 from rllm.trainer import AgentTrainer
 ```
 
+For the full constructor reference (including sandbox auto-wiring, agent_flow / evaluator / hooks plumbing, and the `verl` / `tinker` backends), see the [unified trainer](/training/unified-trainer) page. A condensed view:
+
 ### Constructor
 
 ```python
 def __init__(
-    workflow_class: type | None = None,
-    workflow_args: dict[str, Any] | None = None,
-    config: dict[str, Any] | list[str] | None = None,
+    config: DictConfig,
+    workflow_class: type[Workflow] | None = None,
     train_dataset: Dataset | None = None,
     val_dataset: Dataset | None = None,
-    backend: Literal["verl", "fireworks", "tinker"] = "verl",
-    agent_run_func: Callable | None = None
+    workflow_args: dict | None = None,
+    backend: Literal["verl", "tinker"] = "verl",
+    agent_flow: Any = None,
+    evaluator: Any = None,
+    hooks: Any = None,
+    sandbox_backend: str | None = None,
+    sandbox_concurrency: int | None = None,
+    store: Store | None = None,
 )
 ```
 
-Two ways to plug in your agent: pass either `workflow_class` (a `Workflow` subclass) **or** `agent_run_func` (a plain rollout function for the AgentSdk path).
+Two ways to plug in your agent: pass either `workflow_class` (a `Workflow` subclass) **or** `agent_flow` (an AgentFlow built with the AgentSdk).
 
 <ParamField path="workflow_class" type="type | None">
   Workflow class to use for training (e.g., `SimpleWorkflow`, `MultiTurnWorkflow`).
@@ -51,25 +58,22 @@ Two ways to plug in your agent: pass either `workflow_class` (a `Workflow` subcl
   Validation dataset.
 </ParamField>
 
-<ParamField path="backend" type="Literal['verl', 'fireworks', 'tinker']" default="verl">
+<ParamField path="backend" type="Literal['verl', 'tinker']" default="verl">
   Training backend:
-  - `"verl"`: Standard distributed PPO via the verl framework
-  - `"fireworks"`: Pipeline-based variant (workflow-only) for the Fireworks workflow API
-  - `"tinker"`: Single-machine LoRA training via tinker (workflow-only)
+  - `"verl"`: Distributed PPO via the verl framework
+  - `"tinker"`: LoRA training via tinker
 </ParamField>
 
-<ParamField path="agent_run_func" type="Callable | None">
-  Plain rollout function — drives the AgentSdk path. Use this **or**
-  `workflow_class`, not both.
+<ParamField path="agent_flow" type="Any | None">
+  AgentFlow object (from the AgentSdk path). Use this **or** `workflow_class`,
+  not both.
 </ParamField>
 
 <Note>
-The legacy `agent_class` + `env_class` parameters that drove the
-`AgentExecutionEngine` rollout have been removed. Port your agent to
-either a [Workflow](/api/workflows) or an
-[AgentFlow](/core-concepts/agentflow-evaluator) — see the
-[`cookbooks/`](https://github.com/rllm-org/rllm/tree/main/cookbooks)
-directory for examples.
+The legacy `rllm.trainer.agent_trainer.AgentTrainer` (with `fireworks` backend
+support and `agent_run_func`) is still importable but emits a
+`DeprecationWarning` on instantiation. Migrate to the unified trainer via
+`from rllm.trainer import AgentTrainer`.
 </Note>
 
 ### Methods
