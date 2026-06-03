@@ -102,8 +102,7 @@ def score(task: dict, episode: Episode) -> EvalOutput:
 
 ```python
 # train.py
-from rllm.trainer.unified_trainer import AgentTrainer
-
+from rllm.trainer import AgentTrainer
 trainer = AgentTrainer(
     backend="tinker",
     agent_flow=solve,

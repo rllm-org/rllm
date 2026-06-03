@@ -2,11 +2,11 @@ import hydra
 
 from rllm.data.dataset import DatasetRegistry
 from rllm.rewards.countdown_reward import countdown_reward_fn
-from rllm.trainer.unified_trainer import AgentTrainer
+from rllm.trainer import AgentTrainer
 from rllm.workflows.simple_workflow import SimpleWorkflow
 
 
-@hydra.main(config_path="pkg://rllm.trainer.config.unified", config_name="unified", version_base=None)
+@hydra.main(config_path="pkg://rllm.trainer.config", config_name="unified", version_base=None)
 def main(config):
     train_dataset = DatasetRegistry.load_dataset("countdown", "train")
     test_dataset = DatasetRegistry.load_dataset("countdown", "test")

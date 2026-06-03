@@ -26,7 +26,7 @@ theme = Theme({"label": "dim", "success": "bold green", "error": "bold red", "va
 console = Console(theme=theme)
 
 # Path to the bundled YAML config templates
-_CONFIG_PKG = Path(__file__).resolve().parent.parent / "trainer" / "config" / "unified"
+_CONFIG_PKG = Path(__file__).resolve().parent.parent / "trainer" / "config"
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +170,7 @@ def _run_train(
     try:
         from rllm.eval.agent_loader import load_agent
         from rllm.eval.evaluator_loader import load_evaluator, resolve_evaluator_from_catalog
-        from rllm.trainer.unified_trainer import AgentTrainer
+        from rllm.trainer import AgentTrainer
     except ImportError as e:
         console.print(f"  [error]Missing training dependencies: {e}[/]")
         console.print("  Install with: [bold]pip install rllm\\[train][/]")

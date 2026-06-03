@@ -191,8 +191,7 @@ def my_grouping_hook(
 Pass it to the trainer:
 
 ```python
-from rllm.trainer.unified_trainer import AgentTrainer
-
+from rllm.trainer import AgentTrainer
 trainer = AgentTrainer(
     backend="tinker",
     workflow_class=MyWorkflow,

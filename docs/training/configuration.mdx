@@ -13,12 +13,12 @@ The configuration system is organized into three main components:
 2. **Backend-specific configs**: Settings specific to Tinker or Verl backends
 3. **Forwarding mechanism**: Allows backend-specific configs to override rLLM configs for backward compatibility
 
-All configuration files are located in `rllm/trainer/config/unified/`:
+All configuration files are located in `rllm/trainer/config/`:
 
-- `rllm/trainer/config/unified/rllm/base.yaml`: Backend-agnostic rLLM configurations
-- `rllm/trainer/config/unified/rllm/backend/tinker.yaml`: Tinker-specific configurations
-- `rllm/trainer/config/unified/rllm/backend/verl.yaml`: Verl-specific configurations
-- `rllm/trainer/config/unified/unified.yaml`: Main entry point that combines all configs
+- `rllm/trainer/config/rllm/base.yaml`: Backend-agnostic rLLM configurations
+- `rllm/trainer/config/rllm/backend/tinker.yaml`: Tinker-specific configurations
+- `rllm/trainer/config/rllm/backend/verl.yaml`: Verl-specific configurations
+- `rllm/trainer/config/unified.yaml`: Main entry point that combines all configs
 
 ## rLLM backend-agnostic configurations
 
@@ -178,7 +178,7 @@ Settings for logging full episode trajectories to disk.
 
 ### Tinker backend
 
-Tinker-specific settings live in `rllm/trainer/config/unified/rllm/backend/tinker.yaml`.
+Tinker-specific settings live in `rllm/trainer/config/rllm/backend/tinker.yaml`.
 
 This file contains:
 
@@ -250,7 +250,7 @@ Tinker backend forwards group-size settings into backend-agnostic rollout config
 
 ### Verl backend
 
-Verl-specific settings live in `rllm/trainer/config/unified/rllm/backend/verl.yaml`.
+Verl-specific settings live in `rllm/trainer/config/rllm/backend/verl.yaml`.
 
 This file is intentionally thin and composes Verl's native PPO config via:
 

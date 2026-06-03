@@ -6,11 +6,11 @@ from transformers import AutoTokenizer
 from rllm.data.dataset import DatasetRegistry
 from rllm.engine.rollout.tinker_engine import TinkerEngine
 from rllm.rewards.reward_fn import math_reward_fn
-from rllm.trainer.unified_trainer import AgentTrainer
+from rllm.trainer import AgentTrainer
 from rllm.workflows.distillation_workflow import DistillationWorkflow
 
 
-@hydra.main(config_path="pkg://rllm.trainer.config.unified", config_name="unified", version_base=None)
+@hydra.main(config_path="pkg://rllm.trainer.config", config_name="unified", version_base=None)
 def main(config: DictConfig):
     """Main training function for simple math distillation."""
     # Load datasets

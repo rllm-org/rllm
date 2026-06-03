@@ -70,9 +70,9 @@ Two ways to plug in your agent: pass either `workflow_class` (a `Workflow` subcl
 </ParamField>
 
 <Note>
-The legacy `rllm.trainer.agent_trainer.AgentTrainer` (with `fireworks` backend
-support and `agent_run_func`) is still importable but emits a
-`DeprecationWarning` on instantiation. Migrate to the unified trainer via
+The verl/fireworks-specific legacy trainer lives at
+`rllm.trainer.agent_trainer.AgentTrainer` and remains supported for the
+`fireworks` backend. New code should prefer the unified
 `from rllm.trainer import AgentTrainer`.
 </Note>
 

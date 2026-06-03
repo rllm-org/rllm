@@ -15,10 +15,10 @@ Usage:
 import hydra
 
 from rllm.data.dataset import DatasetRegistry
-from rllm.trainer.unified_trainer import AgentTrainer
+from rllm.trainer import AgentTrainer
 
 
-@hydra.main(config_path="pkg://rllm.trainer.config.unified", config_name="unified", version_base=None)
+@hydra.main(config_path="pkg://rllm.trainer.config", config_name="unified", version_base=None)
 def main(config):
     train_dataset = DatasetRegistry.load_dataset("gsm8k_agentcore", "train")
     test_dataset = DatasetRegistry.load_dataset("gsm8k_agentcore", "test")

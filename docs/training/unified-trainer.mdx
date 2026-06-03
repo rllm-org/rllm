@@ -41,8 +41,7 @@ A convenience wrapper that selects the correct `TrainerLauncher` for the backend
 string (`"verl"` or `"tinker"`) and handles environment setup.
 
 ```python
-from rllm.trainer.unified_trainer import AgentTrainer
-
+from rllm.trainer import AgentTrainer
 trainer = AgentTrainer(
     config=config,
     workflow_class=MyWorkflow,

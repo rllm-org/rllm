@@ -102,8 +102,7 @@ Configure this via `traj_group_adv_estimator_map` in the trainer constructor:
 
 ```python
 from rllm.trainer.algorithms.config import rLLMAdvantageEstimator
-from rllm.trainer.unified_trainer import AgentTrainer
-
+from rllm.trainer import AgentTrainer
 traj_group_adv_estimator_map = {
     "solver": rLLMAdvantageEstimator.GRPO,
     "judge": rLLMAdvantageEstimator.REINFORCE,
