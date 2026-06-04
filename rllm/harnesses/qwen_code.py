@@ -17,17 +17,27 @@ import shlex
 from rllm.harnesses.cli_harness import BaseCliHarness
 from rllm.types import AgentConfig, Task
 
+# apt branch hardened against arm64 ubuntu-ports GPG flakes — same
+# rationale as claude_code.py's install script.
 _INSTALL_SCRIPT = r"""
 set -e
 export DEBIAN_FRONTEND=noninteractive
 if ! command -v qwen >/dev/null 2>&1; then
     if ! command -v curl >/dev/null 2>&1; then
         if command -v apt-get >/dev/null 2>&1; then
-            apt-get update -qq && apt-get install -y -qq curl ca-certificates
+            apt-get update -qq \
+                -o Acquire::AllowInsecureRepositories=true \
+                -o Acquire::AllowDowngradeToInsecureRepositories=true \
+                -o Acquire::Check-Valid-Until=false 2>/dev/null || true
+            apt-get install -y -qq --no-install-recommends --allow-unauthenticated \
+                -o Acquire::AllowInsecureRepositories=true \
+                curl ca-certificates
         elif command -v apk >/dev/null 2>&1; then
             apk add --no-cache curl bash ca-certificates
         fi
     fi
+    command -v curl >/dev/null 2>&1 \
+        || { echo "qwen-code install: failed to bootstrap curl in sandbox" >&2; exit 1; }
     if ! command -v node >/dev/null 2>&1; then
         export NVM_DIR="$HOME/.nvm"
         curl -fsSL -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh | bash

@@ -30,23 +30,50 @@ from rllm.types import AgentConfig, Task
 # Install strategy mirrors harbor: Alpine → npm (the install script's
 # musl-linked binary fails on Alpine), everyone else → official curl
 # script (more reliable than nvm bootstrap, doesn't need a node toolchain).
+#
+# The apt branch is hardened against two recurring container quirks:
+#  1. arm64 ``ports.ubuntu.com`` ``InRelease`` GPG flakes (Ubuntu noble
+#     on Docker Desktop / macOS): ``apt-get update`` exits non-zero with
+#     ``is not signed``, ``&&`` short-circuits, curl never installs.
+#     Fix: ``-o Acquire::AllowInsecureRepositories=true`` plus
+#     ``--allow-unauthenticated``.
+#  2. Tight overlay space on tasks where ``/var`` is small (the
+#     hello-world image with ``storage_mb = 10240`` still hits
+#     ``E: You don't have enough free space in /var/cache/apt/archives/``
+#     during install). Fix: redirect apt's download cache + lists to
+#     ``/tmp`` (tmpfs, plenty of room), so the real root only stores
+#     the extracted binaries.
 _INSTALL_SCRIPT = r"""
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+
+# Redirect apt's bulky temp dirs to /tmp so /var doesn't fill up.
+_APT_OPTS=(
+    -o Dir::Cache::archives=/tmp/rllm-apt-archives
+    -o Dir::State::lists=/tmp/rllm-apt-lists
+    -o Acquire::AllowInsecureRepositories=true
+    -o Acquire::AllowDowngradeToInsecureRepositories=true
+    -o Acquire::Check-Valid-Until=false
+)
+
 if ! { export PATH="$HOME/.local/bin:$PATH"; command -v claude >/dev/null 2>&1; }; then
-    # Make sure curl + bash are available before pulling the install script.
     if ! command -v curl >/dev/null 2>&1; then
         if command -v apk >/dev/null 2>&1; then
             apk add --no-cache curl bash nodejs npm ca-certificates
         elif command -v apt-get >/dev/null 2>&1; then
-            apt-get update -qq && apt-get install -y -qq curl ca-certificates
+            mkdir -p /tmp/rllm-apt-archives/partial /tmp/rllm-apt-lists/partial
+            apt-get "${_APT_OPTS[@]}" update -qq 2>/dev/null || true
+            apt-get "${_APT_OPTS[@]}" install -y -qq \
+                --no-install-recommends --allow-unauthenticated \
+                curl ca-certificates
+            rm -rf /tmp/rllm-apt-archives /tmp/rllm-apt-lists
         elif command -v yum >/dev/null 2>&1; then
             yum install -y -q curl ca-certificates
         fi
     fi
+    command -v curl >/dev/null 2>&1 \
+        || { echo "claude-code install: failed to bootstrap curl in sandbox" >&2; exit 1; }
     if command -v apk >/dev/null 2>&1; then
-        # Alpine: the curl install script ships a glibc binary that won't
-        # run under musl. npm is the supported path.
         if ! command -v npm >/dev/null 2>&1; then
             apk add --no-cache nodejs npm
         fi
