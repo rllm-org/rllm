@@ -152,6 +152,8 @@ Under the hood:
 - [V1: Unifying Generation and Self-Verification](https://arxiv.org/abs/2603.04304) — Pairwise self-verification for parallel test-time scaling
 - [TherapyGym](https://therapygym.stanford.edu/) - Evaluating and Aligning Clinical Fidelity and Safety in Therapy Chatbots
 - [SandMLE](https://arxiv.org/pdf/2604.04872) - Synthetic Sandbox for Training MLE Agents
+- [AxPO](https://byungkwanlee.github.io/AXPO-page/) - Agent Explorative Policy Optimization for Multimodal Agentic Reasoning
+  
 ## Articles & Blog Posts
 
 - [rLLM UI: Real-Time Observability Tool for Agent Training & Evaluation](https://rllm-project.com/post.html?post=rllm_ui.md) — Mar 2026
