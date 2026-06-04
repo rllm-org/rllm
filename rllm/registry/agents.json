@@ -51,11 +51,6 @@
       "function": "SweAgentHarness",
       "description": "Run Princeton's SWE-agent inside the sandbox."
     },
-    "pi": {
-      "module": "rllm.harnesses.pi",
-      "function": "PiHarness",
-      "description": "Run Mario Zechner's pi-coding-agent CLI inside the sandbox."
-    },
     "kimi-cli": {
       "module": "rllm.harnesses.kimi_cli",
       "function": "KimiCliHarness",

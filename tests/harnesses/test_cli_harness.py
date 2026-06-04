@@ -23,7 +23,6 @@ from rllm.harnesses.kimi_cli import KimiCliHarness
 from rllm.harnesses.mini_swe_agent import MiniSweAgentHarness
 from rllm.harnesses.opencode import OpenCodeHarness
 from rllm.harnesses.openhands import OpenHandsHarness
-from rllm.harnesses.pi import PiHarness
 from rllm.harnesses.qwen_code import QwenCodeHarness
 from rllm.harnesses.swe_agent import SweAgentHarness
 from rllm.types import AgentConfig, Task
@@ -691,50 +690,6 @@ def test_swe_agent_invocation_disables_cost_limits():
     assert "--agent.model.per_instance_cost_limit=0" in cmd
     assert "--env.deployment.type=local" in cmd
     assert "/tmp/swe-agent-problem.md" in cmd
-
-
-# ---------------------------------------------------------------------------
-# PiHarness — npm-installed, ai-sdk under the hood
-# ---------------------------------------------------------------------------
-
-
-def test_pi_install_uses_official_npm_package():
-    assert "@mariozechner/pi-coding-agent" in PiHarness().install_script()
-
-
-def test_pi_build_env_routes_both_openai_and_anthropic_base_urls():
-    """pi uses ai-sdk which routes per-provider — set both env vars so
-    whichever ``--provider`` we pick on the CLI still hits the gateway."""
-    h = PiHarness()
-    env = h.build_env(_make_task(), _make_config(model="claude-opus-4-1"))
-    assert env["OPENAI_BASE_URL"] == "http://gw:8000/sessions/eval-0/v1"
-    assert env["ANTHROPIC_BASE_URL"] == "http://gw:8000/sessions/eval-0"
-
-
-def test_pi_invocation_uses_print_json_no_session():
-    """``--print --mode json --no-session`` is the non-interactive
-    contract: single-shot, structured output, no persisted session."""
-    h = PiHarness()
-    cmd = h.build_invocation("fix the bug", _make_task(), _make_config(model="claude-opus-4-1"))
-    assert "pi --print --mode json --no-session" in cmd
-    assert "--provider anthropic" in cmd
-    assert "--model claude-opus-4-1" in cmd
-    # Prompt is the trailing positional; shlex.quote wraps it because of the space.
-    assert " 'fix the bug' " in cmd
-
-
-def test_pi_provider_inferred_from_model_name():
-    """Mapping from rllm's provider inference to pi's --provider name.
-    Most map 1:1; deepseek routes as ``openai`` because pi has no
-    dedicated deepseek provider but accepts any OpenAI-compatible
-    backend under that name."""
-    h = PiHarness()
-    assert h._pi_provider("gpt-4o") == ("openai", "gpt-4o")
-    assert h._pi_provider("claude-opus-4-1") == ("anthropic", "claude-opus-4-1")
-    assert h._pi_provider("gemini-1.5-pro") == ("google", "gemini-1.5-pro")
-    # Unknown providers default to openai (pi handles arbitrary
-    # openai-compatible endpoints under that name).
-    assert h._pi_provider("deepseek-coder")[0] == "openai"
 
 
 # ---------------------------------------------------------------------------
