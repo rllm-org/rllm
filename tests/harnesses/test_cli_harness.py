@@ -454,12 +454,14 @@ def test_codex_build_env_sets_codex_home_and_credentials():
 
 
 def test_codex_writes_auth_json_and_config_toml():
-    """Codex 0.118+ requires BOTH:
-      - ``$CODEX_HOME/auth.json`` with ``{"OPENAI_API_KEY": "..."}``
-        (env var alone is not picked up by ``codex exec``)
-      - ``$CODEX_HOME/config.toml`` with ``openai_base_url = "..."``
-        (the env var is ignored by recent versions)
-    The earlier custom ``model_provider`` block was a silent no-op."""
+    """Codex ≥ 0.119 needs both:
+    - ``$CODEX_HOME/auth.json`` with ``{"OPENAI_API_KEY": "..."}``
+      (env var alone is not picked up by ``codex exec``)
+    - ``$CODEX_HOME/config.toml`` with the gateway registered as an
+      EXPLICIT custom provider with ``wire_api = "chat"`` — the bundled
+      ``openai`` provider's wire_api locked to "responses" in current
+      versions, which the rllm gateway doesn't parse, producing empty
+      TraceRecords."""
     h = CodexHarness()
     sandbox = FakeSandbox()
     h.set_sandbox(sandbox)
@@ -476,12 +478,14 @@ def test_codex_writes_auth_json_and_config_toml():
     assert 'cat > "$CODEX_HOME/config.toml"' in written
     # auth.json schema: JSON with OPENAI_API_KEY at top level.
     assert '"OPENAI_API_KEY"' in written
-    # config.toml schema: just openai_base_url — no custom-provider blocks.
-    assert 'openai_base_url = "http://gw:8000/sessions/eval-0/v1"' in written
-    # Custom-provider keys must NOT appear — they're a silent no-op and
-    # caused the original "codex runs, no traces captured" symptom.
-    assert "model_provider" not in written
-    assert "model_providers" not in written
+    # Custom provider id selected via model_provider — NOT "openai",
+    # which Codex special-cases with a locked-in responses wire_api.
+    assert 'model_provider = "rllm-gateway"' in written
+    assert "[model_providers.rllm-gateway]" in written
+    assert 'base_url = "http://gw:8000/sessions/eval-0/v1"' in written
+    # The load-bearing field: force chat completions wire api so the
+    # gateway's TraceRecord parser sees the right shape.
+    assert 'wire_api = "chat"' in written
 
 
 def test_codex_invocation_uses_exec_with_bypass_flags_and_separator():

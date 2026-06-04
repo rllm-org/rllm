@@ -1,17 +1,26 @@
 """CodexHarness: runs the OpenAI Codex CLI inside the sandbox.
 
-This implementation mirrors the proven pattern from
-``harbor/src/harbor/agents/installed/codex.py`` (verified working against
-Codex CLI 0.118.0+). Two non-obvious facts drive the shape:
+Three non-obvious facts drive the shape (verified against Codex CLI
+≥ 0.119; harbor's simpler ``openai_base_url`` pattern works for them
+because they call api.openai.com directly without an intercepting
+gateway, but breaks against the rllm model gateway):
 
 1. **Codex reads auth from a JSON file, not from ``OPENAI_API_KEY``
-   alone.** Recent Codex versions resolve credentials from
+   alone.** Recent versions resolve credentials from
    ``$CODEX_HOME/auth.json`` (schema: ``{"OPENAI_API_KEY": "..."}``).
    Setting only the env var leaves the CLI looking unauthenticated.
-2. **Codex 0.118+ ignores ``OPENAI_BASE_URL`` and instead reads
-   ``openai_base_url`` from ``$CODEX_HOME/config.toml``.** Routing
-   through the rLLM gateway therefore requires writing that key — env
-   var alone goes straight to api.openai.com.
+2. **The bundled ``openai`` provider defaults to ``wire_api = "responses"``
+   in 0.119+** — i.e. POSTs to ``/v1/responses`` (OpenAI Responses
+   API), not ``/v1/chat/completions``. The rllm model gateway only
+   parses chat-completion-shaped traces, so calls land but the
+   TraceRecord comes out empty and ``rllm view`` shows no chat
+   messages. Forcing a chat-completions wire requires registering the
+   gateway as an EXPLICIT custom provider with ``wire_api = "chat"``
+   and selecting it via ``model_provider`` — overriding the bundled
+   ``openai`` provider in place doesn't work.
+3. **Codex 0.118+ ignores ``OPENAI_BASE_URL``**. The custom-provider
+   block's ``base_url`` field is the only routing knob that takes
+   effect.
 
 We set ``CODEX_HOME`` to ``/tmp/codex-home`` so auth/config never touch
 ``$HOME/.codex`` (cleaner in shared/sandbox environments).
@@ -63,6 +72,13 @@ codex --version >/dev/null
 """
 
 _CODEX_HOME = "/tmp/codex-home"
+# Custom-provider id registered in ~/.codex/config.toml. Must NOT be
+# "openai" — Codex special-cases the bundled openai provider (locks
+# wire_api to "responses" in current versions). A separate id with
+# wire_api="chat" forces routing through the rllm gateway's
+# /v1/chat/completions endpoint, which is the only one the gateway
+# parses into TraceRecords.
+_RLLM_PROVIDER_ID = "rllm-gateway"
 
 
 class CodexHarness(BaseCliHarness):
@@ -98,30 +114,39 @@ class CodexHarness(BaseCliHarness):
     ) -> None:
         """Write ``$CODEX_HOME/auth.json`` and ``$CODEX_HOME/config.toml``.
 
-        - ``auth.json`` schema: ``{"OPENAI_API_KEY": "..."}`` — Codex reads
-          credentials from here. Setting ``OPENAI_API_KEY`` in env alone is
-          not enough for ``codex exec`` to pick them up.
-        - ``config.toml`` only needs ``openai_base_url = "..."`` to redirect
-          the bundled openai provider at our gateway. The custom
-          ``model_provider`` / ``model_providers.<id>`` schema is NOT
-          required (and was the source of the silent no-op in earlier
-          versions of this harness).
+        - ``auth.json`` schema: ``{"OPENAI_API_KEY": "..."}`` — Codex
+          reads credentials from here.
+        - ``config.toml`` declares the rLLM gateway as a custom provider
+          with ``wire_api = "chat"`` and selects it via ``model_provider``.
+          Critical: overriding the bundled ``openai`` provider in place
+          doesn't change its locked-in ``responses`` wire api in current
+          Codex versions, so a separate provider id is required.
         """
         gateway_url = self._container_url(config.base_url)
         api_key = env.get("OPENAI_API_KEY", self.gateway_api_key(config, "OPENAI_API_KEY"))
+        _, model_id, _ = self.ensure_provider_prefix(config.model)
 
-        # JSON has to be escaped enough to survive a single-quoted heredoc
-        # marker. The key has no quotes/backslashes in practice (it's a
-        # bearer token or sk-... string), but use json.dumps to be safe.
         import json as _json
 
         auth_json = _json.dumps({"OPENAI_API_KEY": api_key})
-        config_toml = f'openai_base_url = "{gateway_url}"\n'
 
-        # Heredoc target paths must leave ``$CODEX_HOME`` UNQUOTED so the
-        # shell expands it (same lesson as opencode.py / mini_swe_agent.py
-        # — ``_heredoc_write`` single-quotes the path which kills the
-        # ``$VAR`` expansion).
+        # Hand-rolled TOML — schema is tiny and the stdlib has no
+        # writer. ``wire_api = "chat"`` is the load-bearing field;
+        # without it Codex defaults to ``responses`` and the gateway's
+        # chat-completion trace parser produces empty TraceRecords.
+        config_toml = (
+            f'model = "{model_id}"\n'
+            f'model_provider = "{_RLLM_PROVIDER_ID}"\n'
+            f"\n"
+            f"[model_providers.{_RLLM_PROVIDER_ID}]\n"
+            f'name = "rLLM Gateway"\n'
+            f'base_url = "{gateway_url}"\n'
+            f'env_key = "OPENAI_API_KEY"\n'
+            f'wire_api = "chat"\n'
+        )
+
+        # Heredoc target paths must leave ``$CODEX_HOME`` UNQUOTED so
+        # the shell expands it at exec time.
         cmd = (
             'mkdir -p "$CODEX_HOME" && '
             "cat > \"$CODEX_HOME/auth.json\" << '_RLLM_CODEX_AUTH_EOF'\n"
