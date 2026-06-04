@@ -39,7 +39,7 @@ dependencies = [
     "aiosqlite",
     "hydra-core",
     "codetiming",
-    "tinker ; python_version >= '3.11'",
+    "tinker>=0.22.3 ; python_version >= '3.11'",
     "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook ; python_version >= '3.11'",
 ]
 
@@ -91,7 +91,7 @@ verl = [
 ]
 
 tinker = [
-    "tinker ; python_version >= '3.11'",
+    "tinker>=0.22.3 ; python_version >= '3.11'",
     "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook ; python_version >= '3.11'",
 ]
 
