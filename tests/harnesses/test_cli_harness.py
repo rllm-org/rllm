@@ -16,11 +16,16 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from rllm.harnesses.aider import AiderHarness
 from rllm.harnesses.claude_code import ClaudeCodeHarness
 from rllm.harnesses.codex import CodexHarness
+from rllm.harnesses.kimi_cli import KimiCliHarness
 from rllm.harnesses.mini_swe_agent import MiniSweAgentHarness
 from rllm.harnesses.opencode import OpenCodeHarness
+from rllm.harnesses.openhands import OpenHandsHarness
+from rllm.harnesses.pi import PiHarness
 from rllm.harnesses.qwen_code import QwenCodeHarness
+from rllm.harnesses.swe_agent import SweAgentHarness
 from rllm.types import AgentConfig, Task
 
 
@@ -557,6 +562,228 @@ def test_qwen_code_run_returns_none():
     sandbox = FakeSandbox()
     h.set_sandbox(sandbox)
     assert h.run(_make_task(), _make_config(model="qwen3-coder-plus")) is None
+
+
+# ---------------------------------------------------------------------------
+# AiderHarness — litellm-backed, --yes for unattended
+# ---------------------------------------------------------------------------
+
+
+def test_aider_install_uses_official_uv_script():
+    """aider's official installer (https://aider.chat/install.sh) is a
+    uv-backed shell script that lands the binary in $HOME/.local/bin."""
+    assert "aider.chat/install.sh" in AiderHarness().install_script()
+
+
+def test_aider_build_env_routes_via_openai_and_anthropic_base_url():
+    """aider uses litellm under the hood — both OPENAI_API_BASE and
+    OPENAI_BASE_URL are honored across litellm versions, and Anthropic
+    routing goes through ANTHROPIC_BASE_URL minus the /v1 suffix."""
+    h = AiderHarness()
+    env = h.build_env(_make_task(), _make_config(base_url="http://gw:8000/sessions/eval-0/v1", model="openai/gpt-4o"))
+    assert env["OPENAI_API_BASE"] == "http://gw:8000/sessions/eval-0/v1"
+    assert env["OPENAI_BASE_URL"] == "http://gw:8000/sessions/eval-0/v1"
+    assert env["ANTHROPIC_BASE_URL"] == "http://gw:8000/sessions/eval-0"
+
+
+def test_aider_invocation_uses_yes_no_stream_no_git():
+    """``--yes`` auto-confirms diffs/shell prompts (mandatory for
+    unattended). ``--no-stream`` so the gateway sees one response per
+    turn rather than a chunk-per-token stream. ``--no-git`` because
+    Harbor task workdirs aren't always git repos and aider would
+    refuse to start."""
+    h = AiderHarness()
+    cmd = h.build_invocation("fix it", _make_task(), _make_config(model="gpt-4o"))
+    assert "aider --yes --no-stream --no-git" in cmd
+    assert "--model=openai/gpt-4o" in cmd
+    assert "--message='fix it'" in cmd
+
+
+# ---------------------------------------------------------------------------
+# OpenHandsHarness — uv venv install, LLM_BASE_URL routing
+# ---------------------------------------------------------------------------
+
+
+def test_openhands_install_uses_uv_venv():
+    """OpenHands installs into a dedicated venv at /opt/openhands-venv
+    so it doesn't pollute the task's Python environment."""
+    script = OpenHandsHarness().install_script()
+    assert "/opt/openhands-venv" in script
+    assert "openhands-ai" in script
+    # Smoke check at the end so install failures surface eagerly.
+    assert "import openhands" in script
+
+
+def test_openhands_build_env_sets_llm_routing_trio():
+    """OpenHands' LLM config reads LLM_MODEL / LLM_BASE_URL / LLM_API_KEY —
+    these are the primary routing knobs. The OPENAI_* / ANTHROPIC_* vars
+    are present as fallbacks for code paths that bypass the config."""
+    h = OpenHandsHarness()
+    env = h.build_env(_make_task(), _make_config(model="gpt-4o"))
+    assert env["LLM_MODEL"] == "openai/gpt-4o"
+    assert env["LLM_BASE_URL"] == "http://gw:8000/sessions/eval-0/v1"
+    assert env["LLM_API_KEY"]
+
+
+def test_openhands_build_env_sets_sandbox_mode_flags():
+    """``RUNTIME=local`` runs tools in-process instead of spinning a
+    nested docker container; the other two avoid the user-switching
+    dance that assumes an ``openhands`` user account."""
+    h = OpenHandsHarness()
+    env = h.build_env(_make_task(), _make_config(model="gpt-4o"))
+    assert env["RUNTIME"] == "local"
+    assert env["RUN_AS_OPENHANDS"] == "false"
+    assert env["SU_TO_USER"] == "false"
+
+
+def test_openhands_invocation_runs_module_in_venv():
+    """Invoke /opt/openhands-venv/bin/python directly so PATH activation
+    isn't required. ``--task=`` is the single-shot entrypoint."""
+    h = OpenHandsHarness()
+    cmd = h.build_invocation("solve it", _make_task(), _make_config())
+    assert "/opt/openhands-venv/bin/python -m openhands.core.main" in cmd
+    assert "--task='solve it'" in cmd
+
+
+# ---------------------------------------------------------------------------
+# SweAgentHarness — git-cloned, problem-statement via file
+# ---------------------------------------------------------------------------
+
+
+def test_swe_agent_install_clones_from_github():
+    """SWE-agent is installed by cloning the upstream repo and uv-pip-
+    installing it into a venv — no PyPI release is officially supported."""
+    script = SweAgentHarness().install_script()
+    assert "github.com/SWE-agent/SWE-agent.git" in script
+    assert "/opt/sweagent-venv" in script
+
+
+def test_swe_agent_build_env_passes_openai_base_url():
+    h = SweAgentHarness()
+    env = h.build_env(_make_task(), _make_config(model="gpt-4o"))
+    assert env["OPENAI_API_BASE"] == "http://gw:8000/sessions/eval-0/v1"
+    assert env["OPENAI_BASE_URL"] == "http://gw:8000/sessions/eval-0/v1"
+
+
+def test_swe_agent_write_configs_drops_problem_statement_to_file():
+    """``sweagent run --problem_statement.path`` requires a file path,
+    not inline text. The harness writes the instruction to
+    /tmp/swe-agent-problem.md before invocation."""
+    h = SweAgentHarness()
+    sandbox = FakeSandbox()
+    h.set_sandbox(sandbox)
+    task = Task(id="t-1", instruction="solve the failing test", metadata={})
+    env = h.build_env(task, _make_config())
+    h.write_configs(task, _make_config(), env)
+    written = sandbox.calls[-1].command
+    assert "/tmp/swe-agent-problem.md" in written
+    assert "solve the failing test" in written
+
+
+def test_swe_agent_invocation_disables_cost_limits():
+    """litellm aborts when the gateway-routed model isn't in its cost
+    table — explicit zeros mean ``no limit`` here, which is what we
+    want for eval runs (the gateway/operator caps spend)."""
+    h = SweAgentHarness()
+    cmd = h.build_invocation("hi", _make_task(), _make_config(model="gpt-4o"))
+    assert "sweagent run" in cmd
+    assert "--agent.model.name=openai/gpt-4o" in cmd
+    assert "--agent.model.per_instance_cost_limit=0" in cmd
+    assert "--env.deployment.type=local" in cmd
+    assert "/tmp/swe-agent-problem.md" in cmd
+
+
+# ---------------------------------------------------------------------------
+# PiHarness — npm-installed, ai-sdk under the hood
+# ---------------------------------------------------------------------------
+
+
+def test_pi_install_uses_official_npm_package():
+    assert "@mariozechner/pi-coding-agent" in PiHarness().install_script()
+
+
+def test_pi_build_env_routes_both_openai_and_anthropic_base_urls():
+    """pi uses ai-sdk which routes per-provider — set both env vars so
+    whichever ``--provider`` we pick on the CLI still hits the gateway."""
+    h = PiHarness()
+    env = h.build_env(_make_task(), _make_config(model="claude-opus-4-1"))
+    assert env["OPENAI_BASE_URL"] == "http://gw:8000/sessions/eval-0/v1"
+    assert env["ANTHROPIC_BASE_URL"] == "http://gw:8000/sessions/eval-0"
+
+
+def test_pi_invocation_uses_print_json_no_session():
+    """``--print --mode json --no-session`` is the non-interactive
+    contract: single-shot, structured output, no persisted session."""
+    h = PiHarness()
+    cmd = h.build_invocation("fix the bug", _make_task(), _make_config(model="claude-opus-4-1"))
+    assert "pi --print --mode json --no-session" in cmd
+    assert "--provider anthropic" in cmd
+    assert "--model claude-opus-4-1" in cmd
+    # Prompt is the trailing positional; shlex.quote wraps it because of the space.
+    assert " 'fix the bug' " in cmd
+
+
+def test_pi_provider_inferred_from_model_name():
+    """Mapping from rllm's provider inference to pi's --provider name.
+    Most map 1:1; deepseek routes as ``openai`` because pi has no
+    dedicated deepseek provider but accepts any OpenAI-compatible
+    backend under that name."""
+    h = PiHarness()
+    assert h._pi_provider("gpt-4o") == ("openai", "gpt-4o")
+    assert h._pi_provider("claude-opus-4-1") == ("anthropic", "claude-opus-4-1")
+    assert h._pi_provider("gemini-1.5-pro") == ("google", "gemini-1.5-pro")
+    # Unknown providers default to openai (pi handles arbitrary
+    # openai-compatible endpoints under that name).
+    assert h._pi_provider("deepseek-coder")[0] == "openai"
+
+
+# ---------------------------------------------------------------------------
+# KimiCliHarness — JSON-RPC wire protocol, config-file routing
+# ---------------------------------------------------------------------------
+
+
+def test_kimi_cli_install_uses_uv_tool():
+    """kimi-cli is distributed as a uv-installable Python tool, NOT npm."""
+    script = KimiCliHarness().install_script()
+    assert "uv tool install" in script
+    assert "kimi-cli" in script
+
+
+def test_kimi_cli_writes_config_with_custom_provider_block():
+    """kimi reads provider+model routing from a JSON config; the harness
+    registers the rLLM gateway as a custom ``openai_legacy`` provider
+    (kimi's name for any plain /v1/chat/completions endpoint) and points
+    the chosen model at it."""
+    h = KimiCliHarness()
+    sandbox = FakeSandbox()
+    h.set_sandbox(sandbox)
+    config = _make_config(base_url="http://gw:8000/sessions/eval-0/v1", model="gpt-4o")
+    env = h.build_env(_make_task(), config)
+    h.write_configs(_make_task(), config, env)
+    written = sandbox.calls[-1].command
+    assert "/tmp/kimi-config.json" in written
+    assert '"rllm-gateway"' in written
+    # type=openai_legacy is the wire-compatible setting for plain
+    # /v1/chat/completions backends (which is what the gateway exposes).
+    assert '"type": "openai_legacy"' in written
+    assert '"base_url": "http://gw:8000/sessions/eval-0/v1"' in written
+
+
+def test_kimi_cli_invocation_pipes_jsonrpc_prompt_over_stdin():
+    """kimi reads the prompt from stdin as a JSON-RPC ``prompt`` method,
+    not from argv. ``sleep 86400`` keeps the pipe open so kimi can
+    stream responses back; ``--yolo`` auto-approves every tool call."""
+    h = KimiCliHarness()
+    cmd = h.build_invocation("hi", _make_task(), _make_config(model="gpt-4o"))
+    # Wire-protocol JSON-RPC frame on stdin.
+    assert '"jsonrpc": "2.0"' in cmd
+    assert '"method": "prompt"' in cmd
+    assert '"text": "hi"' in cmd
+    # Keep-stdin-open trick and the flags that gate non-interactive mode.
+    assert "sleep 86400" in cmd
+    assert "--wire" in cmd
+    assert "--yolo" in cmd
+    assert "--config-file /tmp/kimi-config.json" in cmd
 
 
 # ---------------------------------------------------------------------------

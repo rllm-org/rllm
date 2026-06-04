@@ -36,6 +36,31 @@
       "function": "QwenCodeHarness",
       "description": "Run the Qwen Code CLI inside the sandbox."
     },
+    "aider": {
+      "module": "rllm.harnesses.aider",
+      "function": "AiderHarness",
+      "description": "Run Paul Gauthier's aider CLI inside the sandbox."
+    },
+    "openhands": {
+      "module": "rllm.harnesses.openhands",
+      "function": "OpenHandsHarness",
+      "description": "Run All Hands AI's OpenHands inside the sandbox."
+    },
+    "swe-agent": {
+      "module": "rllm.harnesses.swe_agent",
+      "function": "SweAgentHarness",
+      "description": "Run Princeton's SWE-agent inside the sandbox."
+    },
+    "pi": {
+      "module": "rllm.harnesses.pi",
+      "function": "PiHarness",
+      "description": "Run Mario Zechner's pi-coding-agent CLI inside the sandbox."
+    },
+    "kimi-cli": {
+      "module": "rllm.harnesses.kimi_cli",
+      "function": "KimiCliHarness",
+      "description": "Run Moonshot's kimi-cli inside the sandbox."
+    },
     "oracle": {
       "module": "rllm.harnesses.oracle",
       "function": "OracleHarness",
