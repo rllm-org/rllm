@@ -222,7 +222,7 @@ def transform_episodes_to_trajectory_groups(
         Tuple of (list of TrajectoryGroups, metrics)
 
     Example:
-        >>> from rllm.trainer.common.transform import (
+        >>> from rllm.trainer.algorithms.transform import (
         ...     transform_episodes_to_trajectory_groups,
         ... )
         >>> config = TransformConfig(

@@ -262,7 +262,7 @@ class TestTrainCommand:
             patch("rllm.cli.train.load_dataset_catalog", return_value=catalog),
             patch("rllm.eval.agent_loader.load_agent", return_value=mock_agent) as mock_load_agent,
             patch("rllm.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator),
-            patch("rllm.trainer.unified_trainer.AgentTrainer", return_value=mock_trainer),
+            patch("rllm.trainer.AgentTrainer", return_value=mock_trainer),
         ):
             result = runner.invoke(cli, ["train", "test_math", "--model", "test-model"])
 
@@ -281,7 +281,7 @@ class TestTrainCommand:
             patch("rllm.cli.train.load_dataset_catalog", return_value=catalog),
             patch("rllm.eval.agent_loader.load_agent", return_value=mock_agent) as mock_load_agent,
             patch("rllm.eval.evaluator_loader.load_evaluator", return_value=mock_evaluator) as mock_load_eval,
-            patch("rllm.trainer.unified_trainer.AgentTrainer", return_value=mock_trainer),
+            patch("rllm.trainer.AgentTrainer", return_value=mock_trainer),
         ):
             result = runner.invoke(
                 cli,
@@ -312,7 +312,7 @@ class TestTrainCommand:
             patch("rllm.cli.train.load_dataset_catalog", return_value=catalog),
             patch("rllm.eval.agent_loader.load_agent", return_value=mock_agent),
             patch("rllm.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator),
-            patch("rllm.trainer.unified_trainer.AgentTrainer", return_value=mock_trainer),
+            patch("rllm.trainer.AgentTrainer", return_value=mock_trainer),
         ):
             result = runner.invoke(
                 cli,
@@ -344,7 +344,7 @@ class TestTrainCommand:
             patch("rllm.cli.train.load_dataset_catalog", return_value=catalog),
             patch("rllm.eval.agent_loader.load_agent", return_value=mock_agent),
             patch("rllm.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator),
-            patch("rllm.trainer.unified_trainer.AgentTrainer", return_value=mock_trainer),
+            patch("rllm.trainer.AgentTrainer", return_value=mock_trainer),
         ):
             result = runner.invoke(
                 cli,
@@ -373,7 +373,7 @@ class TestTrainCommand:
             patch("rllm.cli.train.load_dataset_catalog", return_value=catalog),
             patch("rllm.eval.agent_loader.load_agent", return_value=mock_agent),
             patch("rllm.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator),
-            patch("rllm.trainer.unified_trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls,
+            patch("rllm.trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls,
         ):
             result = runner.invoke(
                 cli,
@@ -423,7 +423,7 @@ class TestTrainCommand:
             patch("rllm.cli.train.load_dataset_catalog", return_value=catalog),
             patch("rllm.eval.agent_loader.load_agent", return_value=mock_agent),
             patch("rllm.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator),
-            patch("rllm.trainer.unified_trainer.AgentTrainer", return_value=mock_trainer),
+            patch("rllm.trainer.AgentTrainer", return_value=mock_trainer),
         ):
             result = runner.invoke(
                 cli,
@@ -468,7 +468,7 @@ class TestTrainCommand:
             patch("rllm.cli.train.load_dataset_catalog", return_value=catalog),
             patch("rllm.eval.agent_loader.load_agent", return_value=mock_agent),
             patch("rllm.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator),
-            patch("rllm.trainer.unified_trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls,
+            patch("rllm.trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls,
         ):
             result = runner.invoke(cli, ["train", "test_math", "--model", "test-model"])
 
@@ -488,7 +488,7 @@ class TestTrainCommand:
             patch("rllm.cli.train.load_dataset_catalog", return_value=catalog),
             patch("rllm.eval.agent_loader.load_agent", return_value=mock_agent),
             patch("rllm.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator),
-            patch("rllm.trainer.unified_trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls,
+            patch("rllm.trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls,
         ):
             result = runner.invoke(cli, ["train", "test_math", "--model", "test-model"])
 
@@ -509,7 +509,7 @@ class TestTrainCommand:
             patch("rllm.cli.train.load_dataset_catalog", return_value=catalog),
             patch("rllm.eval.agent_loader.load_agent", return_value=mock_agent),
             patch("rllm.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator),
-            patch("rllm.trainer.unified_trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls,
+            patch("rllm.trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls,
         ):
             result = runner.invoke(cli, ["train", "test_math", "--model", "test-model", "--ui"])
 
@@ -529,7 +529,7 @@ class TestTrainCommand:
             patch("rllm.cli.train.load_dataset_catalog", return_value=catalog),
             patch("rllm.eval.agent_loader.load_agent", return_value=mock_agent),
             patch("rllm.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator),
-            patch("rllm.trainer.unified_trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls,
+            patch("rllm.trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls,
         ):
             result = runner.invoke(cli, ["train", "test_math", "--model", "test-model", "--ui-url", "http://localhost:3000"])
 
