@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from rllm.experimental.common.config import AlgorithmConfig, rLLMAdvantageEstimator
+from rllm.trainer.algorithms.config import AlgorithmConfig, rLLMAdvantageEstimator
 
 # ---------------------------------------------------------------------------
 # AlgorithmConfig normalization
@@ -100,14 +100,14 @@ class TestTinkerLossFallback:
 class TestVerlActorPatch:
     def test_patch_is_idempotent(self):
         """Calling the patch function twice should not error."""
-        from rllm.experimental.verl.patch import patch_verl_actor_for_loss_override
+        from rllm.trainer.verl.patch import patch_verl_actor_for_loss_override
 
         patch_verl_actor_for_loss_override()
         patch_verl_actor_for_loss_override()
 
     def test_override_applied_and_restored(self):
         """The patched update_policy should read override from meta_info and restore config."""
-        from rllm.experimental.verl.patch import patch_verl_actor_for_loss_override
+        from rllm.trainer.verl.patch import patch_verl_actor_for_loss_override
 
         patch_verl_actor_for_loss_override()
 
@@ -129,7 +129,7 @@ class TestVerlActorPatch:
 
     def test_no_override_passes_through(self):
         """Without override in meta_info, original behavior is preserved."""
-        from rllm.experimental.verl.patch import patch_verl_actor_for_loss_override
+        from rllm.trainer.verl.patch import patch_verl_actor_for_loss_override
 
         patch_verl_actor_for_loss_override()
         # Just verify no crash — actual actor integration requires GPU
@@ -142,14 +142,14 @@ class TestVerlActorPatch:
 
 class TestVerlKnownLosses:
     def test_registry_populated(self):
-        from rllm.experimental.verl.verl_backend import _get_verl_known_losses
+        from rllm.trainer.verl.verl_backend import _get_verl_known_losses
 
         known = _get_verl_known_losses()
         assert "vanilla" in known
         assert len(known) > 5  # at least the main ones
 
     def test_default_loss_is_known(self):
-        from rllm.experimental.verl.verl_backend import (
+        from rllm.trainer.verl.verl_backend import (
             _DEFAULT_VERL_LOSS,
             _get_verl_known_losses,
         )
@@ -208,7 +208,7 @@ class TestGroupRolesInDataclass:
     def test_accumulated_data_tracks_group_roles(self):
         import torch
 
-        from rllm.experimental.verl.dataclass import AccumulatedData, ProcessedStepData
+        from rllm.trainer.verl.dataclass import AccumulatedData, ProcessedStepData
 
         acc = AccumulatedData()
         step = ProcessedStepData(

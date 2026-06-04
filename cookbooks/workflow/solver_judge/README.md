@@ -1,6 +1,6 @@
 # Solver-Judge (legacy Workflow API)
 
-Solver-judge multi-agent flow for the countdown task, built on the **legacy `Workflow` abstraction** (`rllm.workflows.workflow.Workflow` + `RolloutEngine` + `AgentWorkflowEngine`). The training side runs through the **unified trainer** (`rllm.experimental.unified_trainer.AgentTrainer`), which keeps the `workflow_class=...` interface while routing to the maintained backend launchers. The old `rllm.trainer.AgentTrainer(backend="tinker")` path has been removed.
+Solver-judge multi-agent flow for the countdown task, built on the **legacy `Workflow` abstraction** (`rllm.workflows.workflow.Workflow` + `RolloutEngine` + `AgentWorkflowEngine`). The training side runs through the **unified trainer** (`rllm.trainer.unified_trainer.AgentTrainer`), which keeps the `workflow_class=...` interface while routing to the maintained backend launchers. The old `rllm.trainer.AgentTrainer(backend="tinker")` path has been removed.
 
 For the equivalent example written against the newer `@rllm.rollout` AgentFlow protocol, see [`cookbooks/solver_judge_flow/`](../../solver_judge_flow/).
 

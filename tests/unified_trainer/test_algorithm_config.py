@@ -11,7 +11,7 @@ import os
 from omegaconf import OmegaConf
 
 # Import config module directly to avoid heavy transitive deps (codetiming, verl, etc.)
-_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "../../rllm/experimental/common/config.py")
+_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "../../rllm/trainer/algorithms/config.py")
 _spec = importlib.util.spec_from_file_location("rllm_common_config", _CONFIG_PATH)
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)

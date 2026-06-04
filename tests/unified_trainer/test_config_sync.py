@@ -1,4 +1,4 @@
-"""Tests for ``sync_config`` in ``rllm.experimental.verl.utils``."""
+"""Tests for ``sync_config`` in ``rllm.trainer.verl.utils``."""
 
 import logging
 
@@ -92,7 +92,7 @@ def _make_config():
 def propagate(monkeypatch):
     """Returns a callable ``run(config, explicit_keys)`` that invokes the propagator
     with a stubbed ``_explicit_override_keys``."""
-    from rllm.experimental.verl import utils as utils_mod
+    from rllm.trainer.verl import utils as utils_mod
 
     def run(config, explicit_keys: set[str] | None = None):
         monkeypatch.setattr(utils_mod, "_explicit_override_keys", lambda *_a, **_k: set(explicit_keys or ()))
@@ -125,7 +125,7 @@ def test_adv_estimator_rllm_cli_wins(propagate):
 
 def test_adv_estimator_verl_cli_wins_with_deprecation_warning(propagate, caplog):
     """User typed verl-side → propagates to rllm for now, with a warning."""
-    caplog.set_level(logging.WARNING, logger="rllm.experimental.verl.utils")
+    caplog.set_level(logging.WARNING, logger="rllm.trainer.verl.utils")
     cfg = _make_config()
     cfg.algorithm.adv_estimator = "rloo"
     cfg = propagate(cfg, explicit_keys={"algorithm.adv_estimator"})
@@ -137,7 +137,7 @@ def test_adv_estimator_verl_cli_wins_with_deprecation_warning(propagate, caplog)
 
 def test_adv_estimator_rllm_wins_over_verl_conflict(propagate, caplog):
     """User typed both → rllm CLI takes precedence."""
-    caplog.set_level(logging.WARNING, logger="rllm.experimental.verl.utils")
+    caplog.set_level(logging.WARNING, logger="rllm.trainer.verl.utils")
     cfg = _make_config()
     cfg.rllm.algorithm.adv_estimator = "rloo"
     cfg.algorithm.adv_estimator = "reinforce"
@@ -174,7 +174,7 @@ def test_total_batches_maps_to_verl_total_training_steps(propagate):
 
 
 def test_verl_total_training_steps_syncs_to_rllm_total_batches_with_warning(propagate, caplog):
-    caplog.set_level(logging.WARNING, logger="rllm.experimental.verl.utils")
+    caplog.set_level(logging.WARNING, logger="rllm.trainer.verl.utils")
     cfg = _make_config()
     cfg.trainer.total_training_steps = 42
     cfg = propagate(cfg, explicit_keys={"trainer.total_training_steps"})
@@ -206,7 +206,7 @@ def test_rllm_lr_schedule_propagates_to_verl_optimizer(propagate):
 
 
 def test_verl_lr_scheduler_type_propagates_to_rllm_with_warning(propagate, caplog):
-    caplog.set_level(logging.WARNING, logger="rllm.experimental.verl.utils")
+    caplog.set_level(logging.WARNING, logger="rllm.trainer.verl.utils")
     cfg = _make_config()
     cfg.actor_rollout_ref.actor.optim.lr_scheduler_type = "cosine"
     cfg = propagate(cfg, explicit_keys={"actor_rollout_ref.actor.optim.lr_scheduler_type"})
@@ -229,7 +229,7 @@ def test_rllm_warmup_steps_propagates_to_verl_optimizer(propagate):
 
 
 def test_verl_warmup_steps_propagates_to_rllm_with_warning(propagate, caplog):
-    caplog.set_level(logging.WARNING, logger="rllm.experimental.verl.utils")
+    caplog.set_level(logging.WARNING, logger="rllm.trainer.verl.utils")
     cfg = _make_config()
     cfg.actor_rollout_ref.actor.optim.lr_warmup_steps = 25
     cfg = propagate(cfg, explicit_keys={"actor_rollout_ref.actor.optim.lr_warmup_steps"})
@@ -290,7 +290,7 @@ def test_explicit_use_kl_loss_overrides_derivation(propagate):
 
 def test_verl_kl_loss_coef_propagates_to_rllm_kl_beta_with_warning(propagate, caplog):
     """User typed verl-side → kl_beta synced; use_kl_loss derived True."""
-    caplog.set_level(logging.WARNING, logger="rllm.experimental.verl.utils")
+    caplog.set_level(logging.WARNING, logger="rllm.trainer.verl.utils")
     cfg = _make_config()
     cfg.actor_rollout_ref.actor.kl_loss_coef = 0.02
     cfg = propagate(cfg, explicit_keys={"actor_rollout_ref.actor.kl_loss_coef"})
@@ -332,7 +332,7 @@ def test_rllm_eps_clip_high_sets_asymmetric_upper_bound(propagate):
 
 def test_verl_clip_ratio_propagates_to_rllm_eps_clip_with_warning(propagate, caplog):
     """User sets verl.clip_ratio (no asymmetric override) → rllm.eps_clip mirrors it."""
-    caplog.set_level(logging.WARNING, logger="rllm.experimental.verl.utils")
+    caplog.set_level(logging.WARNING, logger="rllm.trainer.verl.utils")
     cfg = _make_config()
     cfg.actor_rollout_ref.actor.clip_ratio = 0.3
     cfg = propagate(cfg, explicit_keys={"actor_rollout_ref.actor.clip_ratio"})
@@ -356,7 +356,7 @@ def test_clip_ratio_low_takes_precedence_over_clip_ratio(propagate):
 
 
 def test_rllm_eps_clip_wins_over_verl_clip_ratio_conflict(propagate, caplog):
-    caplog.set_level(logging.WARNING, logger="rllm.experimental.verl.utils")
+    caplog.set_level(logging.WARNING, logger="rllm.trainer.verl.utils")
     cfg = _make_config()
     cfg.rllm.algorithm.eps_clip = 0.3
     cfg.actor_rollout_ref.actor.clip_ratio = 0.15

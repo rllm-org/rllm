@@ -235,7 +235,7 @@ class AgentWorkflowEngine:
         return self.transform_results_for_verl(results, task_ids)
 
     def transform_results_for_verl(self, episodes: list[Episode], task_ids: np.ndarray) -> DataProto:
-        """Transform episode results into Verl-compatible DataProto format. Delegate to `transform_episodes_to_dataproto` in `rllm.experimental.verl.transform`.
+        """Transform episode results into Verl-compatible DataProto format. Delegate to `transform_episodes_to_dataproto` in `rllm.trainer.verl.transform`.
 
         Args:
             episodes: List of completed episodes from workflow execution.
@@ -244,7 +244,7 @@ class AgentWorkflowEngine:
         Returns:
             DataProto: Formatted data ready for Verl training pipeline.
         """
-        from rllm.experimental.verl.transform import transform_episodes_to_dataproto
+        from rllm.trainer.verl.transform import transform_episodes_to_dataproto
 
         dropped_episodes: list[dict] = []
         remaining_episodes: list[Episode] = []

@@ -1,0 +1,174 @@
+# Common, backend-agnostic configuration for rLLM
+# Agent Configuration
+agent:
+  name: math_agent
+  max_steps: 20
+  trajectory_timeout: null
+  overlong_filter: False
+  agent_args: {}
+  engine_args: {}
+
+# Environment Configuration
+env:
+  name: custom
+  env_args: {}
+
+# Workflow Configuration
+workflow:
+  use_workflow: False
+  name: single_turn_workflow
+  workflow_args:
+    agent_cls: null
+    agent_args: {}
+    env_cls: null
+    env_args: {}
+    timeout: 1e6
+    gamma: 0.0 # no discounting
+    reward_bonus_coeff: 0.0 # no reward shaping
+  n_parallel_tasks: 256
+  retry_limit: 3
+  raise_on_error: true
+
+# Rollout Configuration. Backend-agnostic source of truth for sampling
+# parameters; ``rllm/trainer/verl/utils.py:sync_config`` mirrors
+# ``rollout.{train,val}.*`` into ``actor_rollout_ref.rollout`` and
+# ``actor_rollout_ref.rollout.val_kwargs`` respectively.
+# The AgentFlowEngine forwards ``rollout.train`` / ``rollout.val`` into
+# ``AgentConfig.sampling_params``, so AgentFlows spread them straight into
+# their LLM calls (``**config.sampling_params``; ``top_k`` dropped for
+# OpenAI-compatible chat-completions clients that don't accept it).
+rollout:
+  n: 8
+  n_val: 1  # number of validation samples per prompt
+  train:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    max_tokens: 2048
+  val:
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    max_tokens: 2048
+
+# Trainer Configuration
+trainer:
+  total_epochs: 10
+  total_batches: -1
+  logger: ['console']  # Options: 'console', 'wandb', 'tensorboard'
+  project_name: 'rllm-training'
+  experiment_name: 'default'
+  test_freq: 5
+  save_freq: 20
+  val_before_train: false
+  val_only: false
+
+# Algorithm Configuration
+algorithm:
+  adv_estimator: grpo # [grpo, reinforce, reinforce_plus_plus_baseline, rloo]
+  norm_adv_by_std_in_grpo: true
+  use_rllm: null  # deprecated, unified trainer only support rllm advantage estimators
+  use_precomputed_advantage: false # use pre-computed step.advantage from the workflow (e.g. distillation)
+  loss_fn: null           # backend-specific values; null = backend default
+  loss_agg_mode: null     # [null, token-mean, seq-mean-token-sum, seq-mean-token-mean]
+  lr_schedule: constant   # [constant, linear, cosine]
+  warmup_steps: -1        # Absolute optimizer-step warmup; <=0 uses warmup_steps_ratio
+  warmup_steps_ratio: 0.0 # Fractional warmup fallback
+  kl_beta: 0.0            # KL penalty coefficient
+  eps_clip: 0.2           # PPO clip epsilon
+  eps_clip_high: null     # Asymmetric upper clip bound (null = symmetric)
+  router_replay: disabled # Router Replay: "disabled" | "R2" (training-side record) | "R3" (rollout-side record)
+  rollout_correction:
+    bypass_mode: null     # true = pi_old = pi_rollout, false = pi_old is computed (null = backend default)
+    tis_mode: null        # null = disabled, "token" or "sequence" = TIS importance sampling level
+    tis_cap: 2.0          # Upper clamp on TIS importance weight
+
+# Stepwise advantage
+# TODO(listar2000): deprecate the `per_step` mode and refactor this config.
+stepwise_advantage:
+  enable: False
+  mode: broadcast # support `broadcast` only now
+  normalize_by_steps: False
+
+# Disable thinking
+disable_thinking: False
+
+# Accumulate reasoning
+accumulate_reasoning: False
+
+# Mask truncated samples
+mask_truncated_samples: False
+filter_token_mismatch: True
+
+# Compact filtering
+compact_filtering:
+  enable: False
+  mask_max_prompt_length_exceeded: True
+  mask_max_response_length_exceeded: True
+  mask_env_done: False
+  mask_max_turns_exceeded: True
+  mask_timeout: True
+  mask_unknown: False
+  mask_error: True
+
+# Rejection sampling
+rejection_sample:
+  enable: False
+  multiplier: 1
+  min_partial_solve_tasks: 1
+  min_trajs_per_group: 2
+  filter_uniform_groups: false
+
+# Remote Runtime Configuration (for agent-in-container runtimes like AgentCore, Harbor)
+remote_runtime:
+  enabled: false
+  backend: agentcore   # agentcore | harbor
+  # Per-backend named sub-configs. Only the sub-dict matching `backend` is read.
+  agentcore:
+    agent_runtime_arn: ""
+    s3_bucket: ""
+    tps_limit: 25
+  harbor:
+    agent: mini-swe-agent       # scaffold name (mini-swe-agent | aider | openhands | swe-agent | qwen-coder | ...)
+    environment_type: docker    # docker | modal | daytona | e2b | runloop | gke | apple-container
+    agent_kwargs: {}            # pass-through to harbor's AgentConfig.kwargs (scaffold-specific flags)
+    agent_timeout_multiplier: null
+    verifier_timeout_multiplier: null
+    agent_setup_timeout_multiplier: null
+    environment_build_timeout_multiplier: null
+  session_timeout: 300.0
+
+# Gateway Configuration (model gateway for AgentFlow-based training)
+gateway:
+  port: 9090
+  host: null          # Auto-detects routable IP; set explicitly to override
+  tunnel: null        # Reach gateway from remote sandboxes. Either a backend name ("cloudflared")
+                      # to auto-spawn a tunnel, or an http(s):// URL reachable from the sandbox
+                      # (your own tailscale IP, bore/ngrok/frp URL, internal DNS, etc.).
+  store: memory       # "memory" (non-persistent) | "sqlite" (writes traces to disk)
+  db_path: null       # Only used when store=sqlite; null → auto-resolved path (logged at startup)
+  sampling_params_priority: session   # "session" | "client" — who wins when both set the same key
+  cumulative_token_mode: false   # Drift-free multi-turn token forwarding: rewrites turn 2+ to
+                                 # /v1/completions with cumulative raw token IDs built by the renderer.
+                                 # The tokenizer is loaded from the served model path (model.name).
+  renderer_family: auto  # renderers family for the cumulative-mode bridge. Renderers can auto infer it
+                         # if your input model.name is a huggingface model it. If model.name is a local
+                         # path, you must set this explicitly (e.g. qwen3, qwen3.5, qwen3.6, glm-5, 
+                         # deepseek-v3, gpt-oss). Check supported model families in MODEL_RENDERER_MAP of 
+                         # https://github.com/PrimeIntellect-ai/renderers/blob/main/renderers/base.py
+
+# Async Training Configuration
+async_training:
+  enable: false
+  mini_batch_size: 64
+  fwd_bwd_group_size: null  # task batches per forward-backward pass (default: mini_batch_size)
+  staleness_threshold: 0.0
+  trigger_parameter_sync_step: 1
+  partial_rollout: false
+  episode_offload_dir: null       # NVMe offload dir for pending episodes (null = disabled)
+  trajectory_group_offload_dir: null  # NVMe offload dir for queued task batches (null = disabled)
+
+# Episode Logging Configuration
+episode_logging:
+  log_episodes: false
+  episode_log_dir: logs/${rllm.trainer.project_name}/${rllm.trainer.experiment_name}

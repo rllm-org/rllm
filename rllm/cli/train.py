@@ -26,7 +26,7 @@ theme = Theme({"label": "dim", "success": "bold green", "error": "bold red", "va
 console = Console(theme=theme)
 
 # Path to the bundled YAML config templates
-_CONFIG_PKG = Path(__file__).resolve().parent.parent / "experimental" / "config"
+_CONFIG_PKG = Path(__file__).resolve().parent.parent / "trainer" / "config"
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +170,7 @@ def _run_train(
     try:
         from rllm.eval.agent_loader import load_agent
         from rllm.eval.evaluator_loader import load_evaluator, resolve_evaluator_from_catalog
-        from rllm.experimental.unified_trainer import AgentTrainer
+        from rllm.trainer import AgentTrainer
     except ImportError as e:
         console.print(f"  [error]Missing training dependencies: {e}[/]")
         console.print("  Install with: [bold]pip install rllm\\[train][/]")
@@ -454,7 +454,7 @@ def _describe_sandbox_routing(
     tunnel: str | None = None,
 ) -> str | None:
     """One-line description of sandbox + gateway routing for the header. Returns ``None`` when no sandbox is needed."""
-    from rllm.experimental.engine.tunnel import is_local_sandbox_backend, parse_tunnel
+    from rllm.gateway.tunnel import is_local_sandbox_backend, parse_tunnel
     from rllm.hooks import needs_sandbox_isolation
 
     if not needs_sandbox_isolation(agent_flow, train_dataset, val_dataset):

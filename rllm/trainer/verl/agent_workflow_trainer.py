@@ -11,6 +11,7 @@ import torch
 from omegaconf import OmegaConf
 from tensordict import TensorDict
 from verl import DataProto
+from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
 from verl.protocol import pad_dataproto_to_divisor
 from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.core_algos import (
@@ -36,7 +37,7 @@ from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_pad
 
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout.verl_engine import VerlEngine
-from rllm.experimental.verl.metrics import calculate_debug_metrics_compat
+from rllm.trainer.verl.metrics import calculate_debug_metrics_compat
 from rllm.utils.episode_logger import EpisodeLogger
 from rllm.workflows.workflow import TerminationReason
 
@@ -111,9 +112,19 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
     def init_workers(self):
         super().init_workers()
 
+        servers = zip(
+            self.async_rollout_manager.server_addresses,
+            self.async_rollout_manager.server_handles,
+            strict=True,
+        )
+        server_manager = AsyncLLMServerManager(
+            self.config,
+            servers=servers,
+            load_balancer_handle=self.async_rollout_manager.global_load_balancer,
+        )
         rollout_engine = VerlEngine(
             config=self.config,
-            rollout_manager=self.async_rollout_manager,
+            server_manager=server_manager,
             tokenizer=self.tokenizer,
             processor=self.processor,
         )

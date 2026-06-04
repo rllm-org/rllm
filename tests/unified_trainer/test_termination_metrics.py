@@ -1,5 +1,5 @@
 from rllm.agents.agent import Episode
-from rllm.experimental.unified_trainer import UnifiedTrainer
+from rllm.trainer.unified_trainer import UnifiedTrainer
 from rllm.workflows.workflow import TerminationReason
 
 

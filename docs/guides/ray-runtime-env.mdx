@@ -103,7 +103,7 @@ ray job submit \
 
 ## Worker process setup hook
 
-Beyond environment variables, rLLM also wires a `worker_process_setup_hook` into the runtime env. Ray invokes this once at the start of every worker interpreter, before any user code runs. rLLM points it at `rllm.experimental.verl.patch.apply_all_verl_patches`, which monkey-patches the verl modules that the FSDP / vLLM workers re-import on startup.
+Beyond environment variables, rLLM also wires a `worker_process_setup_hook` into the runtime env. Ray invokes this once at the start of every worker interpreter, before any user code runs. rLLM points it at `rllm.trainer.verl.patch.apply_all_verl_patches`, which monkey-patches the verl modules that the FSDP / vLLM workers re-import on startup.
 
 This matters because verl is pinned (currently 0.7.1) and rLLM ships small backports for known issues — e.g. the qwen3-VL inplace-add fix from [verl#5881](https://github.com/volcengine/verl/pull/5881), the NCCL-deadlock fix on dynamic-batching from [verl#5750](https://github.com/volcengine/verl/issues/5750), and the jagged-NestedTensor `_ragged_idx` preservation fix from [verl#6127](https://github.com/volcengine/verl/pull/6127). Ray spawns each worker as a fresh Python interpreter that re-imports verl from disk, so a driver-side `import verl; verl.X = patched_X` never propagates. The setup hook runs the patches *inside* every worker.
 

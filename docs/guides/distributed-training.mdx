@@ -32,9 +32,8 @@ from math_flow import math_flow                # from cookbooks/math/
 from math_eval import math_evaluator           # from cookbooks/math/
 
 from rllm.data.dataset import DatasetRegistry
-from rllm.experimental.unified_trainer import AgentTrainer
-
-@hydra.main(config_path="pkg://rllm.experimental.config", config_name="unified", version_base=None)
+from rllm.trainer import AgentTrainer
+@hydra.main(config_path="pkg://rllm.trainer.config", config_name="unified", version_base=None)
 def main(config: DictConfig):
     train_dataset = DatasetRegistry.load_dataset("gsm8k", "train")
     test_dataset = DatasetRegistry.load_dataset("gsm8k", "test")

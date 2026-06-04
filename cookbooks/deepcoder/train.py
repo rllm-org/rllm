@@ -14,10 +14,10 @@ from deepcoder_flow import deepcoder_flow
 from omegaconf import DictConfig
 
 from rllm.data.dataset import DatasetRegistry
-from rllm.experimental.unified_trainer import AgentTrainer
+from rllm.trainer import AgentTrainer
 
 
-@hydra.main(config_path="pkg://rllm.experimental.config", config_name="unified", version_base=None)
+@hydra.main(config_path="pkg://rllm.trainer.config", config_name="unified", version_base=None)
 def main(config: DictConfig):
     train_dataset = DatasetRegistry.load_dataset("deepcoder", "train")
     val_dataset = DatasetRegistry.load_dataset("deepcoder", "test")

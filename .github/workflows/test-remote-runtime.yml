@@ -4,10 +4,10 @@ on:
   push:
     branches: [main]
     paths:
-      - "rllm/experimental/engine/remote_runtime/**"
-      - "rllm/experimental/engine/remote_agent_flow_engine.py"
-      - "rllm/experimental/engine/gateway_manager.py"
-      - "rllm/experimental/engine/trace_converter.py"
+      - "rllm/engine/remote_runtime/**"
+      - "rllm/engine/remote_agent_flow_engine.py"
+      - "rllm/gateway/manager.py"
+      - "rllm/engine/trace_converter.py"
       - "rllm/utils/episode_logger.py"
       - "rllm/types.py"
       - "tests/engine/test_remote_runtime.py"
@@ -15,10 +15,10 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - "rllm/experimental/engine/remote_runtime/**"
-      - "rllm/experimental/engine/remote_agent_flow_engine.py"
-      - "rllm/experimental/engine/gateway_manager.py"
-      - "rllm/experimental/engine/trace_converter.py"
+      - "rllm/engine/remote_runtime/**"
+      - "rllm/engine/remote_agent_flow_engine.py"
+      - "rllm/gateway/manager.py"
+      - "rllm/engine/trace_converter.py"
       - "rllm/utils/episode_logger.py"
       - "rllm/types.py"
       - "tests/engine/test_remote_runtime.py"

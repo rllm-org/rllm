@@ -12,11 +12,11 @@ from omegaconf import DictConfig
 from solver_judge_flow import SolverJudgeWorkflow
 
 from rllm.data.dataset import DatasetRegistry
-from rllm.experimental.unified_trainer import AgentTrainer
 from rllm.rewards.countdown_reward import countdown_reward_fn
+from rllm.trainer import AgentTrainer
 
 
-@hydra.main(config_path="pkg://rllm.experimental.config", config_name="unified", version_base=None)
+@hydra.main(config_path="pkg://rllm.trainer.config", config_name="unified", version_base=None)
 def main(config: DictConfig):
     train_dataset = DatasetRegistry.load_dataset("countdown", "train")
     val_dataset = DatasetRegistry.load_dataset("countdown", "test")

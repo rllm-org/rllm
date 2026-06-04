@@ -37,7 +37,7 @@ from rllm.experimental.fully_async.utils import (
     compute_grpo_outcome_advantage,
     reduce_metrics_with_flatten,
 )
-from rllm.experimental.verl.metrics import calculate_debug_metrics_compat
+from rllm.trainer.verl.metrics import calculate_debug_metrics_compat
 
 
 @ray.remote(num_cpus=10)
