@@ -26,6 +26,16 @@
       "function": "MiniSweAgentHarness",
       "description": "Run mini-swe-agent inside the sandbox."
     },
+    "codex": {
+      "module": "rllm.harnesses.codex",
+      "function": "CodexHarness",
+      "description": "Run the OpenAI Codex CLI inside the sandbox."
+    },
+    "qwen-code": {
+      "module": "rllm.harnesses.qwen_code",
+      "function": "QwenCodeHarness",
+      "description": "Run the Qwen Code CLI inside the sandbox."
+    },
     "oracle": {
       "module": "rllm.harnesses.oracle",
       "function": "OracleHarness",

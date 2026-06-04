@@ -16,8 +16,11 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from rllm.harnesses.claude_code import ClaudeCodeHarness
+from rllm.harnesses.codex import CodexHarness
 from rllm.harnesses.mini_swe_agent import MiniSweAgentHarness
 from rllm.harnesses.opencode import OpenCodeHarness
+from rllm.harnesses.qwen_code import QwenCodeHarness
 from rllm.types import AgentConfig, Task
 
 
@@ -324,6 +327,236 @@ def test_mini_swe_agent_invocation_uses_qualified_model():
     assert "--model=openai/gpt-4o" in cmd
     assert "--yolo" in cmd
     assert "--exit-immediately" in cmd
+
+
+# ---------------------------------------------------------------------------
+# ClaudeCodeHarness — official installer, bypassPermissions sandbox mode
+# ---------------------------------------------------------------------------
+
+
+def test_claude_code_install_uses_official_curl_script_for_non_alpine():
+    """Anthropic's installer (curl https://claude.ai/install.sh) is more
+    reliable than the nvm bootstrap on apt/yum images — fewer moving
+    parts, no GPG/cert flakes from stale Ubuntu jammy repos. Alpine
+    falls back to npm because the installer's glibc binary won't run
+    under musl."""
+    h = ClaudeCodeHarness()
+    script = h.install_script()
+    assert "https://claude.ai/install.sh" in script
+    # Alpine fallback still exists.
+    assert "apk add" in script and "npm install -g @anthropic-ai/claude-code" in script
+    # Smoke-check at the end so install failures surface immediately
+    # instead of leaking to the run step.
+    assert "claude --version" in script
+
+
+def test_claude_code_build_env_sets_is_sandbox_for_bypass_permissions():
+    """``--permission-mode=bypassPermissions`` is a no-op unless
+    ``IS_SANDBOX=1`` is in the environment. Without it the CLI ignores
+    the flag and exits silently on the first filesystem tool call —
+    which is what produced the original 'ran but no traces' symptom."""
+    h = ClaudeCodeHarness()
+    env = h.build_env(_make_task(), _make_config(model="claude-opus-4-1"))
+    assert env["IS_SANDBOX"] == "1"
+
+
+def test_claude_code_build_env_isolates_state_via_claude_config_dir():
+    """``CLAUDE_CONFIG_DIR`` keeps debug logs / project sessions /
+    statsig writes out of ``$HOME/.claude`` so concurrent runs don't
+    stomp each other and read-only $HOME images don't fail."""
+    h = ClaudeCodeHarness()
+    env = h.build_env(_make_task(), _make_config(model="claude-opus-4-1"))
+    assert env["CLAUDE_CONFIG_DIR"].startswith("/")
+
+
+def test_claude_code_anthropic_base_url_strips_v1_suffix():
+    """Anthropic's SDK appends ``/v1/messages`` itself — a trailing
+    ``/v1`` on ANTHROPIC_BASE_URL doubles up to ``/v1/v1/messages``."""
+    h = ClaudeCodeHarness()
+    env = h.build_env(_make_task(), _make_config(base_url="http://gw:8000/sessions/eval-0/v1"))
+    assert env["ANTHROPIC_BASE_URL"] == "http://gw:8000/sessions/eval-0"
+
+
+def test_claude_code_build_env_aliases_default_models():
+    """The CLI uses internal ``ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL``
+    aliases for sub-agent dispatch and resumed-session continuations.
+    When the gateway routes to a non-Anthropic id, these need to point
+    at the chosen model or sub-agents try to call api.anthropic.com
+    directly and 404 against the bare model id."""
+    h = ClaudeCodeHarness()
+    env = h.build_env(_make_task(), _make_config(model="gpt-4o"))
+    for k in (
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+    ):
+        assert env[k] == "gpt-4o"
+
+
+def test_claude_code_invocation_uses_print_and_bypass_permissions():
+    """Replaces the old ``--bare -p ... --permission-mode acceptEdits``
+    shape: ``--bare`` no longer exists in recent CLI versions, and
+    ``acceptEdits`` still prompts on shell tool calls. ``--print``
+    is the non-interactive entrypoint; ``bypassPermissions`` (gated by
+    ``IS_SANDBOX=1`` from build_env) is the unattended-eval contract."""
+    h = ClaudeCodeHarness()
+    cmd = h.build_invocation("fix the bug", _make_task(), _make_config(model="claude-opus-4-1"))
+    assert "claude --verbose" in cmd
+    assert "--output-format=stream-json" in cmd
+    assert "--permission-mode=bypassPermissions" in cmd
+    assert "--print" in cmd
+    # ``--`` separator so prompts starting with ``-`` aren't reparsed as flags.
+    assert "-- 'fix the bug'" in cmd
+    # Old ``--bare`` flag is gone in current CLI versions.
+    assert "--bare" not in cmd
+
+
+def test_claude_code_invocation_extends_path_for_local_bin():
+    """The official installer places ``claude`` at ``$HOME/.local/bin``.
+    The agent shell's default PATH doesn't always include it, so the
+    invocation must export it before running the binary."""
+    h = ClaudeCodeHarness()
+    cmd = h.build_invocation("hi", _make_task(), _make_config(model="claude-opus-4-1"))
+    assert '"$HOME/.local/bin:$PATH"' in cmd
+
+
+def test_claude_code_run_returns_none():
+    h = ClaudeCodeHarness()
+    sandbox = FakeSandbox()
+    h.set_sandbox(sandbox)
+    assert h.run(_make_task(), _make_config(model="claude-opus-4-1")) is None
+
+
+# ---------------------------------------------------------------------------
+# CodexHarness — custom-provider config + non-interactive exec
+# ---------------------------------------------------------------------------
+
+
+def test_codex_install_script_uses_official_npm_package():
+    """Codex CLI is distributed as ``@openai/codex``; brew/curl installers
+    skip the npm-pinned version, which is the only one we test against."""
+    h = CodexHarness()
+    assert "@openai/codex" in h.install_script()
+
+
+def test_codex_build_env_sets_codex_home_and_credentials():
+    """Codex reads auth from ``$CODEX_HOME/auth.json`` and the gateway
+    URL from ``$CODEX_HOME/config.toml``. The env must point CODEX_HOME
+    at our writable dir and keep OPENAI_API_KEY in sync with auth.json."""
+    h = CodexHarness()
+    env = h.build_env(_make_task(), _make_config(model="gpt-5"))
+    assert env["CODEX_HOME"] == "/tmp/codex-home"
+    assert env["OPENAI_API_KEY"]
+    assert env["OPENAI_BASE_URL"] == "http://gw:8000/sessions/eval-0/v1"
+
+
+def test_codex_writes_auth_json_and_config_toml():
+    """Codex 0.118+ requires BOTH:
+      - ``$CODEX_HOME/auth.json`` with ``{"OPENAI_API_KEY": "..."}``
+        (env var alone is not picked up by ``codex exec``)
+      - ``$CODEX_HOME/config.toml`` with ``openai_base_url = "..."``
+        (the env var is ignored by recent versions)
+    The earlier custom ``model_provider`` block was a silent no-op."""
+    h = CodexHarness()
+    sandbox = FakeSandbox()
+    h.set_sandbox(sandbox)
+    config = _make_config(base_url="http://gw:8000/sessions/eval-0/v1", model="gpt-5")
+    env = h.build_env(_make_task(), config)
+
+    h.write_configs(_make_task(), config, env)
+
+    written = sandbox.calls[-1].command
+    assert sandbox.calls[-1].user is None  # written as agent user
+    # $CODEX_HOME left unquoted so the shell expands it at exec time.
+    assert 'mkdir -p "$CODEX_HOME"' in written
+    assert 'cat > "$CODEX_HOME/auth.json"' in written
+    assert 'cat > "$CODEX_HOME/config.toml"' in written
+    # auth.json schema: JSON with OPENAI_API_KEY at top level.
+    assert '"OPENAI_API_KEY"' in written
+    # config.toml schema: just openai_base_url — no custom-provider blocks.
+    assert 'openai_base_url = "http://gw:8000/sessions/eval-0/v1"' in written
+    # Custom-provider keys must NOT appear — they're a silent no-op and
+    # caused the original "codex runs, no traces captured" symptom.
+    assert "model_provider" not in written
+    assert "model_providers" not in written
+
+
+def test_codex_invocation_uses_exec_with_bypass_flags_and_separator():
+    """``codex exec`` is the non-interactive entrypoint. The bypass flag
+    skips Codex's inner approval gates and seatbelt (we're already inside
+    the rLLM sandbox). ``--json --enable unified_exec`` are required for
+    non-interactive runs against the new exec engine. The ``--`` separator
+    is load-bearing — without it Codex tries to parse the instruction as
+    flags when it begins with ``-``."""
+    h = CodexHarness()
+    cmd = h.build_invocation("fix the bug", _make_task(), _make_config(model="gpt-5"))
+    assert "codex exec" in cmd
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+    assert "--skip-git-repo-check" in cmd
+    assert "--model gpt-5" in cmd
+    assert "--json" in cmd
+    assert "--enable unified_exec" in cmd
+    assert "-- 'fix the bug'" in cmd
+    assert "</dev/null" in cmd
+
+
+def test_codex_invocation_strips_provider_prefix_from_model():
+    """``rllm setup`` may give bare or pre-qualified names; the Codex
+    ``--model`` flag expects the bare id (no ``provider/`` prefix)."""
+    h = CodexHarness()
+    cmd = h.build_invocation("hi", _make_task(), _make_config(model="openai/gpt-5"))
+    assert "--model gpt-5" in cmd
+    assert "openai/gpt-5" not in cmd
+
+
+def test_codex_run_swallows_failure_and_returns_none():
+    h = CodexHarness()
+    sandbox = FakeSandbox(fail_on_substring="codex exec")
+    h.set_sandbox(sandbox)
+    assert h.run(_make_task(), _make_config(model="gpt-5")) is None
+
+
+# ---------------------------------------------------------------------------
+# QwenCodeHarness — env-only routing, --yolo for unattended runs
+# ---------------------------------------------------------------------------
+
+
+def test_qwen_code_install_script_uses_official_npm_package():
+    h = QwenCodeHarness()
+    assert "@qwen-code/qwen-code" in h.install_script()
+
+
+def test_qwen_code_build_env_routes_through_openai_compat_vars():
+    """Qwen Code is a gemini-cli fork that natively reads
+    OPENAI_BASE_URL/OPENAI_API_KEY/OPENAI_MODEL — so unlike Codex it
+    needs no config file, just env vars."""
+    h = QwenCodeHarness()
+    env = h.build_env(_make_task(), _make_config(model="qwen3-coder-plus"))
+    assert env["OPENAI_API_KEY"]
+    assert env["OPENAI_BASE_URL"] == "http://gw:8000/sessions/eval-0/v1"
+    # OPENAI_MODEL carries the bare model id, not a provider-prefixed name.
+    assert env["OPENAI_MODEL"] == "qwen3-coder-plus"
+
+
+def test_qwen_code_invocation_uses_prompt_flag_with_yolo():
+    """``-p`` is the non-interactive prompt flag (gemini-cli inheritance).
+    ``--yolo`` auto-approves tool calls so the run finishes unattended."""
+    h = QwenCodeHarness()
+    cmd = h.build_invocation("fix the bug", _make_task(), _make_config(model="qwen3-coder-plus"))
+    assert "qwen --yolo" in cmd
+    assert "--model qwen3-coder-plus" in cmd
+    assert " -p 'fix the bug'" in cmd
+    assert "</dev/null" in cmd
+
+
+def test_qwen_code_run_returns_none():
+    """Like every BaseCliHarness subclass: run() returns None and the
+    gateway-captured traces drive trajectory enrichment."""
+    h = QwenCodeHarness()
+    sandbox = FakeSandbox()
+    h.set_sandbox(sandbox)
+    assert h.run(_make_task(), _make_config(model="qwen3-coder-plus")) is None
 
 
 # ---------------------------------------------------------------------------

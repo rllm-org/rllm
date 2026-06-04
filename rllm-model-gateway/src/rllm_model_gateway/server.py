@@ -268,7 +268,24 @@ def create_app(
         result = await sessions.list_sessions(since=since, limit=limit)
         return [s.model_dump() for s in result]
 
-    @app.get("/sessions/{session_id}")
+    # NOTE: ``{session_id:path}`` allows multi-segment IDs (e.g.
+    # ``harbor/hello-world:0`` from namespaced Harbor tasks). FastAPI/
+    # Starlette match routes in declaration order, so the more-specific
+    # ``/sessions/{session_id:path}/traces`` MUST be declared before the
+    # bare ``/sessions/{session_id:path}`` — otherwise the bare route's
+    # greedy capture swallows ``/sessions/foo/traces`` as
+    # ``session_id="foo/traces"`` and the traces endpoint is unreachable.
+
+    @app.get("/sessions/{session_id:path}/traces")
+    async def get_session_traces(
+        session_id: str,
+        since: float | None = Query(None),
+        limit: int | None = Query(None),
+    ):
+        traces = await store.get_session_traces(session_id, since=since, limit=limit)
+        return traces
+
+    @app.get("/sessions/{session_id:path}")
     async def get_session(session_id: str):
         info = await sessions.get_session_info(session_id)
         if info is None:
@@ -278,16 +295,7 @@ def create_app(
             )
         return info.model_dump()
 
-    @app.get("/sessions/{session_id}/traces")
-    async def get_session_traces(
-        session_id: str,
-        since: float | None = Query(None),
-        limit: int | None = Query(None),
-    ):
-        traces = await store.get_session_traces(session_id, since=since, limit=limit)
-        return traces
-
-    @app.delete("/sessions/{session_id}")
+    @app.delete("/sessions/{session_id:path}")
     async def delete_session(session_id: str):
         proxy._accumulators.pop(session_id, None)
         count = await sessions.delete_session(session_id)
