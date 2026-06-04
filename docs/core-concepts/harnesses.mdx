@@ -18,6 +18,8 @@ You don't need a harness for everything — for one-off agents and cookbooks, ha
 | `mini-swe-agent` | `rllm.harnesses.mini_swe_agent.MiniSweAgentHarness` | Run mini-swe-agent inside the sandbox. |
 | `codex` | `rllm.harnesses.codex.CodexHarness` | Run the OpenAI Codex CLI inside the sandbox. |
 | `qwen-code` | `rllm.harnesses.qwen_code.QwenCodeHarness` | Run the Qwen Code CLI inside the sandbox. |
+| `aider` | `rllm.harnesses.aider.AiderHarness` | Run Paul Gauthier's aider CLI inside the sandbox. |
+| `kimi-cli` | `rllm.harnesses.kimi_cli.KimiCliHarness` | Run Moonshot's kimi-cli inside the sandbox. |
 
 The registry lives at `rllm/registry/agents.json`. `load_agent("react")` resolves to `ReActHarness()`.
 

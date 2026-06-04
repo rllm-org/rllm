@@ -16,8 +16,10 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from rllm.harnesses.aider import AiderHarness
 from rllm.harnesses.claude_code import ClaudeCodeHarness
 from rllm.harnesses.codex import CodexHarness
+from rllm.harnesses.kimi_cli import KimiCliHarness
 from rllm.harnesses.mini_swe_agent import MiniSweAgentHarness
 from rllm.harnesses.opencode import OpenCodeHarness
 from rllm.harnesses.qwen_code import QwenCodeHarness
@@ -557,6 +559,106 @@ def test_qwen_code_run_returns_none():
     sandbox = FakeSandbox()
     h.set_sandbox(sandbox)
     assert h.run(_make_task(), _make_config(model="qwen3-coder-plus")) is None
+
+
+# ---------------------------------------------------------------------------
+# AiderHarness — litellm-backed, --yes for unattended
+# ---------------------------------------------------------------------------
+
+
+def test_aider_install_uses_official_uv_script():
+    """aider's official installer (https://aider.chat/install.sh) is a
+    uv-backed shell script that lands the binary in $HOME/.local/bin."""
+    assert "aider.chat/install.sh" in AiderHarness().install_script()
+
+
+def test_aider_build_env_routes_via_openai_and_anthropic_base_url():
+    """aider uses litellm under the hood — both OPENAI_API_BASE and
+    OPENAI_BASE_URL are honored across litellm versions, and Anthropic
+    routing goes through ANTHROPIC_BASE_URL minus the /v1 suffix."""
+    h = AiderHarness()
+    env = h.build_env(_make_task(), _make_config(base_url="http://gw:8000/sessions/eval-0/v1", model="openai/gpt-4o"))
+    assert env["OPENAI_API_BASE"] == "http://gw:8000/sessions/eval-0/v1"
+    assert env["OPENAI_BASE_URL"] == "http://gw:8000/sessions/eval-0/v1"
+    assert env["ANTHROPIC_BASE_URL"] == "http://gw:8000/sessions/eval-0"
+
+
+def test_aider_invocation_uses_yes_no_stream_no_git():
+    """``--yes`` auto-confirms diffs/shell prompts (mandatory for
+    unattended). ``--no-stream`` so the gateway sees one response per
+    turn rather than a chunk-per-token stream. ``--no-git`` because
+    Harbor task workdirs aren't always git repos and aider would
+    refuse to start."""
+    h = AiderHarness()
+    cmd = h.build_invocation("fix it", _make_task(), _make_config(model="gpt-4o"))
+    assert "aider --yes --no-stream --no-git" in cmd
+    assert "--model=openai/gpt-4o" in cmd
+    assert "--message='fix it'" in cmd
+
+
+# ---------------------------------------------------------------------------
+# KimiCliHarness — JSON-RPC wire protocol, config-file routing
+# ---------------------------------------------------------------------------
+
+
+def test_kimi_cli_install_uses_uv_tool():
+    """kimi-cli is distributed as a uv-installable Python tool, NOT npm."""
+    script = KimiCliHarness().install_script()
+    assert "uv tool install" in script
+    assert "kimi-cli" in script
+
+
+def test_kimi_cli_writes_config_with_custom_provider_block():
+    """kimi reads provider+model routing from a JSON config; the harness
+    registers the rLLM gateway as a custom ``openai_legacy`` provider
+    (kimi's name for any plain /v1/chat/completions endpoint) and points
+    the chosen model at it."""
+    h = KimiCliHarness()
+    sandbox = FakeSandbox()
+    h.set_sandbox(sandbox)
+    config = _make_config(base_url="http://gw:8000/sessions/eval-0/v1", model="gpt-4o")
+    env = h.build_env(_make_task(), config)
+    h.write_configs(_make_task(), config, env)
+    written = sandbox.calls[-1].command
+    assert "/tmp/kimi-config.json" in written
+    assert '"rllm-gateway"' in written
+    # type=openai_legacy is the wire-compatible setting for plain
+    # /v1/chat/completions backends (which is what the gateway exposes).
+    assert '"type": "openai_legacy"' in written
+    assert '"base_url": "http://gw:8000/sessions/eval-0/v1"' in written
+
+
+def test_kimi_cli_invocation_pipes_jsonrpc_prompt_over_stdin():
+    """kimi reads the prompt from stdin as a JSON-RPC ``prompt`` method,
+    not from argv. The field name is ``user_input`` (NOT ``text`` — the
+    old field is silently dropped). ``--yolo`` auto-approves tool calls;
+    ``--wire`` enables the JSON-RPC protocol."""
+    h = KimiCliHarness()
+    cmd = h.build_invocation("hi", _make_task(), _make_config(model="gpt-4o"))
+    assert '"jsonrpc": "2.0"' in cmd
+    assert '"method": "prompt"' in cmd
+    assert '"user_input": "hi"' in cmd
+    # id is a string, not an int — kimi's wire parser expects "1".
+    assert '"id": "1"' in cmd
+    assert "--wire" in cmd
+    assert "--yolo" in cmd
+    assert "--config-file /tmp/kimi-config.json" in cmd
+
+
+def test_kimi_cli_invocation_breaks_loop_on_matching_response_id():
+    """kimi doesn't exit on EOF — the while-read loop watches stdout
+    for the response with ``"id":"1"``, ``kill 0``s the process group
+    (sleep + kimi + loop). ``trap 'exit 0' TERM`` converts the SIGTERM
+    that ``kill 0`` raises into a clean exit so the engine doesn't see
+    a 143 and treat the run as failed."""
+    h = KimiCliHarness()
+    cmd = h.build_invocation("hi", _make_task(), _make_config(model="gpt-4o"))
+    assert "sleep 86400" in cmd
+    assert "while IFS= read -r line" in cmd
+    assert '*\'"id":"1"\'*' in cmd
+    assert "kill 0" in cmd
+    # SIGTERM → exit 0 so docker exec / engine see success.
+    assert "trap 'exit 0' TERM" in cmd
 
 
 # ---------------------------------------------------------------------------

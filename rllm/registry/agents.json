@@ -36,6 +36,16 @@
       "function": "QwenCodeHarness",
       "description": "Run the Qwen Code CLI inside the sandbox."
     },
+    "aider": {
+      "module": "rllm.harnesses.aider",
+      "function": "AiderHarness",
+      "description": "Run Paul Gauthier's aider CLI inside the sandbox."
+    },
+    "kimi-cli": {
+      "module": "rllm.harnesses.kimi_cli",
+      "function": "KimiCliHarness",
+      "description": "Run Moonshot's kimi-cli inside the sandbox."
+    },
     "oracle": {
       "module": "rllm.harnesses.oracle",
       "function": "OracleHarness",
