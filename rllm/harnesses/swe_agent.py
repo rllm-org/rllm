@@ -30,7 +30,13 @@ _INSTALL_SCRIPT = r"""
 set -e
 export DEBIAN_FRONTEND=noninteractive
 if [ ! -x /opt/sweagent-venv/bin/sweagent ]; then
-    if ! command -v curl >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1; then
+    # ``python3`` is non-optional: SWE-agent's internal state-collector
+    # tool shells out to ``/usr/bin/env python3`` between turns, and on
+    # minimal images (e.g. ubuntu:24.04) it's absent — every tool
+    # invocation then fails with exit 127 and the agent loops forever
+    # retrying. Install eagerly even when curl+git are already present.
+    if ! command -v curl >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1 \
+            || ! command -v python3 >/dev/null 2>&1; then
         if command -v apt-get >/dev/null 2>&1; then
             apt-get update -qq \
                 -o Acquire::AllowInsecureRepositories=true \
@@ -38,9 +44,9 @@ if [ ! -x /opt/sweagent-venv/bin/sweagent ]; then
                 -o Acquire::Check-Valid-Until=false 2>/dev/null || true
             apt-get install -y -qq --no-install-recommends --allow-unauthenticated \
                 -o Acquire::AllowInsecureRepositories=true \
-                curl ca-certificates git build-essential
+                curl ca-certificates git build-essential python3
         elif command -v apk >/dev/null 2>&1; then
-            apk add --no-cache curl bash ca-certificates git build-base
+            apk add --no-cache curl bash ca-certificates git build-base python3
         fi
     fi
     if ! command -v uv >/dev/null 2>&1; then
@@ -52,7 +58,13 @@ if [ ! -x /opt/sweagent-venv/bin/sweagent ]; then
     if [ ! -d /opt/sweagent-repo ]; then
         git clone --depth 1 https://github.com/SWE-agent/SWE-agent.git /opt/sweagent-repo
     fi
-    uv pip install --python /opt/sweagent-venv/bin/python /opt/sweagent-repo
+    # Editable install so the package stays anchored to the source tree
+    # at ``/opt/sweagent-repo`` rather than getting copied into
+    # site-packages. SWE-agent's ``__init__.py`` asserts the existence
+    # of sibling dirs (``config/``, ``tools/``, …) that ship as repo
+    # data files OUTSIDE the python package — a normal pip install
+    # leaves them behind and the CLI dies at import.
+    uv pip install --python /opt/sweagent-venv/bin/python -e /opt/sweagent-repo
 fi
 /opt/sweagent-venv/bin/sweagent --help >/dev/null
 """
@@ -112,12 +124,17 @@ class SweAgentHarness(BaseCliHarness):
         # disables litellm's cost guard (the gateway-routed model often
         # isn't in litellm's cost table and the run aborts otherwise).
         _, _, qualified = self.ensure_provider_prefix(config.model)
+        # ``--agent.max_steps=30`` caps runaway loops — without it,
+        # tool failures (e.g. missing python3) drive the agent through
+        # hundreds of retries and rack up real cost. 30 is enough for
+        # any plausible single-turn task; tune per benchmark.
         return (
             f"{self._cd_prefix(task)}"
             f"/opt/sweagent-venv/bin/sweagent run "
             f"--agent.model.name={shlex.quote(qualified)} "
             f"--agent.model.per_instance_cost_limit=0 "
             f"--agent.model.total_cost_limit=0 "
+            f"--agent.max_steps=30 "
             f"--problem_statement.path=/tmp/swe-agent-problem.md "
             f"--env.deployment.type=local "
             f"--output_dir=/tmp/swe-agent-output "

@@ -46,10 +46,16 @@ if [ ! -x /opt/openhands-venv/bin/python ]; then
         curl -LsSf https://astral.sh/uv/install.sh | sh
     fi
     export PATH="$HOME/.local/bin:$PATH"
-    uv python install 3.13
-    uv venv /opt/openhands-venv --python 3.13
-    /opt/openhands-venv/bin/python -m pip install --quiet --upgrade pip
-    uv pip install --python /opt/openhands-venv/bin/python openhands-ai
+    uv python install 3.12
+    uv venv /opt/openhands-venv --python 3.12
+    # Pin to the last pre-1.0 release: openhands-ai 1.x is a ground-up
+    # rewrite that removes ``openhands.core.main`` (the single-shot CLI
+    # entrypoint this harness invokes). The 1.x API only exposes a
+    # long-running ``agent-server`` HTTP service, which needs a separate
+    # client integration. Pre-1.0 keeps working with ``--task=<prompt>``.
+    # uv handles installs without pip — calling ``python -m pip`` on a
+    # bare ``uv venv`` fails with ``No module named pip``.
+    uv pip install --python /opt/openhands-venv/bin/python "openhands-ai<1"
 fi
 /opt/openhands-venv/bin/python -c "import openhands" >/dev/null
 """
