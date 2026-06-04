@@ -483,9 +483,10 @@ def test_codex_writes_auth_json_and_config_toml():
     assert 'model_provider = "rllm-gateway"' in written
     assert "[model_providers.rllm-gateway]" in written
     assert 'base_url = "http://gw:8000/sessions/eval-0/v1"' in written
-    # The load-bearing field: force chat completions wire api so the
-    # gateway's TraceRecord parser sees the right shape.
-    assert 'wire_api = "chat"' in written
+    # Only value current Codex CLI accepts — "chat" is hard-rejected
+    # at startup. Trace parsing for /v1/responses is a separate
+    # gateway-side change tracked in the file's docstring.
+    assert 'wire_api = "responses"' in written
 
 
 def test_codex_invocation_uses_exec_with_bypass_flags_and_separator():

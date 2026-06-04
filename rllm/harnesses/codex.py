@@ -1,32 +1,34 @@
 """CodexHarness: runs the OpenAI Codex CLI inside the sandbox.
 
-Three non-obvious facts drive the shape (verified against Codex CLI
-≥ 0.119; harbor's simpler ``openai_base_url`` pattern works for them
-because they call api.openai.com directly without an intercepting
-gateway, but breaks against the rllm model gateway):
+Current Codex CLI is Responses-API-only: ``wire_api = "chat"`` is
+hard-rejected at startup with ``no longer supported`` (see
+https://github.com/openai/codex/discussions/7782). Codex POSTs to
+``/v1/responses``, NOT ``/v1/chat/completions``.
 
-1. **Codex reads auth from a JSON file, not from ``OPENAI_API_KEY``
-   alone.** Recent versions resolve credentials from
-   ``$CODEX_HOME/auth.json`` (schema: ``{"OPENAI_API_KEY": "..."}``).
-   Setting only the env var leaves the CLI looking unauthenticated.
-2. **The bundled ``openai`` provider defaults to ``wire_api = "responses"``
-   in 0.119+** — i.e. POSTs to ``/v1/responses`` (OpenAI Responses
-   API), not ``/v1/chat/completions``. The rllm model gateway only
-   parses chat-completion-shaped traces, so calls land but the
-   TraceRecord comes out empty and ``rllm view`` shows no chat
-   messages. Forcing a chat-completions wire requires registering the
-   gateway as an EXPLICIT custom provider with ``wire_api = "chat"``
-   and selecting it via ``model_provider`` — overriding the bundled
-   ``openai`` provider in place doesn't work.
-3. **Codex 0.118+ ignores ``OPENAI_BASE_URL``**. The custom-provider
-   block's ``base_url`` field is the only routing knob that takes
-   effect.
+The gateway's catch-all proxy still records a TraceRecord per call
+(role, finish_reason, token counts) but the chat-completion parser
+can't extract the message *content* from Responses API output
+(``output[].content[].text`` shape vs ``choices[0].message.content``).
+Net effect: the run succeeds, reward is correct, ``rllm view`` shows
+the right number of steps — but message content reads as ``None``
+until the gateway grows a Responses-API parser (separate piece of
+work; see also the harness docs).
 
-We set ``CODEX_HOME`` to ``/tmp/codex-home`` so auth/config never touch
-``$HOME/.codex`` (cleaner in shared/sandbox environments).
+Three other non-obvious facts drive the shape:
 
-``run()`` returns ``None``; the gateway captures every LLM call and
-the engine builds the trajectory.
+1. **Codex reads auth from a JSON file**, ``$CODEX_HOME/auth.json``
+   (schema: ``{"OPENAI_API_KEY": "..."}``). Setting only the env var
+   leaves the CLI looking unauthenticated.
+2. **The bundled ``openai`` provider is locked** in ways that block
+   the rllm gateway — registering an explicit custom provider via
+   ``model_provider`` + ``[model_providers.<id>]`` is the reliable
+   routing path.
+3. **Codex ignores ``OPENAI_BASE_URL`` env**. The custom-provider
+   block's ``base_url`` is the only routing knob that takes effect.
+
+``CODEX_HOME`` is set to ``/tmp/codex-home`` so auth/config never
+touch ``$HOME/.codex``. ``run()`` returns ``None`` — gateway-captured
+traces drive Episode enrichment.
 """
 
 from __future__ import annotations
@@ -72,12 +74,6 @@ codex --version >/dev/null
 """
 
 _CODEX_HOME = "/tmp/codex-home"
-# Custom-provider id registered in ~/.codex/config.toml. Must NOT be
-# "openai" — Codex special-cases the bundled openai provider (locks
-# wire_api to "responses" in current versions). A separate id with
-# wire_api="chat" forces routing through the rllm gateway's
-# /v1/chat/completions endpoint, which is the only one the gateway
-# parses into TraceRecords.
 _RLLM_PROVIDER_ID = "rllm-gateway"
 
 
@@ -131,9 +127,11 @@ class CodexHarness(BaseCliHarness):
         auth_json = _json.dumps({"OPENAI_API_KEY": api_key})
 
         # Hand-rolled TOML — schema is tiny and the stdlib has no
-        # writer. ``wire_api = "chat"`` is the load-bearing field;
-        # without it Codex defaults to ``responses`` and the gateway's
-        # chat-completion trace parser produces empty TraceRecords.
+        # writer. ``wire_api = "responses"`` is the only value current
+        # Codex CLI versions accept; ``"chat"`` is hard-rejected at
+        # startup. This means the gateway sees /v1/responses traffic
+        # which it currently doesn't parse into TraceRecords (file-
+        # level docstring covers the implications).
         config_toml = (
             f'model = "{model_id}"\n'
             f'model_provider = "{_RLLM_PROVIDER_ID}"\n'
@@ -142,7 +140,7 @@ class CodexHarness(BaseCliHarness):
             f'name = "rLLM Gateway"\n'
             f'base_url = "{gateway_url}"\n'
             f'env_key = "OPENAI_API_KEY"\n'
-            f'wire_api = "chat"\n'
+            f'wire_api = "responses"\n'
         )
 
         # Heredoc target paths must leave ``$CODEX_HOME`` UNQUOTED so
