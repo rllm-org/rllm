@@ -22,9 +22,7 @@ from rllm.harnesses.codex import CodexHarness
 from rllm.harnesses.kimi_cli import KimiCliHarness
 from rllm.harnesses.mini_swe_agent import MiniSweAgentHarness
 from rllm.harnesses.opencode import OpenCodeHarness
-from rllm.harnesses.openhands import OpenHandsHarness
 from rllm.harnesses.qwen_code import QwenCodeHarness
-from rllm.harnesses.swe_agent import SweAgentHarness
 from rllm.types import AgentConfig, Task
 
 
@@ -599,100 +597,6 @@ def test_aider_invocation_uses_yes_no_stream_no_git():
 
 
 # ---------------------------------------------------------------------------
-# OpenHandsHarness — uv venv install, LLM_BASE_URL routing
-# ---------------------------------------------------------------------------
-
-
-def test_openhands_install_uses_uv_venv():
-    """OpenHands installs into a dedicated venv at /opt/openhands-venv
-    so it doesn't pollute the task's Python environment."""
-    script = OpenHandsHarness().install_script()
-    assert "/opt/openhands-venv" in script
-    assert "openhands-ai" in script
-    # Smoke check at the end so install failures surface eagerly.
-    assert "import openhands" in script
-
-
-def test_openhands_build_env_sets_llm_routing_trio():
-    """OpenHands' LLM config reads LLM_MODEL / LLM_BASE_URL / LLM_API_KEY —
-    these are the primary routing knobs. The OPENAI_* / ANTHROPIC_* vars
-    are present as fallbacks for code paths that bypass the config."""
-    h = OpenHandsHarness()
-    env = h.build_env(_make_task(), _make_config(model="gpt-4o"))
-    assert env["LLM_MODEL"] == "openai/gpt-4o"
-    assert env["LLM_BASE_URL"] == "http://gw:8000/sessions/eval-0/v1"
-    assert env["LLM_API_KEY"]
-
-
-def test_openhands_build_env_sets_sandbox_mode_flags():
-    """``RUNTIME=local`` runs tools in-process instead of spinning a
-    nested docker container; the other two avoid the user-switching
-    dance that assumes an ``openhands`` user account."""
-    h = OpenHandsHarness()
-    env = h.build_env(_make_task(), _make_config(model="gpt-4o"))
-    assert env["RUNTIME"] == "local"
-    assert env["RUN_AS_OPENHANDS"] == "false"
-    assert env["SU_TO_USER"] == "false"
-
-
-def test_openhands_invocation_runs_module_in_venv():
-    """Invoke /opt/openhands-venv/bin/python directly so PATH activation
-    isn't required. ``--task=`` is the single-shot entrypoint."""
-    h = OpenHandsHarness()
-    cmd = h.build_invocation("solve it", _make_task(), _make_config())
-    assert "/opt/openhands-venv/bin/python -m openhands.core.main" in cmd
-    assert "--task='solve it'" in cmd
-
-
-# ---------------------------------------------------------------------------
-# SweAgentHarness — git-cloned, problem-statement via file
-# ---------------------------------------------------------------------------
-
-
-def test_swe_agent_install_clones_from_github():
-    """SWE-agent is installed by cloning the upstream repo and uv-pip-
-    installing it into a venv — no PyPI release is officially supported."""
-    script = SweAgentHarness().install_script()
-    assert "github.com/SWE-agent/SWE-agent.git" in script
-    assert "/opt/sweagent-venv" in script
-
-
-def test_swe_agent_build_env_passes_openai_base_url():
-    h = SweAgentHarness()
-    env = h.build_env(_make_task(), _make_config(model="gpt-4o"))
-    assert env["OPENAI_API_BASE"] == "http://gw:8000/sessions/eval-0/v1"
-    assert env["OPENAI_BASE_URL"] == "http://gw:8000/sessions/eval-0/v1"
-
-
-def test_swe_agent_write_configs_drops_problem_statement_to_file():
-    """``sweagent run --problem_statement.path`` requires a file path,
-    not inline text. The harness writes the instruction to
-    /tmp/swe-agent-problem.md before invocation."""
-    h = SweAgentHarness()
-    sandbox = FakeSandbox()
-    h.set_sandbox(sandbox)
-    task = Task(id="t-1", instruction="solve the failing test", metadata={})
-    env = h.build_env(task, _make_config())
-    h.write_configs(task, _make_config(), env)
-    written = sandbox.calls[-1].command
-    assert "/tmp/swe-agent-problem.md" in written
-    assert "solve the failing test" in written
-
-
-def test_swe_agent_invocation_disables_cost_limits():
-    """litellm aborts when the gateway-routed model isn't in its cost
-    table — explicit zeros mean ``no limit`` here, which is what we
-    want for eval runs (the gateway/operator caps spend)."""
-    h = SweAgentHarness()
-    cmd = h.build_invocation("hi", _make_task(), _make_config(model="gpt-4o"))
-    assert "sweagent run" in cmd
-    assert "--agent.model.name=openai/gpt-4o" in cmd
-    assert "--agent.model.per_instance_cost_limit=0" in cmd
-    assert "--env.deployment.type=local" in cmd
-    assert "/tmp/swe-agent-problem.md" in cmd
-
-
-# ---------------------------------------------------------------------------
 # KimiCliHarness — JSON-RPC wire protocol, config-file routing
 # ---------------------------------------------------------------------------
 
@@ -726,19 +630,35 @@ def test_kimi_cli_writes_config_with_custom_provider_block():
 
 def test_kimi_cli_invocation_pipes_jsonrpc_prompt_over_stdin():
     """kimi reads the prompt from stdin as a JSON-RPC ``prompt`` method,
-    not from argv. ``sleep 86400`` keeps the pipe open so kimi can
-    stream responses back; ``--yolo`` auto-approves every tool call."""
+    not from argv. The field name is ``user_input`` (NOT ``text`` — the
+    old field is silently dropped). ``--yolo`` auto-approves tool calls;
+    ``--wire`` enables the JSON-RPC protocol."""
     h = KimiCliHarness()
     cmd = h.build_invocation("hi", _make_task(), _make_config(model="gpt-4o"))
-    # Wire-protocol JSON-RPC frame on stdin.
     assert '"jsonrpc": "2.0"' in cmd
     assert '"method": "prompt"' in cmd
-    assert '"text": "hi"' in cmd
-    # Keep-stdin-open trick and the flags that gate non-interactive mode.
-    assert "sleep 86400" in cmd
+    assert '"user_input": "hi"' in cmd
+    # id is a string, not an int — kimi's wire parser expects "1".
+    assert '"id": "1"' in cmd
     assert "--wire" in cmd
     assert "--yolo" in cmd
     assert "--config-file /tmp/kimi-config.json" in cmd
+
+
+def test_kimi_cli_invocation_breaks_loop_on_matching_response_id():
+    """kimi doesn't exit on EOF — the while-read loop watches stdout
+    for the response with ``"id":"1"``, ``kill 0``s the process group
+    (sleep + kimi + loop). ``trap 'exit 0' TERM`` converts the SIGTERM
+    that ``kill 0`` raises into a clean exit so the engine doesn't see
+    a 143 and treat the run as failed."""
+    h = KimiCliHarness()
+    cmd = h.build_invocation("hi", _make_task(), _make_config(model="gpt-4o"))
+    assert "sleep 86400" in cmd
+    assert "while IFS= read -r line" in cmd
+    assert '*\'"id":"1"\'*' in cmd
+    assert "kill 0" in cmd
+    # SIGTERM → exit 0 so docker exec / engine see success.
+    assert "trap 'exit 0' TERM" in cmd
 
 
 # ---------------------------------------------------------------------------

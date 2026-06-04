@@ -41,16 +41,6 @@
       "function": "AiderHarness",
       "description": "Run Paul Gauthier's aider CLI inside the sandbox."
     },
-    "openhands": {
-      "module": "rllm.harnesses.openhands",
-      "function": "OpenHandsHarness",
-      "description": "Run All Hands AI's OpenHands inside the sandbox."
-    },
-    "swe-agent": {
-      "module": "rllm.harnesses.swe_agent",
-      "function": "SweAgentHarness",
-      "description": "Run Princeton's SWE-agent inside the sandbox."
-    },
     "kimi-cli": {
       "module": "rllm.harnesses.kimi_cli",
       "function": "KimiCliHarness",

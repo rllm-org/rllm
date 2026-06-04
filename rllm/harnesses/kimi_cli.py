@@ -125,16 +125,34 @@ class KimiCliHarness(BaseCliHarness):
         task: Task,
         config: AgentConfig,
     ) -> str:
-        # kimi reads the prompt from stdin as a JSON-RPC ``prompt``
-        # method. ``--wire`` enables that protocol; ``--yolo`` auto-
-        # approves every tool call. ``sleep 86400`` keeps the pipe open
-        # so kimi can stream responses back (it exits when the model
-        # signals completion).
-        wire_request = json.dumps({"jsonrpc": "2.0", "method": "prompt", "params": {"text": instruction}, "id": 1})
+        # kimi reads the prompt from stdin as a JSON-RPC ``prompt`` method
+        # (``params.user_input``, NOT ``params.text`` — the field name
+        # changed in 2025 and the old one is silently dropped). ``--wire``
+        # enables the protocol; ``--yolo`` auto-approves tool calls.
+        #
+        # kimi doesn't exit on EOF — once the wire is open it waits for
+        # more JSON-RPC messages indefinitely. ``sleep 86400`` keeps the
+        # pipe open so kimi can stream responses; the trailing while-read
+        # loop watches stdout for the response whose ``"id":"1"`` matches
+        # our request and then ``kill 0`` SIGTERMs the entire process
+        # group (sleep, kimi, the loop). Without ``kill 0`` the shell
+        # pipeline would block on the 24h sleep before returning.
+        #
+        # ``trap 'exit 0' TERM`` converts that SIGTERM into a clean exit
+        # 0 — harbor's version exits 143, which trips a noisy warning
+        # in BaseCliHarness.run() and can confuse downstream tooling that
+        # treats non-zero as failure.
+        wire_request = json.dumps({"jsonrpc": "2.0", "method": "prompt", "id": "1", "params": {"user_input": instruction}})
+        log = shlex.quote(self.stdout_log_path)
         return (
             f"{self._cd_prefix(task)}"
             f'export PATH="$HOME/.local/bin:$PATH"; '
+            f"trap 'exit 0' TERM; "
             f"(echo {shlex.quote(wire_request)}; sleep 86400) "
             f"| kimi --config-file {shlex.quote(_KIMI_CONFIG_PATH)} --wire --yolo "
-            f"2>&1 | tee {shlex.quote(self.stdout_log_path)}"
+            f"2>/dev/null | ("
+            f"while IFS= read -r line; do "
+            f'echo "$line" >> {log}; '
+            f'case "$line" in *\'"id":"1"\'*) break ;; esac; '
+            f"done; kill 0 2>/dev/null)"
         )
