@@ -69,7 +69,7 @@ and overwrites with the configured RL estimator.
 ## Solver-judge example (mixed mode)
 
 The solver-judge workflow is a good example of why this is useful. Suppose each episode
-has two `solver` trajectories and one `judge` trajectory, the workflow (with some simplification from `examples.solver_judge.solver_judge_flow`) looks like this:
+has two `solver` trajectories and one `judge` trajectory, the workflow (with some simplification from `cookbooks.workflow.solver_judge.solver_judge_flow`) looks like this:
 
 ```python
 async def run(self, task: dict, uid: str, **kwargs) -> Episode:

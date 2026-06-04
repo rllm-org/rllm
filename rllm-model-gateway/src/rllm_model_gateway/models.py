@@ -111,7 +111,7 @@ class GatewayConfig(BaseModel):
     port: int = 9090
     workers: list[WorkerConfig] = Field(default_factory=list)
     db_path: str | None = None
-    store_worker: str = "sqlite"
+    store_worker: str = "memory"
     add_logprobs: bool = True
     add_return_token_ids: bool = True
     strip_vllm_fields: bool = True
@@ -121,3 +121,7 @@ class GatewayConfig(BaseModel):
     sync_traces: bool = False
     sampling_params_priority: str = "client"
     model: str | None = None  # When set, overrides ``body.model``
+    cumulative_token_mode: bool = False
+    # renderers family for the cumulative-mode bridge. Check supported model families
+    # in MODEL_RENDERER_MAP of https://github.com/PrimeIntellect-ai/renderers/blob/main/renderers/base.py
+    renderer_family: str = "auto"

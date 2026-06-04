@@ -11,6 +11,7 @@ import logging
 import os
 import pickle
 import tempfile
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -93,6 +94,31 @@ class TrajectoryGroupBuffer:
         if trajectory_group_offload_dir:
             os.makedirs(trajectory_group_offload_dir, exist_ok=True)
         self._queue: asyncio.Queue[TaskBatch | str | None] = asyncio.Queue()
+        self._training_queue_size = 0
+        self._filtered_count = 0
+        self._consumed_count = 0
+        self._training_step = 0
+        self._queue_update_event = asyncio.Event()
+        self._generation_complete = False
+
+    def set_training_step(self, step: int) -> None:
+        self._training_step = step
+        self._refresh_pbar_counters()
+
+    def _refresh_pbar_counters(self) -> None:
+        if self._pbar is not None:
+            self._pbar.set_postfix(
+                step=self._training_step,
+                queued=self._training_queue_size,
+                filtered=self._filtered_count,
+                consumed=self._consumed_count,
+                refresh=False,
+            )
+
+    def _record_classified_prompt_group(self) -> None:
+        self._refresh_pbar_counters()
+        if self._pbar is not None:
+            self._pbar.update(1)
 
     async def _offload_episode(self, task_id: str, episode: Episode) -> str:
         """Serialize episode to disk, return file path."""
@@ -139,6 +165,10 @@ class TrajectoryGroupBuffer:
 
     async def add_episode(self, task_id: str, episode: Episode) -> bool:
         """Add episode. When group completes, process and queue task batch."""
+        if self._generation_complete:
+            logger.warning("Ignoring episode for task %s after generation was marked complete", task_id)
+            return False
+
         # Offload episode to disk if enabled
         if self._episode_offload_dir:
             path = await self._offload_episode(task_id, episode)
@@ -148,10 +178,6 @@ class TrajectoryGroupBuffer:
 
         if len(self._pending[task_id]) < self._group_size:
             return False
-
-        # Group complete — tick progress bar
-        if self._pbar is not None:
-            self._pbar.update(1)
 
         # Load all episodes
         if self._episode_offload_dir:
@@ -178,7 +204,24 @@ class TrajectoryGroupBuffer:
         self._aggregator.record("groups/dropped_min_trajs", before_min_traj - len(traj_groups))
 
         if not traj_groups:
+            if before_min_traj > 0:
+                filter_reason = "min_trajs"
+            elif self._all_episodes_compact_filtered(episodes):
+                filter_reason = "compact_filtering"
+            else:
+                filter_reason = "no_trajectory_groups"
+            self._log_prompt_group_finished(
+                task_id=task_id,
+                episodes=episodes,
+                status="filtered",
+                reason=filter_reason,
+                groups_after_transform=before_min_traj,
+                groups_after_min_trajs=0,
+                groups_after_reward_filter=0,
+            )
             self._coordinator.on_group_filtered()
+            self._filtered_count += 1
+            self._record_classified_prompt_group()
             return True
 
         # 4. Compute advantages
@@ -197,7 +240,18 @@ class TrajectoryGroupBuffer:
         self._aggregator.record("groups/dropped_zero_adv", filtered_zero_adv)
 
         if not traj_groups:
+            self._log_prompt_group_finished(
+                task_id=task_id,
+                episodes=episodes,
+                status="filtered",
+                reason="uniform_reward",
+                groups_after_transform=before_min_traj,
+                groups_after_min_trajs=before_adv,
+                groups_after_reward_filter=0,
+            )
             self._coordinator.on_group_filtered()
+            self._filtered_count += 1
+            self._record_classified_prompt_group()
             return True
 
         # 6. Set weight version and queue
@@ -209,6 +263,19 @@ class TrajectoryGroupBuffer:
             await self._queue.put(await self._offload_task_batch(batch))
         else:
             await self._queue.put(batch)
+        self._training_queue_size += 1
+        self._queue_update_event.set()
+        self._record_classified_prompt_group()
+
+        self._log_prompt_group_finished(
+            task_id=task_id,
+            episodes=episodes,
+            status="queued",
+            reason="accepted",
+            groups_after_transform=before_min_traj,
+            groups_after_min_trajs=len(traj_groups) + filtered_zero_adv,
+            groups_after_reward_filter=len(traj_groups),
+        )
 
         return True
 
@@ -217,10 +284,38 @@ class TrajectoryGroupBuffer:
         item = await self._queue.get()
         if item is None:
             return None
+        self._training_queue_size = max(0, self._training_queue_size - 1)
+        self._consumed_count += 1
+        self._refresh_pbar_counters()
         return await self._load_task_batch(item)
+
+    async def get_many(self, count: int) -> list[TaskBatch] | None:
+        """Get a full forward/backward chunk, or None if generation ended first."""
+        while self._training_queue_size < count:
+            if self._generation_complete:
+                return None
+            self._queue_update_event.clear()
+            if self._training_queue_size >= count or self._generation_complete:
+                continue
+            await self._queue_update_event.wait()
+
+        items = []
+        for _ in range(count):
+            item = await self._queue.get()
+            if item is None:
+                return None
+            items.append(await self._load_task_batch(item))
+
+        self._training_queue_size = max(0, self._training_queue_size - count)
+        self._consumed_count += count
+        self._refresh_pbar_counters()
+        return items
 
     def mark_generation_complete(self) -> None:
         """Signal that generation is finished. Flushes incomplete groups and enqueues a sentinel."""
+        if self._generation_complete:
+            return
+        self._generation_complete = True
         for task_id in list(self._pending.keys()):
             items = self._pending.pop(task_id, [])
             for item in items:
@@ -230,12 +325,17 @@ class TrajectoryGroupBuffer:
                     except OSError:
                         pass
             self._coordinator.on_group_filtered()
+            self._filtered_count += 1
+            self._record_classified_prompt_group()
         self._queue.put_nowait(None)
+        self._queue_update_event.set()
 
     def stats(self) -> dict:
         return {
-            "async/buffer_qsize": self._queue.qsize(),
+            "async/buffer_qsize": self._training_queue_size,
             "async/buffer_pending": len(self._pending),
+            "async/buffer_filtered": self._filtered_count,
+            "async/buffer_consumed": self._consumed_count,
         }
 
     def _record_episode_metrics(self, episodes: list[Episode]) -> None:
@@ -261,6 +361,54 @@ class TrajectoryGroupBuffer:
             self._aggregator.record("episode/prompt_tokens", total_prompt_tokens)
             self._aggregator.record("episode/response_tokens", total_response_tokens)
             self._aggregator.record("episode/correct", 1.0 if ep.is_correct else 0.0)
+
+    def _all_episodes_compact_filtered(self, episodes: list[Episode]) -> bool:
+        return all(self._cf_config.should_mask(ep.termination_reason or TerminationReason.UNKNOWN) for ep in episodes)
+
+    @staticmethod
+    def _termination_value(reason: TerminationReason | str) -> str:
+        return str(getattr(reason, "value", reason))
+
+    def _log_prompt_group_finished(
+        self,
+        *,
+        task_id: str,
+        episodes: list[Episode],
+        status: str,
+        reason: str,
+        groups_after_transform: int,
+        groups_after_min_trajs: int,
+        groups_after_reward_filter: int,
+    ) -> None:
+        termination_counts = Counter(self._termination_value(ep.termination_reason or TerminationReason.UNKNOWN) for ep in episodes)
+        compact_masked = Counter(
+            self._termination_value(ep.termination_reason or TerminationReason.UNKNOWN) for ep in episodes if self._cf_config.should_mask(ep.termination_reason or TerminationReason.UNKNOWN)
+        )
+        rewards = []
+        for ep in episodes:
+            reward = None
+            for traj in ep.trajectories:
+                if traj.reward is not None:
+                    reward = traj.reward
+                elif traj.steps:
+                    reward = traj.steps[-1].reward
+            rewards.append(reward)
+
+        logger.debug(
+            "Prompt group finished task_id=%s status=%s reason=%s episodes=%d rewards=%s "
+            "terminations=%s compact_masked=%s groups_after_transform=%d "
+            "groups_after_min_trajs=%d groups_after_reward_filter=%d",
+            task_id,
+            status,
+            reason,
+            len(episodes),
+            rewards,
+            dict(termination_counts),
+            dict(compact_masked),
+            groups_after_transform,
+            groups_after_min_trajs,
+            groups_after_reward_filter,
+        )
 
     @staticmethod
     def _min_weight_version(episodes: list[Episode]) -> int:

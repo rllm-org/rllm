@@ -131,3 +131,21 @@ class TestSqliteStoreSpecific:
             assert row[0].lower() == "wal"
         finally:
             await store.close()
+
+    def test_explicit_db_path_does_not_warn(self, tmp_path, caplog):
+        path = tmp_path / "explicit.db"
+        with caplog.at_level("WARNING", logger="rllm_model_gateway.store.sqlite_store"):
+            store = SqliteTraceStore(db_path=str(path))
+        assert store.db_path == str(path)
+        assert not any("db_path not set" in rec.message for rec in caplog.records)
+
+    def test_missing_db_path_warns_and_resolves(self, tmp_path, monkeypatch, caplog):
+        # Redirect ~/.rllm into tmp_path so the test doesn't touch the user's home.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        with caplog.at_level("WARNING", logger="rllm_model_gateway.store.sqlite_store"):
+            store = SqliteTraceStore(db_path=None)
+        assert store.db_path  # auto-resolved to a non-empty path
+        assert store.db_path.endswith("gateway_traces.db")
+        warnings = [rec for rec in caplog.records if "db_path not set" in rec.message]
+        assert len(warnings) == 1
+        assert store.db_path in warnings[0].message

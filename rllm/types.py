@@ -39,7 +39,7 @@ class Task:
     Pure data — describes itself (instruction, metadata) and points at the
     directory where its verifier lives.
     :class:`rllm.engine.agentflow_engine.AgentFlowEngine`
-    (driven by :class:`rllm.eval._hooks.EvalHooks` at eval time) reads
+    (driven by :class:`rllm.hooks.SandboxTaskHooks` at eval time) reads
     the task config and resolves the appropriate :class:`Evaluator` at
     run time.
 
@@ -322,6 +322,7 @@ class Episode(BaseModel):
     task: Any = None
     termination_reason: Any | None = None
     is_correct: bool = False
+    session_id: str | None = None
     trajectories: list[Trajectory] = Field(default_factory=list)
     artifacts: dict[str, Any] = Field(default_factory=dict)
     metrics: dict = Field(default_factory=dict)
@@ -357,6 +358,7 @@ class Episode(BaseModel):
             "task": _sanitize_task(self.task),
             "termination_reason": self.termination_reason.value if self.termination_reason is not None else None,
             "is_correct": bool(self.is_correct),
+            "session_id": self.session_id,
             "trajectories": [trajectory.to_dict() for trajectory in self.trajectories],
             "metrics": self.metrics,
             "info": self.info,
@@ -420,6 +422,7 @@ class AgentConfig:
     session_uid: str
     metadata: dict = field(default_factory=dict)
     is_validation: bool = False
+    sampling_params: dict = field(default_factory=dict)
 
 
 @runtime_checkable

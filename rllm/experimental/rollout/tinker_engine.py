@@ -294,6 +294,7 @@ class TinkerEngine(RolloutEngine):
 
         # prepare sampling params
         sampling_params = self.val_sampling_params.copy() if self.is_validation else self.train_sampling_params.copy()
+        sampling_params.pop("max_tokens", None)  # TODO(listar2000): later we should simply use this as the max_tokens
 
         requested_max_tokens = kwargs.pop("max_tokens", kwargs.pop("max_new_tokens", self.max_response_length))
         requested_max_tokens = sampling_params.pop("max_tokens", requested_max_tokens)

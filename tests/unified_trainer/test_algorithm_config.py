@@ -18,7 +18,7 @@ _spec.loader.exec_module(_mod)
 AlgorithmConfig = _mod.AlgorithmConfig
 
 
-def _make_config(norm_adv_by_std_in_grpo: bool = True):
+def _make_config(norm_adv_by_std_in_grpo: bool = True, warmup_steps: int = -1):
     """Build a minimal DictConfig mirroring the real rllm config structure."""
     return OmegaConf.create(
         {
@@ -32,6 +32,7 @@ def _make_config(norm_adv_by_std_in_grpo: bool = True):
                     "use_precomputed_advantage": False,
                     "loss_fn": None,
                     "lr_schedule": "constant",
+                    "warmup_steps": warmup_steps,
                     "warmup_steps_ratio": 0.0,
                 },
                 "stepwise_advantage": {
@@ -56,3 +57,9 @@ def test_norm_adv_by_std_in_grpo_false_from_algorithm():
     config = _make_config(norm_adv_by_std_in_grpo=False)
     algo_config = AlgorithmConfig.from_config(config.rllm.algorithm, stepwise_advantage_mode=config.rllm.stepwise_advantage.mode)
     assert algo_config.norm_adv_by_std_in_grpo is False
+
+
+def test_warmup_steps_from_algorithm():
+    config = _make_config(warmup_steps=25)
+    algo_config = AlgorithmConfig.from_config(config.rllm.algorithm, stepwise_advantage_mode=config.rllm.stepwise_advantage.mode)
+    assert algo_config.warmup_steps == 25

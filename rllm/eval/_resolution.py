@@ -5,13 +5,13 @@ that drove ``rllm eval`` before eval was unified onto
 :class:`rllm.engine.agentflow_engine.AgentFlowEngine`.
 ``Runner`` is gone; the helpers live here because:
 
-* :class:`rllm.eval._hooks.EvalHooks` calls them on every rollout to set
+* :class:`rllm.hooks.SandboxTaskHooks` calls them on every rollout to set
   up the sandbox and resolve the per-task evaluator.
 * :func:`build_dataset_evaluator` is the train CLI's entry point for
   resolving a single dataset-wide evaluator from a ``[verifier]`` block.
 
 Module is private (``_resolution``) — external callers should go through
-:class:`rllm.eval._hooks.EvalHooks` or :func:`build_dataset_evaluator`.
+:class:`rllm.hooks.SandboxTaskHooks` or :func:`build_dataset_evaluator`.
 """
 
 from __future__ import annotations

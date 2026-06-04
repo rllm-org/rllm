@@ -256,7 +256,7 @@ def _run_eval(
                     agent.max_concurrent = agent_metadata["sandbox_concurrency"]
 
         # Resolve evaluator: explicit --evaluator > catalog auto-resolve >
-        # catalog reward_fn > None. When ``evaluator`` is None ``EvalHooks``
+        # catalog reward_fn > None. When ``evaluator`` is None ``SandboxTaskHooks``
         # falls back to per-task verifier resolution (works only when each
         # Task has its verifier config — i.e. materialised dir or harbor
         # task.toml).
@@ -275,7 +275,7 @@ def _run_eval(
             # harbor-sourced dataset through an rllm-native harness (oracle,
             # opencode, mini-swe-agent, …), the artifact never gets set and
             # the eval would always score zero. Skip the catalog evaluator in
-            # that case and let ``EvalHooks`` resolve a per-task verifier
+            # that case and let ``SandboxTaskHooks`` resolve a per-task verifier
             # (typically ``tests/test.sh`` inside the harbor task dir).
             _harbor_reward_fn_skipped = catalog_entry and catalog_entry.get("reward_fn") == "harbor_reward_fn" and not _is_harbor_agent
             if _harbor_reward_fn_skipped:
@@ -452,11 +452,11 @@ def _run_eval(
                 _ui_callback(episode)
 
     # Single execution path: every Task goes through ``AgentFlowEngine``
-    # via ``EvalHooks``. The engine fronts every LLM call with the rLLM
+    # via ``SandboxTaskHooks``. The engine fronts every LLM call with the rLLM
     # model gateway (so flows that ``return None`` get their Steps
     # populated from gateway-captured traces, exactly as in training).
     # ``evaluator`` (when set) overrides per-task verifier resolution;
-    # otherwise ``EvalHooks`` reads each Task's [verifier] config.
+    # otherwise ``SandboxTaskHooks`` reads each Task's [verifier] config.
     from rllm.eval.runner import run_dataset
 
     result, episodes = asyncio.run(

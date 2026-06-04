@@ -196,40 +196,39 @@ class TestConstants:
         assert info.litellm_prefix == "minimax"
         assert info.env_key == "MINIMAX_API_KEY"
 
-    def test_minimax_default_model_is_m27(self):
-        """MiniMax default model should be the latest M2.7."""
+    def test_minimax_default_model_is_m3(self):
+        """MiniMax default model should be the latest M3."""
         info = get_provider_info("minimax")
         assert info is not None
-        assert info.default_model == "MiniMax-M2.7"
+        assert info.default_model == "MiniMax-M3"
+
+    def test_minimax_models_include_m3(self):
+        """MiniMax model list should include the M3 flagship."""
+        info = get_provider_info("minimax")
+        assert info is not None
+        assert "MiniMax-M3" in info.models
 
     def test_minimax_models_include_m27_family(self):
-        """MiniMax model list should include M2.7 and M2.7-highspeed."""
+        """MiniMax model list should still include M2.7 and M2.7-highspeed for backward compat."""
         info = get_provider_info("minimax")
         assert info is not None
         assert "MiniMax-M2.7" in info.models
         assert "MiniMax-M2.7-highspeed" in info.models
 
-    def test_minimax_models_include_m25_family(self):
-        """MiniMax model list should still include M2.5 models for backward compat."""
+    def test_minimax_m3_is_first_model(self):
+        """M3 should be listed before M2.7 (newest first)."""
         info = get_provider_info("minimax")
         assert info is not None
-        assert "MiniMax-M2.5" in info.models
-        assert "MiniMax-M2.5-highspeed" in info.models
-
-    def test_minimax_m27_is_first_model(self):
-        """M2.7 should be listed before M2.5 (newest first)."""
-        info = get_provider_info("minimax")
-        assert info is not None
+        m3_idx = info.models.index("MiniMax-M3")
         m27_idx = info.models.index("MiniMax-M2.7")
-        m25_idx = info.models.index("MiniMax-M2.5")
-        assert m27_idx < m25_idx
+        assert m3_idx < m27_idx
 
     def test_minimax_config_validates(self):
         """A complete MiniMax config should pass validation."""
         config = RllmConfig(
             provider="minimax",
             api_keys={"minimax": "test-key"},
-            model="MiniMax-M2.7",
+            model="MiniMax-M3",
         )
         assert config.is_configured()
         assert config.validate() == []
@@ -237,4 +236,4 @@ class TestConstants:
     def test_minimax_in_default_models(self):
         """MiniMax should have an entry in DEFAULT_MODELS."""
         assert "minimax" in DEFAULT_MODELS
-        assert DEFAULT_MODELS["minimax"] == "MiniMax-M2.7"
+        assert DEFAULT_MODELS["minimax"] == "MiniMax-M3"

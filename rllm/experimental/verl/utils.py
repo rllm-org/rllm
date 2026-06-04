@@ -50,10 +50,18 @@ _SHARED_KEYS: list[tuple[str, str]] = [
     ("actor_rollout_ref.actor.kl_loss_coef", "rllm.algorithm.kl_beta"),
     ("actor_rollout_ref.actor.policy_loss.loss_mode", "rllm.algorithm.loss_fn"),
     ("actor_rollout_ref.actor.loss_agg_mode", "rllm.algorithm.loss_agg_mode"),
+    ("actor_rollout_ref.actor.optim.lr_warmup_steps", "rllm.algorithm.warmup_steps"),
+    ("actor_rollout_ref.actor.optim.lr_warmup_steps_ratio", "rllm.algorithm.warmup_steps_ratio"),
     ("actor_rollout_ref.actor.clip_ratio_high", "rllm.algorithm.eps_clip_high"),
     ("actor_rollout_ref.actor.router_replay.mode", "rllm.algorithm.router_replay"),
     ("actor_rollout_ref.rollout.n", "rllm.rollout.n"),
     ("actor_rollout_ref.rollout.val_kwargs.n", "rllm.rollout.n_val"),
+    ("actor_rollout_ref.rollout.temperature", "rllm.rollout.train.temperature"),
+    ("actor_rollout_ref.rollout.top_p", "rllm.rollout.train.top_p"),
+    ("actor_rollout_ref.rollout.top_k", "rllm.rollout.train.top_k"),
+    ("actor_rollout_ref.rollout.val_kwargs.temperature", "rllm.rollout.val.temperature"),
+    ("actor_rollout_ref.rollout.val_kwargs.top_p", "rllm.rollout.val.top_p"),
+    ("actor_rollout_ref.rollout.val_kwargs.top_k", "rllm.rollout.val.top_k"),
     ("trainer.save_freq", "rllm.trainer.save_freq"),
     ("trainer.test_freq", "rllm.trainer.test_freq"),
     ("trainer.val_before_train", "rllm.trainer.val_before_train"),
@@ -149,6 +157,16 @@ def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) ->
         else:
             OmegaConf.update(config, verl_path, to_verl(OmegaConf.select(config, rllm_path)), merge=False)
 
+    def sync_do_sample_temperature() -> None:
+        """Force temperature to 0.0 when do_sample is False, on both sides."""
+        for do_sample_path, train_temp_paths in (
+            ("actor_rollout_ref.rollout.do_sample", ("rllm.rollout.train.temperature", "actor_rollout_ref.rollout.temperature")),
+            ("actor_rollout_ref.rollout.val_kwargs.do_sample", ("rllm.rollout.val.temperature", "actor_rollout_ref.rollout.val_kwargs.temperature")),
+        ):
+            if OmegaConf.select(config, do_sample_path) is False:
+                for path in train_temp_paths:
+                    OmegaConf.update(config, path, 0.0, merge=False)
+
     def sync_clip_ratio() -> None:
         eps_clip_path = "rllm.algorithm.eps_clip"
         clip_ratio_path = "actor_rollout_ref.actor.clip_ratio"
@@ -185,9 +203,20 @@ def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) ->
         if eps_clip_high is not None:
             OmegaConf.update(config, "actor_rollout_ref.actor.clip_ratio_high", eps_clip_high, merge=False)
 
+    def sync_lr_schedule() -> None:
+        optim = OmegaConf.select(config, "actor_rollout_ref.actor.optim")
+        if optim is None:
+            return
+        # different training backends use a different config key
+        for key in ("lr_scheduler_type", "lr_decay_style", "decay_type"):
+            if key in optim:
+                sync_pair(f"actor_rollout_ref.actor.optim.{key}", "rllm.algorithm.lr_schedule")
+                return
+
     for verl_path, rllm_path in _SHARED_KEYS:
         sync_pair(verl_path, rllm_path)
 
+    sync_lr_schedule()
     sync_total_training_steps()
 
     # Derived verl-only keys
@@ -205,6 +234,9 @@ def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) ->
     # clip_ratio family: verl uses clip_ratio_{low,high} when set, else falls back to clip_ratio.
     # Mirror the effective low bound to/from rllm.algorithm.eps_clip.
     sync_clip_ratio()
+
+    # When do_sample=False, force the effective sampling temperature to 0.0
+    sync_do_sample_temperature()
 
     # Async / separated mode toggles. Colocated needs hybrid_engine + naive ckpt;
     # separated needs hybrid_engine=False + nccl ckpt + the async_training mini-batch sizing.

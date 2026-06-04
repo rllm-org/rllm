@@ -20,7 +20,13 @@ class GatewayClient:
         timeout: float = 30.0,
     ) -> None:
         self.gateway_url = gateway_url.rstrip("/")
-        self._http = httpx.Client(timeout=timeout)
+        # max_keepalive_connections=0 disables idle connection reuse so every
+        # request opens a fresh TCP connection. Avoids the keepalive race where
+        # client and uvicorn both expire idle connections at ~5s and the next
+        # request hits a half-closed socket → httpx.ReadError. Per-request
+        # handshake cost is negligible for the control-plane JSON calls this
+        # client makes.
+        self._http = httpx.Client(timeout=timeout, limits=httpx.Limits(max_keepalive_connections=0))
 
     def close(self) -> None:
         self._http.close()
@@ -146,7 +152,8 @@ class AsyncGatewayClient:
         timeout: float = 30.0,
     ) -> None:
         self.gateway_url = gateway_url.rstrip("/")
-        self._http = httpx.AsyncClient(timeout=timeout)
+        # See GatewayClient.__init__ for why keepalive is disabled.
+        self._http = httpx.AsyncClient(timeout=timeout, limits=httpx.Limits(max_keepalive_connections=0))
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -196,6 +203,17 @@ class AsyncGatewayClient:
 
     async def delete_session(self, session_id: str) -> int:
         resp = await self._http.delete(f"{self.gateway_url}/sessions/{session_id}")
+        resp.raise_for_status()
+        return resp.json().get("deleted", 0)
+
+    async def delete_sessions(self, session_ids: list[str]) -> int:
+        """Batch-delete sessions (and their traces) in a single round-trip."""
+        if not session_ids:
+            return 0
+        resp = await self._http.post(
+            f"{self.gateway_url}/sessions/batch_delete",
+            json={"session_ids": list(session_ids)},
+        )
         resp.raise_for_status()
         return resp.json().get("deleted", 0)
 

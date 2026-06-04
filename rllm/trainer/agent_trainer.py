@@ -14,7 +14,11 @@ class AgentTrainer:
 
     * ``verl`` (default): distributed PPO via the verl framework.
     * ``fireworks``: pipeline-based variant for the Fireworks workflow API.
-    * ``tinker``: single-machine LoRA training via tinker.
+
+    For the tinker backend, use
+    :class:`rllm.experimental.unified_trainer.AgentTrainer` instead — the
+    legacy tinker workflow trainer was removed when its underlying
+    ``TinkerAgentTrainer`` was dropped from the codebase.
 
     The legacy ``agent_class`` + ``env_class`` and ``agent_run_func`` (SDK)
     paths have been removed. New agents should be authored as a Workflow or
@@ -28,7 +32,7 @@ class AgentTrainer:
         config: dict[str, Any] | list[str] | None = None,
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
-        backend: Literal["verl", "fireworks", "tinker"] = "verl",
+        backend: Literal["verl", "fireworks"] = "verl",
     ):
         """Initialize the AgentTrainer.
 
@@ -41,9 +45,10 @@ class AgentTrainer:
                 (e.g. ``["data.train_batch_size=8"]``).
             train_dataset: Optional train dataset.
             val_dataset: Optional validation dataset.
-            backend: Training backend (``'verl'`` | ``'fireworks'`` | ``'tinker'``).
+            backend: Training backend (``'verl'`` | ``'fireworks'``). For
+                tinker, use :class:`rllm.experimental.unified_trainer.AgentTrainer`.
         """
-        assert backend in ("verl", "fireworks", "tinker"), f"Unsupported backend: {backend}; must be one of ('verl', 'fireworks', 'tinker')"
+        assert backend in ("verl", "fireworks"), f"Unsupported backend: {backend}; must be one of ('verl', 'fireworks'). For tinker, use rllm.experimental.unified_trainer.AgentTrainer."
         self.backend = backend
 
         if workflow_class is None:
@@ -66,20 +71,6 @@ class AgentTrainer:
             self._train_verl()
         elif self.backend == "fireworks":
             self._train_fireworks()
-        elif self.backend == "tinker":
-            self._train_tinker()
-
-    def _train_tinker(self):
-        from rllm.trainer.deprecated.tinker_workflow_trainer import TinkerWorkflowTrainer
-
-        trainer = TinkerWorkflowTrainer(
-            config=self.config,
-            workflow_class=self.workflow_class,
-            workflow_args=self.workflow_args,
-            train_dataset=self.train_dataset,
-            val_dataset=self.val_dataset,
-        )
-        trainer.fit_agent()
 
     def _train_verl(self):
         """Train using the standard verl backend."""

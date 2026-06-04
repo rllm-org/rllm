@@ -5,7 +5,11 @@ Main package for the rLLM framework.
 
 import sys
 
+from rllm.utils.logging import configure_logging_from_env
+
 __all__ = ["BaseAgent", "Action", "Step", "Trajectory", "Episode", "rollout", "evaluator", "Task", "Runner"]
+
+configure_logging_from_env()
 
 
 def __getattr__(name: str):

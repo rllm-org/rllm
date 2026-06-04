@@ -1,6 +1,6 @@
 """SandboxedAgentFlow: base class for agents that need sandboxed execution environments.
 
-Lifecycle managed by :class:`rllm.eval._hooks.EvalHooks` (which sits in
+Lifecycle managed by :class:`rllm.hooks.SandboxTaskHooks` (which sits in
 front of :class:`rllm.engine.agentflow_engine.AgentFlowEngine`):
 
 1. The hook creates a Sandbox via ``_create_sandbox_for_task`` and injects
@@ -75,7 +75,7 @@ class SandboxedAgentFlow(ABC):
         """Create and configure sandbox.
 
         Legacy entry point retained for callers that still build a sandbox
-        inside the agent flow. The :class:`rllm.eval._hooks.EvalHooks` path
+        inside the agent flow. The :class:`rllm.hooks.SandboxTaskHooks` path
         uses :meth:`set_sandbox` + :meth:`on_sandbox_ready` instead.
         """
         image = self.get_image(task)
@@ -136,5 +136,9 @@ def create_sandbox(backend: str, name: str, image: str, **kwargs) -> Sandbox:
         from rllm.sandbox.backends.modal_backend import ModalSandbox
 
         return ModalSandbox(name=name, **kwargs)
+    elif backend == "daytona":
+        from rllm.sandbox.backends.daytona import DaytonaSandbox
+
+        return DaytonaSandbox(name=name, image=image, **kwargs)
     else:
-        raise ValueError(f"Unknown sandbox backend: {backend}. Available: docker, local, modal")
+        raise ValueError(f"Unknown sandbox backend: {backend}. Available: docker, local, modal, daytona")

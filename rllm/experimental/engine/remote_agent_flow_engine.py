@@ -121,7 +121,7 @@ class RemoteAgentFlowEngine:
             result = results[0]
 
             if not result.finished:
-                logger.warning("[%s] Remote task failed (assigning reward=0): %s", uid, result.error)
+                logger.warning("Remote task failed (session=%s, assigning reward=0): %s", result.session_id, result.error)
                 result.reward = 0.0
 
             traces = await self.gateway.aget_traces(session_id)
@@ -129,10 +129,21 @@ class RemoteAgentFlowEngine:
             if result.metadata:
                 episode.metadata.update(result.metadata)
             if not result.finished:
-                episode.metadata["error"] = {"message": result.error or "Unknown error"}
+                error_info: dict = {
+                    "error_message": result.error or "Unknown error",
+                    "elapsed": result.elapsed,
+                }
+                if result.raw_result:
+                    for k in ("stop_reason", "traceback", "status_code"):
+                        if k in result.raw_result:
+                            error_info[k] = result.raw_result[k]
+                episode.metadata["error"] = error_info
 
             # Delete traces from gateway DB to prevent unbounded growth
-            await self.gateway.adelete_session(session_id)
+            try:
+                await self.gateway.adelete_session(session_id)
+            except Exception as e:
+                logger.warning("[%s] Failed to delete session (non-fatal): %s", uid, e)
 
             return task_id, rollout_idx, result_idx, episode
 
@@ -184,12 +195,13 @@ def _build_episode(
     metrics["empty"] = int(len(traces) == 0)
     metrics["steps_collected"] = len(traces)
 
-    is_correct = bool(result.reward and result.reward > 0)
+    is_correct = bool(result.reward and result.reward >= 1.0)
 
     return Episode(
         id=uid,
         task=task,
         is_correct=is_correct,
+        session_id=result.session_id,
         trajectories=trajectories,
         metrics=metrics,
         termination_reason=result.termination_reason or TerminationReason.UNKNOWN,

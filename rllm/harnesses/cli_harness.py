@@ -146,19 +146,54 @@ class BaseCliHarness(SandboxedAgentFlow):
 
         return os.environ.get(fallback_env_var, "sk-rllm-gateway")
 
+    # Provider slugs litellm accepts as the request prefix.
+    _LITELLM_PROVIDER_SLUGS = frozenset(
+        {
+            "openai",
+            "anthropic",
+            "azure",
+            "azure_openai",
+            "bedrock",
+            "vertex_ai",
+            "google",
+            "gemini",
+            "cohere",
+            "deepseek",
+            "groq",
+            "mistral",
+            "xai",
+            "perplexity",
+            "fireworks_ai",
+            "together_ai",
+            "anyscale",
+            "deepinfra",
+            "huggingface",
+            "ollama",
+            "replicate",
+            "openrouter",
+            "databricks",
+        }
+    )
+
     @classmethod
     def ensure_provider_prefix(cls, model_name: str) -> tuple[str, str, str]:
         """Return ``(provider, model_id, qualified_name)`` for *model_name*.
 
-        Accepts both bare names (``gpt-4o``) and pre-qualified names
-        (``openai/gpt-4o``); inference fills in the provider when missing.
+        Accepts bare names (``gpt-4o``), pre-qualified names
+        (``openai/gpt-4o``), and HF-style identifiers
+        (``Qwen/Qwen3.5-35B-A3B``). For HF-style inputs whose first
+        segment isn't in ``_LITELLM_PROVIDER_SLUGS``, the org is dropped
+        and the provider is re-inferred from the model id.
         """
         if "/" in model_name:
-            provider, model_id = model_name.split("/", 1)
-        else:
-            provider = cls.infer_provider(model_name)
-            model_id = model_name
-        return provider, model_id, f"{provider}/{model_id}"
+            head, rest = model_name.split("/", 1)
+            if head.lower() in cls._LITELLM_PROVIDER_SLUGS:
+                return head, rest, model_name
+            model_id = rest
+            provider = cls.infer_provider(model_id)
+            return provider, model_id, f"{provider}/{model_id}"
+        provider = cls.infer_provider(model_name)
+        return provider, model_name, f"{provider}/{model_name}"
 
     def _container_url(self, url: str) -> str:
         """Rewrite host loopback addresses for in-container reachability.

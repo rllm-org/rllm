@@ -21,11 +21,17 @@ logger = logging.getLogger(__name__)
 
 
 def extract_prompt_token_ids(response: dict[str, Any]) -> list[int]:
-    """Extract ``prompt_token_ids`` from the root of a vLLM response."""
+    """Extract ``prompt_token_ids`` from a vLLM response.
+
+    Checks root level first (chat/completions format), then falls back to
+    choices[0].prompt_token_ids (completions format).
+    """
     ids = response.get("prompt_token_ids")
     if ids is None:
-        return []
-    return list(ids)
+        choices = response.get("choices")
+        if choices:
+            ids = choices[0].get("prompt_token_ids")
+    return list(ids) if ids is not None else []
 
 
 def extract_completion_token_ids(response: dict[str, Any]) -> list[int]:
@@ -40,7 +46,12 @@ def extract_completion_token_ids(response: dict[str, Any]) -> list[int]:
 
 
 def extract_logprobs(response: dict[str, Any]) -> list[float]:
-    """Extract per-token logprobs from ``choices[0].logprobs.content``."""
+    """Extract per-token logprobs from a vLLM response.
+
+    Handles both formats:
+    - chat/completions: choices[0].logprobs.content[].logprob
+    - completions: choices[0].logprobs.token_logprobs (flat list)
+    """
     choices = response.get("choices")
     if not choices:
         return []
@@ -48,10 +59,18 @@ def extract_logprobs(response: dict[str, Any]) -> list[float]:
     lp_obj = choices[0].get("logprobs")
     if lp_obj is None:
         return []
+
+    # Chat/completions format: logprobs.content[].logprob
     content = lp_obj.get("content")
-    if content is None:
-        return []
-    return [float(entry["logprob"]) for entry in content if entry and entry.get("logprob") is not None]
+    if content is not None:
+        return [float(entry["logprob"]) for entry in content if entry and entry.get("logprob") is not None]
+
+    # Completions format: logprobs.token_logprobs (flat list of floats)
+    token_logprobs = lp_obj.get("token_logprobs")
+    if token_logprobs is not None:
+        return [float(lp) for lp in token_logprobs if lp is not None]
+
+    return []
 
 
 # ------------------------------------------------------------------
@@ -76,7 +95,12 @@ def extract_delta_token_ids(chunk: dict[str, Any]) -> list[int]:
 
 
 def extract_delta_logprobs(chunk: dict[str, Any]) -> list[float]:
-    """Extract logprobs from a single SSE chunk's ``choices[0].logprobs.content``."""
+    """Extract logprobs from a single SSE chunk.
+
+    Handles both formats:
+    - chat/completions streaming: choices[0].logprobs.content[].logprob
+    - completions streaming: choices[0].logprobs.token_logprobs (flat list)
+    """
     choices = chunk.get("choices")
     if not choices:
         return []
@@ -84,9 +108,12 @@ def extract_delta_logprobs(chunk: dict[str, Any]) -> list[float]:
     if not lp:
         return []
     content = lp.get("content")
-    if not content:
-        return []
-    return [float(e["logprob"]) for e in content if e and e.get("logprob") is not None]
+    if content:
+        return [float(e["logprob"]) for e in content if e and e.get("logprob") is not None]
+    token_logprobs = lp.get("token_logprobs")
+    if token_logprobs:
+        return [float(v) for v in token_logprobs if v is not None]
+    return []
 
 
 # ------------------------------------------------------------------

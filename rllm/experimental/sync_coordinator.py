@@ -46,6 +46,8 @@ class SyncCoordinator:
 
         # Tracks in-flight async rollout tasks for drain/wait logic
         self._in_flight_tasks: set[asyncio.Task] = set()
+        self._task_errors: list[BaseException] = []
+        self._task_error_event: asyncio.Event = asyncio.Event()
 
     @property
     def weight_version(self) -> int:
@@ -65,12 +67,16 @@ class SyncCoordinator:
         self._in_flight = max(0, self._in_flight - 1)
 
     def on_group_filtered(self) -> None:
-        """Accumulator filtered out a group. Decrements in-flight count."""
+        """Accumulator filtered out a group. Releases in-flight and quota."""
         self._in_flight = max(0, self._in_flight - 1)
+        self._quota_used = max(0, self._quota_used - 1)
+        if self._quota_used < self.config.max_rollout_quota:
+            self._throttle_event.set()
 
     async def wait_for_throttle(self) -> None:
         """Generation loop blocks here when dispatch window is full."""
         await self._throttle_event.wait()
+        self.raise_if_task_failed()
 
     def has_quota(self) -> bool:
         """Whether the generation loop can dispatch another group."""
@@ -104,18 +110,55 @@ class SyncCoordinator:
 
     async def wait_for_generation_allowed(self) -> None:
         await self._generation_paused.wait()
+        self.raise_if_task_failed()
 
     # --- In-flight task tracking ---
 
     def track_task(self, task: asyncio.Task) -> None:
         """Register an in-flight rollout task."""
         self._in_flight_tasks.add(task)
-        task.add_done_callback(self._in_flight_tasks.discard)
+
+        def _on_done(done_task: asyncio.Task) -> None:
+            self._in_flight_tasks.discard(done_task)
+            if done_task.cancelled():
+                return
+            exc = done_task.exception()
+            if exc is not None:
+                self.record_task_error(exc)
+
+        task.add_done_callback(_on_done)
+
+    def record_task_error(self, exc: BaseException) -> None:
+        """Record a rollout task failure and release waits so it can surface."""
+        if not any(existing is exc for existing in self._task_errors):
+            self._task_errors.append(exc)
+        self._task_error_event.set()
+        self._throttle_event.set()
+        self._generation_paused.set()
+
+    def raise_if_task_failed(self) -> None:
+        if not self._task_errors:
+            return
+        first = self._task_errors[0]
+        self._task_errors.clear()
+        self._task_error_event.clear()
+        raise RuntimeError("Async rollout task failed") from first
+
+    async def wait_for_task_error(self) -> None:
+        """Block until any tracked rollout task fails, then raise that failure."""
+        await self._task_error_event.wait()
+        self.raise_if_task_failed()
+
+    def cancel_tracked_tasks(self) -> None:
+        """Cancel rollout tasks that were dispatched but are no longer useful."""
+        for task in list(self._in_flight_tasks):
+            task.cancel()
 
     async def wait_for_drain(self) -> None:
         """Wait for all in-flight rollout tasks to complete."""
         while self._in_flight_tasks:
             await asyncio.sleep(0.1)
+        self.raise_if_task_failed()
 
     def stats(self) -> dict:
         return {

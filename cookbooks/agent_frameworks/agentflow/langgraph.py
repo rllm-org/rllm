@@ -28,11 +28,13 @@ async def langgraph_math(task: Task, config: AgentConfig) -> None:
     auto-builds the Episode from those traces; the evaluator pulls the
     answer from the trajectory's last assistant message.
     """
+    # top_k isn't a ChatOpenAI constructor arg; drop it from the rollout sampling params.
+    sampling = {k: v for k, v in config.sampling_params.items() if k != "top_k"}
     llm = ChatOpenAI(
         model=config.model,
         base_url=config.base_url,
         api_key="EMPTY",
-        temperature=1.0,
+        **sampling,
     )
     agent = create_react_agent(llm, tools=[calculate], prompt=SYSTEM_PROMPT)
     await agent.ainvoke({"messages": [("user", task.instruction)]})

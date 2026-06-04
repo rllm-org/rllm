@@ -127,11 +127,26 @@ class GatewayManager:
         configured_host = gw_cfg.get("host", None)
         self.host: str = configured_host if configured_host else _get_routable_ip()
         self.port: int = gw_cfg.get("port", 9090)
+        self.store: str = gw_cfg.get("store", "memory")
         self.db_path: str | None = gw_cfg.get("db_path", None)
-        self.public_url: str | None = gw_cfg.get("public_url", None)
+        if self.store not in ("memory", "sqlite"):
+            raise ValueError(f"rllm.gateway.store must be 'memory' or 'sqlite', got {self.store!r}")
+        if self.store == "memory" and self.db_path:
+            raise ValueError("rllm.gateway.db_path is set but store='memory'; set store='sqlite' or clear db_path")
+        from rllm.experimental.engine.tunnel import parse_tunnel
+
+        self.public_url, self.tunnel_backend = parse_tunnel(gw_cfg.get("tunnel", None))
         self.sampling_params_priority: str = gw_cfg.get("sampling_params_priority", "client")
         # The gateway always pins ``body.model`` to whatever the trainer is serving
         self.model: str | None = config.get("model", {}).get("name", None)
+
+        # Cumulative token mode: drift-free multi-turn token forwarding. The
+        # gateway loads the tokenizer from the served model path. renderers
+        # cannot infer the family from a local checkpoint path, so
+        # renderer_family must be set explicitly (e.g. "qwen3", "glm-5").
+        self.cumulative_token_mode: bool = gw_cfg.get("cumulative_token_mode", False)
+        self.renderer_family: str = gw_cfg.get("renderer_family", "auto")
+
         self.mode = mode
 
         self._process: subprocess.Popen | None = None
@@ -140,6 +155,7 @@ class GatewayManager:
         self._local_handler: Any = None  # in-process handler for tinker
         self._client: GatewayClient | None = None
         self._async_client: AsyncGatewayClient | None = None
+        self._tunnel: Any = None  # CloudflaredTunnel when tunnel_backend is set
 
         # Per-mode sampling params (extracted from rollout engine in start())
         self._train_sampling_params: dict[str, Any] = {}
@@ -196,8 +212,29 @@ class GatewayManager:
         self._train_sampling_params = getattr(rollout_engine, "train_sampling_params", {})
         self._val_sampling_params = getattr(rollout_engine, "val_sampling_params", {})
 
+        if self.tunnel_backend and not self.public_url:
+            self._start_tunnel()
+
+    def _start_tunnel(self) -> None:
+        """Spawn the named tunnel backend and pin its public URL onto ``self.public_url``."""
+        if self.tunnel_backend != "cloudflared":
+            raise ValueError(f"Unsupported gateway tunnel backend: {self.tunnel_backend!r}. Supported: 'cloudflared', or pass an http(s):// URL.")
+
+        from rllm.experimental.engine.tunnel import CloudflaredTunnel
+
+        tunnel = CloudflaredTunnel(self.gateway_url)
+        self.public_url = tunnel.start()
+        self._tunnel = tunnel
+
     def stop(self) -> None:
         """Terminate the gateway (process or thread)."""
+        if self._tunnel is not None:
+            try:
+                self._tunnel.stop()
+            except Exception:
+                logger.exception("Error stopping cloudflared tunnel")
+            self._tunnel = None
+
         if self._client is not None:
             self._client.close()
             self._client = None
@@ -247,8 +284,15 @@ class GatewayManager:
 
     async def adelete_session(self, session_id: str) -> int:
         """Delete a session and all its accumulated traces. Returns count removed."""
-        await self.async_client.flush()
+        await self.async_client.flush(timeout=_TRACE_API_TIMEOUT)
         return await self.async_client.delete_session(session_id)
+
+    async def adelete_sessions(self, session_ids: list[str]) -> int:
+        """Batch-delete many sessions in a single flush + request."""
+        if not session_ids:
+            return 0
+        await self.async_client.flush()
+        return await self.async_client.delete_sessions(session_ids)
 
     # -- Worker setup --------------------------------------------------------
 
@@ -270,12 +314,17 @@ class GatewayManager:
             "--port",
             str(self.port),
         ]
+        cmd.extend(["--store", self.store])
         if self.db_path:
             cmd.extend(["--db-path", self.db_path])
         if self.sampling_params_priority != "client":
             cmd.extend(["--sampling-params-priority", self.sampling_params_priority])
         if self.model:
             cmd.extend(["--model", self.model])
+        if self.cumulative_token_mode:
+            cmd.append("--cumulative-token-mode")
+            if self.renderer_family != "auto":
+                cmd.extend(["--renderer-family", self.renderer_family])
 
         logger.info("Starting gateway subprocess: %s", " ".join(cmd))
         # Inherit parent's stdout/stderr so gateway logs are visible for debugging.
@@ -309,11 +358,13 @@ class GatewayManager:
             host="0.0.0.0",
             port=self.port,
             db_path=self.db_path,
-            store_worker="sqlite" if self.db_path else "memory",
+            store_worker=self.store,
             sampling_params_priority=self.sampling_params_priority,
             model=self.model,
             add_logprobs=self.add_logprobs,
             add_return_token_ids=self.add_return_token_ids,
+            cumulative_token_mode=self.cumulative_token_mode,
+            renderer_family=self.renderer_family,
         )
         app = create_app(config=gw_config, local_handler=local_handler)
 
@@ -382,6 +433,7 @@ class EvalGatewayManager(GatewayManager):
         host: str = "127.0.0.1",
         port: int | None = None,
         db_path: str | None = None,
+        tunnel: str | None = None,
     ) -> None:
         from omegaconf import OmegaConf
 
@@ -392,6 +444,7 @@ class EvalGatewayManager(GatewayManager):
                         "host": host,
                         "port": port if port is not None else _find_free_port(),
                         "db_path": db_path,
+                        "tunnel": tunnel,
                     }
                 },
                 "model": {"name": model},
@@ -401,10 +454,9 @@ class EvalGatewayManager(GatewayManager):
         self._upstream_urls: list[str] = [upstream_url]
 
     def start(self, rollout_engine: RolloutEngine | None = None) -> None:  # type: ignore[override]
-        """Start gateway and register the static upstream URL(s).
+        """Start gateway, register the static upstream URL(s), and bring up the tunnel if configured.
 
-        ``rollout_engine`` is accepted for shape-compatibility with the
-        base class signature but ignored — this gateway has no engine.
+        ``rollout_engine`` is accepted for shape-compatibility with the base class but ignored.
         """
         if rollout_engine is not None:
             logger.warning("EvalGatewayManager.start ignores `rollout_engine` argument")
@@ -413,3 +465,6 @@ class EvalGatewayManager(GatewayManager):
             url = _normalize_worker_url(raw_url)
             worker_id = self.client.add_worker(url=url)
             logger.info("Registered worker %s -> %s (raw=%s)", worker_id, url, raw_url)
+
+        if self.tunnel_backend and not self.public_url:
+            self._start_tunnel()

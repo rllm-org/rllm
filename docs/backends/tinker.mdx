@@ -100,35 +100,37 @@ bash cookbooks/math/train_tinker.sh \
 
 ### Workflow Training
 
-Tinker backend also supports workflow-based training:
+For legacy `Workflow`-based training on tinker, use the unified trainer
+(``rllm.experimental.unified_trainer.AgentTrainer``) — the old
+``rllm.trainer.AgentTrainer(backend="tinker")`` path has been removed.
+See [`cookbooks/workflow/solver_judge/`](https://github.com/agentica-project/rllm/tree/main/cookbooks/workflow/solver_judge)
+for a runnable example:
 
 ```python train_workflow_tinker.py
 import hydra
 from omegaconf import DictConfig
+from solver_judge_flow import SolverJudgeWorkflow
 
-from examples.solver_judge_tinker.solver_judge_flow import SolverJudgeFlow
 from rllm.data.dataset import DatasetRegistry
-from rllm.trainer import WorkflowTrainer
+from rllm.experimental.unified_trainer import AgentTrainer
+from rllm.rewards.countdown_reward import countdown_reward_fn
 
-@hydra.main(
-    version_base=None,
-    config_path="../../rllm/trainer/config",
-    config_name="tinker_rl_trainer"
-)
+
+@hydra.main(config_path="pkg://rllm.experimental.config", config_name="unified", version_base=None)
 def main(config: DictConfig):
     train_dataset = DatasetRegistry.load_dataset("countdown", "train")
-    test_dataset = DatasetRegistry.load_dataset("countdown", "test")
+    val_dataset = DatasetRegistry.load_dataset("countdown", "test")
 
-    trainer = WorkflowTrainer(
-        config=config,
-        workflow_class=SolverJudgeFlow,
-        workflow_args={},
-        train_dataset=train_dataset,
-        val_dataset=test_dataset,
+    trainer = AgentTrainer(
         backend="tinker",
+        workflow_class=SolverJudgeWorkflow,
+        workflow_args={"n_solutions": 2, "reward_function": countdown_reward_fn},
+        config=config,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
     )
-
     trainer.train()
+
 
 if __name__ == "__main__":
     main()

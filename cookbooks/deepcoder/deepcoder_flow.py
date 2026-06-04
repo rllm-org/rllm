@@ -62,12 +62,14 @@ async def deepcoder_flow(task: Task, config: AgentConfig) -> Episode:
         {"role": "user", "content": question},
     ]
 
+    # top_k is not a chat.completions parameter; drop it from the rollout sampling params.
+    sampling = {k: v for k, v in config.sampling_params.items() if k != "top_k"}
+
     try:
         resp = await client.chat.completions.create(
             model=config.model,
             messages=messages,
-            temperature=0.6,
-            max_tokens=16384,
+            **sampling,
             timeout=600,
         )
         content = resp.choices[0].message.content or ""
