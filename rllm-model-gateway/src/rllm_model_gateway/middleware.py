@@ -15,7 +15,12 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
 
-_SESSION_PATH_RE = re.compile(r"/sessions/([^/]+)(/v1(?:/.*)?)$")
+# ``.+?`` (non-greedy) so multi-segment session IDs work — e.g.
+# ``harbor/hello-world:0`` from a namespaced Harbor task. The ``/v1``
+# suffix anchor forces the shortest match that still leaves a valid
+# ``/v1[/...]`` tail, so legacy single-segment ids (no slash) capture
+# identically to the old ``[^/]+`` pattern.
+_SESSION_PATH_RE = re.compile(r"/sessions/(.+?)(/v1(?:/.*)?)$")
 
 
 class SessionRoutingMiddleware:

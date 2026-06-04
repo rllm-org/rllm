@@ -14,6 +14,10 @@ You don't need a harness for everything — for one-off agents and cookbooks, ha
 | `react` | `rllm.harnesses.react.ReActHarness` | One-shot LLM call. Default for data tasks (math, MCQ, QA). |
 | `bash` | `rllm.harnesses.bash.BashHarness` | Multi-turn ReAct bash loop inside a sandbox. Default for sandbox tasks. |
 | `claude-code` | `rllm.harnesses.claude_code.ClaudeCodeHarness` | Run the Claude Code CLI inside the sandbox. |
+| `opencode` | `rllm.harnesses.opencode.OpenCodeHarness` | Run the opencode-ai CLI inside the sandbox. |
+| `mini-swe-agent` | `rllm.harnesses.mini_swe_agent.MiniSweAgentHarness` | Run mini-swe-agent inside the sandbox. |
+| `codex` | `rllm.harnesses.codex.CodexHarness` | Run the OpenAI Codex CLI inside the sandbox. |
+| `qwen-code` | `rllm.harnesses.qwen_code.QwenCodeHarness` | Run the Qwen Code CLI inside the sandbox. |
 
 The registry lives at `rllm/registry/agents.json`. `load_agent("react")` resolves to `ReActHarness()`.
 
