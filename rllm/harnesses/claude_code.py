@@ -2,12 +2,22 @@
 
 Subclass of :class:`BaseCliHarness`, so it inherits the install/run
 lifecycle, gateway-trace-driven trajectory wiring (``run() -> None``),
-host-loopback rewrite (so ``127.0.0.1`` resolves to ``host.docker.internal``
-inside Docker), and bearer-token auth handling.
+host-loopback rewrite, and bearer-token auth handling.
 
-Anthropic's CLI reads ``ANTHROPIC_BASE_URL`` and ``ANTHROPIC_API_KEY``;
-the gateway-routed URL is ``<base>/sessions/<uid>`` (the SDK appends
-``/v1/messages`` itself so we strip a trailing ``/v1``).
+The install + invocation shape mirrors harbor's verified-working
+``claude-code`` agent (``harbor/src/harbor/agents/installed/claude_code.py``).
+Two facts are load-bearing:
+
+1. **Use the official Anthropic installer**
+   (``curl https://claude.ai/install.sh | bash``) on apt/yum distros;
+   fall back to ``npm i -g @anthropic-ai/claude-code`` only on Alpine
+   (where the install script's binary doesn't run). The installer
+   drops ``claude`` into ``$HOME/.local/bin`` — the agent's PATH must
+   pick that up at run time.
+2. **``IS_SANDBOX=1`` is required for ``--permission-mode=bypassPermissions``**.
+   Without it the CLI ignores the flag and silently exits without
+   making any LLM calls (which is what produced the previous "ran but
+   no traces" symptom).
 """
 
 from __future__ import annotations
@@ -17,34 +27,47 @@ import shlex
 from rllm.harnesses.cli_harness import BaseCliHarness
 from rllm.types import AgentConfig, Task
 
-# nvm-based bootstrap mirrors :mod:`rllm.harnesses.opencode`. apt-based
-# nodejs/npm installs on swebench testbeds (Ubuntu jammy) routinely
-# fail with stale GPG signatures; ``-qq`` masks the error and the
-# script proceeds to ``npm`` which is then not on PATH.
+# Install strategy mirrors harbor: Alpine → npm (the install script's
+# musl-linked binary fails on Alpine), everyone else → official curl
+# script (more reliable than nvm bootstrap, doesn't need a node toolchain).
 _INSTALL_SCRIPT = r"""
-set -e
+set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
-if ! command -v claude >/dev/null 2>&1; then
-    if ! command -v node >/dev/null 2>&1; then
-        if ! command -v curl >/dev/null 2>&1; then
-            if command -v apt-get >/dev/null 2>&1; then
-                apt-get update -qq && apt-get install -y -qq curl ca-certificates
-            elif command -v apk >/dev/null 2>&1; then
-                apk add --no-cache curl bash ca-certificates
-            else
-                echo "claude-code install requires curl" >&2
-                exit 1
-            fi
+if ! { export PATH="$HOME/.local/bin:$PATH"; command -v claude >/dev/null 2>&1; }; then
+    # Make sure curl + bash are available before pulling the install script.
+    if ! command -v curl >/dev/null 2>&1; then
+        if command -v apk >/dev/null 2>&1; then
+            apk add --no-cache curl bash nodejs npm ca-certificates
+        elif command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq && apt-get install -y -qq curl ca-certificates
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y -q curl ca-certificates
         fi
-        export NVM_DIR="$HOME/.nvm"
-        curl -fsSL -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh | bash
-        \. "$NVM_DIR/nvm.sh"
-        nvm install 22
     fi
-    [ -s "$HOME/.nvm/nvm.sh" ] && \. "$HOME/.nvm/nvm.sh"
-    npm install -g @anthropic-ai/claude-code
+    if command -v apk >/dev/null 2>&1; then
+        # Alpine: the curl install script ships a glibc binary that won't
+        # run under musl. npm is the supported path.
+        if ! command -v npm >/dev/null 2>&1; then
+            apk add --no-cache nodejs npm
+        fi
+        npm install -g @anthropic-ai/claude-code
+    else
+        # Anthropic's official installer lays ``claude`` into ``$HOME/.local/bin``.
+        curl -fsSL https://claude.ai/install.sh | bash
+    fi
 fi
+# Persist PATH for future agent execs; current root-exec also needs it
+# to satisfy the ``claude --version`` smoke check below.
+grep -q 'HOME/.local/bin' "$HOME/.bashrc" 2>/dev/null \
+    || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+export PATH="$HOME/.local/bin:$PATH"
+claude --version >/dev/null
 """
+
+# Per-task CLAUDE_CONFIG_DIR keeps Claude Code's local state (debug logs,
+# project sessions, statsig) out of $HOME/.claude — useful when many runs
+# share an image, and mandatory for read-only $HOME setups.
+_CLAUDE_CONFIG_DIR = "/tmp/claude-config"
 
 
 class ClaudeCodeHarness(BaseCliHarness):
@@ -59,15 +82,42 @@ class ClaudeCodeHarness(BaseCliHarness):
         return _INSTALL_SCRIPT
 
     def build_env(self, task: Task, config: AgentConfig) -> dict[str, str]:
-        # Anthropic's SDK appends ``/v1/messages`` itself, so trim a
+        # Anthropic's SDK appends ``/v1/messages`` itself, so strip a
         # trailing ``/v1`` from the gateway URL or it doubles up.
         gateway_url = self._container_url(config.base_url)
         anthropic_url = gateway_url.rstrip("/").removesuffix("/v1") or gateway_url
-        return {
+        api_key = self.gateway_api_key(config, "ANTHROPIC_API_KEY")
+        model = config.model
+
+        env: dict[str, str] = {
             "ANTHROPIC_BASE_URL": anthropic_url,
-            "ANTHROPIC_API_KEY": self.gateway_api_key(config, "ANTHROPIC_API_KEY"),
-            "ANTHROPIC_MODEL": config.model,
+            "ANTHROPIC_API_KEY": api_key,
+            "ANTHROPIC_MODEL": model,
+            # IS_SANDBOX=1 is the gate for ``--permission-mode=bypassPermissions``
+            # to actually take effect. Without it the CLI exits silently
+            # on the first tool call that would touch the filesystem.
+            "IS_SANDBOX": "1",
+            # Isolate Claude Code state to a per-task directory so the
+            # harness doesn't pollute $HOME between runs.
+            "CLAUDE_CONFIG_DIR": _CLAUDE_CONFIG_DIR,
+            # Skip the telemetry POSTs the CLI fires on startup — they
+            # add latency and have nothing to do with the eval.
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            # Allow long-running tool calls (file watches, build steps)
+            # to keep going across agent turns instead of being killed
+            # on the first idle window.
+            "FORCE_AUTO_BACKGROUND_TASKS": "1",
+            "ENABLE_BACKGROUND_TASKS": "1",
+            # When the gateway redirects to a non-Anthropic model, the
+            # CLI's internal "auto" model selection (sonnet/opus/haiku
+            # aliases used for sub-agents and resumed sessions) still
+            # routes — point all three at the chosen model.
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+            "CLAUDE_CODE_SUBAGENT_MODEL": model,
         }
+        return env
 
     def build_invocation(
         self,
@@ -75,18 +125,22 @@ class ClaudeCodeHarness(BaseCliHarness):
         task: Task,
         config: AgentConfig,
     ) -> str:
-        # ``--bare`` is the key flag for non-interactive auth: claude
-        # otherwise gates ``-p`` on an OAuth login check (``Not logged
-        # in · Please run /login``) that exits 0 with no trace, even
-        # when ``ANTHROPIC_API_KEY`` is set. Bare mode skips OAuth +
-        # keychain reads and uses the env-var key directly, which is
-        # what we want when routing through the rllm gateway.
-        # Source nvm so the npm-installed ``claude`` binary is on PATH;
-        # silent no-op when node came from a system package.
+        # Match harbor's verified flag shape:
+        #   claude --verbose --output-format=stream-json
+        #          --permission-mode=bypassPermissions
+        #          --print -- <prompt>
+        # ``--print`` is the non-interactive flag (printable result on
+        # stdout, then exit). ``--`` is the flag terminator so prompts
+        # beginning with ``-`` aren't reparsed as options.
+        # ``mkdir -p $CLAUDE_CONFIG_DIR`` matches harbor's pre-run setup —
+        # the CLI ENOENTs trying to write its debug log if the dir is
+        # missing.
         return (
             f"{self._cd_prefix(task)}"
-            f". $HOME/.nvm/nvm.sh 2>/dev/null; "
-            f"claude --bare -p {shlex.quote(instruction)} "
-            f"--output-format text --permission-mode acceptEdits "
+            f'export PATH="$HOME/.local/bin:$PATH"; '
+            f"mkdir -p {shlex.quote(_CLAUDE_CONFIG_DIR)}; "
+            f"claude --verbose --output-format=stream-json "
+            f"--permission-mode=bypassPermissions "
+            f"--print -- {shlex.quote(instruction)} "
             f"</dev/null 2>&1 | tee {shlex.quote(self.stdout_log_path)}"
         )
