@@ -128,14 +128,20 @@ class EvalProxyManager(_ProxyManagerBase):
         prefix = info.litellm_prefix if info else self.provider
         litellm_model = f"{prefix}/{self.model_name}"
 
+        litellm_params: dict[str, Any] = {
+            "model": litellm_model,
+            "api_key": self.api_key,
+        }
+        # Providers with a fixed OpenAI-compatible endpoint (e.g. Tinker) route
+        # through the ``openai/`` adapter pinned to their ``api_base``.
+        if info and info.base_url:
+            litellm_params["api_base"] = info.base_url
+
         return {
             "model_list": [
                 {
                     "model_name": self.model_name,
-                    "litellm_params": {
-                        "model": litellm_model,
-                        "api_key": self.api_key,
-                    },
+                    "litellm_params": litellm_params,
                 }
             ],
             "litellm_settings": {

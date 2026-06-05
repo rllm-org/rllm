@@ -103,9 +103,24 @@ def _select_provider(existing: RllmConfig) -> str:
     return provider_ids[idx]
 
 
-def _select_model(provider: str, existing: RllmConfig) -> str:
-    """Interactive model selection with option to enter a custom model."""
+def _select_model(provider: str, existing: RllmConfig, api_key: str | None = None) -> str:
+    """Interactive model selection with option to enter a custom model.
+
+    For Tinker, the model list is pulled live from the server's capabilities
+    (``api_key`` lets the fetch authenticate); the curated list is the fallback.
+    """
     models = PROVIDER_MODELS.get(provider, [])
+
+    if provider == "tinker":
+        from rllm.eval.config import fetch_tinker_models
+
+        with console.status("[dim]Fetching Tinker model catalog...[/]"):
+            live = fetch_tinker_models(api_key)
+        if live:
+            models = live
+            console.print(f"  [success]Loaded {len(live)} Tinker models[/] [dim](base IDs; you can also paste a tinker:// checkpoint path)[/]")
+        else:
+            console.print("  [dim]Could not fetch live catalog — showing curated list (or enter a tinker:// path manually).[/]")
 
     # For custom provider or providers with no curated list, prompt for free-text
     if provider == "custom" or not models:

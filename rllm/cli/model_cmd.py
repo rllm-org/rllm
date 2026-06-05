@@ -129,7 +129,7 @@ def _do_swap(existing: RllmConfig) -> None:
 
     # Model — pre-select current if same provider
     model_existing = RllmConfig(provider=provider, model=existing.model if existing.provider == provider else "")
-    model = _select_model(provider, model_existing)
+    model = _select_model(provider, model_existing, api_key=api_keys.get(provider))
     console.print()
 
     config = RllmConfig(provider=provider, model=model, api_keys=api_keys, base_url=base_url)
@@ -184,7 +184,7 @@ def model_setup():
         api_key = _prompt_api_key(provider)
     console.print()
 
-    model_name = _select_model(provider, existing)
+    model_name = _select_model(provider, existing, api_key=api_key)
     console.print()
 
     api_keys = {}
