@@ -9,6 +9,12 @@ import json
 import os
 from dataclasses import dataclass, field
 
+# Tinker's (beta) OpenAI-compatible inference endpoint. Used as a fixed
+# ``api_base`` so the Tinker provider routes through LiteLLM's OpenAI adapter
+# exactly like any other provider. See
+# https://tinker-docs.thinkingmachines.ai/tinker/compatible-apis/openai/
+TINKER_OAI_BASE_URL = "https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1"
+
 
 @dataclass
 class ProviderInfo:
@@ -20,6 +26,7 @@ class ProviderInfo:
     env_key: str  # Environment variable for API key, e.g. "OPENAI_API_KEY"
     default_model: str  # Default model name
     models: list[str] = field(default_factory=list)  # Curated model list
+    base_url: str = ""  # Fixed OpenAI-compatible api_base (e.g. Tinker); blank = use provider default
 
 
 PROVIDER_REGISTRY: list[ProviderInfo] = [
@@ -226,6 +233,31 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
             "MiniMax-M2.7-highspeed",
         ],
     ),
+    # --- Tinker (Thinking Machines) — beta OpenAI-compatible endpoint ---
+    ProviderInfo(
+        id="tinker",
+        label="Tinker (Thinking Machines)",
+        # Route through LiteLLM's OpenAI-compatible adapter pointed at the
+        # Tinker endpoint (``base_url`` below). The OAI endpoint accepts both
+        # base model IDs (below) and ``tinker://`` sampler checkpoint paths.
+        litellm_prefix="openai",
+        env_key="TINKER_API_KEY",
+        default_model="Qwen/Qwen3-8B",
+        # Curated fallback shown when the live catalog can't be fetched
+        # (offline / no key). ``rllm model setup`` pulls the full, live list
+        # from ``ServiceClient.get_server_capabilities()`` when possible.
+        models=[
+            "Qwen/Qwen3-8B",
+            "Qwen/Qwen3-32B",
+            "Qwen/Qwen3-4B-Instruct-2507",
+            "Qwen/Qwen3-30B-A3B-Instruct-2507",
+            "meta-llama/Llama-3.1-8B-Instruct",
+            "meta-llama/Llama-3.3-70B-Instruct",
+            "deepseek-ai/DeepSeek-V3.1",
+            "openai/gpt-oss-20b",
+        ],
+        base_url=TINKER_OAI_BASE_URL,
+    ),
     # --- Custom endpoint (last) ---
     ProviderInfo(
         id="custom",
@@ -243,6 +275,9 @@ DEFAULT_MODELS: dict[str, str] = {p.id: p.default_model for p in PROVIDER_REGIST
 PROVIDER_MODELS: dict[str, list[str]] = {p.id: p.models for p in PROVIDER_REGISTRY if p.models}
 PROVIDER_ENV_KEYS: dict[str, str] = {p.id: p.env_key for p in PROVIDER_REGISTRY if p.env_key}
 
+# Fixed OpenAI-compatible api_base per provider (only set for e.g. Tinker)
+PROVIDER_BASE_URLS: dict[str, str] = {p.id: p.base_url for p in PROVIDER_REGISTRY if p.base_url}
+
 # Index for fast lookup
 _PROVIDER_INDEX: dict[str, ProviderInfo] = {p.id: p for p in PROVIDER_REGISTRY}
 
@@ -250,6 +285,39 @@ _PROVIDER_INDEX: dict[str, ProviderInfo] = {p.id: p for p in PROVIDER_REGISTRY}
 def get_provider_info(provider_id: str) -> ProviderInfo | None:
     """Look up a provider by ID. Returns None if not found."""
     return _PROVIDER_INDEX.get(provider_id)
+
+
+def fetch_tinker_models(api_key: str | None = None) -> list[str]:
+    """Return Tinker's live base-model catalog (best-effort).
+
+    Queries ``ServiceClient.get_server_capabilities()`` for the models the
+    Tinker server currently exposes. Any base model here can be sampled via
+    the OpenAI-compatible endpoint without training (a ``tinker://`` sampler
+    checkpoint path also works, but isn't enumerable here).
+
+    Returns an empty list on any failure (tinker not installed, no API key,
+    network error) so callers can fall back to the curated static list.
+    """
+    key = api_key or os.environ.get("TINKER_API_KEY", "")
+    if not key:
+        return []
+    # ServiceClient reads TINKER_API_KEY from the environment; set it for the
+    # duration of the call without clobbering any pre-existing value.
+    prev = os.environ.get("TINKER_API_KEY")
+    os.environ["TINKER_API_KEY"] = key
+    try:
+        import tinker
+
+        caps = tinker.ServiceClient().get_server_capabilities()
+        names = [m.model_name for m in caps.supported_models if m.model_name]
+        return sorted(names)
+    except Exception:
+        return []
+    finally:
+        if prev is None:
+            os.environ.pop("TINKER_API_KEY", None)
+        else:
+            os.environ["TINKER_API_KEY"] = prev
 
 
 def _rllm_home() -> str:
