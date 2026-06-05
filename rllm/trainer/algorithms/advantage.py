@@ -229,4 +229,66 @@ def collect_reward_and_advantage_from_trajectory_groups(
             final_metrics[f"advantage/{group_role}/min"] = np.min(advantages)
             final_metrics[f"advantage/{group_role}/fraction_zero"] = np.sum(np.abs(advantages) < 1e-8) / len(advantages)
 
+    # Per-group difficulty / learning-signal diagnostics (keyed by role to match
+    # the reward/* and advantage/* conventions above; single-agent runs emit a
+    # single "default" role). Gated on `collect_advantage` because these metrics
+    # describe the advantage signal (zero variance -> zero advantage); they are
+    # meaningless on the validation path where no advantages are computed.
+    #
+    # GRPO zeros the advantage of any group whose trajectory rewards have zero
+    # variance (advantage = (r - mean) / std). advantage/*/fraction_zero alone
+    # can't tell *why* a group is wasted: all-solved (too easy) vs all-failed
+    # (too hard). We decompose zero-variance groups by their mean reward, with
+    # boundaries at the reward extremes 1.0 / 0.0; >=/<= keeps any out-of-range
+    # rewards bucketed sensibly rather than silently dropped.
+    #
+    # The percentile metrics are two-stage, computed over the groups of a role:
+    #   group_reward_mean/pXX  -- pXX over each group's *mean* reward (task difficulty spread)
+    #   group_reward_std/pXX   -- pXX over each group's *within-group std* (signal magnitude spread)
+    if collect_advantage:
+        # Reuse `traj_rewards_by_role` (populated above for the advantage estimator)
+        # so the diagnostic and the advantage path always see the same per-group
+        # reward arrays. This also implicitly skips precomputed-advantage groups,
+        # matching the behavior of the `reward/*` block above.
+        for role, role_traj_rewards in traj_rewards_by_role.items():
+            group_means: list[float] = []
+            group_stds: list[float] = []
+            n_total = n_informative = n_too_easy = n_too_hard = 0
+            for rewards_arr in role_traj_rewards:
+                # Within-group reward variance is only meaningful with >=2 trajectories.
+                # A size-1 group has artifactual zero variance, not a real difficulty
+                # signal -- excludes any group that rejection sampling trimmed to a
+                # single trajectory.
+                if len(rewards_arr) < 2:
+                    continue
+                mean_r = float(rewards_arr.mean())
+                std_r = float(rewards_arr.std())
+                group_means.append(mean_r)
+                group_stds.append(std_r)
+                n_total += 1
+                if std_r >= 1e-8:
+                    n_informative += 1  # nonzero variance -> produces gradient
+                elif mean_r >= 1.0:
+                    n_too_easy += 1
+                elif mean_r <= 0.0:
+                    n_too_hard += 1
+                # else: zero-variance group stuck at a partial reward -- derivable
+                # from 1 - effective - too_easy - too_hard, so not logged.
+
+            if n_total == 0:
+                continue
+            # Prefixed `batch/{role}/` to sit in the same family as the existing
+            # per-batch difficulty metrics (batch/solve_*, batch/steps_per_traj/*),
+            # but role-keyed for multi-agent correctness (single-agent -> "default").
+            final_metrics[f"batch/{role}/total"] = n_total
+            final_metrics[f"batch/{role}/informative"] = n_informative
+            final_metrics[f"batch/{role}/fractions/effective"] = n_informative / n_total
+            final_metrics[f"batch/{role}/fractions/too_easy"] = n_too_easy / n_total
+            final_metrics[f"batch/{role}/fractions/too_hard"] = n_too_hard / n_total
+            means_arr = np.asarray(group_means, dtype=float)
+            stds_arr = np.asarray(group_stds, dtype=float)
+            for p in (10, 50, 90):
+                final_metrics[f"batch/{role}/group_reward_mean/p{p}"] = float(np.percentile(means_arr, p))
+                final_metrics[f"batch/{role}/group_reward_std/p{p}"] = float(np.percentile(stds_arr, p))
+
     return final_metrics
