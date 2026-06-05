@@ -92,13 +92,21 @@ class DaytonaSandbox:
 
     def __init__(self, name: str, image: str = "python:3.11-slim", **kwargs):
         # Lazy import so users without the SDK can still import this module.
-        from daytona import (
-            CreateSandboxFromImageParams,
-            CreateSandboxFromSnapshotParams,
-            Daytona,
-            Image,
-            Resources,
-        )
+        try:
+            from daytona import (
+                CreateSandboxFromImageParams,
+                CreateSandboxFromSnapshotParams,
+                Daytona,
+                Image,
+                Resources,
+            )
+        except ImportError as e:
+            raise ImportError(
+                "The Daytona sandbox backend requires the 'daytona' package. "
+                "Install with: pip install daytona  "
+                "(or, for harbor agents: pip install 'harbor[daytona]'). "
+                "Also set DAYTONA_API_KEY in your environment."
+            ) from e
 
         self.name = name
         self._image_spec = image
