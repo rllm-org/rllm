@@ -213,6 +213,57 @@ def test_missing_verifier_raises(tmp_path, cfg):
 
 
 # ---------------------------------------------------------------------------
+# Sandbox lifecycle (regression: SandboxedAgentFlow sandbox leak)
+# ---------------------------------------------------------------------------
+
+
+class _FakeSandbox:
+    """Tracks close() calls so tests can assert on the lifecycle."""
+
+    def __init__(self):
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+def test_hooks_close_sandbox_for_sandboxed_agent_flow(tmp_path, cfg, monkeypatch):
+    """Regression: SandboxedAgentFlow sandboxes were leaked because the hook
+    teardown went through ``task_flow.teardown_sandbox()``, which is a no-op
+    when ``set_sandbox()`` marked the sandbox externally-managed. The hook
+    creates the sandbox, so it must close it.
+    """
+    from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
+
+    fake_sandbox = _FakeSandbox()
+
+    class _SandboxedStub(SandboxedAgentFlow):
+        def run(self, task: Task, config: AgentConfig) -> Episode:
+            traj = Trajectory(uid="t", name="stub", task=task.id, steps=[], output="")
+            return Episode(id=task.id, task=task.id, trajectories=[traj])
+
+    # Force the hook to allocate a sandbox without doing any real I/O.
+    monkeypatch.setattr(
+        "rllm.eval._resolution._create_sandbox_for_task",
+        lambda task, backend: fake_sandbox,
+    )
+    monkeypatch.setattr(
+        "rllm.eval._resolution._setup_task_environment",
+        lambda task, sandbox: None,
+    )
+
+    bench = tmp_path / "bench"
+    bench.mkdir()
+    task = Task(id="0", instruction="x?", metadata={}, dataset_dir=bench)
+
+    hooks = SandboxTaskHooks(evaluator_override=_FixedEvaluator(EvalOutput(reward=1.0, is_correct=True)))
+    ctx = hooks.setup(task, _SandboxedStub(), "test-uid")
+    ctx.run_teardown()
+
+    assert fake_sandbox.close_calls == 1, "hook teardown must close the sandbox it created"
+
+
+# ---------------------------------------------------------------------------
 # build_dataset_evaluator (used by train CLI)
 # ---------------------------------------------------------------------------
 

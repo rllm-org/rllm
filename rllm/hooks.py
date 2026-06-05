@@ -79,18 +79,18 @@ class SandboxTaskHooks:
             evaluator = _resolve_evaluator(task, sandbox, verifier_kind, verifier_config)
 
         def teardown() -> None:
+            # The hook created the sandbox, so it owns the lifecycle.
+            # Going through ``task_flow.teardown_sandbox()`` would no-op
+            # because ``set_sandbox()`` marks it externally-managed, leaking
+            # cloud sandboxes (Daytona/Modal/e2b) that bill by duration.
             if sandbox is None:
                 return
+            try:
+                sandbox.close()
+            except Exception:
+                logger.exception("sandbox close failed")
             if isinstance(task_flow, SandboxedAgentFlow):
-                try:
-                    task_flow.teardown_sandbox()
-                except Exception:
-                    logger.exception("teardown_sandbox failed")
-            else:
-                try:
-                    sandbox.close()
-                except Exception:
-                    logger.exception("sandbox close failed")
+                task_flow._sandbox = None  # noqa: SLF001
 
         ctx_flow = task_flow if task_flow is not agent_flow else None
         return TaskContext(evaluator=evaluator, agent_flow=ctx_flow, teardown=teardown)
