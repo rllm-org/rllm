@@ -8,6 +8,8 @@ Subcommands:
 
 from __future__ import annotations
 
+import os
+
 import click
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
@@ -29,12 +31,43 @@ from rllm.eval.config import (
 )
 
 
+def _env_key_value(env_key: str) -> str:
+    """Resolve an API key from the environment, falling back to a ``.env`` file.
+
+    Checks ``os.environ`` first, then a ``.env`` in the current directory so the
+    user can just press Enter at the prompt instead of re-typing the key.
+    """
+    if not env_key:
+        return ""
+    val = os.environ.get(env_key, "")
+    if val:
+        return val
+    env_path = os.path.join(os.getcwd(), ".env")
+    if os.path.isfile(env_path):
+        try:
+            with open(env_path) as f:
+                for raw in f:
+                    line = raw.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    if key.strip() == env_key:
+                        return value.strip().strip('"').strip("'")
+        except OSError:
+            pass
+    return ""
+
+
 def _prompt_api_key(provider: str) -> str:
-    """Prompt for an API key, showing env var tip."""
+    """Prompt for an API key, defaulting to the provider's env var if present."""
     env_key = PROVIDER_ENV_KEYS.get(provider, "")
-    if env_key:
+    env_val = _env_key_value(env_key)
+    if env_val:
+        console.print(f"  [dim]Found {env_key} in your environment — press Enter to use it.[/]")
+    elif env_key:
         console.print(f"  [dim]Tip: you can also set {env_key} in your environment[/]")
-    api_key = Prompt.ask("  [label]API key[/]", password=True, console=console).strip()
+    api_key = Prompt.ask("  [label]API key[/]", password=True, default=env_val or None, show_default=False, console=console)
+    api_key = (api_key or "").strip()
     if not api_key:
         console.print("  [error]API key is required.[/]")
         raise SystemExit(1)
