@@ -7,8 +7,7 @@ credentials, model, and autonomy policy. So the load-bearing method here is
 :meth:`write_configs`, which emits that TOML pointing ZeroClaw's OpenAI-
 compatible client at the rLLM gateway.
 
-Three facts established from the ZeroClaw docs/installer (see
-``tmp/rllm_eval_new_harness/plans/plan.md`` Spike B):
+Three facts established from the ZeroClaw docs/installer:
 
 1. **Install** via the official installer with ``--prebuilt --skip-onboard``
    (downloads a checksum-verified release binary; no Rust toolchain needed).
@@ -146,12 +145,16 @@ class ZeroClawHarness(BaseCliHarness):
             f"mkdir -p $HOME/.zeroclaw && cat > {_CONFIG_PATH} << 'ZC_CONFIG_EOF'\n{content}\nZC_CONFIG_EOF",
             env=env,
         )
-        # CRITICAL: ZeroClaw operates in its OWN workspace ($HOME/.zeroclaw/
-        # workspace), not the shell cwd. rLLM uploads the task fixtures to the
-        # task workdir (/workspace), so without this the agent can't see them
-        # and answers "I don't have access to your files". Point ZeroClaw's
-        # workspace at the task workdir via a symlink so file_read/shell see
-        # the fixtures.
+        # ZeroClaw operates in its OWN workspace ($HOME/.zeroclaw/workspace),
+        # not the shell cwd. rLLM uploads the task fixtures to the task workdir
+        # (e.g. /workspace), so without this the agent can't see them. Point
+        # ZeroClaw's workspace at the task workdir via a symlink so its
+        # file_read/shell tools operate on the fixtures.
+        #
+        # (We deliberately use a symlink rather than the ZEROCLAW_WORKSPACE env
+        # var: that var has version-dependent, buggy config-location coupling —
+        # upstream issue #5465 / PR #731 — and setting it made ZeroClaw exit at
+        # startup before any LLM call in testing. The symlink is robust.)
         workdir = task.metadata.get("workdir")
         if workdir:
             self._exec_agent(
@@ -160,9 +163,13 @@ class ZeroClawHarness(BaseCliHarness):
             )
 
     # Prepended to the task instruction so the agent knows its data lives in
-    # the workspace (the Claw-Eval `query` assumes a tool/integration provides
-    # it). Standard agent-harness practice (cf. SWE harnesses describing the
-    # repo). Keeps failures attributable to reasoning, not "didn't find data".
+    # the workspace. The symlink (write_configs) makes the fixtures *reachable*,
+    # but ZeroClaw still doesn't *look*: tested without this preamble, the agent
+    # replies "I don't have access to your email account" and makes a single LLM
+    # call (reward 0) instead of exploring. With it, it `ls`/`file_read`s the
+    # fixtures and completes (4+ tool steps, reward 1). This mirrors how SWE
+    # harnesses must tell the agent about the repo — it shapes *where to look*,
+    # not *what answer to give*, so it keeps failures attributable to reasoning.
     _WORKSPACE_PREAMBLE = (
         "You are an autonomous agent working in a sandbox. All files and data needed for this "
         "task are already present in your workspace (your working directory). Begin by exploring "
@@ -172,6 +179,8 @@ class ZeroClawHarness(BaseCliHarness):
 
     def build_invocation(self, instruction: str, task: Task, config: AgentConfig) -> str:
         # ``-m`` runs a single non-interactive turn and exits. ``</dev/null``
-        # guarantees no stdin block if the binary probes for a TTY.
+        # guarantees no stdin block if the binary probes for a TTY. The agent's
+        # workspace (symlinked to the task workdir in write_configs) holds the
+        # fixtures; the preamble tells it to read them with file_read/shell.
         prompt = self._WORKSPACE_PREAMBLE + instruction
         return f'{self._cd_prefix(task)}export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"; zeroclaw agent -m {shlex.quote(prompt)} </dev/null 2>&1 | tee {shlex.quote(self.stdout_log_path)}'
