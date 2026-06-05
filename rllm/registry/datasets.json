@@ -1,6 +1,18 @@
 {
   "version": 1,
   "datasets": {
+    "claw_eval": {
+      "description": "Claw-Eval general split: 161 personal-assistant agent tasks (sandbox; LLM-judge graded)",
+      "source": "claw-eval/Claw-Eval",
+      "builder": "rllm.data.claw_eval_builder:build_benchmark",
+      "category": "agentic",
+      "splits": [
+        "general"
+      ],
+      "eval_split": "general",
+      "default_agent": "zeroclaw",
+      "reward_fn": "claw_eval_reward_fn"
+    },
     "gsm8k": {
       "description": "Grade school math word problems (8.5K train, 1.3K test)",
       "source": "openai/gsm8k",

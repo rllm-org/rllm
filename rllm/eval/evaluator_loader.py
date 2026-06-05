@@ -98,6 +98,7 @@ _EVALUATOR_REGISTRY: dict[str, str] = {
     "ifeval_reward_fn": "rllm.eval.reward_fns.ifeval:evaluate",
     "bfcl_reward_fn": "rllm.eval.reward_fns.bfcl:evaluate",
     "llm_judge_reward_fn": "rllm.eval.reward_fns.llm_judge:evaluate",
+    "claw_eval_reward_fn": "rllm.eval.reward_fns.claw_eval:evaluate",
     "llm_equality_reward_fn": "rllm.eval.reward_fns.llm_equality:evaluate",
     "translation_reward_fn": "rllm.eval.reward_fns.translation:evaluate",
     "widesearch_reward_fn": "rllm.eval.reward_fns.widesearch:evaluate",

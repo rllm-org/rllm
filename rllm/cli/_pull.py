@@ -370,11 +370,30 @@ def _pull_harbor_dataset(name: str, catalog_entry: dict) -> None:
     logger.info("Registered Harbor dataset %s/%s (%d tasks)", name, split, len(data_list))
 
 
+def _pull_built_dataset(name: str, catalog_entry: dict, builder_path: str) -> None:
+    """Build a sandbox (task-per-directory) benchmark via a builder function.
+
+    The builder is specified as ``module:function`` and materializes the
+    benchmark directory under ``~/.rllm/datasets/<name>/`` directly (the
+    ``rllm eval`` materialised-benchmark redirect then resolves it by name).
+    It receives ``name``, ``split``, ``out_dir`` and ``catalog_entry`` kwargs.
+
+    Unlike HF/generator datasets (which emit row data), sandbox datasets are
+    whole workspaces, so they bypass the row-materialize path entirely.
+    """
+    build_fn = _load_transform(builder_path)
+    out_dir = os.path.join(_DATASETS_ROOT, name)
+    split = catalog_entry.get("eval_split") or (catalog_entry.get("splits") or ["test"])[0]
+    build_fn(name=name, split=split, out_dir=out_dir, catalog_entry=catalog_entry)
+    logger.info("Built sandbox benchmark '%s' at %s", name, out_dir)
+
+
 def pull_dataset(name: str, catalog_entry: dict) -> None:
     """Download a dataset from HuggingFace, Harbor, or generate it, and register locally.
 
     Supports optional field_map, hf_config, aggregate_configs, transform,
-    generator for procedurally-generated datasets, and Harbor registry datasets.
+    generator for procedurally-generated datasets, builder for sandbox
+    (task-per-directory) benchmarks, and Harbor registry datasets.
 
     Args:
         name: Dataset name (e.g., 'gsm8k').
@@ -384,6 +403,13 @@ def pull_dataset(name: str, catalog_entry: dict) -> None:
     source = catalog_entry.get("source", "")
     if source.startswith("harbor:"):
         _pull_harbor_dataset(name, catalog_entry)
+        return
+
+    # Check for a builder (sandbox/task-per-directory benchmarks built from a
+    # mix of HF rows + fixture archives — they produce a directory, not rows).
+    builder_path = catalog_entry.get("builder")
+    if builder_path:
+        _pull_built_dataset(name, catalog_entry, builder_path)
         return
 
     # Check for a generator function (procedural datasets that don't live on HF)
