@@ -50,6 +50,11 @@
       "module": "rllm.harnesses.oracle",
       "function": "OracleHarness",
       "description": "Run the task's reference solution (solution/solve.sh) without an LLM. Smoke-test for verifier + image."
+    },
+    "zeroclaw": {
+      "module": "rllm.harnesses.zeroclaw",
+      "function": "ZeroClawHarness",
+      "description": "Run the ZeroClaw autonomous-assistant CLI inside the sandbox."
     }
   }
 }
