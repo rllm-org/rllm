@@ -96,6 +96,7 @@ class ReverseProxy:
         self.local_handler = local_handler
         self.cumulative_token_mode = cumulative_token_mode
         self.renderer = renderer
+        self.weight_version: int | None = None
         self._http: httpx.AsyncClient | None = None
         self._pending_traces: set[asyncio.Task[None]] = set()
         self._accumulators: dict[str, TokenAccumulator] = {}
@@ -226,7 +227,7 @@ class ReverseProxy:
 
         # Persist trace
         if session_id and response_body:
-            trace = build_trace_record(session_id, request_body, response_body, latency_ms)
+            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=self.weight_version)
             await self._persist(trace)
 
             # Ingest first turn into accumulator for cumulative token mode
@@ -347,7 +348,7 @@ class ReverseProxy:
         response_body["object"] = "chat.completion"
 
         if session_id and response_body:
-            trace = build_trace_record(session_id, request_body, response_body, latency_ms)
+            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=self.weight_version)
             await self._persist(trace)
 
         sanitized = response_body
@@ -483,7 +484,7 @@ class ReverseProxy:
                 # Ingest accumulated token data
                 if chunks:
                     latency_ms = (time.perf_counter() - t0) * 1000
-                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms)
+                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=self.weight_version)
                     prompt_ids = trace.prompt_token_ids or token_ids
                     completion_ids = trace.completion_token_ids
 
@@ -609,7 +610,7 @@ class ReverseProxy:
                 # finally block may run during GeneratorExit, where await
                 # on real async I/O (e.g. aiosqlite) is not reliable.
                 if session_id and chunks:
-                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms)
+                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=self.weight_version)
                     task = asyncio.create_task(
                         self._safe_store(
                             trace.trace_id,
@@ -650,7 +651,7 @@ class ReverseProxy:
 
         # Persist trace from the full response
         if session_id and response_body:
-            trace = build_trace_record(session_id, request_body, response_body, latency_ms)
+            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=self.weight_version)
             await self._persist(trace)
 
         needs_strip_vllm = self.strip_vllm

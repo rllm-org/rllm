@@ -130,6 +130,18 @@ class GatewayClient:
         resp.raise_for_status()
         return [WorkerInfo(**w) for w in resp.json()]
 
+    # -- Weight version ----------------------------------------------------
+
+    def set_weight_version(self, weight_version: int) -> int:
+        resp = self._http.post(f"{self.gateway_url}/admin/weight_version", json={"weight_version": weight_version})
+        resp.raise_for_status()
+        return resp.json()["weight_version"]
+
+    def get_weight_version(self) -> int | None:
+        resp = self._http.get(f"{self.gateway_url}/admin/weight_version")
+        resp.raise_for_status()
+        return resp.json().get("weight_version")
+
     # -- Lifecycle ---------------------------------------------------------
 
     def flush(self, timeout: float = 30.0) -> bool:
@@ -264,6 +276,18 @@ class AsyncGatewayClient:
         resp = await self._http.get(f"{self.gateway_url}/admin/workers")
         resp.raise_for_status()
         return [WorkerInfo(**w) for w in resp.json()]
+
+    # -- Weight version ----------------------------------------------------
+
+    async def set_weight_version(self, weight_version: int) -> int:
+        resp = await self._http.post(f"{self.gateway_url}/admin/weight_version", json={"weight_version": weight_version})
+        resp.raise_for_status()
+        return resp.json()["weight_version"]
+
+    async def get_weight_version(self) -> int | None:
+        resp = await self._http.get(f"{self.gateway_url}/admin/weight_version")
+        resp.raise_for_status()
+        return resp.json().get("weight_version")
 
     # -- Lifecycle ---------------------------------------------------------
 

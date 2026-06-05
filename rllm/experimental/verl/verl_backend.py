@@ -339,6 +339,8 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             assert fwd_bwd == async_cfg.mini_batch_size, (
                 f"VerlBackend requires async_training.fwd_bwd_group_size == mini_batch_size (got {async_cfg.fwd_bwd_group_size} vs {async_cfg.mini_batch_size})"
             )
+            if async_cfg.get("partial_rollout", False) and self.config.rllm.get("remote_runtime", {}).get("enabled", False):
+                raise ValueError("VerlBackend: async_training.partial_rollout is not supported with remote_runtime; set it to false.")
         if self.config.rllm.stepwise_advantage.mode != "broadcast":
             # automatically set the stepwise_advantage_mode to "broadcast", the warning is already shown in AlgorithmConfig.from_config
             self.config.rllm.stepwise_advantage.mode = "broadcast"

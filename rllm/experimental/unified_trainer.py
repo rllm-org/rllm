@@ -326,6 +326,7 @@ class UnifiedTrainer:
 
         if hasattr(self, "_gateway") and self._gateway is not None:
             self._gateway.start(self.backend.rollout_engine)
+            self._gateway.set_weight_version(trainer_state.weight_version)
 
         if self.rllm_config.trainer.get("val_before_train", True):
             await self._validate_async(trainer_state)
@@ -711,6 +712,8 @@ class UnifiedTrainer:
         await self.backend.on_policy_updated(trainer_state)
         if rollout_engine is not None:
             rollout_engine.weight_version = trainer_state.weight_version
+        if self._gateway is not None:
+            await self._gateway.aset_weight_version(trainer_state.weight_version)
         coordinator.on_sync_complete()
 
         if not self.async_config.partial_rollout:
