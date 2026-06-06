@@ -7,10 +7,10 @@ import json
 import os
 from importlib.metadata import entry_points
 
+from rllm import paths
 from rllm.types import AgentFlow
 
-_RLLM_HOME = os.environ.get("RLLM_HOME", os.path.expanduser("~/.rllm"))
-_USER_AGENTS_FILE = os.path.join(_RLLM_HOME, "agents.json")
+_USER_AGENTS_FILE = paths.rllm_path("agents.json")
 
 
 def _load_user_agents() -> dict[str, dict]:

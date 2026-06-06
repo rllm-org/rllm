@@ -15,6 +15,7 @@ import sqlite3
 import threading
 import time
 
+from rllm import paths
 from rllm.sandbox.protocol import ExecutionResult
 from rllm.sandbox.serialization import deserialize_execution_result
 
@@ -48,7 +49,7 @@ class ExecutionResultStore:
 
     def __init__(self, db_path: str | None = None, pool_size: int = 2):
         if db_path is None:
-            db_dir = os.path.expanduser("~/.rllm")
+            db_dir = paths.rllm_home()
             os.makedirs(db_dir, exist_ok=True)
             db_path = os.path.join(db_dir, "traces.db")
         else:

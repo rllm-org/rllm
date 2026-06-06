@@ -15,11 +15,11 @@ import os
 from importlib.metadata import entry_points
 from typing import Any
 
+from rllm import paths
 from rllm.eval.types import EvalOutput, Signal
 from rllm.types import Evaluator
 
-_RLLM_HOME = os.environ.get("RLLM_HOME", os.path.expanduser("~/.rllm"))
-_USER_EVALUATORS_FILE = os.path.join(_RLLM_HOME, "evaluators.json")
+_USER_EVALUATORS_FILE = paths.rllm_path("evaluators.json")
 
 
 def _load_user_evaluators() -> dict[str, dict]:

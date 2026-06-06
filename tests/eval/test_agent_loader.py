@@ -122,7 +122,6 @@ class TestRegisterAgent:
         """Point the agent registry at a temp directory."""
         agents_file = str(tmp_path / "agents.json")
         monkeypatch.setattr("rllm.eval.agent_loader._USER_AGENTS_FILE", agents_file)
-        monkeypatch.setattr("rllm.eval.agent_loader._RLLM_HOME", str(tmp_path))
 
     def test_register_string_path_and_load(self):
         register_agent("test_agent", "rllm.harnesses.react:ReActHarness")

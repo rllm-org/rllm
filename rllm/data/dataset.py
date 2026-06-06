@@ -4,6 +4,8 @@ import os
 import shutil
 from typing import Any
 
+from rllm import paths
+
 logger = logging.getLogger(__name__)
 
 
@@ -213,9 +215,9 @@ class DatasetRegistry:
     that includes metadata alongside file paths.
     """
 
-    _RLLM_HOME = os.path.expanduser(os.environ.get("RLLM_HOME", "~/.rllm"))
-    _REGISTRY_FILE = os.path.join(_RLLM_HOME, "datasets", "registry.json")
-    _DATASET_DIR = os.path.join(_RLLM_HOME, "datasets")
+    _RLLM_HOME = paths.rllm_home()
+    _REGISTRY_FILE = paths.rllm_path("datasets", "registry.json")
+    _DATASET_DIR = paths.datasets_dir()
 
     # Legacy paths for v1 migration
     _LEGACY_REGISTRY_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "registry")
