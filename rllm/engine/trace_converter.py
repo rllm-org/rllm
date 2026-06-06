@@ -50,6 +50,7 @@ def trace_record_to_step(trace: TraceRecord) -> Step:
         prompt_ids=trace.prompt_token_ids,
         completion_ids=trace.completion_token_ids,
         logprobs=trace.logprobs or [],
+        routing_matrices=trace.routing_matrices,
         prompt_length=len(trace.prompt_token_ids),
         completion_length=len(trace.completion_token_ids),
         finish_reason=trace.finish_reason,
