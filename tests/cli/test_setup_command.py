@@ -6,7 +6,7 @@ import pytest
 from click.testing import CliRunner
 
 from rllm.cli.main import cli
-from rllm.eval.config import RllmConfig, load_config, save_config
+from rllm.eval.config import PROVIDER_MODELS, RllmConfig, load_config, save_config
 
 
 @pytest.fixture
@@ -24,7 +24,7 @@ def runner():
 
 def test_setup_fresh(runner, tmp_rllm_home):
     """Setup with no existing config should prompt and save."""
-    # Numbered fallback: 1 = openai, API key, 1 = gpt-5-nano
+    # Numbered fallback: 1 = openai, API key, 1 = first OpenAI model in the catalog
     result = runner.invoke(cli, ["setup"], input="1\nsk-testkey123\n1\n")
     assert result.exit_code == 0
     assert "Configuration saved" in result.output
@@ -32,17 +32,17 @@ def test_setup_fresh(runner, tmp_rllm_home):
     config = load_config()
     assert config.provider == "openai"
     assert config.api_key == "sk-testkey123"
-    assert config.model == "gpt-5-nano"
+    assert config.model == PROVIDER_MODELS["openai"][0]
 
 
 def test_setup_select_different_model(runner, tmp_rllm_home):
     """Setup should allow selecting a different model from the list."""
-    # 1 = openai, API key, 2 = gpt-5-mini
+    # 1 = openai, API key, 2 = second OpenAI model in the catalog
     result = runner.invoke(cli, ["setup"], input="1\nsk-testkey\n2\n")
     assert result.exit_code == 0
 
     config = load_config()
-    assert config.model == "gpt-5-mini"
+    assert config.model == PROVIDER_MODELS["openai"][1]
 
 
 def test_setup_custom_model(runner, tmp_rllm_home):
@@ -95,13 +95,13 @@ def test_setup_replace_key(runner, tmp_rllm_home):
 
 def test_setup_default_selection(runner, tmp_rllm_home):
     """Pressing enter should use the default (pre-selected) choice."""
-    # Default provider = 1, API key, default model = 1
+    # Default provider = 1, API key, default model = 1 (first OpenAI model)
     result = runner.invoke(cli, ["setup"], input="\nsk-testkey\n\n")
     assert result.exit_code == 0
 
     config = load_config()
     assert config.provider == "openai"
-    assert config.model == "gpt-5-nano"
+    assert config.model == PROVIDER_MODELS["openai"][0]
 
 
 def test_setup_invalid_choice_reprompts(runner, tmp_rllm_home):
@@ -117,7 +117,7 @@ def test_setup_invalid_choice_reprompts(runner, tmp_rllm_home):
 
 def test_setup_anthropic_provider(runner, tmp_rllm_home):
     """Setup with Anthropic provider should save correctly."""
-    # 2 = anthropic, API key, 1 = claude-sonnet-4-6
+    # 2 = anthropic, API key, 1 = first Anthropic model in the catalog
     result = runner.invoke(cli, ["setup"], input="2\nsk-ant-testkey\n1\n")
     assert result.exit_code == 0
     assert "Configuration saved" in result.output
@@ -125,12 +125,12 @@ def test_setup_anthropic_provider(runner, tmp_rllm_home):
     config = load_config()
     assert config.provider == "anthropic"
     assert config.api_key == "sk-ant-testkey"
-    assert config.model == "claude-sonnet-4-6"
+    assert config.model == PROVIDER_MODELS["anthropic"][0]
 
 
 def test_setup_gemini_provider(runner, tmp_rllm_home):
     """Setup with Gemini provider should save correctly."""
-    # 3 = gemini, API key, 1 = gemini-3-flash-preview
+    # 3 = gemini, API key, 1 = first Gemini model in the catalog
     result = runner.invoke(cli, ["setup"], input="3\nAIza-testkey\n1\n")
     assert result.exit_code == 0
     assert "Configuration saved" in result.output
@@ -138,7 +138,7 @@ def test_setup_gemini_provider(runner, tmp_rllm_home):
     config = load_config()
     assert config.provider == "gemini"
     assert config.api_key == "AIza-testkey"
-    assert config.model == "gemini-3-flash-preview"
+    assert config.model == PROVIDER_MODELS["gemini"][0]
 
 
 def test_setup_shows_env_var_tip(runner, tmp_rllm_home):

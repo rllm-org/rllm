@@ -34,16 +34,16 @@ def runner():
     return CliRunner()
 
 
-def test_dataset_list_empty(runner, tmp_rllm_home):
-    """List with no datasets should show a helpful message."""
-    result = runner.invoke(cli, ["dataset", "list"])
+def test_dataset_list_local_empty(runner, tmp_rllm_home):
+    """List --local with no pulled datasets should show a helpful message."""
+    result = runner.invoke(cli, ["dataset", "list", "--local"])
     assert result.exit_code == 0
     assert "No datasets pulled" in result.output
 
 
-def test_dataset_list_all(runner, tmp_rllm_home):
-    """List --all should show catalog datasets."""
-    result = runner.invoke(cli, ["dataset", "list", "--all"])
+def test_dataset_list_catalog(runner, tmp_rllm_home):
+    """List (default) should show catalog datasets."""
+    result = runner.invoke(cli, ["dataset", "list"])
     assert result.exit_code == 0
     assert "gsm8k" in result.output
     assert "available" in result.output

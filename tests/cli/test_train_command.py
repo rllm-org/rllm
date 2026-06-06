@@ -236,7 +236,6 @@ class TestTrainCommand:
         assert "--evaluator" in result.output
         assert "--config" in result.output
         assert "--ui" in result.output
-        assert "--ui-url" in result.output
 
     def test_train_listed_in_main_help(self, runner):
         """rllm --help should list the train command."""
@@ -517,42 +516,3 @@ class TestTrainCommand:
         call_kwargs = mock_at_cls.call_args[1]
         loggers = list(call_kwargs["config"].rllm.trainer.logger)
         assert "ui" in loggers
-
-    def test_train_ui_url_implies_ui(self, runner, tmp_rllm_home, mock_train_dataset):
-        """--ui-url should implicitly enable UI logging (no API key needed)."""
-        catalog = {"datasets": {"test_math": {"default_agent": "math", "reward_fn": "math_reward_fn", "eval_split": "test"}}}
-        mock_agent = _MockAgentFlow()
-        mock_evaluator = _MockEvaluator()
-        mock_trainer = MagicMock()
-
-        with (
-            patch("rllm.cli.train.load_dataset_catalog", return_value=catalog),
-            patch("rllm.eval.agent_loader.load_agent", return_value=mock_agent),
-            patch("rllm.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator),
-            patch("rllm.trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls,
-        ):
-            result = runner.invoke(cli, ["train", "test_math", "--model", "test-model", "--ui-url", "http://localhost:3000"])
-
-        assert result.exit_code == 0
-        call_kwargs = mock_at_cls.call_args[1]
-        loggers = list(call_kwargs["config"].rllm.trainer.logger)
-        assert "ui" in loggers
-        assert "Live UI" in result.output
-        assert "localhost:3000" in result.output
-
-    def test_train_ui_without_api_key_errors(self, runner, tmp_rllm_home, mock_train_dataset, monkeypatch):
-        """--ui without RLLM_API_KEY and no --ui-url should error."""
-        monkeypatch.delenv("RLLM_API_KEY", raising=False)
-        catalog = {"datasets": {"test_math": {"default_agent": "math", "reward_fn": "math_reward_fn", "eval_split": "test"}}}
-        mock_agent = _MockAgentFlow()
-        mock_evaluator = _MockEvaluator()
-
-        with (
-            patch("rllm.cli.train.load_dataset_catalog", return_value=catalog),
-            patch("rllm.eval.agent_loader.load_agent", return_value=mock_agent),
-            patch("rllm.eval.evaluator_loader.resolve_evaluator_from_catalog", return_value=mock_evaluator),
-        ):
-            result = runner.invoke(cli, ["train", "test_math", "--model", "test-model", "--ui"])
-
-        assert result.exit_code != 0
-        assert "RLLM_API_KEY" in result.output

@@ -121,7 +121,7 @@ def list_datasets(local_only: bool):
             _console.print()
             _console.print(
                 Panel(
-                    "[dim]No datasets pulled yet.[/]\n\nRun [bold #00D4FF]rllm dataset list --all[/] to see available datasets.",
+                    "[dim]No datasets pulled yet.[/]\n\nRun [bold #00D4FF]rllm dataset list[/] to see available datasets.",
                     border_style="dim #0077FF",
                     title="[bold]Datasets[/]",
                     expand=False,
