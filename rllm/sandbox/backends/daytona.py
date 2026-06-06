@@ -315,7 +315,13 @@ class DaytonaSandbox:
         try:
             self._sandbox.delete()
         except Exception:
-            logger.debug("Sandbox %s delete error (may already be gone)", self.name, exc_info=True)
+            # A failed delete (e.g. API key without delete scope) leaks a billed
+            # sandbox — surface it, then stop() so compute halts now, not at auto_stop.
+            logger.warning("Sandbox %s delete failed; attempting stop() fallback", self.name, exc_info=True)
+            try:
+                self._sandbox.stop()
+            except Exception:
+                logger.warning("Sandbox %s stop() fallback also failed — it may be orphaned until auto_stop", self.name, exc_info=True)
         with _LIVE_LOCK:
             _LIVE_SANDBOXES.discard(self)
         self._closed = True

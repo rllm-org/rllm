@@ -219,8 +219,14 @@ def _run_eval(
             else:
                 split = "test"
 
-        # Docker check for Harbor tasks
-        if (agent_name and agent_name.startswith("harbor:")) or (catalog_entry and catalog_entry.get("source", "").startswith("harbor:")):
+        _is_harbor_agent = bool(agent_name) and agent_name.startswith("harbor:")
+        _is_harbor_source = bool(catalog_entry) and catalog_entry.get("source", "").startswith("harbor:")
+
+        # Require Docker only when execution lands on the local daemon; a remote
+        # backend (modal/daytona) pulls the task's image in the cloud.
+        _eff_backend = (agent_metadata or {}).get("sandbox_backend")
+        _runs_on_local_docker = _eff_backend in (None, "docker")
+        if (_is_harbor_agent or _is_harbor_source) and _runs_on_local_docker:
             from rllm.integrations.harbor.utils import diagnose_docker
 
             ok, reason, hint = diagnose_docker()
@@ -228,9 +234,8 @@ def _run_eval(
                 console.print(f"  [error]Harbor tasks require Docker — {reason}.[/]")
                 if hint:
                     console.print(f"  [dim]{hint}[/]")
+                console.print("  [dim]Or run on a remote backend, e.g. [bold]--sandbox-backend modal[/].[/]")
                 raise SystemExit(1)
-
-        _is_harbor_agent = bool(agent_name) and agent_name.startswith("harbor:")
 
         # Load the agent. Catalog covers built-in flows (react/bash/claude-code)
         # plus user-registered + plugin agents; ``harbor:<scaffold>`` resolves
@@ -308,7 +313,7 @@ def _run_eval(
         # datasets carry their verifier inside the harbor task dir (read via
         # task.metadata["task_path"]), so we wrap rows directly.
         bench_result = None
-        if not _is_harbor_agent:
+        if not _is_harbor_agent and not _is_harbor_source:
             _materialised = os.path.expanduser(os.path.join(os.environ.get("RLLM_HOME", "~/.rllm"), "datasets", benchmark))
             if not os.path.isfile(os.path.join(_materialised, "dataset.toml")):
                 try:
@@ -327,8 +332,10 @@ def _run_eval(
                 dataset = Dataset(data=list(bench_result.tasks), name=bench_result.name, split=bench_result.split or split)
 
         if bench_result is None:
-            # Wrap dict-rows as Tasks; rely on evaluator_override for scoring.
-            if evaluator is None:
+            # Harbor rows root at their task dir, so SandboxTaskHooks resolves
+            # each task's own tests/test.sh — no dataset-wide evaluator needed.
+            # Non-harbor rows carry no per-task verifier, so still require one.
+            if evaluator is None and not _is_harbor_source:
                 console.print(f"  [error]No evaluator found for '{benchmark}'. Specify --evaluator explicitly.[/]")
                 raise SystemExit(1)
             from rllm.data.dataset import Dataset
