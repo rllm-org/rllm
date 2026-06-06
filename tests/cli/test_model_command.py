@@ -7,7 +7,7 @@ import pytest
 from click.testing import CliRunner
 
 from rllm.cli.main import cli
-from rllm.eval.config import RllmConfig, load_config, save_config
+from rllm.eval.config import PROVIDER_MODELS, RllmConfig, load_config, save_config
 
 
 @pytest.fixture
@@ -28,7 +28,7 @@ def runner():
 
 def test_model_setup_fresh(runner, tmp_rllm_home):
     """First-time setup: provider -> key -> model."""
-    # 1 = openai (OpenAI), key, 1 = gpt-5-nano
+    # 1 = openai (OpenAI), key, 1 = first OpenAI model in the catalog
     result = runner.invoke(cli, ["model", "setup"], input="1\nsk-test123\n1\n")
     assert result.exit_code == 0
     assert "Configuration saved" in result.output
@@ -36,7 +36,7 @@ def test_model_setup_fresh(runner, tmp_rllm_home):
     config = load_config()
     assert config.provider == "openai"
     assert config.api_key == "sk-test123"
-    assert config.model == "gpt-5-nano"
+    assert config.model == PROVIDER_MODELS["openai"][0]
     assert config.api_keys == {"openai": "sk-test123"}
 
 
@@ -76,14 +76,14 @@ def test_model_swap_same_provider_new_model(runner, tmp_rllm_home):
     """Swap model within same provider — key is preserved without prompting."""
     save_config(RllmConfig(provider="openai", model="gpt-5-nano", api_keys={"openai": "sk-keep"}))
 
-    # 1 = openai (OpenAI), n = don't change key, 2 = gpt-5-mini
+    # 1 = openai (OpenAI), n = don't change key, 2 = second OpenAI model in the catalog
     result = runner.invoke(cli, ["model", "swap"], input="1\nn\n2\n")
     assert result.exit_code == 0
     assert "Configuration saved" in result.output
 
     config = load_config()
     assert config.provider == "openai"
-    assert config.model == "gpt-5-mini"
+    assert config.model == PROVIDER_MODELS["openai"][1]
     assert config.api_key == "sk-keep"
 
 
@@ -190,7 +190,7 @@ def test_model_setup_deepseek(runner, tmp_rllm_home):
 
     ds_idx = SUPPORTED_PROVIDERS.index("deepseek") + 1
 
-    # deepseek idx, api key, 1 = deepseek-chat
+    # deepseek idx, api key, 1 = first deepseek model in the catalog
     result = runner.invoke(cli, ["model", "setup"], input=f"{ds_idx}\nsk-ds-test\n1\n")
     assert result.exit_code == 0
     assert "Configuration saved" in result.output
@@ -198,7 +198,7 @@ def test_model_setup_deepseek(runner, tmp_rllm_home):
     config = load_config()
     assert config.provider == "deepseek"
     assert config.api_key == "sk-ds-test"
-    assert config.model == "deepseek-chat"
+    assert config.model == PROVIDER_MODELS["deepseek"][0]
 
 
 # --- backward compatibility ---
