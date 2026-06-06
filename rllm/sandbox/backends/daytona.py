@@ -92,13 +92,21 @@ class DaytonaSandbox:
 
     def __init__(self, name: str, image: str = "python:3.11-slim", **kwargs):
         # Lazy import so users without the SDK can still import this module.
-        from daytona import (
-            CreateSandboxFromImageParams,
-            CreateSandboxFromSnapshotParams,
-            Daytona,
-            Image,
-            Resources,
-        )
+        try:
+            from daytona import (
+                CreateSandboxFromImageParams,
+                CreateSandboxFromSnapshotParams,
+                Daytona,
+                Image,
+                Resources,
+            )
+        except ImportError as e:
+            raise ImportError(
+                "The Daytona sandbox backend requires the 'daytona' package. "
+                "Install with: pip install daytona  "
+                "(or, for harbor agents: pip install 'harbor[daytona]'). "
+                "Also set DAYTONA_API_KEY in your environment."
+            ) from e
 
         self.name = name
         self._image_spec = image
@@ -307,7 +315,13 @@ class DaytonaSandbox:
         try:
             self._sandbox.delete()
         except Exception:
-            logger.debug("Sandbox %s delete error (may already be gone)", self.name, exc_info=True)
+            # A failed delete (e.g. API key without delete scope) leaks a billed
+            # sandbox — surface it, then stop() so compute halts now, not at auto_stop.
+            logger.warning("Sandbox %s delete failed; attempting stop() fallback", self.name, exc_info=True)
+            try:
+                self._sandbox.stop()
+            except Exception:
+                logger.warning("Sandbox %s stop() fallback also failed — it may be orphaned until auto_stop", self.name, exc_info=True)
         with _LIVE_LOCK:
             _LIVE_SANDBOXES.discard(self)
         self._closed = True
