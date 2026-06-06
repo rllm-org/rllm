@@ -196,7 +196,49 @@ def _create_sandbox_for_task(task: Task, sandbox_backend: str | None) -> Sandbox
 
     safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "-", task.id)
     name = f"rllm-{safe_id}-{uuid.uuid4().hex[:6]}"
-    return create_sandbox(backend, name=name, image=image)
+    sandbox = create_sandbox(backend, name=name, image=image)
+
+    # Non-docker backends pull the Dockerfile's FROM base instead of building
+    # it, so replay its RUN steps (e.g. swebench's `uv`, needed by the grader).
+    # Best-effort: a failed step shouldn't abort the task.
+    if backend != "docker":
+        for cmd in _dockerfile_run_commands(task):
+            _safe_exec(sandbox, cmd, timeout=900)
+    return sandbox
+
+
+def _dockerfile_run_commands(task: Task) -> list[str]:
+    """Return a task's ``environment/Dockerfile`` ``RUN`` shell steps (joining
+    ``\\``-continuations). Non-``RUN`` directives — ``COPY``/``ADD`` etc. — are
+    skipped; only ``RUN`` is replayable on a live sandbox.
+    """
+    dockerfile = task.task_dir / "environment" / "Dockerfile"
+    if not dockerfile.exists():
+        dockerfile = task.dataset_dir / "environment" / "Dockerfile"
+    if not dockerfile.exists():
+        return []
+    try:
+        lines = dockerfile.read_text().splitlines()
+    except OSError:
+        return []
+
+    commands: list[str] = []
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if stripped.upper().startswith("RUN "):
+            parts = [stripped[4:]]
+            while parts[-1].rstrip().endswith("\\"):
+                parts[-1] = parts[-1].rstrip()[:-1]
+                i += 1
+                if i >= len(lines):
+                    break
+                parts.append(lines[i])
+            cmd = "\n".join(parts).strip()
+            if cmd:
+                commands.append(cmd)
+        i += 1
+    return commands
 
 
 def _resolve_image(task: Task, backend: str) -> str:

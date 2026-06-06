@@ -37,13 +37,15 @@ def _suggest_benchmarks(name: str, catalog_names: list[str], max_suggestions: in
 def _dict_rows_to_tasks(rows: list[dict]) -> list:
     """Wrap dict-rows from a catalog dataset as Task objects.
 
-    Harbor rows carry ``task_path`` pointing at their own Harbor task
-    directory; we root the Task there so HarborRuntime and per-task
-    verifier resolution find ``task.toml`` / ``tests/`` natively. Other
-    rows get ``dataset_dir=Path(".")`` and rely on ``evaluator_override``.
+    Harbor rows carry ``task_path``; we root the Task there and merge the task's
+    ``task.toml`` + ``environment/Dockerfile`` metadata (workdir, verifier
+    timeout, per-task image) so per-task verifier resolution and an rllm-native
+    harness get the right sandbox. Other rows get ``dataset_dir=Path(".")`` and
+    rely on ``evaluator_override``.
     """
     from pathlib import Path
 
+    from rllm.tasks.loader import _merge_task_toml_metadata
     from rllm.types import Task
 
     tasks: list[Task] = []
@@ -52,11 +54,14 @@ def _dict_rows_to_tasks(rows: list[dict]) -> list:
         task_id = str(row.get("id") or row.get("task_id") or idx)
         task_path = row.get("task_path")
         dataset_dir = Path(task_path) if task_path else Path(".")
+        metadata = dict(row)
+        if task_path:
+            metadata = _merge_task_toml_metadata(dataset_dir, metadata)
         tasks.append(
             Task(
                 id=task_id,
                 instruction=str(instruction),
-                metadata=dict(row),
+                metadata=metadata,
                 dataset_dir=dataset_dir,
                 sub_dir=None,
             )
@@ -219,8 +224,14 @@ def _run_eval(
             else:
                 split = "test"
 
-        # Docker check for Harbor tasks
-        if (agent_name and agent_name.startswith("harbor:")) or (catalog_entry and catalog_entry.get("source", "").startswith("harbor:")):
+        _is_harbor_agent = bool(agent_name) and agent_name.startswith("harbor:")
+        _is_harbor_source = bool(catalog_entry) and catalog_entry.get("source", "").startswith("harbor:")
+
+        # Require Docker only when execution lands on the local daemon; a remote
+        # backend (modal/daytona) pulls the task's image in the cloud.
+        _eff_backend = (agent_metadata or {}).get("sandbox_backend")
+        _runs_on_local_docker = _eff_backend in (None, "docker")
+        if (_is_harbor_agent or _is_harbor_source) and _runs_on_local_docker:
             from rllm.integrations.harbor.utils import diagnose_docker
 
             ok, reason, hint = diagnose_docker()
@@ -228,9 +239,8 @@ def _run_eval(
                 console.print(f"  [error]Harbor tasks require Docker — {reason}.[/]")
                 if hint:
                     console.print(f"  [dim]{hint}[/]")
+                console.print("  [dim]Or run on a remote backend, e.g. [bold]--sandbox-backend modal[/].[/]")
                 raise SystemExit(1)
-
-        _is_harbor_agent = bool(agent_name) and agent_name.startswith("harbor:")
 
         # Load the agent. Catalog covers built-in flows (react/bash/claude-code)
         # plus user-registered + plugin agents; ``harbor:<scaffold>`` resolves
@@ -303,12 +313,12 @@ def _run_eval(
             console.print(f"  [error]Could not load dataset '{benchmark}' split '{split}'.[/]")
             raise SystemExit(1)
 
-        # Prefer a materialised local dir for non-harbor catalog datasets so
-        # each Task carries its per-task verifier from dataset.toml. Harbor
-        # datasets carry their verifier inside the harbor task dir (read via
-        # task.metadata["task_path"]), so we wrap rows directly.
+        # Materialise non-harbor catalog datasets so each Task carries its
+        # per-task verifier from dataset.toml. Harbor datasets are
+        # task-per-directory; materialising would drop their tests/ +
+        # environment/, so wrap their rows directly instead.
         bench_result = None
-        if not _is_harbor_agent:
+        if not _is_harbor_agent and not _is_harbor_source:
             _materialised = os.path.expanduser(os.path.join(os.environ.get("RLLM_HOME", "~/.rllm"), "datasets", benchmark))
             if not os.path.isfile(os.path.join(_materialised, "dataset.toml")):
                 try:
@@ -327,8 +337,10 @@ def _run_eval(
                 dataset = Dataset(data=list(bench_result.tasks), name=bench_result.name, split=bench_result.split or split)
 
         if bench_result is None:
-            # Wrap dict-rows as Tasks; rely on evaluator_override for scoring.
-            if evaluator is None:
+            # Harbor rows root at their task dir, so SandboxTaskHooks resolves
+            # each task's own tests/test.sh — no dataset-wide evaluator needed.
+            # Non-harbor rows carry no per-task verifier, so still require one.
+            if evaluator is None and not _is_harbor_source:
                 console.print(f"  [error]No evaluator found for '{benchmark}'. Specify --evaluator explicitly.[/]")
                 raise SystemExit(1)
             from rllm.data.dataset import Dataset

@@ -135,7 +135,7 @@ def create_sandbox(backend: str, name: str, image: str, **kwargs) -> Sandbox:
     elif backend == "modal":
         from rllm.sandbox.backends.modal_backend import ModalSandbox
 
-        return ModalSandbox(name=name, **kwargs)
+        return ModalSandbox(name=name, image=image, **kwargs)
     elif backend == "daytona":
         from rllm.sandbox.backends.daytona import DaytonaSandbox
 
