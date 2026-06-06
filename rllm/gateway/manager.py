@@ -294,6 +294,14 @@ class GatewayManager:
         await self.async_client.flush()
         return await self.async_client.delete_sessions(session_ids)
 
+    # -- Weight version ------------------------------------------------------
+
+    def set_weight_version(self, weight_version: int) -> None:
+        self.client.set_weight_version(weight_version)
+
+    async def aset_weight_version(self, weight_version: int) -> None:
+        await self.async_client.set_weight_version(weight_version)
+
     # -- Worker setup --------------------------------------------------------
 
     def _ensure_verl_engine_workers(self, rollout_engine: VerlEngine) -> list[str]:

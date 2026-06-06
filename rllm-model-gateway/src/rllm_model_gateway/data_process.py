@@ -161,6 +161,7 @@ def build_trace_record(
     latency_ms: float,
     *,
     metadata: dict[str, Any] | None = None,
+    weight_version: int | None = None,
 ) -> TraceRecord:
     """Assemble a ``TraceRecord`` from raw request/response dicts."""
     choices = response_body.get("choices") or []
@@ -183,6 +184,7 @@ def build_trace_record(
         completion_token_ids=extract_completion_token_ids(response_body),
         logprobs=extract_logprobs(response_body) or None,
         finish_reason=first_choice.get("finish_reason"),
+        weight_version=weight_version,
         latency_ms=latency_ms,
         token_counts=token_counts,
         timestamp=time.time(),
@@ -199,6 +201,7 @@ def build_trace_record_from_chunks(
     latency_ms: float,
     *,
     metadata: dict[str, Any] | None = None,
+    weight_version: int | None = None,
 ) -> TraceRecord:
     """Assemble a ``TraceRecord`` from accumulated streaming SSE chunks.
 
@@ -267,6 +270,7 @@ def build_trace_record_from_chunks(
         completion_token_ids=completion_ids,
         logprobs=logprobs or None,
         finish_reason=finish_reason,
+        weight_version=weight_version,
         latency_ms=latency_ms,
         token_counts=token_counts,
         timestamp=time.time(),

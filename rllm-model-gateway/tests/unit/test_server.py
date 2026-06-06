@@ -184,6 +184,32 @@ class TestAdmin:
         assert resp.status_code == 200
         assert resp.json()["status"] == "flushed"
 
+    @pytest.mark.asyncio
+    async def test_weight_version_defaults_none(self, client: httpx.AsyncClient):
+        resp = await client.get("/admin/weight_version")
+        assert resp.status_code == 200
+        assert resp.json()["weight_version"] is None
+
+    @pytest.mark.asyncio
+    async def test_set_and_get_weight_version(self, client: httpx.AsyncClient, app):
+        resp = await client.post("/admin/weight_version", json={"weight_version": 7})
+        assert resp.status_code == 200
+        assert resp.json()["weight_version"] == 7
+
+        resp = await client.get("/admin/weight_version")
+        assert resp.json()["weight_version"] == 7
+        assert app.state.proxy.weight_version == 7
+
+    @pytest.mark.asyncio
+    async def test_set_weight_version_missing(self, client: httpx.AsyncClient):
+        resp = await client.post("/admin/weight_version", json={})
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_set_weight_version_invalid(self, client: httpx.AsyncClient):
+        resp = await client.post("/admin/weight_version", json={"weight_version": "abc"})
+        assert resp.status_code == 400
+
 
 # ------------------------------------------------------------------
 # Proxy (non-streaming)
@@ -574,6 +600,51 @@ class TestTraceCapture:
     async def test_get_trace_not_found(self, client: httpx.AsyncClient):
         resp = await client.get("/traces/nonexistent")
         assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_trace_stamped_with_weight_version(self, mock_vllm: MockVLLMServer):
+        """Traces capture the gateway's current weight_version."""
+        config = GatewayConfig(
+            store_worker="memory",
+            workers=[{"url": f"{mock_vllm.url}/v1", "worker_id": "w0"}],
+            health_check_interval=999,
+            sync_traces=True,
+        )
+        app = create_app(config)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            await client.post("/admin/weight_version", json={"weight_version": 5})
+            await client.post(
+                "/sessions/wv/v1/chat/completions",
+                json={"model": "mock-model", "messages": [{"role": "user", "content": "hi"}]},
+            )
+            traces = (await client.get("/sessions/wv/traces")).json()
+            assert len(traces) == 1
+            assert traces[0]["weight_version"] == 5
+
+    @pytest.mark.asyncio
+    async def test_trace_weight_version_none_when_unset(self, mock_vllm: MockVLLMServer):
+        config = GatewayConfig(
+            store_worker="memory",
+            workers=[{"url": f"{mock_vllm.url}/v1", "worker_id": "w0"}],
+            health_check_interval=999,
+            sync_traces=True,
+        )
+        app = create_app(config)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            await client.post(
+                "/sessions/no-wv/v1/chat/completions",
+                json={"model": "mock-model", "messages": [{"role": "user", "content": "hi"}]},
+            )
+            traces = (await client.get("/sessions/no-wv/traces")).json()
+            assert traces[0]["weight_version"] is None
 
 
 # ------------------------------------------------------------------

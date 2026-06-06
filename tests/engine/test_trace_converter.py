@@ -112,6 +112,16 @@ class TestTraceRecordToStep:
         assert step.model_output.logprobs == [-0.5, -0.3]
         assert step.model_output.tool_calls is None
 
+    def test_weight_version_propagated(self):
+        trace = self._make_trace(weight_version=7)
+        step = trace_record_to_step(trace)
+        assert step.weight_version == 7
+        assert step.model_output.weight_version == 7
+
+    def test_weight_version_defaults_none(self):
+        step = trace_record_to_step(self._make_trace())
+        assert step.weight_version is None
+
     def test_step_with_tool_calls(self):
         trace = self._make_trace(
             response_message={

@@ -53,6 +53,7 @@ def trace_record_to_step(trace: TraceRecord) -> Step:
         prompt_length=len(trace.prompt_token_ids),
         completion_length=len(trace.completion_token_ids),
         finish_reason=trace.finish_reason,
+        weight_version=trace.weight_version,
     )
 
     # Build chat_completions: input messages + assistant response
@@ -66,6 +67,7 @@ def trace_record_to_step(trace: TraceRecord) -> Step:
         model_response=content,
         thought=reasoning,
         metadata=trace.metadata,
+        weight_version=trace.weight_version,
     )
 
 

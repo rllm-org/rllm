@@ -397,6 +397,22 @@ def create_app(
         # Placeholder for hot-reload
         return {"status": "ok"}
 
+    @app.get("/admin/weight_version")
+    async def get_weight_version():
+        return {"weight_version": proxy.weight_version}
+
+    @app.post("/admin/weight_version")
+    async def set_weight_version(request: Request):
+        body = await _safe_json(request)
+        version = body.get("weight_version")
+        if version is None:
+            return JSONResponse(status_code=400, content={"error": "weight_version is required"})
+        try:
+            proxy.weight_version = int(version)
+        except (TypeError, ValueError):
+            return JSONResponse(status_code=400, content={"error": f"invalid weight_version: {version!r}"})
+        return {"weight_version": proxy.weight_version}
+
     # -- Proxy catch-all (must be last) ------------------------------------
 
     @app.api_route(

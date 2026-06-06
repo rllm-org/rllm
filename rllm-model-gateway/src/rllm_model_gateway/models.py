@@ -20,6 +20,7 @@ class TraceRecord(BaseModel):
     completion_token_ids: list[int] = Field(default_factory=list)
     logprobs: list[float] | None = None
     finish_reason: str | None = None
+    weight_version: int | None = None
     # Metadata
     latency_ms: float = 0.0
     token_counts: dict[str, int] = Field(default_factory=dict)

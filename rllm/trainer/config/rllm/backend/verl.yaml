@@ -27,6 +27,13 @@ data:
   max_prompt_length: 30720
   max_response_length: 2048
 
+rollout:
+  nnodes: 1
+  n_gpus_per_node: 8
+
+async_training:
+  partial_rollout: False
+
 rllm:
   backend: verl
   algorithm:

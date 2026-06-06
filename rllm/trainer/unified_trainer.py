@@ -326,6 +326,7 @@ class UnifiedTrainer:
 
         if hasattr(self, "_gateway") and self._gateway is not None:
             self._gateway.start(self.backend.rollout_engine)
+            self._gateway.set_weight_version(trainer_state.weight_version)
 
         if self.rllm_config.trainer.get("val_before_train", True):
             await self._validate_async(trainer_state)
@@ -533,7 +534,9 @@ class UnifiedTrainer:
                 self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="train", epoch=epoch)
 
                 for batch in train_dataloader:
-                    task = batch[0]
+                    # Tinker dataloader: list of task dicts. Verl dataloader: dict with
+                    # per-sample fields under "extra_info".
+                    task = batch["extra_info"][0] if isinstance(batch, dict) else batch[0]
 
                     await coordinator.wait_for_generation_allowed()
                     if not coordinator.has_quota():
@@ -653,7 +656,9 @@ class UnifiedTrainer:
                 logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: weight sync complete ({sync_time:.2f}s)")
             if sync_time > 0:
                 aggregator.record("time/weight_sync", sync_time)
-            aggregator.record("time/step", time.perf_counter() - step_start)
+            step_time = time.perf_counter() - step_start
+            aggregator.record("time/step", step_time)
+            trainer_state.timing_dict["step"] = step_time
 
             # Set all trajectory groups and stripped episodes for visualization/logging
             trainer_state.trajectory_groups = all_trajectory_groups
@@ -707,6 +712,8 @@ class UnifiedTrainer:
         await self.backend.on_policy_updated(trainer_state)
         if rollout_engine is not None:
             rollout_engine.weight_version = trainer_state.weight_version
+        if self._gateway is not None:
+            await self._gateway.aset_weight_version(trainer_state.weight_version)
         coordinator.on_sync_complete()
 
         if not self.async_config.partial_rollout:
