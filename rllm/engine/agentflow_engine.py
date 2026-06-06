@@ -30,8 +30,8 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from tqdm import tqdm
 
+from rllm.engine.trace_converter import compute_step_metrics, trace_record_to_step
 from rllm.eval.types import EvalOutput
-from rllm.experimental.engine.trace_converter import compute_step_metrics, trace_record_to_step
 from rllm.types import AgentConfig, Episode, Step, Task, Trajectory, run_agent_flow
 from rllm.utils import colorful_print
 from rllm.workflows.workflow import TerminationReason
@@ -39,7 +39,7 @@ from rllm.workflows.workflow import TerminationReason
 if TYPE_CHECKING:
     from rllm_model_gateway.models import TraceRecord
 
-    from rllm.experimental.engine.gateway_manager import GatewayManager
+    from rllm.gateway.manager import GatewayManager
     from rllm.types import AgentFlow, Evaluator
     from rllm.utils.episode_logger import EpisodeLogger
 

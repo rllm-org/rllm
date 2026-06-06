@@ -1,0 +1,41 @@
+# @package _global_
+
+# Verl Backend Configuration for rLLM.
+# Loads verl's ppo_trainer.yaml as defaults. Shared rllm/verl knobs are
+# mirrored at runtime by ``sync_config`` in ``rllm/trainer/verl/utils.py``.
+# Prefer rllm.* for new configs. Verl-native shared-key CLI overrides still
+# work for backward compatibility, but they warn because that path is deprecated.
+
+defaults:
+  - /ppo_trainer
+  - _self_
+
+actor_rollout_ref:
+  actor:
+    use_rollout_log_probs: true
+  rollout:
+    mode: async
+    agent:
+      num_workers: 0
+    calculate_log_probs: true
+    val_kwargs:
+      do_sample: true
+
+data:
+  gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
+  return_multi_modal_inputs: false
+  max_prompt_length: 30720
+  max_response_length: 2048
+
+rollout:
+  nnodes: 1
+  n_gpus_per_node: 8
+
+async_training:
+  partial_rollout: False
+
+rllm:
+  backend: verl
+  algorithm:
+    rollout_correction:
+      bypass_mode: false

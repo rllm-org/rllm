@@ -5,8 +5,8 @@ import logging
 import tinker
 import torch
 
-from rllm.experimental.common.visualization import print_metrics_table  # noqa: F401 (re-export)
-from rllm.experimental.unified_trainer import TrainerState
+from rllm.trainer.algorithms.visualization import print_metrics_table  # noqa: F401 (re-export)
+from rllm.trainer.unified_trainer import TrainerState
 
 logger = logging.getLogger(__name__)
 

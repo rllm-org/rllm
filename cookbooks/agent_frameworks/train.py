@@ -18,10 +18,10 @@ from omegaconf import DictConfig
 from rllm.data.dataset import DatasetRegistry
 from rllm.eval.agent_loader import load_agent
 from rllm.eval.evaluator_loader import load_evaluator
-from rllm.experimental.unified_trainer import AgentTrainer
+from rllm.trainer import AgentTrainer
 
 
-@hydra.main(config_path="pkg://rllm.experimental.config", config_name="unified", version_base=None)
+@hydra.main(config_path="pkg://rllm.trainer.config", config_name="unified", version_base=None)
 def main(config: DictConfig):
     agent_name = config.rllm.get("agent_name") or "langgraph_math"
     evaluator_name = config.rllm.get("evaluator_name") or "math_evaluator"

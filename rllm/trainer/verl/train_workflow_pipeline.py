@@ -193,7 +193,7 @@ class PipelineTaskRunner:
         )
 
         # Apply NCCL dynamic batch sync patch (fixes verl#5750)
-        from rllm.experimental.verl.patch import patch_verl_dynamic_batch_sync
+        from rllm.trainer.verl.patch import patch_verl_dynamic_batch_sync
 
         patch_verl_dynamic_batch_sync()
 

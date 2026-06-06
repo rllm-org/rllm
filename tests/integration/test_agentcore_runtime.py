@@ -8,8 +8,8 @@ import uuid
 
 import pytest
 
-from rllm.experimental.engine.remote_runtime.agentcore_runtime import AgentCoreRuntime
-from rllm.experimental.engine.remote_runtime.protocol import (
+from rllm.engine.remote_runtime.agentcore_runtime import AgentCoreRuntime
+from rllm.engine.remote_runtime.protocol import (
     RemoteRuntimeConfig,
     TaskSubmission,
 )

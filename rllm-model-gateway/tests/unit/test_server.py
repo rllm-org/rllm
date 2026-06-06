@@ -96,6 +96,38 @@ class TestSessions:
         resp = await client.delete("/sessions/to-delete")
         assert resp.status_code == 200
 
+    # ----- Session IDs containing '/' (namespaced task ids like ``harbor/hello-world:0``) -----
+
+    @pytest.mark.asyncio
+    async def test_get_session_with_slash_in_id(self, client: httpx.AsyncClient):
+        """Namespaced ids like ``harbor/hello-world:0`` must round-trip
+        through the session endpoints — the routes use the ``:path``
+        converter so multi-segment ids capture cleanly."""
+        sid = "harbor/hello-world:0"
+        await client.post("/sessions", json={"session_id": sid})
+        resp = await client.get(f"/sessions/{sid}")
+        assert resp.status_code == 200
+        assert resp.json()["session_id"] == sid
+
+    @pytest.mark.asyncio
+    async def test_get_session_traces_with_slash_in_id(self, client: httpx.AsyncClient):
+        """The ``/traces`` suffix must remain reachable even when the
+        session id contains slashes. Route ordering matters: the bare
+        ``/sessions/{session_id:path}`` route comes after the more-specific
+        ``.../traces`` route or it greedily swallows ``/traces``."""
+        sid = "harbor/hello-world:0"
+        await client.post("/sessions", json={"session_id": sid})
+        resp = await client.get(f"/sessions/{sid}/traces")
+        assert resp.status_code == 200
+        assert resp.json() == []  # no traces captured yet
+
+    @pytest.mark.asyncio
+    async def test_delete_session_with_slash_in_id(self, client: httpx.AsyncClient):
+        sid = "harbor/hello-world:0"
+        await client.post("/sessions", json={"session_id": sid})
+        resp = await client.delete(f"/sessions/{sid}")
+        assert resp.status_code == 200
+
 
 # ------------------------------------------------------------------
 # Admin / worker management
@@ -218,6 +250,44 @@ class TestProxy:
         assert resp.status_code == 200
         data = resp.json()
         assert data["choices"][0]["message"]["content"] == "Hello from mock!"
+
+    @pytest.mark.asyncio
+    async def test_chat_completions_with_slash_in_session_id(self, mock_vllm: MockVLLMServer):
+        """Multi-segment session ids (e.g. namespaced Harbor task ids)
+        must bind to the session in the middleware. The non-greedy
+        ``.+?`` regex matches the shortest prefix that still leaves a
+        ``/v1[/...]`` tail, so the trace ends up attached to the full
+        ``harbor/hello-world:0`` id rather than getting silently dropped
+        (which is what happened with the old ``[^/]+`` single-segment
+        pattern — the regex failed to match, session_id became None,
+        and no trace was persisted)."""
+        config = GatewayConfig(
+            store_worker="memory",
+            workers=[{"url": f"{mock_vllm.url}/v1", "worker_id": "w0"}],
+            health_check_interval=999,
+            sync_traces=True,  # so traces are queryable immediately after POST returns
+        )
+        app = create_app(config)
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            sid = "harbor/hello-world:0"
+            resp = await client.post(
+                f"/sessions/{sid}/v1/chat/completions",
+                json={
+                    "model": "mock-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+            assert resp.status_code == 200
+
+            traces_resp = await client.get(f"/sessions/{sid}/traces")
+            assert traces_resp.status_code == 200
+            traces = traces_resp.json()
+            assert len(traces) == 1
+            assert traces[0]["session_id"] == sid
 
     @pytest.mark.asyncio
     async def test_models_endpoint(self, client: httpx.AsyncClient):

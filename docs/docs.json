@@ -96,16 +96,16 @@
           {
             "group": "Unified workflow trainer",
             "pages": [
-              "experimental/unified-trainer",
-              "experimental/backend-protocol",
-              "experimental/configuration"
+              "training/unified-trainer",
+              "training/backend-protocol",
+              "training/configuration"
             ]
           },
           {
             "group": "Advanced algorithms",
             "pages": [
-              "experimental/advantage-estimator",
-              "experimental/precompute-advantage"
+              "training/advantage-estimator",
+              "training/precompute-advantage"
             ]
           }
         ]

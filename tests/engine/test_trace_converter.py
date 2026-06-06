@@ -2,7 +2,7 @@
 
 from rllm_model_gateway.models import TraceRecord
 
-from rllm.experimental.engine.trace_converter import (
+from rllm.engine.trace_converter import (
     _parse_openai_tool_calls,
     trace_record_to_step,
 )

@@ -26,10 +26,35 @@
       "function": "MiniSweAgentHarness",
       "description": "Run mini-swe-agent inside the sandbox."
     },
+    "codex": {
+      "module": "rllm.harnesses.codex",
+      "function": "CodexHarness",
+      "description": "Run the OpenAI Codex CLI inside the sandbox."
+    },
+    "qwen-code": {
+      "module": "rllm.harnesses.qwen_code",
+      "function": "QwenCodeHarness",
+      "description": "Run the Qwen Code CLI inside the sandbox."
+    },
+    "aider": {
+      "module": "rllm.harnesses.aider",
+      "function": "AiderHarness",
+      "description": "Run Paul Gauthier's aider CLI inside the sandbox."
+    },
+    "kimi-cli": {
+      "module": "rllm.harnesses.kimi_cli",
+      "function": "KimiCliHarness",
+      "description": "Run Moonshot's kimi-cli inside the sandbox."
+    },
     "oracle": {
       "module": "rllm.harnesses.oracle",
       "function": "OracleHarness",
       "description": "Run the task's reference solution (solution/solve.sh) without an LLM. Smoke-test for verifier + image."
+    },
+    "zeroclaw": {
+      "module": "rllm.harnesses.zeroclaw",
+      "function": "ZeroClawHarness",
+      "description": "Run the ZeroClaw autonomous-assistant CLI inside the sandbox."
     }
   }
 }

@@ -11,10 +11,10 @@ from unittest.mock import MagicMock
 import torch
 
 from rllm.agents.agent import Episode, Step, Trajectory
-from rllm.experimental.common.config import CompactFilteringConfig, TransformConfig
-from rllm.experimental.common.transform import transform_episodes_to_trajectory_groups
-from rllm.experimental.rollout import ModelOutput
-from rllm.experimental.verl.transform import transform_episodes_to_dataproto
+from rllm.engine.rollout import ModelOutput
+from rllm.trainer.algorithms.config import CompactFilteringConfig, TransformConfig
+from rllm.trainer.algorithms.transform import transform_episodes_to_trajectory_groups
+from rllm.trainer.verl.transform import transform_episodes_to_dataproto
 from rllm.workflows.workflow import TerminationReason
 
 

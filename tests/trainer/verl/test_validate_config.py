@@ -1,7 +1,7 @@
 import pytest
 from omegaconf import OmegaConf
 
-from rllm.experimental.verl.verl_backend import VerlBackend
+from rllm.trainer.verl.verl_backend import VerlBackend
 
 
 def _make_config(*, remote_enabled: bool, partial_rollout: bool):

@@ -113,5 +113,5 @@ def get_ppo_ray_runtime_env():
     if job_runtime_env.get("worker_process_setup_hook") is None:
         # Ray expects a dotted import path (no colon); it does
         # ``module.rpartition('.') -> module + attr`` to load the hook.
-        runtime_env["worker_process_setup_hook"] = "rllm.experimental.verl.patch.apply_all_verl_patches"
+        runtime_env["worker_process_setup_hook"] = "rllm.trainer.verl.patch.apply_all_verl_patches"
     return runtime_env

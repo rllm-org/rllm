@@ -173,7 +173,7 @@ class HarborRuntime:
         Returns:
             list of ``RemoteTaskResult`` objects.
         """
-        from rllm.experimental.engine.remote_runtime.protocol import RemoteTaskResult
+        from rllm.engine.remote_runtime.protocol import RemoteTaskResult
 
         if not self._initialized:
             raise RuntimeError("Call initialize() before execute_tasks()")

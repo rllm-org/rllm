@@ -18,7 +18,7 @@ from tinker.types import AdamParams
 from tinker_cookbook import checkpoint_utils
 from tinker_cookbook.tokenizer_utils import Tokenizer
 
-from rllm.experimental.common import (
+from rllm.trainer.algorithms import (
     AlgorithmConfig,
     CompactFilteringConfig,
     TransformConfig,
