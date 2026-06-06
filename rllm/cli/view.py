@@ -12,18 +12,18 @@ The dashboard is served by the Python standard library
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import click
 from rich.console import Console
 
+from rllm import paths
+
 console = Console()
 
 
 def _eval_results_root() -> Path:
-    rllm_home = os.path.expanduser(os.environ.get("RLLM_HOME", "~/.rllm"))
-    return Path(rllm_home) / "eval_results"
+    return Path(paths.eval_results_dir())
 
 
 def _resolve_target(arg: str | None) -> Path | None:

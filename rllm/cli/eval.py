@@ -19,6 +19,7 @@ from rich.status import Status
 from rich.table import Table
 from rich.theme import Theme
 
+from rllm import paths
 from rllm.cli._pull import load_dataset_catalog, pull_dataset
 
 logger = logging.getLogger(__name__)
@@ -104,7 +105,7 @@ def _run_eval(
     # so they go through the catalog branch's row-wrapping path instead).
     _materialised_path_override = None
     if not _is_local and not benchmark.startswith(("./", "../", "/", "~", "harbor:")):
-        _materialised = os.path.expanduser(os.path.join(os.environ.get("RLLM_HOME", "~/.rllm"), "datasets", benchmark))
+        _materialised = paths.rllm_path("datasets", benchmark)
         if os.path.isfile(os.path.join(_materialised, "dataset.toml")):
             _can_redirect = bool(agent_name) and not agent_name.startswith("harbor:")
             if _can_redirect and BenchmarkLoader.is_local_benchmark(_materialised):
@@ -319,7 +320,7 @@ def _run_eval(
         # environment/, so wrap their rows directly instead.
         bench_result = None
         if not _is_harbor_agent and not _is_harbor_source:
-            _materialised = os.path.expanduser(os.path.join(os.environ.get("RLLM_HOME", "~/.rllm"), "datasets", benchmark))
+            _materialised = paths.rllm_path("datasets", benchmark)
             if not os.path.isfile(os.path.join(_materialised, "dataset.toml")):
                 try:
                     from rllm.eval.materialize import materialize_benchmark as _materialize_benchmark
@@ -397,10 +398,9 @@ def _run_eval(
     if episodes_dir is not None:
         run_dir = os.path.expanduser(episodes_dir)
     else:
-        rllm_home = os.path.expanduser(os.environ.get("RLLM_HOME", "~/.rllm"))
         model_safe = model.replace("/", "_").replace("\\", "_")
         bench_safe = benchmark.replace("/", "_").replace("\\", "_")
-        run_dir = os.path.join(rllm_home, "eval_results", f"{bench_safe}_{model_safe}_{timestamp}")
+        run_dir = paths.rllm_path("eval_results", f"{bench_safe}_{model_safe}_{timestamp}")
     run_store = EvalEpisodeStore(run_dir)
     run_store.write_meta(
         {

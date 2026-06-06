@@ -191,7 +191,6 @@ class TestRegisterEvaluator:
     def _isolate_registry(self, tmp_path, monkeypatch):
         evals_file = str(tmp_path / "evaluators.json")
         monkeypatch.setattr("rllm.eval.evaluator_loader._USER_EVALUATORS_FILE", evals_file)
-        monkeypatch.setattr("rllm.eval.evaluator_loader._RLLM_HOME", str(tmp_path))
 
     def test_register_string_path_and_load(self):
         register_evaluator("test_eval", "rllm.eval.reward_fns.math:evaluate")

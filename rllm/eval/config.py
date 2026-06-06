@@ -9,6 +9,8 @@ import json
 import os
 from dataclasses import dataclass, field
 
+from rllm import paths
+
 # Tinker's (beta) OpenAI-compatible inference endpoint. Used as a fixed
 # ``api_base`` so the Tinker provider routes through LiteLLM's OpenAI adapter
 # exactly like any other provider. See
@@ -320,12 +322,8 @@ def fetch_tinker_models(api_key: str | None = None) -> list[str]:
             os.environ["TINKER_API_KEY"] = prev
 
 
-def _rllm_home() -> str:
-    return os.path.expanduser(os.environ.get("RLLM_HOME", "~/.rllm"))
-
-
 def _config_path() -> str:
-    return os.path.join(_rllm_home(), "config.json")
+    return paths.config_path()
 
 
 @dataclass

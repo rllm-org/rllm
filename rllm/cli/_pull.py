@@ -7,10 +7,12 @@ import json
 import logging
 import os
 
+from rllm import paths
+
 logger = logging.getLogger(__name__)
 
-# Default root for rllm datasets (overridden by RLLM_HOME env var)
-_DATASETS_ROOT = os.path.join(os.environ.get("RLLM_HOME", os.path.expanduser("~/.rllm")), "datasets")
+# Default root for rllm datasets (under $RLLM_HOME, defaulting to ~/.rllm).
+_DATASETS_ROOT = paths.datasets_dir()
 
 
 def load_dataset_catalog() -> dict:

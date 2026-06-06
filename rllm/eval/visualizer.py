@@ -954,10 +954,9 @@ def _make_handler(root_path: Path, html_factory):
 
 
 def _eval_results_root() -> Path:
-    import os
+    from rllm import paths
 
-    rllm_home = os.path.expanduser(os.environ.get("RLLM_HOME", "~/.rllm"))
-    return Path(rllm_home) / "eval_results"
+    return Path(paths.eval_results_dir())
 
 
 def launch(

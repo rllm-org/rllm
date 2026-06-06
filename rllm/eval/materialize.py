@@ -31,9 +31,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any
+
+from rllm import paths
 
 logger = logging.getLogger(__name__)
 
@@ -61,10 +62,7 @@ def materialize_benchmark(
         Path to the benchmark directory.
     """
     if benchmark_root is None:
-        benchmark_root = os.path.join(
-            os.environ.get("RLLM_HOME", os.path.expanduser("~/.rllm")),
-            "datasets",
-        )
+        benchmark_root = paths.datasets_dir()
     bench_dir = Path(benchmark_root) / name
     bench_dir.mkdir(parents=True, exist_ok=True)
 

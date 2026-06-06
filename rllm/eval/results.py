@@ -7,6 +7,8 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from rllm import paths
+
 
 @dataclass
 class EvalItem:
@@ -75,8 +77,7 @@ class EvalResult:
             The path the results were saved to.
         """
         if path is None:
-            rllm_home = os.path.expanduser(os.environ.get("RLLM_HOME", "~/.rllm"))
-            results_dir = os.path.join(rllm_home, "eval_results")
+            results_dir = paths.eval_results_dir()
             os.makedirs(results_dir, exist_ok=True)
             # Sanitize names for filename
             model_safe = self.model.replace("/", "_").replace("\\", "_")
