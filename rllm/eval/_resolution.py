@@ -196,7 +196,7 @@ def _create_sandbox_for_task(task: Task, sandbox_backend: str | None) -> Sandbox
 
     safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "-", task.id)
     name = f"rllm-{safe_id}-{uuid.uuid4().hex[:6]}"
-    sandbox = create_sandbox(backend, name=name, image=image)
+    sandbox = create_sandbox(backend, name=name, image=image, **_sandbox_resource_kwargs(task, backend))
 
     # Non-docker backends pull the Dockerfile's FROM base instead of building
     # it, so replay its RUN steps (e.g. swebench's `uv`, needed by the grader).
@@ -205,6 +205,32 @@ def _create_sandbox_for_task(task: Task, sandbox_backend: str | None) -> Sandbox
         for cmd in _dockerfile_run_commands(task):
             _safe_exec(sandbox, cmd, timeout=900)
     return sandbox
+
+
+def _sandbox_resource_kwargs(task: Task, backend: str) -> dict:
+    """Map a harbor task's declared ``[environment]`` resources to backend kwargs.
+
+    Harbor task.toml declares ``cpus`` / ``memory_mb`` / ``storage_mb``; without
+    these a remote sandbox runs at the backend default (Daytona: 1 GiB), which
+    OOM-kills compile-heavy graders (e.g. ``go test ./...``). Modal takes memory
+    in MB; Daytona takes memory/disk in GB. Docker/local ignore the values.
+    """
+    env = task.metadata.get("environment", {}) or {}
+    cpus, mem_mb, disk_mb = env.get("cpus"), env.get("memory_mb"), env.get("storage_mb")
+    kw: dict = {}
+    if backend == "modal":
+        if cpus:
+            kw["cpu"] = float(cpus)
+        if mem_mb:
+            kw["memory"] = int(mem_mb)
+    elif backend == "daytona":
+        if cpus:
+            kw["cpu"] = int(cpus)
+        if mem_mb:
+            kw["memory"] = max(1, round(mem_mb / 1024))
+        if disk_mb:
+            kw["disk"] = max(1, round(disk_mb / 1024))
+    return kw
 
 
 def _dockerfile_run_commands(task: Task) -> list[str]:

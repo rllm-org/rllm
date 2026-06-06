@@ -189,8 +189,10 @@ class ModalSandbox:
 
         b64 = base64.b64encode(tar_buf.read()).decode("ascii")
 
-        # Write tar to sandbox and extract
-        self._exec_unchecked(f"echo '{b64}' | base64 -d | tar xzf - -C {remote_parent}")
+        # Write tar to sandbox and extract. --no-same-owner: don't restore the
+        # host's uid/gid (root extraction would otherwise chown to nonexistent
+        # ids and error); permissions are kept so executables stay +x.
+        self._exec_unchecked(f"echo '{b64}' | base64 -d | tar xzf - --no-same-owner -C {remote_parent}")
         logger.debug("Uploaded dir %s -> %s in sandbox %s", local_path, remote_path, self.name)
 
     def start_agent_process(self, command: str, port: int) -> None:

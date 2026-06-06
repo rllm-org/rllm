@@ -232,7 +232,10 @@ class DaytonaSandbox:
         try:
             remote_tar = f"/tmp/_upload_{self.name}_{int(time.time() * 1000)}.tar.gz"
             self._sandbox.fs.upload_file(tmp_path, remote_tar)
-            self.exec(f"tar xzf {remote_tar} -C {remote_parent} && rm -f {remote_tar}")
+            # --no-same-owner: don't restore the host's uid/gid (root extraction
+            # would otherwise chown to nonexistent ids and fail). Permissions are
+            # kept, so executables stay +x.
+            self.exec(f"tar xzf {remote_tar} --no-same-owner -C {remote_parent} && rm -f {remote_tar}")
         finally:
             try:
                 os.unlink(tmp_path)
