@@ -163,6 +163,31 @@ def _load_data_dataset(
     )
 
 
+def _parse_dockerfile_image_workdir(dockerfile: Path) -> tuple[str | None, str | None]:
+    """Return ``(base_image, workdir)`` from a Dockerfile's last ``FROM`` (``AS``
+    alias / platform flags stripped) and last ``WORKDIR``. Either is ``None`` if
+    absent/unreadable. Lets backends that pull a named image (rather than
+    building the Dockerfile) still get a harbor task's image + cwd.
+    """
+    if not dockerfile.exists():
+        return None, None
+    base_image: str | None = None
+    workdir: str | None = None
+    try:
+        for raw_line in dockerfile.read_text().splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            upper = line.upper()
+            if upper.startswith("FROM "):
+                base_image = line[5:].strip().split()[0]  # drop "AS <alias>" / flags
+            elif upper.startswith("WORKDIR "):
+                workdir = line[8:].strip()
+    except OSError:
+        return None, None
+    return base_image, workdir
+
+
 def _merge_task_toml_metadata(task_dir: Path, base: dict) -> dict:
     """Merge per-task ``task.toml`` metadata into *base*.
 
@@ -182,14 +207,20 @@ def _merge_task_toml_metadata(task_dir: Path, base: dict) -> dict:
     except Exception:
         return base
     merged = {**base, **raw}
-    env_section = raw.get("environment", {}) or {}
-    # Only set workdir when the task explicitly declares one. Otherwise
-    # downstream (``_setup_task_environment`` / ``ShellScriptEvaluator``
-    # / ``BaseCliHarness._cd_prefix``) leaves cwd alone and the
-    # Dockerfile's WORKDIR wins — required for harbor task families
-    # like swesmith whose base image expects ``/testbed`` and whose
-    # test.sh + pytest break when forced into ``/workspace``.
-    declared_workdir = env_section.get("workdir") or merged.get("workdir")
+    env_section = dict(raw.get("environment", {}) or {})
+    # Harbor tasks declare image + workdir in environment/Dockerfile, not
+    # task.toml. Surface both as fallbacks so a non-docker backend (which pulls
+    # a named image rather than building the Dockerfile) still gets them; docker
+    # backends rebuild the Dockerfile in _resolve_image and ignore these.
+    base_image, dockerfile_workdir = _parse_dockerfile_image_workdir(task_dir / "environment" / "Dockerfile")
+    if base_image and not env_section.get("docker_image"):
+        env_section["docker_image"] = base_image
+    if env_section:
+        merged["environment"] = env_section
+    # Set workdir only when declared (task.toml or Dockerfile WORKDIR); else
+    # leave cwd alone so the image's WORKDIR wins — swesmith-style tasks expect
+    # /testbed and break if forced into /workspace.
+    declared_workdir = env_section.get("workdir") or merged.get("workdir") or dockerfile_workdir
     if declared_workdir is not None:
         merged["workdir"] = declared_workdir
     merged["env_vars"] = env_section.get("env", {}) or merged.get("env_vars", {}) or {}
