@@ -21,6 +21,7 @@ from rich.theme import Theme
 
 from rllm import paths
 from rllm.cli._pull import load_dataset_catalog, pull_dataset
+from rllm.cli._sampling import SAMPLING_PARAMS_HELP as _SAMPLING_PARAMS_HELP
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,7 @@ def _run_eval(
     save_episodes: bool = True,
     episodes_dir: str | None = None,
     use_snapshot: bool = True,
+    sampling_config=None,
 ):
     """Core eval logic, extracted for clean proxy lifecycle management."""
     from rllm.data import DatasetRegistry
@@ -382,6 +384,8 @@ def _run_eval(
     table.add_row("Evaluator", f"[dim]{evaluator_display}[/]")
     if not use_snapshot:
         table.add_row("Snapshots", "[dim]disabled (--no-snapshot, cold start)[/]")
+    if sampling_config is not None and not sampling_config.is_empty:
+        table.add_row("Sampling", f"[dim]{sampling_config.as_dict()} (gateway-enforced)[/]")
     console.print()
     console.print(Panel(table, border_style="cyan", expand=False))
     console.print()
@@ -487,6 +491,7 @@ def _run_eval(
             dataset_name=getattr(dataset, "name", benchmark) or benchmark,
             on_episode_complete=on_episode_complete,
             evaluator_override=evaluator,
+            sampling_params=(sampling_config.as_dict() if sampling_config is not None else None),
         )
     )
 
@@ -578,6 +583,10 @@ def _run_eval(
 @click.option("--ui/--no-ui", "enable_ui", default=None, help="Enable/disable live UI logging. Default: auto-enabled when logged in (see 'rllm login').")
 @click.option("--save-episodes/--no-save-episodes", "save_episodes", default=True, help="Save each Episode as its own JSON file for later visualization (default: enabled).")
 @click.option("--episodes-dir", "episodes_dir", default=None, help="Directory to write the episode JSONs into. Default: ~/.rllm/eval_results/<bench>_<model>_<timestamp>/.")
+@click.option("--sampling-params", "sampling_params", default=None, help=_SAMPLING_PARAMS_HELP)
+@click.option("--temperature", default=None, type=float, help="Sampling temperature (shortcut for --sampling-params temperature=...).")
+@click.option("--top-p", "top_p", default=None, type=float, help="Nucleus sampling top_p (shortcut for --sampling-params top_p=...).")
+@click.option("--max-tokens", "max_tokens", default=None, type=int, help="Max generated tokens per call (shortcut for --sampling-params max_tokens=...).")
 def eval_cmd(
     benchmark: str,
     agent_name: str | None,
@@ -596,8 +605,19 @@ def eval_cmd(
     enable_ui: bool | None,
     save_episodes: bool,
     episodes_dir: str | None,
+    sampling_params: str | None,
+    temperature: float | None,
+    top_p: float | None,
+    max_tokens: int | None,
 ):
     """Evaluate a model on a benchmark dataset."""
+    from rllm.cli._sampling import resolve_eval_sampling
+
+    try:
+        sampling_config = resolve_eval_sampling(sampling_params, temperature, top_p, max_tokens)
+    except (ValueError, FileNotFoundError, TypeError) as e:
+        console.print(f"  [error]Invalid --sampling-params: {e}[/]")
+        raise SystemExit(1) from None
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
     _ui_explicit = enable_ui is not None
     if enable_ui is None:
@@ -698,6 +718,7 @@ def eval_cmd(
             save_episodes=save_episodes,
             episodes_dir=episodes_dir,
             use_snapshot=use_snapshot,
+            sampling_config=sampling_config,
         )
     finally:
         if proxy_manager is not None:

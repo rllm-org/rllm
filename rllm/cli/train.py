@@ -21,6 +21,7 @@ from rich.table import Table
 from rich.theme import Theme
 
 from rllm.cli._pull import load_dataset_catalog, pull_dataset
+from rllm.cli._sampling import SAMPLING_PARAMS_HELP as _SAMPLING_PARAMS_HELP
 
 theme = Theme({"label": "dim", "success": "bold green", "error": "bold red", "val": "bold", "key": "yellow"})
 console = Console(theme=theme)
@@ -164,6 +165,10 @@ def _run_train(
     enable_ui: bool = False,
     sandbox_backend: str | None = None,
     sandbox_concurrency: int | None = None,
+    sampling_params: str | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    max_tokens: int | None = None,
 ):
     """Core training logic: resolve catalog, load data, build config, launch trainer."""
 
@@ -384,6 +389,21 @@ def _run_train(
         config_file=config_file,
     )
 
+    # Layer --sampling-params over base.yaml rollout.{train,val}; gateway-enforced.
+    from omegaconf import OmegaConf
+
+    from rllm.cli._sampling import resolve_train_sampling
+
+    base_train = OmegaConf.to_container(config.rllm.rollout.train, resolve=True)
+    base_val = OmegaConf.to_container(config.rllm.rollout.val, resolve=True)
+    try:
+        train_sc, val_sc = resolve_train_sampling(sampling_params, temperature, top_p, max_tokens, base_train=base_train, base_val=base_val)
+    except (ValueError, FileNotFoundError, TypeError) as e:
+        console.print(f"  [error]Invalid --sampling-params: {e}[/]")
+        raise SystemExit(1) from None
+    config.rllm.rollout.train = train_sc.as_dict()
+    config.rllm.rollout.val = val_sc.as_dict()
+
     # ---- Wire UI logging ----
     if enable_ui:
         if not os.environ.get("RLLM_UI_URL"):
@@ -417,6 +437,11 @@ def _run_train(
     sandbox_row = _describe_sandbox_routing(agent_flow, train_dataset, val_dataset, sandbox_backend, sandbox_concurrency, tunnel_cfg)
     if sandbox_row is not None:
         table.add_row("Sandbox", sandbox_row)
+    train_sp = train_sc.as_dict()
+    val_sp = val_sc.as_dict()
+    if train_sp or val_sp:
+        sp_text = f"train={train_sp}" + (f"  val={val_sp}" if val_sp != train_sp else "")
+        table.add_row("Sampling", f"[dim]{sp_text} (gateway-enforced)[/]")
     table.add_row("Group size", f"[dim]{group_size}[/]")
     table.add_row("Batch size", f"[dim]{batch_size}[/]")
     table.add_row("Learning rate", f"[dim]{lr}[/]")
@@ -554,6 +579,11 @@ def _load_or_pull_dataset(name: str, split: str, catalog: dict, catalog_entry_ov
     help="Sandbox backend for SandboxedAgentFlow harnesses (default: per-task or docker). Remote backends auto-spawn a cloudflared tunnel for the gateway.",
 )
 @click.option("--sandbox-concurrency", "sandbox_concurrency", default=None, type=int, help="Override max concurrent sandboxes (default: agent's max_concurrent — usually 4).")
+# Sampling options (resolved into rollout.{train,val}; gateway-enforced)
+@click.option("--sampling-params", "sampling_params", default=None, help=_SAMPLING_PARAMS_HELP)
+@click.option("--temperature", default=None, type=float, help="Sampling temperature for train+val (shortcut for --sampling-params temperature=...).")
+@click.option("--top-p", "top_p", default=None, type=float, help="Nucleus sampling top_p for train+val (shortcut).")
+@click.option("--max-tokens", "max_tokens", default=None, type=int, help="Max generated tokens per call for train+val (shortcut).")
 def train_cmd(
     benchmark: str,
     train_dataset: str | None,
@@ -579,6 +609,10 @@ def train_cmd(
     enable_ui: bool | None,
     sandbox_backend: str | None,
     sandbox_concurrency: int | None,
+    sampling_params: str | None,
+    temperature: float | None,
+    top_p: float | None,
+    max_tokens: int | None,
 ):
     """Train a model on a benchmark dataset using RL."""
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
@@ -620,4 +654,8 @@ def train_cmd(
         enable_ui=enable_ui,
         sandbox_backend=sandbox_backend,
         sandbox_concurrency=sandbox_concurrency,
+        sampling_params=sampling_params,
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
     )

@@ -252,16 +252,12 @@ async def math_tool_agent(task: Task, config: AgentConfig) -> Episode:
     steps = []
     final_answer = ""
 
-    # top_k is not a chat.completions parameter; drop it from the rollout sampling params.
-    sampling = {k: v for k, v in config.sampling_params.items() if k != "top_k"}
-
     for turn in range(MAX_TURNS):
         try:
             response = await client.chat.completions.create(
                 model=config.model,
                 messages=messages,
                 tools=TOOLS,
-                **sampling,
                 timeout=120,
             )
         except Exception as e:

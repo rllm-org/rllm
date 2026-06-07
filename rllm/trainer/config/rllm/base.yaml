@@ -29,26 +29,23 @@ workflow:
   retry_limit: 3
   raise_on_error: true
 
-# Rollout Configuration. Backend-agnostic source of truth for sampling
-# parameters; ``rllm/trainer/verl/utils.py:sync_config`` mirrors
-# ``rollout.{train,val}.*`` into ``actor_rollout_ref.rollout`` and
-# ``actor_rollout_ref.rollout.val_kwargs`` respectively.
-# The AgentFlowEngine forwards ``rollout.train`` / ``rollout.val`` into
-# ``AgentConfig.sampling_params``, so AgentFlows spread them straight into
-# their LLM calls (``**config.sampling_params``; ``top_k`` dropped for
-# OpenAI-compatible chat-completions clients that don't accept it).
+# Rollout configuration: backend-agnostic source of truth for sampling params.
+# For AgentFlow, rollout.{train,val} are attached to the gateway session and
+# enforced on every LLM call; extra keys (e.g. presence_penalty) pass through.
+# sync_config mirrors the core keys into actor_rollout_ref.rollout for verl's
+# native rollout.
 rollout:
   n: 8
   n_val: 1  # number of validation samples per prompt
+  # Only defaults the params every backend accepts. Set top_k / penalties / etc.
+  # explicitly (CLI or here) when your served backend supports them.
   train:
     temperature: 1.0
     top_p: 1.0
-    top_k: -1
     max_tokens: 2048
   val:
     temperature: 1.0
     top_p: 1.0
-    top_k: -1
     max_tokens: 2048
 
 # Trainer Configuration
@@ -147,7 +144,8 @@ gateway:
                       # (your own tailscale IP, bore/ngrok/frp URL, internal DNS, etc.).
   store: memory       # "memory" (non-persistent) | "sqlite" (writes traces to disk)
   db_path: null       # Only used when store=sqlite; null → auto-resolved path (logged at startup)
-  sampling_params_priority: session   # "session" | "client" — who wins when both set the same key
+  # Sampling params attached to a session overwrite those keys on every LLM call;
+  # keys not set pass through untouched.
   cumulative_token_mode: false   # Drift-free multi-turn token forwarding: rewrites turn 2+ to
                                  # /v1/completions with cumulative raw token IDs built by the renderer.
                                  # The tokenizer is loaded from the served model path (model.name).
