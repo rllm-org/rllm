@@ -22,6 +22,8 @@ import threading
 import time
 import weakref
 
+from rllm.sandbox.protocol import SnapshotNotFound
+
 logger = logging.getLogger(__name__)
 
 # Default sandbox timeout: 30 minutes (Modal default is 5 min).
@@ -80,29 +82,33 @@ class ModalSandbox:
         self._timeout = kwargs.pop("timeout", _DEFAULT_TIMEOUT)
         self._app_name = kwargs.pop("app_name", "rllm-sandbox")
 
-        # Resolve image
-        if isinstance(image, str):
-            modal_image = modal.Image.from_registry(image)
-        else:
-            # Assume it's already a modal.Image
-            modal_image = image
-
-        # Resolve app
+        # A stored snapshot ref is a bare Modal image id ("im-…", no registry/tag);
+        # the ":" / "/" guard keeps real docker images off the from_id path.
+        from_snapshot = isinstance(image, str) and image.startswith("im-") and ":" not in image and "/" not in image
         self._app = modal.App.lookup(self._app_name, create_if_missing=True)
 
-        # Build create kwargs
-        create_kwargs: dict = {
-            "app": self._app,
-            "image": modal_image,
-            "timeout": self._timeout,
-        }
+        # A missing snapshot surfaces as NotFoundError either at from_id (if it
+        # ever resolves eagerly) or at create; translate both so get_sandbox can
+        # fall back to cold. A registry-image NotFoundError is a genuine bad
+        # image — let it raise.
+        try:
+            if from_snapshot:
+                modal_image = modal.Image.from_id(image)
+            elif isinstance(image, str):
+                modal_image = modal.Image.from_registry(image)
+            else:
+                modal_image = image  # already a modal.Image
 
-        # Optional params
-        for key in ("secrets", "volumes", "workdir", "gpu", "cpu", "memory"):
-            if key in kwargs:
-                create_kwargs[key] = kwargs.pop(key)
+            create_kwargs: dict = {"app": self._app, "image": modal_image, "timeout": self._timeout}
+            for key in ("secrets", "volumes", "workdir", "gpu", "cpu", "memory"):
+                if key in kwargs:
+                    create_kwargs[key] = kwargs.pop(key)
 
-        self._sandbox = modal.Sandbox.create(**create_kwargs)
+            self._sandbox = modal.Sandbox.create(**create_kwargs)
+        except modal.exception.NotFoundError as e:
+            if from_snapshot:
+                raise SnapshotNotFound(f"modal snapshot {image} no longer exists") from e
+            raise
         self._sandbox_id = self._sandbox.object_id
 
         with _LIVE_LOCK:
@@ -259,3 +265,36 @@ class ModalSandbox:
 def create_modal_sandbox(name: str, image: str = "python:3.11-slim", **kwargs) -> ModalSandbox:
     """Factory function for creating a ModalSandbox."""
     return ModalSandbox(name=name, image=image, **kwargs)
+
+
+def build_modal_snapshot(task, key: str) -> str | None:
+    """Build a Modal filesystem snapshot of ``task``'s environment; return its image id.
+
+    Create a base sandbox, replay the Dockerfile RUN steps, then capture the
+    live filesystem as a ``modal.Image`` (stored as a diff from the base).
+    """
+    from rllm.eval._resolution import _create_base_sandbox, _replay_dockerfile
+
+    sb = _create_base_sandbox(task, "modal", name=f"{key}-build")
+    try:
+        _replay_dockerfile(task, sb, "modal")
+        image = sb._sandbox.snapshot_filesystem()  # noqa: SLF001 — modal.Image
+        logger.info("modal snapshot built: %s -> %s", key, image.object_id)
+        return image.object_id
+    finally:
+        try:
+            sb.close()
+        except Exception:
+            logger.debug("build sandbox close failed", exc_info=True)
+
+
+def delete_modal_snapshot(ref: str) -> bool:
+    """Delete a Modal filesystem snapshot by image id."""
+    try:
+        from modal.experimental import image_delete
+
+        image_delete(ref)
+        return True
+    except Exception:
+        logger.warning("failed to delete modal snapshot %s", ref, exc_info=True)
+        return False

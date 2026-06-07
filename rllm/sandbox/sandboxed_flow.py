@@ -142,3 +142,33 @@ def create_sandbox(backend: str, name: str, image: str, **kwargs) -> Sandbox:
         return DaytonaSandbox(name=name, image=image, **kwargs)
     else:
         raise ValueError(f"Unknown sandbox backend: {backend}. Available: docker, local, modal, daytona")
+
+
+def build_snapshot(backend: str, task: Task, key: str) -> str | None:
+    """Build a snapshot of ``task``'s environment; return a backend ref, or ``None``.
+
+    Each backend owns its mechanism (Modal: live-FS capture; Daytona:
+    declarative bake). Backends without snapshots (docker/local) return ``None``.
+    """
+    if backend == "modal":
+        from rllm.sandbox.backends.modal_backend import build_modal_snapshot
+
+        return build_modal_snapshot(task, key)
+    elif backend == "daytona":
+        from rllm.sandbox.backends.daytona import build_daytona_snapshot
+
+        return build_daytona_snapshot(task, key)
+    return None
+
+
+def delete_snapshot(backend: str, ref: str) -> bool:
+    """Delete a snapshot from its backend. Returns ``True`` on success."""
+    if backend == "modal":
+        from rllm.sandbox.backends.modal_backend import delete_modal_snapshot
+
+        return delete_modal_snapshot(ref)
+    elif backend == "daytona":
+        from rllm.sandbox.backends.daytona import delete_daytona_snapshot
+
+        return delete_daytona_snapshot(ref)
+    return False

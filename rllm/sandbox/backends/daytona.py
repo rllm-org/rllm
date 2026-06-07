@@ -24,6 +24,8 @@ import time
 import weakref
 from pathlib import Path
 
+from rllm.sandbox.protocol import SnapshotNotFound
+
 logger = logging.getLogger(__name__)
 
 # Default auto-stop interval (minutes). 0 disables auto-stop entirely;
@@ -97,6 +99,8 @@ class DaytonaSandbox:
                 CreateSandboxFromImageParams,
                 CreateSandboxFromSnapshotParams,
                 Daytona,
+                DaytonaNotFoundError,
+                DaytonaValidationError,
                 Image,
                 Resources,
             )
@@ -147,14 +151,23 @@ class DaytonaSandbox:
             self._sandbox = self._client.create(params, timeout=self._create_timeout)
             image_label = image
         else:
-            # Treat as Daytona snapshot name
+            # Treat as Daytona snapshot name. Resources are baked into the
+            # snapshot at build time, so any re-passed here are ignored (debug,
+            # not a warning — booting from a snapshot is the expected path).
             if resources is not None:
-                logger.warning(
-                    "Resources are ignored when creating from a snapshot (%s); snapshot resources win.",
-                    image,
-                )
+                logger.debug("Resources ignored when creating from snapshot %s; snapshot resources win.", image)
             params = CreateSandboxFromSnapshotParams(snapshot=image, **base_kwargs)
-            self._sandbox = self._client.create(params, timeout=self._create_timeout)
+            try:
+                self._sandbox = self._client.create(params, timeout=self._create_timeout)
+            except (DaytonaNotFoundError, DaytonaValidationError) as e:
+                # A gone/removing snapshot surfaces as 404 (NotFound) or 400
+                # (Validation, e.g. "Snapshot <name> is removing") — both mean
+                # cold fallback. Validation errors that don't name this snapshot
+                # (bad resources, etc.) are real and must propagate.
+                msg = str(e).lower()
+                if isinstance(e, DaytonaNotFoundError) or image.lower() in msg or any(w in msg for w in ("not found", "does not exist", "removing", "removed")):
+                    raise SnapshotNotFound(f"daytona snapshot {image} unavailable: {e}") from e
+                raise
             image_label = f"snapshot:{image}"
 
         self._sandbox_id = getattr(self._sandbox, "id", None) or getattr(self._sandbox, "sandbox_id", None)
@@ -346,3 +359,45 @@ def _shell_quote(s: str) -> str:
 def create_daytona_sandbox(name: str, image: str = "python:3.11-slim", **kwargs) -> DaytonaSandbox:
     """Factory function for creating a DaytonaSandbox."""
     return DaytonaSandbox(name=name, image=image, **kwargs)
+
+
+def build_daytona_snapshot(task, key: str) -> str | None:
+    """Declaratively bake ``task``'s base image + RUN steps into a named snapshot; return the name."""
+    from daytona import CreateSnapshotParams, Daytona, DaytonaNotFoundError, Image, Resources
+
+    from rllm.eval._resolution import _dockerfile_run_commands, _resolve_image, _sandbox_resource_kwargs
+
+    client = Daytona()
+    try:
+        client.snapshot.get(key)
+        logger.info("daytona snapshot %s already registered", key)
+        return key
+    except DaytonaNotFoundError:
+        pass
+
+    img = Image.base(_resolve_image(task, "daytona"))
+    run_commands = _dockerfile_run_commands(task)
+    if run_commands:
+        img = img.run_commands(*run_commands)
+
+    res_kw = _sandbox_resource_kwargs(task, "daytona")
+    resources = Resources(**res_kw) if res_kw else None
+    client.snapshot.create(
+        CreateSnapshotParams(name=key, image=img, resources=resources),
+        on_logs=lambda chunk: logger.debug("daytona build[%s]: %s", key, chunk.rstrip()),
+    )
+    logger.info("daytona snapshot built: %s", key)
+    return key
+
+
+def delete_daytona_snapshot(ref: str) -> bool:
+    """Delete a Daytona snapshot by name."""
+    try:
+        from daytona import Daytona
+
+        client = Daytona()
+        client.snapshot.delete(client.snapshot.get(ref))
+        return True
+    except Exception:
+        logger.warning("failed to delete daytona snapshot %s", ref, exc_info=True)
+        return False

@@ -34,6 +34,7 @@ async def run_dataset(
     *,
     concurrency: int = 64,
     sandbox_backend: str | None = None,
+    use_snapshot: bool = True,
     agent_name: str = "",
     dataset_name: str = "unknown",
     on_episode_complete=None,
@@ -82,7 +83,7 @@ async def run_dataset(
         gateway = EvalGatewayManager(upstream_url=base_url, model=model, tunnel=gateway_tunnel)
         gateway.start()
 
-    hooks = SandboxTaskHooks(evaluator_override=evaluator_override, sandbox_backend=sandbox_backend)
+    hooks = SandboxTaskHooks(evaluator_override=evaluator_override, sandbox_backend=sandbox_backend, use_snapshot=use_snapshot)
 
     engine = AgentFlowEngine(
         agent_flow=agent_flow,

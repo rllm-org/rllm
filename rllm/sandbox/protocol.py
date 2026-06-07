@@ -7,6 +7,13 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 
+class SnapshotNotFound(Exception):
+    """Raised by ``create_sandbox(image=ref)`` when a snapshot ref no longer
+    resolves on its backend, signalling :func:`rllm.sandbox.snapshot.get_sandbox`
+    to fall back to the cold path. Transient/auth errors propagate instead.
+    """
+
+
 @dataclass
 class SandboxConfig:
     """Configuration for sandboxed agent execution."""
