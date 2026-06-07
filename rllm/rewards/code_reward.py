@@ -117,7 +117,7 @@ def check_correctness(tests: list[dict[str, str]] | dict[str, list[str]], code: 
 
         process = multiprocessing.Process(target=evaluate_code, args=(tests, code, False, test_results, test_fn))
         process.start()
-        process.join()
+        process.join(timeout=timeout_per_test * num_tests + 5)
 
         if process.is_alive():
             process.kill()
@@ -151,8 +151,8 @@ def check_correctness(tests: list[dict[str, str]] | dict[str, list[str]], code: 
 
 
 def postprocess_lcb_sample(sample):
-    sample_inputs = [sample["input"] for sample in sample]
-    sample_outputs = [sample["output"] for sample in sample]
+    sample_inputs = [item["input"] for item in sample]
+    sample_outputs = [item["output"] for item in sample]
 
     sample_dict = {
         "inputs": sample_inputs,
