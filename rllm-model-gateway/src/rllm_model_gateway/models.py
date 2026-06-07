@@ -19,6 +19,7 @@ class TraceRecord(BaseModel):
     response_message: dict[str, Any] = Field(default_factory=dict)
     completion_token_ids: list[int] = Field(default_factory=list)
     logprobs: list[float] | None = None
+    routing_matrices: list[str] | None = None
     finish_reason: str | None = None
     weight_version: int | None = None
     # Metadata

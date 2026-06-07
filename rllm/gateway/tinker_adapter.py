@@ -97,6 +97,7 @@ def create_tinker_handler(engine: TinkerEngine) -> Callable[[dict[str, Any]], Aw
                     "message": response_message,
                     "finish_reason": finish_reason,
                     "token_ids": completion_ids,
+                    "routing_matrices": getattr(model_output, "routing_matrices", None),
                     "logprobs": {
                         "content": [{"logprob": lp} for lp in logprobs],
                     },
@@ -108,6 +109,7 @@ def create_tinker_handler(engine: TinkerEngine) -> Callable[[dict[str, Any]], Aw
                 "total_tokens": prompt_len + completion_len,
             },
             "prompt_token_ids": prompt_ids,
+            "weight_version": getattr(model_output, "weight_version", None),
         }
 
     return handler
