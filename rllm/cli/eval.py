@@ -85,6 +85,7 @@ def _run_eval(
     enable_ui: bool = False,
     save_episodes: bool = True,
     episodes_dir: str | None = None,
+    use_snapshot: bool = True,
 ):
     """Core eval logic, extracted for clean proxy lifecycle management."""
     from rllm.data import DatasetRegistry
@@ -379,6 +380,8 @@ def _run_eval(
         agent_text += f"  [dim]{agent_desc}[/]"
     table.add_row("Agent", agent_text)
     table.add_row("Evaluator", f"[dim]{evaluator_display}[/]")
+    if not use_snapshot:
+        table.add_row("Snapshots", "[dim]disabled (--no-snapshot, cold start)[/]")
     console.print()
     console.print(Panel(table, border_style="cyan", expand=False))
     console.print()
@@ -479,6 +482,7 @@ def _run_eval(
             model=model,
             concurrency=concurrency,
             sandbox_backend=(agent_metadata or {}).get("sandbox_backend"),
+            use_snapshot=use_snapshot,
             agent_name=agent_name,
             dataset_name=getattr(dataset, "name", benchmark) or benchmark,
             on_episode_complete=on_episode_complete,
@@ -565,6 +569,12 @@ def _run_eval(
     help="Sandbox/environment backend. For Harbor agents: docker, daytona, modal, e2b, etc. For sandboxed agents: docker, local, modal.",
 )
 @click.option("--sandbox-concurrency", "sandbox_concurrency", default=None, type=int, help="Override max concurrent sandboxes (default: agent's max_concurrent).")
+@click.option(
+    "--snapshot/--no-snapshot",
+    "use_snapshot",
+    default=True,
+    help="Boot each task from a pre-built environment snapshot when one exists (default). Use --no-snapshot to force the cold path (e.g. A/B timing). Build snapshots with 'rllm snapshot create'.",
+)
 @click.option("--ui/--no-ui", "enable_ui", default=None, help="Enable/disable live UI logging. Default: auto-enabled when logged in (see 'rllm login').")
 @click.option("--save-episodes/--no-save-episodes", "save_episodes", default=True, help="Save each Episode as its own JSON file for later visualization (default: enabled).")
 @click.option("--episodes-dir", "episodes_dir", default=None, help="Directory to write the episode JSONs into. Default: ~/.rllm/eval_results/<bench>_<model>_<timestamp>/.")
@@ -582,6 +592,7 @@ def eval_cmd(
     search_backend: str | None,
     sandbox_backend: str | None,
     sandbox_concurrency: int | None,
+    use_snapshot: bool,
     enable_ui: bool | None,
     save_episodes: bool,
     episodes_dir: str | None,
@@ -686,6 +697,7 @@ def eval_cmd(
             enable_ui=enable_ui,
             save_episodes=save_episodes,
             episodes_dir=episodes_dir,
+            use_snapshot=use_snapshot,
         )
     finally:
         if proxy_manager is not None:

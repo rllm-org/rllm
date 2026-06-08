@@ -142,3 +142,51 @@ def create_sandbox(backend: str, name: str, image: str, **kwargs) -> Sandbox:
         return DaytonaSandbox(name=name, image=image, **kwargs)
     else:
         raise ValueError(f"Unknown sandbox backend: {backend}. Available: docker, local, modal, daytona")
+
+
+def build_snapshot(backend: str, task: Task, key: str, prior_ref: str | None = None, *, force: bool = False) -> str | None:
+    """Build a snapshot of ``task``'s environment; return a backend ref, or ``None``.
+
+    Each backend owns its mechanism (Modal: live-FS capture; Daytona:
+    declarative bake). Backends without snapshots (docker/local) return ``None``.
+    A known-live ``prior_ref`` is reused unless ``force``, which always rebuilds.
+    """
+    if backend == "modal":
+        from rllm.sandbox.backends.modal_backend import build_modal_snapshot
+
+        return build_modal_snapshot(task, key, prior_ref, force=force)
+    elif backend == "daytona":
+        from rllm.sandbox.backends.daytona import build_daytona_snapshot
+
+        return build_daytona_snapshot(task, key, force=force)
+    return None
+
+
+def delete_snapshot(backend: str, ref: str) -> bool:
+    """Delete a snapshot from its backend. Returns ``True`` on success."""
+    if backend == "modal":
+        from rllm.sandbox.backends.modal_backend import delete_modal_snapshot
+
+        return delete_modal_snapshot(ref)
+    elif backend == "daytona":
+        from rllm.sandbox.backends.daytona import delete_daytona_snapshot
+
+        return delete_daytona_snapshot(ref)
+    return False
+
+
+def snapshot_absent(backend: str, ref: str) -> bool:
+    """No-boot probe for ``registry.sync``: ``True`` only when ``ref`` is verifiably gone.
+
+    Conservative by construction — auth/permission/rate-limit/unknown errors return
+    ``False`` so sync never prunes a record it cannot confirm is absent.
+    """
+    if backend == "modal":
+        from rllm.sandbox.backends.modal_backend import _modal_ref_absent
+
+        return _modal_ref_absent(ref)
+    elif backend == "daytona":
+        from rllm.sandbox.backends.daytona import _daytona_ref_absent
+
+        return _daytona_ref_absent(ref)
+    return False

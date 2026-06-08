@@ -31,21 +31,37 @@ class SandboxTaskHooks:
         sandbox_backend: Override for the sandbox backend
             (``"docker"``, ``"local"``, ``"modal"``, ...). Falls back to
             per-task ``metadata['sandbox_backend']`` then ``"docker"``.
+        use_snapshot: When True (default), boot each task from a pre-built
+            environment snapshot if the local registry has one (transparent
+            cold-start acceleration); otherwise always take the cold path.
     """
 
     def __init__(
         self,
         evaluator_override: Evaluator | None = None,
         sandbox_backend: str | None = None,
+        use_snapshot: bool = True,
     ) -> None:
+        from rllm.sandbox.snapshot import SnapshotRegistry
+
         self.evaluator_override = evaluator_override
         self.sandbox_backend = sandbox_backend
+        # Read-only registry, loaded once and shared across this run's tasks
+        # (None disables snapshots, e.g. eval --no-snapshot).
+        self._registry = SnapshotRegistry.load() if use_snapshot else None
+        if self._registry is not None and sandbox_backend:
+            # Best-effort run-start reconcile: drop only verified-absent local
+            # records so a stale ref doesn't cost an optimistic boot. A sync
+            # failure must never crash the run.
+            try:
+                self._registry.sync(sandbox_backend)
+            except Exception:
+                logger.debug("snapshot sync at run start failed — continuing", exc_info=True)
 
     def setup(self, task: Task, agent_flow: AgentFlow, uid: str) -> TaskContext:
         from rllm.engine.agentflow_engine import TaskContext
         from rllm.eval._resolution import (
             _adapt_legacy_evaluator,
-            _create_sandbox_for_task,
             _detect_verifier,
             _needs_sandbox,
             _resolve_evaluator,
@@ -67,7 +83,9 @@ class SandboxTaskHooks:
 
         sandbox = None
         if needs_sandbox:
-            sandbox = _create_sandbox_for_task(task, self.sandbox_backend)
+            from rllm.sandbox.snapshot import get_sandbox
+
+            sandbox = get_sandbox(task, self.sandbox_backend, self._registry)
             _setup_task_environment(task, sandbox)
             if isinstance(task_flow, SandboxedAgentFlow):
                 task_flow.set_sandbox(sandbox)
@@ -79,16 +97,17 @@ class SandboxTaskHooks:
             evaluator = _resolve_evaluator(task, sandbox, verifier_kind, verifier_config)
 
         def teardown() -> None:
-            # The hook created the sandbox, so it owns the lifecycle.
-            # Going through ``task_flow.teardown_sandbox()`` would no-op
-            # because ``set_sandbox()`` marks it externally-managed, leaking
-            # cloud sandboxes (Daytona/Modal/e2b) that bill by duration.
+            # Sandboxes are ephemeral — the hook owns this one's lifecycle and
+            # closes it directly (the #616 fix). Going through
+            # ``task_flow.teardown_sandbox()`` would no-op because
+            # ``set_sandbox()`` marks it externally-managed, leaking cloud
+            # sandboxes (Daytona/Modal/e2b) that bill by duration.
             if sandbox is None:
                 return
             try:
                 sandbox.close()
             except Exception:
-                logger.exception("sandbox close failed")
+                logger.exception("sandbox.close failed")
             if isinstance(task_flow, SandboxedAgentFlow):
                 task_flow._sandbox = None  # noqa: SLF001
 
