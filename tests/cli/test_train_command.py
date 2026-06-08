@@ -300,6 +300,48 @@ class TestTrainCommand:
         mock_load_agent.assert_called_once_with("custom_agent")
         mock_load_eval.assert_called_once_with("custom_evaluator")
 
+    def test_train_sampling_params_reach_rollout_config(self, runner, tmp_rllm_home, mock_train_dataset):
+        """--sampling-params (+ standalone flags) must land in rllm.rollout.{train,val},
+        including extra keys, before the trainer is constructed."""
+        catalog = {"datasets": {"test_math": {"eval_split": "test"}}}
+        mock_trainer = MagicMock()
+
+        with (
+            patch("rllm.cli.train.load_dataset_catalog", return_value=catalog),
+            patch("rllm.eval.agent_loader.load_agent", return_value=_MockAgentFlow()),
+            patch("rllm.eval.evaluator_loader.load_evaluator", return_value=_MockEvaluator()),
+            patch("rllm.trainer.AgentTrainer", return_value=mock_trainer) as mock_cls,
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "train",
+                    "test_math",
+                    "--agent",
+                    "a",
+                    "--evaluator",
+                    "e",
+                    "--model",
+                    "m",
+                    "--sampling-params",
+                    "temperature=0.3,presence_penalty=0.5",
+                    "--top-p",
+                    "0.9",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        cfg = mock_cls.call_args.kwargs["config"]
+        # Standalone flag, string param, and extra key all reach train + val.
+        assert cfg.rllm.rollout.train.temperature == 0.3
+        assert cfg.rllm.rollout.train.top_p == 0.9
+        assert cfg.rllm.rollout.train.presence_penalty == 0.5
+        assert cfg.rllm.rollout.val.temperature == 0.3
+        assert cfg.rllm.rollout.val.presence_penalty == 0.5
+        # Untouched base key preserved; top_k is no longer defaulted (opt-in).
+        assert cfg.rllm.rollout.train.max_tokens == 2048
+        assert "top_k" not in cfg.rllm.rollout.train
+
     def test_train_header_display(self, runner, tmp_rllm_home, mock_train_dataset):
         """Train should display a header panel with configuration info."""
         catalog = {"datasets": {"test_math": {"default_agent": "math", "reward_fn": "math_reward_fn", "eval_split": "test"}}}

@@ -40,6 +40,7 @@ async def run_dataset(
     on_episode_complete=None,
     evaluator_override: Evaluator | None = None,
     gateway: GatewayManager | None = None,
+    sampling_params: dict | None = None,
 ) -> tuple[EvalResult, list]:
     """Run a list of :class:`rllm.types.Task` objects through :class:`AgentFlowEngine`.
 
@@ -57,6 +58,9 @@ async def run_dataset(
             ``--evaluator`` flag). When ``None``, ``SandboxTaskHooks``
             resolves a per-task verifier from the task's ``[verifier]``
             config.
+        sampling_params: Resolved sampling params from the CLI, attached to each
+            gateway session so the gateway enforces them on every LLM call. ``None``
+            or empty → flows/harnesses keep their own params.
 
     Returns ``(EvalResult, list[Episode])``.
     """
@@ -94,6 +98,7 @@ async def run_dataset(
         retry_limit=1,  # eval doesn't retry on flow errors
         raise_on_error=False,  # capture per-task errors as error Episodes
         hooks=hooks,
+        val_sampling_params=sampling_params or None,  # eval is always validation
     )
 
     try:
