@@ -8,14 +8,15 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
+import os
 from functools import wraps
 from typing import TYPE_CHECKING, Literal
 
 import tinker
 from omegaconf import OmegaConf
 from tinker.types import AdamParams
-from tinker_cookbook import checkpoint_utils
 from tinker_cookbook.tokenizer_utils import Tokenizer
 
 from rllm.trainer.algorithms import (
@@ -116,52 +117,27 @@ class TinkerPolicyTrainer:
             stepwise_advantage_mode=self.config.rllm.stepwise_advantage.mode,
         )
 
-    async def initialize_async(self, resume_from_checkpoint: bool = True):
-        """
-        Initialize or resume training client.
-
-        Args:
-            resume_from_checkpoint: If True, attempt to resume from last checkpoint
-        """
-        # Check for existing checkpoint
+    async def initialize_async(self):
+        """Initialize or resume the training client based on ``training.resume_mode``."""
+        step_dir = self._resume_step_dir()
         resume_info = None
-        if resume_from_checkpoint:
-            # Check if a Tinker model ID is provided in config
-            tinker_model_id = OmegaConf.select(self.config, "training.resume_from_tinker_id", default=None)
-            if tinker_model_id and tinker_model_id.startswith("tinker://") and "/weights/" in tinker_model_id:
-                checkpoint_name = tinker_model_id.split("/weights/")[-1]
-                try:
-                    batch = int(checkpoint_name)
-                except ValueError:
-                    batch = 0
-
-                resume_info = {
-                    "state_path": tinker_model_id,
-                    "sampler_path": tinker_model_id.replace("/weights/", "/sampler_weights/"),
-                    "batch": batch,
-                }
-                logger.info(f"Resuming from Tinker model ID: {tinker_model_id}")
-            else:
-                # Fall back to local checkpoint lookup
-                resume_info = self.get_last_checkpoint()
+        if step_dir is not None:
+            ckpt_file = os.path.join(step_dir, "checkpoint.json")
+            if os.path.exists(ckpt_file):
+                with open(ckpt_file) as f:
+                    resume_info = json.load(f)
 
         if resume_info:
-            # Resume from checkpoint
-            logger.info(f"Resuming from checkpoint: {resume_info}")
+            logger.info(f"Resuming from checkpoint: {step_dir}")
             self.training_client = await self.service_client.create_training_client_from_state_async(resume_info["state_path"])
-
-            if "sampler_path" in resume_info:
-                logger.info(f"Using sampler checkpoint: {resume_info['sampler_path']}")
-                sampling_client = self.create_sampling_client(resume_info["sampler_path"])
-            else:
-                # Fallback: convert state path to sampler path
-                sampler_path = resume_info["state_path"].replace("weights", "sampler_weights")
-                logger.info(f"No sampler_path in checkpoint, using: {sampler_path}")
-                sampling_client = self.create_sampling_client(sampler_path)
-
-            start_batch = resume_info["batch"]
+            sampler_path = resume_info.get("sampler_path") or resume_info["state_path"].replace("/weights/", "/sampler_weights/")
+            sampling_client = self.create_sampling_client(sampler_path)
+            try:
+                start_batch = int(os.path.basename(step_dir.rstrip("/")).split("global_step_")[-1])
+            except ValueError:
+                start_batch = 0
             logger.info(f"Resuming from batch {start_batch}")
-            return start_batch, sampling_client
+            return start_batch, sampling_client, resume_info.get("dataloader_state")
         else:
             # Start from scratch
             # Create LoRA training client
@@ -181,7 +157,7 @@ class TinkerPolicyTrainer:
             sampler_future = await self.training_client.save_weights_for_sampler_async(name="000000")
             sampler_result = await sampler_future.result_async()
             sampling_client = self.create_sampling_client(sampler_result.path)
-            return 0, sampling_client
+            return 0, sampling_client, None
 
     def _remove_mask(self, datum: tinker.Datum) -> tinker.Datum:
         """Remove mask from datum (not needed by forward_backward)."""
@@ -360,31 +336,33 @@ class TinkerPolicyTrainer:
     async def save_checkpoint_and_get_sampling_client(
         self,
         batch_idx: int,
-        kind: str = "both",
         do_save: bool = False,
+        dataloader_state: dict | None = None,
     ) -> tinker.SamplingClient:
         """
-        Save checkpoint and return paths.
+        Save a checkpoint and return a sampling client.
 
         Args:
             batch_idx: Current batch index
-            kind: Checkpoint kind ("state", "sampler", or "both")
-            do_save: Whether to save the checkpoint
-
-        Returns:
-            Dictionary with checkpoint paths
+            do_save: Whether to persist a checkpoint (state + sampler weights + metadata)
+            dataloader_state: Loader position, stored in checkpoint.json so it resumes with the weights.
         """
-        if do_save:
-            path_dict = await checkpoint_utils.save_checkpoint_async(
-                training_client=self.training_client,
-                name=f"{batch_idx:06d}",
-                log_path=self.config.training.default_local_dir,
-                kind=kind,
-                loop_state={"batch": batch_idx},
-            )
-            return self.training_client.create_sampling_client(path_dict["sampler_path"])
-        else:
+        if not do_save:
             return await self.training_client.save_weights_and_get_sampling_client_async()
+
+        name = f"{batch_idx:06d}"
+        state_future = await self.training_client.save_state_async(name)
+        sampler_future = await self.training_client.save_weights_for_sampler_async(name)
+        state_path = (await state_future.result_async()).path
+        sampler_path = (await sampler_future.result_async()).path
+
+        step_dir = os.path.join(self.config.training.default_local_dir, f"global_step_{batch_idx}")
+        os.makedirs(step_dir, exist_ok=True)
+        with open(os.path.join(step_dir, "checkpoint.json"), "w") as f:
+            json.dump({"name": name, "state_path": state_path, "sampler_path": sampler_path, "dataloader_state": dataloader_state}, f)
+        with open(os.path.join(self.config.training.default_local_dir, "latest_checkpointed_iteration.txt"), "w") as f:
+            f.write(str(batch_idx))
+        return self.training_client.create_sampling_client(sampler_path)
 
     @require_training_client
     def create_sampling_client(self, sampler_path: str) -> tinker.SamplingClient:
@@ -399,17 +377,28 @@ class TinkerPolicyTrainer:
         """
         return self.training_client.create_sampling_client(sampler_path)  # type: ignore[attr-defined]
 
-    def get_last_checkpoint(self) -> dict | None:
-        """
-        Get information about the last checkpoint.
-
-        Returns:
-            Resume info dictionary or None if no checkpoint exists
-        """
-        # TODO: default_local_dir is shared across all experiments (e.g. /tmp/rllm-tinker-checkpoints),
-        # so this can load checkpoints from a different model/experiment. Should scope by experiment
-        # name like tinker-cookbook does with its per-experiment log_path.
-        return checkpoint_utils.get_last_checkpoint(self.config.training.default_local_dir)
+    def _resume_step_dir(self) -> str | None:
+        """Resolve the global_step_<N> dir to resume from per ``training.resume_mode``."""
+        mode = OmegaConf.select(self.config, "training.resume_mode", default="auto")
+        if mode == "disable":
+            return None
+        if mode == "resume_path":
+            path = OmegaConf.select(self.config, "training.resume_from_path", default=None)
+            assert path and "global_step_" in path, "resume_from_path must point at a global_step_<N> folder"
+            path = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
+            if not os.path.exists(os.path.join(path, "checkpoint.json")):
+                raise FileNotFoundError(f"resume_from_path has no checkpoint.json: {path}")
+            return path
+        tracker = os.path.join(self.config.training.default_local_dir, "latest_checkpointed_iteration.txt")
+        if not os.path.exists(tracker):
+            return None
+        with open(tracker) as f:
+            try:
+                n = int(f.read().strip())
+            except ValueError:
+                return None
+        step_dir = os.path.join(self.config.training.default_local_dir, f"global_step_{n}")
+        return step_dir if os.path.exists(step_dir) else None
 
     @require_training_client
     def get_tokenizer(self) -> Tokenizer:

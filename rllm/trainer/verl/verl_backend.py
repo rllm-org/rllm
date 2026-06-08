@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import uuid
 from collections import defaultdict
 from collections.abc import Iterable
 from functools import reduce
@@ -11,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf, open_dict
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
@@ -29,7 +28,7 @@ from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.metric import reduce_metrics
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
-from rllm.data import Dataset
+from rllm.data.utils import interleave_tasks
 from rllm.engine.rollout import RolloutEngine, VerlEngine
 from rllm.trainer.algorithms import (
     AlgorithmConfig,
@@ -42,7 +41,6 @@ from rllm.trainer.verl.metrics import calculate_debug_metrics_compat
 from rllm.trainer.verl.utils import (
     balance_batch,
     build_wg_kwargs,
-    create_dataloaders,
     load_checkpoint,
     save_checkpoint,
     start_profiling,
@@ -143,12 +141,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         self.checkpoint_manager: CheckpointEngineManager | None = None
         self.rollout_engine: VerlEngine | None = None
         self.algorithm_config: AlgorithmConfig | None = None
-
-        self.train_dataloader, self.val_dataloader, self.total_training_steps = create_dataloaders(
-            config,
-            tokenizer,
-            processor,
-        )
 
     def _init_colocated_workers(self) -> None:
         """Create worker groups for colocated (hybrid engine) mode."""
@@ -297,6 +289,20 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
         patch_verl_tensordict_jagged_layout()
 
+        # Set actor.optim.total_training_steps before workers build the LR scheduler;
+        # a verl-native trainer.total_training_steps override wins over the computed count.
+        total_training_steps = kwargs.get("total_training_steps")
+        if total_training_steps is not None:
+            if self.config.trainer.get("total_training_steps") is not None:
+                total_training_steps = self.config.trainer.total_training_steps
+            try:
+                OmegaConf.set_struct(self.config, True)
+                with open_dict(self.config):
+                    if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
+                        self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
+            except Exception as e:
+                logger.warning(f"Could not set total_training_steps on actor.optim: {e}")
+
         if self.is_separated:
             self._init_separated_workers()
         else:
@@ -362,15 +368,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             if strategy != "megatron":
                 raise ValueError(f"router_replay={router_replay_mode!r} requires actor.strategy='megatron', got {strategy!r}")
 
-    def get_dataloader(self, dataset: Dataset | None, trainer_state: TrainerState) -> Iterable:
-        """Get dataloader. Note that for Verl backend, the RayPPOTrainer init already creates the dataloaders."""
-        if trainer_state.is_training:
-            return self.train_dataloader
-        elif self.val_dataloader is not None:
-            return self.val_dataloader
-        else:
-            raise ValueError("No validation dataloader available. Please check the configuration.")
-
     async def generate_episodes(self, batch: Any, agent_workflow_engine: UnifiedWorkflowEngine, is_validation: bool = False, **kwargs) -> list[Episode]:
         """Generate episodes using the workflow engine.
 
@@ -382,42 +379,29 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         4. Return the episodes.
 
         Args:
-            batch: Input batch (dict format from dataloader).
+            batch: Input batch (list of rllm task dicts from the dataloader).
             agent_workflow_engine: The workflow engine to use.
             **kwargs: Additional arguments.
 
         Returns:
             List of generated episodes.
         """
-        # Step 1: build interleaved batch
-        if isinstance(batch, dict):
-            batch = DataProto.from_single_dict(batch)
-
-        batch.non_tensor_batch["task_ids"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
-        if is_validation:
-            repeat_times = self.full_config.rllm.rollout.n_val
-        else:
-            repeat_times = self.full_config.rllm.rollout.n
-        batch = batch.repeat(repeat_times=repeat_times)
-        # Step 2: execute tasks using the agent workflow engine (async)
-        episodes = await self._execute_tasks_async(batch, agent_workflow_engine, is_validation=is_validation, **kwargs)
-        # Step 3: sleep the replicas to free kv_cache before weight sync (colocated only).
-        # Skip during validation (no weight sync follows) and in separated mode
-        # (rollout servers run on their own resources; sleeping is a separated-mode no-op).
+        repeat_times = self.full_config.rllm.rollout.n_val if is_validation else self.full_config.rllm.rollout.n
+        tasks, task_ids = interleave_tasks(batch, repeat_times)
+        episodes = await self._execute_tasks_async(tasks, task_ids, agent_workflow_engine, is_validation=is_validation, **kwargs)
+        # Sleep the replicas to free kv_cache before weight sync (colocated only). Skip during
+        # validation (no weight sync follows) and in separated mode (rollout on own resources).
         if not is_validation and not self.is_separated:
             await self.checkpoint_manager.sleep_replicas()
         return episodes
 
-    async def _execute_tasks_async(self, batch: DataProto, agent_workflow_engine: UnifiedWorkflowEngine, **kwargs) -> list[Episode]:
+    async def _execute_tasks_async(self, tasks: list, task_ids: list[str], agent_workflow_engine: UnifiedWorkflowEngine, **kwargs) -> list[Episode]:
         """A Verl-specific helper function to execute tasks asynchronously."""
         assert self.rollout_engine is not None, "rollout_engine is not initialized."
-        tasks = batch.non_tensor_batch["extra_info"].tolist()
-        task_ids = batch.non_tensor_batch["task_ids"].tolist()
         episodes = await agent_workflow_engine.execute_tasks(tasks, task_ids, **kwargs)
-        # handle data sources in the input dataproto
-        if "data_source" in batch.non_tensor_batch:
-            data_sources = batch.non_tensor_batch["data_source"].tolist()
-            for episode, data_source in zip(episodes, data_sources, strict=True):
+        for episode, task in zip(episodes, tasks, strict=True):
+            data_source = task.get("data_source") if isinstance(task, dict) else None
+            if data_source is not None:
                 episode.info["data_source"] = data_source
         return episodes
 
@@ -767,11 +751,11 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
     async def on_train_start(self, trainer_state: TrainerState) -> None:
         """Called at the start of training."""
         self.global_steps = trainer_state.global_step
-        self.global_steps = load_checkpoint(self.config, self.actor_rollout_wg, train_dataloader=self.train_dataloader)
+        self.global_steps = load_checkpoint(self.config, self.actor_rollout_wg, train_dataloader=trainer_state.train_dataloader)
         await self.checkpoint_manager.update_weights(self.global_steps)
         # we need to set trainer's global_steps to sync with the loaded checkpoint
         trainer_state.global_step = self.global_steps
-        trainer_state.epoch = self.global_steps // len(self.train_dataloader)
+        trainer_state.epoch = trainer_state.train_dataloader.epoch if trainer_state.train_dataloader is not None else 0
 
     async def on_batch_start(self, trainer_state: TrainerState) -> None:
         """Called at the start of each batch."""
@@ -793,7 +777,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         # Save checkpoint if configured
         if self.config.trainer.save_freq > 0 and trainer_state.global_step % self.config.trainer.save_freq == 0:
             with simple_timer("save_checkpoint", trainer_state.timing_dict):
-                save_checkpoint(self.config, self.global_steps, self.actor_rollout_wg, train_dataloader=self.train_dataloader)
+                save_checkpoint(self.config, self.global_steps, self.actor_rollout_wg, train_dataloader=trainer_state.train_dataloader)
 
         # Weight synchronization (colocated only — separated mode syncs in on_policy_updated)
         if not self.is_separated:

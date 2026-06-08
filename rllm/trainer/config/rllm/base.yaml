@@ -1,4 +1,12 @@
 # Common, backend-agnostic configuration for rLLM
+
+data:
+  train_batch_size: 64
+  val_batch_size: -1
+  max_prompt_length: 2048
+  max_response_length: 30720
+  seed: 0
+
 # Agent Configuration
 agent:
   name: math_agent
@@ -44,12 +52,12 @@ rollout:
     temperature: 1.0
     top_p: 1.0
     top_k: -1
-    max_tokens: 2048
+    max_tokens: ${rllm.data.max_response_length}
   val:
     temperature: 1.0
     top_p: 1.0
     top_k: -1
-    max_tokens: 2048
+    max_tokens: ${rllm.data.max_response_length}
 
 # Trainer Configuration
 trainer:

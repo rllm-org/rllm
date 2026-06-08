@@ -1,11 +1,74 @@
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from omegaconf import DictConfig, OmegaConf
 
 from rllm.types import _DEFAULT_TRAJ_NAME
 from rllm.workflows.workflow import TerminationReason
+
+
+def _explicit_override_keys(hydra_overrides: list[str] | None = None) -> set[str]:
+    """Dotted paths the user explicitly set on the Hydra CLI.
+
+    Falls back to ``HydraConfig.get().overrides.task`` when ``hydra_overrides``
+    is None (only works inside the Hydra entry-point process).
+    """
+    if hydra_overrides is None:
+        try:
+            from hydra.core.hydra_config import HydraConfig
+
+            hydra_overrides = list(HydraConfig.get().overrides.task)
+        except (ValueError, AttributeError, ImportError):
+            return set()
+    keys: set[str] = set()
+    for o in hydra_overrides:
+        if "=" not in o:
+            continue
+        keys.add(o.split("=", 1)[0].lstrip("+~"))
+    return keys
+
+
+def _plain(value: Any) -> Any:
+    """Resolve-free plain-Python view of a config value (for equality checks)."""
+    return OmegaConf.to_container(value, resolve=False) if OmegaConf.is_config(value) else value
+
+
+def sync_shared_keys(
+    config: DictConfig,
+    shared_keys: list[tuple[str, str]],
+    *,
+    hydra_overrides: list[str] | None = None,
+    explicit: set[str] | None = None,
+    on_native_override: Callable[[str, str, bool], None] | None = None,
+) -> None:
+    """Keep a backend-native namespace in parity with ``rllm.*`` over a shared-keys table.
+
+    Each entry is ``(native_path, rllm_path)``. Precedence per key:
+    rllm CLI > native CLI > rllm yaml (non-None) > native yaml. Backend-agnostic —
+    the backend supplies its own table (cf. verl's ``_SHARED_KEYS``).
+
+    ``on_native_override(native_path, rllm_path, conflict)`` is invoked when the user set the
+    native path on the CLI — e.g. to emit a deprecation warning. ``explicit`` may be passed to
+    reuse a precomputed override set.
+    """
+    if explicit is None:
+        explicit = _explicit_override_keys(hydra_overrides)
+    for native_path, rllm_path in shared_keys:
+        if rllm_path in explicit:
+            rllm_value = OmegaConf.select(config, rllm_path)
+            if native_path in explicit and on_native_override is not None:
+                on_native_override(native_path, rllm_path, _plain(OmegaConf.select(config, native_path)) != _plain(rllm_value))
+            OmegaConf.update(config, native_path, rllm_value, merge=False)
+        elif native_path in explicit:
+            if on_native_override is not None:
+                on_native_override(native_path, rllm_path, False)
+            OmegaConf.update(config, rllm_path, OmegaConf.select(config, native_path), merge=False)
+        else:
+            value = OmegaConf.select(config, rllm_path)
+            if value is not None:
+                OmegaConf.update(config, native_path, value, merge=False)
 
 
 @dataclass
