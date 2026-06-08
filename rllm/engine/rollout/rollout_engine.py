@@ -85,8 +85,9 @@ class RolloutEngine:
         raise NotImplementedError(f"_get_model_response is not implemented for {self.__class__.__name__}")
 
     async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
+        weight_version = self.weight_version
         result = await self._get_model_response(messages, **kwargs)
-        result.weight_version = self.weight_version
+        result.weight_version = weight_version
         return result
 
     def assemble_model_output(self, token_input: TokenInput, token_output: TokenOutput) -> ModelOutput:
