@@ -267,13 +267,61 @@ def create_modal_sandbox(name: str, image: str = "python:3.11-slim", **kwargs) -
     return ModalSandbox(name=name, image=image, **kwargs)
 
 
-def build_modal_snapshot(task, key: str) -> str | None:
+def _modal_ref_alive(ref: str) -> bool:
+    """True only when the image is confirmed present, for build reuse (one no-boot ``ImageFromId`` RPC).
+
+    ``hydrate()`` resolves the id without creating a sandbox. Unsure (auth/unknown)
+    returns ``False`` so the caller rebuilds rather than reuse a ref it cannot confirm.
+    """
+    import modal
+    from modal.exception import NotFoundError
+
+    try:
+        modal.Image.from_id(ref).hydrate()
+        return True
+    except NotFoundError:
+        return False
+    except Exception:
+        logger.debug("modal ref probe failed for %s — treating as unknown", ref, exc_info=True)
+        return False
+
+
+def _modal_ref_absent(ref: str) -> bool:
+    """True only when the image is confirmed gone, for sync prune.
+
+    Not the inverse of :func:`_modal_ref_alive`: both default to ``False`` when unsure,
+    for opposite-safe reasons — here unsure (auth/unknown) means keep the local record
+    rather than prune one we cannot confirm is absent.
+    """
+    import modal
+    from modal.exception import NotFoundError
+
+    try:
+        modal.Image.from_id(ref).hydrate()
+        return False  # present
+    except NotFoundError:
+        return True  # confirmed gone
+    except Exception:
+        logger.debug("modal ref probe failed for %s — treating as unknown (keep)", ref, exc_info=True)
+        return False
+
+
+def build_modal_snapshot(task, key: str, prior_ref: str | None = None, *, force: bool = False) -> str | None:
     """Build a Modal filesystem snapshot of ``task``'s environment; return its image id.
+
+    Mirrors Daytona's idempotency: when a ``prior_ref`` is known and still live
+    (probed via :func:`_modal_ref_alive`), reuse it instead of capturing a fresh
+    filesystem — every fresh capture orphans the old image forever. ``force``
+    bypasses reuse and always rebuilds.
 
     Create a base sandbox, replay the Dockerfile RUN steps, then capture the
     live filesystem as a ``modal.Image`` (stored as a diff from the base).
     """
     from rllm.eval._resolution import _create_base_sandbox, _replay_dockerfile
+
+    if prior_ref and not force and _modal_ref_alive(prior_ref):
+        logger.info("modal snapshot %s already live (%s) — reusing", key, prior_ref)
+        return prior_ref
 
     sb = _create_base_sandbox(task, "modal", name=f"{key}-build")
     try:
@@ -289,12 +337,18 @@ def build_modal_snapshot(task, key: str) -> str | None:
 
 
 def delete_modal_snapshot(ref: str) -> bool:
-    """Delete a Modal filesystem snapshot by image id."""
-    try:
-        from modal.experimental import image_delete
+    """Delete a Modal snapshot by image id; ``True`` only when confirmed gone, ``False`` (keep) otherwise."""
+    from modal.exception import AuthError, NotFoundError, PermissionDeniedError
+    from modal.experimental import image_delete
 
+    try:
         image_delete(ref)
         return True
+    except NotFoundError:
+        return True  # already gone — safe to drop
+    except (AuthError, PermissionDeniedError):
+        logger.warning("no permission to delete modal snapshot %s — keeping local record", ref)
+        return False
     except Exception:
-        logger.warning("failed to delete modal snapshot %s", ref, exc_info=True)
+        logger.warning("failed to delete modal snapshot %s — keeping local record", ref, exc_info=True)
         return False

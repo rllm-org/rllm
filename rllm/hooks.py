@@ -49,6 +49,14 @@ class SandboxTaskHooks:
         # Read-only registry, loaded once and shared across this run's tasks
         # (None disables snapshots, e.g. eval --no-snapshot).
         self._registry = SnapshotRegistry.load() if use_snapshot else None
+        if self._registry is not None and sandbox_backend:
+            # Best-effort run-start reconcile: drop only verified-absent local
+            # records so a stale ref doesn't cost an optimistic boot. A sync
+            # failure must never crash the run.
+            try:
+                self._registry.sync(sandbox_backend)
+            except Exception:
+                logger.debug("snapshot sync at run start failed — continuing", exc_info=True)
 
     def setup(self, task: Task, agent_flow: AgentFlow, uid: str) -> TaskContext:
         from rllm.engine.agentflow_engine import TaskContext

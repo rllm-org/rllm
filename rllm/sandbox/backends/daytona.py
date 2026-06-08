@@ -361,17 +361,24 @@ def create_daytona_sandbox(name: str, image: str = "python:3.11-slim", **kwargs)
     return DaytonaSandbox(name=name, image=image, **kwargs)
 
 
-def build_daytona_snapshot(task, key: str) -> str | None:
-    """Declaratively bake ``task``'s base image + RUN steps into a named snapshot; return the name."""
+def build_daytona_snapshot(task, key: str, *, force: bool = False) -> str | None:
+    """Declaratively bake ``task``'s base image + RUN steps into a named snapshot; return the name.
+
+    Idempotent: an already-registered snapshot is reused unless ``force``, which
+    deletes the existing snapshot first so the rebuild replaces it.
+    """
     from daytona import CreateSnapshotParams, Daytona, DaytonaNotFoundError, Image, Resources
 
     from rllm.eval._resolution import _dockerfile_run_commands, _resolve_image, _sandbox_resource_kwargs
 
     client = Daytona()
     try:
-        client.snapshot.get(key)
-        logger.info("daytona snapshot %s already registered", key)
-        return key
+        existing = client.snapshot.get(key)
+        if not force:
+            logger.info("daytona snapshot %s already registered", key)
+            return key
+        client.snapshot.delete(existing)  # force: replace the existing snapshot
+        logger.info("daytona snapshot %s deleted for forced rebuild", key)
     except DaytonaNotFoundError:
         pass
 
@@ -390,14 +397,49 @@ def build_daytona_snapshot(task, key: str) -> str | None:
     return key
 
 
-def delete_daytona_snapshot(ref: str) -> bool:
-    """Delete a Daytona snapshot by name."""
-    try:
-        from daytona import Daytona
+def _daytona_ref_absent(ref: str) -> bool:
+    """True only when the snapshot is verifiably gone (NotFound / terminal state); ``False`` (keep) on any unconfirmed error."""
+    from daytona import (
+        Daytona,
+        DaytonaAuthenticationError,
+        DaytonaAuthorizationError,
+        DaytonaNotFoundError,
+        DaytonaRateLimitError,
+    )
 
+    try:
+        snapshot = Daytona().snapshot.get(ref)
+        state = getattr(snapshot, "state", None)
+        name = str(getattr(state, "value", state) or "").lower()  # state is a SnapshotState enum
+        return name in {"error", "build_failed", "removing", "removed"}
+    except DaytonaNotFoundError:
+        return True  # confirmed gone
+    except (DaytonaAuthenticationError, DaytonaAuthorizationError, DaytonaRateLimitError):
+        return False  # cannot confirm — keep
+    except Exception:
+        logger.debug("daytona ref probe failed for %s — treating as unknown", ref, exc_info=True)
+        return False
+
+
+def delete_daytona_snapshot(ref: str) -> bool:
+    """Delete a Daytona snapshot by name; ``True`` only when confirmed gone, ``False`` (keep the local record) otherwise."""
+    from daytona import (
+        Daytona,
+        DaytonaAuthenticationError,
+        DaytonaAuthorizationError,
+        DaytonaNotFoundError,
+        DaytonaRateLimitError,
+    )
+
+    try:
         client = Daytona()
         client.snapshot.delete(client.snapshot.get(ref))
         return True
+    except DaytonaNotFoundError:
+        return True  # already gone — safe to drop
+    except (DaytonaAuthenticationError, DaytonaAuthorizationError, DaytonaRateLimitError):
+        logger.warning("no permission to delete daytona snapshot %s — keeping local record", ref)
+        return False
     except Exception:
-        logger.warning("failed to delete daytona snapshot %s", ref, exc_info=True)
+        logger.warning("failed to delete daytona snapshot %s — keeping local record", ref, exc_info=True)
         return False
