@@ -56,8 +56,9 @@
             "group": "rLLM CLI & UI",
             "pages": [
               "core-concepts/cli-and-ui",
-              "experimental/ui",
-              "datasets"
+              "core-concepts/running-evaluations",
+              "datasets",
+              "experimental/ui"
             ]
           },
           {

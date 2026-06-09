@@ -134,6 +134,7 @@ class ReverseProxy:
 
     async def handle(self, request: Request) -> Response:
         """Proxy *request* to an inference worker, capture trace, return response."""
+        request.state.weight_version = self.weight_version
         await self._ensure_started()
         session_id: str | None = request.state.session_id
         originally_requested_logprobs: bool = getattr(request.state, "originally_requested_logprobs", False)
@@ -227,7 +228,7 @@ class ReverseProxy:
 
         # Persist trace
         if session_id and response_body:
-            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=self.weight_version)
+            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=request.state.weight_version)
             await self._persist(trace)
 
             # Ingest first turn into accumulator for cumulative token mode
@@ -348,7 +349,7 @@ class ReverseProxy:
         response_body["object"] = "chat.completion"
 
         if session_id and response_body:
-            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=self.weight_version)
+            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=request.state.weight_version)
             await self._persist(trace)
 
         sanitized = response_body
@@ -484,7 +485,7 @@ class ReverseProxy:
                 # Ingest accumulated token data
                 if chunks:
                     latency_ms = (time.perf_counter() - t0) * 1000
-                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=self.weight_version)
+                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version)
                     prompt_ids = trace.prompt_token_ids or token_ids
                     completion_ids = trace.completion_token_ids
 
@@ -514,7 +515,7 @@ class ReverseProxy:
         originally_requested_logprobs: bool = False,
     ) -> StreamingResponse:
         if self.local_handler is not None:
-            return await self._handle_streaming_local(request_body, session_id, originally_requested_logprobs)
+            return await self._handle_streaming_local(request_body, session_id, originally_requested_logprobs, request.state.weight_version)
 
         worker = self.router.route(session_id)
         url = self._build_url(worker.api_url, request.url.path, str(request.url.query))
@@ -610,7 +611,7 @@ class ReverseProxy:
                 # finally block may run during GeneratorExit, where await
                 # on real async I/O (e.g. aiosqlite) is not reliable.
                 if session_id and chunks:
-                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=self.weight_version)
+                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version)
                     task = asyncio.create_task(
                         self._safe_store(
                             trace.trace_id,
@@ -642,6 +643,7 @@ class ReverseProxy:
         request_body: dict[str, Any],
         session_id: str | None,
         originally_requested_logprobs: bool = False,
+        weight_version: int | None = None,
     ) -> StreamingResponse:
         """Handle streaming when using a local handler (fake-streaming)."""
         assert self.local_handler is not None
@@ -651,7 +653,7 @@ class ReverseProxy:
 
         # Persist trace from the full response
         if session_id and response_body:
-            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=self.weight_version)
+            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=weight_version)
             await self._persist(trace)
 
         needs_strip_vllm = self.strip_vllm

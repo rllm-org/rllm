@@ -41,6 +41,7 @@ class ModelOutput:
             "multi_modal_inputs": self.multi_modal_inputs,
             "logprobs": self.logprobs,
             "prompt_logprobs": self.prompt_logprobs,
+            "routing_matrices": self.routing_matrices,
             "prompt_length": self.prompt_length,
             "completion_length": self.completion_length,
             "finish_reason": self.finish_reason,
@@ -62,6 +63,7 @@ class ModelOutput:
             multi_modal_inputs=data.get("multi_modal_inputs"),
             logprobs=data.get("logprobs"),
             prompt_logprobs=data.get("prompt_logprobs"),
+            routing_matrices=data.get("routing_matrices"),
             prompt_length=data.get("prompt_length", 0),
             completion_length=data.get("completion_length", 0),
             finish_reason=data.get("finish_reason"),
@@ -83,8 +85,9 @@ class RolloutEngine:
         raise NotImplementedError(f"_get_model_response is not implemented for {self.__class__.__name__}")
 
     async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
+        weight_version = self.weight_version
         result = await self._get_model_response(messages, **kwargs)
-        result.weight_version = self.weight_version
+        result.weight_version = weight_version
         return result
 
     def assemble_model_output(self, token_input: TokenInput, token_output: TokenOutput) -> ModelOutput:
