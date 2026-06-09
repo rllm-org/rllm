@@ -590,7 +590,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             # Surface the now-deterministic update count and the decoupled batch
             # sizes computed in _pad_dataproto_to_world_size.
             if "rllm_actor_num_updates" in batch.meta_info:
-                metrics["actor/num_updates"] = batch.meta_info["rllm_actor_num_updates"]
+                metrics["actor/num_updates_per_epoch"] = batch.meta_info["rllm_actor_num_updates"]
                 metrics["actor/mini_batch_rows"] = batch.meta_info["rllm_actor_mini_batch_size"]
                 metrics["actor/global_batch_rollouts"] = batch.meta_info["rllm_actor_global_batch_size"]
                 metrics["batch/rows_pre_pad"] = batch.meta_info["rllm_actor_rows_pre_pad"]
