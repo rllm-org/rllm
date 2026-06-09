@@ -271,7 +271,11 @@ class UnifiedTrainer:
             )
             total_batches = self.rllm_config.trainer.get("total_batches")
             use_total_batches = total_batches is not None and total_batches > 0
-            self._total_training_steps = total_batches if use_total_batches else len(self._train_dataloader) * self.rllm_config.trainer.total_epochs
+            if use_total_batches:
+                self._total_training_steps = total_batches
+            else:
+                total_task_batches = len(self._train_dataloader) * self.rllm_config.trainer.total_epochs
+                self._total_training_steps = total_task_batches // self.async_config.mini_batch_size if self.async_config.enable else total_task_batches
 
         if self.val_dataset is not None:
             val_batch_size = self.rllm_config.data.val_batch_size
