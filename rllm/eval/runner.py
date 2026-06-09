@@ -34,11 +34,14 @@ async def run_dataset(
     *,
     concurrency: int = 64,
     sandbox_backend: str | None = None,
+    use_snapshot: bool = True,
+    warm_queue_size: int = 0,
     agent_name: str = "",
     dataset_name: str = "unknown",
     on_episode_complete=None,
     evaluator_override: Evaluator | None = None,
     gateway: GatewayManager | None = None,
+    sampling_params: dict | None = None,
 ) -> tuple[EvalResult, list]:
     """Run a list of :class:`rllm.types.Task` objects through :class:`AgentFlowEngine`.
 
@@ -56,6 +59,9 @@ async def run_dataset(
             ``--evaluator`` flag). When ``None``, ``SandboxTaskHooks``
             resolves a per-task verifier from the task's ``[verifier]``
             config.
+        sampling_params: Resolved sampling params from the CLI, attached to each
+            gateway session so the gateway enforces them on every LLM call. ``None``
+            or empty → flows/harnesses keep their own params.
 
     Returns ``(EvalResult, list[Episode])``.
     """
@@ -82,7 +88,7 @@ async def run_dataset(
         gateway = EvalGatewayManager(upstream_url=base_url, model=model, tunnel=gateway_tunnel)
         gateway.start()
 
-    hooks = SandboxTaskHooks(evaluator_override=evaluator_override, sandbox_backend=sandbox_backend)
+    hooks = SandboxTaskHooks(evaluator_override=evaluator_override, sandbox_backend=sandbox_backend, use_snapshot=use_snapshot)
 
     engine = AgentFlowEngine(
         agent_flow=agent_flow,
@@ -93,15 +99,30 @@ async def run_dataset(
         retry_limit=1,  # eval doesn't retry on flow errors
         raise_on_error=False,  # capture per-task errors as error Episodes
         hooks=hooks,
+        val_sampling_params=sampling_params or None,  # eval is always validation
     )
 
+    warm_queue = None
     try:
+        # Warm queue: prefetch this run's next sandboxes ahead of consumption.
+        # Negative size means "match concurrency"; it only helps when sandboxes
+        # are actually created, so gate on a chosen sandbox backend.
+        if warm_queue_size != 0 and sandbox_backend:
+            from rllm.sandbox.warm_queue import WarmQueue
+
+            size = effective_concurrency if warm_queue_size < 0 else warm_queue_size
+            warm_queue = WarmQueue(list(tasks), sandbox_backend, hooks.registry, size)
+            hooks.warm_queue = warm_queue
+            warm_queue.start()
+
         # task_ids carry the original Task.id so GRPO-style grouping (if a
         # downstream consumer wants it) is stable; the engine's session uid
         # becomes f"{task.id}:0" which matches training's convention.
         task_ids = [getattr(t, "id", None) or str(idx) for idx, t in enumerate(tasks)]
         episodes = await engine.execute_tasks(tasks, task_ids=task_ids, is_validation=True)
     finally:
+        if warm_queue is not None:
+            warm_queue.shutdown()
         engine.shutdown()
         if owned_gateway:
             try:

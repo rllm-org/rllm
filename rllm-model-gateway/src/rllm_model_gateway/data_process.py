@@ -73,6 +73,29 @@ def extract_logprobs(response: dict[str, Any]) -> list[float]:
     return []
 
 
+def extract_weight_version(response: dict[str, Any]) -> int | None:
+    """Per-response weight version stamped by the rollout engine.
+
+    Present on rollout-engine outputs (e.g. the Tinker in-process handler);
+    absent on plain vLLM responses, which fall back to the proxy's tracked
+    version.
+    """
+    version = response.get("weight_version")
+    return int(version) if version is not None else None
+
+
+def extract_routing_matrices(response: dict[str, Any]) -> list[str] | None:
+    """Per-token routing matrices stamped by the rollout engine (R3 router replay).
+
+    Carried on the choice alongside ``token_ids``; absent on plain vLLM responses.
+    """
+    choices = response.get("choices")
+    if not choices:
+        return None
+    rm = choices[0].get("routing_matrices")
+    return list(rm) if rm else None
+
+
 # ------------------------------------------------------------------
 # Streaming accumulation helpers
 # ------------------------------------------------------------------
@@ -125,6 +148,7 @@ _VLLM_ROOT_FIELDS = frozenset(
         "prompt_token_ids",
         "prompt_logprobs",
         "kv_transfer_params",
+        "weight_version",
     }
 )
 
@@ -132,6 +156,7 @@ _VLLM_CHOICE_FIELDS = frozenset(
     {
         "token_ids",
         "stop_reason",
+        "routing_matrices",
     }
 )
 
@@ -174,6 +199,10 @@ def build_trace_record(
     if "completion_tokens" in usage:
         token_counts["completion"] = usage["completion_tokens"]
 
+    response_weight_version = extract_weight_version(response_body)
+    if response_weight_version is not None:
+        weight_version = response_weight_version
+
     return TraceRecord(
         trace_id=str(uuid.uuid4()),
         session_id=session_id,
@@ -183,6 +212,7 @@ def build_trace_record(
         response_message=first_choice.get("message") or first_choice.get("delta") or {},
         completion_token_ids=extract_completion_token_ids(response_body),
         logprobs=extract_logprobs(response_body) or None,
+        routing_matrices=extract_routing_matrices(response_body),
         finish_reason=first_choice.get("finish_reason"),
         weight_version=weight_version,
         latency_ms=latency_ms,

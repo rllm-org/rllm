@@ -136,7 +136,6 @@ class GatewayManager:
         from rllm.gateway.tunnel import parse_tunnel
 
         self.public_url, self.tunnel_backend = parse_tunnel(gw_cfg.get("tunnel", None))
-        self.sampling_params_priority: str = gw_cfg.get("sampling_params_priority", "client")
         # The gateway always pins ``body.model`` to whatever the trainer is serving
         self.model: str | None = config.get("model", {}).get("name", None)
 
@@ -258,8 +257,8 @@ class GatewayManager:
 
     # -- Session / trace API -------------------------------------------------
 
-    def create_session(self, session_id: str, is_validation: bool = False) -> str:
-        sp = self._val_sampling_params if is_validation else self._train_sampling_params
+    def create_session(self, session_id: str, is_validation: bool = False, sampling_params: dict[str, Any] | None = None) -> str:
+        sp = sampling_params if sampling_params is not None else (self._val_sampling_params if is_validation else self._train_sampling_params)
         return self.client.create_session(session_id=session_id, sampling_params=sp or None)
 
     def get_session_url(self, session_id: str) -> str:
@@ -274,8 +273,8 @@ class GatewayManager:
 
     # -- Async session / trace API -------------------------------------------
 
-    async def acreate_session(self, session_id: str, is_validation: bool = False) -> str:
-        sp = self._val_sampling_params if is_validation else self._train_sampling_params
+    async def acreate_session(self, session_id: str, is_validation: bool = False, sampling_params: dict[str, Any] | None = None) -> str:
+        sp = sampling_params if sampling_params is not None else (self._val_sampling_params if is_validation else self._train_sampling_params)
         return await self.async_client.create_session(session_id=session_id, sampling_params=sp or None)
 
     async def aget_traces(self, session_id: str) -> list[TraceRecord]:
@@ -325,8 +324,6 @@ class GatewayManager:
         cmd.extend(["--store", self.store])
         if self.db_path:
             cmd.extend(["--db-path", self.db_path])
-        if self.sampling_params_priority != "client":
-            cmd.extend(["--sampling-params-priority", self.sampling_params_priority])
         if self.model:
             cmd.extend(["--model", self.model])
         if self.cumulative_token_mode:
@@ -367,7 +364,6 @@ class GatewayManager:
             port=self.port,
             db_path=self.db_path,
             store_worker=self.store,
-            sampling_params_priority=self.sampling_params_priority,
             model=self.model,
             add_logprobs=self.add_logprobs,
             add_return_token_ids=self.add_return_token_ids,

@@ -247,6 +247,9 @@ class UnifiedTrainer:
                 store=self.store,
             )
 
+        if self._gateway is not None and self.backend.__class__.__name__ == "VerlBackend" and self.rllm_config.algorithm.get("router_replay", "disabled") == "R3":
+            raise ValueError("R3 is not supported with the gateway-based rollout (agent_flow / remote_runtime) on the verl backend.")
+
         self.tokenizer = None
         if hasattr(self.backend, "tokenizer"):
             self.tokenizer = self.backend.tokenizer

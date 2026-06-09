@@ -188,22 +188,45 @@ def _needs_sandbox(task: Task, verifier_kind: str) -> bool:
     return False
 
 
-def _create_sandbox_for_task(task: Task, sandbox_backend: str | None) -> Sandbox:
+def _resolve_backend(task: Task, sandbox_backend: str | None) -> str:
+    """Resolve the effective sandbox backend for a task."""
+    return sandbox_backend or task.metadata.get("sandbox_backend") or "docker"
+
+
+def _create_base_sandbox(task: Task, backend: str, *, image: str | None = None, name: str | None = None) -> Sandbox:
+    """Create a sandbox from a base ``image`` — no Dockerfile RUN replay.
+
+    ``image`` defaults to the task's resolved base image; pass a snapshot
+    ref to boot from a pre-warmed environment instead.
+    """
     from rllm.sandbox.sandboxed_flow import create_sandbox
 
-    backend = sandbox_backend or task.metadata.get("sandbox_backend") or "docker"
-    image = _resolve_image(task, backend)
+    image = image if image is not None else _resolve_image(task, backend)
+    if name is None:
+        safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "-", task.id)
+        name = f"rllm-{safe_id}-{uuid.uuid4().hex[:6]}"
+    return create_sandbox(backend, name=name, image=image, **_sandbox_resource_kwargs(task, backend))
 
-    safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "-", task.id)
-    name = f"rllm-{safe_id}-{uuid.uuid4().hex[:6]}"
-    sandbox = create_sandbox(backend, name=name, image=image, **_sandbox_resource_kwargs(task, backend))
 
-    # Non-docker backends pull the Dockerfile's FROM base instead of building
-    # it, so replay its RUN steps (e.g. swebench's `uv`, needed by the grader).
-    # Best-effort: a failed step shouldn't abort the task.
-    if backend != "docker":
-        for cmd in _dockerfile_run_commands(task):
-            _safe_exec(sandbox, cmd, timeout=900)
+def _replay_dockerfile(task: Task, sandbox: Sandbox, backend: str) -> None:
+    """Replay the Dockerfile RUN steps on a live sandbox (stage C).
+
+    Non-docker backends pull the Dockerfile's FROM base instead of building
+    it, so the RUN steps (e.g. swebench's ``uv``, needed by the grader) must
+    be replayed. Best-effort: a failed step shouldn't abort the task. Docker
+    builds the image, so its RUN steps already ran — skip.
+    """
+    if backend == "docker":
+        return
+    for cmd in _dockerfile_run_commands(task):
+        _safe_exec(sandbox, cmd, timeout=900)
+
+
+def _create_sandbox_for_task(task: Task, sandbox_backend: str | None) -> Sandbox:
+    """Cold-path sandbox creation: base image + RUN replay (today's behavior)."""
+    backend = _resolve_backend(task, sandbox_backend)
+    sandbox = _create_base_sandbox(task, backend)
+    _replay_dockerfile(task, sandbox, backend)
     return sandbox
 
 

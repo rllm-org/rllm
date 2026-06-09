@@ -13,10 +13,9 @@ import os
 import re
 
 import click
-from rich.console import Console
 from rich.panel import Panel
 
-console = Console()
+from rllm.cli._ui import abort, console
 
 # Template directory (sibling to this module)
 _TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
@@ -83,8 +82,8 @@ def init_cmd(project_name: str | None, template: str | None, evaluator: bool, ou
     \b
     Examples:
         rllm init my-math-agent
-        rllm init my-agent --template langchain --evaluator
-        rllm init my-agent -t openai-agents
+        rllm init my-agent --evaluator
+        rllm init my-agent -o ./projects
     """
     console.print()
 
@@ -125,7 +124,6 @@ def init_cmd(project_name: str | None, template: str | None, evaluator: bool, ou
         "agent_name": module_name.replace("_", "-"),
         "agent_class": agent_class,
         "agent_instance": agent_instance,
-        "agent_class_name": agent_instance,
         "evaluator_class": evaluator_class,
         "description": f"Custom rllm agent: {project_name}",
         "extra_deps": tpl_info["extra_deps"],
@@ -137,7 +135,7 @@ def init_cmd(project_name: str | None, template: str | None, evaluator: bool, ou
 
     if os.path.exists(project_dir):
         if not click.confirm(f"Directory '{project_name}' already exists. Overwrite?", default=False):
-            raise SystemExit(1)
+            abort()
 
     # Render and write files
     pkg_dir = os.path.join(project_dir, module_name)
