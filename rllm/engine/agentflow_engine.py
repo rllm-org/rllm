@@ -607,6 +607,12 @@ class AgentFlowEngine:
             _timings["time/setup_s"] = time.perf_counter() - t
 
         try:
+            # Attach resolved sampling params to the session so the gateway
+            # enforces them on every LLM call; skip when there are none.
+            session_sampling_params = (self.val_sampling_params if is_validation else self.train_sampling_params) or None
+            if session_sampling_params:
+                await self.gateway.acreate_session(uid, is_validation=is_validation, sampling_params=session_sampling_params)
+
             session_url = self.gateway.get_session_url(uid)
 
             config = AgentConfig(
@@ -614,7 +620,7 @@ class AgentFlowEngine:
                 model=self.model,
                 session_uid=uid,
                 is_validation=is_validation,
-                sampling_params=(self.train_sampling_params if not is_validation else self.val_sampling_params) or {},
+                sampling_params=session_sampling_params or {},
             )
 
             # Prefer the per-task flow from the hook so parallel tasks don't

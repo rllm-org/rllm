@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import click
 
-from rllm.cli._display import format_table
 from rllm.cli._pull import load_agent_catalog, load_dataset_catalog
+from rllm.cli._ui import console, info_panel, not_found, simple_table
 
 
 @click.group()
@@ -24,15 +24,14 @@ def list_agents():
     agents = _list_agents()
 
     if not agents:
-        click.echo("No agents registered.")
+        console.print("  [dim]No agents registered.[/]")
         return
 
-    headers = ["Name", "Source", "Module", "Description"]
     rows = []
     for a in agents:
         rows.append([a["name"], a["source"], a["module"], a["description"]])
 
-    click.echo(format_table(headers, rows))
+    console.print(simple_table(["Name", "Source", "Module", "Description"], rows))
 
 
 @agent.command()
@@ -49,21 +48,18 @@ def info(name: str):
         plugin_agents = {a["name"]: a for a in _list_agents()}
         if name in plugin_agents:
             a = plugin_agents[name]
-            click.echo(f"\nAgent: {name}")
-            click.echo(f"  Source:       {a['source']}")
-            click.echo(f"  Module:       {a['module']}")
-            click.echo()
+            console.print(info_panel([("Source", a["source"]), ("Module", a["module"])], title=f"Agent: {name}"))
             return
 
         available = ", ".join(sorted({*agents.keys(), *plugin_agents.keys()}))
-        click.echo(f"Error: Agent '{name}' not found. Available: {available}")
-        raise SystemExit(1)
+        not_found("Agent", name, f"Available: {available}")
 
     entry = agents[name]
-    click.echo(f"\nAgent: {name}")
-    click.echo(f"  Description:  {entry.get('description', 'N/A')}")
-    click.echo(f"  Module:       {entry.get('module', 'N/A')}")
-    click.echo(f"  Function:     {entry.get('function', 'N/A')}")
+    rows = [
+        ("Description", entry.get("description", "N/A")),
+        ("Module", entry.get("module", "N/A")),
+        ("Function", entry.get("function", "N/A")),
+    ]
 
     # Find compatible datasets
     ds_catalog = load_dataset_catalog()
@@ -73,8 +69,9 @@ def info(name: str):
             compatible.append(ds_name)
 
     if compatible:
-        click.echo(f"\n  Compatible datasets: {', '.join(compatible)}")
-    click.echo()
+        rows.append(("Datasets", ", ".join(compatible)))
+
+    console.print(info_panel(rows, title=f"Agent: {name}"))
 
 
 @agent.command()

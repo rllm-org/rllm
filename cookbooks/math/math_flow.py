@@ -54,14 +54,11 @@ async def math_flow(task: Task, config: AgentConfig) -> Episode:
         {"role": "user", "content": question},
     ]
 
-    # top_k is not a chat.completions parameter; drop it from the rollout sampling params.
-    sampling = {k: v for k, v in config.sampling_params.items() if k != "top_k"}
-
+    # Sampling params are injected by the gateway; the flow just makes a plain call.
     try:
         resp = await client.chat.completions.create(
             model=config.model,
             messages=messages,
-            **sampling,
             timeout=300,
         )
         content = resp.choices[0].message.content or ""

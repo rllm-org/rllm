@@ -422,6 +422,8 @@ class AgentConfig:
     session_uid: str
     metadata: dict = field(default_factory=dict)
     is_validation: bool = False
+    # Informational copy of the gateway-enforced sampling config; not authoritative
+    # (the gateway applies it server-side regardless of what the flow passes).
     sampling_params: dict = field(default_factory=dict)
 
 
