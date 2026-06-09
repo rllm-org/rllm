@@ -261,7 +261,7 @@ class UnifiedTrainer:
         self._total_training_steps: int | None = None
 
         if self.train_dataset is not None:
-            batch_size = 1 if self.async_config.enable else self.rllm_config.data.train_batch_size * self.rllm_config.rejection_sample.multiplier
+            batch_size = 1 if self.async_config.enable else int(self.rllm_config.data.train_batch_size * self.rllm_config.rejection_sample.multiplier)
             self._train_dataloader = StatefulTaskDataLoader(
                 self.train_dataset,
                 batch_size=batch_size,

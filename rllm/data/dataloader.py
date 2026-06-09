@@ -33,7 +33,7 @@ class StatefulTaskDataLoader:
         if batch_size <= 0:
             raise ValueError(f"batch_size must be positive, got {batch_size}")
         self._dataset = dataset
-        self._batch_size = batch_size
+        self._batch_size = int(batch_size)
         self._shuffle = shuffle
         self._seed = seed
         self._drop_last = drop_last

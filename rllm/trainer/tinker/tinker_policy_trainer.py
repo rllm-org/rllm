@@ -128,7 +128,6 @@ class TinkerPolicyTrainer:
                     resume_info = json.load(f)
 
         if resume_info:
-            logger.info(f"Resuming from checkpoint: {step_dir}")
             self.training_client = await self.service_client.create_training_client_from_state_async(resume_info["state_path"])
             sampler_path = resume_info.get("sampler_path") or resume_info["state_path"].replace("/weights/", "/sampler_weights/")
             sampling_client = self.create_sampling_client(sampler_path)
@@ -136,7 +135,7 @@ class TinkerPolicyTrainer:
                 start_batch = int(os.path.basename(step_dir.rstrip("/")).split("global_step_")[-1])
             except ValueError:
                 start_batch = 0
-            logger.info(f"Resuming from batch {start_batch}")
+            print(f"[tinker] Resuming from {step_dir}: step {start_batch}, dataloader {resume_info.get('dataloader_state')}")
             return start_batch, sampling_client, resume_info.get("dataloader_state")
         else:
             # Start from scratch
@@ -153,7 +152,7 @@ class TinkerPolicyTrainer:
                 train_attn=train_attn,
                 train_mlp=train_mlp,
             )
-            logger.info(f"Starting training from scratch with model: {self.config.model.name}")
+            print(f"[tinker] Starting from scratch (no checkpoint to resume) with model: {self.config.model.name}")
             sampler_future = await self.training_client.save_weights_for_sampler_async(name="000000")
             sampler_result = await sampler_future.result_async()
             sampling_client = self.create_sampling_client(sampler_result.path)
