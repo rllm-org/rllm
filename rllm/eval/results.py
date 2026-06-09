@@ -101,10 +101,11 @@ class EvalResult:
             json.dump(data, f, indent=2)
 
         return path
+
     @classmethod
     def load(cls, path: str) -> EvalResult:
         """Load results from a JSON file."""
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
 
         items = [EvalItem(idx=item["idx"], reward=item["reward"], is_correct=item["is_correct"], error=item.get("error"), signals=item.get("signals", {})) for item in data["items"]]

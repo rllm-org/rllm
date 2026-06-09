@@ -81,6 +81,7 @@ def _run_eval(
     save_episodes: bool = True,
     episodes_dir: str | None = None,
     use_snapshot: bool = True,
+    warm_queue_size: int = 0,
     sampling_config=None,
 ):
     """Core eval logic, extracted for clean proxy lifecycle management."""
@@ -469,6 +470,7 @@ def _run_eval(
             concurrency=concurrency,
             sandbox_backend=(agent_metadata or {}).get("sandbox_backend"),
             use_snapshot=use_snapshot,
+            warm_queue_size=warm_queue_size,
             agent_name=agent_name,
             dataset_name=getattr(dataset, "name", benchmark) or benchmark,
             on_episode_complete=on_episode_complete,
@@ -554,6 +556,13 @@ def _run_eval(
     default=True,
     help="Boot each task from a pre-built environment snapshot when one exists (default). Use --no-snapshot to force the cold path (e.g. A/B timing). Build snapshots with 'rllm snapshot create'.",
 )
+@click.option(
+    "--warm-queue-size",
+    "warm_queue_size",
+    default=0,
+    type=int,
+    help="Prefetch up to N sandboxes ahead of consumption to overlap creation with rollout (0 = off; -1 = match --concurrency). Requires --sandbox-backend.",
+)
 @click.option("--ui/--no-ui", "enable_ui", default=None, help="Enable/disable live UI logging. Default: auto-enabled when logged in (see 'rllm login').")
 @click.option("--save-episodes/--no-save-episodes", "save_episodes", default=True, help="Save each Episode as its own JSON file for later visualization (default: enabled).")
 @click.option("--episodes-dir", "episodes_dir", default=None, help="Directory to write the episode JSONs into. Default: ~/.rllm/eval_results/<bench>_<model>_<timestamp>/.")
@@ -575,6 +584,7 @@ def eval_cmd(
     sandbox_backend: str | None,
     sandbox_concurrency: int | None,
     use_snapshot: bool,
+    warm_queue_size: int,
     enable_ui: bool | None,
     save_episodes: bool,
     episodes_dir: str | None,
@@ -673,6 +683,7 @@ def eval_cmd(
             save_episodes=save_episodes,
             episodes_dir=episodes_dir,
             use_snapshot=use_snapshot,
+            warm_queue_size=warm_queue_size,
             sampling_config=sampling_config,
         )
     finally:

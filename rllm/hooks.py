@@ -17,6 +17,8 @@ from rllm.types import Evaluator
 
 if TYPE_CHECKING:
     from rllm.engine.agentflow_engine import TaskContext
+    from rllm.sandbox.snapshot import SnapshotRegistry
+    from rllm.sandbox.warm_queue import WarmQueue
     from rllm.types import AgentFlow, Task
 
 logger = logging.getLogger(__name__)
@@ -46,6 +48,9 @@ class SandboxTaskHooks:
 
         self.evaluator_override = evaluator_override
         self.sandbox_backend = sandbox_backend
+        # Optional per-run warm queue (set by run_dataset); when present, setup
+        # pops a prefetched sandbox from it instead of creating one inline.
+        self.warm_queue: WarmQueue | None = None
         # Read-only registry, loaded once and shared across this run's tasks
         # (None disables snapshots, e.g. eval --no-snapshot).
         self._registry = SnapshotRegistry.load() if use_snapshot else None
@@ -57,6 +62,11 @@ class SandboxTaskHooks:
                 self._registry.sync(sandbox_backend)
             except Exception:
                 logger.debug("snapshot sync at run start failed — continuing", exc_info=True)
+
+    @property
+    def registry(self) -> SnapshotRegistry | None:
+        """The shared snapshot registry (so a warm queue fills from the same one)."""
+        return self._registry
 
     def setup(self, task: Task, agent_flow: AgentFlow, uid: str) -> TaskContext:
         from rllm.engine.agentflow_engine import TaskContext
@@ -85,7 +95,7 @@ class SandboxTaskHooks:
         if needs_sandbox:
             from rllm.sandbox.snapshot import get_sandbox
 
-            sandbox = get_sandbox(task, self.sandbox_backend, self._registry)
+            sandbox = self.warm_queue.pop(task) if self.warm_queue is not None else get_sandbox(task, self.sandbox_backend, self._registry)
             _setup_task_environment(task, sandbox)
             if isinstance(task_flow, SandboxedAgentFlow):
                 task_flow.set_sandbox(sandbox)
