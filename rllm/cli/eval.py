@@ -13,20 +13,14 @@ import logging
 import os
 
 import click
-from rich.console import Console
-from rich.panel import Panel
 from rich.status import Status
-from rich.table import Table
-from rich.theme import Theme
 
 from rllm import paths
 from rllm.cli._pull import load_dataset_catalog, pull_dataset
 from rllm.cli._sampling import SAMPLING_PARAMS_HELP as _SAMPLING_PARAMS_HELP
+from rllm.cli._ui import console, fail, info_panel, not_found, parse_index_spec
 
 logger = logging.getLogger(__name__)
-
-theme = Theme({"label": "dim", "success": "bold green", "error": "bold red", "val": "bold", "key": "yellow"})
-console = Console(theme=theme)
 
 
 def _suggest_benchmarks(name: str, catalog_names: list[str], max_suggestions: int = 3) -> list[str]:
@@ -121,11 +115,10 @@ def _run_eval(
         import os as _os
 
         resolved = _os.path.expanduser(benchmark)
-        console.print(f"  [error]Path-like benchmark '{benchmark}' did not resolve to a benchmark directory.[/]")
         console.print(f"  [dim]Resolved to: {_os.path.abspath(resolved)}[/]")
         console.print(f"  [dim]Exists: {_os.path.exists(resolved)}, is dir: {_os.path.isdir(resolved) if _os.path.exists(resolved) else 'N/A'}[/]")
         console.print("  [dim]A benchmark directory must contain dataset.toml, task.toml, or sub-dirs with task.toml.[/]")
-        raise SystemExit(1)
+        fail(f"Path-like benchmark '{benchmark}' did not resolve to a benchmark directory.")
 
     if _is_local:
         sandbox_backend = (agent_metadata or {}).get("sandbox_backend")
@@ -154,8 +147,7 @@ def _run_eval(
         try:
             agent = load_agent(agent_name)
         except (KeyError, ImportError, AttributeError, TypeError) as e:
-            console.print(f"  [error]Cannot load agent '{agent_name}': {e}[/]")
-            raise SystemExit(1) from None
+            fail(f"Cannot load agent '{agent_name}': {e}")
 
         # Apply CLI sandbox overrides
         if agent_metadata:
@@ -176,8 +168,7 @@ def _run_eval(
                 evaluator = load_evaluator(evaluator_name)
                 evaluator_display = f"{evaluator_name} (overrides per-task verifier)"
             except (KeyError, ImportError, AttributeError, TypeError) as e:
-                console.print(f"  [error]Error loading evaluator '{evaluator_name}': {e}[/]")
-                raise SystemExit(1) from None
+                fail(f"Error loading evaluator '{evaluator_name}': {e}")
 
         # Wrap tasks in a Dataset so the existing CLI filter code (select, len) works
         from rllm.data.dataset import Dataset
@@ -209,17 +200,15 @@ def _run_eval(
             if catalog_entry and "default_agent" in catalog_entry:
                 agent_name = catalog_entry["default_agent"]
             elif not catalog_entry:
-                msg = f"  [error]Benchmark '{benchmark}' not found.[/]"
+                hint = ""
                 suggestions = _suggest_benchmarks(benchmark, list(all_datasets.keys()))
                 if suggestions:
-                    msg += f"\n\n  Did you mean: [bold]{', '.join(suggestions)}[/]?"
-                msg += "\n\n  Run [bold]rllm dataset list[/] to see available benchmarks."
-                msg += "\n  Use [bold]harbor:[/] prefix for Harbor datasets (e.g., [bold]rllm eval harbor:swebench-verified[/])."
-                console.print(msg)
-                raise SystemExit(1)
+                    hint += f"\n\n  Did you mean: [bold]{', '.join(suggestions)}[/]?"
+                hint += "\n\n  Run [bold]rllm dataset list[/] to see available benchmarks."
+                hint += "\n  Use [bold]harbor:[/] prefix for Harbor datasets (e.g., [bold]rllm eval harbor:swebench-verified[/])."
+                not_found("Benchmark", benchmark, hint=hint.lstrip())
             else:
-                console.print(f"  [error]No --agent specified and no default_agent in catalog for '{benchmark}'.[/]")
-                raise SystemExit(1)
+                fail(f"No --agent specified and no default_agent in catalog for '{benchmark}'.")
 
         # Resolve split
         if split is None:
@@ -240,11 +229,10 @@ def _run_eval(
 
             ok, reason, hint = diagnose_docker()
             if not ok:
-                console.print(f"  [error]Harbor tasks require Docker — {reason}.[/]")
                 if hint:
                     console.print(f"  [dim]{hint}[/]")
                 console.print("  [dim]Or run on a remote backend, e.g. [bold]--sandbox-backend modal[/].[/]")
-                raise SystemExit(1)
+                fail(f"Harbor tasks require Docker — {reason}.")
 
         # Load the agent. Catalog covers built-in flows (react/bash/claude-code)
         # plus user-registered + plugin agents; ``harbor:<scaffold>`` resolves
@@ -252,8 +240,7 @@ def _run_eval(
         try:
             agent = load_agent(agent_name)
         except (KeyError, ImportError, AttributeError, TypeError) as e:
-            console.print(f"  [error]Error loading agent '{agent_name}': {e}[/]")
-            raise SystemExit(1) from None
+            fail(f"Error loading agent '{agent_name}': {e}")
 
         # Apply sandbox CLI overrides
         if agent_metadata:
@@ -281,8 +268,7 @@ def _run_eval(
                 evaluator = load_evaluator(evaluator_name)
                 evaluator_display = f"{evaluator_name} (overrides per-task verifier)"
             except (KeyError, ImportError, AttributeError, TypeError) as e:
-                console.print(f"  [error]Error loading evaluator '{evaluator_name}': {e}[/]")
-                raise SystemExit(1) from None
+                fail(f"Error loading evaluator '{evaluator_name}': {e}")
         else:
             # ``harbor_reward_fn`` reads ``episode.artifacts['harbor_reward']``,
             # which is only populated by HarborRuntime. When the user runs a
@@ -314,8 +300,7 @@ def _run_eval(
             dataset = DatasetRegistry.load_dataset(benchmark, split)
 
         if dataset is None:
-            console.print(f"  [error]Could not load dataset '{benchmark}' split '{split}'.[/]")
-            raise SystemExit(1)
+            fail(f"Could not load dataset '{benchmark}' split '{split}'.")
 
         # Materialise non-harbor catalog datasets so each Task carries its
         # per-task verifier from dataset.toml. Harbor datasets are
@@ -345,8 +330,7 @@ def _run_eval(
             # each task's own tests/test.sh — no dataset-wide evaluator needed.
             # Non-harbor rows carry no per-task verifier, so still require one.
             if evaluator is None and not _is_harbor_source:
-                console.print(f"  [error]No evaluator found for '{benchmark}'. Specify --evaluator explicitly.[/]")
-                raise SystemExit(1)
+                fail(f"No evaluator found for '{benchmark}'. Specify --evaluator explicitly.")
             from rllm.data.dataset import Dataset
 
             tasks = _dict_rows_to_tasks(list(dataset.data))
@@ -356,8 +340,7 @@ def _run_eval(
     if task_indices is not None:
         out_of_range = [i for i in task_indices if i < 0 or i >= len(dataset)]
         if out_of_range:
-            console.print(f"  [error]Task indices out of range (dataset has {len(dataset)} examples): {out_of_range}[/]")
-            raise SystemExit(1)
+            fail(f"Task indices out of range (dataset has {len(dataset)} examples): {out_of_range}")
         dataset = dataset.select(task_indices)
     elif max_examples is not None and max_examples < len(dataset):
         dataset = dataset.select(range(max_examples))
@@ -372,22 +355,21 @@ def _run_eval(
         agent_desc = agent_entry.get("description", "")
 
     # Print eval header
-    table = Table(show_header=False, box=None, padding=(0, 2))
-    table.add_column(style="label", width=12)
-    table.add_column()
-    table.add_row("Benchmark", f"[val]{benchmark}[/]  [dim]({split}, {len(dataset)} examples)[/]")
-    table.add_row("Model", f"[val]{model}[/]")
     agent_text = f"[val]{agent_name}[/]"
     if agent_desc:
         agent_text += f"  [dim]{agent_desc}[/]"
-    table.add_row("Agent", agent_text)
-    table.add_row("Evaluator", f"[dim]{evaluator_display}[/]")
+    rows = [
+        ("Benchmark", f"[val]{benchmark}[/]  [dim]({split}, {len(dataset)} examples)[/]"),
+        ("Model", f"[val]{model}[/]"),
+        ("Agent", agent_text),
+        ("Evaluator", f"[dim]{evaluator_display}[/]"),
+    ]
     if not use_snapshot:
-        table.add_row("Snapshots", "[dim]disabled (--no-snapshot, cold start)[/]")
+        rows.append(("Snapshots", "[dim]disabled (--no-snapshot, cold start)[/]"))
     if sampling_config is not None and not sampling_config.is_empty:
-        table.add_row("Sampling", f"[dim]{sampling_config.as_dict()} (gateway-enforced)[/]")
+        rows.append(("Sampling", f"[dim]{sampling_config.as_dict()} (gateway-enforced)[/]"))
     console.print()
-    console.print(Panel(table, border_style="cyan", expand=False))
+    console.print(info_panel(rows, border="brand"))
     console.print()
 
     # Single timestamp shared by UI session, results.json, and episodes dir.
@@ -504,20 +486,19 @@ def _run_eval(
 
     # Print results
     pct = f"{result.score * 100:.1f}%"
-    res_table = Table(show_header=False, box=None, padding=(0, 2))
-    res_table.add_column(style="label", width=12)
-    res_table.add_column()
     score_style = "bold green" if result.score >= 0.5 else "bold yellow" if result.score >= 0.2 else "bold red"
-    res_table.add_row("Accuracy", f"[{score_style}]{pct}[/]  [dim]({result.correct}/{result.total})[/]")
     error_style = "dim" if result.errors == 0 else "bold red"
-    res_table.add_row("Errors", f"[{error_style}]{result.errors}[/]")
+    res_rows = [
+        ("Accuracy", f"[{score_style}]{pct}[/]  [dim]({result.correct}/{result.total})[/]"),
+        ("Errors", f"[{error_style}]{result.errors}[/]"),
+    ]
 
     # Display signal breakdown if any
     if result.signal_averages:
         for sig_name, sig_avg in result.signal_averages.items():
-            res_table.add_row(sig_name.title(), f"[dim]{sig_avg:.3f}[/]")
+            res_rows.append((sig_name.title(), f"[dim]{sig_avg:.3f}[/]"))
 
-    console.print(Panel(res_table, title="[bold]Results[/]", border_style="green" if result.score >= 0.5 else "yellow", expand=False))
+    console.print(info_panel(res_rows, title="[bold]Results[/]", border="green" if result.score >= 0.5 else "yellow"))
 
     # Print error details so the user knows what went wrong
     if result.errors > 0:
@@ -560,13 +541,6 @@ def _run_eval(
 @click.option("--task-indices", default=None, type=str, help="Comma-separated task indices to evaluate (e.g., '0', '3,7,12', '0-9').")
 @click.option("--output", "output_path", default=None, help="Output file path for results JSON.")
 @click.option(
-    "--search-backend",
-    "search_backend",
-    default=None,
-    type=click.Choice(["serper", "brave"], case_sensitive=False),
-    help="Search backend for the search agent (auto-detected from API keys if omitted).",
-)
-@click.option(
     "--sandbox-backend",
     "sandbox_backend",
     default=None,
@@ -598,7 +572,6 @@ def eval_cmd(
     max_examples: int | None,
     task_indices: str | None,
     output_path: str | None,
-    search_backend: str | None,
     sandbox_backend: str | None,
     sandbox_concurrency: int | None,
     use_snapshot: bool,
@@ -616,8 +589,7 @@ def eval_cmd(
     try:
         sampling_config = resolve_eval_sampling(sampling_params, temperature, top_p, max_tokens)
     except (ValueError, FileNotFoundError, TypeError) as e:
-        console.print(f"  [error]Invalid --sampling-params: {e}[/]")
-        raise SystemExit(1) from None
+        fail(f"Invalid --sampling-params: {e}")
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
     _ui_explicit = enable_ui is not None
     if enable_ui is None:
@@ -636,18 +608,14 @@ def eval_cmd(
     if base_url is not None:
         # Direct mode: user provided --base-url, require --model too
         if model is None:
-            console.print("  [error]--model is required when --base-url is provided.[/]")
-            raise SystemExit(1)
+            fail("--model is required when --base-url is provided.")
     else:
         # Proxy mode: auto-start LiteLLM proxy from config
         from rllm.eval.config import load_config
 
         config = load_config()
         if not config.is_configured():
-            console.print()
-            console.print("  [error]No configuration found.[/] Run [bold]rllm setup[/] first to configure your provider and API key.")
-            console.print()
-            raise SystemExit(1)
+            fail("No configuration found. Run `rllm setup` first to configure your provider and API key.")
 
         # --model overrides configured model
         if model is None:
@@ -673,33 +641,20 @@ def eval_cmd(
                 try:
                     proxy_manager.start_proxy_subprocess(proxy_manager.build_proxy_config())
                 except (RuntimeError, TimeoutError) as e:
-                    console.print(f"\n  [error]Failed to start LiteLLM proxy.[/]\n\n  {e}")
                     console.print("\n  [dim]Make sure litellm is installed:[/] [bold]pip install litellm\\[proxy][/]")
                     console.print()
-                    raise SystemExit(1) from None
+                    fail(f"Failed to start LiteLLM proxy.\n\n  {e}")
             base_url = proxy_manager.get_proxy_url()
             console.print(f"  [success]Proxy ready[/] at [dim]{base_url}[/]")
 
     # Build agent metadata from CLI options
     agent_metadata = {}
-    if search_backend:
-        agent_metadata["search_backend"] = search_backend
     if sandbox_backend:
         agent_metadata["sandbox_backend"] = sandbox_backend
     if sandbox_concurrency is not None:
         agent_metadata["sandbox_concurrency"] = sandbox_concurrency
 
-    # Parse --task-indices: "5", "3,7,12", "0-9", or "2,5-8,11"
-    parsed_indices = None
-    if task_indices is not None:
-        parsed_indices = []
-        for part in task_indices.split(","):
-            part = part.strip()
-            if "-" in part:
-                lo, hi = part.split("-", 1)
-                parsed_indices.extend(range(int(lo), int(hi) + 1))
-            else:
-                parsed_indices.append(int(part))
+    parsed_indices = parse_index_spec(task_indices) if task_indices is not None else None
 
     try:
         _run_eval(

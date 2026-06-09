@@ -21,15 +21,19 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import click
-from rich.console import Console
-from rich.panel import Panel
 from rich.table import Table
-from rich.theme import Theme
 
-theme = Theme({"label": "dim", "success": "bold green", "error": "bold red", "val": "bold", "key": "yellow"})
-console = Console(theme=theme)
+from rllm.cli._ui import console, fail, info_panel, not_found, parse_index_spec
 
 _MAX_BUILD_WORKERS = 4  # snapshot builds are network/IO-bound; a few in parallel is a real win
+
+# Build outcome → cell markup (status is carried as a plain code, styled only at render).
+_STATUS_MARKUP = {
+    "reused": "[dim]reused[/]",
+    "ok": "[success]ok[/]",
+    "no-snapshot": "[error]no-snapshot[/]",
+    "failed": "[error]failed[/]",
+}
 
 
 def _resolve_dataset_tasks(benchmark: str, agent_name: str | None, sandbox_backend: str | None, split: str | None) -> list:
@@ -57,7 +61,7 @@ def _resolve_dataset_tasks(benchmark: str, agent_name: str | None, sandbox_backe
         benchmark = harbor_name
 
     if catalog_entry is None:
-        raise click.ClickException(f"Benchmark '{benchmark}' not found in catalog and is not a local benchmark directory.")
+        fail(f"Benchmark '{benchmark}' not found in catalog and is not a local benchmark directory.")
 
     split = split or catalog_entry.get("eval_split", "test")
     dataset = DatasetRegistry.load_dataset(benchmark, split)
@@ -65,7 +69,7 @@ def _resolve_dataset_tasks(benchmark: str, agent_name: str | None, sandbox_backe
         pull_dataset(benchmark, catalog_entry)
         dataset = DatasetRegistry.load_dataset(benchmark, split)
     if dataset is None:
-        raise click.ClickException(f"Could not load dataset '{benchmark}' split '{split}'.")
+        fail(f"Could not load dataset '{benchmark}' split '{split}'.")
 
     return _dict_rows_to_tasks(list(dataset.data))
 
@@ -73,15 +77,7 @@ def _resolve_dataset_tasks(benchmark: str, agent_name: str | None, sandbox_backe
 def _slice_tasks(tasks: list, max_examples: int | None, task_indices: str | None) -> list:
     """Apply a ``--task-indices`` (e.g. '0,3-5') or ``--max-examples`` slice."""
     if task_indices is not None:
-        idx: list[int] = []
-        for part in task_indices.split(","):
-            part = part.strip()
-            if "-" in part:
-                lo, hi = part.split("-", 1)
-                idx.extend(range(int(lo), int(hi) + 1))
-            else:
-                idx.append(int(part))
-        return [tasks[i] for i in idx if 0 <= i < len(tasks)]
+        return [tasks[i] for i in parse_index_spec(task_indices) if 0 <= i < len(tasks)]
     if max_examples is not None:
         return tasks[:max_examples]
     return tasks
@@ -107,6 +103,7 @@ def _slice_display(slice_spec: dict) -> str:
 
 
 def _humanize_expiry(iso: str | None) -> str:
+    """Plain time-to-expiry: ``-`` if unknown, ``expired`` if past, else ``in Nd`` / ``in Nh``."""
     from datetime import datetime, timezone
 
     if not iso:
@@ -116,7 +113,7 @@ def _humanize_expiry(iso: str | None) -> str:
         dt = dt.replace(tzinfo=timezone.utc)
     delta = dt - datetime.now(tz=timezone.utc)
     if delta.total_seconds() <= 0:
-        return "[error]expired[/]"
+        return "expired"
     days, hours = delta.days, delta.seconds // 3600
     return f"in {days}d" if days else f"in {hours}h"
 
@@ -126,6 +123,12 @@ def _is_live(iso: str | None) -> bool:
     from rllm.sandbox.snapshot import _expired
 
     return bool(iso) and not _expired(iso)
+
+
+def _expiry_cell(iso: str | None) -> str:
+    """Expiry text for a table cell — reddened when expired."""
+    text = _humanize_expiry(iso)
+    return f"[error]{text}[/]" if iso and not _is_live(iso) else text
 
 
 @click.group("snapshot")
@@ -163,20 +166,21 @@ def create_snapshots(benchmark: str, sandbox_backend: str, agent_name: str | Non
     console.print(f"\n  Building [val]{len(by_key)}[/] snapshot(s) from [val]{len(tasks)}[/] task(s) on [val]{sandbox_backend}[/]\n")
     registry = SnapshotRegistry.load()
 
-    def _build(item: tuple[str, object]) -> tuple[str, str | None, str, float]:
+    def _build(item: tuple[str, object]) -> tuple[str, str | None, str, str | None, float]:
         key, task = item
         t0 = time.monotonic()
+        err = None
         try:
             prior_ref = registry.lookup_env(key, sandbox_backend)  # a live local ref to reuse when not forced
             ref = build_snapshot(sandbox_backend, task, key, prior_ref, force=force)
             reused = ref is not None and not force and prior_ref == ref
-            status = "[dim]reused[/]" if reused else "[success]ok[/]" if ref is not None else "[error]no-snapshot[/]"
+            status = "reused" if reused else "ok" if ref is not None else "no-snapshot"
         except Exception as e:  # noqa: BLE001
-            ref, status = None, f"[error]failed[/] [dim]{e}[/]"
-        return key, ref, status, time.monotonic() - t0
+            ref, status, err = None, "failed", str(e)
+        return key, ref, status, err, time.monotonic() - t0
 
     with ThreadPoolExecutor(max_workers=min(_MAX_BUILD_WORKERS, len(by_key))) as pool:
-        results = {key: (ref, status, elapsed) for key, ref, status, elapsed in pool.map(_build, by_key.items())}
+        results = {key: (ref, status, err, elapsed) for key, ref, status, err, elapsed in pool.map(_build, by_key.items())}
 
     # the group's tasks: the exact sliced tasks whose env actually built
     built_tasks = []
@@ -194,8 +198,9 @@ def create_snapshots(benchmark: str, sandbox_backend: str, agent_name: str | Non
     table.add_column("env_key", style="key")
     table.add_column("status", style="val")
     table.add_column("elapsed", style="dim", justify="right")
-    for key, (ref, status, elapsed) in results.items():
-        table.add_row(key, status, f"{elapsed:.1f}s")
+    for key, (ref, status, err, elapsed) in results.items():
+        cell = _STATUS_MARKUP[status] + (f" [dim]{err}[/]" if err else "")
+        table.add_row(key, cell, f"{elapsed:.1f}s")
     console.print(table)
     if group_id:
         console.print(f"\n  group [val]{group_id}[/]")
@@ -229,7 +234,7 @@ def list_snapshots(sandbox_backend: str | None, verbose: bool):
         live = sum(1 for k in members if _is_live(envs.get(k, {}).get("expires_at")))
         expiries = [envs[k]["expires_at"] for k in members if k in envs and envs[k].get("expires_at")]
         soonest = min(expiries) if expiries else None
-        table.add_row(gid, g.get("dataset", "?"), g.get("backend", "?"), _slice_display(g.get("slice", {})), str(len(members)), str(live), _humanize_expiry(soonest))
+        table.add_row(gid, g.get("dataset", "?"), g.get("backend", "?"), _slice_display(g.get("slice", {})), str(len(members)), str(live), _expiry_cell(soonest))
     console.print(table)
 
     if verbose:
@@ -240,7 +245,7 @@ def list_snapshots(sandbox_backend: str | None, verbose: bool):
                 sub.add_column(col, style="key" if col == "env_key" else "dim")
             for k in registry.group_members(gid):
                 e = envs.get(k, {})
-                sub.add_row(k, str(e.get("ref", "?")), e.get("base_image", "?"), _humanize_expiry(e.get("expires_at")))
+                sub.add_row(k, str(e.get("ref", "?")), e.get("base_image", "?"), _expiry_cell(e.get("expires_at")))
             console.print(sub)
 
 
@@ -253,25 +258,23 @@ def info_snapshot(group_id: str):
     registry = SnapshotRegistry.load()
     group = registry.groups().get(group_id)
     if group is None:
-        console.print(f"  [error]No group '{group_id}'.[/] [dim]See[/] [bold]rllm snapshot list[/]")
-        raise SystemExit(1)
+        not_found("Group", group_id, "See `rllm snapshot list`.")
 
     envs = registry.env_entries()
     members = registry.group_members(group_id)
     live = sum(1 for k in members if _is_live(envs.get(k, {}).get("expires_at")))
     shared = sorted({g for k in members for g in registry.groups_referencing(k) if g != group_id})
 
-    table = Table(show_header=False, box=None, padding=(0, 2))
-    table.add_column(style="label", width=12)
-    table.add_column()
-    table.add_row("Dataset", group.get("dataset", "?"))
-    table.add_row("Backend", f"[key]{group.get('backend', '?')}[/]")
-    table.add_row("Slice", _slice_display(group.get("slice", {})))
-    table.add_row("Created", str(group.get("created_at", "?")))
-    table.add_row("TTL", f"{group.get('ttl_hours', '?')}h")
-    table.add_row("Members", f"{len(members)} env(s), [success]{live} live[/] / {len(members) - live} expired")
-    table.add_row("Shared with", ", ".join(shared) if shared else "[dim]none[/]")
-    console.print(Panel(table, title=f"[val]{group_id}[/]", border_style="cyan", expand=False))
+    rows = [
+        ("Dataset", group.get("dataset", "?")),
+        ("Backend", f"[key]{group.get('backend', '?')}[/]"),
+        ("Slice", _slice_display(group.get("slice", {}))),
+        ("Created", str(group.get("created_at", "?"))),
+        ("TTL", f"{group.get('ttl_hours', '?')}h"),
+        ("Members", f"{len(members)} env(s), [success]{live} live[/] / {len(members) - live} expired"),
+        ("Shared with", ", ".join(shared) if shared else "[dim]none[/]"),
+    ]
+    console.print(info_panel(rows, title=f"[val]{group_id}[/]", border="cyan"))
 
 
 @snapshot.command("inspect")
@@ -307,20 +310,18 @@ def inspect_snapshot(group_or_env_key: str):
     if group_or_env_key in envs:
         e = envs[group_or_env_key]
         in_groups = sorted(registry.groups_referencing(group_or_env_key))
-        table = Table(show_header=False, box=None, padding=(0, 2))
-        table.add_column(style="label", width=12)
-        table.add_column()
-        table.add_row("env_key", f"[key]{group_or_env_key}[/]")
-        table.add_row("Backend", e.get("backend", "?"))
-        table.add_row("Ref", str(e.get("ref", "?")))
-        table.add_row("Base image", e.get("base_image", "?"))
-        table.add_row("Expires", _humanize_expiry(e.get("expires_at")))
-        table.add_row("In groups", ", ".join(in_groups) if in_groups else "[dim]none[/]")
-        console.print(Panel(table, title=f"[val]{group_or_env_key}[/]", border_style="cyan", expand=False))
+        rows = [
+            ("env_key", f"[key]{group_or_env_key}[/]"),
+            ("Backend", e.get("backend", "?")),
+            ("Ref", str(e.get("ref", "?"))),
+            ("Base image", e.get("base_image", "?")),
+            ("Expires", _expiry_cell(e.get("expires_at"))),
+            ("In groups", ", ".join(in_groups) if in_groups else "[dim]none[/]"),
+        ]
+        console.print(info_panel(rows, title=f"[val]{group_or_env_key}[/]", border="cyan"))
         return
 
-    console.print(f"  [error]No group or env_key '{group_or_env_key}'.[/] [dim]See[/] [bold]rllm snapshot list[/]")
-    raise SystemExit(1)
+    not_found("Group or env_key", group_or_env_key, "See `rllm snapshot list`.")
 
 
 @snapshot.command("destroy")
@@ -331,8 +332,7 @@ def destroy_snapshot(group_id: str):
 
     result = SnapshotRegistry.load().destroy_group(group_id)
     if not result["found"]:
-        console.print(f"  [error]No group '{group_id}'.[/] [dim]See[/] [bold]rllm snapshot list[/]")
-        raise SystemExit(1)
+        not_found("Group", group_id, "See `rllm snapshot list`.")
 
     console.print(f"  [success]Removed group[/] {group_id}")
     if result["deleted"]:
@@ -352,8 +352,7 @@ def renew_snapshot(group_id: str, ttl_hours: float):
 
     registry = SnapshotRegistry.load()
     if group_id not in registry.groups():
-        console.print(f"  [error]No group '{group_id}'.[/] [dim]See[/] [bold]rllm snapshot list[/]")
-        raise SystemExit(1)
+        not_found("Group", group_id, "See `rllm snapshot list`.")
     renewed = registry.renew(group_id, ttl_hours)
     console.print(f"  [success]Renewed[/] {renewed} env(s) of {group_id} to +{ttl_hours}h.")
 

@@ -15,16 +15,10 @@ import os
 from pathlib import Path
 
 import click
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
-from rich.theme import Theme
 
 from rllm.cli._pull import load_dataset_catalog, pull_dataset
 from rllm.cli._sampling import SAMPLING_PARAMS_HELP as _SAMPLING_PARAMS_HELP
-
-theme = Theme({"label": "dim", "success": "bold green", "error": "bold red", "val": "bold", "key": "yellow"})
-console = Console(theme=theme)
+from rllm.cli._ui import console, fail, info_panel
 
 # Path to the bundled YAML config templates
 _CONFIG_PKG = Path(__file__).resolve().parent.parent / "trainer" / "config"
@@ -177,9 +171,7 @@ def _run_train(
         from rllm.eval.evaluator_loader import load_evaluator, resolve_evaluator_from_catalog
         from rllm.trainer import AgentTrainer
     except ImportError as e:
-        console.print(f"  [error]Missing training dependencies: {e}[/]")
-        console.print("  Install with: [bold]pip install rllm\\[train][/]")
-        raise SystemExit(1) from None
+        fail(f"Missing training dependencies: {e}\n  Install with: pip install 'rllm[train]'")
 
     # ------------------------------------------------------------------
     # Local benchmark path: directory with dataset.toml / task.toml
@@ -205,8 +197,7 @@ def _run_train(
         try:
             agent_flow = load_agent(agent_name)
         except (KeyError, ImportError, AttributeError, TypeError) as e:
-            console.print(f"  [error]Cannot load agent '{agent_name}': {e}[/]")
-            raise SystemExit(1) from None
+            fail(f"Cannot load agent '{agent_name}': {e}")
 
         # Evaluator: --evaluator > dataset.toml [verifier].
         # Sandbox-shell verifiers aren't supported here (per-task sandbox
@@ -222,13 +213,12 @@ def _run_train(
 
             evaluator = build_dataset_evaluator(_Path(benchmark).resolve())
             if evaluator is None:
-                console.print(
-                    "  [error]Could not resolve a verifier for this benchmark. "
+                fail(
+                    "Could not resolve a verifier for this benchmark. "
                     "Declare a host-side verifier in dataset.toml ([verifier].name / "
                     ".module / .import_path) or pass --evaluator explicitly. "
-                    "Sandbox-shell verifiers aren't supported in training yet.[/]"
+                    "Sandbox-shell verifiers aren't supported in training yet."
                 )
-                raise SystemExit(1)
             evaluator_display = f"{type(evaluator).__name__} (from dataset.toml)"
 
         # Datasets: pass the Task list as both train and val for now
@@ -275,24 +265,22 @@ def _run_train(
 
             ok, reason, hint = diagnose_docker()
             if not ok:
-                console.print(f"  [error]Harbor tasks require Docker — {reason}.[/]")
+                message = f"Harbor tasks require Docker — {reason}."
                 if hint:
-                    console.print(f"  [dim]{hint}[/]")
-                raise SystemExit(1)
+                    message += f"\n  [dim]{hint}[/]"
+                fail(message)
 
         # ---- Resolve agent ----
         if agent_name is None:
             if catalog_entry and "default_agent" in catalog_entry:
                 agent_name = catalog_entry["default_agent"]
             else:
-                console.print(f"  [error]No --agent specified and no default_agent in catalog for '{benchmark}'.[/]")
-                raise SystemExit(1)
+                fail(f"No --agent specified and no default_agent in catalog for '{benchmark}'.")
 
         try:
             agent_flow = load_agent(agent_name)
         except (KeyError, ImportError, AttributeError, TypeError) as e:
-            console.print(f"  [error]Error loading agent '{agent_name}': {e}[/]")
-            raise SystemExit(1) from None
+            fail(f"Error loading agent '{agent_name}': {e}")
 
         _is_harbor_source = bool(catalog_entry) and catalog_entry.get("source", "").startswith("harbor:")
         _is_harbor_agent = bool(agent_name) and agent_name.startswith("harbor:")
@@ -307,8 +295,7 @@ def _run_train(
                 evaluator = load_evaluator(evaluator_name)
                 evaluator_display = f"{evaluator_name} (overrides per-task verifier)"
             except (KeyError, ImportError, AttributeError, TypeError) as e:
-                console.print(f"  [error]Error loading evaluator '{evaluator_name}': {e}[/]")
-                raise SystemExit(1) from None
+                fail(f"Error loading evaluator '{evaluator_name}': {e}")
         else:
             _harbor_reward_fn_skipped = _is_harbor_source and catalog_entry.get("reward_fn") == "harbor_reward_fn" and not _is_harbor_agent
             if _harbor_reward_fn_skipped:
@@ -326,8 +313,7 @@ def _run_train(
                         pass
 
         if evaluator is None and not _is_harbor_source:
-            console.print(f"  [error]No evaluator found for '{benchmark}'. Specify --evaluator explicitly.[/]")
-            raise SystemExit(1)
+            fail(f"No evaluator found for '{benchmark}'. Specify --evaluator explicitly.")
 
         # ---- Resolve dataset names ----
         train_ds_name = train_dataset_name or benchmark
@@ -352,8 +338,7 @@ def _run_train(
         # ---- Load training dataset ----
         train_dataset = _load_or_pull_dataset(train_ds_name, train_split, catalog, train_entry)
         if train_dataset is None:
-            console.print(f"  [error]Could not load training dataset '{train_ds_name}' split '{train_split}'.[/]")
-            raise SystemExit(1)
+            fail(f"Could not load training dataset '{train_ds_name}' split '{train_split}'.")
 
         if max_examples is not None and max_examples < len(train_dataset):
             train_dataset = train_dataset.select(range(max_examples))
@@ -399,8 +384,7 @@ def _run_train(
     try:
         train_sc, val_sc = resolve_train_sampling(sampling_params, temperature, top_p, max_tokens, base_train=base_train, base_val=base_val)
     except (ValueError, FileNotFoundError, TypeError) as e:
-        console.print(f"  [error]Invalid --sampling-params: {e}[/]")
-        raise SystemExit(1) from None
+        fail(f"Invalid --sampling-params: {e}")
     config.rllm.rollout.train = train_sc.as_dict()
     config.rllm.rollout.val = val_sc.as_dict()
 
@@ -423,37 +407,36 @@ def _run_train(
         )
 
     # ---- Display header ----
-    table = Table(show_header=False, box=None, padding=(0, 2))
-    table.add_column(style="label", width=14)
-    table.add_column()
-    table.add_row("Benchmark", f"[val]{benchmark}[/]")
-    table.add_row("Model", f"[val]{model}[/]")
-    table.add_row("Agent", f"[val]{agent_name}[/]")
-    table.add_row("Evaluator", f"[dim]{evaluator_display}[/]")
-    table.add_row("Train data", f"[val]{train_ds_name}[/]  [dim]({train_split}, {len(train_dataset)} examples)[/]")
     val_info = f"[val]{val_ds_name}[/]  [dim]({val_split}, {len(val_dataset)} examples)[/]" if val_dataset else "[dim]None[/]"
-    table.add_row("Val data", val_info)
+    rows = [
+        ("Benchmark", f"[val]{benchmark}[/]"),
+        ("Model", f"[val]{model}[/]"),
+        ("Agent", f"[val]{agent_name}[/]"),
+        ("Evaluator", f"[dim]{evaluator_display}[/]"),
+        ("Train data", f"[val]{train_ds_name}[/]  [dim]({train_split}, {len(train_dataset)} examples)[/]"),
+        ("Val data", val_info),
+    ]
     tunnel_cfg = (config.rllm.get("gateway", {}) or {}).get("tunnel")
     sandbox_row = _describe_sandbox_routing(agent_flow, train_dataset, val_dataset, sandbox_backend, sandbox_concurrency, tunnel_cfg)
     if sandbox_row is not None:
-        table.add_row("Sandbox", sandbox_row)
+        rows.append(("Sandbox", sandbox_row))
     train_sp = train_sc.as_dict()
     val_sp = val_sc.as_dict()
     if train_sp or val_sp:
         sp_text = f"train={train_sp}" + (f"  val={val_sp}" if val_sp != train_sp else "")
-        table.add_row("Sampling", f"[dim]{sp_text} (gateway-enforced)[/]")
-    table.add_row("Group size", f"[dim]{group_size}[/]")
-    table.add_row("Batch size", f"[dim]{batch_size}[/]")
-    table.add_row("Learning rate", f"[dim]{lr}[/]")
-    table.add_row("LoRA rank", f"[dim]{lora_rank}[/]")
+        rows.append(("Sampling", f"[dim]{sp_text} (gateway-enforced)[/]"))
+    rows.append(("Group size", f"[dim]{group_size}[/]"))
+    rows.append(("Batch size", f"[dim]{batch_size}[/]"))
+    rows.append(("Learning rate", f"[dim]{lr}[/]"))
+    rows.append(("LoRA rank", f"[dim]{lora_rank}[/]"))
     epochs_str = f"[dim]{total_epochs}[/]"
     if total_steps is not None:
         epochs_str += f"  [dim](max {total_steps} steps)[/]"
-    table.add_row("Epochs", epochs_str)
+    rows.append(("Epochs", epochs_str))
     if enable_ui:
-        table.add_row("Live UI", f"[val]{os.environ['RLLM_UI_URL']}[/]")
+        rows.append(("Live UI", f"[val]{os.environ['RLLM_UI_URL']}[/]"))
     console.print()
-    console.print(Panel(table, title="[bold]rLLM Train[/]", border_style="cyan", expand=False))
+    console.print(info_panel(rows, title="[bold]rLLM Train[/]", label_width=14))
     console.print()
 
     # ---- Launch training ----
@@ -476,7 +459,7 @@ def _describe_sandbox_routing(
     val_dataset,
     sandbox_backend: str | None,
     sandbox_concurrency: int | None,
-    tunnel: str | None = None,
+    tunnel: str | None,
 ) -> str | None:
     """One-line description of sandbox + gateway routing for the header. Returns ``None`` when no sandbox is needed."""
     from rllm.gateway.tunnel import is_local_sandbox_backend, parse_tunnel
