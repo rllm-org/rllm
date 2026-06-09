@@ -19,7 +19,6 @@ import logging
 import os
 import tarfile
 import threading
-import time
 import weakref
 
 from rllm.sandbox.protocol import SnapshotNotFound
@@ -200,45 +199,6 @@ class ModalSandbox:
         # ids and error); permissions are kept so executables stay +x.
         self._exec_unchecked(f"echo '{b64}' | base64 -d | tar xzf - --no-same-owner -C {remote_parent}")
         logger.debug("Uploaded dir %s -> %s in sandbox %s", local_path, remote_path, self.name)
-
-    def start_agent_process(self, command: str, port: int) -> None:
-        """Start a background process in the Modal sandbox.
-
-        Uses ``nohup`` to background the process and polls a health
-        endpoint until it's ready.
-        """
-        bg_command = f"nohup {command} > /tmp/worker.log 2>&1 &"
-        self._exec_unchecked(bg_command)
-
-        self._wait_for_ready(port, timeout=60.0)
-        logger.info("Agent process started in sandbox %s on port %d", self.name, port)
-
-    def _wait_for_ready(self, port: int, timeout: float = 60.0) -> None:
-        """Poll the health endpoint inside the sandbox."""
-        start = time.time()
-        while time.time() - start < timeout:
-            try:
-                process = self._sandbox.exec(
-                    "bash",
-                    "-c",
-                    f"curl -sf http://127.0.0.1:{port}/health",
-                )
-                process.wait()
-                if process.returncode == 0:
-                    return
-            except Exception:
-                pass
-            time.sleep(1.0)
-        raise TimeoutError(f"Worker server did not start within {timeout}s in sandbox {self.name}")
-
-    def get_endpoint(self, port: int) -> tuple[str, dict[str, str]]:
-        """Return the URL to reach the given port.
-
-        Modal sandboxes use tunnel URLs for external access. For
-        internal exec-based access, the loopback address works.
-        """
-        # For exec-based interaction (our primary use case), loopback works
-        return f"http://127.0.0.1:{port}", {}
 
     def close(self) -> None:
         """Terminate and detach from the Modal sandbox."""
