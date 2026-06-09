@@ -53,11 +53,11 @@ rollout:
   train:
     temperature: 1.0
     top_p: 1.0
-    max_tokens: 2048
+    max_tokens: ${rllm.data.max_response_length}
   val:
     temperature: 1.0
     top_p: 1.0
-    max_tokens: 2048
+    max_tokens: ${rllm.data.max_response_length}
 
 # Trainer Configuration
 trainer:
