@@ -115,7 +115,6 @@ class DaytonaSandbox:
         self.name = name
         self._image_spec = image
         self._closed = False
-        self._worker_session_id: str | None = None
         self._auto_stop_interval = int(kwargs.pop("auto_stop_interval", _DEFAULT_AUTO_STOP_INTERVAL))
         self._auto_archive_interval = kwargs.pop("auto_archive_interval", None)
         self._create_timeout = float(kwargs.pop("create_timeout", 120.0))
@@ -265,69 +264,10 @@ class DaytonaSandbox:
 
         logger.debug("Uploaded dir %s -> %s in sandbox %s", local_path, remote_path, self.name)
 
-    def start_agent_process(self, command: str, port: int) -> None:
-        """Start a long-running process (worker_server.py) and poll until ready.
-
-        Daytona's ephemeral ``process.exec`` reaps backgrounded children
-        when the call returns, so ``nohup ... &`` (the Modal/Docker
-        pattern) doesn't survive here. We launch inside a persistent
-        ``process.create_session`` instead — the subprocess lives until
-        the session is deleted, which ``close()`` handles.
-        """
-        from daytona import SessionExecuteRequest
-
-        session_id = f"rllm-worker-{self.name}"
-        self._sandbox.process.create_session(session_id)
-        self._worker_session_id = session_id
-        self._sandbox.process.execute_session_command(
-            session_id,
-            SessionExecuteRequest(command=command, run_async=True),
-        )
-        self._wait_for_ready(port, timeout=60.0)
-        logger.info("Agent process started in sandbox %s on port %d (session: %s)", self.name, port, session_id)
-
-    def _wait_for_ready(self, port: int, timeout: float = 60.0) -> None:
-        """Poll the in-sandbox health endpoint until 200 or timeout.
-
-        Uses ``python3 + urllib`` because slim Python images don't ship
-        ``curl`` or ``wget``.
-        """
-        health_cmd = f"python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:{port}/health', timeout=2)\""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                response = self._sandbox.process.exec(health_cmd)
-                if response.exit_code == 0:
-                    return
-            except Exception:
-                pass
-            time.sleep(1.0)
-        raise TimeoutError(f"Worker server did not start within {timeout}s in sandbox {self.name}")
-
-    def get_endpoint(self, port: int) -> tuple[str, dict[str, str]]:
-        """Return a public URL + headers to reach the given in-sandbox port.
-
-        Uses Daytona's native preview-link API, so the caller can reach
-        the worker_server from anywhere on the network (no cloudflared
-        tunnel needed for this direction).
-        """
-        preview = self._sandbox.get_preview_link(port=port)
-        return preview.url, {"x-daytona-preview-token": preview.token}
-
     def close(self) -> None:
-        """Delete the Daytona sandbox and release resources.
-
-        Deletes the worker session first (which kills the long-running
-        worker_server process), then deletes the sandbox itself.
-        """
+        """Delete the Daytona sandbox and release resources."""
         if self._closed:
             return
-        if self._worker_session_id is not None:
-            try:
-                self._sandbox.process.delete_session(self._worker_session_id)
-            except Exception:
-                logger.debug("Sandbox %s: worker session delete error", self.name, exc_info=True)
-            self._worker_session_id = None
         try:
             self._sandbox.delete()
         except Exception:

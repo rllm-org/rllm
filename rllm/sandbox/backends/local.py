@@ -7,7 +7,6 @@ import os
 import shutil
 import subprocess
 import tempfile
-import time
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +20,6 @@ class LocalSandbox:
     def __init__(self, name: str, **kwargs):
         self.name = name
         self._workdir = tempfile.mkdtemp(prefix=f"rllm-sandbox-{name}-")
-        self._agent_process: subprocess.Popen | None = None
         self._env = os.environ.copy()
         logger.info("LocalSandbox %s created at %s", name, self._workdir)
 
@@ -68,79 +66,8 @@ class LocalSandbox:
 
         shutil.copytree(local_path, dest, ignore=_ignore)
 
-    def start_agent_process(self, command: str, port: int) -> None:
-        """Start a background process (e.g. worker_server.py)."""
-        translated_cmd = command.replace("/app/", f"{self._workdir}/app/")
-
-        # Set PYTHONPATH so the worker can import from uploaded code
-        env = self._env.copy()
-        python_paths = [
-            os.path.join(self._workdir, "app", "agent"),
-            os.path.join(self._workdir, "app", "runner"),
-        ]
-        existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = ":".join(python_paths + ([existing] if existing else []))
-
-        # Redirect stdout/stderr to files to avoid PIPE buffer deadlocks.
-        # The subprocess runs an aiohttp server which can produce output at
-        # any time; PIPE buffers fill up and block the process if not drained.
-        log_dir = os.path.join(self._workdir, "logs")
-        os.makedirs(log_dir, exist_ok=True)
-        stdout_log = open(os.path.join(log_dir, "worker_stdout.log"), "w")
-        stderr_log = open(os.path.join(log_dir, "worker_stderr.log"), "w")
-        self._log_files = (stdout_log, stderr_log)
-
-        self._agent_process = subprocess.Popen(
-            translated_cmd,
-            shell=True,
-            cwd=self._workdir,
-            env=env,
-            stdout=stdout_log,
-            stderr=stderr_log,
-        )
-
-        # Wait for the server to become ready
-        self._wait_for_ready(port, timeout=30.0)
-        logger.info("Agent process started in sandbox %s (PID: %s, port: %d)", self.name, self._agent_process.pid, port)
-
-    def _wait_for_ready(self, port: int, timeout: float = 30.0) -> None:
-        """Poll the /health endpoint until the worker is ready."""
-        import urllib.request
-
-        start = time.time()
-        url = f"http://127.0.0.1:{port}/health"
-        while time.time() - start < timeout:
-            try:
-                resp = urllib.request.urlopen(url, timeout=1)
-                if resp.status == 200:
-                    return
-            except Exception:
-                pass
-            time.sleep(0.3)
-        raise TimeoutError(f"Worker server did not start within {timeout}s on port {port}")
-
-    def get_endpoint(self, port: int) -> tuple[str, dict[str, str]]:
-        """Return the base URL and headers to reach the worker server."""
-        return f"http://127.0.0.1:{port}", {}
-
     def close(self) -> None:
-        """Terminate the agent process and clean up the temp directory."""
-        if self._agent_process is not None:
-            self._agent_process.terminate()
-            try:
-                self._agent_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._agent_process.kill()
-                self._agent_process.wait()
-            self._agent_process = None
-
-        # Close log file handles
-        for fh in getattr(self, "_log_files", ()):
-            try:
-                fh.close()
-            except Exception:
-                pass
-
+        """Clean up the temp directory."""
         if os.path.exists(self._workdir):
             shutil.rmtree(self._workdir, ignore_errors=True)
         logger.info("LocalSandbox %s closed", self.name)
