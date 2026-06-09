@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from tqdm import tqdm
 
+from rllm.data.utils import task_from_row
 from rllm.engine.trace_converter import compute_step_metrics, trace_record_to_step
 from rllm.eval.types import EvalOutput
 from rllm.types import AgentConfig, Episode, Step, Task, Trajectory, run_agent_flow
@@ -459,19 +460,13 @@ class AgentFlowEngine:
         the new attempt's enrich doesn't see a mix of trace records.
         """
         task_for_episode = task.metadata if isinstance(task, Task) else task
-        from pathlib import Path
 
         if isinstance(task, Task):
             task_obj = task
             task_dict = task.metadata
         else:
             task_dict = task
-            task_obj = Task(
-                id=str(task_id),
-                instruction=str(task.get("question", task.get("instruction", ""))),
-                metadata=task,
-                dataset_dir=Path("."),
-            )
+            task_obj = task_from_row(task, task_id)
 
         async with self._semaphore:
             for retry_attempt in range(1, self.retry_limit + 1):

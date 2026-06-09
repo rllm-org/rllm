@@ -36,6 +36,9 @@ workflow:
   n_parallel_tasks: 256
   retry_limit: 3
   raise_on_error: true
+  # Sandbox warm-pool prefetch for training (mirrors eval): 0 disables,
+  # negative matches the sandbox-creation frontier, positive = literal cap.
+  warm_queue_size: -1
 
 # Rollout configuration: backend-agnostic source of truth for sampling params.
 # For AgentFlow, rollout.{train,val} are attached to the gateway session and
@@ -45,18 +48,16 @@ workflow:
 rollout:
   n: 8
   n_val: 1  # number of validation samples per prompt
-  # Defaults below are accepted by every backend (top_k: -1 = no filtering).
-  # Set penalties / etc. explicitly (CLI or here) when your backend supports them.
+  # Only defaults the params every backend accepts. Set top_k / penalties / etc.
+  # explicitly (CLI or here) when your served backend supports them.
   train:
     temperature: 1.0
     top_p: 1.0
-    top_k: -1
-    max_tokens: ${rllm.data.max_response_length}
+    max_tokens: 2048
   val:
     temperature: 1.0
     top_p: 1.0
-    top_k: -1
-    max_tokens: ${rllm.data.max_response_length}
+    max_tokens: 2048
 
 # Trainer Configuration
 trainer:

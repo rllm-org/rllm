@@ -5,6 +5,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pprint import pprint
 from typing import Any, Literal
@@ -47,6 +48,21 @@ from rllm.workflows.store import Store
 from rllm.workflows.workflow import TerminationReason, Workflow
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _detached_warm_queue(hooks):
+    """Temporarily detach a training warm queue so the enclosed work (validation,
+    whose tasks aren't in the train schedule) falls back to direct sandbox creation."""
+    if hooks is None:
+        yield
+        return
+    saved = hooks.warm_queue
+    hooks.warm_queue = None
+    try:
+        yield
+    finally:
+        hooks.warm_queue = saved
 
 
 @dataclass
@@ -389,44 +405,79 @@ class UnifiedTrainer:
         trainer_state.total_steps = self._total_training_steps
         break_via_total_batches = False
 
-        for epoch in range(train_dataloader.epoch, total_epochs):
-            if break_via_total_batches:
-                break
-            trainer_state.epoch = epoch
-            pprint(f"epoch {epoch}, step {trainer_state.global_step} started")
-            await self.backend.on_epoch_start(trainer_state)
-
-            for batch in train_dataloader:
-                trainer_state.reset_batch()
-                await self.backend.on_batch_start(trainer_state)
-                with simple_timer("step", trainer_state.timing_dict):
-                    await self._train_batch_async(batch, trainer_state)
-                await self.backend.on_batch_end(trainer_state)
-
-                print_metrics_table(trainer_state.metrics, trainer_state.global_step)
-                self.logger.log(
-                    data=trainer_state.metrics,
-                    step=trainer_state.global_step,
-                    episodes=trainer_state.episodes,
-                    trajectory_groups=trainer_state.trajectory_groups,
-                )
-
-                # if the config specifies the `total_batches` parameter, then we check if we should stop
-                if use_total_batches and trainer_state.global_step >= self.rllm_config.trainer.total_batches:
-                    break_via_total_batches = True
+        hooks = getattr(self.agent_workflow_engine, "hooks", None)
+        warm_queue = self._start_train_warm_queue(train_dataloader, trainer_state, total_epochs, use_total_batches, hooks)
+        try:
+            for epoch in range(train_dataloader.epoch, total_epochs):
+                if break_via_total_batches:
                     break
+                trainer_state.epoch = epoch
+                pprint(f"epoch {epoch}, step {trainer_state.global_step} started")
+                await self.backend.on_epoch_start(trainer_state)
 
-                # periodic validation
-                if self.rllm_config.trainer.test_freq > 0 and trainer_state.global_step % self.rllm_config.trainer.test_freq == 0:
-                    await self._validate_async(trainer_state)
+                for batch in train_dataloader:
+                    trainer_state.reset_batch()
+                    await self.backend.on_batch_start(trainer_state)
+                    with simple_timer("step", trainer_state.timing_dict):
+                        await self._train_batch_async(batch, trainer_state)
+                    await self.backend.on_batch_end(trainer_state)
 
-                trainer_state.global_step += 1
+                    print_metrics_table(trainer_state.metrics, trainer_state.global_step)
+                    self.logger.log(
+                        data=trainer_state.metrics,
+                        step=trainer_state.global_step,
+                        episodes=trainer_state.episodes,
+                        trajectory_groups=trainer_state.trajectory_groups,
+                    )
 
-            await self.backend.on_epoch_end(trainer_state)
+                    # if the config specifies the `total_batches` parameter, then we check if we should stop
+                    if use_total_batches and trainer_state.global_step >= self.rllm_config.trainer.total_batches:
+                        break_via_total_batches = True
+                        break
 
-        # final validation after training
+                    # periodic validation
+                    if self.rllm_config.trainer.test_freq > 0 and trainer_state.global_step % self.rllm_config.trainer.test_freq == 0:
+                        with _detached_warm_queue(hooks):
+                            await self._validate_async(trainer_state)
+
+                    trainer_state.global_step += 1
+
+                await self.backend.on_epoch_end(trainer_state)
+        finally:
+            if warm_queue is not None:
+                warm_queue.shutdown()
+                hooks.warm_queue = None
+
+        # final validation after training (queue already shut down + detached above)
         if self.rllm_config.trainer.test_freq > 0:
             await self._validate_async(trainer_state)
+
+    def _start_train_warm_queue(self, train_dataloader, trainer_state, total_epochs, use_total_batches, hooks):
+        """Prefetch upcoming sandboxes ahead of rollout, mirroring eval's warm pool.
+
+        Returns a started :class:`WarmQueue` attached to ``hooks`` (the caller shuts
+        it down), or ``None`` when there is no sandbox backend or the knob is 0.
+        Size ``-1`` matches the sandbox-creation frontier (``agent_flow.max_concurrent``).
+        """
+        warm_queue_size = self.rllm_config.workflow.get("warm_queue_size", -1)
+        if hooks is None or not getattr(hooks, "sandbox_backend", None) or warm_queue_size == 0:
+            return None
+
+        from rllm.sandbox.train_schedule import build_train_schedule
+        from rllm.sandbox.warm_queue import WarmQueue
+
+        frontier = getattr(getattr(self.agent_workflow_engine, "agent_flow", None), "max_concurrent", 8)
+        size = frontier if warm_queue_size < 0 else warm_queue_size
+        consumed = trainer_state.global_step - 1  # global_step is 1-based once fit_async starts
+        remaining = self._total_training_steps - consumed
+        if use_total_batches:
+            remaining = min(remaining, self.rllm_config.trainer.total_batches - consumed)
+        schedule = build_train_schedule(train_dataloader, group_size=self.rllm_config.rollout.n, total_epochs=total_epochs, remaining_batches=remaining)
+        warm_queue = WarmQueue(schedule, hooks.sandbox_backend, hooks.registry, size)
+        hooks.warm_queue = warm_queue
+        warm_queue.start()
+        logger.info("training warm queue started: %d ahead over %d scheduled tasks", size, len(schedule))
+        return warm_queue
 
     async def _train_batch_async(self, batch: Any, trainer_state: TrainerState) -> None:
         """Train a batch (async implementation)."""

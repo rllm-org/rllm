@@ -80,3 +80,19 @@ class StatefulTaskDataLoader:
         self._epoch = state["epoch"]
         self._cursor = state["cursor"]
         self._seed = state.get("seed", self._seed)
+
+    def clone(self) -> StatefulTaskDataLoader:
+        """A detached copy at the same position — same dataset/config, independent cursor.
+
+        Lets a consumer walk the remaining task order (e.g. to prefetch sandboxes)
+        without perturbing the live loader's iteration state.
+        """
+        twin = StatefulTaskDataLoader(
+            self._dataset,
+            self._batch_size,
+            shuffle=self._shuffle,
+            seed=self._seed,
+            drop_last=self._drop_last,
+        )
+        twin.load_state_dict(self.state_dict())
+        return twin
