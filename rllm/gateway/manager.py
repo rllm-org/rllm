@@ -39,6 +39,8 @@ from typing import TYPE_CHECKING, Any
 from rllm_model_gateway.client import AsyncGatewayClient, GatewayClient
 from rllm_model_gateway.models import TraceRecord
 
+from rllm.env import env_float
+
 if TYPE_CHECKING:
     from omegaconf import DictConfig
 
@@ -47,7 +49,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _HEALTH_POLL_INTERVAL = 0.5
-_HEALTH_POLL_TIMEOUT = 30.0
+_HEALTH_POLL_TIMEOUT = env_float("RLLM_GATEWAY_HEALTH_TIMEOUT_S", 30.0)  # set env var: export RLLM_GATEWAY_HEALTH_TIMEOUT_S=xxx
 _TRACE_API_TIMEOUT = 600.0
 
 

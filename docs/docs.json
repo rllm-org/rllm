@@ -91,7 +91,8 @@
             "pages": [
               "guides/customizing-training",
               "guides/distributed-training",
-              "guides/ray-runtime-env"
+              "guides/ray-runtime-env",
+              "guides/environment-variables"
             ]
           },
           {
