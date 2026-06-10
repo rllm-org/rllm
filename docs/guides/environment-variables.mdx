@@ -1,0 +1,95 @@
+---
+title: Environment variables
+description: The RLLM_* operational environment variables rLLM reads for timeouts, retries, and TTLs, and how they propagate to Ray training workers
+---
+
+rLLM exposes a small set of `RLLM_*` environment variables for *operational* knobs — timeouts, retries, TTLs — that you tune per environment (CI vs. cluster vs. laptop) without editing code or touching the experiment config. These are deliberately env vars rather than config fields: the config system is for experiment design, while env vars cover the operational surface.
+
+Every one of these parses through the typed readers in `rllm/env.py` (`env_int` / `env_float` / `env_str`), which read `os.environ` when called — usually once at module import to produce a module-level constant. This follows the existing `RLLM_HOME` / `RLLM_LOG_LEVEL` / `RLLM_SYMPY_TIMEOUT_S` precedent.
+
+<Note>
+  `env_int` and `env_float` raise `ValueError` on a malformed value — a typo in an ops knob fails loudly rather than silently falling back to the default.
+</Note>
+
+## Tier-1 operational knobs
+
+| Environment variable | Default | What it controls |
+| -------------------- | ------- | ---------------- |
+| `RLLM_SNAPSHOT_TTL_HOURS` | `168.0` | Snapshot-registry trust horizon (hours) before eviction |
+| `RLLM_OPENAI_REQUEST_TIMEOUT_S` | `3600` | Per-request HTTP timeout for OpenAI-compatible rollout calls |
+| `RLLM_GATEWAY_HEALTH_TIMEOUT_S` | `30.0` | Wait for the gateway subprocess to report healthy |
+| `RLLM_TUNNEL_READY_TIMEOUT_S` | `30.0` | Wait for cloudflared to publish a public URL |
+| `RLLM_HARNESS_RUN_TIMEOUT_S` | `1800` | Global per-task agent-CLI wall-clock ceiling (per-task metadata still overrides) |
+| `RLLM_HARNESS_INSTALL_TIMEOUT_S` | `600` | In-sandbox install-script timeout |
+| `RLLM_EVAL_PROXY_STARTUP_TIMEOUT_S` | `30.0` | Deadline for the litellm proxy to accept connections |
+| `RLLM_EVAL_PROXY_NUM_RETRIES` | `3` | litellm `num_retries` baked into the proxy config |
+| `RLLM_FIREJAIL_EXEC_TIMEOUT_S` | `30` | firejail per-invocation code-exec timeout |
+| `RLLM_TACO_EXEC_TIMEOUT_S` | `90` | TACO / APPS / code-contests per-test exec timeout |
+| `RLLM_UI_HTTP_TIMEOUT_S` | `5.0` | httpx timeout for `UILogger` calls to the rLLM UI |
+| `RLLM_HARBOR_SESSION_TIMEOUT_S` | `900.0` | Per-task Harbor trial timeout (closes the gap where the eval path had no override) |
+
+### Usage
+
+Export the variable before running the command. Each knob falls back to its default when unset or empty.
+
+```bash
+# Give long-running harness tasks more headroom and loosen the firejail exec ceiling.
+export RLLM_HARNESS_RUN_TIMEOUT_S=3600
+export RLLM_FIREJAIL_EXEC_TIMEOUT_S=60
+
+python -m rllm.cli.train ...
+```
+
+<Tip>
+  An unset or empty value always resolves to the default shown above, so you only need to export the knobs you actually want to change.
+</Tip>
+
+## Use in distributed (Ray) training
+
+Because `"RLLM_"` is one of the `FORWARD_PREFIXES` in `rllm/trainer/verl/ray_runtime_env.py`, any `RLLM_*` variable exported on the launching node is **snapshotted into the Ray `runtime_env`** at `ray.init()` time and is therefore visible in `os.environ` on every Ray worker. So the knobs read inside workers — reward exec timeouts, harness timeouts, sandbox/snapshot TTLs — just work, without any per-worker plumbing.
+
+### How forwarding works
+
+`_get_forwarded_env_vars()` snapshots every `os.environ` key starting with a forwarded prefix into a dict; `get_ppo_ray_runtime_env()` does `env.update(_get_forwarded_env_vars())` and returns `{"env_vars": env, ...}`. That dict is passed straight to `ray.init(runtime_env=...)` (in `rllm/trainer/agent_trainer.py` and identically in `rllm/trainer/verl/train_agent_ppo.py`). Ray injects `runtime_env["env_vars"]` into every worker process's `os.environ`, so any `RLLM_*` re-read inside a worker sees the launcher-node value.
+
+<Note>
+  The snapshot is taken **once**, at `ray.init()` time, reading directly from the launching process's `os.environ`. Export your `RLLM_*` knobs *before* launching training — a value set after `ray.init()` will not reach the workers.
+</Note>
+
+### Why import-time reads still work
+
+Most of these vars are read at **module-import time** as module-level constants (firejail, TACO, harness, gateway, tunnel, snapshot, Harbor, UI-http). Ray imports those modules fresh inside the worker process, and the `runtime_env` has *already* populated `os.environ` before user modules import — so the constant captures the operator-set value. This ordering (env injected before modules import) is exactly the design the `rllm/env.py` docstring describes.
+
+### Architecture nuance: where the knobs actually run
+
+In rLLM training, the agent rollout loop, gateway/tunnel, harness execution, reward computation (firejail/TACO), and sandbox/snapshot all run inside the **`TaskRunner` Ray actor**, which hosts the workflow engine on a background asyncio loop. They do **not** run in the FSDP GPU workers (which only do `compute_log_prob` / `update_actor` / vLLM generation). The `TaskRunner` actor is a separate worker process from the launching driver, so forwarding still matters: `RLLM_*` must reach the actor, and it does via the `runtime_env` on `ray.init()`.
+
+The `RLLM_*` knobs that are read inside Ray workers (the `TaskRunner` actor) include:
+
+- `RLLM_HARNESS_INSTALL_TIMEOUT_S`, `RLLM_HARNESS_RUN_TIMEOUT_S`
+- `RLLM_FIREJAIL_EXEC_TIMEOUT_S`, `RLLM_TACO_EXEC_TIMEOUT_S`
+- `RLLM_GATEWAY_HEALTH_TIMEOUT_S`, `RLLM_TUNNEL_READY_TIMEOUT_S`
+- `RLLM_SNAPSHOT_TTL_HOURS`, `RLLM_UI_HTTP_TIMEOUT_S`
+- `RLLM_HARBOR_SESSION_TIMEOUT_S`
+
+<Note>
+  The primary verl rollout uses `VerlEngine` (talking to in-process vLLM servers via `AsyncLLMServerManager`), **not** `OpenAIEngine`, so `RLLM_OPENAI_REQUEST_TIMEOUT_S` does not affect it. That timeout applies only when `OpenAIEngine` is used — as the teacher engine for distillation, or in the eval-protocol / Fireworks engines — and even then it runs inside the `TaskRunner` actor.
+</Note>
+
+### Client-side knobs (not read in training workers)
+
+A few `RLLM_*` vars are read on the **driver / CLI side**, not inside Ray training workers:
+
+- `RLLM_EVAL_PROXY_NUM_RETRIES`, `RLLM_EVAL_PROXY_STARTUP_TIMEOUT_S` (litellm proxy)
+- `RLLM_JUDGE_MODEL` / `RLLM_JUDGE_BASE_URL` (LLM-equality judge)
+- `RLLM_UI_URL` / `RLLM_API_KEY` (CLI login / tracking)
+
+The eval path does not go through `ray.init()`, so for evaluation these are simply read in the CLI process.
+
+### Opting a variable out of forwarding
+
+Forwarding is governed by the same mechanism described in [Ray runtime environment](/guides/ray-runtime-env). `RLLM_EXCLUDE` opts variables out of the host-forwarding step: a specific name (`RLLM_EXCLUDE=RLLM_TACO_EXEC_TIMEOUT_S`) excludes that var, and `RLLM_EXCLUDE=RLLM*` strips **all** `RLLM_` forwarding by removing the prefix entirely.
+
+## See also
+
+All of these knobs parse through `rllm/env.py`. For parameters that shape the *experiment* rather than the operational surface, use the [config system](/training/configuration) — those are config fields, not environment variables.

@@ -17,6 +17,8 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
+from rllm.env import env_float
+
 if TYPE_CHECKING:
     from rllm.sandbox.protocol import Sandbox
     from rllm.types import Task
@@ -27,7 +29,7 @@ logger = logging.getLogger(__name__)
 _NO_SNAPSHOT_BACKENDS = {"docker", "local"}
 
 # Default local trust horizon for a snapshot entry (7 days).
-_DEFAULT_TTL_HOURS = 168.0
+_DEFAULT_TTL_HOURS = env_float("RLLM_SNAPSHOT_TTL_HOURS", 168.0)  # set env var: export RLLM_SNAPSHOT_TTL_HOURS=xxx
 
 
 def _registry_path() -> str:

@@ -34,6 +34,7 @@ import shlex
 import uuid
 from abc import abstractmethod
 
+from rllm.env import env_int
 from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
 from rllm.types import AgentConfig, Task
 
@@ -61,8 +62,8 @@ class BaseCliHarness(SandboxedAgentFlow):
     # Path inside the sandbox where the CLI's stdout is teed.
     stdout_log_path: str = "/tmp/agent-stdout.log"
     # Per-call timeouts (seconds). Tasks may override via metadata.
-    install_timeout: int = 600
-    run_timeout: int = 1800
+    install_timeout: int = env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 600)  # set env var: export RLLM_HARNESS_INSTALL_TIMEOUT_S=xxx
+    run_timeout: int = env_int("RLLM_HARNESS_RUN_TIMEOUT_S", 1800)  # set env var: export RLLM_HARNESS_RUN_TIMEOUT_S=xxx
 
     # ---------------------------------------------------------------------
     # Sandbox helpers

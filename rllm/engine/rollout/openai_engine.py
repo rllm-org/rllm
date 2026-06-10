@@ -8,10 +8,13 @@ import openai
 from PIL import Image
 
 from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine
+from rllm.env import env_int
 from rllm.globals import THOUGHT_DELIMITER_END, THOUGHT_DELIMITER_START
 from rllm.parser import ChatTemplateParser
 from rllm.tools.tool_base import Tool
 from rllm.workflows import TerminationEvent, TerminationReason
+
+_REQUEST_TIMEOUT_S = env_int("RLLM_OPENAI_REQUEST_TIMEOUT_S", 3600)  # set env var: export RLLM_OPENAI_REQUEST_TIMEOUT_S=xxx
 
 
 class OpenAIEngine(RolloutEngine):
@@ -110,7 +113,7 @@ class OpenAIEngine(RolloutEngine):
         retries = self.api_retries
         while retries > 0:
             try:
-                response = await self.client.chat.completions.create(model=self.model, messages=converted_messages, timeout=3600, **create_params, **sampling_params)
+                response = await self.client.chat.completions.create(model=self.model, messages=converted_messages, timeout=_REQUEST_TIMEOUT_S, **create_params, **sampling_params)
 
                 content = response.choices[0].message.content
                 reasoning = response.choices[0].message.reasoning if hasattr(response.choices[0].message, "reasoning") and isinstance(response.choices[0].message.reasoning, str) else ""
