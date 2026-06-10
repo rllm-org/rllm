@@ -86,10 +86,6 @@ A few `RLLM_*` vars are read on the **driver / CLI side**, not inside Ray traini
 
 The eval path does not go through `ray.init()`, so for evaluation these are simply read in the CLI process.
 
-### The Fireworks backend forwards `RLLM_*` too
-
-The Fireworks (pipeline) backend builds its `runtime_env` from the installed `verl.trainer.constants_ppo.get_ppo_ray_runtime_env`, which copies only a fixed PPO env dict and has no `RLLM_` forwarding of its own. To keep behaviour consistent with the default verl backend, `_train_fireworks` merges rLLM's `_get_forwarded_env_vars()` into that dict before `ray.init()`, so operator-set `RLLM_*` (and the other forwarded prefixes) reach the pipeline workers as well. The same `RLLM_EXCLUDE` opt-out applies.
-
 ### Opting a variable out of forwarding
 
 Forwarding is governed by the same mechanism described in [Ray runtime environment](/guides/ray-runtime-env). `RLLM_EXCLUDE` opts variables out of the host-forwarding step: a specific name (`RLLM_EXCLUDE=RLLM_TACO_EXEC_TIMEOUT_S`) excludes that var, and `RLLM_EXCLUDE=RLLM*` strips **all** `RLLM_` forwarding by removing the prefix entirely.
