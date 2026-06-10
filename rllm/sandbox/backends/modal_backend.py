@@ -266,7 +266,7 @@ def _modal_ref_absent(ref: str) -> bool:
         return False
 
 
-def build_modal_snapshot(task, key: str, prior_ref: str | None = None, *, force: bool = False) -> str | None:
+def build_modal_snapshot(task, key: str, prior_ref: str | None = None, *, force: bool = False, install_script: str = "") -> str | None:
     """Build a Modal filesystem snapshot of ``task``'s environment; return its image id.
 
     Mirrors Daytona's idempotency: when a ``prior_ref`` is known and still live
@@ -274,8 +274,10 @@ def build_modal_snapshot(task, key: str, prior_ref: str | None = None, *, force:
     filesystem — every fresh capture orphans the old image forever. ``force``
     bypasses reuse and always rebuilds.
 
-    Create a base sandbox, replay the Dockerfile RUN steps, then capture the
-    live filesystem as a ``modal.Image`` (stored as a diff from the base).
+    Create a base sandbox, replay the Dockerfile RUN steps, run the install
+    script (if any), then capture the live filesystem as a ``modal.Image``
+    (stored as a diff from the base). A failed install fails the build — a
+    snapshot keyed on the install must actually contain it.
     """
     from rllm.eval._resolution import _create_base_sandbox, _replay_dockerfile
 
@@ -286,6 +288,10 @@ def build_modal_snapshot(task, key: str, prior_ref: str | None = None, *, force:
     sb = _create_base_sandbox(task, "modal", name=f"{key}-build")
     try:
         _replay_dockerfile(task, sb, "modal")
+        if install_script:
+            from rllm.env import env_int
+
+            sb.exec(install_script, timeout=env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 900), user="root")
         image = sb._sandbox.snapshot_filesystem()  # noqa: SLF001 — modal.Image
         logger.info("modal snapshot built: %s -> %s", key, image.object_id)
         return image.object_id

@@ -51,27 +51,37 @@ def _expired(iso: str | None) -> bool:
     return _now() >= dt
 
 
-def env_key(backend: str, base_image: str, run_commands: list[str]) -> str:
+def env_key(backend: str, base_image: str, run_commands: list[str], install_script: str = "") -> str:
     """Content-hash fingerprint of an environment: ``rllm-env-<hash12>``.
 
-    Hashes only ``(backend, base_image, RUN block)`` — never ``task.id`` — so
-    GRPO group copies share one key and any image/RUN change yields a new key
-    (a clean miss, never a stale hit). Lowercase + dashes: a legal Daytona
-    snapshot name, Modal/Docker-safe.
+    Hashes ``(backend, base_image, RUN block, install script)`` — never
+    ``task.id`` — so GRPO group copies share one key and any image/RUN/install
+    change yields a new key (a clean miss, never a stale hit). An empty
+    ``install_script`` contributes nothing, keeping task-only keys stable.
+    Lowercase + dashes: a legal Daytona snapshot name, Modal/Docker-safe.
     """
-    payload = "\n".join([backend, base_image, *run_commands])
+    parts = [backend, base_image, *run_commands]
+    if install_script:
+        parts += ["install:", install_script]
+    payload = "\n".join(parts)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
     return f"rllm-env-{digest}"
 
 
-def env_key_for(task: Task, backend: str) -> str:
+def env_key_for(task: Task, backend: str, install_script: str = "") -> str:
     """Fingerprint a task's environment via the shared image/RUN resolution."""
     from rllm.eval._resolution import _dockerfile_run_commands, _resolve_image
 
-    return env_key(backend, _resolve_image(task, backend), _dockerfile_run_commands(task))
+    return env_key(backend, _resolve_image(task, backend), _dockerfile_run_commands(task), install_script)
 
 
-def keys_for_tasks(tasks: list[Task], backend: str | None) -> dict[str, Task]:
+def install_script_for(agent_flow: object) -> str:
+    """The flow's CLI install script, ``""`` when it has none (host flows, bash loops)."""
+    fn = getattr(agent_flow, "install_script", None)
+    return fn() if callable(fn) else ""
+
+
+def keys_for_tasks(tasks: list[Task], backend: str | None, install_script: str = "") -> dict[str, Task]:
     """Map distinct env_keys to a representative task (used by ``rllm snapshot create``)."""
     from rllm.eval._resolution import _resolve_backend
 
@@ -80,7 +90,7 @@ def keys_for_tasks(tasks: list[Task], backend: str | None) -> dict[str, Task]:
         eff = _resolve_backend(task, backend)
         if eff in _NO_SNAPSHOT_BACKENDS:
             continue
-        out.setdefault(env_key_for(task, eff), task)
+        out.setdefault(env_key_for(task, eff, install_script), task)
     return out
 
 
@@ -104,7 +114,7 @@ def _make_group_id(dataset: str, slice_spec: dict, task_count: int) -> str:
     return f"{_slug(dataset)}-{_slice_id_token(slice_spec, task_count)}-{os.urandom(4).hex()}"
 
 
-def get_sandbox(task: Task, backend: str | None, registry: SnapshotRegistry | None = None) -> Sandbox:
+def get_sandbox(task: Task, backend: str | None, registry: SnapshotRegistry | None = None, install_script: str = "") -> Sandbox:
     """Return a ready sandbox for ``task`` — from a snapshot when available, else cold.
 
     Snapshots are used iff ``registry`` is given. Two cheap gates before the cold
@@ -112,20 +122,34 @@ def get_sandbox(task: Task, backend: str | None, registry: SnapshotRegistry | No
     straight to cold), then an optimistic boot from the stored ref. If that ref
     vanished backend-side the boot raises :class:`SnapshotNotFound` and we fall back
     to cold. Read-only w.r.t. snapshots — building is ``rllm snapshot``'s job.
+
+    ``sandbox.baked_install`` records the install script the booted image
+    actually contains: the requested script on an exact-fingerprint hit, ``""``
+    when the boot came from the task-only fallback snapshot (better than cold,
+    but the caller must still install at runtime). Cold sandboxes leave the
+    attribute unset.
     """
     from rllm.eval._resolution import _create_base_sandbox, _create_sandbox_for_task, _resolve_backend
     from rllm.sandbox.protocol import SnapshotNotFound
 
     backend = _resolve_backend(task, backend)
     if registry is not None and backend not in _NO_SNAPSHOT_BACKENDS:
-        key = env_key_for(task, backend)
-        ref = registry.lookup_env(key, backend)
-        if ref is not None:
+        key = env_key_for(task, backend, install_script)
+        candidates = [key]
+        if install_script:
+            candidates.append(env_key_for(task, backend))
+        for candidate in candidates:
+            ref = registry.lookup_env(candidate, backend)
+            if ref is None:
+                continue
             try:
-                return _create_base_sandbox(task, backend, image=ref)  # snapshot has RUN baked — no replay
+                sandbox = _create_base_sandbox(task, backend, image=ref)  # snapshot has RUN baked — no replay
             except SnapshotNotFound:
                 logger.info("snapshot %s gone on %s — cold fallback", ref, backend)
-                registry.discard(key)  # so sibling tasks this run skip the doomed boot
+                registry.discard(candidate)  # so sibling tasks this run skip the doomed boot
+                continue
+            sandbox.baked_install = install_script if candidate == key else ""
+            return sandbox
     return _create_sandbox_for_task(task, backend)
 
 
@@ -385,4 +409,4 @@ class SnapshotRegistry:
         self._write(self.path, {"version": 2, "envs": self._envs, "groups": self._groups})
 
 
-__all__ = ["env_key", "env_key_for", "keys_for_tasks", "get_sandbox", "SnapshotRegistry"]
+__all__ = ["env_key", "env_key_for", "install_script_for", "keys_for_tasks", "get_sandbox", "SnapshotRegistry"]
