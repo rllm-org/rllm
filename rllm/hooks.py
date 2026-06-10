@@ -2,34 +2,208 @@
 
 :class:`SandboxTaskHooks` is the canonical implementation, used by
 ``rllm eval`` and by :class:`rllm.trainer.unified_trainer.AgentTrainer`
-for sandbox-style harnesses on harbor task dirs.
+for sandbox-style flows and env-carrying datasets.
+
+The central question — *does this rollout need a sandbox?* — is answered in
+exactly one place, :func:`resolve_rollout_plan`, as the join of three
+declared needs:
+
+* the **flow** declares it (``needs_env`` attr — ``True`` on
+  :class:`~rllm.sandbox.sandboxed_flow.SandboxedAgentFlow`, ``False`` on
+  ``@rllm.rollout`` flows),
+* the **evaluation policy** needs it (:class:`FromTaskEvaluation` resolving a
+  ``sandbox-shell`` / ``python-hybrid`` verifier; :class:`FixedEvaluation` never does),
+* the **task** declares it (``environment/`` dir or ``task_path`` metadata).
+
+Wiring-time call sites (trainer/CLI) use :func:`scan_env_requirements` over
+the datasets to decide *whether to install these hooks at all* and whether
+the gateway needs a public tunnel — the same predicate, evaluated before
+any per-task bind.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from omegaconf import DictConfig, OmegaConf
 
 from rllm.gateway.tunnel import is_local_sandbox_backend
-from rllm.types import Evaluator
+from rllm.types import Evaluator, Task
 
 if TYPE_CHECKING:
     from rllm.engine.agentflow_engine import TaskContext
+    from rllm.sandbox.protocol import Sandbox
     from rllm.sandbox.snapshot import SnapshotRegistry
     from rllm.sandbox.warm_queue import WarmQueue
-    from rllm.types import AgentFlow, Task
+    from rllm.types import AgentFlow
 
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Evaluation policies
+# ---------------------------------------------------------------------------
+
+
+class FixedEvaluation:
+    """Evaluation policy: one host-side evaluator scores every task.
+
+    Host-side by definition — it never contributes an env requirement.
+    """
+
+    def __init__(self, evaluator: Evaluator):
+        from rllm.eval._resolution import _adapt_legacy_evaluator
+
+        self.evaluator = _adapt_legacy_evaluator(evaluator)
+
+    def detect(self, task: Task) -> tuple[str, dict]:  # noqa: ARG002
+        return "fixed", {}
+
+    def resolve(self, task: Task, sandbox: Sandbox | None, kind: str, config: dict) -> Evaluator:  # noqa: ARG002
+        return self.evaluator
+
+
+class FromTaskEvaluation:
+    """Evaluation policy: resolve a per-task verifier from the task's ``[verifier]`` config."""
+
+    def detect(self, task: Task) -> tuple[str, dict]:
+        from rllm.eval._resolution import _detect_verifier
+
+        return _detect_verifier(task)
+
+    def resolve(self, task: Task, sandbox: Sandbox | None, kind: str, config: dict) -> Evaluator:
+        from rllm.eval._resolution import _resolve_evaluator
+
+        return _resolve_evaluator(task, sandbox, kind, config)
+
+
+EvaluationPolicy = FixedEvaluation | FromTaskEvaluation
+
+# Verifier kinds that must run against a live sandbox.
+_ENV_VERIFIER_KINDS = frozenset({"sandbox-shell", "python-hybrid"})
+
+
+# ---------------------------------------------------------------------------
+# The env-requirement join (one place, pure, per task)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RolloutPlan:
+    """Pure bind-time resolution for one task: env requirement + verifier choice."""
+
+    needs_env: bool
+    verifier_kind: str
+    verifier_config: dict = field(default_factory=dict)
+
+
+def flow_needs_env(agent_flow: Any) -> bool:
+    """The flow's declared env requirement (``False`` when undeclared)."""
+    return bool(getattr(agent_flow, "needs_env", False))
+
+
+def task_declares_env(task_or_row: Any) -> bool:
+    """True when a task (or raw dataset row) declares a sandbox environment.
+
+    Carriers: ``task_path`` metadata (harbor-sourced rows) or an
+    ``environment/`` dir next to the task/dataset (local benchmarks).
+    """
+    meta = getattr(task_or_row, "metadata", None)
+    if meta is None and isinstance(task_or_row, dict):
+        meta = task_or_row
+    if isinstance(meta, dict) and meta.get("task_path"):
+        return True
+    if isinstance(task_or_row, Task):
+        return (task_or_row.task_dir / "environment").is_dir() or (task_or_row.dataset_dir / "environment").is_dir()
+    return False
+
+
+# Warn once per task id, not once per rollout (the same task repeats across
+# group rollouts and epochs).
+_warned_no_consumer: set[str] = set()
+
+
+def resolve_rollout_plan(task: Task, agent_flow: Any, evaluation: EvaluationPolicy) -> RolloutPlan:
+    """Decide once whether this rollout needs a sandbox, and which verifier scores it.
+
+    ``needs_env = flow ∨ evaluator ∨ task`` — with the no-consumer rule: a
+    task-declared env that neither the flow nor the evaluator can reach is
+    downgraded (with a warning) instead of provisioned for nobody.
+    """
+    kind, config = evaluation.detect(task)
+    flow_env = flow_needs_env(agent_flow)
+    eval_env = kind in _ENV_VERIFIER_KINDS
+    task_env = task_declares_env(task)
+
+    needs_env = flow_env or eval_env or task_env
+    if needs_env and not flow_env and not eval_env:
+        if task.id not in _warned_no_consumer:
+            _warned_no_consumer.add(task.id)
+            logger.warning(
+                "task '%s' declares a sandbox environment, but neither the agent flow (%s) nor the verifier (kind=%s) can use one — skipping sandbox provisioning",
+                task.id,
+                type(agent_flow).__name__,
+                kind,
+            )
+        needs_env = False
+
+    return RolloutPlan(needs_env=needs_env, verifier_kind=kind, verifier_config=config)
+
+
+# ---------------------------------------------------------------------------
+# Wiring-time scan (trainer/CLI: install hooks? tunnel?)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EnvRequirements:
+    """Run-level env requirements: whether any rollout may need a sandbox, and remoteness."""
+
+    needs_env: bool
+    any_remote: bool
+
+
+def scan_env_requirements(agent_flow: Any, *datasets: Any, sandbox_backend: str | None = None) -> EnvRequirements:
+    """Scan flow + all dataset rows for env requirements before wiring.
+
+    ``any_remote`` drives the run-global gateway tunnel decision: when
+    ``sandbox_backend`` is explicitly set it wins (it overrides per-task
+    metadata at provision time); otherwise any row's ``sandbox_backend``
+    metadata counts.
+    """
+    needs_env = flow_needs_env(agent_flow)
+    any_remote = sandbox_backend is not None and not is_local_sandbox_backend(sandbox_backend)
+
+    for ds in datasets:
+        if ds is None:
+            continue
+        for row in ds:
+            if not needs_env and task_declares_env(row):
+                needs_env = True
+            if sandbox_backend is None and not any_remote:
+                meta = getattr(row, "metadata", None) or (row if isinstance(row, dict) else {})
+                row_backend = meta.get("sandbox_backend") if isinstance(meta, dict) else None
+                if row_backend and not is_local_sandbox_backend(row_backend):
+                    any_remote = True
+            if needs_env and (any_remote or sandbox_backend is not None):
+                return EnvRequirements(needs_env=needs_env, any_remote=any_remote)
+
+    return EnvRequirements(needs_env=needs_env, any_remote=any_remote)
+
+
+# ---------------------------------------------------------------------------
+# SandboxTaskHooks
+# ---------------------------------------------------------------------------
+
+
 class SandboxTaskHooks:
-    """Per-task setup/teardown hook with sandbox + per-task verifier resolution.
+    """Per-task setup/teardown hook with sandbox lifecycle + verifier resolution.
 
     Args:
-        evaluator_override: If set, used for every task and per-task
-            verifier detection is skipped.
+        evaluation: :class:`FixedEvaluation` (one host evaluator for every task) or
+            :class:`FromTaskEvaluation` (per-task ``[verifier]`` resolution, the default).
         sandbox_backend: Override for the sandbox backend
             (``"docker"``, ``"local"``, ``"modal"``, ...). Falls back to
             per-task ``metadata['sandbox_backend']`` then ``"docker"``.
@@ -40,16 +214,16 @@ class SandboxTaskHooks:
 
     def __init__(
         self,
-        evaluator_override: Evaluator | None = None,
+        evaluation: EvaluationPolicy | None = None,
         sandbox_backend: str | None = None,
         use_snapshot: bool = True,
     ) -> None:
         from rllm.sandbox.snapshot import SnapshotRegistry
 
-        self.evaluator_override = evaluator_override
+        self.evaluation: EvaluationPolicy = evaluation if evaluation is not None else FromTaskEvaluation()
         self.sandbox_backend = sandbox_backend
-        # Optional per-run warm queue (set by run_dataset); when present, setup
-        # pops a prefetched sandbox from it instead of creating one inline.
+        # Optional per-run warm queue (set by run_dataset / the trainer); when
+        # present, setup pops a prefetched sandbox instead of creating one inline.
         self.warm_queue: WarmQueue | None = None
         # Read-only registry, loaded once and shared across this run's tasks
         # (None disables snapshots, e.g. eval --no-snapshot).
@@ -70,21 +244,10 @@ class SandboxTaskHooks:
 
     def setup(self, task: Task, agent_flow: AgentFlow, uid: str) -> TaskContext:
         from rllm.engine.agentflow_engine import TaskContext
-        from rllm.eval._resolution import (
-            _adapt_legacy_evaluator,
-            _detect_verifier,
-            _needs_sandbox,
-            _resolve_evaluator,
-            _setup_task_environment,
-        )
+        from rllm.eval._resolution import _setup_task_environment
         from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
 
-        if self.evaluator_override is not None:
-            verifier_kind, verifier_config = "override", {}
-            needs_sandbox = isinstance(agent_flow, SandboxedAgentFlow)
-        else:
-            verifier_kind, verifier_config = _detect_verifier(task)
-            needs_sandbox = _needs_sandbox(task, verifier_kind) or isinstance(agent_flow, SandboxedAgentFlow)
+        plan = resolve_rollout_plan(task, agent_flow, self.evaluation)
 
         # Shallow-copy SandboxedAgentFlow so parallel rollouts get their own _sandbox.
         task_flow: AgentFlow = agent_flow
@@ -92,7 +255,7 @@ class SandboxTaskHooks:
             task_flow = agent_flow.create_instance()
 
         sandbox = None
-        if needs_sandbox:
+        if plan.needs_env:
             from rllm.sandbox.snapshot import get_sandbox
 
             sandbox = self.warm_queue.pop(task) if self.warm_queue is not None else get_sandbox(task, self.sandbox_backend, self._registry)
@@ -101,10 +264,7 @@ class SandboxTaskHooks:
                 task_flow.set_sandbox(sandbox)
                 task_flow.on_sandbox_ready({"task_path": str(task.task_dir)}, None)
 
-        if self.evaluator_override is not None:
-            evaluator = _adapt_legacy_evaluator(self.evaluator_override)
-        else:
-            evaluator = _resolve_evaluator(task, sandbox, verifier_kind, verifier_config)
+        evaluator = self.evaluation.resolve(task, sandbox, plan.verifier_kind, plan.verifier_config)
 
         def teardown() -> None:
             # Sandboxes are ephemeral — the hook owns this one's lifecycle and
@@ -125,24 +285,29 @@ class SandboxTaskHooks:
         return TaskContext(evaluator=evaluator, agent_flow=ctx_flow, teardown=teardown)
 
 
-def needs_sandbox_isolation(agent_flow: Any, train_dataset: Any, val_dataset: Any) -> bool:
-    """True when ``agent_flow`` is a :class:`SandboxedAgentFlow` or any task carries ``task_path`` metadata."""
-    try:
-        from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
+class FixedEvaluatorHooks:
+    """Hooks that bind one evaluator to every task and provision nothing.
 
-        if isinstance(agent_flow, SandboxedAgentFlow):
-            return True
-    except ImportError:
-        pass
+    What :class:`~rllm.engine.agentflow_engine.AgentFlowEngine` wraps a bare
+    ``evaluator=`` in, so the engine has exactly one execution path
+    (always-hooks). Routes through ``_adapt_legacy_evaluator`` so dict-style
+    ``evaluate(task: dict, episode)`` evaluators keep working.
+    """
 
-    for ds in (train_dataset, val_dataset):
-        if ds is None or len(ds) == 0:
-            continue
-        first = ds[0]
-        meta = getattr(first, "metadata", None) or (first if isinstance(first, dict) else None)
-        if isinstance(meta, dict) and meta.get("task_path"):
-            return True
-    return False
+    def __init__(self, evaluator: Evaluator):
+        from rllm.eval._resolution import _adapt_legacy_evaluator
+
+        self.evaluator = _adapt_legacy_evaluator(evaluator)
+
+    def setup(self, task: Task, agent_flow: AgentFlow, uid: str) -> TaskContext:  # noqa: ARG002
+        from rllm.engine.agentflow_engine import TaskContext
+
+        return TaskContext(evaluator=self.evaluator)
+
+
+# ---------------------------------------------------------------------------
+# Gateway wiring helpers
+# ---------------------------------------------------------------------------
 
 
 def pin_gateway_host_loopback(config: DictConfig) -> DictConfig:
@@ -155,10 +320,12 @@ def pin_gateway_host_loopback(config: DictConfig) -> DictConfig:
     )
 
 
-def enable_tunnel_for_remote_sandbox(config: DictConfig, sandbox_backend: str | None) -> DictConfig:
-    """Auto-wire ``rllm.gateway.tunnel="cloudflared"`` when sandboxes run off-host and no tunnel is already set."""
-    if is_local_sandbox_backend(sandbox_backend):
-        return config
+def enable_gateway_tunnel(config: DictConfig) -> DictConfig:
+    """Auto-wire ``rllm.gateway.tunnel="cloudflared"`` when no tunnel is already set.
+
+    Callers decide *when* (sandboxes run off-host — see
+    :func:`scan_env_requirements`); this helper only applies the setting.
+    """
     gw = config.rllm.get("gateway", {}) or {}
     if gw.get("tunnel"):
         return config
@@ -169,8 +336,15 @@ def enable_tunnel_for_remote_sandbox(config: DictConfig, sandbox_backend: str | 
 
 
 __all__ = [
+    "EnvRequirements",
+    "EvaluationPolicy",
+    "FixedEvaluation",
+    "FixedEvaluatorHooks",
+    "FromTaskEvaluation",
+    "RolloutPlan",
     "SandboxTaskHooks",
-    "needs_sandbox_isolation",
+    "enable_gateway_tunnel",
     "pin_gateway_host_loopback",
-    "enable_tunnel_for_remote_sandbox",
+    "resolve_rollout_plan",
+    "scan_env_requirements",
 ]

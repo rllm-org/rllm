@@ -6,8 +6,8 @@ front of :class:`rllm.engine.agentflow_engine.AgentFlowEngine`):
 1. The hook creates a Sandbox via ``_create_sandbox_for_task`` and injects
    it with ``set_sandbox()``, then calls ``on_sandbox_ready(task, config)``.
 2. The engine calls ``run(task, config)`` — the agent uses ``self.sandbox``.
-3. The hook resolves an Evaluator from the Task's verifier config (or uses
-   ``evaluator_override``) and runs ``evaluator.evaluate(task, episode)``.
+3. The hook resolves an Evaluator from the Task's verifier config (or its
+   ``FixedEvaluation`` policy) and runs ``evaluator.evaluate(task, episode)``.
 4. The hook's teardown closure calls ``teardown_sandbox()`` — guaranteed
    cleanup, no-op when the sandbox was injected externally.
 """
@@ -34,6 +34,12 @@ class SandboxedAgentFlow(ABC):
     :meth:`get_image` or :meth:`on_sandbox_ready` for task-specific setup.
     """
 
+    # Declared env requirement — read by rllm.hooks.resolve_rollout_plan.
+    needs_env: bool = True
+    # Where the flow's LLM client runs. Host-side loops (bash/oracle) keep the
+    # local gateway URL; CLI harnesses (BaseCliHarness) override to True so
+    # the in-sandbox process gets the publicly-reachable (tunneled) URL.
+    llm_inside_env: bool = False
     sandbox_backend: str = "docker"
     image: str = "python:3.11-slim"
     max_concurrent: int = 4

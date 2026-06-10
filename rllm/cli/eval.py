@@ -38,7 +38,7 @@ def _dict_rows_to_tasks(rows: list[dict]) -> list[Task]:
     ``task.toml`` + ``environment/Dockerfile`` metadata (workdir, verifier
     timeout, per-task image) so per-task verifier resolution and an rllm-native
     harness get the right sandbox. Other rows get ``dataset_dir=Path(".")`` and
-    rely on ``evaluator_override``.
+    rely on the fixed-evaluator policy.
     """
     from pathlib import Path
 
@@ -474,7 +474,7 @@ def _run_eval(
             agent_name=agent_name,
             dataset_name=getattr(dataset, "name", benchmark) or benchmark,
             on_episode_complete=on_episode_complete,
-            evaluator_override=evaluator,
+            evaluator=evaluator,
             sampling_params=(sampling_config.as_dict() if sampling_config is not None else None),
         )
     )

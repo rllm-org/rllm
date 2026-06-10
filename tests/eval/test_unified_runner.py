@@ -8,7 +8,7 @@ host-only verifier paths are now exercised through ``SandboxTaskHooks.setup``:
 - ``[verifier].module`` (Python module verifier)
 - ``[verifier].import_path`` (bare callable)
 - Auto-detect via ``tests/evaluate.py``
-- ``evaluator_override`` short-circuits per-task resolution
+- a ``FixedEvaluation`` policy short-circuits per-task resolution
 - ``"missing"`` verifier raises a clear error
 
 Sandbox-shell + python-hybrid paths need a real container and live in
@@ -24,7 +24,7 @@ import pytest
 
 from rllm.eval._resolution import build_dataset_evaluator
 from rllm.eval.types import EvalOutput
-from rllm.hooks import SandboxTaskHooks
+from rllm.hooks import FixedEvaluation, SandboxTaskHooks
 from rllm.types import AgentConfig, Episode, Step, Task, Trajectory, run_agent_flow
 
 # ---------------------------------------------------------------------------
@@ -67,7 +67,7 @@ def _write_data_dataset(root: Path, *, verifier_block: str) -> Path:
     return bench
 
 
-def _run_through_hooks(agent_flow, task: Task, config: AgentConfig, evaluator_override=None) -> Episode:
+def _run_through_hooks(agent_flow, task: Task, config: AgentConfig, evaluator=None) -> Episode:
     """Replicate the Runner.run lifecycle through SandboxTaskHooks for unit tests.
 
     Real eval goes through ``AgentFlowEngine``, which inserts the gateway
@@ -75,7 +75,7 @@ def _run_through_hooks(agent_flow, task: Task, config: AgentConfig, evaluator_ov
     (the StubAgent doesn't make LLM calls) and just exercise the hook's
     verifier resolution + reward writeback paths.
     """
-    hooks = SandboxTaskHooks(evaluator_override=evaluator_override)
+    hooks = SandboxTaskHooks(evaluation=FixedEvaluation(evaluator) if evaluator is not None else None)
     ctx = hooks.setup(task, agent_flow, "test-uid")
     try:
         episode = asyncio.run(run_agent_flow(agent_flow, task, config))
@@ -168,7 +168,7 @@ def test_runner_auto_detects_tests_evaluate_py(tmp_path, cfg):
 
 
 # ---------------------------------------------------------------------------
-# evaluator_override short-circuits resolution
+# FixedEvaluation policy short-circuits resolution
 # ---------------------------------------------------------------------------
 
 
@@ -182,13 +182,13 @@ class _FixedEvaluator:
         return self._output
 
 
-def test_evaluator_override_bypasses_per_task_verifier(tmp_path, cfg):
+def test_fixed_evaluation_bypasses_per_task_verifier(tmp_path, cfg):
     bench = _write_data_dataset(tmp_path, verifier_block='[verifier]\nname = "math_reward_fn"\n')
     task = Task(id="0", instruction="x?", metadata={"ground_truth": "4"}, dataset_dir=bench)
 
-    # Per-task verifier would say wrong → 0; override says correct → 1
-    override = _FixedEvaluator(EvalOutput(reward=1.0, is_correct=True))
-    episode = _run_through_hooks(_StubAgent(answer="totally wrong"), task, cfg, evaluator_override=override)
+    # Per-task verifier would say wrong → 0; the fixed evaluator says correct → 1
+    evaluator = _FixedEvaluator(EvalOutput(reward=1.0, is_correct=True))
+    episode = _run_through_hooks(_StubAgent(answer="totally wrong"), task, cfg, evaluator=evaluator)
 
     assert episode.is_correct is True
     assert episode.trajectories[0].reward == 1.0
@@ -256,7 +256,7 @@ def test_hooks_close_sandbox_for_sandboxed_agent_flow(tmp_path, cfg, monkeypatch
     bench.mkdir()
     task = Task(id="0", instruction="x?", metadata={}, dataset_dir=bench)
 
-    hooks = SandboxTaskHooks(evaluator_override=_FixedEvaluator(EvalOutput(reward=1.0, is_correct=True)))
+    hooks = SandboxTaskHooks(evaluation=FixedEvaluation(_FixedEvaluator(EvalOutput(reward=1.0, is_correct=True))))
     ctx = hooks.setup(task, _SandboxedStub(), "test-uid")
     ctx.run_teardown()
 
