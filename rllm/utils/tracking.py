@@ -29,6 +29,10 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from rllm.env import env_float
+
+_UI_HTTP_TIMEOUT_S = env_float("RLLM_UI_HTTP_TIMEOUT_S", 5.0)  # set env var: export RLLM_UI_HTTP_TIMEOUT_S=xxx
+
 
 def concat_dict_to_str(dict: dict, step):
     output = [f"step:{step}"]
@@ -345,7 +349,7 @@ class UILogger:
         headers = {}
         if api_key:
             headers["X-API-Key"] = api_key
-        self.client = httpx.Client(base_url=self.ui_url, timeout=5.0, headers=headers)
+        self.client = httpx.Client(base_url=self.ui_url, timeout=_UI_HTTP_TIMEOUT_S, headers=headers)
         self._heartbeat_stop = threading.Event()
 
         try:

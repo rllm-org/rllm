@@ -101,10 +101,16 @@ class AgentTrainer:
         import ray
 
         if not ray.is_initialized():
-            # TODO: check whether we need a separate function to retrieve the runtime environment (for fireworks)
             from verl.trainer.constants_ppo import get_ppo_ray_runtime_env as get_fireworks_ray_runtime_env
 
-            ray.init(runtime_env=get_fireworks_ray_runtime_env(), num_cpus=self.config.ray_init.num_cpus)
+            from rllm.trainer.verl.ray_runtime_env import _get_forwarded_env_vars
+
+            # verl's builder doesn't forward operator env vars; merge in the same
+            # RLLM_*/inference/CUDA prefixes the verl backend forwards so RLLM_*
+            # knobs reach the pipeline workers (see guides/environment-variables).
+            runtime_env = get_fireworks_ray_runtime_env()
+            runtime_env.setdefault("env_vars", {}).update(_get_forwarded_env_vars())
+            ray.init(runtime_env=runtime_env, num_cpus=self.config.ray_init.num_cpus)
 
         # Lazy import to avoid requiring fireworks package for users who don't use it
         from rllm.trainer.verl.train_workflow_pipeline import PipelineTaskRunner
