@@ -483,6 +483,40 @@ class TestTrainCommand:
         assert "train_bench" in result.output
         assert "val_bench" in result.output
 
+    def test_train_local_separate_val_dataset(self, runner, tmp_rllm_home, tmp_path):
+        """Local benchmark dirs: --val-dataset pointing at a separate local dir yields a distinct val set."""
+
+        def _make_bench(root, name, n_tasks, split):
+            root.mkdir()
+            (root / "dataset.toml").write_text(f'[dataset]\nname = "{name}"\ntype = "sandbox"\nsplit = "{split}"\n')
+            for i in range(n_tasks):
+                td = root / f"task_{i}"
+                td.mkdir()
+                (td / "task.toml").write_text(f'[task]\nname = "{name}_{i}"\n')
+                (td / "instruction.md").write_text(f"do {i}")
+
+        train_dir = tmp_path / "train_bench"
+        val_dir = tmp_path / "val_bench"
+        _make_bench(train_dir, "train_bench", 2, "train")
+        _make_bench(val_dir, "val_bench", 1, "test")
+
+        mock_trainer = MagicMock()
+        with (
+            patch("rllm.eval.agent_loader.load_agent", return_value=_MockAgentFlow()),
+            patch("rllm.eval._resolution.build_dataset_evaluator", return_value=_MockEvaluator()),
+            patch("rllm.trainer.AgentTrainer", return_value=mock_trainer) as mock_at_cls,
+        ):
+            result = runner.invoke(
+                cli,
+                ["train", str(train_dir), "--val-dataset", str(val_dir), "--agent", "react", "--model", "test-model"],
+            )
+
+        assert result.exit_code == 0, result.output
+        kwargs = mock_at_cls.call_args.kwargs
+        assert len(kwargs["train_dataset"]) == 2
+        assert len(kwargs["val_dataset"]) == 1
+        assert kwargs["train_dataset"] is not kwargs["val_dataset"]
+
     def test_train_no_evaluator_found(self, runner, tmp_rllm_home, mock_train_dataset):
         """Train should fail if no evaluator can be resolved."""
         catalog = {"datasets": {"test_math": {"default_agent": "math"}}}

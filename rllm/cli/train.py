@@ -188,8 +188,18 @@ def _run_train(
     val_ds_name = val_dataset_name or benchmark
 
     if BenchmarkLoader.is_local_benchmark(benchmark):
+        from rllm.data.dataset import Dataset as _Dataset
+
+        # --train/--val-dataset may each point at a separate local benchmark dir;
+        # an unset (or non-local) --val-dataset falls back to reusing the train tasks.
+        train_dir = train_dataset_name if (train_dataset_name and BenchmarkLoader.is_local_benchmark(train_dataset_name)) else benchmark
+        val_dir = val_dataset_name if (val_dataset_name and BenchmarkLoader.is_local_benchmark(val_dataset_name)) else None
+        if val_dataset_name and val_dir is None:
+            console.print(f"  [key]--val-dataset '{val_dataset_name}' is not a local benchmark dir; reusing train tasks for validation.[/]")
+
         # For local sandbox tasks, --agent picks the AgentFlow.
-        bench_result = BenchmarkLoader.load(benchmark, harness_name=agent_name)
+        bench_result = BenchmarkLoader.load(train_dir, harness_name=agent_name)
+        train_ds_name = bench_result.name
         catalog_entry = {
             "description": bench_result.description,
             "category": bench_result.category,
@@ -203,10 +213,9 @@ def _run_train(
         except (KeyError, ImportError, AttributeError, TypeError) as e:
             fail(f"Cannot load agent '{agent_name}': {e}")
 
-        # Evaluator: --evaluator > dataset.toml [verifier].
-        # Sandbox-shell verifiers aren't supported here (per-task sandbox
-        # lifecycle lives inside Runner) — use --evaluator to override.
-        evaluator_display = "N/A"
+        # Evaluator: --evaluator > train dataset.toml [verifier]; one host-side
+        # evaluator scores both train and val. Sandbox-shell verifiers aren't
+        # supported here — use --evaluator to override.
         if evaluator_name is not None:
             evaluator = load_evaluator(evaluator_name)
             evaluator_display = evaluator_name
@@ -215,7 +224,7 @@ def _run_train(
 
             from rllm.eval._resolution import build_dataset_evaluator
 
-            evaluator = build_dataset_evaluator(_Path(benchmark).resolve())
+            evaluator = build_dataset_evaluator(_Path(train_dir).resolve())
             if evaluator is None:
                 fail(
                     "Could not resolve a verifier for this benchmark. "
@@ -225,25 +234,23 @@ def _run_train(
                 )
             evaluator_display = f"{type(evaluator).__name__} (from dataset.toml)"
 
-        # Datasets: pass the Task list as both train and val for now
-        from rllm.data.dataset import Dataset as _Dataset
-
         if train_split is None:
             train_split = bench_result.split or "train"
-        train_dataset = _Dataset(
-            data=list(bench_result.tasks),
-            name=bench_result.name,
-            split=train_split,
-        )
+        train_dataset = _Dataset(data=list(bench_result.tasks), name=bench_result.name, split=train_split)
         if max_examples is not None and max_examples < len(train_dataset):
             train_dataset = train_dataset.select(range(max_examples))
-        val_dataset = _Dataset(
-            data=list(bench_result.tasks),
-            name=bench_result.name,
-            split=bench_result.split or "test",
-        )
-        if val_split is None:
-            val_split = train_dataset.split or "test"
+
+        if val_dir is not None:
+            val_result = BenchmarkLoader.load(val_dir, harness_name=agent_name)
+            val_ds_name = val_result.name
+            if val_split is None:
+                val_split = val_result.split or "test"
+            val_dataset = _Dataset(data=list(val_result.tasks), name=val_result.name, split=val_split)
+        else:
+            val_ds_name = bench_result.name
+            if val_split is None:
+                val_split = bench_result.split or "test"
+            val_dataset = _Dataset(data=list(bench_result.tasks), name=bench_result.name, split=val_split)
 
     # ------------------------------------------------------------------
     # Catalog / Harbor path (existing behavior)
