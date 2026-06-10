@@ -106,6 +106,7 @@
           {
             "group": "Advanced algorithms",
             "pages": [
+              "training/capability-matrix",
               "training/advantage-estimator",
               "training/precompute-advantage"
             ]

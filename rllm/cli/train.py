@@ -83,6 +83,10 @@ def build_train_config(
             "data": {"train_batch_size": batch_size},
             "rllm": {
                 "model_name": model_name,
+                # Post-#627 the loader reads rllm.data directly, so the CLI batch
+                # size must land here too (sync_config keeps the native data.* in
+                # parity); writing both keeps them consistent before sync runs.
+                "data": {"train_batch_size": batch_size},
                 "trainer": {
                     "total_epochs": total_epochs,
                     "test_freq": val_freq,
@@ -259,8 +263,10 @@ def _run_train(
                 console.print(f"  [success]Found Harbor dataset:[/] [val]{harbor_name}[/]")
                 benchmark = harbor_name
 
-        # ---- Docker check for Harbor datasets ----
-        if catalog_entry and catalog_entry.get("source", "").startswith("harbor:"):
+        # ---- Docker check for Harbor datasets (local backends only) ----
+        from rllm.gateway.tunnel import is_local_sandbox_backend
+
+        if catalog_entry and catalog_entry.get("source", "").startswith("harbor:") and is_local_sandbox_backend(sandbox_backend):
             from rllm.integrations.harbor.utils import diagnose_docker
 
             ok, reason, hint = diagnose_docker()
