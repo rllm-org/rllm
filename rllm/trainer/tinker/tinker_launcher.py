@@ -1,7 +1,8 @@
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from rllm.data import Dataset
 from rllm.trainer.tinker.tinker_backend import TinkerBackend
+from rllm.trainer.tinker.utils import sync_config
 from rllm.trainer.unified_trainer import TrainerLauncher, UnifiedTrainer
 from rllm.workflows.workflow import Workflow
 
@@ -24,6 +25,14 @@ class TinkerTrainerLauncher(TrainerLauncher):
         super().__init__(config, workflow_class, train_dataset, val_dataset, workflow_args, **kwargs)
 
     def train(self):
+        try:
+            from hydra.core.hydra_config import HydraConfig
+
+            hydra_overrides = list(HydraConfig.get().overrides.task)
+        except (ValueError, AttributeError, ImportError):
+            hydra_overrides = []
+        sync_config(self.config, hydra_overrides)
+        OmegaConf.resolve(self.config)
         trainer = None
         try:
             trainer = UnifiedTrainer(

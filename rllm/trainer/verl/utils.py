@@ -7,35 +7,13 @@ import os
 from typing import Any
 
 import torch
-from omegaconf import DictConfig, OmegaConf, open_dict
+from omegaconf import DictConfig, OmegaConf
 from verl import DataProto
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 
+from rllm.trainer.algorithms.config import _explicit_override_keys, _plain, sync_shared_keys
+
 logger = logging.getLogger(__name__)
-
-
-def _explicit_override_keys(hydra_overrides: list[str] | None = None) -> set[str]:
-    """Return the set of dotted paths the user explicitly set on the Hydra CLI.
-
-    If ``hydra_overrides`` is provided (typically captured in the main Hydra-
-    decorated process and forwarded into a Ray actor), use it. Otherwise fall
-    back to ``HydraConfig.get().overrides.task``, which only works when running
-    inside the Hydra entry-point process.
-    """
-    if hydra_overrides is None:
-        try:
-            from hydra.core.hydra_config import HydraConfig
-
-            hydra_overrides = list(HydraConfig.get().overrides.task)
-        except (ValueError, AttributeError, ImportError):
-            return set()
-    keys: set[str] = set()
-    for o in hydra_overrides:
-        if "=" not in o:
-            continue
-        key = o.split("=", 1)[0].lstrip("+~")
-        keys.add(key)
-    return keys
 
 
 # (verl_native_path, rllm_path) — value is the same on both sides; only the
@@ -59,6 +37,7 @@ _SHARED_KEYS: list[tuple[str, str]] = [
     ("actor_rollout_ref.rollout.temperature", "rllm.rollout.train.temperature"),
     ("actor_rollout_ref.rollout.top_p", "rllm.rollout.train.top_p"),
     ("actor_rollout_ref.rollout.top_k", "rllm.rollout.train.top_k"),
+    ("actor_rollout_ref.rollout.response_length", "rllm.rollout.train.max_tokens"),
     ("actor_rollout_ref.rollout.val_kwargs.temperature", "rllm.rollout.val.temperature"),
     ("actor_rollout_ref.rollout.val_kwargs.top_p", "rllm.rollout.val.top_p"),
     ("actor_rollout_ref.rollout.val_kwargs.top_k", "rllm.rollout.val.top_k"),
@@ -70,6 +49,9 @@ _SHARED_KEYS: list[tuple[str, str]] = [
     ("trainer.logger", "rllm.trainer.logger"),
     ("trainer.project_name", "rllm.trainer.project_name"),
     ("trainer.experiment_name", "rllm.trainer.experiment_name"),
+    ("data.train_batch_size", "rllm.data.train_batch_size"),
+    ("data.max_prompt_length", "rllm.data.max_prompt_length"),
+    ("data.max_response_length", "rllm.data.max_response_length"),
 ]
 
 _TOTAL_TRAINING_STEPS_KEY: tuple[str, str] = ("trainer.total_training_steps", "rllm.trainer.total_batches")
@@ -93,7 +75,7 @@ def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) ->
     """
     explicit = _explicit_override_keys(hydra_overrides)
 
-    def warn_verl_override(verl_path: str, rllm_path: str, *, conflict: bool = False) -> None:
+    def warn_verl_override(verl_path: str, rllm_path: str, conflict: bool = False) -> None:
         if conflict:
             logger.warning(
                 "Verl-native shared config %s conflicts with %s; using %s. Setting shared rLLM/verl knobs through Verl-native paths is deprecated; use %s=... instead.",
@@ -113,28 +95,8 @@ def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) ->
         if verl_path in explicit:
             warn_verl_override(verl_path, rllm_path, conflict=conflict)
 
-    def plain(value: Any) -> Any:
-        if OmegaConf.is_config(value):
-            return OmegaConf.to_container(value, resolve=False)
-        return value
-
     def same(left: Any, right: Any) -> bool:
-        return plain(left) == plain(right)
-
-    def sync_pair(verl_path: str, rllm_path: str) -> None:
-        if rllm_path in explicit:
-            rllm_value = OmegaConf.select(config, rllm_path)
-            verl_value = OmegaConf.select(config, verl_path)
-            maybe_warn_verl_override(verl_path, rllm_path, conflict=not same(verl_value, rllm_value))
-            OmegaConf.update(config, verl_path, rllm_value, merge=False)
-        elif verl_path in explicit:
-            maybe_warn_verl_override(verl_path, rllm_path)
-            OmegaConf.update(config, rllm_path, OmegaConf.select(config, verl_path), merge=False)
-        else:
-            value = OmegaConf.select(config, rllm_path)
-            if value is None:
-                return
-            OmegaConf.update(config, verl_path, value, merge=False)
+        return _plain(left) == _plain(right)
 
     def sync_total_training_steps() -> None:
         verl_path, rllm_path = _TOTAL_TRAINING_STEPS_KEY
@@ -210,11 +172,10 @@ def sync_config(config: DictConfig, hydra_overrides: list[str] | None = None) ->
         # different training backends use a different config key
         for key in ("lr_scheduler_type", "lr_decay_style", "decay_type"):
             if key in optim:
-                sync_pair(f"actor_rollout_ref.actor.optim.{key}", "rllm.algorithm.lr_schedule")
+                sync_shared_keys(config, [(f"actor_rollout_ref.actor.optim.{key}", "rllm.algorithm.lr_schedule")], explicit=explicit, on_native_override=warn_verl_override)
                 return
 
-    for verl_path, rllm_path in _SHARED_KEYS:
-        sync_pair(verl_path, rllm_path)
+    sync_shared_keys(config, _SHARED_KEYS, explicit=explicit, on_native_override=warn_verl_override)
 
     sync_lr_schedule()
     sync_total_training_steps()
@@ -426,72 +387,3 @@ def build_wg_kwargs(config: DictConfig, device_name: str) -> dict[str, Any]:
             assert OmegaConf.select(config, "global_profiler.global_tool_config.nsys.worker_nsight_options") is not None
             wg_kwargs["worker_nsight_options"] = OmegaConf.to_container(OmegaConf.select(config, "global_profiler.global_tool_config.nsys.worker_nsight_options"))
     return wg_kwargs
-
-
-def create_dataloaders(config: DictConfig, tokenizer, processor=None):
-    """Create train and validation dataloaders.
-
-    Returns (train_dataloader, val_dataloader, total_training_steps).
-    """
-    from torchdata.stateful_dataloader import StatefulDataLoader
-    from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
-    from verl.utils.dataset.rl_dataset import collate_fn as default_collate_fn
-
-    train_dataset = create_rl_dataset(
-        config.data.train_files,
-        config.data,
-        tokenizer,
-        processor,
-        max_samples=config.data.get("train_max_samples", -1),
-    )
-    val_dataset = create_rl_dataset(
-        config.data.val_files,
-        config.data,
-        tokenizer,
-        processor,
-        max_samples=config.data.get("val_max_samples", -1),
-    )
-
-    train_sampler = create_rl_sampler(config.data, train_dataset)
-    num_workers = config.data["dataloader_num_workers"]
-
-    train_dataloader = StatefulDataLoader(
-        dataset=train_dataset,
-        batch_size=config.data.get("gen_batch_size", config.data.train_batch_size),
-        num_workers=num_workers,
-        drop_last=True,
-        collate_fn=default_collate_fn,
-        sampler=train_sampler,
-    )
-
-    val_batch_size = config.data.val_batch_size
-    if val_batch_size is None or val_batch_size == -1:
-        val_batch_size = len(val_dataset)
-
-    val_dataloader = StatefulDataLoader(
-        dataset=val_dataset,
-        batch_size=val_batch_size,
-        num_workers=num_workers,
-        shuffle=config.data.get("validation_shuffle", True),
-        drop_last=False,
-        collate_fn=default_collate_fn,
-    )
-
-    assert len(train_dataloader) >= 1, "Train dataloader is empty!"
-    assert len(val_dataloader) >= 1, "Validation dataloader is empty!"
-    print(f"Size of train dataloader: {len(train_dataloader)}, Size of val dataloader: {len(val_dataloader)}")
-
-    total_training_steps = len(train_dataloader) * config.trainer.total_epochs
-    if config.trainer.total_training_steps is not None:
-        total_training_steps = config.trainer.total_training_steps
-
-    # Propagate total_training_steps into actor.optim so the LR scheduler (cosine / lr_warmup_steps_ratio) sees a valid count.
-    try:
-        OmegaConf.set_struct(config, True)
-        with open_dict(config):
-            if OmegaConf.select(config, "actor_rollout_ref.actor.optim"):
-                config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
-    except Exception as e:
-        logger.warning(f"Could not set total_training_steps on actor.optim: {e}")
-
-    return train_dataloader, val_dataloader, total_training_steps
