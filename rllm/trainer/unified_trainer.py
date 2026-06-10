@@ -978,8 +978,13 @@ class AgentTrainer:
         store: Store | None = None,
         **kwargs,
     ):
-        # Auto-wire sandbox hooks + gateway loopback unless caller set hooks/evaluator.
-        if agent_flow is not None and hooks is None and evaluator is None:
+        # Auto-wire sandbox hooks + gateway loopback unless the caller set hooks.
+        # A SandboxedAgentFlow always needs the per-task sandbox even when the caller
+        # also passed a host-side evaluator, so fold that evaluator into the hooks as
+        # the override (mirrors how ``rllm eval`` wires evaluator_override). For the
+        # other isolation case (harbor task_path rows) keep the prior behavior of
+        # auto-wiring only when no evaluator was given.
+        if agent_flow is not None and hooks is None:
             from rllm.hooks import (
                 SandboxTaskHooks,
                 enable_tunnel_for_remote_sandbox,
@@ -987,8 +992,16 @@ class AgentTrainer:
                 pin_gateway_host_loopback,
             )
 
-            if needs_sandbox_isolation(agent_flow, train_dataset, val_dataset):
-                hooks = SandboxTaskHooks(sandbox_backend=sandbox_backend)
+            try:
+                from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
+
+                is_sandboxed_flow = isinstance(agent_flow, SandboxedAgentFlow)
+            except ImportError:
+                is_sandboxed_flow = False
+
+            if needs_sandbox_isolation(agent_flow, train_dataset, val_dataset) and (evaluator is None or is_sandboxed_flow):
+                hooks = SandboxTaskHooks(evaluator_override=evaluator, sandbox_backend=sandbox_backend)
+                evaluator = None
                 config = pin_gateway_host_loopback(config)
                 config = enable_tunnel_for_remote_sandbox(config, sandbox_backend)
 
