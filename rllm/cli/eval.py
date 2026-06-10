@@ -31,6 +31,18 @@ def _suggest_benchmarks(name: str, catalog_names: list[str], max_suggestions: in
     return get_close_matches(name, catalog_names, n=max_suggestions, cutoff=0.5)
 
 
+def _apply_sandbox_overrides(agent, agent_metadata: dict | None) -> None:
+    """Route CLI sandbox flags through the flow's ``configure()`` and warn about leftovers."""
+    if not agent_metadata:
+        return
+    configure = getattr(agent, "configure", None)
+    leftovers = dict(configure(dict(agent_metadata)) if callable(configure) else agent_metadata)
+    # run_dataset / the sandbox hooks consume the backend regardless of the flow.
+    leftovers.pop("sandbox_backend", None)
+    for flag in leftovers:
+        logger.warning("--%s has no effect for agent %s", flag.replace("_", "-"), type(agent).__name__)
+
+
 def _dict_rows_to_tasks(rows: list[dict]) -> list[Task]:
     """Wrap dict-rows from a catalog dataset as Task objects.
 
@@ -150,15 +162,7 @@ def _run_eval(
         except (KeyError, ImportError, AttributeError, TypeError) as e:
             fail(f"Cannot load agent '{agent_name}': {e}")
 
-        # Apply CLI sandbox overrides
-        if agent_metadata:
-            from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
-
-            if isinstance(agent, SandboxedAgentFlow):
-                if "sandbox_backend" in agent_metadata:
-                    agent.sandbox_backend = agent_metadata["sandbox_backend"]
-                if "sandbox_concurrency" in agent_metadata:
-                    agent.max_concurrent = agent_metadata["sandbox_concurrency"]
+        _apply_sandbox_overrides(agent, agent_metadata)
 
         # Evaluator: comes from each Task's [verifier] config by default.
         # CLI --evaluator (when provided) overrides for every task.
@@ -243,19 +247,7 @@ def _run_eval(
         except (KeyError, ImportError, AttributeError, TypeError) as e:
             fail(f"Error loading agent '{agent_name}': {e}")
 
-        # Apply sandbox CLI overrides
-        if agent_metadata:
-            from rllm.integrations.harbor.runtime import HarborRuntime
-            from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
-
-            if isinstance(agent, HarborRuntime):
-                if "sandbox_backend" in agent_metadata:
-                    agent.environment_type = agent_metadata["sandbox_backend"]
-            elif isinstance(agent, SandboxedAgentFlow):
-                if "sandbox_backend" in agent_metadata:
-                    agent.sandbox_backend = agent_metadata["sandbox_backend"]
-                if "sandbox_concurrency" in agent_metadata:
-                    agent.max_concurrent = agent_metadata["sandbox_concurrency"]
+        _apply_sandbox_overrides(agent, agent_metadata)
 
         # Resolve evaluator: explicit --evaluator > catalog auto-resolve >
         # catalog reward_fn > None. When ``evaluator`` is None ``SandboxTaskHooks``
