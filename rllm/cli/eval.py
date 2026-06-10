@@ -19,6 +19,7 @@ from rllm import paths
 from rllm.cli._pull import load_dataset_catalog, pull_dataset
 from rllm.cli._sampling import SAMPLING_PARAMS_HELP as _SAMPLING_PARAMS_HELP
 from rllm.cli._ui import console, fail, info_panel, not_found, parse_index_spec
+from rllm.types import Task
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ def _suggest_benchmarks(name: str, catalog_names: list[str], max_suggestions: in
     return get_close_matches(name, catalog_names, n=max_suggestions, cutoff=0.5)
 
 
-def _dict_rows_to_tasks(rows: list[dict]) -> list:
+def _dict_rows_to_tasks(rows: list[dict]) -> list[Task]:
     """Wrap dict-rows from a catalog dataset as Task objects.
 
     Harbor rows carry ``task_path``; we root the Task there and merge the task's
@@ -42,7 +43,6 @@ def _dict_rows_to_tasks(rows: list[dict]) -> list:
     from pathlib import Path
 
     from rllm.tasks.loader import _merge_task_toml_metadata
-    from rllm.types import Task
 
     tasks: list[Task] = []
     for idx, row in enumerate(rows):
