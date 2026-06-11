@@ -16,7 +16,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from rllm.eval.results import EvalItem, EvalResult
-from rllm.hooks import SandboxTaskHooks
+from rllm.hooks import FixedEvaluation, SandboxTaskHooks
 from rllm.types import AgentFlow, Evaluator
 from rllm.workflows.workflow import TerminationReason
 
@@ -39,7 +39,7 @@ async def run_dataset(
     agent_name: str = "",
     dataset_name: str = "unknown",
     on_episode_complete=None,
-    evaluator_override: Evaluator | None = None,
+    evaluator: Evaluator | None = None,
     gateway: GatewayManager | None = None,
     sampling_params: dict | None = None,
 ) -> tuple[EvalResult, list]:
@@ -47,7 +47,7 @@ async def run_dataset(
 
     Per-task: the engine creates a gateway session, runs the agent flow
     against the session URL, fetches traces, enriches the Episode, then
-    runs the per-task evaluator (or ``evaluator_override`` if set).
+    runs the per-task evaluator (or the fixed ``evaluator`` if set).
 
     Args:
         gateway: Optional pre-started gateway. When ``None``, this function
@@ -55,10 +55,10 @@ async def run_dataset(
             ``base_url`` and tears it down on exit. When provided, the
             caller owns the lifecycle (used by ``rllm.cli.eval`` so the
             gateway can stay up across multiple runs).
-        evaluator_override: Bind a single evaluator to all tasks (CLI's
-            ``--evaluator`` flag). When ``None``, ``SandboxTaskHooks``
-            resolves a per-task verifier from the task's ``[verifier]``
-            config.
+        evaluator: Bind a single evaluator to all tasks (CLI's
+            ``--evaluator`` flag; the hooks' ``FixedEvaluation`` policy).
+            When ``None``, ``SandboxTaskHooks`` resolves a per-task verifier
+            from the task's ``[verifier]`` config.
         sampling_params: Resolved sampling params from the CLI, attached to each
             gateway session so the gateway enforces them on every LLM call. ``None``
             or empty → flows/harnesses keep their own params.
@@ -88,7 +88,7 @@ async def run_dataset(
         gateway = EvalGatewayManager(upstream_url=base_url, model=model, tunnel=gateway_tunnel)
         gateway.start()
 
-    hooks = SandboxTaskHooks(evaluator_override=evaluator_override, sandbox_backend=sandbox_backend, use_snapshot=use_snapshot)
+    hooks = SandboxTaskHooks(evaluation=FixedEvaluation(evaluator) if evaluator is not None else None, sandbox_backend=sandbox_backend, use_snapshot=use_snapshot)
 
     engine = AgentFlowEngine(
         agent_flow=agent_flow,

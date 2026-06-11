@@ -948,11 +948,13 @@ class AgentTrainer:
 
     This trainer will simply delegate the task to the corresponding launcher class.
 
-    Provide exactly one of ``workflow_class`` or ``agent_flow``. For sandbox-style
-    flows (``SandboxedAgentFlow`` agent or tasks with ``task_path`` metadata),
-    ``hooks`` and gateway loopback are auto-wired via
-    :class:`rllm.hooks.SandboxTaskHooks`; pass ``hooks=`` or ``evaluator=``
-    explicitly to override.
+    Provide exactly one of ``workflow_class`` or ``agent_flow``. When the run
+    needs sandboxes (the flow declares ``needs_env``, or any dataset row
+    carries an environment — see :func:`rllm.hooks.scan_env_requirements`),
+    :class:`rllm.hooks.SandboxTaskHooks` and gateway loopback/tunnel are
+    auto-wired. A passed ``evaluator`` becomes the hooks' FixedEvaluation
+    policy (it does not disable the sandbox lifecycle); pass ``hooks=``
+    explicitly to take over per-task setup entirely.
 
     Args:
         sandbox_backend: Backend for the auto-wired sandbox hooks
@@ -978,32 +980,33 @@ class AgentTrainer:
         store: Store | None = None,
         **kwargs,
     ):
-        # Auto-wire sandbox hooks + gateway loopback unless the caller set hooks.
-        # A SandboxedAgentFlow always needs the per-task sandbox even when the caller
-        # also passed a host-side evaluator, so fold that evaluator into the hooks as
-        # the override (mirrors how ``rllm eval`` wires evaluator_override). For the
-        # other isolation case (harbor task_path rows) keep the prior behavior of
-        # auto-wiring only when no evaluator was given.
-        if agent_flow is not None and hooks is None:
+        # Loopback/tunnel pinning must happen here, before the launcher
+        # constructs GatewayManager, and applies to explicitly-passed hooks too.
+        if agent_flow is not None:
+            from rllm.gateway.tunnel import is_local_sandbox_backend
             from rllm.hooks import (
+                FixedEvaluation,
                 SandboxTaskHooks,
-                enable_tunnel_for_remote_sandbox,
-                needs_sandbox_isolation,
+                enable_gateway_tunnel,
                 pin_gateway_host_loopback,
+                scan_env_requirements,
             )
 
-            try:
-                from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
-
-                is_sandboxed_flow = isinstance(agent_flow, SandboxedAgentFlow)
-            except ImportError:
-                is_sandboxed_flow = False
-
-            if needs_sandbox_isolation(agent_flow, train_dataset, val_dataset) and (evaluator is None or is_sandboxed_flow):
-                hooks = SandboxTaskHooks(evaluator_override=evaluator, sandbox_backend=sandbox_backend)
+            scan = scan_env_requirements(agent_flow, train_dataset, val_dataset, sandbox_backend=sandbox_backend)
+            if hooks is None and scan.needs_env:
+                hooks = SandboxTaskHooks(
+                    evaluation=FixedEvaluation(evaluator) if evaluator is not None else None,
+                    sandbox_backend=sandbox_backend,
+                )
                 evaluator = None
+            if hooks is not None and scan.needs_env:
                 config = pin_gateway_host_loopback(config)
-                config = enable_tunnel_for_remote_sandbox(config, sandbox_backend)
+                # The hooks-backend clause matters only for explicitly-passed
+                # hooks; auto-wired hooks share `sandbox_backend`, already
+                # folded into `scan.any_remote`.
+                hooks_backend = getattr(hooks, "sandbox_backend", None)
+                if scan.any_remote or not is_local_sandbox_backend(hooks_backend):
+                    config = enable_gateway_tunnel(config)
 
         # Forward concurrency + backend overrides onto a SandboxedAgentFlow.
         if agent_flow is not None and (sandbox_concurrency is not None or sandbox_backend is not None):
