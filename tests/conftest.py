@@ -100,7 +100,6 @@ _STUB_MODULES = [
     "antlr4",
     "antlr4_python3_runtime",
     "mcp",
-    "eval_protocol",
     "hydra",
     "fastapi",
     "uvicorn",
