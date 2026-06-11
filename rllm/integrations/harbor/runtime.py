@@ -11,6 +11,7 @@ import asyncio
 import logging
 from typing import Any
 
+from rllm.env import env_float
 from rllm.integrations.harbor.trial_helper import (
     MODEL_PLACEHOLDER,
     HarborTaskOutcome,
@@ -21,6 +22,8 @@ from rllm.integrations.harbor.trial_helper import (
 )
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_SESSION_TIMEOUT_S = env_float("RLLM_HARBOR_SESSION_TIMEOUT_S", 900.0)  # set env var: export RLLM_HARBOR_SESSION_TIMEOUT_S=xxx
 
 
 class HarborRuntime:
@@ -48,7 +51,7 @@ class HarborRuntime:
         verifier_timeout_multiplier: float | None = None,
         agent_setup_timeout_multiplier: float | None = None,
         environment_build_timeout_multiplier: float | None = None,
-        session_timeout: float = 900.0,
+        session_timeout: float = _DEFAULT_SESSION_TIMEOUT_S,
     ):
         self.agent_name = agent_name
         self.environment_type = environment_type

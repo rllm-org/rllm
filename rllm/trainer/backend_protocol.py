@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 
 from omegaconf import DictConfig
 
-from rllm.data import Dataset
 from rllm.engine.rollout import RolloutEngine
 from rllm.trainer.algorithms.advantage import AlgorithmConfig, collect_reward_and_advantage_from_trajectory_groups
 from rllm.types import Episode
@@ -62,19 +61,6 @@ class BackendProtocol(ABC, Generic[TDataset, TBatch]):
     def validate_config(self) -> None:
         """Validate and setup the backend configuration."""
         pass
-
-    @abstractmethod
-    def get_dataloader(self, dataset: Dataset | None, trainer_state: TrainerState) -> TDataset:
-        """Get the dataloader for the backend.
-
-        Args:
-            dataset: The dataset to get the dataloader from.
-            trainer_state: The trainer state.
-
-        Returns:
-            The dataloader of type TDataset.
-        """
-        raise NotImplementedError("Subclasses must implement this method.")
 
     @abstractmethod
     def shutdown(self) -> None:

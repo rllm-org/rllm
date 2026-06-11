@@ -3,6 +3,8 @@ import os
 import subprocess
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 
+from rllm.env import env_int
+
 from .utils import BASE_IMPORTS, BASE_LEETCODE_IMPORTS
 
 # sudo add-apt-repository ppa:deki/firejail
@@ -12,7 +14,7 @@ from .utils import BASE_IMPORTS, BASE_LEETCODE_IMPORTS
 CLI_ARG_SIZE_LIMIT = 1024 * 3
 
 _ERROR_MSG_PREFIX = "Failed to execute program: "
-_DEFAULT_TIMEOUT_SECONDS = 30
+_DEFAULT_TIMEOUT_SECONDS = env_int("RLLM_FIREJAIL_EXEC_TIMEOUT_S", 30)  # set env var: export RLLM_FIREJAIL_EXEC_TIMEOUT_S=xxx
 
 
 def code_exec_firejail(code, stdin: str = None, timeout=_DEFAULT_TIMEOUT_SECONDS, pytest: str = None):

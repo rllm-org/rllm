@@ -29,8 +29,9 @@ training:
   eps: 1e-8
   max_length: 32768
   num_minibatches: 1
-  default_local_dir: '/tmp/rllm-tinker-checkpoints'
-  resume_from_tinker_id: null  # Tinker model ID path to resume from (e.g., tinker://uuid/weights/000060)
+  default_local_dir: 'checkpoints/${rllm.trainer.project_name}/${rllm.trainer.experiment_name}'
+  resume_mode: auto  # 'auto' (latest checkpoint), 'disable' (fresh), or 'resume_path'
+  resume_from_path: null  # global_step_<N> folder to resume from when resume_mode=resume_path
 
 # Validation Configuration
 validation:

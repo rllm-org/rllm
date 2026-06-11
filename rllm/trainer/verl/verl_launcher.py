@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class VerlTaskRunner(TaskRunner):
     """Ray remote class for executing training with the unified trainer."""
 
-    def run(self, config, workflow_class: type[Workflow], workflow_args: dict, hydra_overrides: list[str] | None = None, **kwargs):  # type: ignore
+    def run(self, config, workflow_class: type[Workflow], workflow_args: dict, hydra_overrides: list[str] | None = None, train_dataset=None, val_dataset=None, **kwargs):  # type: ignore
         import os
         import socket
         from pprint import pprint
@@ -31,10 +31,8 @@ class VerlTaskRunner(TaskRunner):
         from rllm.trainer.verl.utils import sync_config
 
         print(f"VerlTaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
-        OmegaConf.register_new_resolver("mul", lambda x, y: int(x) * int(y))
         sync_config(config, hydra_overrides=hydra_overrides)
         OmegaConf.resolve(config)
-        sync_config(config, hydra_overrides=hydra_overrides)
         config.trainer.use_legacy_worker_impl = "disable"
         pprint(OmegaConf.to_container(config))
 
@@ -88,8 +86,8 @@ class VerlTaskRunner(TaskRunner):
                 backend_cls=VerlBackend,
                 config=config,
                 workflow_class=workflow_class,
-                train_dataset=None,
-                val_dataset=None,
+                train_dataset=train_dataset,
+                val_dataset=val_dataset,
                 workflow_args=workflow_args,
                 backend_args=backend_args,
                 **kwargs,
@@ -120,13 +118,6 @@ class VerlTrainerLauncher(TrainerLauncher):
         """Initialize the VerlTrainerLauncher. The heavy lifting is done in the `run` method of the `TaskRunner` class."""
         super().__init__(config, workflow_class, train_dataset, val_dataset, workflow_args, **kwargs)
 
-        # For Verl specifically, the datasets are not passed directly to the backend, which instead relies on the data paths
-        # being set in the config. TODO(listar2000): check whether this can be deprecated in favor of a more standard approach.
-        if train_dataset is not None and self.config is not None and hasattr(self.config, "data"):
-            self.config.data.train_files = train_dataset.get_verl_data_path()
-        if val_dataset is not None and self.config is not None and hasattr(self.config, "data"):
-            self.config.data.val_files = val_dataset.get_verl_data_path()
-
     def train(self):
         own_ray = False
         if not ray.is_initialized():
@@ -155,6 +146,8 @@ class VerlTrainerLauncher(TrainerLauncher):
                     workflow_args=self.workflow_args,
                     store=self.store,
                     hydra_overrides=hydra_overrides,
+                    train_dataset=self.train_dataset,
+                    val_dataset=self.val_dataset,
                     **self.kwargs,
                 )
             )

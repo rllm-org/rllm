@@ -4,7 +4,7 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pprint import pprint
 from typing import Any, Literal
@@ -13,7 +13,7 @@ import numpy as np
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
-from rllm.data import Dataset
+from rllm.data import Dataset, StatefulTaskDataLoader
 from rllm.engine.rollout import RolloutEngine
 from rllm.engine.unified_workflow_engine import UnifiedWorkflowEngine
 from rllm.trainer.algorithms.advantage import (
@@ -59,6 +59,7 @@ class TrainerState:
     total_steps: int = 0
     is_training: bool = True
     weight_version: int = 0
+    train_dataloader: StatefulTaskDataLoader | None = None
     # For timing and metrics
     timing_dict: dict = field(default_factory=dict)
     metrics: dict = field(default_factory=dict)
@@ -152,11 +153,14 @@ class UnifiedTrainer:
 
         self.async_config = AsyncTrainingConfig.from_config(self.rllm_config.get("async_training", {}))
 
+        self._init_dataloaders()
+
         rollout_engine: RolloutEngine = self.backend.init_rollout_engine(
             cf_config=self.cf_config,
             transform_config=self.transform_config,
             rs_config=self.rs_config,
             algorithm_config=self.algorithm_config,
+            total_training_steps=self._total_training_steps,
         )
 
         # Determine which engine path to use:
@@ -179,15 +183,8 @@ class UnifiedTrainer:
             gateway_mode = "process" if kwargs.get("backend_name") == "verl" else "thread"
             self._gateway = GatewayManager(self.config, mode=gateway_mode)
 
-            # merge the data.max_response_length into the sampling_params; TODO(listar2000): refactor the data config group
-            training_sampling_params = {
-                **OmegaConf.to_container(self.rllm_config.rollout.train, resolve=True),
-                "max_tokens": self.config.data.max_response_length,
-            }
-            val_sampling_params = {
-                **OmegaConf.to_container(self.rllm_config.rollout.val, resolve=True),
-                "max_tokens": self.config.data.max_response_length,
-            }
+            training_sampling_params = OmegaConf.to_container(self.rllm_config.rollout.train, resolve=True)
+            val_sampling_params = OmegaConf.to_container(self.rllm_config.rollout.val, resolve=True)
 
             self.agent_workflow_engine = AgentFlowEngine(
                 agent_flow=agent_flow,
@@ -202,6 +199,7 @@ class UnifiedTrainer:
                 val_sampling_params=val_sampling_params,
                 hooks=hooks,
             )
+
         elif remote_runtime_cfg.get("enabled", False):
             from rllm.engine.remote_agent_flow_engine import (
                 RemoteAgentFlowEngine,
@@ -235,6 +233,7 @@ class UnifiedTrainer:
                 n_parallel_tasks=self.rllm_config.workflow.n_parallel_tasks,
                 episode_logger=self.episode_logger,
             )
+
         else:
             self.agent_workflow_engine = UnifiedWorkflowEngine(
                 workflow_cls=self.workflow_class,
@@ -254,6 +253,35 @@ class UnifiedTrainer:
         self.tokenizer = None
         if hasattr(self.backend, "tokenizer"):
             self.tokenizer = self.backend.tokenizer
+
+    def _init_dataloaders(self) -> None:
+        """Build the train and val dataloaders from their datasets."""
+        self._train_dataloader: StatefulTaskDataLoader | None = None
+        self._val_dataloader: StatefulTaskDataLoader | None = None
+        self._total_training_steps: int | None = None
+
+        if self.train_dataset is not None:
+            batch_size = 1 if self.async_config.enable else int(self.rllm_config.data.train_batch_size * self.rllm_config.rejection_sample.multiplier)
+            self._train_dataloader = StatefulTaskDataLoader(
+                self.train_dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                seed=self.rllm_config.data.seed,
+                drop_last=True,
+            )
+            total_batches = self.rllm_config.trainer.get("total_batches")
+            use_total_batches = total_batches is not None and total_batches > 0
+            if use_total_batches:
+                self._total_training_steps = total_batches
+            else:
+                total_task_batches = len(self._train_dataloader) * self.rllm_config.trainer.total_epochs
+                self._total_training_steps = total_task_batches // self.async_config.mini_batch_size if self.async_config.enable else total_task_batches
+
+        if self.val_dataset is not None:
+            val_batch_size = self.rllm_config.data.val_batch_size
+            if val_batch_size == -1:
+                val_batch_size = len(self.val_dataset)
+            self._val_dataloader = StatefulTaskDataLoader(self.val_dataset, batch_size=val_batch_size, shuffle=False, drop_last=False)
 
     def _validate_and_setup_configs(self):
         """Validate and setup common configs."""
@@ -324,6 +352,7 @@ class UnifiedTrainer:
             await self.agent_workflow_engine.initialize_pool()
 
         trainer_state = TrainerState()
+        trainer_state.train_dataloader = self._train_dataloader
 
         await self.backend.on_train_start(trainer_state)
 
@@ -357,28 +386,22 @@ class UnifiedTrainer:
 
     async def _fit_on_policy(self, trainer_state: TrainerState) -> None:
         """Synchronous training loop (the most vanilla, standalone case that does not support minibatching or off-policy training)."""
-        # TODO(kylemontgomery1): dataloader should be backend-agnostic
-        train_dataloader: Iterable = self.backend.get_dataloader(self.train_dataset, trainer_state)
-        break_via_total_batches = False  # used to break the training loop via the `total_batches` parameter
+        train_dataloader = self._train_dataloader
+        assert train_dataloader is not None, "train_dataset is required for training"
+        total_epochs = self.rllm_config.trainer.total_epochs
         use_total_batches = self.rllm_config.trainer.get("total_batches") is not None and self.rllm_config.trainer.total_batches > 0
+        trainer_state.total_steps = self._total_training_steps
+        break_via_total_batches = False
 
-        if use_total_batches:
-            trainer_state.total_steps = self.rllm_config.trainer.total_batches
-        else:
-            trainer_state.total_steps = len(train_dataloader) * self.rllm_config.trainer.total_epochs
-
-        for epoch in range(self.rllm_config.trainer.total_epochs):
-            # recursively break through the outer loop
+        for epoch in range(train_dataloader.epoch, total_epochs):
             if break_via_total_batches:
                 break
-
-            pprint(f"epoch {epoch}, step {trainer_state.global_step} started")
             trainer_state.epoch = epoch
+            pprint(f"epoch {epoch}, step {trainer_state.global_step} started")
             await self.backend.on_epoch_start(trainer_state)
 
             for batch in train_dataloader:
                 trainer_state.reset_batch()
-
                 await self.backend.on_batch_start(trainer_state)
                 with simple_timer("step", trainer_state.timing_dict):
                     await self._train_batch_async(batch, trainer_state)
@@ -475,7 +498,7 @@ class UnifiedTrainer:
 
     async def _fit_fully_async(self, trainer_state: TrainerState) -> None:
         """Fully-async generation + training with group-level streaming."""
-        assert self.config.data.train_batch_size == 1, f"Async training requires train_batch_size=1, got {self.config.data.train_batch_size}"
+        assert self.rllm_config.data.train_batch_size == 1, f"Async training requires train_batch_size=1, got {self.rllm_config.data.train_batch_size}"
         assert not getattr(self.agent_workflow_engine, "raise_on_error", False), "Async training requires raise_on_error=False so that process_task_with_retry always returns an episode"
         coord_config = SyncCoordinatorConfig(
             mini_batch_size=self.async_config.mini_batch_size,
@@ -497,13 +520,9 @@ class UnifiedTrainer:
             trajectory_group_offload_dir=self.async_config.trajectory_group_offload_dir,
         )
 
-        # Compute total_steps for LR scheduling
-        train_dataloader = self.backend.get_dataloader(self.train_dataset, trainer_state)
-        use_total_batches = self.rllm_config.trainer.get("total_batches", -1) > 0
-        if use_total_batches:
-            trainer_state.total_steps = self.rllm_config.trainer.total_batches
-        else:
-            trainer_state.total_steps = len(train_dataloader) * self.rllm_config.trainer.total_epochs
+        train_dataloader = self._train_dataloader
+        assert train_dataloader is not None, "train_dataset is required for training"
+        trainer_state.total_steps = self._total_training_steps
 
         total_tasks = len(train_dataloader) * self.rllm_config.trainer.total_epochs
         pbar = tqdm(total=total_tasks, desc="Tasks", unit="task")
@@ -529,17 +548,16 @@ class UnifiedTrainer:
     ) -> None:
         """Generate episodes and stream to TrajectoryGroupBuffer."""
         group_size = self.rllm_config.rollout.n
+        train_dataloader = self._train_dataloader
+        assert train_dataloader is not None, "train_dataset is required for training"
 
         try:
-            for epoch in range(self.rllm_config.trainer.total_epochs):
+            for epoch in range(train_dataloader.epoch, self.rllm_config.trainer.total_epochs):
                 await self.backend.on_epoch_start(trainer_state)
-                train_dataloader = self.backend.get_dataloader(self.train_dataset, trainer_state)
                 self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="train", epoch=epoch)
 
                 for batch in train_dataloader:
-                    # Tinker dataloader: list of task dicts. Verl dataloader: dict with
-                    # per-sample fields under "extra_info".
-                    task = batch["extra_info"][0] if isinstance(batch, dict) else batch[0]
+                    task = batch[0]
 
                     await coordinator.wait_for_generation_allowed()
                     if not coordinator.has_quota():
@@ -733,6 +751,8 @@ class UnifiedTrainer:
 
     async def _validate_async(self, trainer_state: TrainerState) -> dict:
         """Validate the model (async implementation)."""
+        if self._val_dataloader is None:
+            return {}
         n_val_samples = self.rllm_config.rollout.n_val
         val_metrics = defaultdict(list)
 
@@ -745,8 +765,7 @@ class UnifiedTrainer:
         is_correct_lst, uid_lst, data_source_lst = [], [], []
         workflow_metrics_by_source = defaultdict(lambda: defaultdict(list))
 
-        val_dataloader: Iterable = self.backend.get_dataloader(self.val_dataset, trainer_state)
-        for batch in val_dataloader:
+        for batch in self._val_dataloader:
             # Generate episodes and transform to trajectory groups
             val_episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, is_validation=True)
             val_trajectory_groups, _ = transform_episodes_to_trajectory_groups(val_episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook)

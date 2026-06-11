@@ -2,10 +2,25 @@
 
 import json
 import os
+import uuid
 from typing import Any
 
 from rllm.data.dataset_types import TestDataset, TrainDataset
 from rllm.system_prompts import LCB_FORMATTING_MESSAGE_WITH_STARTER_CODE, LCB_FORMATTING_WITHOUT_STARTER_CODE, LCB_SYSTEM_MESSAGE_GENERIC
+
+
+def interleave_tasks(batch: list[dict], group_size: int) -> tuple[list[dict], list[str]]:
+    """Interleave each task ``group_size`` times; return ``(tasks, task_ids)`` with one shared
+    id per group for GRPO grouping — the task's own ``id`` when truthy, else a uuid."""
+    tasks: list[dict] = []
+    task_ids: list[str] = []
+    for item in batch:
+        item_id = item.get("id")
+        uid = str(item_id) if item_id else str(uuid.uuid4())
+        for _ in range(group_size):
+            tasks.append(item)
+            task_ids.append(uid)
+    return tasks, task_ids
 
 
 def load_dataset(dataset_enum: TrainDataset.Math | TrainDataset.Code | TestDataset.Math | TestDataset.Code) -> list[dict[str, Any]]:

@@ -18,6 +18,8 @@ import time
 
 from rich.console import Console
 
+from rllm.env import env_float
+
 logger = logging.getLogger(__name__)
 
 _status = Console()
@@ -47,7 +49,7 @@ def parse_tunnel(value: str | None) -> tuple[str | None, str | None]:
 
 
 _TRYCF_URL_RE = re.compile(r"https?://[a-zA-Z0-9.-]+\.trycloudflare\.com")
-_DEFAULT_READY_TIMEOUT = 30.0
+_DEFAULT_READY_TIMEOUT = env_float("RLLM_TUNNEL_READY_TIMEOUT_S", 30.0)  # set env var: export RLLM_TUNNEL_READY_TIMEOUT_S=xxx
 # Retry transient Cloudflare QuickTunnel allocator 5xx blips.
 _DEFAULT_MAX_ATTEMPTS = 4
 

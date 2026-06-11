@@ -1,6 +1,6 @@
 """Dataset management CLI commands.
 
-``rllm dataset [list|pull|info|inspect|remove]``
+``rllm dataset [list|pull|info|inspect|register|remove]``
 """
 
 from __future__ import annotations
@@ -8,15 +8,11 @@ from __future__ import annotations
 import os
 
 import click
-from rich import box
-from rich.console import Console
 from rich.panel import Panel
-from rich.table import Table
 from rich.text import Text
 
 from rllm.cli._pull import load_dataset_catalog, pull_dataset
-
-_console = Console()
+from rllm.cli._ui import catalog_table, console, fail, info_panel, not_found
 
 _CATEGORY_ICONS = {
     "math": "📐",
@@ -71,18 +67,11 @@ def list_datasets(local_only: bool):
         total = sum(len(v) for v in by_category.values())
         pulled = sum(1 for entries in by_category.values() for _, _, s in entries if s == "pulled")
 
-        table = Table(
-            box=box.ROUNDED,
-            show_header=True,
-            header_style="bold #00D4FF",
-            padding=(0, 1),
-            border_style="dim #0077FF",
+        table = catalog_table(
             title=f"[bold]Dataset Catalog[/]  [dim]({total} datasets, {pulled} pulled)[/]",
-            title_style="bold",
-            expand=False,
-            width=min(_console.width, 96),
+            width=min(console.width, 96),
         )
-        table.add_column("Dataset", style="bold #00CCFF", min_width=18, no_wrap=True)
+        table.add_column("Dataset", style="brand", min_width=18, no_wrap=True)
         table.add_column("Status", justify="center", width=13, no_wrap=True)
         table.add_column("Description", style="dim", overflow="ellipsis", no_wrap=True)
 
@@ -95,7 +84,7 @@ def list_datasets(local_only: bool):
                 table.add_row("", "", "")
             first_category = False
             table.add_row(
-                f"[bold #FFD700]{icon} {label}[/]",
+                f"[highlight]{icon} {label}[/]",
                 "",
                 f"[dim]{len(entries)} dataset{'s' if len(entries) != 1 else ''}[/]",
             )
@@ -107,43 +96,34 @@ def list_datasets(local_only: bool):
                     desc = desc[:41] + "..."
                 table.add_row(f"  {name}", status_text, desc)
 
-        _console.print()
-        _console.print(table)
-        _console.print()
-        _console.print(Text("  Legend: ", style="bold") + Text("● pulled  ", style="bold green") + Text("○ available  ", style="dim") + Text("◆ local", style="bold yellow"))
-        _console.print(Text("  Run ", style="dim") + Text("rllm dataset pull <name>", style="bold #00D4FF") + Text(" to download a dataset.", style="dim"))
-        _console.print()
-        _console.print(Text("  Harbor: ", style="bold #FFD700") + Text("80+ agent benchmarks available via ", style="dim") + Text("harbor:", style="bold #00D4FF") + Text(" prefix", style="dim"))
-        _console.print(Text("  Browse: ", style="dim") + Text("https://harbor.ai/datasets", style="bold dim") + Text("  |  ", style="dim") + Text("rllm eval harbor:<name>", style="bold #00D4FF"))
-        _console.print()
+        console.print()
+        console.print(table)
+        console.print()
+        console.print(Text("  Legend: ", style="bold") + Text("● pulled  ", style="bold green") + Text("○ available  ", style="dim") + Text("◆ local", style="bold yellow"))
+        console.print(Text("  Run ", style="dim") + Text("rllm dataset pull <name>", style="header") + Text(" to download a dataset.", style="dim"))
+        console.print()
+        console.print(Text("  Harbor: ", style="bold highlight") + Text("80+ agent benchmarks available via ", style="dim") + Text("harbor:", style="header") + Text(" prefix", style="dim"))
+        console.print(Text("  Browse: ", style="dim") + Text("https://harbor.ai/datasets", style="bold dim") + Text("  |  ", style="dim") + Text("rllm eval harbor:<name>", style="header"))
+        console.print()
     else:
         if not local_names:
-            _console.print()
-            _console.print(
+            console.print()
+            console.print(
                 Panel(
-                    "[dim]No datasets pulled yet.[/]\n\nRun [bold #00D4FF]rllm dataset list[/] to see available datasets.",
-                    border_style="dim #0077FF",
+                    "[dim]No datasets pulled yet.[/]\n\nRun [header]rllm dataset list[/] to see available datasets.",
+                    border_style="border",
                     title="[bold]Datasets[/]",
                     expand=False,
                     padding=(1, 3),
                 )
             )
-            _console.print()
+            console.print()
             return
 
-        table = Table(
-            box=box.ROUNDED,
-            show_header=True,
-            header_style="bold #00D4FF",
-            padding=(0, 2),
-            border_style="dim #0077FF",
-            title=f"[bold]Local Datasets[/]  [dim]({len(local_names)} pulled)[/]",
-            title_style="bold",
-            expand=False,
-        )
-        table.add_column("Dataset", style="bold #00CCFF", min_width=20)
+        table = catalog_table(title=f"[bold]Local Datasets[/]  [dim]({len(local_names)} pulled)[/]")
+        table.add_column("Dataset", style="brand", min_width=20)
         table.add_column("Category", justify="center", min_width=10)
-        table.add_column("Splits", style="#88BBFF")
+        table.add_column("Splits", style="muted")
 
         for name in sorted(local_names):
             splits = DatasetRegistry.get_dataset_splits(name)
@@ -153,9 +133,9 @@ def list_datasets(local_only: bool):
             label = _CATEGORY_LABELS.get(cat, cat)
             table.add_row(name, f"{icon} {label}" if cat else "", ", ".join(splits))
 
-        _console.print()
-        _console.print(table)
-        _console.print()
+        console.print()
+        console.print(table)
+        console.print()
 
 
 @dataset.command()
@@ -175,16 +155,14 @@ def pull(name: str):
         from rllm.cli._pull import resolve_harbor_catalog_entry
 
         harbor_name = name.removeprefix("harbor:")
-        _console.print(f"[dim]Looking up '{harbor_name}' in Harbor registry...[/]")
+        console.print(f"[dim]Looking up '{harbor_name}' in Harbor registry...[/]")
         catalog_entry = resolve_harbor_catalog_entry(harbor_name)
         if catalog_entry:
-            _console.print(f"[bold green]Found Harbor dataset:[/] {harbor_name}")
+            console.print(f"[bold green]Found Harbor dataset:[/] {harbor_name}")
             name = harbor_name
 
     if catalog_entry is None:
-        click.echo(f"Error: Dataset '{name}' not found in catalog.")
-        click.echo("Use harbor: prefix for Harbor datasets (e.g., rllm dataset pull harbor:swebench-verified).")
-        raise SystemExit(1)
+        fail(f"Dataset '{name}' not found in catalog. Use the harbor: prefix (e.g. rllm dataset pull harbor:swebench-verified).")
 
     click.echo(f"Pulling {name} from {catalog_entry['source']}...")
     pull_dataset(name, catalog_entry)
@@ -205,37 +183,38 @@ def info(name: str):
     catalog_entry = catalog.get("datasets", {}).get(name)
 
     if not ds_info and not catalog_entry:
-        click.echo(f"Error: Dataset '{name}' not found.")
-        raise SystemExit(1)
+        not_found("Dataset", name)
 
-    click.echo(f"\nDataset: {name}")
+    rows: list[tuple[str, str]] = []
 
     if catalog_entry:
-        click.echo(f"  Description:    {catalog_entry.get('description', 'N/A')}")
-        click.echo(f"  Source:         {catalog_entry.get('source', 'N/A')}")
-        click.echo(f"  Category:       {catalog_entry.get('category', 'N/A')}")
-        click.echo(f"  Default agent:  {catalog_entry.get('default_agent', 'N/A')}")
-        click.echo(f"  Reward fn:      {catalog_entry.get('reward_fn', 'N/A')}")
-        click.echo(f"  Eval split:     {catalog_entry.get('eval_split', 'N/A')}")
+        rows.append(("Description", str(catalog_entry.get("description", "N/A"))))
+        rows.append(("Source", str(catalog_entry.get("source", "N/A"))))
+        rows.append(("Category", str(catalog_entry.get("category", "N/A"))))
+        rows.append(("Default agent", str(catalog_entry.get("default_agent", "N/A"))))
+        rows.append(("Reward fn", str(catalog_entry.get("reward_fn", "N/A"))))
+        rows.append(("Eval split", str(catalog_entry.get("eval_split", "N/A"))))
 
     if ds_info:
         splits = ds_info.get("splits", {})
         split_paths = [DatasetRegistry._resolve_path(s["path"]) for s in splits.values() if s.get("path")]
         if split_paths:
             location = os.path.commonpath(split_paths) if len(split_paths) > 1 else os.path.dirname(split_paths[0])
-            click.echo(f"  Location:       {location}")
+            rows.append(("Location", str(location)))
 
-        click.echo("\n  Local splits:")
         for split, split_info in splits.items():
             num = split_info.get("num_examples", "?")
             fields = split_info.get("fields", [])
-            click.echo(f"    {split}: {num} examples")
+            value = f"{num} examples"
             if fields:
-                click.echo(f"      fields: {', '.join(fields)}")
+                value += f"\nfields: {', '.join(fields)}"
+            rows.append((split, value))
     else:
-        click.echo("\n  Status: not pulled (use 'rllm dataset pull {name}')".format(name=name))
+        rows.append(("Status", f"not pulled (use 'rllm dataset pull {name}')"))
 
-    click.echo()
+    console.print()
+    console.print(info_panel(rows, title=f"Dataset: {name}"))
+    console.print()
 
 
 @dataset.command()
@@ -258,8 +237,7 @@ def inspect(name: str, split: str | None, num_rows: int):
 
     ds = DatasetRegistry.load_dataset(name, split)
     if ds is None:
-        click.echo(f"Error: Cannot load '{name}' split '{split}'. Try 'rllm dataset pull {name}' first.")
-        raise SystemExit(1)
+        fail(f"Cannot load '{name}' split '{split}'. Try 'rllm dataset pull {name}' first.")
 
     click.echo(f"\n{name}/{split} — {len(ds)} examples (showing first {min(num_rows, len(ds))})\n")
 

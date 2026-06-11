@@ -16,10 +16,9 @@ from __future__ import annotations
 
 import copy
 import logging
-import uuid
 from abc import ABC, abstractmethod
 
-from rllm.sandbox.protocol import Sandbox, _safe_exec
+from rllm.sandbox.protocol import Sandbox
 from rllm.types import AgentConfig, Episode, Task
 
 logger = logging.getLogger(__name__)
@@ -29,7 +28,7 @@ class SandboxedAgentFlow(ABC):
     """Base class for agents that need sandboxed execution environments.
 
     The sandbox backend is pluggable via ``sandbox_backend``:
-    ``"docker"`` | ``"local"`` | ``"modal"``.
+    ``"docker"`` | ``"local"`` | ``"modal"`` | ``"daytona"``.
 
     Subclasses must implement :meth:`run` and may override
     :meth:`get_image` or :meth:`on_sandbox_ready` for task-specific setup.
@@ -38,8 +37,6 @@ class SandboxedAgentFlow(ABC):
     sandbox_backend: str = "docker"
     image: str = "python:3.11-slim"
     max_concurrent: int = 4
-    setup_commands: list[str] = []
-    task_setup_commands: list[str] = []
 
     def __init__(self, **kwargs):
         self._sandbox: Sandbox | None = None
@@ -70,30 +67,6 @@ class SandboxedAgentFlow(ABC):
         instance._sandbox = None
         instance._sandbox_externally_managed = False
         return instance
-
-    def setup_sandbox(self, task: dict, config: AgentConfig) -> None:
-        """Create and configure sandbox.
-
-        Legacy entry point retained for callers that still build a sandbox
-        inside the agent flow. The :class:`rllm.hooks.SandboxTaskHooks` path
-        uses :meth:`set_sandbox` + :meth:`on_sandbox_ready` instead.
-        """
-        image = self.get_image(task)
-        task_id = task.get("instance_id", task.get("task_id", "unknown"))
-        name = f"rllm-{task_id}-{uuid.uuid4().hex[:6]}"
-        self._sandbox = create_sandbox(self.sandbox_backend, name=name, image=image)
-
-        for cmd in self.setup_commands:
-            _safe_exec(self._sandbox, cmd, timeout=300)
-
-        for cmd_template in self.task_setup_commands:
-            try:
-                cmd = cmd_template.format(**task)
-            except KeyError:
-                cmd = cmd_template
-            _safe_exec(self._sandbox, cmd, timeout=300)
-
-        self.on_sandbox_ready(task, config)
 
     def on_sandbox_ready(self, task: dict, config: AgentConfig) -> None:  # noqa: B027
         """Hook for subclasses to run additional setup after sandbox creation."""
@@ -142,3 +115,51 @@ def create_sandbox(backend: str, name: str, image: str, **kwargs) -> Sandbox:
         return DaytonaSandbox(name=name, image=image, **kwargs)
     else:
         raise ValueError(f"Unknown sandbox backend: {backend}. Available: docker, local, modal, daytona")
+
+
+def build_snapshot(backend: str, task: Task, key: str, prior_ref: str | None = None, *, force: bool = False) -> str | None:
+    """Build a snapshot of ``task``'s environment; return a backend ref, or ``None``.
+
+    Each backend owns its mechanism (Modal: live-FS capture; Daytona:
+    declarative bake). Backends without snapshots (docker/local) return ``None``.
+    A known-live ``prior_ref`` is reused unless ``force``, which always rebuilds.
+    """
+    if backend == "modal":
+        from rllm.sandbox.backends.modal_backend import build_modal_snapshot
+
+        return build_modal_snapshot(task, key, prior_ref, force=force)
+    elif backend == "daytona":
+        from rllm.sandbox.backends.daytona import build_daytona_snapshot
+
+        return build_daytona_snapshot(task, key, force=force)
+    return None
+
+
+def delete_snapshot(backend: str, ref: str) -> bool:
+    """Delete a snapshot from its backend. Returns ``True`` on success."""
+    if backend == "modal":
+        from rllm.sandbox.backends.modal_backend import delete_modal_snapshot
+
+        return delete_modal_snapshot(ref)
+    elif backend == "daytona":
+        from rllm.sandbox.backends.daytona import delete_daytona_snapshot
+
+        return delete_daytona_snapshot(ref)
+    return False
+
+
+def snapshot_absent(backend: str, ref: str) -> bool:
+    """No-boot probe for ``registry.sync``: ``True`` only when ``ref`` is verifiably gone.
+
+    Conservative by construction — auth/permission/rate-limit/unknown errors return
+    ``False`` so sync never prunes a record it cannot confirm is absent.
+    """
+    if backend == "modal":
+        from rllm.sandbox.backends.modal_backend import _modal_ref_absent
+
+        return _modal_ref_absent(ref)
+    elif backend == "daytona":
+        from rllm.sandbox.backends.daytona import _daytona_ref_absent
+
+        return _daytona_ref_absent(ref)
+    return False

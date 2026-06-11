@@ -24,6 +24,8 @@ import time
 import weakref
 from pathlib import Path
 
+from rllm.sandbox.protocol import SnapshotNotFound
+
 logger = logging.getLogger(__name__)
 
 # Default auto-stop interval (minutes). 0 disables auto-stop entirely;
@@ -97,6 +99,8 @@ class DaytonaSandbox:
                 CreateSandboxFromImageParams,
                 CreateSandboxFromSnapshotParams,
                 Daytona,
+                DaytonaNotFoundError,
+                DaytonaValidationError,
                 Image,
                 Resources,
             )
@@ -111,7 +115,6 @@ class DaytonaSandbox:
         self.name = name
         self._image_spec = image
         self._closed = False
-        self._worker_session_id: str | None = None
         self._auto_stop_interval = int(kwargs.pop("auto_stop_interval", _DEFAULT_AUTO_STOP_INTERVAL))
         self._auto_archive_interval = kwargs.pop("auto_archive_interval", None)
         self._create_timeout = float(kwargs.pop("create_timeout", 120.0))
@@ -147,14 +150,23 @@ class DaytonaSandbox:
             self._sandbox = self._client.create(params, timeout=self._create_timeout)
             image_label = image
         else:
-            # Treat as Daytona snapshot name
+            # Treat as Daytona snapshot name. Resources are baked into the
+            # snapshot at build time, so any re-passed here are ignored (debug,
+            # not a warning — booting from a snapshot is the expected path).
             if resources is not None:
-                logger.warning(
-                    "Resources are ignored when creating from a snapshot (%s); snapshot resources win.",
-                    image,
-                )
+                logger.debug("Resources ignored when creating from snapshot %s; snapshot resources win.", image)
             params = CreateSandboxFromSnapshotParams(snapshot=image, **base_kwargs)
-            self._sandbox = self._client.create(params, timeout=self._create_timeout)
+            try:
+                self._sandbox = self._client.create(params, timeout=self._create_timeout)
+            except (DaytonaNotFoundError, DaytonaValidationError) as e:
+                # A gone/removing snapshot surfaces as 404 (NotFound) or 400
+                # (Validation, e.g. "Snapshot <name> is removing") — both mean
+                # cold fallback. Validation errors that don't name this snapshot
+                # (bad resources, etc.) are real and must propagate.
+                msg = str(e).lower()
+                if isinstance(e, DaytonaNotFoundError) or image.lower() in msg or any(w in msg for w in ("not found", "does not exist", "removing", "removed")):
+                    raise SnapshotNotFound(f"daytona snapshot {image} unavailable: {e}") from e
+                raise
             image_label = f"snapshot:{image}"
 
         self._sandbox_id = getattr(self._sandbox, "id", None) or getattr(self._sandbox, "sandbox_id", None)
@@ -252,69 +264,10 @@ class DaytonaSandbox:
 
         logger.debug("Uploaded dir %s -> %s in sandbox %s", local_path, remote_path, self.name)
 
-    def start_agent_process(self, command: str, port: int) -> None:
-        """Start a long-running process (worker_server.py) and poll until ready.
-
-        Daytona's ephemeral ``process.exec`` reaps backgrounded children
-        when the call returns, so ``nohup ... &`` (the Modal/Docker
-        pattern) doesn't survive here. We launch inside a persistent
-        ``process.create_session`` instead — the subprocess lives until
-        the session is deleted, which ``close()`` handles.
-        """
-        from daytona import SessionExecuteRequest
-
-        session_id = f"rllm-worker-{self.name}"
-        self._sandbox.process.create_session(session_id)
-        self._worker_session_id = session_id
-        self._sandbox.process.execute_session_command(
-            session_id,
-            SessionExecuteRequest(command=command, run_async=True),
-        )
-        self._wait_for_ready(port, timeout=60.0)
-        logger.info("Agent process started in sandbox %s on port %d (session: %s)", self.name, port, session_id)
-
-    def _wait_for_ready(self, port: int, timeout: float = 60.0) -> None:
-        """Poll the in-sandbox health endpoint until 200 or timeout.
-
-        Uses ``python3 + urllib`` because slim Python images don't ship
-        ``curl`` or ``wget``.
-        """
-        health_cmd = f"python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:{port}/health', timeout=2)\""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                response = self._sandbox.process.exec(health_cmd)
-                if response.exit_code == 0:
-                    return
-            except Exception:
-                pass
-            time.sleep(1.0)
-        raise TimeoutError(f"Worker server did not start within {timeout}s in sandbox {self.name}")
-
-    def get_endpoint(self, port: int) -> tuple[str, dict[str, str]]:
-        """Return a public URL + headers to reach the given in-sandbox port.
-
-        Uses Daytona's native preview-link API, so the caller can reach
-        the worker_server from anywhere on the network (no cloudflared
-        tunnel needed for this direction).
-        """
-        preview = self._sandbox.get_preview_link(port=port)
-        return preview.url, {"x-daytona-preview-token": preview.token}
-
     def close(self) -> None:
-        """Delete the Daytona sandbox and release resources.
-
-        Deletes the worker session first (which kills the long-running
-        worker_server process), then deletes the sandbox itself.
-        """
+        """Delete the Daytona sandbox and release resources."""
         if self._closed:
             return
-        if self._worker_session_id is not None:
-            try:
-                self._sandbox.process.delete_session(self._worker_session_id)
-            except Exception:
-                logger.debug("Sandbox %s: worker session delete error", self.name, exc_info=True)
-            self._worker_session_id = None
         try:
             self._sandbox.delete()
         except Exception:
@@ -346,3 +299,87 @@ def _shell_quote(s: str) -> str:
 def create_daytona_sandbox(name: str, image: str = "python:3.11-slim", **kwargs) -> DaytonaSandbox:
     """Factory function for creating a DaytonaSandbox."""
     return DaytonaSandbox(name=name, image=image, **kwargs)
+
+
+def build_daytona_snapshot(task, key: str, *, force: bool = False) -> str | None:
+    """Declaratively bake ``task``'s base image + RUN steps into a named snapshot; return the name.
+
+    Idempotent: an already-registered snapshot is reused unless ``force``, which
+    deletes the existing snapshot first so the rebuild replaces it.
+    """
+    from daytona import CreateSnapshotParams, Daytona, DaytonaNotFoundError, Image, Resources
+
+    from rllm.eval._resolution import _dockerfile_run_commands, _resolve_image, _sandbox_resource_kwargs
+
+    client = Daytona()
+    try:
+        existing = client.snapshot.get(key)
+        if not force:
+            logger.info("daytona snapshot %s already registered", key)
+            return key
+        client.snapshot.delete(existing)  # force: replace the existing snapshot
+        logger.info("daytona snapshot %s deleted for forced rebuild", key)
+    except DaytonaNotFoundError:
+        pass
+
+    img = Image.base(_resolve_image(task, "daytona"))
+    run_commands = _dockerfile_run_commands(task)
+    if run_commands:
+        img = img.run_commands(*run_commands)
+
+    res_kw = _sandbox_resource_kwargs(task, "daytona")
+    resources = Resources(**res_kw) if res_kw else None
+    client.snapshot.create(
+        CreateSnapshotParams(name=key, image=img, resources=resources),
+        on_logs=lambda chunk: logger.debug("daytona build[%s]: %s", key, chunk.rstrip()),
+    )
+    logger.info("daytona snapshot built: %s", key)
+    return key
+
+
+def _daytona_ref_absent(ref: str) -> bool:
+    """True only when the snapshot is verifiably gone (NotFound / terminal state); ``False`` (keep) on any unconfirmed error."""
+    from daytona import (
+        Daytona,
+        DaytonaAuthenticationError,
+        DaytonaAuthorizationError,
+        DaytonaNotFoundError,
+        DaytonaRateLimitError,
+    )
+
+    try:
+        snapshot = Daytona().snapshot.get(ref)
+        state = getattr(snapshot, "state", None)
+        name = str(getattr(state, "value", state) or "").lower()  # state is a SnapshotState enum
+        return name in {"error", "build_failed", "removing", "removed"}
+    except DaytonaNotFoundError:
+        return True  # confirmed gone
+    except (DaytonaAuthenticationError, DaytonaAuthorizationError, DaytonaRateLimitError):
+        return False  # cannot confirm — keep
+    except Exception:
+        logger.debug("daytona ref probe failed for %s — treating as unknown", ref, exc_info=True)
+        return False
+
+
+def delete_daytona_snapshot(ref: str) -> bool:
+    """Delete a Daytona snapshot by name; ``True`` only when confirmed gone, ``False`` (keep the local record) otherwise."""
+    from daytona import (
+        Daytona,
+        DaytonaAuthenticationError,
+        DaytonaAuthorizationError,
+        DaytonaNotFoundError,
+        DaytonaRateLimitError,
+    )
+
+    try:
+        client = Daytona()
+        client.snapshot.delete(client.snapshot.get(ref))
+        return True
+    except DaytonaNotFoundError:
+        return True  # already gone — safe to drop
+    except (DaytonaAuthenticationError, DaytonaAuthorizationError, DaytonaRateLimitError):
+        logger.warning("no permission to delete daytona snapshot %s — keeping local record", ref)
+        return False
+    except Exception:
+        logger.warning("failed to delete daytona snapshot %s — keeping local record", ref, exc_info=True)
+        return False
