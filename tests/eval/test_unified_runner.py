@@ -228,17 +228,15 @@ class _FakeSandbox:
 
 
 def test_hooks_close_sandbox_for_sandboxed_agent_flow(tmp_path, cfg, monkeypatch):
-    """Regression: SandboxedAgentFlow sandboxes were leaked because the hook
-    teardown went through ``task_flow.teardown_sandbox()``, which is a no-op
-    when ``set_sandbox()`` marked the sandbox externally-managed. The hook
-    creates the sandbox, so it must close it.
+    """The hook creates the sandbox, so its teardown must close it (#616) —
+    flows never own sandbox lifecycle.
     """
     from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
 
     fake_sandbox = _FakeSandbox()
 
     class _SandboxedStub(SandboxedAgentFlow):
-        def run(self, task: Task, config: AgentConfig) -> Episode:
+        def run(self, task: Task, config: AgentConfig, *, env) -> Episode:
             traj = Trajectory(uid="t", name="stub", task=task.id, steps=[], output="")
             return Episode(id=task.id, task=task.id, trajectories=[traj])
 

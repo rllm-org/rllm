@@ -29,12 +29,12 @@ propagates ``config.base_url`` through the appropriate env var
 from __future__ import annotations
 
 import logging
-import re
 import shlex
 import uuid
 from abc import abstractmethod
 
 from rllm.env import env_int
+from rllm.sandbox.protocol import Sandbox
 from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
 from rllm.types import AgentConfig, Task
 
@@ -72,19 +72,14 @@ class BaseCliHarness(SandboxedAgentFlow):
     # Sandbox helpers
     # ---------------------------------------------------------------------
 
-    def _exec_root(self, command: str, timeout: float | None = None) -> str:
-        """Run *command* as root inside the sandbox."""
-        if self.sandbox is None:
-            raise RuntimeError(f"{type(self).__name__} requires a sandbox.")
-        return self.sandbox.exec(command, timeout=timeout, user="root")
-
     def _exec_agent(
         self,
+        sandbox: Sandbox,
         command: str,
         timeout: float | None = None,
         env: dict[str, str] | None = None,
     ) -> str:
-        """Run *command* as the agent user, with *env* exported.
+        """Run *command* in *sandbox* as the agent user, with *env* exported.
 
         Uses ``export`` (not the inline ``K=V cmd`` prefix), because
         invocations like ``cd /workspace && claude ...`` are compound
@@ -93,12 +88,10 @@ class BaseCliHarness(SandboxedAgentFlow):
         ``cd`` and gone by the time the CLI runs, leaving the agent
         looking like it had no auth even though we passed it.
         """
-        if self.sandbox is None:
-            raise RuntimeError(f"{type(self).__name__} requires a sandbox.")
         if env:
             exports = "; ".join(f"export {k}={shlex.quote(v)}" for k, v in env.items() if v is not None)
             command = f"{exports}; {command}"
-        return self.sandbox.exec(command, timeout=timeout, user=self.agent_user)
+        return sandbox.exec(command, timeout=timeout, user=self.agent_user)
 
     @staticmethod
     def infer_provider(model_name: str) -> str:
@@ -199,26 +192,6 @@ class BaseCliHarness(SandboxedAgentFlow):
         provider = cls.infer_provider(model_name)
         return provider, model_name, f"{provider}/{model_name}"
 
-    def _container_url(self, url: str) -> str:
-        """Rewrite host loopback addresses for in-container reachability.
-
-        The gateway binds to 127.0.0.1 on the host. From inside a Docker
-        container, that loopback addresses the container itself, not the
-        host. Docker Desktop (macOS/Windows) resolves the magic hostname
-        ``host.docker.internal`` to the host; on Linux Docker 20.10+ the
-        same hostname works when the container is started with
-        ``--add-host=host.docker.internal:host-gateway``.
-
-        For the ``local`` and ``modal`` backends this is a no-op.
-        """
-        if self.sandbox_backend != "docker":
-            return url
-        return re.sub(
-            r"(https?://)(?:127\.0\.0\.1|localhost)(:\d+|/|$)",
-            r"\1host.docker.internal\2",
-            url,
-        )
-
     @staticmethod
     def _cd_prefix(task: Task) -> str:
         """Return ``cd <workdir> && `` only when the task explicitly sets ``workdir``.
@@ -261,8 +234,10 @@ class BaseCliHarness(SandboxedAgentFlow):
     def install_script(self) -> str:
         """Return a shell script that installs the CLI in the sandbox.
 
-        Runs as root via ``on_sandbox_ready``. Must be idempotent — the
-        hook may fire on a container where the CLI is already present.
+        Baked into snapshot images by ``rllm snapshot create --agent``;
+        otherwise run as root by ``SandboxTaskHooks`` on cold sandboxes.
+        Must be idempotent — it may run on a container where the CLI is
+        already present.
         """
 
     @abstractmethod
@@ -271,6 +246,7 @@ class BaseCliHarness(SandboxedAgentFlow):
 
     def write_configs(
         self,
+        sandbox: Sandbox,
         task: Task,
         config: AgentConfig,
         env: dict[str, str],
@@ -299,42 +275,25 @@ class BaseCliHarness(SandboxedAgentFlow):
     # Lifecycle
     # ---------------------------------------------------------------------
 
-    def on_sandbox_ready(self, task: dict, config: AgentConfig) -> None:  # noqa: ARG002
-        """Install the CLI inside the sandbox before the first run.
+    def run(self, task: Task, config: AgentConfig, *, env: Sandbox) -> None:
+        """Exec the CLI in the sandbox; let the gateway build the trajectory.
 
-        Skipped when the sandbox's image already contains exactly this
-        harness's install (``baked_install``, recorded at snapshot boot by
-        :func:`rllm.sandbox.snapshot.get_sandbox`). Cold boots and task-only
-        snapshot boots install as usual.
+        The install has already happened by the time this runs — either
+        baked into the snapshot image or executed by the hook on a cold
+        sandbox. Returns ``None`` so :func:`rllm.types._coerce_to_episode`
+        builds an empty single-trajectory Episode whose Steps the engine
+        enriches from gateway-captured traces.
         """
-        if self.sandbox is None:
-            return
-        if getattr(self.sandbox, "baked_install", "") == self.install_script():
-            return
-        try:
-            self._exec_root(self.install_script(), timeout=self.install_timeout)
-        except Exception as e:
-            raise RuntimeError(f"Failed to install {self.name} in sandbox: {e}") from e
-
-    def run(self, task: Task, config: AgentConfig) -> None:
-        """Exec the CLI; let the gateway build the trajectory.
-
-        Returns ``None`` so :func:`rllm.types._coerce_to_episode` builds
-        an empty single-trajectory Episode. The engine then enriches its
-        Steps from the gateway-captured traces during ``execute_tasks``.
-        """
-        if self.sandbox is None:
-            raise RuntimeError(f"{type(self).__name__} requires a sandbox.")
-
-        env = self.build_env(task, config)
-        self.write_configs(task, config, env)
+        sandbox = env
+        env_vars = self.build_env(task, config)
+        self.write_configs(sandbox, task, config, env_vars)
 
         instruction = str(task.instruction).strip()
         timeout = float(task.metadata.get("agent_timeout", self.run_timeout))
         cmd = self.build_invocation(instruction, task, config)
 
         try:
-            self._exec_agent(cmd, timeout=timeout, env=env)
+            self._exec_agent(sandbox, cmd, timeout=timeout, env=env_vars)
         except Exception as e:
             # Surface as a warning for operator visibility; the engine
             # still gets None and the gateway traces (if any LLM calls

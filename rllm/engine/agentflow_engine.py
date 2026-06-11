@@ -34,7 +34,8 @@ from tqdm import tqdm
 from rllm.data.utils import task_from_row
 from rllm.engine.trace_converter import compute_step_metrics, trace_record_to_step
 from rllm.eval.types import EvalOutput
-from rllm.types import AgentConfig, Episode, Step, Task, Trajectory, run_agent_flow
+from rllm.gateway.manager import container_reachable_url
+from rllm.types import AgentConfig, Episode, Step, Task, Trajectory, flow_accepts_env, run_agent_flow
 from rllm.utils import colorful_print
 from rllm.workflows.workflow import TerminationReason
 
@@ -64,14 +65,15 @@ class TaskContext:
     """Per-task state returned by :meth:`TaskHooks.setup`.
 
     Encapsulates the per-task evaluator (resolved by the hook from a task's
-    [verifier] config, or pre-bound by the caller), an optional per-task
-    agent flow (so SandboxedAgentFlow's per-task sandbox can't leak across
-    parallel rollouts), and a teardown callback that releases any per-task
+    [verifier] config, or pre-bound by the caller), the task's live sandbox
+    (``env``, ``None`` for host-only rollouts) with the backend that
+    provisioned it, and a teardown callback that releases any per-task
     resources (sandboxes, temp dirs, ...).
     """
 
     evaluator: Evaluator
-    agent_flow: Any = None  # AgentFlow | None — kept loose for the import-cycle reason below
+    env: Any = None  # Sandbox | None — kept loose for the import-cycle reason below
+    env_backend: str | None = None  # backend that actually provisioned env
     teardown: Any = None  # Callable[[], None] | None — kept loose to avoid Callable import loop
 
     def run_teardown(self) -> None:
@@ -356,6 +358,10 @@ class AgentFlowEngine:
 
             hooks = FixedEvaluatorHooks(evaluator)
 
+        self._flow_accepts_env = flow_accepts_env(agent_flow)
+        if getattr(agent_flow, "needs_env", False) and not self._flow_accepts_env:
+            raise TypeError(f"{type(agent_flow).__name__} declares needs_env but its run/arun has no keyword-only 'env' parameter; declare run(self, task, config, *, env).")
+
         self.agent_flow = agent_flow
         self.gateway = gateway
         self.model = model
@@ -595,20 +601,26 @@ class AgentFlowEngine:
         _timings["time/setup_s"] = time.perf_counter() - t
 
         try:
+            if getattr(self.agent_flow, "needs_env", False) and ctx.env is None:
+                raise RuntimeError(
+                    f"{type(self.agent_flow).__name__} needs a sandbox but hooks {type(self.hooks).__name__} provisioned none — pass hooks=SandboxTaskHooks(...) or run via AgentTrainer / run_dataset."
+                )
+
             # Attach resolved sampling params to the session so the gateway
             # enforces them on every LLM call; skip when there are none.
             session_sampling_params = (self.val_sampling_params if is_validation else self.train_sampling_params) or None
             if session_sampling_params:
                 await self.gateway.acreate_session(uid, is_validation=is_validation, sampling_params=session_sampling_params)
 
-            # Prefer the per-task flow from the hook so parallel tasks don't
-            # share mutable sandbox state on the engine-bound flow.
-            flow_for_task = ctx.agent_flow if ctx.agent_flow is not None else self.agent_flow
-
             # Flows whose LLM client runs *inside* the env (CLI harnesses)
-            # need the publicly-reachable URL; host-side flows keep the local
-            # gateway URL so they never depend on a tunnel hostname.
-            session_url = self.gateway.get_session_url(uid, public=getattr(flow_for_task, "llm_inside_env", False))
+            # need the publicly-reachable URL — rewritten for in-container
+            # networking on the backend that actually provisioned this task's
+            # sandbox. Host-side flows keep the local gateway URL so they
+            # never depend on a tunnel hostname.
+            llm_inside_env = getattr(self.agent_flow, "llm_inside_env", False)
+            session_url = self.gateway.get_session_url(uid, public=llm_inside_env)
+            if llm_inside_env and ctx.env is not None:
+                session_url = container_reachable_url(session_url, ctx.env_backend)
 
             config = AgentConfig(
                 base_url=session_url,
@@ -619,7 +631,7 @@ class AgentFlowEngine:
             )
             logger.debug("[%s] Starting agent flow at %s", uid, session_url)
             t = time.perf_counter()
-            episode = await run_agent_flow(flow_for_task, task_obj, config, executor=self.executor)
+            episode = await run_agent_flow(self.agent_flow, task_obj, config, executor=self.executor, env=ctx.env if self._flow_accepts_env else None)
             _timings["time/agentflow_s"] = time.perf_counter() - t
             logger.debug("[%s] Agent flow completed, %d trajectories", uid, len(episode.trajectories))
             return episode, ctx

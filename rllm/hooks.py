@@ -244,45 +244,51 @@ class SandboxTaskHooks:
 
     def setup(self, task: Task, agent_flow: AgentFlow, uid: str) -> TaskContext:
         from rllm.engine.agentflow_engine import TaskContext
-        from rllm.eval._resolution import _setup_task_environment
-        from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
+        from rllm.eval._resolution import _resolve_backend, _setup_task_environment
 
         plan = resolve_rollout_plan(task, agent_flow, self.evaluation)
 
-        # Shallow-copy SandboxedAgentFlow so parallel rollouts get their own _sandbox.
-        task_flow: AgentFlow = agent_flow
-        if isinstance(agent_flow, SandboxedAgentFlow):
-            task_flow = agent_flow.create_instance()
-
         sandbox = None
-        if plan.needs_env:
-            from rllm.sandbox.snapshot import get_sandbox, install_script_for
+        env_backend = None
+        try:
+            if plan.needs_env:
+                from rllm.env import env_int
+                from rllm.sandbox.snapshot import get_sandbox, install_script_for
 
-            sandbox = self.warm_queue.pop(task) if self.warm_queue is not None else get_sandbox(task, self.sandbox_backend, self._registry, install_script_for(task_flow))
-            _setup_task_environment(task, sandbox)
-            if isinstance(task_flow, SandboxedAgentFlow):
-                task_flow.set_sandbox(sandbox)
-                task_flow.on_sandbox_ready({"task_path": str(task.task_dir)}, None)
+                install = install_script_for(agent_flow)
+                sandbox = self.warm_queue.pop(task) if self.warm_queue is not None else get_sandbox(task, self.sandbox_backend, self._registry, install)
+                env_backend = _resolve_backend(task, self.sandbox_backend)
+                _setup_task_environment(task, sandbox)
+                # CLI install, unless the image already contains exactly this
+                # script (baked_install, recorded at snapshot boot).
+                if install and getattr(sandbox, "baked_install", "") != install:
+                    try:
+                        sandbox.exec(install, timeout=getattr(agent_flow, "install_timeout", env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 600)), user="root")
+                    except Exception as e:
+                        raise RuntimeError(f"Failed to install {getattr(agent_flow, 'name', type(agent_flow).__name__)} in sandbox: {e}") from e
 
-        evaluator = self.evaluation.resolve(task, sandbox, plan.verifier_kind, plan.verifier_config)
+            evaluator = self.evaluation.resolve(task, sandbox, plan.verifier_kind, plan.verifier_config)
+        except BaseException:
+            # Nothing has registered a teardown yet — close the sandbox here
+            # or it leaks (and the retry path provisions another).
+            if sandbox is not None:
+                try:
+                    sandbox.close()
+                except Exception:
+                    logger.exception("sandbox.close failed after setup error")
+            raise
 
         def teardown() -> None:
             # Sandboxes are ephemeral — the hook owns this one's lifecycle and
-            # closes it directly (the #616 fix). Going through
-            # ``task_flow.teardown_sandbox()`` would no-op because
-            # ``set_sandbox()`` marks it externally-managed, leaking cloud
-            # sandboxes (Daytona/Modal/e2b) that bill by duration.
+            # closes it directly (the #616 fix); flows never hold one.
             if sandbox is None:
                 return
             try:
                 sandbox.close()
             except Exception:
                 logger.exception("sandbox.close failed")
-            if isinstance(task_flow, SandboxedAgentFlow):
-                task_flow._sandbox = None  # noqa: SLF001
 
-        ctx_flow = task_flow if task_flow is not agent_flow else None
-        return TaskContext(evaluator=evaluator, agent_flow=ctx_flow, teardown=teardown)
+        return TaskContext(evaluator=evaluator, env=sandbox, env_backend=env_backend, teardown=teardown)
 
 
 class FixedEvaluatorHooks:
