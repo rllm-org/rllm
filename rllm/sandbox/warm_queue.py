@@ -48,11 +48,12 @@ class WarmQueue:
     stays within ``size`` of how many pops have happened.
     """
 
-    def __init__(self, schedule: list[Task], backend: str | None, registry: SnapshotRegistry | None, size: int) -> None:
+    def __init__(self, schedule: list[Task], backend: str | None, registry: SnapshotRegistry | None, size: int, install_script: str = "") -> None:
         self._schedule = schedule
         self._backend = backend
         self._registry = registry
         self._size = size
+        self._install_script = install_script
 
         self._cond = threading.Condition()
         self._ready: dict[str, list[Sandbox]] = {}
@@ -75,7 +76,7 @@ class WarmQueue:
         for an almost-ready sandbox rather than spawning a duplicate); if none
         is ready or pending, it falls back to a direct ``get_sandbox`` at once.
         """
-        key = env_key_for(task, self._backend)
+        key = env_key_for(task, self._backend, self._install_script)
         with self._cond:
             while not self._ready.get(key) and self._pending.get(key, 0) > 0 and not self._stop:
                 self._cond.wait()
@@ -85,7 +86,7 @@ class WarmQueue:
                 self._free_slots += 1
                 self._cond.notify_all()
                 return sandbox
-        return get_sandbox(task, self._backend, self._registry)
+        return get_sandbox(task, self._backend, self._registry, self._install_script)
 
     def shutdown(self) -> None:
         """Stop the fillers and close the prefetched-but-unconsumed tail.
@@ -117,7 +118,7 @@ class WarmQueue:
                     task = self._schedule[self._cursor]
                     self._cursor += 1
                     self._free_slots -= 1
-                    key = env_key_for(task, self._backend)
+                    key = env_key_for(task, self._backend, self._install_script)
                     self._pending[key] = self._pending.get(key, 0) + 1
                     return task, key
                 self._cond.wait()
@@ -131,7 +132,7 @@ class WarmQueue:
             task, key = claim
             sandbox = None
             try:
-                sandbox = get_sandbox(task, self._backend, self._registry)
+                sandbox = get_sandbox(task, self._backend, self._registry, self._install_script)
             except Exception:
                 logger.exception("warm queue: prefetch failed for task %s", getattr(task, "id", "?"))
             with self._cond:

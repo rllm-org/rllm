@@ -145,7 +145,7 @@ def snapshot():
     type=click.Choice(["modal", "daytona"], case_sensitive=False),
     help="Backend to build snapshots on (only modal/daytona have snapshots).",
 )
-@click.option("--agent", "agent_name", default=None, help="Agent scaffold (only affects local-benchmark resolution).")
+@click.option("--agent", "agent_name", default=None, help="Agent scaffold; its CLI install (if any) is baked into the snapshots.")
 @click.option("--split", default=None, help="Dataset split (default: from catalog eval_split).")
 @click.option("--max-examples", default=None, type=int, help="Snapshot only the first N tasks (e.g. the slice you'll eval).")
 @click.option("--task-indices", default=None, type=str, help="Snapshot only these task indices (e.g. '0', '3,7,12', '0-9').")
@@ -155,15 +155,22 @@ def create_snapshots(benchmark: str, sandbox_backend: str, agent_name: str | Non
     """Build environment snapshots for a benchmark (or a slice of it) and record a group."""
     from rllm.eval._resolution import _resolve_image
     from rllm.sandbox.sandboxed_flow import build_snapshot
-    from rllm.sandbox.snapshot import SnapshotRegistry, env_key_for, keys_for_tasks
+    from rllm.sandbox.snapshot import SnapshotRegistry, env_key_for, install_script_for, keys_for_tasks
+
+    install = ""
+    if agent_name is not None:
+        from rllm.eval.agent_loader import load_agent
+
+        install = install_script_for(load_agent(agent_name))
 
     tasks = _slice_tasks(_resolve_dataset_tasks(benchmark, agent_name, sandbox_backend, split), max_examples, task_indices)
-    by_key = keys_for_tasks(tasks, sandbox_backend)
+    by_key = keys_for_tasks(tasks, sandbox_backend, install)
     if not by_key:
         console.print(f"  [dim]No snapshottable environments for '{benchmark}' on {sandbox_backend}.[/]")
         return
 
-    console.print(f"\n  Building [val]{len(by_key)}[/] snapshot(s) from [val]{len(tasks)}[/] task(s) on [val]{sandbox_backend}[/]\n")
+    baked = f" (baking [val]{agent_name}[/] install)" if install else ""
+    console.print(f"\n  Building [val]{len(by_key)}[/] snapshot(s) from [val]{len(tasks)}[/] task(s) on [val]{sandbox_backend}[/]{baked}\n")
     registry = SnapshotRegistry.load()
 
     def _build(item: tuple[str, object]) -> tuple[str, str | None, str, str | None, float]:
@@ -172,7 +179,7 @@ def create_snapshots(benchmark: str, sandbox_backend: str, agent_name: str | Non
         err = None
         try:
             prior_ref = registry.lookup_env(key, sandbox_backend)  # a live local ref to reuse when not forced
-            ref = build_snapshot(sandbox_backend, task, key, prior_ref, force=force)
+            ref = build_snapshot(sandbox_backend, task, key, prior_ref, force=force, install_script=install)
             reused = ref is not None and not force and prior_ref == ref
             status = "reused" if reused else "ok" if ref is not None else "no-snapshot"
         except Exception as e:  # noqa: BLE001
@@ -185,7 +192,7 @@ def create_snapshots(benchmark: str, sandbox_backend: str, agent_name: str | Non
     # the group's tasks: the exact sliced tasks whose env actually built
     built_tasks = []
     for task in tasks:
-        key = env_key_for(task, sandbox_backend)
+        key = env_key_for(task, sandbox_backend, install)
         ref = results.get(key, (None,))[0]
         if ref is not None:
             built_tasks.append({"id": task.id, "env_key": key, "ref": ref, "base_image": _resolve_image(task, sandbox_backend)})
