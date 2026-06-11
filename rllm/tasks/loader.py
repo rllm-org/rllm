@@ -474,10 +474,21 @@ def _load_task_from_dir(
 
     # Lift commonly-used config into top-level metadata for the Runner
     metadata: dict = dict(raw)
-    env_section = raw.get("environment", {}) or {}
-    # Only set workdir when explicitly declared — see _merge_task_toml_metadata
-    # for the same rationale (Dockerfile WORKDIR vs forced /workspace).
-    declared_workdir = env_section.get("workdir")
+    env_section = dict(raw.get("environment", {}) or {})
+    # Same Dockerfile lifting as _merge_task_toml_metadata (the row path):
+    # FROM fills a missing docker_image so non-docker backends pull the right
+    # image; WORKDIR fills a missing workdir. Explicit task.toml values win.
+    dockerfile = task_dir / "environment" / "Dockerfile"
+    if not dockerfile.exists():
+        dockerfile = dataset_dir / "environment" / "Dockerfile"
+    base_image, dockerfile_workdir = _parse_dockerfile_image_workdir(dockerfile)
+    if base_image and not env_section.get("docker_image"):
+        env_section["docker_image"] = base_image
+    if env_section:
+        metadata["environment"] = env_section
+    # Only set workdir when declared (task.toml or Dockerfile WORKDIR) — see
+    # _merge_task_toml_metadata for the rationale (never force /workspace).
+    declared_workdir = env_section.get("workdir") or dockerfile_workdir
     if declared_workdir is not None:
         metadata["workdir"] = declared_workdir
     metadata["env_vars"] = env_section.get("env", {}) or {}

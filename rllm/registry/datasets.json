@@ -13,6 +13,18 @@
       "default_agent": "zeroclaw",
       "reward_fn": "claw_eval_reward_fn"
     },
+    "rllm-swesmith": {
+      "description": "SWE-smith filtered: ~4.7K solvable bug-fixing tasks across 105 Python repos (sandbox; in-sandbox pytest grading)",
+      "source": "kylemontgomery/swesmith-filtered",
+      "builder": "rllm.data.swesmith_builder:build_benchmark",
+      "category": "agentic",
+      "splits": [
+        "train"
+      ],
+      "eval_split": "train",
+      "train_split": "train",
+      "default_agent": "mini-swe-agent"
+    },
     "skillsbench": {
       "description": "SkillsBench: 91 expert-curated agentic tasks measuring how AI agents use skills across industrial, software, scientific, office, finance, and security domains (Harbor task format; per-task tests/test.sh verifier).",
       "source": "benchflow/skillsbench",
