@@ -10,7 +10,6 @@ rollout engine (FireworksEngine), and checkpoint lifecycle hooks
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from fireworks.training.sdk import (
@@ -18,13 +17,12 @@ from fireworks.training.sdk import (
     TrainerJobManager,
     WeightSyncer,
 )
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from training.provision import FireworksProvisionInfra, init_fireworks_infra
 from training.utils import ReconnectableClient, load_deployment_tokenizer
-from training.utils.config import ConcurrencyConfig, DeployConfig, TrainerConfig
 
 from rllm.engine.rollout import FireworksEngine, RolloutEngine
-from rllm.trainer.algorithms import simple_timer
+from rllm.trainer.algorithms import AlgorithmConfig, simple_timer
 
 # fix:fireworks - tinker 0.15.0 sends project_id=None, server rejects it
 # from tinker.types import CreateSessionRequest
@@ -44,7 +42,7 @@ from rllm.trainer.algorithms import simple_timer
 # def _patched_rc_optim_step(self, params, grad_accumulation_normalization=None):
 #     return self._client.optim_step(params).result(timeout=self._default_timeout)
 # _RC.optim_step = _patched_rc_optim_step
-from rllm.trainer.fireworks.fireworks_policy_trainer import FireworksPolicyTrainer
+from rllm.trainer.fireworks.fireworks_policy_trainer import FireworksPolicyTrainer, builtin_loss_args
 from rllm.trainer.tinker.tinker_backend import TinkerBackend
 from rllm.trainer.tinker.tinker_metrics_utils import (
     update_training_metrics,
@@ -55,27 +53,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 logging.getLogger("fireworks.training.sdk.deployment").setLevel(logging.WARNING)
-
-
-@dataclass
-class _RLProvisionConfig:
-    """Duck-typed stand-in for the cookbook's ``rl_loop.Config``.
-
-    Carries only the fields ``init_fireworks_infra(mode="rl", ...)`` reads, so
-    rllm can provision through ``training.provision`` without importing the
-    full recipe module.
-    """
-
-    base_model: str
-    lora_rank: int
-    learning_rate: float
-    max_seq_len: int | None
-    step_timeout: int
-    kl_beta: float
-    weight_sync_timeout: int
-    trainer: TrainerConfig
-    deployment: DeployConfig
-    concurrency: ConcurrencyConfig
 
 
 class FireworksBackend(TinkerBackend):
@@ -127,52 +104,11 @@ class FireworksBackend(TinkerBackend):
         self._policy_rc: ReconnectableClient | None = None
         self._rlor_mgr: TrainerJobManager | None = None
         self._infra: FireworksProvisionInfra | None = None
+        self._sample_timeout: int = 600
 
     # ------------------------------------------------------------------
     # Fireworks infrastructure setup
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _to_trainer_config(cfg_section: DictConfig) -> TrainerConfig:
-        """Convert an OmegaConf ``training_infra`` section to a ``TrainerConfig`` dataclass."""
-        return TrainerConfig(
-            job_id=cfg_section.get("job_id"),
-            training_shape_id=cfg_section.get("training_shape_id"),
-            reference_training_shape_id=cfg_section.get("ref_training_shape_id"),
-            region=cfg_section.get("region"),
-            custom_image_tag=cfg_section.get("custom_image_tag"),
-            extra_args=list(cfg_section.get("extra_args") or []) or None,
-            skip_validations=cfg_section.get("skip_validations", False),
-        )
-
-    @staticmethod
-    def _to_deploy_config(cfg_section: DictConfig) -> DeployConfig:
-        """Convert an OmegaConf ``deployment`` section to a ``DeployConfig`` dataclass."""
-        return DeployConfig(
-            deployment_id=cfg_section.get("deployment_id"),
-            deployment_shape=cfg_section.get("deployment_shape"),
-            hot_load_bucket_type=cfg_section.get("hot_load_bucket_type", "FW_HOSTED"),
-            deployment_timeout_s=cfg_section.get("deployment_timeout_s", 5400),
-            deployment_extra_args=list(cfg_section.get("deployment_extra_args") or []) or None,
-            tokenizer_model=cfg_section.get("tokenizer_model"),
-            sample_timeout=cfg_section.get("sample_timeout", 600),
-            disable_speculative_decoding=cfg_section.get("disable_speculative_decoding", True),
-            replica_count=cfg_section.get("replica_count"),
-            extra_values=dict(cfg_section.get("extra_values") or {}) or None,
-        )
-
-    @staticmethod
-    def _to_concurrency_config(cfg_section: DictConfig | None) -> ConcurrencyConfig:
-        """Convert an optional OmegaConf ``concurrency`` section to a ``ConcurrencyConfig``."""
-        if not cfg_section:
-            return ConcurrencyConfig()
-        return ConcurrencyConfig(
-            mode=cfg_section.get("mode", "adaptive"),
-            initial_window=cfg_section.get("initial_window"),
-            min_window=cfg_section.get("min_window", 1),
-            max_window=cfg_section.get("max_window", 256),
-            prefill_queue_target=cfg_section.get("prefill_queue_target", 0.5),
-        )
 
     def _init_fireworks_infra(self, **kwargs) -> None:
         """Provision the trainer job, deployment, and sampler via the
@@ -183,18 +119,14 @@ class FireworksBackend(TinkerBackend):
         if kl_beta > 0:
             raise ValueError(f"kl_beta={kl_beta} is not supported with server-side builtin losses. Set kl_beta=0 in your config.")
 
-        provision_cfg = _RLProvisionConfig(
-            base_model=cfg.model.name,
-            lora_rank=cfg.model.get("lora_rank", 0),
-            learning_rate=cfg.training.learning_rate,
-            max_seq_len=cfg.training.get("max_length"),
-            step_timeout=cfg.training.get("client_timeout", 600),
-            kl_beta=kl_beta,
-            weight_sync_timeout=cfg.hotload.hot_load_timeout,
-            trainer=self._to_trainer_config(cfg.training_infra),
-            deployment=self._to_deploy_config(cfg.deployment),
-            concurrency=self._to_concurrency_config(cfg.get("concurrency")),
-        )
+        # Fail fast on loss misconfiguration before provisioning any
+        # (expensive, slow-to-create) remote infrastructure.
+        from training.utils.rl.losses import validate_loss_path
+
+        algorithm_config = kwargs.get("algorithm_config") or AlgorithmConfig.from_config(cfg.rllm.algorithm)
+        validate_loss_path(builtin_loss_args(algorithm_config))
+
+        provision_cfg = OmegaConf.create(OmegaConf.to_container(cfg.fireworks_infra, resolve=True))
 
         # cleanup_existing=True: rllm names a fresh deployment per run, so
         # shutdown deletes the trainer job and deployment even when an
@@ -223,19 +155,17 @@ class FireworksBackend(TinkerBackend):
             self._rlor_mgr = infra.trainer_manager
             self._policy_job_id = infra.policy_job_id
             self._policy_rc = infra.policy
+            self._sample_timeout = provision_cfg.deployment.sample_timeout or 600
 
             self.sampling_client = infra.sampler
             self.tokenizer = getattr(infra.sampler, "tokenizer", None) or load_deployment_tokenizer(provision_cfg.deployment)
             self.weight_syncer = WeightSyncer(
-                policy_client=self._policy_rc.inner,
+                policy_client=infra.training_client,
                 deploy_mgr=infra.deployment_manager,
                 deployment_id=infra.deployment_id,
-                base_model=cfg.model.name,
-                hotload_timeout=cfg.hotload.hot_load_timeout,
-                warmup_after_hotload=cfg.hotload.get("warmup_after_hotload", True),
-                warmup_max_retries=cfg.hotload.get("warmup_max_retries", 10),
-                reset_prompt_cache=cfg.hotload.get("reset_prompt_cache", True),
-                lora_rank=cfg.model.get("lora_rank", 0),
+                base_model=provision_cfg.base_model,
+                hotload_timeout=provision_cfg.weight_sync_timeout,
+                lora_rank=provision_cfg.lora_rank,
             )
         except BaseException:
             infra.close()
@@ -248,34 +178,40 @@ class FireworksBackend(TinkerBackend):
     def init_rollout_engine(self, **kwargs) -> RolloutEngine:
         self._init_fireworks_infra(**kwargs)
 
-        self.policy_trainer = FireworksPolicyTrainer(
-            config=self.full_config,
-            training_client=self._policy_rc,
-            weight_syncer=self.weight_syncer,
-            cf_config=kwargs.get("cf_config"),
-            transform_config=kwargs.get("transform_config"),
-            algorithm_config=kwargs.get("algorithm_config"),
-            rlor_mgr=self._rlor_mgr,
-            policy_job_id=self._policy_job_id,
-        )
+        # Anything that fails past this point must tear down the provisioned
+        # trainer job and deployment, or they keep running (and billing).
+        try:
+            self.policy_trainer = FireworksPolicyTrainer(
+                config=self.full_config,
+                training_client=self._policy_rc,
+                weight_syncer=self.weight_syncer,
+                cf_config=kwargs.get("cf_config"),
+                transform_config=kwargs.get("transform_config"),
+                algorithm_config=kwargs.get("algorithm_config"),
+                rlor_mgr=self._rlor_mgr,
+                policy_job_id=self._policy_job_id,
+            )
 
-        cfg = self.full_config
-        rollout_extra = dict(cfg.get("rollout_engine", {}))
-        self.rollout_engine = FireworksEngine(
-            tokenizer=self.tokenizer,
-            sampler=self.sampling_client,
-            max_prompt_length=cfg.data.max_prompt_length,
-            max_response_length=cfg.data.max_response_length,
-            max_model_length=cfg.training.max_length,
-            sampling_params=cfg.rllm.rollout,
-            disable_thinking=rollout_extra.pop("disable_thinking", False),
-            accumulate_reasoning=rollout_extra.pop("accumulate_reasoning", False),
-            reasoning_effort=rollout_extra.pop("reasoning_effort", "medium"),
-            sample_timeout=cfg.deployment.get("sample_timeout", 600),
-            router_replay=cfg.rllm.algorithm.get("router_replay", "disabled") == "R3",
-            **rollout_extra,
-        )
-        return self.rollout_engine
+            cfg = self.full_config
+            rollout_extra = dict(cfg.get("rollout_engine", {}))
+            self.rollout_engine = FireworksEngine(
+                tokenizer=self.tokenizer,
+                sampler=self.sampling_client,
+                max_prompt_length=cfg.data.max_prompt_length,
+                max_response_length=cfg.data.max_response_length,
+                max_model_length=cfg.training.max_length,
+                sampling_params=cfg.rllm.rollout,
+                disable_thinking=rollout_extra.pop("disable_thinking", False),
+                accumulate_reasoning=rollout_extra.pop("accumulate_reasoning", False),
+                reasoning_effort=rollout_extra.pop("reasoning_effort", "medium"),
+                sample_timeout=self._sample_timeout,
+                router_replay=cfg.rllm.algorithm.get("router_replay", "disabled") == "R3",
+                **rollout_extra,
+            )
+            return self.rollout_engine
+        except BaseException:
+            self.shutdown()
+            raise
 
     def validate_config(self) -> None:
         if self.full_config.get("fuse_forward_backward_and_optim_step", False):
@@ -374,7 +310,6 @@ class FireworksBackend(TinkerBackend):
 
         start_step = await self.policy_trainer.initialize_async(
             resume_from_checkpoint=True,
-            hot_load_before_training=self.full_config.hotload.get("hot_load_before_training", False),
         )
         trainer_state.global_step = start_step
 

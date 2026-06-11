@@ -38,6 +38,39 @@ from rllm.types import TrajectoryGroup
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_DCP_TIMEOUT = 2700
+
+
+def builtin_loss_args(algorithm_config: AlgorithmConfig):
+    """Map an rllm ``AlgorithmConfig`` to the cookbook's ``LossArgs`` for the
+    builtin (server-side) loss path."""
+    from training.utils.rl.cispo import CISPOConfig
+    from training.utils.rl.dapo import DAPOConfig
+    from training.utils.rl.gspo import GSPOConfig
+    from training.utils.rl.losses import LossConfig
+
+    eps = algorithm_config.eps_clip
+    eps_high = algorithm_config.eps_clip_high
+    return LossConfig(
+        policy_loss=algorithm_config.loss_fn or "grpo",
+        loss_path="builtin",
+        kl_beta=algorithm_config.kl_beta,
+        eps_clip=eps,
+        eps_clip_high=eps_high,
+        dapo=DAPOConfig(
+            eps_clip=eps,
+            eps_clip_high=eps_high if eps_high is not None else 0.28,
+        ),
+        gspo=GSPOConfig(
+            clip_ratio_low=eps,
+            clip_ratio_high=eps_high,
+        ),
+        cispo=CISPOConfig(
+            eps_low=eps,
+            eps_high=eps_high if eps_high is not None else 0.28,
+        ),
+    )
+
 
 class FireworksPolicyTrainer:
     """Handles policy updates via gradient descent using Fireworks Firetitan.
@@ -90,7 +123,6 @@ class FireworksPolicyTrainer:
     async def initialize_async(
         self,
         resume_from_checkpoint: bool = True,
-        hot_load_before_training: bool = False,
     ) -> int:
         """Initialize or resume training.
 
@@ -100,8 +132,6 @@ class FireworksPolicyTrainer:
         Args:
             resume_from_checkpoint: If True, attempt to resume from the
                 last DCP checkpoint.
-            hot_load_before_training: If True, push initial weights to the
-                inference deployment before the first training step.
 
         Returns:
             The starting global step (0 when training from scratch).
@@ -113,8 +143,6 @@ class FireworksPolicyTrainer:
 
         if start_step == 0:
             logger.info("Starting training from scratch with model: %s", self.config.model.name)
-            if hot_load_before_training:
-                await self._initial_weight_sync()
 
         return start_step
 
@@ -124,7 +152,6 @@ class FireworksPolicyTrainer:
         Returns:
             The step to resume from, or 0 if no checkpoint was found.
         """
-        inner = self.training_client.inner
         source_job_id = self._resume_source_job_id
         checkpoint_name = self._resume_checkpoint_name
 
@@ -145,9 +172,8 @@ class FireworksPolicyTrainer:
             checkpoint_name = checkpoints[-1]
             logger.info("Resuming from latest DCP checkpoint: %s", checkpoint_name)
 
-        checkpoint_ref = inner.resolve_checkpoint_path(checkpoint_name, source_job_id=source_job_id)
-        timeout = self.config.hotload.get("dcp_timeout", 2700)
-        await asyncio.to_thread(self.training_client.load_state_with_optimizer, checkpoint_ref, timeout=timeout)
+        checkpoint_ref = self.training_client.resolve_checkpoint_path(checkpoint_name, source_job_id=source_job_id)
+        await asyncio.to_thread(self.training_client.load_state_with_optimizer, checkpoint_ref, timeout=DEFAULT_DCP_TIMEOUT)
 
         step = self._parse_checkpoint_step(checkpoint_name)
 
@@ -169,7 +195,7 @@ class FireworksPolicyTrainer:
             checkpoints = [(row.get("name") or "").rstrip("/").rsplit("/", 1)[-1] for row in rows if self._is_dcp_checkpoint_row(row)]
             return sorted(checkpoints, key=self._parse_checkpoint_step)
 
-        checkpoints = self.training_client.inner.list_checkpoints()
+        checkpoints = self.training_client.list_checkpoints()
         if isinstance(checkpoints, tuple):
             checkpoints = checkpoints[0]
         return list(checkpoints)
@@ -374,41 +400,14 @@ class FireworksPolicyTrainer:
         """Resolve the builtin server-side loss kernel at setup time.
 
         Must be called before the first forward-backward pass.
-        Raises ValueError if the loss has no builtin kernel or PP > 1.
+        Raises ValueError if the loss has no builtin kernel or the config is
+        incompatible with the builtin path (e.g. kl_beta > 0).
         """
-        from training.utils.rl.cispo import CISPOConfig
-        from training.utils.rl.dapo import DAPOConfig
-        from training.utils.rl.dro import DROConfig
-        from training.utils.rl.gspo import GSPOConfig
-        from training.utils.rl.losses import resolve_builtin_loss
+        from training.utils.rl.losses import get_builtin_loss_config, validate_loss_path
 
-        eps = algorithm_config.eps_clip
-        eps_high = algorithm_config.eps_clip_high
-        loss_fn_name = algorithm_config.loss_fn or "grpo"
-
-        result = resolve_builtin_loss(
-            loss_fn_name,
-            profile,
-            dapo_config=DAPOConfig(
-                eps_clip=eps,
-                eps_clip_high=eps_high if eps_high is not None else 0.28,
-            ),
-            dro_config=DROConfig(),
-            gspo_config=GSPOConfig(
-                clip_ratio_low=eps,
-                clip_ratio_high=eps_high,
-            ),
-            cispo_config=CISPOConfig(
-                eps_low=eps,
-                eps_high=eps_high if eps_high is not None else 0.28,
-            ),
-            eps_clip=eps,
-            eps_clip_high=eps_high,
-        )
-        if result is None:
-            from training.utils.rl.losses import SUPPORTED_POLICY_LOSSES
-
-            raise ValueError(f"loss_fn='{loss_fn_name}' has no builtin server-side kernel. Supported: {', '.join(SUPPORTED_POLICY_LOSSES)}")
+        args = builtin_loss_args(algorithm_config)
+        validate_loss_path(args, profile)
+        result = get_builtin_loss_config(args)
         self._builtin_loss = result
         logger.info("Resolved builtin loss: kernel=%s, config=%s", result[0], result[1])
 
@@ -582,9 +581,8 @@ class FireworksPolicyTrainer:
     async def save_dcp_checkpoint(self, step: int) -> None:
         """Save a DCP checkpoint for resume."""
         name = f"step-{step}"
-        timeout = self.config.hotload.get("dcp_timeout", 2700)
         try:
-            await asyncio.to_thread(self.training_client.save_state, name, timeout=timeout)
+            await asyncio.to_thread(self.training_client.save_state, name, timeout=DEFAULT_DCP_TIMEOUT)
             logger.info("DCP checkpoint saved: %s", name)
         except Exception:
             logger.exception("Failed to save DCP checkpoint %s", name)

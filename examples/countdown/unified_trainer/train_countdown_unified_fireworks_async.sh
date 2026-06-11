@@ -7,9 +7,9 @@ set -x
 python -m examples.countdown.unified_trainer.train_countdown_unified_fireworks \
     rllm/backend=fireworks \
     model.name=accounts/fireworks/models/qwen3-4b \
+    model.tokenizer_model=Qwen/Qwen3-4B \
     model.lora_rank=0 \
-    training_infra.training_shape_id=qwen3-4b-minimum-h200 \
-    deployment.tokenizer_model=Qwen/Qwen3-4B \
+    fireworks_config.policy_trainer_shape_id=accounts/fireworks/trainingShapes/qwen3-4b-minimum-h200 \
     training.group_size=8 \
     training.learning_rate=1e-5 \
     rllm.rollout.train.temperature=1.0 \
@@ -22,8 +22,10 @@ python -m examples.countdown.unified_trainer.train_countdown_unified_fireworks \
     rllm.workflow.raise_on_error=false \
     data.max_prompt_length=2048 \
     data.max_response_length=2048 \
-    data.train_batch_size=1 \
-    data.val_batch_size=1024 \
+    rllm.data.max_prompt_length=2048 \
+    rllm.data.max_response_length=2048 \
+    rllm.data.train_batch_size=1 \
+    rllm.data.val_batch_size=1024 \
     rllm.algorithm.adv_estimator=grpo \
     rllm.algorithm.norm_adv_by_std_in_grpo=true \
     rllm.async_training.enable=true \
