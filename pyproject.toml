@@ -39,8 +39,8 @@ dependencies = [
     "aiosqlite",
     "hydra-core",
     "codetiming",
-    "tinker>=0.22.3 ; python_version >= '3.11'",
-    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook ; python_version >= '3.11'",
+    "tinker>=0.22.2 ; python_version >= '3.11'",
+    "tinker-cookbook==0.4.1 ; python_version >= '3.11'",
 ]
 
 [project.scripts]
@@ -87,13 +87,13 @@ verl = [
 ]
 
 tinker = [
-    "tinker>=0.22.3 ; python_version >= '3.11'",
-    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook ; python_version >= '3.11'",
+    "tinker>=0.22.2 ; python_version >= '3.11'",
+    "tinker_cookbook==0.4.1 ; python_version >= '3.11'",
 ]
 
 fireworks = [
-    "fireworks-ai[training]==1.2.0a79",
-    "fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git#subdirectory=training",
+    "fireworks-ai[training]==1.2.0a79 ; python_version >= '3.11'",
+    "fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git#subdirectory=training ; python_version >= '3.11'",
 ]
 
 opentelemetry = [
