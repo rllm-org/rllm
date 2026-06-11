@@ -35,7 +35,6 @@ class VerlTaskRunner(TaskRunner):
         sync_config(config, hydra_overrides=hydra_overrides)
         OmegaConf.resolve(config)
         sync_config(config, hydra_overrides=hydra_overrides)
-        config.trainer.use_legacy_worker_impl = "disable"
         pprint(OmegaConf.to_container(config))
 
         is_separated = config.rllm.get("async_training", {}).get("enable", False)

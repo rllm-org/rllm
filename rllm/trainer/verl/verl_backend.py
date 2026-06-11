@@ -27,6 +27,7 @@ from verl.trainer.ppo.utils import Role, WorkerType, need_reference_policy
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.metric import reduce_metrics
+from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 from rllm.data import Dataset
@@ -195,17 +196,22 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
 
-        self.async_rollout_manager = AgentLoopManager.create(
+        self.llm_server_manager = LLMServerManager.create(
             config=config,
             worker_group=self.actor_rollout_wg,
             rollout_resource_pool=actor_rollout_resource_pool,
+        )
+
+        self.async_rollout_manager = AgentLoopManager.create(
+            config=config,
+            llm_client=self.llm_server_manager.get_client(),
         )
 
         ckpt_cfg = omega_conf_to_dataclass(config.actor_rollout_ref.rollout.checkpoint_engine)
         self.checkpoint_manager = CheckpointEngineManager(
             config=ckpt_cfg,
             trainer=self.actor_rollout_wg,
-            replicas=self.async_rollout_manager.rollout_replicas,
+            replicas=self.llm_server_manager.get_replicas(),
         )
         self.checkpoint_manager.sleep_replicas()
 
@@ -309,22 +315,28 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         else:
             logger.warning("RayWorkerGroup.set_loss_fn not available — skipping custom loss injection")
 
-        servers = zip(self.async_rollout_manager.server_addresses, self.async_rollout_manager.server_handles, strict=True)
         if self.is_separated:
             from rllm.trainer.verl.async_agent_loop import FullyAsyncLLMServerManager
 
+            servers = zip(self.async_rollout_manager.server_addresses, self.async_rollout_manager.server_handles, strict=True)
             server_manager = FullyAsyncLLMServerManager(self.config, servers=servers, load_balancer_handle=self.async_rollout_manager.global_load_balancer)
+
+            self.rollout_engine = VerlEngine(
+                config=self.config,
+                server_manager=server_manager,
+                tokenizer=self.tokenizer,
+                processor=self.processor,
+            )
         else:
-            from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
+            server_client = self.llm_server_manager.get_client()
 
-            server_manager = AsyncLLMServerManager(self.config, servers=servers, load_balancer_handle=self.async_rollout_manager.global_load_balancer)
-
-        self.rollout_engine = VerlEngine(
-            config=self.config,
-            server_manager=server_manager,
-            tokenizer=self.tokenizer,
-            processor=self.processor,
-        )
+            self.rollout_engine = VerlEngine(
+                config=self.config,
+                server_manager=server_client,
+                tokenizer=self.tokenizer,
+                processor=self.processor,
+            )
+            self.rollout_engine.server_addresses = self.llm_server_manager.get_addresses()
 
         self.algorithm_config = kwargs.get("algorithm_config")
 

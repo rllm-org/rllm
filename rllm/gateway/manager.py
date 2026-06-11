@@ -306,7 +306,7 @@ class GatewayManager:
 
     def _ensure_verl_engine_workers(self, rollout_engine: VerlEngine) -> list[str]:
         """Get or create worker URLs for the VerlEngine."""
-        addresses = rollout_engine.server_manager._server_id_to_handle.keys()
+        addresses = rollout_engine.server_addresses
         return [f"http://{addr}" if not addr.startswith("http") else addr for addr in addresses]
 
     # -- Internal ------------------------------------------------------------
