@@ -301,7 +301,7 @@ def create_daytona_sandbox(name: str, image: str = "python:3.11-slim", **kwargs)
     return DaytonaSandbox(name=name, image=image, **kwargs)
 
 
-def build_daytona_snapshot(task, key: str, *, force: bool = False) -> str | None:
+def build_daytona_snapshot(task, key: str, *, force: bool = False, install_script: str = "") -> str | None:
     """Declaratively bake ``task``'s base image + RUN steps into a named snapshot; return the name.
 
     Idempotent: an already-registered snapshot is reused unless ``force``, which
@@ -309,7 +309,7 @@ def build_daytona_snapshot(task, key: str, *, force: bool = False) -> str | None
     """
     from daytona import CreateSnapshotParams, Daytona, DaytonaNotFoundError, Image, Resources
 
-    from rllm.eval._resolution import _dockerfile_run_commands, _resolve_image, _sandbox_resource_kwargs
+    from rllm.eval._resolution import _as_single_run_line, _dockerfile_run_commands, _resolve_image, _sandbox_resource_kwargs
 
     client = Daytona()
     try:
@@ -323,7 +323,9 @@ def build_daytona_snapshot(task, key: str, *, force: bool = False) -> str | None
         pass
 
     img = Image.base(_resolve_image(task, "daytona"))
-    run_commands = _dockerfile_run_commands(task)
+    run_commands = [_as_single_run_line(c) for c in _dockerfile_run_commands(task)]
+    if install_script:
+        run_commands.append(_as_single_run_line(install_script))
     if run_commands:
         img = img.run_commands(*run_commands)
 

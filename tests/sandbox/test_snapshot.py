@@ -462,3 +462,133 @@ def test_daytona_ref_absent_reads_enum_or_string_state(monkeypatch):
 
     monkeypatch.setattr(daytona, "Daytona", lambda *a, **k: fake_daytona("error"))  # plain string also works
     assert _daytona_ref_absent("rllm-env-x") is True
+
+
+# --------------------------------------------------------------------------
+# Install baking — fingerprint, single-line wrapper, baked_install, install skip
+# --------------------------------------------------------------------------
+
+
+def test_env_key_install_script_changes_key_and_empty_matches_old():
+    base = env_key("daytona", "img:tag", ["run a"])
+    assert env_key("daytona", "img:tag", ["run a"], "") == base  # no install → key unchanged
+    assert env_key("daytona", "img:tag", ["run a"], "curl install.sh | bash") != base
+    assert env_key_for(_task(), "modal", "curl install.sh | bash") != env_key_for(_task(), "modal")
+
+
+def test_install_script_for_reads_flow_or_empty():
+    from rllm.sandbox.snapshot import install_script_for
+
+    class _Harness:
+        def install_script(self):
+            return "apt-get install -y thing"
+
+    assert install_script_for(_Harness()) == "apt-get install -y thing"
+    assert install_script_for(object()) == ""
+    assert install_script_for(None) == ""
+
+
+def test_as_single_run_line_round_trips_and_executes():
+    import base64
+    import subprocess
+
+    from rllm.eval._resolution import _as_single_run_line
+
+    assert _as_single_run_line("apt-get update") == "apt-get update"  # one line passes through
+
+    script = "set -e\nFOO=bar\necho path-guard $FOO"
+    wrapped = _as_single_run_line(script)
+    assert "\n" not in wrapped
+    encoded = wrapped.removeprefix("echo ").split(" | ")[0]
+    assert base64.b64decode(encoded).decode() == script  # round-trips byte-exact
+    out = subprocess.run(["bash", "-c", wrapped], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "path-guard bar"  # and actually runs through bash
+
+
+def test_get_sandbox_install_hit_records_baked_install(monkeypatch, tmp_path):
+    import rllm.eval._resolution as res
+
+    install = "curl install.sh | bash"
+    reg = SnapshotRegistry(str(tmp_path / "s.json"))
+    key = env_key_for(_task(), "modal", install)
+    reg._envs[key] = {"backend": "modal", "ref": "im-baked", "expires_at": _future()}
+
+    monkeypatch.setattr(res, "_create_base_sandbox", lambda task, backend, *, image=None, name=None: _FakeSandbox())
+    monkeypatch.setattr(res, "_create_sandbox_for_task", lambda task, backend: pytest.fail("cold path taken on a baked hit"))
+
+    sb = get_sandbox(_task(), "modal", reg, install)
+    assert sb.baked_install == install
+
+
+def test_get_sandbox_task_only_fallback_boots_but_does_not_claim_install(monkeypatch, tmp_path):
+    """Only a task-only snapshot exists: boot from it (better than cold) but
+    record an empty ``baked_install`` so the harness still installs at runtime."""
+    import rllm.eval._resolution as res
+
+    reg = SnapshotRegistry(str(tmp_path / "s.json"))
+    task_only_key = env_key_for(_task(), "modal")
+    reg._envs[task_only_key] = {"backend": "modal", "ref": "im-task-only", "expires_at": _future()}
+
+    booted = {}
+    monkeypatch.setattr(res, "_create_base_sandbox", lambda task, backend, *, image=None, name=None: booted.update(image=image) or _FakeSandbox())
+    monkeypatch.setattr(res, "_create_sandbox_for_task", lambda task, backend: pytest.fail("cold path taken despite a usable task-only snapshot"))
+
+    sb = get_sandbox(_task(), "modal", reg, "curl install.sh | bash")
+    assert booted["image"] == "im-task-only"
+    assert sb.baked_install == ""
+
+
+def test_get_sandbox_cold_leaves_baked_install_unset(monkeypatch, tmp_path):
+    import rllm.eval._resolution as res
+
+    reg = SnapshotRegistry(str(tmp_path / "s.json"))  # empty → miss
+    monkeypatch.setattr(res, "_create_sandbox_for_task", lambda task, backend: _FakeSandbox())
+    sb = get_sandbox(_task(), "modal", reg, "curl install.sh | bash")
+    assert getattr(sb, "baked_install", None) is None
+
+
+def test_cli_harness_skips_install_iff_exact_baked_install():
+    from rllm.harnesses.cli_harness import BaseCliHarness
+
+    class _Stub(BaseCliHarness):
+        name = "stub"
+
+        def install_script(self):
+            return "echo installing"
+
+        def build_env(self, task, config):
+            return {}
+
+        def build_invocation(self, instruction, task, config):
+            return "true"
+
+    class _Sandbox:
+        def __init__(self):
+            self.calls = []
+
+        def exec(self, command, timeout=None, user=None):
+            self.calls.append(command)
+            return ""
+
+        def close(self):
+            pass
+
+    cold = _Stub()
+    cold_box = _Sandbox()
+    cold.set_sandbox(cold_box)
+    cold.on_sandbox_ready({}, None)
+    assert cold_box.calls == ["echo installing"]  # cold boot → install runs
+
+    warm = _Stub()
+    warm_box = _Sandbox()
+    warm_box.baked_install = "echo installing"
+    warm.set_sandbox(warm_box)
+    warm.on_sandbox_ready({}, None)
+    assert warm_box.calls == []  # image contains exactly this install → skip
+
+    stale = _Stub()
+    stale_box = _Sandbox()
+    stale_box.baked_install = "echo OLD install"  # baked for a different harness/version
+    stale.set_sandbox(stale_box)
+    stale.on_sandbox_ready({}, None)
+    assert stale_box.calls == ["echo installing"]  # mismatch → install runs

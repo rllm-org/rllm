@@ -123,21 +123,23 @@ def create_sandbox(backend: str, name: str, image: str, **kwargs) -> Sandbox:
         raise ValueError(f"Unknown sandbox backend: {backend}. Available: docker, local, modal, daytona")
 
 
-def build_snapshot(backend: str, task: Task, key: str, prior_ref: str | None = None, *, force: bool = False) -> str | None:
+def build_snapshot(backend: str, task: Task, key: str, prior_ref: str | None = None, *, force: bool = False, install_script: str = "") -> str | None:
     """Build a snapshot of ``task``'s environment; return a backend ref, or ``None``.
 
     Each backend owns its mechanism (Modal: live-FS capture; Daytona:
     declarative bake). Backends without snapshots (docker/local) return ``None``.
     A known-live ``prior_ref`` is reused unless ``force``, which always rebuilds.
+    ``install_script`` is baked on top of the task's RUN steps — ``key`` must
+    have been computed with the same script.
     """
     if backend == "modal":
         from rllm.sandbox.backends.modal_backend import build_modal_snapshot
 
-        return build_modal_snapshot(task, key, prior_ref, force=force)
+        return build_modal_snapshot(task, key, prior_ref, force=force, install_script=install_script)
     elif backend == "daytona":
         from rllm.sandbox.backends.daytona import build_daytona_snapshot
 
-        return build_daytona_snapshot(task, key, force=force)
+        return build_daytona_snapshot(task, key, force=force, install_script=install_script)
     return None
 
 

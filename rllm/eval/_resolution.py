@@ -16,6 +16,7 @@ Module is private (``_resolution``) — external callers should go through
 
 from __future__ import annotations
 
+import base64
 import importlib
 import inspect
 import logging
@@ -290,6 +291,19 @@ def _dockerfile_run_commands(task: Task) -> list[str]:
                 commands.append(cmd)
         i += 1
     return commands
+
+
+def _as_single_run_line(cmd: str) -> str:
+    """Collapse a multi-line shell command into one line for a Dockerfile ``RUN``.
+
+    Daytona builds snapshots declaratively: each command becomes a raw
+    ``RUN <command>`` line, which a multi-line script breaks. ``bash`` (not
+    ``sh``) matches how :meth:`Sandbox.exec` runs the same scripts live.
+    """
+    if "\n" not in cmd:
+        return cmd
+    encoded = base64.b64encode(cmd.encode("utf-8")).decode("ascii")
+    return f"echo {encoded} | base64 -d | bash"
 
 
 def _resolve_image(task: Task, backend: str) -> str:
