@@ -6,10 +6,10 @@ set -x
 
 python -m examples.countdown.unified_trainer.train_countdown_unified_fireworks \
     rllm/backend=fireworks \
-    model.name=accounts/fireworks/models/qwen3-4b \
-    model.tokenizer_model=Qwen/Qwen3-4B \
-    model.lora_rank=0 \
-    fireworks_config.policy_trainer_shape_id=accounts/fireworks/trainingShapes/qwen3-4b-minimum-h200 \
+    model.name=accounts/fireworks/models/qwen3-4b-instruct-2507 \
+    model.tokenizer_model=Qwen/Qwen3-4B-Instruct-2507 \
+    model.lora_rank=32 \
+    fireworks_config.policy_trainer_shape_id=accounts/fireworks/trainingShapes/qwen3-4b-minimum-lora \
     training.group_size=8 \
     training.learning_rate=1e-5 \
     rllm.rollout.train.temperature=1.0 \
@@ -35,7 +35,7 @@ python -m examples.countdown.unified_trainer.train_countdown_unified_fireworks \
     rllm.async_training.trigger_parameter_sync_step=1 \
     rllm.async_training.partial_rollout=true \
     rllm.trainer.total_epochs=1 \
-    rllm.trainer.logger='[wandb]' \
+    rllm.trainer.logger='[console]' \
     rllm.trainer.project_name='rllm-countdown' \
     rllm.trainer.experiment_name='countdown-fireworks-async-staleness-0.5' \
     rllm.trainer.val_before_train=true \
