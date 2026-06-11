@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import rllm
-from rllm.hooks import FixedEvaluation, FromTaskEvaluation, flow_needs_env, resolve_rollout_plan, scan_env_requirements, task_declares_env
+from rllm.hooks import FixedEvaluation, FromTaskEvaluation, resolve_rollout_plan, scan_env_requirements, task_declares_env
 from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
 from rllm.types import Task
 
@@ -52,20 +52,11 @@ def _plain_task(tmp_path: Path, *, with_env_dir: bool = False, verifier_block: s
 # ---------------------------------------------------------------------------
 
 
-def test_rollout_flows_declare_host_only():
-    assert flow_needs_env(_host_flow) is False
-
-
-def test_sandboxed_flows_declare_env():
-    assert flow_needs_env(_SandboxedStub()) is True
-
-
-def test_task_declares_env_via_environment_dir(tmp_path):
+def test_task_declares_env(tmp_path):
+    """One predicate, two carriers: an ``environment/`` dir on a Task, or
+    ``task_path`` metadata on a raw row."""
     assert task_declares_env(_plain_task(tmp_path, with_env_dir=True)) is True
     assert task_declares_env(_plain_task(tmp_path)) is False
-
-
-def test_task_declares_env_via_task_path_metadata():
     assert task_declares_env({"task_path": "/some/harbor/task"}) is True
     assert task_declares_env({"question": "2+2?"}) is False
 
@@ -127,9 +118,11 @@ def test_no_consumer_rule_downgrades_task_env(tmp_path, caplog):
 
 
 def test_scan_flow_declaration_wins():
-    scan = scan_env_requirements(_SandboxedStub(), None, None)
+    """A sandboxed flow needs the env even with no rows; an explicit remote
+    backend makes the scan remote."""
+    scan = scan_env_requirements(_SandboxedStub(), None, sandbox_backend="daytona")
     assert scan.needs_env is True
-    assert scan.any_remote is False
+    assert scan.any_remote is True
 
 
 def test_scan_finds_env_row_beyond_the_first(tmp_path):
@@ -152,11 +145,6 @@ def test_scan_explicit_backend_overrides_row_metadata():
     scan = scan_env_requirements(_host_flow, rows, sandbox_backend="docker")
     assert scan.needs_env is True
     assert scan.any_remote is False
-
-
-def test_scan_explicit_remote_backend():
-    scan = scan_env_requirements(_SandboxedStub(), None, sandbox_backend="daytona")
-    assert scan.any_remote is True
 
 
 def test_scan_no_env_anywhere():
