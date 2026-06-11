@@ -58,12 +58,8 @@ tools = [
     "mcp",
 ]
 
-eval-protocol = [
-    "eval-protocol",
-]
-
 all = [
-    "rllm[train,rewards,tools,eval-protocol]",
+    "rllm[train,rewards,tools]",
 ]
 
 ui = [
@@ -196,7 +192,6 @@ ignore = [
 "examples/fully_async/deepresearch/refine_agent.py" = ["E501"]
 "examples/fully_async/deepresearch/search_agent.py" = ["E501"]
 "examples/countdown/prepare_countdown_data.py" = ["E501"]
-"examples/eval_protocol/prepare_frozen_lake_data.py" = ["E501"]
 "cookbooks/solver_judge_flow/solver_judge_flow.py" = ["E501"]
 "rllm/cli/main.py" = ["E501"]
 "rllm/eval/visualizer.py" = ["E501"]

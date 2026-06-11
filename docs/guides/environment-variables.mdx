@@ -73,7 +73,7 @@ The `RLLM_*` knobs that are read inside Ray workers (the `TaskRunner` actor) inc
 - `RLLM_HARBOR_SESSION_TIMEOUT_S`
 
 <Note>
-  The primary verl rollout uses `VerlEngine` (talking to in-process vLLM servers via `AsyncLLMServerManager`), **not** `OpenAIEngine`, so `RLLM_OPENAI_REQUEST_TIMEOUT_S` does not affect it. That timeout applies only when `OpenAIEngine` is used — as the teacher engine for distillation, or in the eval-protocol / Fireworks engines — and even then it runs inside the `TaskRunner` actor.
+  The primary verl rollout uses `VerlEngine` (talking to in-process vLLM servers via `AsyncLLMServerManager`), **not** `OpenAIEngine`, so `RLLM_OPENAI_REQUEST_TIMEOUT_S` does not affect it. That timeout applies only when `OpenAIEngine` is used — e.g. as the teacher engine for distillation — and even then it runs inside the `TaskRunner` actor.
 </Note>
 
 ### Client-side knobs (not read in training workers)
