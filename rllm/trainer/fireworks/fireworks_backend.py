@@ -110,6 +110,41 @@ class FireworksBackend(TinkerBackend):
     # Fireworks infrastructure setup
     # ------------------------------------------------------------------
 
+    def _build_provision_config(self, algorithm_config: AlgorithmConfig):
+        """Parse ``fireworks_infra`` (cookbook provision-document format) into
+        the flat recipe config ``init_fireworks_infra`` expects.
+
+        The cookbook's ``load_yaml_provision`` resolves trainer/deployment
+        references and builds the typed ``rl_loop.Config``; it only accepts a
+        file path, so the resolved OmegaConf section round-trips through a
+        temp file.
+        """
+        import tempfile
+        from pathlib import Path
+
+        import yaml
+        from training.provision import load_yaml_provision
+
+        cfg = self.full_config
+        doc = OmegaConf.to_container(cfg.fireworks_infra, resolve=True)
+        common = doc.setdefault("common", {})
+        # rllm owns these knobs; mirror them into the provision document.
+        common["kl_beta"] = float(algorithm_config.kl_beta)
+        common["learning_rate"] = self.learning_rate
+        if cfg.get("concurrency") is not None:
+            common["concurrency"] = OmegaConf.to_container(cfg.concurrency, resolve=True)
+        if cfg.training.get("max_length") is not None:
+            common["max_seq_len"] = cfg.training.max_length
+
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
+            yaml.safe_dump(doc, fh)
+            doc_path = Path(fh.name)
+        try:
+            _, provision_cfg = load_yaml_provision(mode=None, recipe=None, path=doc_path)
+        finally:
+            doc_path.unlink(missing_ok=True)
+        return provision_cfg
+
     def _init_fireworks_infra(self, **kwargs) -> None:
         """Provision the trainer job, deployment, and sampler via the
         cookbook's ``training.provision.init_fireworks_infra``."""
@@ -121,7 +156,7 @@ class FireworksBackend(TinkerBackend):
         algorithm_config = kwargs.get("algorithm_config") or AlgorithmConfig.from_config(cfg.rllm.algorithm)
         validate_loss_path(builtin_loss_args(algorithm_config))
 
-        provision_cfg = OmegaConf.create(OmegaConf.to_container(cfg.fireworks_infra, resolve=True))
+        provision_cfg = self._build_provision_config(algorithm_config)
 
         # cleanup_existing=True: rllm names a fresh deployment per run, so
         # shutdown deletes the trainer job and deployment even when an

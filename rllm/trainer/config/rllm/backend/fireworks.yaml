@@ -42,16 +42,9 @@ fireworks_config:
   reference_trainer_shape_id: accounts/fireworks/trainingShapes/qwen3-4b-minimum-lora
   reference_trainer_replica_count: 0
 
-# Sampling concurrency control (cookbook ConcurrencyConfig)
-concurrency:
-  mode: adaptive                   # adaptive | fixed
-  initial_window: null             # Starting window for adaptive mode (null = 8 * replica_count)
-  min_window: 1
-  max_window: 256
-  prefill_queue_target: 0.5        # Target prefill queue duration (seconds)
-
 # Validation Configuration
-validation:  group_size: ???
+validation:
+  group_size: ???
 
 # Rollout Engine Configuration
 rollout_engine:
@@ -65,10 +58,10 @@ rollout_engine:
 data:
   train_files: null
   val_files: null
-  max_prompt_length: 2048
+  max_prompt_length: 30720
   max_response_length: 2048
-  train_batch_size: 64
-  val_batch_size: -1
+  train_batch_size: 32
+  val_batch_size: 32
 
 # Overriding the rLLM-common config with Fireworks-specific ones
 # Only override if the algorithm values are not None, otherwise still use the rLLM-common config
@@ -84,6 +77,16 @@ rllm:
   algorithm:
     rollout_correction:
       bypass_mode: True
+
+
+# Fireworks Sampling concurrency control (cookbook ConcurrencyConfig)
+concurrency:
+  mode: adaptive                   # adaptive | fixed
+  initial_window: null             # Starting window for adaptive mode (null = 8 * replica_count)
+  min_window: 1
+  max_window: 256
+  prefill_queue_target: 0.5        # Target prefill queue duration (seconds)
+
 
 # Do not change this section, unless you are familiar with Fireworks backend.
 fireworks_infra:
