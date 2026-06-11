@@ -213,26 +213,27 @@ def _run_train(
         except (KeyError, ImportError, AttributeError, TypeError) as e:
             fail(f"Cannot load agent '{agent_name}': {e}")
 
-        # Evaluator: --evaluator > train dataset.toml [verifier]; one host-side
-        # evaluator scores both train and val. Sandbox-shell verifiers aren't
-        # supported here — use --evaluator to override.
+        # Evaluator: --evaluator > train dataset.toml [verifier]; a host-side
+        # evaluator scores both train and val. Env-style verifiers
+        # (sandbox-shell / python-hybrid) resolve per task inside the sandbox
+        # via SandboxTaskHooks, so leave ``evaluator`` unset for those.
         if evaluator_name is not None:
             evaluator = load_evaluator(evaluator_name)
             evaluator_display = evaluator_name
         else:
             from pathlib import Path as _Path
 
-            from rllm.eval._resolution import build_dataset_evaluator
+            from rllm.eval._resolution import build_dataset_evaluator, dataset_verifier_kind
 
-            evaluator = build_dataset_evaluator(_Path(train_dir).resolve())
-            if evaluator is None:
-                fail(
-                    "Could not resolve a verifier for this benchmark. "
-                    "Declare a host-side verifier in dataset.toml ([verifier].name / "
-                    ".module / .import_path) or pass --evaluator explicitly. "
-                    "Sandbox-shell verifiers aren't supported in training yet."
-                )
-            evaluator_display = f"{type(evaluator).__name__} (from dataset.toml)"
+            train_dir_path = _Path(train_dir).resolve()
+            evaluator = build_dataset_evaluator(train_dir_path)
+            if evaluator is not None:
+                evaluator_display = f"{type(evaluator).__name__} (from dataset.toml)"
+            else:
+                kind = dataset_verifier_kind(train_dir_path)
+                if kind == "missing":
+                    fail("Could not resolve a verifier for this benchmark. Declare a verifier in dataset.toml ([verifier].name / .module / .import_path / .script) or pass --evaluator explicitly.")
+                evaluator_display = f"per-task ({kind}, in-sandbox)"
 
         if train_split is None:
             train_split = bench_result.split or "train"
@@ -476,9 +477,9 @@ def _describe_sandbox_routing(
 ) -> str | None:
     """One-line description of sandbox + gateway routing for the header. Returns ``None`` when no sandbox is needed."""
     from rllm.gateway.tunnel import is_local_sandbox_backend, parse_tunnel
-    from rllm.hooks import needs_sandbox_isolation
+    from rllm.hooks import scan_env_requirements
 
-    if not needs_sandbox_isolation(agent_flow, train_dataset, val_dataset):
+    if not scan_env_requirements(agent_flow, train_dataset, val_dataset, sandbox_backend=sandbox_backend).needs_env:
         return None
 
     backend = (sandbox_backend or "docker").lower()

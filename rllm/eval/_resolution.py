@@ -139,6 +139,18 @@ def _resolve_evaluator(
     raise RuntimeError(f"No verifier configured for task '{task.id}' (dataset_dir={task.dataset_dir})")
 
 
+def dataset_verifier_kind(dataset_dir: Path, sub_dir: Path | None = None) -> str:
+    """The dataset-level verifier kind (``"missing"`` when none is configured).
+
+    Used by the train CLI to distinguish env-style verifiers (resolved per
+    task inside the sandbox — leave the trainer's ``evaluator`` unset) from a
+    genuinely missing verifier (fail fast).
+    """
+    probe = Task(id="", instruction="", metadata={}, dataset_dir=dataset_dir, sub_dir=sub_dir)
+    kind, _ = _detect_verifier(probe)
+    return kind
+
+
 def build_dataset_evaluator(dataset_dir: Path, sub_dir: Path | None = None) -> Evaluator | None:
     """Build a single :class:`Evaluator` from a dataset's ``[verifier]`` config.
 
@@ -176,16 +188,6 @@ def _wrap_with_sandbox_if_needed(ev: PythonModuleEvaluator, sandbox: Sandbox | N
 # ---------------------------------------------------------------------------
 # Sandbox setup (extracted from rllm/tasks/runner.py)
 # ---------------------------------------------------------------------------
-
-
-def _needs_sandbox(task: Task, verifier_kind: str) -> bool:
-    """Decide whether the Runner should set up a sandbox."""
-    if verifier_kind in ("sandbox-shell", "python-hybrid"):
-        return True
-    # If the task ships an environment/, treat it as sandboxed
-    if (task.task_dir / "environment").is_dir() or (task.dataset_dir / "environment").is_dir():
-        return True
-    return False
 
 
 def _resolve_backend(task: Task, sandbox_backend: str | None) -> str:
