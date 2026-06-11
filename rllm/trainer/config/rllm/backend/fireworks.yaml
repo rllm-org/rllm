@@ -42,28 +42,6 @@ fireworks_config:
   reference_trainer_shape_id: accounts/fireworks/trainingShapes/qwen3-4b-minimum-lora
   reference_trainer_replica_count: 0
 
-
-deployment:
-  deployment_id: "rllm-deploy-${now:%Y%m%d-%H%M%S}"
-  deployment_shape: null  # Auto-derived from training shape if null
-  hot_load_bucket_type: FW_HOSTED  # Bucket type for hot-load snapshots
-  deployment_timeout_s: 5400       # Timeout for deployment creation/readiness (90 min)
-  deployment_extra_args: null      # Extra Helm args for the deployment
-  tokenizer_model: ${model.tokenizer_model}
-  sample_timeout: 600              # HTTP read timeout for sampling completions (10 min)
-  disable_speculative_decoding: true  # Disable EAGLE speculation for hotload compatibility
-  replica_count: 1              # Pin deployment to a fixed replica count (null = 1)
-  extra_values: null               # Extra Helm values dict (e.g. {"priorityClass": "deployment"})
-
-training_infra:
-  job_id: null                     # Existing trainer job to reattach to (null = create one)
-  training_shape_id: qwen3-4b-minimum-h200
-  ref_training_shape_id: null      # Shape for reference trainer; falls back to training_shape_id
-  region: null
-  custom_image_tag: null           # Custom Docker image tag
-  skip_validations: false          # Skip control plane training shape validations
-  extra_args: null                 # Extra CLI args for the trainer job
-
 # Sampling concurrency control (cookbook ConcurrencyConfig)
 concurrency:
   mode: adaptive                   # adaptive | fixed
@@ -73,8 +51,7 @@ concurrency:
   prefill_queue_target: 0.5        # Target prefill queue duration (seconds)
 
 # Validation Configuration
-validation:
-  group_size: ???
+validation:  group_size: ???
 
 # Rollout Engine Configuration
 rollout_engine:

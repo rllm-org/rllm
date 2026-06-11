@@ -114,11 +114,6 @@ class FireworksBackend(TinkerBackend):
         """Provision the trainer job, deployment, and sampler via the
         cookbook's ``training.provision.init_fireworks_infra``."""
         cfg = self.full_config
-
-        kl_beta = cfg.rllm.algorithm.get("kl_beta", 0.0)
-        if kl_beta > 0:
-            raise ValueError(f"kl_beta={kl_beta} is not supported with server-side builtin losses. Set kl_beta=0 in your config.")
-
         # Fail fast on loss misconfiguration before provisioning any
         # (expensive, slow-to-create) remote infrastructure.
         from training.utils.rl.losses import validate_loss_path
