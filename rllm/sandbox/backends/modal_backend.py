@@ -200,6 +200,24 @@ class ModalSandbox:
         self._exec_unchecked(f"echo '{b64}' | base64 -d | tar xzf - --no-same-owner -C {remote_parent}")
         logger.debug("Uploaded dir %s -> %s in sandbox %s", local_path, remote_path, self.name)
 
+    def is_alive(self) -> bool:
+        """One API call: ``poll()`` returns ``None`` while the sandbox is still running.
+
+        A Modal sandbox dies for good when its ``timeout`` (total lifetime,
+        not idle time) elapses or it is terminated; ``poll()`` then returns
+        an exit code (verified live: a box past its lifetime polls ``124``).
+        Caveat: ``poll()`` can lag a *just*-issued terminate by a few
+        seconds, so this is a "has it died" check, not a fence against
+        in-flight termination — fine for callers like the warm queue,
+        whose dead boxes have been dead for minutes by the time they're
+        checked.
+        """
+        try:
+            return self._sandbox.poll() is None
+        except Exception:
+            logger.debug("ModalSandbox %s is_alive check failed — treating as dead", self.name, exc_info=True)
+            return False
+
     def close(self) -> None:
         """Terminate and detach from the Modal sandbox."""
         try:
