@@ -141,7 +141,6 @@ class FireworksBackend(TinkerBackend):
             reference_training_shape_id=cfg_section.get("ref_training_shape_id"),
             region=cfg_section.get("region"),
             custom_image_tag=cfg_section.get("custom_image_tag"),
-            node_count=cfg_section.get("node_count", 1),
             extra_args=list(cfg_section.get("extra_args") or []) or None,
             skip_validations=cfg_section.get("skip_validations", False),
         )

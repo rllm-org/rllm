@@ -54,7 +54,6 @@ training_infra:
   region: null
   custom_image_tag: null           # Custom Docker image tag
   skip_validations: false          # Skip control plane training shape validations
-  node_count: 1                    # Number of training nodes
   extra_args: null                 # Extra CLI args for the trainer job
 
 # Sampling concurrency control (cookbook ConcurrencyConfig)
