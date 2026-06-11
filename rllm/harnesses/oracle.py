@@ -45,10 +45,8 @@ class OracleHarness(SandboxedAgentFlow):
     # comparing the two implementations doesn't trip on path drift.
     _SOLUTION_DIR = "/solution"
 
-    def run(self, task: Task, config: AgentConfig) -> Episode:
-        sandbox = self.sandbox
-        if sandbox is None:
-            raise RuntimeError("OracleHarness requires a sandbox; the eval hooks should set one before run().")
+    def run(self, task: Task, config: AgentConfig, *, env) -> Episode:
+        sandbox = env
 
         solution_dir = task.task_dir / "solution"
         solve_path = solution_dir / "solve.sh"

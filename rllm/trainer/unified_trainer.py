@@ -1010,18 +1010,17 @@ class AgentTrainer:
                 if scan.any_remote or not is_local_sandbox_backend(hooks_backend):
                     config = enable_gateway_tunnel(config)
 
-        # Forward concurrency + backend overrides onto a SandboxedAgentFlow.
-        if agent_flow is not None and (sandbox_concurrency is not None or sandbox_backend is not None):
-            try:
-                from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
-
-                if isinstance(agent_flow, SandboxedAgentFlow):
-                    if sandbox_concurrency is not None:
-                        agent_flow.max_concurrent = sandbox_concurrency
-                    if sandbox_backend is not None:
-                        agent_flow.sandbox_backend = sandbox_backend
-            except ImportError:
-                pass
+        # Forward CLI overrides through the flow's configure(); the wiring
+        # warns about anything it returns unconsumed.
+        overrides = {k: v for k, v in {"sandbox_backend": sandbox_backend, "sandbox_concurrency": sandbox_concurrency}.items() if v is not None}
+        if agent_flow is not None and overrides:
+            configure = getattr(agent_flow, "configure", None)
+            leftovers = dict(configure(overrides) if callable(configure) else overrides)
+            if hooks is not None:
+                # The sandbox hooks consume the backend regardless of the flow.
+                leftovers.pop("sandbox_backend", None)
+            for flag in leftovers:
+                logger.warning("--%s has no effect for agent %s", flag.replace("_", "-"), type(agent_flow).__name__)
 
         has_agent_flow = agent_flow is not None and (evaluator is not None or hooks is not None)
         remote_runtime_enabled = config.rllm.get("remote_runtime", {}).get("enabled", False)

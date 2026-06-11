@@ -29,6 +29,7 @@ For Tinker backends, an in-process handler is injected into the gateway
 from __future__ import annotations
 
 import logging
+import re
 import socket
 import subprocess
 import sys
@@ -58,6 +59,26 @@ def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def container_reachable_url(url: str, backend: str | None) -> str:
+    """Rewrite host loopback addresses so a process inside a container can reach the gateway.
+
+    The gateway binds to 127.0.0.1 on the host; inside a Docker container
+    that loopback addresses the container itself. Docker Desktop resolves
+    ``host.docker.internal`` to the host, and on Linux Docker 20.10+ the
+    same hostname works when the container is started with
+    ``--add-host=host.docker.internal:host-gateway``. Keyed on the backend
+    that actually provisioned the task's sandbox; a no-op for everything
+    but ``docker`` (remote backends get a public tunnel URL instead).
+    """
+    if backend != "docker":
+        return url
+    return re.sub(
+        r"(https?://)(?:127\.0\.0\.1|localhost)(:\d+|/|$)",
+        r"\1host.docker.internal\2",
+        url,
+    )
 
 
 def _normalize_worker_url(raw_url: str) -> str:

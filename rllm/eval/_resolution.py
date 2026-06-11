@@ -118,7 +118,8 @@ def _resolve_evaluator(
         for base in (task.task_dir, task.dataset_dir):
             try:
                 ev = PythonModuleEvaluator.from_module(base, module, function)
-                return _wrap_with_sandbox_if_needed(ev, sandbox)
+                ev.sandbox = sandbox
+                return ev
             except FileNotFoundError:
                 continue
         raise FileNotFoundError(f"Verifier module '{module}' not found in {task.task_dir} or {task.dataset_dir}")
@@ -167,23 +168,6 @@ def build_dataset_evaluator(dataset_dir: Path, sub_dir: Path | None = None) -> E
     if kind in ("sandbox-shell", "python-hybrid", "missing"):
         return None
     return _resolve_evaluator(probe, sandbox=None, kind=kind, verifier_config=config)
-
-
-def _wrap_with_sandbox_if_needed(ev: PythonModuleEvaluator, sandbox: Sandbox | None) -> Evaluator:
-    """If the user's evaluate() signature includes ``sandbox``, inject it."""
-    if sandbox is None:
-        return ev
-    if any(p.name == "sandbox" for p in ev._params):  # noqa: SLF001
-        # Bind the sandbox into kwargs at call time
-        original_build = ev._build_kwargs  # noqa: SLF001
-
-        def build_with_sandbox(task: Task, episode: Episode) -> dict:
-            kwargs = original_build(task, episode)
-            kwargs["sandbox"] = sandbox
-            return kwargs
-
-        ev._build_kwargs = build_with_sandbox  # type: ignore[method-assign]
-    return ev
 
 
 # ---------------------------------------------------------------------------
@@ -412,8 +396,10 @@ class _FunctionEvaluator:
 def _adapt_legacy_evaluator(ev: Any) -> Evaluator:
     """Adapt evaluators with ``evaluate(task: dict, episode)`` to ``evaluate(task: Task, episode)``.
 
-    With ``from __future__ import annotations`` annotations are strings,
-    so we compare both ``is dict`` and string forms.
+    Only an explicit ``dict`` annotation (string form included — with
+    ``from __future__ import annotations`` annotations are strings) or a
+    legacy parameter name opts into the dict calling convention; an
+    unannotated evaluator gets the ``Task``.
     """
     sig = inspect.signature(ev.evaluate)
     params = list(sig.parameters.values())
@@ -423,7 +409,7 @@ def _adapt_legacy_evaluator(ev: Any) -> Evaluator:
     annotation = first.annotation if first.annotation is not inspect.Parameter.empty else None
 
     is_dict_annotation = annotation is dict or annotation == "dict" or (isinstance(annotation, str) and annotation.startswith("dict"))
-    if is_dict_annotation or first.name in ("task_data", "task_info") or annotation is None:
+    if is_dict_annotation or first.name in ("task_data", "task_info"):
         return _LegacyDictAdapter(ev)
     return ev
 

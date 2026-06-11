@@ -63,6 +63,21 @@ class HarborRuntime:
         self.session_timeout = session_timeout
         self._initialized = False
 
+    def configure(self, overrides: dict) -> dict:
+        """Apply caller/CLI overrides this runtime understands; return the rest.
+
+        Harbor provisions its own environments, so ``sandbox_backend`` maps
+        to harbor's ``environment_type``.
+        """
+        leftovers = dict(overrides)
+        backend = leftovers.pop("sandbox_backend", None)
+        if backend is not None:
+            self.environment_type = backend
+        concurrency = leftovers.pop("sandbox_concurrency", None)
+        if concurrency is not None:
+            self.max_concurrent = concurrency
+        return leftovers
+
     # ------------------------------------------------------------------
     # Shared initialization
     # ------------------------------------------------------------------

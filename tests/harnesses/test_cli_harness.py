@@ -71,26 +71,13 @@ def _make_config(base_url: str = "http://gw:8000/sessions/eval-0/v1", model: str
 # ---------------------------------------------------------------------------
 
 
-def test_on_sandbox_ready_runs_install_script_as_root():
-    h = OpenCodeHarness()
-    sandbox = FakeSandbox()
-    h.set_sandbox(sandbox)
-    h.on_sandbox_ready({}, _make_config())
-
-    assert len(sandbox.calls) == 1
-    call = sandbox.calls[0]
-    assert call.user == "root"
-    assert "opencode-ai" in call.command
-
-
 def test_run_returns_none_so_gateway_drives_trajectory():
     """Harnesses don't build Episodes — the gateway captures LLM calls and
     the engine's enrichment pass populates Steps from those traces."""
     h = OpenCodeHarness()
     sandbox = FakeSandbox(stdout="opencode said hi")
-    h.set_sandbox(sandbox)
 
-    result = h.run(_make_task(), _make_config())
+    result = h.run(_make_task(), _make_config(), env=sandbox)
 
     assert result is None
 
@@ -102,9 +89,8 @@ def test_run_execs_cli_against_agent_user_with_env_exported():
     be set for ``cd`` and lost before the CLI runs."""
     h = OpenCodeHarness()
     sandbox = FakeSandbox()
-    h.set_sandbox(sandbox)
 
-    h.run(_make_task(), _make_config())
+    h.run(_make_task(), _make_config(), env=sandbox)
 
     # Last call is the CLI invocation; preceding calls are write_configs.
     invocation = sandbox.calls[-1]
@@ -119,9 +105,8 @@ def test_run_swallows_cli_failure_and_returns_none():
     the point of failure) plus the verifier still drive the reward."""
     h = OpenCodeHarness()
     sandbox = FakeSandbox(fail_on_substring="opencode --model")
-    h.set_sandbox(sandbox)
 
-    result = h.run(_make_task(), _make_config())
+    result = h.run(_make_task(), _make_config(), env=sandbox)
 
     assert result is None
 
@@ -171,11 +156,10 @@ def test_opencode_writes_config_via_unquoted_path_so_home_expands():
     finds it."""
     h = OpenCodeHarness()
     sandbox = FakeSandbox()
-    h.set_sandbox(sandbox)
     config = _make_config(model="gpt-5.4-mini")
     env = h.build_env(_make_task(), config)
 
-    h.write_configs(_make_task(), config, env)
+    h.write_configs(sandbox, _make_task(), config, env)
 
     write_cmd = sandbox.calls[-1].command
     # $HOME left unquoted so the shell expands it at exec time.
@@ -193,11 +177,10 @@ def test_opencode_writes_config_with_custom_provider_to_bypass_models_dev():
     so arbitrary model ids work."""
     h = OpenCodeHarness()
     sandbox = FakeSandbox()
-    h.set_sandbox(sandbox)
     config = _make_config(base_url="http://gw:8000/sessions/eval-0/v1", model="openai/gpt-4o")
     env = h.build_env(_make_task(), config)
 
-    h.write_configs(_make_task(), config, env)
+    h.write_configs(sandbox, _make_task(), config, env)
 
     written = sandbox.calls[-1].command
     assert sandbox.calls[-1].user is None  # written as agent user
@@ -260,10 +243,9 @@ def test_opencode_writes_provider_config_with_model_id_only():
     used for env-var key selection, not for opencode routing."""
     h = OpenCodeHarness()
     sandbox = FakeSandbox()
-    h.set_sandbox(sandbox)
     config = _make_config(model="claude-opus-4-1")  # bare anthropic name
     env = h.build_env(_make_task(), config)
-    h.write_configs(_make_task(), config, env)
+    h.write_configs(sandbox, _make_task(), config, env)
 
     written = sandbox.calls[-1].command
     assert '"rllm-gateway"' in written
@@ -310,11 +292,10 @@ def test_mini_swe_agent_writes_dotenv_at_home_path():
     (not just env) because v2 loads dotenv with override=True."""
     h = MiniSweAgentHarness()
     sandbox = FakeSandbox()
-    h.set_sandbox(sandbox)
     config = _make_config(base_url="http://gw:8000/sessions/eval-0/v1", model="claude-opus-4-1")
     env = h.build_env(_make_task(), config)
 
-    h.write_configs(_make_task(), config, env)
+    h.write_configs(sandbox, _make_task(), config, env)
 
     written = sandbox.calls[-1].command
     assert "$HOME/.config/mini-swe-agent/.env" in written
@@ -426,8 +407,7 @@ def test_claude_code_invocation_extends_path_for_local_bin():
 def test_claude_code_run_returns_none():
     h = ClaudeCodeHarness()
     sandbox = FakeSandbox()
-    h.set_sandbox(sandbox)
-    assert h.run(_make_task(), _make_config(model="claude-opus-4-1")) is None
+    assert h.run(_make_task(), _make_config(model="claude-opus-4-1"), env=sandbox) is None
 
 
 # ---------------------------------------------------------------------------
@@ -462,11 +442,10 @@ def test_codex_writes_auth_json_and_config_toml():
     The earlier custom ``model_provider`` block was a silent no-op."""
     h = CodexHarness()
     sandbox = FakeSandbox()
-    h.set_sandbox(sandbox)
     config = _make_config(base_url="http://gw:8000/sessions/eval-0/v1", model="gpt-5")
     env = h.build_env(_make_task(), config)
 
-    h.write_configs(_make_task(), config, env)
+    h.write_configs(sandbox, _make_task(), config, env)
 
     written = sandbox.calls[-1].command
     assert sandbox.calls[-1].user is None  # written as agent user
@@ -515,8 +494,7 @@ def test_codex_invocation_strips_provider_prefix_from_model():
 def test_codex_run_swallows_failure_and_returns_none():
     h = CodexHarness()
     sandbox = FakeSandbox(fail_on_substring="codex exec")
-    h.set_sandbox(sandbox)
-    assert h.run(_make_task(), _make_config(model="gpt-5")) is None
+    assert h.run(_make_task(), _make_config(model="gpt-5"), env=sandbox) is None
 
 
 # ---------------------------------------------------------------------------
@@ -557,8 +535,7 @@ def test_qwen_code_run_returns_none():
     gateway-captured traces drive trajectory enrichment."""
     h = QwenCodeHarness()
     sandbox = FakeSandbox()
-    h.set_sandbox(sandbox)
-    assert h.run(_make_task(), _make_config(model="qwen3-coder-plus")) is None
+    assert h.run(_make_task(), _make_config(model="qwen3-coder-plus"), env=sandbox) is None
 
 
 # ---------------------------------------------------------------------------
@@ -615,10 +592,9 @@ def test_kimi_cli_writes_config_with_custom_provider_block():
     the chosen model at it."""
     h = KimiCliHarness()
     sandbox = FakeSandbox()
-    h.set_sandbox(sandbox)
     config = _make_config(base_url="http://gw:8000/sessions/eval-0/v1", model="gpt-4o")
     env = h.build_env(_make_task(), config)
-    h.write_configs(_make_task(), config, env)
+    h.write_configs(sandbox, _make_task(), config, env)
     written = sandbox.calls[-1].command
     assert "/tmp/kimi-config.json" in written
     assert '"rllm-gateway"' in written
@@ -667,18 +643,18 @@ def test_kimi_cli_invocation_breaks_loop_on_matching_response_id():
 
 
 def test_container_url_rewrites_loopback_for_docker_backend():
-    h = OpenCodeHarness()
-    h.sandbox_backend = "docker"
-    assert h._container_url("http://127.0.0.1:8000/v1") == "http://host.docker.internal:8000/v1"
-    assert h._container_url("http://localhost:9001/sessions/x/v1") == "http://host.docker.internal:9001/sessions/x/v1"
+    from rllm.gateway.manager import container_reachable_url
+
+    assert container_reachable_url("http://127.0.0.1:8000/v1", "docker") == "http://host.docker.internal:8000/v1"
+    assert container_reachable_url("http://localhost:9001/sessions/x/v1", "docker") == "http://host.docker.internal:9001/sessions/x/v1"
 
 
 def test_container_url_passthrough_for_non_docker_backends():
-    h = OpenCodeHarness()
-    h.sandbox_backend = "modal"
-    assert h._container_url("http://127.0.0.1:8000/v1") == "http://127.0.0.1:8000/v1"
-    h.sandbox_backend = "local"
-    assert h._container_url("http://localhost:9000/v1") == "http://localhost:9000/v1"
+    from rllm.gateway.manager import container_reachable_url
+
+    assert container_reachable_url("http://127.0.0.1:8000/v1", "modal") == "http://127.0.0.1:8000/v1"
+    assert container_reachable_url("http://localhost:9000/v1", "local") == "http://localhost:9000/v1"
+    assert container_reachable_url("http://127.0.0.1:8000/v1", None) == "http://127.0.0.1:8000/v1"
 
 
 # ---------------------------------------------------------------------------
@@ -719,7 +695,6 @@ def test_gateway_api_key_returns_placeholder_when_env_unset(monkeypatch):
 def test_opencode_uses_gateway_token_in_config_when_metadata_set():
     h = OpenCodeHarness()
     sandbox = FakeSandbox()
-    h.set_sandbox(sandbox)
     config = AgentConfig(
         base_url="http://gw/sessions/eval-0/v1",
         model="gpt-4o",
@@ -727,7 +702,7 @@ def test_opencode_uses_gateway_token_in_config_when_metadata_set():
         metadata={"gateway_auth_token": "tok-xyz"},
     )
     env = h.build_env(_make_task(), config)
-    h.write_configs(_make_task(), config, env)
+    h.write_configs(sandbox, _make_task(), config, env)
 
     written = sandbox.calls[-1].command
     assert '"apiKey": "tok-xyz"' in written
