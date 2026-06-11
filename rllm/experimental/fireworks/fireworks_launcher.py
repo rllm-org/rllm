@@ -2,7 +2,7 @@ from omegaconf import DictConfig
 
 from rllm.data import Dataset
 from rllm.experimental.fireworks.fireworks_backend import FireworksBackend
-from rllm.experimental.unified_trainer import TrainerLauncher, UnifiedTrainer
+from rllm.trainer.unified_trainer import TrainerLauncher, UnifiedTrainer
 from rllm.workflows.store import Store
 from rllm.workflows.workflow import Workflow
 

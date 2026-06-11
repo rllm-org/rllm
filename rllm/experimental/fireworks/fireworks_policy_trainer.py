@@ -24,7 +24,7 @@ from fireworks.training.sdk import WeightSyncer
 from tinker.types import AdamParams
 from training.utils.client import ReconnectableClient
 
-from rllm.experimental.common import (
+from rllm.trainer.algorithms import (
     AlgorithmConfig,
     CompactFilteringConfig,
     TransformConfig,

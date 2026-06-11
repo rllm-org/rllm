@@ -25,12 +25,12 @@ from typing import Any
 from fireworks.training.sdk import DeploymentSampler
 from typing_extensions import override
 
-from rllm.experimental.rollout.rollout_engine import ModelOutput
-from rllm.experimental.rollout.tinker_engine import (
+from rllm.engine.rollout.rollout_engine import ModelOutput
+from rllm.engine.rollout.tinker_engine import (
     TinkerEngine,
     _flat_token_input_length,
 )
-from rllm.experimental.rollout.types import (
+from rllm.engine.rollout.types import (
     TinkerTokenInput,
     TinkerTokenOutput,
     Tokenizer,
@@ -119,7 +119,7 @@ class FireworksEngine(TinkerEngine):
             router_replay: If True, request and propagate routing matrices
                 for Router Replay (R3) training.
         """
-        from rllm.experimental.rollout.rollout_engine import RolloutEngine
+        from rllm.engine.rollout.rollout_engine import RolloutEngine
         from rllm.parser import ChatTemplateParser
 
         # Skip TinkerEngine.__init__ (it requires tinker.ServiceClient);

@@ -30,8 +30,6 @@ training:
 deployment:
   deployment_id: "rllm-deploy-${now:%Y%m%d-%H%M%S}"
   deployment_shape: null  # Auto-derived from training shape if null
-  deployment_region: null          # Region for deployment; falls back to training_infra.region
-  deployment_accelerator_type: null  # Accelerator for deployment; falls back to training_infra.accelerator_type
   hot_load_bucket_type: FW_HOSTED  # Bucket type for hot-load snapshots
   deployment_timeout_s: 5400       # Timeout for deployment creation/readiness (90 min)
   deployment_extra_args: null      # Extra Helm args for the deployment
@@ -50,15 +48,22 @@ hotload:
   reset_prompt_cache: true         # Purge KV cache on deployment after hotloading weights
 
 training_infra:
+  job_id: null                     # Existing trainer job to reattach to (null = create one)
   training_shape_id: qwen3-4b-minimum-h200
   ref_training_shape_id: null      # Shape for reference trainer; falls back to training_shape_id
   region: null
   custom_image_tag: null           # Custom Docker image tag
-  accelerator_type: null           # GPU type (auto-resolved from training shape)
-  accelerator_count: null          # Number of GPUs (auto-resolved from training shape)
   skip_validations: false          # Skip control plane training shape validations
   node_count: 1                    # Number of training nodes
   extra_args: null                 # Extra CLI args for the trainer job
+
+# Sampling concurrency control (cookbook ConcurrencyConfig)
+concurrency:
+  mode: adaptive                   # adaptive | fixed
+  initial_window: null             # Starting window for adaptive mode (null = 8 * replica_count)
+  min_window: 1
+  max_window: 256
+  prefill_queue_target: 0.5        # Target prefill queue duration (seconds)
 
 # Validation Configuration
 validation:
