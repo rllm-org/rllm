@@ -104,7 +104,6 @@ class FireworksBackend(TinkerBackend):
         self._policy_rc: ReconnectableClient | None = None
         self._rlor_mgr: TrainerJobManager | None = None
         self._infra: FireworksProvisionInfra | None = None
-        self._sample_timeout: int = 600
 
     # ------------------------------------------------------------------
     # Fireworks infrastructure setup
@@ -172,12 +171,6 @@ class FireworksBackend(TinkerBackend):
         self._infra = infra
 
         try:
-            profile = infra.training_profile
-            if profile is not None:
-                pp = getattr(profile, "pipeline_parallelism", 1)
-                if pp > 1:
-                    raise ValueError(f"Pipeline parallelism (PP={pp}) is not supported. Use a training shape with PP=1.")
-
             if infra.max_seq_len and not cfg.training.get("max_length"):
                 cfg.training.max_length = infra.max_seq_len
                 logger.info("Auto-derived max_length from training shape: %d", cfg.training.max_length)
@@ -185,7 +178,6 @@ class FireworksBackend(TinkerBackend):
             self._rlor_mgr = infra.trainer_manager
             self._policy_job_id = infra.policy_job_id
             self._policy_rc = infra.policy
-            self._sample_timeout = provision_cfg.deployment.sample_timeout or 600
 
             self.sampling_client = infra.sampler
             self.tokenizer = getattr(infra.sampler, "tokenizer", None) or load_deployment_tokenizer(provision_cfg.deployment)
@@ -234,7 +226,6 @@ class FireworksBackend(TinkerBackend):
                 disable_thinking=rollout_extra.pop("disable_thinking", False),
                 accumulate_reasoning=rollout_extra.pop("accumulate_reasoning", False),
                 reasoning_effort=rollout_extra.pop("reasoning_effort", "medium"),
-                sample_timeout=self._sample_timeout,
                 router_replay=cfg.rllm.algorithm.get("router_replay", "disabled") == "R3",
                 **rollout_extra,
             )
