@@ -13,6 +13,18 @@
       "default_agent": "zeroclaw",
       "reward_fn": "claw_eval_reward_fn"
     },
+    "rllm-swesmith": {
+      "description": "SWE-smith filtered: ~4.7K solvable bug-fixing tasks across 105 Python repos (sandbox; in-sandbox pytest grading)",
+      "source": "kylemontgomery/swesmith-filtered",
+      "builder": "rllm.data.swesmith_builder:build_benchmark",
+      "category": "agentic",
+      "splits": [
+        "train"
+      ],
+      "eval_split": "train",
+      "train_split": "train",
+      "default_agent": "mini-swe-agent"
+    },
     "gsm8k": {
       "description": "Grade school math word problems (8.5K train, 1.3K test)",
       "source": "openai/gsm8k",

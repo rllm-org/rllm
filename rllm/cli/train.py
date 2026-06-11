@@ -198,7 +198,11 @@ def _run_train(
             console.print(f"  [key]--val-dataset '{val_dataset_name}' is not a local benchmark dir; reusing train tasks for validation.[/]")
 
         # For local sandbox tasks, --agent picks the AgentFlow.
-        bench_result = BenchmarkLoader.load(train_dir, harness_name=agent_name)
+        bench_result = BenchmarkLoader.load(train_dir, sandbox_backend=sandbox_backend, harness_name=agent_name)
+        # dataset.toml's default_sandbox applies when --sandbox-backend wasn't
+        # given (same rule as the eval CLI).
+        if not sandbox_backend and bench_result.sandbox_backend:
+            sandbox_backend = bench_result.sandbox_backend
         train_ds_name = bench_result.name
         catalog_entry = {
             "description": bench_result.description,

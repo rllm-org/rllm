@@ -148,6 +148,13 @@ def _run_eval(
             "category": bench_result.category,
         }
 
+        # dataset.toml's default_sandbox applies when --sandbox-backend wasn't
+        # given; it reaches the agent and hooks through agent_metadata like the
+        # CLI flag would.
+        if not sandbox_backend and bench_result.sandbox_backend:
+            agent_metadata = dict(agent_metadata or {})
+            agent_metadata["sandbox_backend"] = bench_result.sandbox_backend
+
         if split is None:
             split = bench_result.split or "test"
 
