@@ -263,8 +263,16 @@ class GatewayManager:
         sp = sampling_params if sampling_params is not None else (self._val_sampling_params if is_validation else self._train_sampling_params)
         return self.client.create_session(session_id=session_id, sampling_params=sp or None)
 
-    def get_session_url(self, session_id: str) -> str:
-        if self.public_url:
+    def get_session_url(self, session_id: str, *, public: bool = True) -> str:
+        """Session-scoped base URL for the flow's LLM client.
+
+        ``public=False`` returns the host-local gateway URL even when a tunnel
+        is up — for flows whose LLM client runs on the host (e.g. a sandboxed
+        bash loop driving the sandbox via ``exec``). The tunnel hostname only
+        matters to clients *inside* the env, and free quick-tunnel hostnames
+        can die mid-run; host-side clients should never depend on them.
+        """
+        if public and self.public_url:
             base = self.public_url.rstrip("/")
             return f"{base}/sessions/{session_id}/v1"
         return self.client.get_session_url(session_id)

@@ -51,6 +51,9 @@ class BaseCliHarness(SandboxedAgentFlow):
 
     # Display name used by the agent registry.
     name: str = "cli"
+    # The CLI process makes its LLM calls from inside the sandbox, so it needs
+    # the publicly-reachable gateway URL (tunnel) on remote backends.
+    llm_inside_env: bool = True
     # Default sandbox backend — overridable via class attr or kwargs.
     sandbox_backend: str = "docker"
     # Default container image. Tasks usually override via per-task images.
