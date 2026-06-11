@@ -23,6 +23,9 @@ from training.provision import FireworksProvisionInfra, init_fireworks_infra
 from training.utils import ReconnectableClient, load_deployment_tokenizer
 from training.utils.config import ConcurrencyConfig, DeployConfig, TrainerConfig
 
+from rllm.engine.rollout import FireworksEngine, RolloutEngine
+from rllm.trainer.algorithms import simple_timer
+
 # fix:fireworks - tinker 0.15.0 sends project_id=None, server rejects it
 # from tinker.types import CreateSessionRequest
 # _orig_model_dump = CreateSessionRequest.model_dump
@@ -41,9 +44,7 @@ from training.utils.config import ConcurrencyConfig, DeployConfig, TrainerConfig
 # def _patched_rc_optim_step(self, params, grad_accumulation_normalization=None):
 #     return self._client.optim_step(params).result(timeout=self._default_timeout)
 # _RC.optim_step = _patched_rc_optim_step
-from rllm.experimental.fireworks.fireworks_policy_trainer import FireworksPolicyTrainer
-from rllm.experimental.rollout import FireworksEngine, RolloutEngine
-from rllm.trainer.algorithms import simple_timer
+from rllm.trainer.fireworks.fireworks_policy_trainer import FireworksPolicyTrainer
 from rllm.trainer.tinker.tinker_backend import TinkerBackend
 from rllm.trainer.tinker.tinker_metrics_utils import (
     update_training_metrics,

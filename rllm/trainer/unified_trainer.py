@@ -992,7 +992,7 @@ class AgentTrainer:
                 **kwargs,
             )
         elif backend == "fireworks":
-            from rllm.experimental.fireworks.fireworks_launcher import FireworksTrainerLauncher
+            from rllm.trainer.fireworks.fireworks_launcher import FireworksTrainerLauncher
 
             self.launcher = FireworksTrainerLauncher(
                 config=config,
