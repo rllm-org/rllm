@@ -300,8 +300,16 @@ class BaseCliHarness(SandboxedAgentFlow):
     # ---------------------------------------------------------------------
 
     def on_sandbox_ready(self, task: dict, config: AgentConfig) -> None:  # noqa: ARG002
-        """Install the CLI inside the sandbox before the first run."""
+        """Install the CLI inside the sandbox before the first run.
+
+        Skipped when the sandbox's image already contains exactly this
+        harness's install (``baked_install``, recorded at snapshot boot by
+        :func:`rllm.sandbox.snapshot.get_sandbox`). Cold boots and task-only
+        snapshot boots install as usual.
+        """
         if self.sandbox is None:
+            return
+        if getattr(self.sandbox, "baked_install", "") == self.install_script():
             return
         try:
             self._exec_root(self.install_script(), timeout=self.install_timeout)

@@ -467,17 +467,19 @@ class UnifiedTrainer:
         if hooks is None or not getattr(hooks, "sandbox_backend", None) or warm_queue_size == 0:
             return None
 
+        from rllm.sandbox.snapshot import install_script_for
         from rllm.sandbox.train_schedule import build_train_schedule
         from rllm.sandbox.warm_queue import WarmQueue
 
-        frontier = getattr(getattr(self.agent_workflow_engine, "agent_flow", None), "max_concurrent", 8)
+        flow = getattr(self.agent_workflow_engine, "agent_flow", None)
+        frontier = getattr(flow, "max_concurrent", 8)
         size = frontier if warm_queue_size < 0 else warm_queue_size
         consumed = trainer_state.global_step - 1  # global_step is 1-based once fit_async starts
         remaining = self._total_training_steps - consumed
         if use_total_batches:
             remaining = min(remaining, self.rllm_config.trainer.total_batches - consumed)
         schedule = build_train_schedule(train_dataloader, group_size=self.rllm_config.rollout.n, total_epochs=total_epochs, remaining_batches=remaining)
-        warm_queue = WarmQueue(schedule, hooks.sandbox_backend, hooks.registry, size)
+        warm_queue = WarmQueue(schedule, hooks.sandbox_backend, hooks.registry, size, install_script=install_script_for(flow))
         hooks.warm_queue = warm_queue
         warm_queue.start()
         logger.info("training warm queue started: %d ahead over %d scheduled tasks", size, len(schedule))

@@ -256,9 +256,9 @@ class SandboxTaskHooks:
 
         sandbox = None
         if plan.needs_env:
-            from rllm.sandbox.snapshot import get_sandbox
+            from rllm.sandbox.snapshot import get_sandbox, install_script_for
 
-            sandbox = self.warm_queue.pop(task) if self.warm_queue is not None else get_sandbox(task, self.sandbox_backend, self._registry)
+            sandbox = self.warm_queue.pop(task) if self.warm_queue is not None else get_sandbox(task, self.sandbox_backend, self._registry, install_script_for(task_flow))
             _setup_task_environment(task, sandbox)
             if isinstance(task_flow, SandboxedAgentFlow):
                 task_flow.set_sandbox(sandbox)

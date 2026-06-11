@@ -51,7 +51,7 @@ class _FakeGetSandbox:
         self.gate = gate
         self.made: list[_CountingSandbox] = []
 
-    def __call__(self, task: Task, backend: str | None, registry) -> _CountingSandbox:
+    def __call__(self, task: Task, backend: str | None, registry, install_script: str = "") -> _CountingSandbox:
         sandbox = _CountingSandbox(task)
         self.made.append(sandbox)
         if self.gate is not None:
