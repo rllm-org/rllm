@@ -116,10 +116,9 @@ fireworks_infra:
     base_model: ${model.name}
     tokenizer_model: ${model.tokenizer_model}
     lora_rank: ${model.lora_rank}            # 0 = full-parameter training
-    learning_rate: ${training.learning_rate}
-    max_seq_len: ${training.max_length}        # null = use the training shape's default context length
-    step_timeout: ${training.client_timeout}
-    kl_beta: ${oc.select:rllm.algorithm.kl_beta, 0.0}
+    learning_rate: 1e-5      # placeholder for fireworks managed flow. Should be overridden in the training codes.
+    max_seq_len: null        # null = use the training shape's default context length
+    step_timeout: 3600       # SDK default (3600s)
     weight_sync_timeout: 600
 
   deployments:
