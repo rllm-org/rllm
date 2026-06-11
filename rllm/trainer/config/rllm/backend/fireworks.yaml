@@ -126,9 +126,9 @@ fireworks_infra:
     # Only needed for full-parameter RFT with KL (kl_beta > 0).
     # LoRA reuses the policy as its frozen reference, so leave it unwired otherwise.
     reference:
-      training_shape_id: ${fireworks_config.policy_trainer_shape_id}
+      training_shape_id: ${fireworks_config.reference_trainer_shape_id}
       job_id: null           # null = create a new job; set to reattach
-      replica_count: ${fireworks_config.policy_trainer_replica_count}
+      replica_count: ${fireworks_config.reference_trainer_replica_count}
       # Optional fields for admin users.
       custom_image_tag: null
       region: null           # optional explicit trainer region; prefer leaving unset
