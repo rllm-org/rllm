@@ -203,7 +203,15 @@ class TinkerEngine(RolloutEngine):
         self.service_client = service_client
 
         # Initialize the renderer
-        renderer_name = renderer_name or model_info.get_recommended_renderer_name(self.model_name)
+        if renderer_name is None:
+            try:
+                renderer_name = model_info.get_recommended_renderer_name(self.model_name)
+            except KeyError as e:
+                raise ValueError(
+                    f"tinker_cookbook's model_info does not know '{self.model_name}' (the cookbook release can lag "
+                    f"models the Tinker service already supports). Set rollout_engine.renderer_name explicitly to a "
+                    f"renderer matching the model's chat template (e.g. 'qwen3_5' for Qwen3.6 models)."
+                ) from e
         # Pass image_processor for VLM support with Tinker renderer
         self.renderer = renderers.get_renderer(renderer_name, self.tokenizer, image_processor=image_processor)
 

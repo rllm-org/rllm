@@ -40,7 +40,7 @@ dependencies = [
     "hydra-core",
     "codetiming",
     "tinker>=0.22.3 ; python_version >= '3.11'",
-    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook ; python_version >= '3.11'",
+    "tinker-cookbook>=0.4.2 ; python_version >= '3.11'",
 ]
 
 [project.scripts]
@@ -92,7 +92,7 @@ verl = [
 
 tinker = [
     "tinker>=0.22.3 ; python_version >= '3.11'",
-    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook ; python_version >= '3.11'",
+    "tinker-cookbook>=0.4.2 ; python_version >= '3.11'",
 ]
 
 opentelemetry = [
