@@ -41,8 +41,10 @@ class DatasetConfig:
     data: str = ""  # path to data file relative to dataset dir
     evaluation: EvaluationConfig | None = None
 
-    # Sandbox datasets only
-    default_sandbox: str = "docker"
+    # Sandbox datasets only. None = not declared — callers fall back to their
+    # own default; an undeclared value must NOT override a task-level
+    # ``sandbox_backend`` (see rllm.eval._resolution._resolve_backend).
+    default_sandbox: str | None = None
 
     # Shared
     default_agent: str | None = None
@@ -88,7 +90,7 @@ def load_dataset_config(path: str | Path) -> DatasetConfig:
         description=ds.get("description", ""),
         data=ds.get("data", ""),
         evaluation=evaluation,
-        default_sandbox=ds.get("default_sandbox", "docker"),
+        default_sandbox=ds.get("default_sandbox"),
         default_agent=ds.get("default_agent"),
         split=ds.get("split", "test"),
         tasks=tasks,
