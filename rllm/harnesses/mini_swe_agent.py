@@ -14,6 +14,7 @@ from __future__ import annotations
 import shlex
 
 from rllm.harnesses.cli_harness import BaseCliHarness
+from rllm.sandbox.protocol import Sandbox
 from rllm.types import AgentConfig, Task
 
 # Model-name prefix → provider env-var mapping. Mirrors litellm's logic
@@ -77,7 +78,7 @@ class MiniSweAgentHarness(BaseCliHarness):
         return _INSTALL_SCRIPT
 
     def build_env(self, task: Task, config: AgentConfig) -> dict[str, str]:
-        gateway_url = self._container_url(config.base_url)
+        gateway_url = config.base_url
         env: dict[str, str] = {
             # Legacy v1 wizard-skip (still honoured by some forks); v2
             # ignores it and instead checks for ~/.config/mini-swe-agent/.env
@@ -99,6 +100,7 @@ class MiniSweAgentHarness(BaseCliHarness):
 
     def write_configs(
         self,
+        sandbox: Sandbox,
         task: Task,
         config: AgentConfig,
         env: dict[str, str],
@@ -119,7 +121,7 @@ class MiniSweAgentHarness(BaseCliHarness):
         # the dotenv with ``override=True`` — it would otherwise unset
         # ``OPENAI_API_BASE`` we exported in :meth:`build_env`, sending
         # every call to api.openai.com and bypassing the gateway.
-        gateway_url = self._container_url(config.base_url)
+        gateway_url = config.base_url
         dotenv_lines = [
             f"MSWEA_GLOBAL_MODEL={qualified}",
             f"{api_var}={api_key}",
@@ -134,6 +136,7 @@ class MiniSweAgentHarness(BaseCliHarness):
         # ``_heredoc_write`` quotes the target path, which kills
         # ``$HOME`` expansion — write the heredoc inline instead.
         self._exec_agent(
+            sandbox,
             f"mkdir -p $HOME/.config/mini-swe-agent && cat > {path} << 'MSWEA_DOTENV_EOF'\n{content}\nMSWEA_DOTENV_EOF",
             env=env,
         )

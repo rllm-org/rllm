@@ -547,48 +547,64 @@ def test_get_sandbox_cold_leaves_baked_install_unset(monkeypatch, tmp_path):
     assert getattr(sb, "baked_install", None) is None
 
 
-def test_cli_harness_skips_install_iff_exact_baked_install():
-    from rllm.harnesses.cli_harness import BaseCliHarness
+def _hook_setup(monkeypatch, sandbox, flow):
+    """Run the real SandboxTaskHooks.setup with provisioning stubbed out."""
+    import rllm.eval._resolution as res
+    import rllm.sandbox.snapshot as snap
+    from rllm.hooks import FixedEvaluation, SandboxTaskHooks
 
-    class _Stub(BaseCliHarness):
+    class _Evaluator:
+        def evaluate(self, task, episode):
+            return None
+
+    monkeypatch.setattr(snap, "get_sandbox", lambda task, backend, registry=None, install_script="": sandbox)
+    monkeypatch.setattr(res, "_setup_task_environment", lambda task, sb: None)
+    hooks = SandboxTaskHooks(evaluation=FixedEvaluation(_Evaluator()), sandbox_backend="docker", use_snapshot=False)
+    return hooks.setup(_task(backend="docker"), flow, "uid")
+
+
+def _install_flow():
+    from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
+
+    class _InstallFlow(SandboxedAgentFlow):
         name = "stub"
 
         def install_script(self):
             return "echo installing"
 
-        def build_env(self, task, config):
-            return {}
+        def run(self, task, config, *, env):
+            return None
 
-        def build_invocation(self, instruction, task, config):
-            return "true"
+    return _InstallFlow()
 
-    class _Sandbox:
-        def __init__(self):
-            self.calls = []
 
-        def exec(self, command, timeout=None, user=None):
-            self.calls.append(command)
-            return ""
+class _ExecRecordingSandbox(_FakeSandbox):
+    def __init__(self):
+        self.calls = []
 
-        def close(self):
-            pass
+    def exec(self, command, timeout=None, user=None):
+        self.calls.append((command, user))
+        return ""
 
-    cold = _Stub()
-    cold_box = _Sandbox()
-    cold.set_sandbox(cold_box)
-    cold.on_sandbox_ready({}, None)
-    assert cold_box.calls == ["echo installing"]  # cold boot → install runs
 
-    warm = _Stub()
-    warm_box = _Sandbox()
-    warm_box.baked_install = "echo installing"
-    warm.set_sandbox(warm_box)
-    warm.on_sandbox_ready({}, None)
-    assert warm_box.calls == []  # image contains exactly this install → skip
+def test_hook_installs_on_cold_sandbox(monkeypatch):
+    sandbox = _ExecRecordingSandbox()  # no baked_install attr → cold
+    ctx = _hook_setup(monkeypatch, sandbox, _install_flow())
+    assert sandbox.calls == [("echo installing", "root")]
+    assert ctx.env is sandbox
 
-    stale = _Stub()
-    stale_box = _Sandbox()
-    stale_box.baked_install = "echo OLD install"  # baked for a different harness/version
-    stale.set_sandbox(stale_box)
-    stale.on_sandbox_ready({}, None)
-    assert stale_box.calls == ["echo installing"]  # mismatch → install runs
+
+def test_hook_skips_install_when_exactly_baked(monkeypatch):
+    sandbox = _ExecRecordingSandbox()
+    sandbox.baked_install = "echo installing"
+    ctx = _hook_setup(monkeypatch, sandbox, _install_flow())
+    assert sandbox.calls == []
+    assert ctx.env is sandbox
+
+
+def test_hook_installs_when_baked_script_differs(monkeypatch):
+    sandbox = _ExecRecordingSandbox()
+    sandbox.baked_install = "echo OLD install"  # baked for a different harness/version
+    ctx = _hook_setup(monkeypatch, sandbox, _install_flow())
+    assert sandbox.calls == [("echo installing", "root")]
+    assert ctx.env is sandbox

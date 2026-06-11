@@ -27,6 +27,7 @@ import json
 import shlex
 
 from rllm.harnesses.cli_harness import BaseCliHarness
+from rllm.sandbox.protocol import Sandbox
 from rllm.types import AgentConfig, Task
 
 _INSTALL_SCRIPT = r"""
@@ -85,12 +86,13 @@ class KimiCliHarness(BaseCliHarness):
 
     def write_configs(
         self,
+        sandbox: Sandbox,
         task: Task,
         config: AgentConfig,
         env: dict[str, str],
     ) -> None:
         """Write kimi-cli's config JSON pointing at the gateway as a custom provider."""
-        gateway_url = self._container_url(config.base_url)
+        gateway_url = config.base_url
         _, model_id, _ = self.ensure_provider_prefix(config.model)
         api_key = env.get("OPENAI_API_KEY", self.gateway_api_key(config, "OPENAI_API_KEY"))
 
@@ -117,7 +119,7 @@ class KimiCliHarness(BaseCliHarness):
             },
         }
         content = json.dumps(kimi_config, indent=2)
-        self._exec_agent(self._heredoc_write(_KIMI_CONFIG_PATH, content), env=env)
+        self._exec_agent(sandbox, self._heredoc_write(_KIMI_CONFIG_PATH, content), env=env)
 
     def build_invocation(
         self,

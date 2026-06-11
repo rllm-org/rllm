@@ -34,6 +34,9 @@ class PythonModuleEvaluator:
     def __init__(self, fn: Callable, module_name: str = "<unknown>"):
         self.fn = fn
         self.module_name = module_name
+        # Live sandbox handle for hybrid verifiers whose evaluate() declares
+        # a ``sandbox`` parameter; set by the resolution layer per task.
+        self.sandbox = None
         # Inspect signature once
         sig = inspect.signature(fn)
         self._params = list(sig.parameters.values())
@@ -90,6 +93,7 @@ class PythonModuleEvaluator:
           - ``metadata`` → ``task.metadata`` dict
           - ``episode`` → the Episode object
           - ``trajectory`` → ``episode.trajectories[-1]`` as a plain dict
+          - ``sandbox`` → the live sandbox handle (hybrid verifiers)
         Any remaining positional params get filled in the natural order.
         """
         out: dict = {}
@@ -103,6 +107,8 @@ class PythonModuleEvaluator:
                 out[name] = episode
             elif name == "trajectory":
                 out[name] = _trajectory_as_dict(episode)
+            elif name == "sandbox" and self.sandbox is not None:
+                out[name] = self.sandbox
         # If nothing matched, fall back to (task, episode) positionally
         if not out:
             return {"task": task, "episode": episode}

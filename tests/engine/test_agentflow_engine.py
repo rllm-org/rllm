@@ -125,3 +125,67 @@ def test_strict_enrichment_follows_is_validation(is_validation):
                 asyncio.run(engine._run_single(task, "task:0", is_validation=False))
     finally:
         engine.shutdown()
+
+
+def test_needs_env_flow_must_declare_env_param():
+    """Binding a needs_env flow whose run() lacks the keyword-only ``env``
+    parameter fails at construction, not mid-rollout."""
+    from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
+
+    class _LegacyFlow(SandboxedAgentFlow):
+        def run(self, task, config):  # no env param
+            return None
+
+    with pytest.raises(TypeError, match="keyword-only 'env'"):
+        AgentFlowEngine(
+            agent_flow=_LegacyFlow(),
+            evaluator=_Evaluator(),
+            gateway=_Gateway(),
+            model="test-model",
+            n_parallel_tasks=1,
+        )
+
+
+def test_env_flow_receives_sandbox_and_container_url():
+    """A needs_env flow gets the hook-provisioned sandbox as ``env`` and, when
+    its LLM client runs in-sandbox on docker, a container-reachable URL."""
+    from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
+
+    seen = {}
+
+    class _EnvFlow(SandboxedAgentFlow):
+        llm_inside_env = True
+
+        def run(self, task, config, *, env):
+            seen["env"] = env
+            seen["base_url"] = config.base_url
+            return None
+
+    sandbox = object()
+
+    class _Hooks:
+        def setup(self, task, agent_flow, uid):
+            from rllm.engine.agentflow_engine import TaskContext
+
+            return TaskContext(evaluator=_Evaluator(), env=sandbox, env_backend="docker")
+
+    class _LoopbackGateway(_Gateway):
+        def get_session_url(self, session_id, public=True):
+            return f"http://127.0.0.1:9131/sessions/{session_id}/v1"
+
+    engine = AgentFlowEngine(
+        agent_flow=_EnvFlow(),
+        evaluator=None,
+        gateway=_LoopbackGateway(),
+        model="test-model",
+        n_parallel_tasks=1,
+        hooks=_Hooks(),
+    )
+    task = task_from_row({"question": "q"}, "task")
+    try:
+        asyncio.run(engine._run_single(task, "task:0", is_validation=True))
+    finally:
+        engine.shutdown()
+
+    assert seen["env"] is sandbox
+    assert seen["base_url"].startswith("http://host.docker.internal:9131/")

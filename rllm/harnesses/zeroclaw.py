@@ -12,7 +12,7 @@ Three facts established from the ZeroClaw docs/installer:
 1. **Install** via the official installer with ``--prebuilt --skip-onboard``
    (downloads a checksum-verified release binary; no Rust toolchain needed).
    The binary lands in ``$CARGO_HOME/bin/zeroclaw`` (``/root/.cargo/bin`` when
-   installed as root, which ``on_sandbox_ready`` does).
+   installed as root, which the install hook does).
 2. **One-shot, non-interactive** execution is ``zeroclaw agent -m "<prompt>"``
    ("if -m is provided, runs a single turn and exits").
 3. **Autonomy** must be ``level = "full"`` for the agent to run shell/filesystem
@@ -29,6 +29,7 @@ from __future__ import annotations
 import shlex
 
 from rllm.harnesses.cli_harness import BaseCliHarness
+from rllm.sandbox.protocol import Sandbox
 from rllm.types import AgentConfig, Task
 
 # Idempotent install. Bootstraps curl/ca-certs/tar/coreutils (the installer
@@ -84,7 +85,7 @@ class ZeroClawHarness(BaseCliHarness):
         # ZeroClaw resolves credentials in the order: explicit config.toml →
         # env vars (OPENAI_API_KEY/OPENAI_BASE_URL) → fallbacks. We set both:
         # config.toml is authoritative, these env vars are belt-and-suspenders.
-        gateway_url = self._container_url(config.base_url)
+        gateway_url = config.base_url
         api_key = self.gateway_api_key(config, "OPENAI_API_KEY")
         return {
             "OPENAI_API_KEY": api_key,
@@ -102,7 +103,7 @@ class ZeroClawHarness(BaseCliHarness):
         ``ModelProviderConfig`` struct. If a ZeroClaw version rejects it,
         switch to ``uri`` (older docs used that name).
         """
-        gateway_url = self._container_url(config.base_url)
+        gateway_url = config.base_url
         api_key = self.gateway_api_key(config, "OPENAI_API_KEY")
         model = config.model
         return "\n".join(
@@ -137,11 +138,12 @@ class ZeroClawHarness(BaseCliHarness):
             ]
         )
 
-    def write_configs(self, task: Task, config: AgentConfig, env: dict[str, str]) -> None:
+    def write_configs(self, sandbox: Sandbox, task: Task, config: AgentConfig, env: dict[str, str]) -> None:
         content = self._config_toml(config)
         # Write inline (not via _heredoc_write) so $HOME expands — the helper
         # single-quotes the path which would kill the expansion.
         self._exec_agent(
+            sandbox,
             f"mkdir -p $HOME/.zeroclaw && cat > {_CONFIG_PATH} << 'ZC_CONFIG_EOF'\n{content}\nZC_CONFIG_EOF",
             env=env,
         )
@@ -158,6 +160,7 @@ class ZeroClawHarness(BaseCliHarness):
         workdir = task.metadata.get("workdir")
         if workdir:
             self._exec_agent(
+                sandbox,
                 f'rm -rf "$HOME/.zeroclaw/workspace" && ln -sfn {shlex.quote(workdir)} "$HOME/.zeroclaw/workspace"',
                 env=env,
             )
