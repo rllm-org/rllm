@@ -1,0 +1,173 @@
+---
+title: Terminal-Bench 2.0
+description: Evaluate Harbor's Terminus-2 terminal agent on all 89 Terminal-Bench 2.0 tasks with Modal sandboxes, snapshots, and pass@k — entirely from the CLI
+---
+
+This cookbook runs Harbor's [Terminus-2](https://www.harborframework.com/docs/agents/terminus-2) agent against the full [Terminal-Bench 2.0](https://www.tbench.ai) benchmark. Unlike the other cookbooks, there is no plugin to install: the `terminus2` harness ships with rLLM, the dataset comes from the Harbor registry, and the whole run is driven by `rllm` CLI commands.
+
+Harbor is used only as a dataset registry and for the agent code itself. Execution stays on rLLM's own stack: each task boots a Modal sandbox from its prebuilt Docker image, the agent runs *inside* the sandbox (LLM calls route back through the rLLM gateway over a tunnel), and the task's own `tests/test.sh` produces the reward.
+
+## Pattern
+
+| Aspect | Value |
+|---|---|
+| Loop shape | Multi-turn terminal agent (tmux-driven), running inside the sandbox |
+| Dataset | `harbor:terminal-bench@2.0` — 89 tasks, each with a prebuilt Docker image |
+| Sandbox | Modal, booted from prebuilt environment snapshots |
+| Termination | Agent declares the task complete, or hits its turn limit (50) |
+| Reward shape | Per-task verifier: `tests/test.sh` writes `1.0` / `0.0` to `/logs/verifier/reward.txt` |
+| Metrics | Per-rollout accuracy, plus unbiased pass@k when `--attempts N` is set |
+
+## Prerequisites
+
+- **Python ≥ 3.12** — the `harbor` package requires it.
+- **A Modal account** — authenticate with `modal setup`, or export `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET`.
+- **A configured model provider** — `rllm model setup` (any provider works; the gateway enforces sampling parameters either way).
+
+No local Docker is needed: images are pulled and run on Modal.
+
+<Steps>
+  <Step title="Install rLLM with the harbor extra">
+    The harness itself ships with rLLM; the `harbor` extra is what lets the CLI resolve `harbor:` dataset names from the Harbor registry.
+
+    ```bash
+    uv pip install -e ".[harbor]"
+    rllm agent list        # should include "terminus2"
+    ```
+
+    <Warning>
+    If `rllm eval harbor:terminal-bench@2.0` later reports *"Benchmark 'terminal-bench@2.0' not found in catalog"*, the harbor import is failing silently — usually because the extra isn't installed in the active environment. A leftover empty `site-packages/harbor/` directory from an old uninstall produces the same symptom (Python treats the bare directory as a namespace package); delete it and reinstall.
+    </Warning>
+  </Step>
+
+  <Step title="Pull the dataset">
+    Nothing to do explicitly — the first command that references `harbor:terminal-bench@2.0` downloads all 89 task directories into `~/.cache/harbor/tasks/` and registers the dataset locally. After that it shows up like any other dataset:
+
+    ```bash
+    rllm dataset list      # includes terminal-bench@2.0 after first use
+    ```
+
+    Each task directory carries its own `task.toml` (with the prebuilt `docker_image`), `instruction.md`, and `tests/test.sh`. rLLM lifts the image and workdir into task metadata and auto-detects the verifier — no evaluator flag is needed.
+
+    <Note>
+    The registered dataset's rows point into `~/.cache/harbor/`. If you clear that cache, re-pull before the next run — stale rows fall back to a default image and snapshots stop matching.
+    </Note>
+  </Step>
+
+  <Step title="Build environment snapshots">
+    A cold run pulls each task's Docker image and installs the agent at rollout time. Snapshots pay that cost once: each of the 89 environments is built, the Terminus-2 install (an isolated Python 3.12 venv with `harbor`, plus tmux) is baked in, and the live filesystem is captured as a Modal image.
+
+    ```bash
+    rllm snapshot create harbor:terminal-bench@2.0 \
+      --sandbox-backend modal --agent terminus2 --ttl-hours 168
+    ```
+
+    Builds run 4-way parallel and take roughly an hour for all 89 (most images build in 30–60 s; a few multi-gigabyte ones take 15 minutes). Verify and inspect:
+
+    ```bash
+    rllm snapshot list
+    rllm snapshot inspect <group-id>   # per-task env keys and live status
+    ```
+
+    With snapshots in place, eval-time sandbox setup drops to 2–3 seconds per rollout. Snapshots are keyed on content (image + Dockerfile steps + agent install), so rebuilding after a TTL expiry reuses nothing stale, and switching to a different agent simply misses to the cold path.
+  </Step>
+
+  <Step title="Set the sandbox lifetime">
+    Modal sandboxes live 30 minutes by default, and several Terminal-Bench tasks (`compile-compcert`, `sam-cell-seg`, `train-fasttext`) legitimately need rollouts longer than that — the sandbox would die mid-run. Raise the lifetime for the eval process:
+
+    ```bash
+    export RLLM_MODAL_SANDBOX_TIMEOUT_S=5400   # 90 minutes
+    ```
+
+    This is the one environment variable the full run requires. The default is left at 30 minutes on purpose, so unrelated Modal workloads don't hold stuck sandboxes longer than necessary.
+  </Step>
+
+  <Step title="Smoke-test two tasks">
+    Before spending hours, run two known-fast tasks with two attempts each. This exercises every moving part — snapshot boot, gateway tunnel, in-sandbox agent, verifier, pass@k aggregation — in a few minutes:
+
+    ```bash
+    rllm eval harbor:terminal-bench@2.0 \
+      --agent terminus2 --sandbox-backend modal \
+      --task-indices 84,64 --attempts 2 \
+      --max-tokens 4096 --temperature 0.7
+    ```
+
+    Indices 84 and 64 are `openssl-selfsigned-cert` and `regex-log`. A healthy smoke run finishes with `Errors: 0` and a pass@1 / pass@2 block in the results panel.
+
+    <Note>
+    `--sandbox-backend modal` is required even though the harness defaults to Modal — without it the CLI's Docker preflight check rejects harbor datasets on machines without a local Docker daemon.
+    </Note>
+  </Step>
+
+  <Step title="Run the full benchmark">
+    89 tasks × 2 attempts = 178 rollouts:
+
+    ```bash
+    RLLM_MODAL_SANDBOX_TIMEOUT_S=5400 rllm eval harbor:terminal-bench@2.0 \
+      --agent terminus2 --sandbox-backend modal \
+      --attempts 2 --concurrency 12 --sandbox-concurrency 12 \
+      --max-tokens 4096 --temperature 0.7 \
+      --output results/tb2_full.json
+    ```
+
+    Expect 3–4 hours at this concurrency, dominated by LLM latency. Rollout completions stream to the console as they finish (`[task:attempt] Rollout completed. Rewards: [terminus2: 1.0] in 67s …`), so you can watch reward signal arrive long before the run ends.
+
+    When it completes, the results panel reports per-rollout accuracy, the error count, and pass@k:
+
+    ```text
+    Accuracy   33.1%  (59/178)
+    Errors     0
+    pass@1     33.1%
+    pass@2     43.8%
+    ```
+
+    Those numbers are from `Qwen/Qwen3.6-35B-A3B`; treat them as a reference point, not a target — sampling at temperature 0.7 moves individual runs by a few points.
+  </Step>
+
+  <Step title="Inspect the rollouts">
+    Every rollout is saved as its own episode JSON (attempt-suffixed, e.g. `episode_000004_regex-log_1.json`) under the run directory, alongside `results.json` whose `items` carry per-attempt rewards and `pass_at` the aggregate. Browse trajectories interactively:
+
+    ```bash
+    rllm view <run-id>
+    ```
+  </Step>
+</Steps>
+
+## Flags that matter for this run
+
+Every flag below is documented in full in [Running evaluations](/core-concepts/running-evaluations); this table covers why each one is set the way it is *for this benchmark*.
+
+| Flag | Why |
+|---|---|
+| `--attempts 2` | Two independent rollouts per task; the report gains unbiased pass@1 and pass@2. Needs `--temperature > 0` or the attempts are identical. |
+| `--sandbox-concurrency 12` | The terminus2 harness caps itself at 4 concurrent sandboxes by default; this lifts the cap. 12 is a comfortable level for Modal and most providers. |
+| `--max-tokens 4096` | Terminus-2 rejects any response over 16384 tokens outright ("NONE of the actions were performed"), and weaker models ramble past it. Capping generation keeps every turn usable. |
+| `--temperature 0.7` | Sampling diversity for pass@k. Drop to 0.2 for a more deterministic single-attempt run. |
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title='"Harbor tasks require Docker — Docker CLI not found"'>
+    The preflight check ran against a local-Docker assumption. Add `--sandbox-backend modal` to the command — it must be explicit on machines without Docker.
+  </Accordion>
+  <Accordion title='"Sandbox has already shut down" mid-rollout'>
+    The rollout outlived the sandbox. Raise `RLLM_MODAL_SANDBOX_TIMEOUT_S` (the full-run command above uses 5400 s) and re-run the affected tasks with `--task-indices`.
+  </Accordion>
+  <Accordion title="Snapshot builds report a failed env">
+    Re-run the same `rllm snapshot create` command with `--task-indices <idx>` for just the failed task — already-built environments are recorded and shared between groups, so nothing is rebuilt. Transient image-pull slowness is the usual cause.
+  </Accordion>
+  <Accordion title="Rewards are all 0.0 but rollouts look busy">
+    Open an episode JSON and check the model outputs. Empty `content` on every step means the provider/API key is broken (the agent sees blank replies); valid-looking commands with 0.0 rewards usually just mean the model isn't strong enough for the task — Terminal-Bench 2.0 is hard.
+  </Accordion>
+</AccordionGroup>
+
+## Cleanup
+
+Snapshots expire after their TTL (168 hours above) but the backend images linger until destroyed:
+
+```bash
+rllm snapshot destroy <group-id>     # delete the group + unreferenced images
+rllm snapshot renew <group-id>       # or extend the TTL instead
+```
+
+Eval sandboxes are terminated as each rollout finishes; a crashed run's leftovers are cleaned up by Modal when their lifetime lapses.
