@@ -26,6 +26,11 @@
       "function": "MiniSweAgentHarness",
       "description": "Run mini-swe-agent inside the sandbox."
     },
+    "terminus2": {
+      "module": "rllm.harnesses.terminus2",
+      "function": "Terminus2Harness",
+      "description": "Run Harbor's Terminus-2 terminal agent inside the sandbox (harbor used only for the agent code)."
+    },
     "codex": {
       "module": "rllm.harnesses.codex",
       "function": "CodexHarness",
