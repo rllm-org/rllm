@@ -58,11 +58,11 @@ No local Docker is needed: images are pulled and run on Modal.
     A cold run pulls each task's Docker image and installs the agent at rollout time. Snapshots pay that cost once: each of the 89 environments is built, the Terminus-2 install (an isolated Python 3.12 venv with `harbor`, plus tmux) is baked in, and the live filesystem is captured as a Modal image.
 
     ```bash
-    rllm snapshot create harbor:terminal-bench@2.0 \
+    RLLM_SNAPSHOT_BUILD_WORKERS=10 rllm snapshot create harbor:terminal-bench@2.0 \
       --sandbox-backend modal --agent terminus2 --ttl-hours 168
     ```
 
-    Builds run 4-way parallel and take roughly an hour for all 89 (most images build in 30–60 s; a few multi-gigabyte ones take 15 minutes). Verify and inspect:
+    `RLLM_SNAPSHOT_BUILD_WORKERS` lifts build parallelism from its default of 4 — Modal absorbs 10 concurrent builds comfortably, finishing all 89 environments in roughly 20–30 minutes (most images build in 30–60 s; the few multi-gigabyte ones dominate the tail). Verify and inspect:
 
     ```bash
     rllm snapshot list
