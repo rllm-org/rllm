@@ -13,6 +13,31 @@
       "default_agent": "zeroclaw",
       "reward_fn": "claw_eval_reward_fn"
     },
+    "skillsbench": {
+      "description": "SkillsBench: 91 expert-curated agentic tasks measuring how AI agents use skills across industrial, software, scientific, office, finance, and security domains (Harbor task format; per-task tests/test.sh verifier).",
+      "source": "benchflow/skillsbench",
+      "builder": "rllm.data.skillsbench_builder:build_benchmark",
+      "category": "agentic",
+      "splits": [
+        "train"
+      ],
+      "eval_split": "train",
+      "default_agent": "claude-code"
+    },
+    "skillsbench-no-skills": {
+      "description": "SkillsBench baseline without the per-task skills/ tree, for measuring the gain from skills augmentation.",
+      "source": "benchflow/skillsbench",
+      "builder": "rllm.data.skillsbench_builder:build_benchmark",
+      "builder_kwargs": {
+        "include_skills": false
+      },
+      "category": "agentic",
+      "splits": [
+        "train"
+      ],
+      "eval_split": "train",
+      "default_agent": "claude-code"
+    },
     "gsm8k": {
       "description": "Grade school math word problems (8.5K train, 1.3K test)",
       "source": "openai/gsm8k",
