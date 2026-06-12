@@ -106,9 +106,8 @@ def get_ppo_ray_runtime_env():
         env.pop(key, None)
 
     runtime_env = {"env_vars": env}
-    # Only set working_dir=None when the job config doesn't specify one (avoid merge conflict)
-    if job_runtime_env.get("working_dir") is None:
-        runtime_env["working_dir"] = None
+    # Don't set working_dir=None explicitly — Ray 2.55+'s uv_runtime_env_hook
+    # crashes on None (TypeError in _is_path). Omitting it has the same effect.
     # Apply rLLM's verl patches (PR #5881 backport, dynamic-batch sync, etc.) on every
     # Ray worker process so the patches take effect inside FSDP workers — driver-side
     # monkey-patches do not propagate. The hook function is lazy and idempotent.

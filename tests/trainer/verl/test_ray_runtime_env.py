@@ -248,14 +248,14 @@ def test_edge_case_exact_prefix():
 
 
 def test_runtime_env_no_job_config():
-    """No `ray job submit` context → returns rllm defaults + working_dir=None."""
+    """No `ray job submit` context → returns rllm defaults, no working_dir key."""
     with patch.dict(os.environ, {}, clear=True):
         runtime_env = get_ppo_ray_runtime_env()
 
     assert "env_vars" in runtime_env
     assert runtime_env["env_vars"]["TOKENIZERS_PARALLELISM"] == "true"
     assert runtime_env["env_vars"]["NCCL_DEBUG"] == "WARN"
-    assert runtime_env["working_dir"] is None
+    assert "working_dir" not in runtime_env
 
 
 def test_runtime_env_pops_keys_from_job_config():
@@ -294,4 +294,4 @@ def test_runtime_env_handles_invalid_job_config_json():
         runtime_env = get_ppo_ray_runtime_env()
 
     assert runtime_env["env_vars"]["TOKENIZERS_PARALLELISM"] == "true"
-    assert runtime_env["working_dir"] is None
+    assert "working_dir" not in runtime_env

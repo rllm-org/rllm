@@ -4,7 +4,7 @@ import socket
 import hydra
 import ray
 from omegaconf import OmegaConf
-from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
+from rllm.trainer.verl.ray_runtime_env import get_ppo_ray_runtime_env
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils.device import is_cuda_available
 
