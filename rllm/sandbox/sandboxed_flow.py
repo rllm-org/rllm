@@ -113,8 +113,12 @@ def create_sandbox(backend: str, name: str, image: str, **kwargs) -> Sandbox:
         from rllm.sandbox.backends.daytona import DaytonaSandbox
 
         return DaytonaSandbox(name=name, image=image, **kwargs)
+    elif backend == "bwrap":
+        from rllm.sandbox.backends.bwrap import BwrapSandbox
+
+        return BwrapSandbox(name=name, **kwargs)
     else:
-        raise ValueError(f"Unknown sandbox backend: {backend}. Available: docker, local, modal, daytona")
+        raise ValueError(f"Unknown sandbox backend: {backend}. Available: docker, local, modal, daytona, bwrap")
 
 
 def build_snapshot(backend: str, task: Task, key: str, prior_ref: str | None = None, *, force: bool = False) -> str | None:
