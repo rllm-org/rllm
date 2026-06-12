@@ -2,7 +2,7 @@
 
 # rLLM
 
-**Train your AI agents with RL. Any framework. Minimal code changes.**
+**Agentic RL on any harness, with any backend, on any benchmark.**
 
 [![Documentation](https://img.shields.io/badge/Documentation-blue?style=for-the-badge&logo=googledocs&logoColor=white)](https://docs.rllm-project.com/)
 [![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://join.slack.com/t/rllmproject/shared_invite/zt-3pyblo6ef-m9kqAoInI8xSyUBkpuOyXA)
@@ -14,16 +14,16 @@
 
 </div>
 
-rLLM is an open-source framework for training AI agents with reinforcement learning. Swap in a tracked client, define a reward function, and let RL handle the rest — no matter what agent framework you use.
+rLLM is an open-source framework for training language agents with reinforcement learning. Bring any harness — Claude Code, Codex, mini-swe-agent, opencode, Terminus-2, or your own — run it inside any sandbox (Docker, Daytona, Modal, local), and rLLM captures the rollouts, computes rewards, and updates the policy. Switch the training backend (verl, tinker, fireworks) with one flag; the same agent code runs both eval and training.
 
-## Core Features
+## Core features
 
-- **Works with any agent framework** — LangGraph, SmolAgent, Strands, OpenAI Agents SDK, Google ADK, or plain `openai.OpenAI`. Just swap the client. 🔌
-- **Near-zero code changes** — Add `@rllm.rollout` to wrap your agent code, and rLLM traces every LLM call automatically. 🪄
-- **CLI-first workflow** — Eval and train from the command line with 50+ built-in benchmarks. `rllm eval gsm8k` just works. ⚡
-- **Battle-tested results** — rLLM-trained agents beat models 50x their size (4B → outperforms 235B on finance, 1.5B → surpasses O1-Preview on math). 📈
-- **Multiple RL algorithms** — GRPO, REINFORCE, RLOO, rejection sampling, and more. 🧠
-- **Two training backends** — `verl` for distributed multi-GPU training, `tinker` for single-machine / CPU setups. Same API either way. 🔧
+- **Any harness.** 10+ built-in CLI harnesses (Claude Code, Codex, Terminus-2, mini-swe-agent, opencode, qwen-code, aider, kimi-cli, zeroclaw) plus Harbor-compatible task directories. For custom agents, wrap any framework — LangGraph, SmolAgent, Strands, OpenAI Agents SDK, Google ADK, or plain `openai.OpenAI` — with `@rllm.rollout` and the same code runs in eval and in training.
+- **Any sandbox.** Run harnesses inside Docker, Daytona, Modal, or local execution. Pre-built snapshots and a warm-pool scheduler keep rollouts cheap at training-scale.
+- **Multiple training backends, one API.** `verl` for distributed multi-GPU training, `tinker` for single-machine / Tinker API, `fireworks` for the Fireworks training platform. Switch with `--backend`; agent and eval don't change.
+- **60+ integrated benchmarks.** Evaluate across math, code, MCQ, QA, instruction following, search, vision-language, translation, and agentic suites — Terminal-Bench 2.0, SkillsBench, SWEbench-Verified, AIME, MATH-500, GPQA, and 50+ more. `rllm eval <name>` auto-pulls and runs.
+- **Multiple RL algorithms.** GRPO, REINFORCE, RLOO, rejection sampling, and more.
+- **Battle-tested.** rLLM-trained agents have set open-source state of the art — DeepScaleR-1.5B surpassing O1-Preview on math, DeepCoder-14B matching O3-mini, DeepSWE-32B on SWE-bench, and a 4B finance model outperforming 235B. Adopted by academic labs and industry research teams, with community projects including Tongyi DeepResearch, PettingLLMs, SETA, and Terminal-Bench-RL (see [Community Projects](#community-projects) below).
 
 Read more on our [documentation site](https://docs.rllm-project.com/).
 
@@ -35,13 +35,14 @@ rLLM requires `Python >= 3.11`. You can install it either directly via pip or bu
 uv pip install "rllm @ git+https://github.com/rllm-org/rllm.git"
 ```
 
-this installs dependencies for running rllm cli, which uses Tinker as the training backend. 
-
-To use `verl` as the training backend (GPU machine required), install via 
+This installs dependencies for running `rllm` CLI with the `tinker` backend (single-machine, Tinker API). For other backends:
 
 ```bash
-# For distributed GPU training (verl + vLLM/SGLang)
-uv pip install rllm[verl] @ git+https://github.com/rllm-org/rllm.git
+# Distributed multi-GPU training (verl + vLLM/SGLang)
+uv pip install "rllm[verl] @ git+https://github.com/rllm-org/rllm.git"
+
+# Fireworks training platform
+uv pip install "rllm[fireworks] @ git+https://github.com/rllm-org/rllm.git"
 ```
 
 For building from source or Docker, see the [installation guide](https://docs.rllm-project.com/installation).
@@ -134,7 +135,7 @@ Under the hood:
 - **Workflow Engine** runs N parallel agent instances to collect rollouts
 - **Model Gateway** routes requests and captures token IDs + logprobs
 - **Transform Pipeline** groups trajectories for advantage computation
-- **Training Backend** (verl or tinker) handles the policy update
+- **Training Backend** (verl, tinker, or fireworks) handles the policy update
 
 ## Community Projects
 
