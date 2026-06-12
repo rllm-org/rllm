@@ -38,7 +38,7 @@ class AgentConfig:
     metadata: dict                           # Extra configuration
 ```
 
-`Task` is pure data. The instruction is rendered ahead of time (from a JSONL row, an `instruction.md` file, or an `instruction.md.tpl` template). `metadata` carries everything the verifier needs — for catalog datasets that's the source row; for sandbox tasks it's the parsed `task.toml`. See [Tasks and the Runner](/core-concepts/task-and-runner) for the loader and execution pipeline.
+`Task` is pure data. The instruction is rendered ahead of time (from a JSONL row, an `instruction.md` file, or an `instruction.md.tpl` template). `metadata` carries everything the verifier needs — for catalog datasets that's the source row; for sandbox tasks it's the parsed `task.toml`. See [Tasks (Harbor-compatible)](/core-concepts/tasks) for the loader and execution pipeline.
 
 ### Example AgentFlow
 
@@ -119,7 +119,7 @@ class ExactMatchEvaluator:
         )
 ```
 
-In practice you rarely write a class — most rLLM evaluators are plain `evaluate(task, episode) -> EvalOutput` functions exported from a module under `rllm.eval.reward_fns`. See [Reward functions](/core-concepts/reward-functions) for the convention and how a benchmark wires one up.
+In practice you rarely write a class — most rLLM evaluators are plain `evaluate(task, episode) -> EvalOutput` functions exported from a module under `rllm.eval.reward_fns`. See [Reward functions](/datasets/reward-functions) for the convention and how a benchmark wires one up.
 
 ### Built-in reward functions
 

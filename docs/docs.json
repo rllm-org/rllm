@@ -56,8 +56,6 @@
             "group": "rLLM CLI & UI",
             "pages": [
               "core-concepts/cli-and-ui",
-              "core-concepts/running-evaluations",
-              "datasets",
               "experimental/ui"
             ]
           },
@@ -65,11 +63,20 @@
             "group": "Core concepts",
             "pages": [
               "core-concepts/episodes-trajectories-steps",
-              "core-concepts/task-and-runner",
+              "core-concepts/tasks",
               "core-concepts/agentflow-evaluator",
-              "core-concepts/reward-functions",
               "core-concepts/harnesses",
+              "core-concepts/sandbox",
               "core-concepts/training"
+            ]
+          },
+          {
+            "group": "Datasets & Evaluation",
+            "pages": [
+              "datasets/overview",
+              "datasets/running-evaluations",
+              "datasets/reward-functions",
+              "datasets/byo-dataset"
             ]
           },
           {

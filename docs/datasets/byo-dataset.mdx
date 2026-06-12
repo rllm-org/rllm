@@ -1,0 +1,159 @@
+---
+title: Bring your own dataset
+description: Add a benchmark via the registry, a builder, or an ad-hoc directory — three paths for evaluating and training on your own data
+---
+
+There are three ways to point `rllm eval` and `rllm train` at a dataset that isn't already in the [Supported datasets](/datasets/overview) catalog. Pick the one that matches your situation.
+
+| Path | Use when | What you write |
+|------|----------|----------------|
+| **Ad-hoc directory** | one-off; experiment doesn't need to be redistributed | a folder on disk |
+| **Builder + catalog entry** | you want `rllm dataset pull <name>` to work for collaborators | a builder function + a registry row |
+| **Harbor package** | you're publishing a task suite for broad consumption | a Harbor-format git repo |
+
+All three resolve to the same `Task` shape; the difference is how the directory gets on disk.
+
+## Ad-hoc directory
+
+The fastest path. Build a directory in either supported shape (see [Tasks (Harbor-compatible)](/core-concepts/tasks) for the format) and point the CLI at it:
+
+```bash
+rllm eval ./my-benchmark/                  # auto-detects shape and verifier
+rllm eval ./my-benchmark/ --agent bash     # override harness
+rllm eval ./my-benchmark/fix-sort-bug      # single task subdirectory
+```
+
+A minimum row-based dataset:
+
+```
+my-math/
+├── dataset.toml
+├── instruction.md.tpl
+└── data/test.jsonl
+```
+
+```toml
+# dataset.toml
+name = "my-math"
+category = "math"
+instruction_field = "question"
+metadata_fields = ["answer"]
+
+[verifier]
+name = "math_reward_fn"
+```
+
+A minimum sandbox dataset:
+
+```
+my-bench/
+├── dataset.toml
+└── task-001/
+    ├── task.toml
+    ├── instruction.md
+    ├── environment/Dockerfile
+    └── tests/test.sh
+```
+
+No `rllm dataset pull` registration needed — `rllm eval ./path` works on any well-formed directory.
+
+## Builder + catalog entry
+
+When you want `rllm dataset pull my-bench` to materialize the dataset on a collaborator's machine, register a builder in `rllm/registry/datasets.json`:
+
+```json
+{
+  "my-bench": {
+    "description": "My benchmark: 200 widget-fixing tasks (sandbox)",
+    "source": "myorg/my-bench",
+    "builder": "rllm.data.my_bench_builder:build_benchmark",
+    "category": "agentic",
+    "splits": ["train", "test"],
+    "eval_split": "test",
+    "default_agent": "mini-swe-agent",
+    "default_sandbox": "modal"
+  }
+}
+```
+
+The builder downloads from `source`, screens out unsolvable rows, writes `dataset.toml` + per-task directories into `~/.rllm/datasets/my-bench/`, and registers `task_path` rows so `rllm eval my-bench` resolves to the materialized directory:
+
+```python
+# rllm/data/my_bench_builder.py
+from pathlib import Path
+from huggingface_hub import snapshot_download
+
+def build_benchmark(target_dir: Path, **kwargs) -> None:
+    raw = snapshot_download(repo_id="myorg/my-bench", repo_type="dataset")
+    for instance in _iter_instances(raw):
+        if not _is_solvable(instance):
+            continue
+        _write_task_dir(target_dir / instance["id"], instance)
+    _write_dataset_toml(target_dir)
+```
+
+The `rllm-swesmith` and `skillsbench` builders (in `rllm/data/`) are real-world references. Builders also accept `task_ids` / `limit` kwargs for partial builds — useful for smoke tests:
+
+```bash
+rllm dataset pull my-bench --task-ids fix-sort-bug,fix-search-bug
+rllm dataset pull my-bench --limit 50
+```
+
+### What goes in `default_sandbox`
+
+For sandbox datasets, declaring `default_sandbox` in the registry row (or in the materialized `dataset.toml`) means users don't have to remember `--sandbox-backend modal`. Both the eval and train CLIs honor it when `--sandbox-backend` is absent, falling back to the harness class default otherwise.
+
+### When the builder should *not* fill in resource limits
+
+Remote backends (Modal, Daytona) OOM on heavy environments with the default ~1 GiB allocation. If your tasks need more, patch in defaults at build time:
+
+```python
+# In your builder, before writing task.toml
+task_toml.setdefault("environment", {}).update({
+    "memory": "4 GiB",
+    "cpu": 2,
+    "build_timeout_sec": 1800,
+})
+```
+
+The `rllm-swesmith` builder does this — without it, the `uv install` step OOMs on cold sandbox builds.
+
+## Harbor packages
+
+If you already have a [Harbor](https://github.com/laude-institute/t-bench) task package, rLLM consumes it unchanged:
+
+```bash
+rllm eval harbor:my-org/my-tasks --agent bash --sandbox-backend modal
+```
+
+The `harbor:` prefix resolves through the Harbor registry. See [Tasks (Harbor-compatible)](/core-concepts/tasks) for the format — it's the same one rLLM uses natively.
+
+## Mixing splits for training
+
+`rllm train` accepts independent `--train-dataset` and `--val-dataset` paths, so train/val can be different directories or different shapes:
+
+```bash
+rllm train \
+  --train-dataset ./my-bench-train/ \
+  --val-dataset ./my-bench-val/ \
+  --agent mini-swe-agent \
+  --backend tinker
+```
+
+The registry's `train_split` / `eval_split` keys do the same for catalog datasets:
+
+```json
+{
+  "my-bench": {
+    "splits": ["train", "test"],
+    "train_split": "train",
+    "eval_split": "test"
+  }
+}
+```
+
+## What you don't need to write
+
+- **The reward function** for sandbox tasks — `tests/test.sh` writes a reward file; the framework reads it. See the [shell verifier contract](/core-concepts/tasks#shell-verifier-contract).
+- **The reward function** for catalog-style data tasks if your task matches an existing pattern — point `[verifier].name` at `math_reward_fn`, `mcq_reward_fn`, `f1_reward_fn`, etc.
+- **A custom harness** — if your task fits the bash-ReAct or one-shot LLM shape, the built-in harnesses already cover it. See [Harnesses](/core-concepts/harnesses).
