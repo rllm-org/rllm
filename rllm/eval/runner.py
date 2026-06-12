@@ -42,6 +42,7 @@ async def run_dataset(
     evaluator: Evaluator | None = None,
     gateway: GatewayManager | None = None,
     sampling_params: dict | None = None,
+    attempts: int = 1,
 ) -> tuple[EvalResult, list]:
     """Run a list of :class:`rllm.types.Task` objects through :class:`AgentFlowEngine`.
 
@@ -62,6 +63,10 @@ async def run_dataset(
         sampling_params: Resolved sampling params from the CLI, attached to each
             gateway session so the gateway enforces them on every LLM call. ``None``
             or empty → flows/harnesses keep their own params.
+        attempts: Independent rollouts per task (pass@k). Each task is expanded
+            into ``attempts`` adjacent copies; the engine numbers sibling rollouts
+            ``task_id:0..n-1`` (training's GRPO convention) and the EvalResult
+            groups them back by task to compute ``pass_at``.
 
     Returns ``(EvalResult, list[Episode])``.
     """
@@ -72,6 +77,13 @@ async def run_dataset(
     from rllm.engine.agentflow_engine import AgentFlowEngine
     from rllm.gateway.manager import EvalGatewayManager
     from rllm.gateway.tunnel import is_local_sandbox_backend
+
+    # pass@k: expand each task into `attempts` adjacent copies. Everything
+    # downstream (warm queue, engine, episode callbacks) sees one entry per
+    # rollout; only the EvalItem aggregation below folds attempts back onto
+    # their task index.
+    if attempts > 1:
+        tasks = [task for task in tasks for _ in range(attempts)]
 
     # Cap concurrency by the agent flow's hint, if any. The engine's
     # internal semaphore enforces this on the rollout side.
@@ -131,12 +143,14 @@ async def run_dataset(
             except Exception:
                 logger.exception("gateway.stop() raised; suppressing")
 
-    # Aggregate per-task EvalItems for the report.
+    # Aggregate per-rollout EvalItems for the report; with attempts > 1 the
+    # expanded index folds back to (task index, attempt).
     items: list[EvalItem] = []
     surviving_episodes: list = []
     for idx, episode in enumerate(episodes):
+        task_idx, attempt = divmod(idx, attempts) if attempts > 1 else (idx, 0)
         if episode is None:
-            items.append(EvalItem(idx=idx, reward=0.0, is_correct=False, error="missing episode"))
+            items.append(EvalItem(idx=task_idx, attempt=attempt, reward=0.0, is_correct=False, error="missing episode"))
             continue
 
         error_msg = None
@@ -160,7 +174,8 @@ async def run_dataset(
 
         items.append(
             EvalItem(
-                idx=idx,
+                idx=task_idx,
+                attempt=attempt,
                 reward=reward,
                 is_correct=bool(episode.is_correct),
                 signals=signals,
@@ -170,4 +185,4 @@ async def run_dataset(
         if error_msg is None:
             surviving_episodes.append(episode)
 
-    return (EvalResult.from_items(dataset_name, model, agent_name, items), surviving_episodes)
+    return (EvalResult.from_items(dataset_name, model, agent_name, items, attempts=attempts), surviving_episodes)

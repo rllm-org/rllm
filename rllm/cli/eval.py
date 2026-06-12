@@ -95,6 +95,7 @@ def _run_eval(
     use_snapshot: bool = True,
     warm_queue_size: int = 0,
     sampling_config=None,
+    attempts: int = 1,
 ):
     """Core eval logic, extracted for clean proxy lifecycle management."""
     from rllm.data import DatasetRegistry
@@ -398,6 +399,7 @@ def _run_eval(
             "agent": agent_name,
             "split": split,
             "timestamp": timestamp,
+            "attempts": attempts,
         }
     )
     episode_store = run_store if save_episodes else None
@@ -475,6 +477,7 @@ def _run_eval(
             on_episode_complete=on_episode_complete,
             evaluator=evaluator,
             sampling_params=(sampling_config.as_dict() if sampling_config is not None else None),
+            attempts=attempts,
         )
     )
 
@@ -493,6 +496,8 @@ def _run_eval(
         ("Accuracy", f"[{score_style}]{pct}[/]  [dim]({result.correct}/{result.total})[/]"),
         ("Errors", f"[{error_style}]{result.errors}[/]"),
     ]
+    for k, v in sorted(result.pass_at.items()):
+        res_rows.append((f"pass@{k}", f"[bold]{v * 100:.1f}%[/]"))
 
     # Display signal breakdown if any
     if result.signal_averages:
@@ -538,6 +543,7 @@ def _run_eval(
 @click.option("--model", default=None, help="Model name to evaluate. Defaults to configured model from 'rllm setup'.")
 @click.option("--split", default=None, help="Dataset split (default: from catalog eval_split).")
 @click.option("--concurrency", default=64, type=int, help="Number of parallel requests.")
+@click.option("--attempts", default=1, type=int, help="Independent rollouts per task; reports pass@k for k=1..N (default: 1).")
 @click.option("--max-examples", default=None, type=int, help="Limit number of examples (for dev/testing).")
 @click.option("--task-indices", default=None, type=str, help="Comma-separated task indices to evaluate (e.g., '0', '3,7,12', '0-9').")
 @click.option("--output", "output_path", default=None, help="Output file path for results JSON.")
@@ -577,6 +583,7 @@ def eval_cmd(
     model: str | None,
     split: str | None,
     concurrency: int,
+    attempts: int,
     max_examples: int | None,
     task_indices: str | None,
     output_path: str | None,
@@ -599,6 +606,8 @@ def eval_cmd(
         sampling_config = resolve_eval_sampling(sampling_params, temperature, top_p, max_tokens)
     except (ValueError, FileNotFoundError, TypeError) as e:
         fail(f"Invalid --sampling-params: {e}")
+    if attempts < 1:
+        fail("--attempts must be >= 1.")
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
     _ui_explicit = enable_ui is not None
     if enable_ui is None:
@@ -684,6 +693,7 @@ def eval_cmd(
             use_snapshot=use_snapshot,
             warm_queue_size=warm_queue_size,
             sampling_config=sampling_config,
+            attempts=attempts,
         )
     finally:
         if proxy_manager is not None:
