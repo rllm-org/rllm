@@ -180,11 +180,10 @@ def test_builder_patches_dockerfile_with_neutral_path_and_symlinks(tmp_path, syn
     dockerfile = (out / "skill-task" / "environment" / "Dockerfile").read_text()
     # Neutral copy — single source of truth in the image.
     assert "COPY skills /opt/skills/" in dockerfile
-    # Symlinks land at every well-known agent discovery path.
-    assert "ln -sfn /opt/skills /root/.claude/skills" in dockerfile
-    assert "ln -sfn /opt/skills /root/.agents/skills" in dockerfile
-    assert "ln -sfn /opt/skills /root/.terminus/skills" in dockerfile
-    assert "ln -sfn /opt/skills /etc/codex/skills" in dockerfile
+    # Symlinks land at every BenchFlow-declared per-agent discovery path
+    # (sourced from benchflow/src/benchflow/agents/registry.py).
+    for path in sb._AGENT_SKILL_PATHS:
+        assert f"ln -sfn /opt/skills {path}" in dockerfile, f"missing symlink for {path}"
     assert sb._SKILLS_COPY_MARKER in dockerfile
 
     # Tasks with no skills get no patch — no spurious COPY/RUN lines.

@@ -14,17 +14,23 @@ disk, which the rLLM ``BenchmarkLoader`` already understands.
 
 Skills injection: SkillsBench task authors place skill scripts under
 ``environment/skills/<name>/scripts/`` but the row's Dockerfile does
-*not* COPY them — they assume the harness mounts them at the right
-agent-specific path at runtime. Different agents look in different
-places (Claude Code: ``~/.claude/skills/``; Codex: ``~/.agents/skills/``
-and ``/etc/codex/skills/``; Terminus: ``/root/.terminus/skills/``). To
-match BenchFlow's official "neutral path + symlinks" pattern without
-host-side mounts, the builder writes each skill's ``SKILL.md`` into
-the Docker build context alongside the scripts and patches the
-Dockerfile with a single COPY to a neutral ``/opt/skills/`` plus
-symlinks to every well-known per-agent discovery path. Result:
-whichever agent the harness picks up finds the skills at *its* own
-conventional location.
+*not* COPY them — BenchFlow's "Do NOT bake skills into the image"
+convention. To match BenchFlow's officially-supported agents
+(``claude-agent-acp``, ``codex-acp``, ``gemini``, ``opencode``,
+``openhands``, ``openclaw``, ``pi-acp``) without host-side mounts, the
+builder writes each skill's ``SKILL.md`` into the Docker build context
+alongside the scripts and patches the Dockerfile with a single
+``COPY skills /opt/skills/`` plus symlinks to every per-agent
+discovery path declared in ``benchflow/src/benchflow/agents/registry.py``
+(``$HOME/.claude/skills``, ``$HOME/.agents/skills``,
+``$HOME/.gemini/skills``, ``$HOME/.opencode/skills``,
+``$HOME/.pi/agent/skills``, plus Terminus's ``/root/.terminus/skills``).
+Result: whichever ACP-mode harness runs, the agent finds skills at
+its own conventional location.
+
+Caveat: non-ACP CLI invocations (bare ``codex``, ``claude --print``,
+``mini-swe-agent``) don't auto-discover skills regardless of filesystem
+placement. ACP-mode harnesses are a follow-up.
 
 Invoked from:
 - ``rllm dataset pull skillsbench`` (via the ``builder`` field in
@@ -216,25 +222,31 @@ _SKILLS_COPY_MARKER = "# rllm-skillsbench: skills injection"
 
 # Per-agent discovery paths the skills tree gets symlinked into.
 #
-# Choices justified:
-# - Claude Code scans ``$HOME/.claude/skills/`` (user-level) and
-#   ``<cwd>/.claude/skills/`` (project-level). With ``$HOME=/root`` (the
-#   image's default), the user-level symlink at ``/root/.claude/skills``
-#   covers it across any cwd.
-# - Codex CLI scans ``$HOME/.agents/skills/``, ``/etc/codex/skills``, and
-#   ``<cwd>/.agents/skills/`` (per OpenAI's Codex skills docs). The
-#   ``$HOME/.agents/skills`` symlink covers it across any cwd.
-# - Terminus scans ``/root/.claude/skills`` and ``/root/.terminus/skills``.
-# - ``/root/.agents/skills`` doubles as a generic catch-all for AGENTS.md-
-#   aware agents (Cursor, Cline, Gemini CLI) that look in ``~/.agents/``.
+# Set sourced from BenchFlow's official agent registry
+# (``src/benchflow/agents/registry.py``). Every agent SkillsBench evaluates
+# declares its ``skill_paths`` there:
 #
+#   claude-agent-acp  → $HOME/.claude/skills
+#   codex-acp         → $HOME/.agents/skills
+#   gemini            → $HOME/.gemini/skills
+#   opencode          → $HOME/.opencode/skills
+#   openhands         → $HOME/.agents/skills, $WORKSPACE/.agents/skills
+#   openclaw          → $HOME/.claude/skills, $WORKSPACE/skills
+#   pi-acp            → $HOME/.pi/agent/skills, $HOME/.agents/skills
+#
+# We resolve ``$HOME`` to ``/root`` (the image default) and add Terminus's
+# ``/root/.terminus/skills`` as a free extra. ``$WORKSPACE``-relative paths
+# are skipped — those depend on each task's cwd which we don't know at
+# materialization time; the harness-layer hook is the right place for them.
 # All symlinks point at the single neutral copy under ``/opt/skills``, so
-# disk usage stays flat and per-agent paths stay consistent.
+# disk usage stays flat and discovery is consistent across agents.
 _AGENT_SKILL_PATHS: tuple[str, ...] = (
     "/root/.claude/skills",
     "/root/.agents/skills",
+    "/root/.gemini/skills",
+    "/root/.opencode/skills",
+    "/root/.pi/agent/skills",
     "/root/.terminus/skills",
-    "/etc/codex/skills",
 )
 
 
