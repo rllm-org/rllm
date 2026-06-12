@@ -240,6 +240,10 @@ def _sandbox_resource_kwargs(task: Task, backend: str) -> dict:
             kw["memory"] = max(1, round(mem_mb / 1024))
         if disk_mb:
             kw["disk"] = max(1, round(disk_mb / 1024))
+        # First boot of a from-image sandbox includes the registry pull, which
+        # for multi-GB SWE images routinely exceeds the SDK's 120s default.
+        # Honor the task's declared build timeout, with a pull-friendly floor.
+        kw["create_timeout"] = float(env.get("build_timeout_sec") or 600.0)
     return kw
 
 

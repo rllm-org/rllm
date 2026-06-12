@@ -30,11 +30,17 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 REPO_ID = "kylemontgomery/swesmith-filtered"
+
+# Headroom over ``limit`` when selecting task dirs to download, covering
+# instances the solvability screen will drop (~2% measured; see
+# :func:`bug_in_test_file`).
+_SCREEN_MARGIN = 1.2
 
 # Upstream tasks declare no [environment] resources; remote backends then run
 # at their defaults (Daytona: 1 GiB), which OOMs the verifier's in-sandbox
@@ -57,6 +63,68 @@ def bug_in_test_file(task_dir: Path) -> bool:
     targets = [line.split(" b/")[-1] for line in cfg["patch"].splitlines() if line.startswith("diff --git")]
     f2p_files = {t.split("::")[0] for t in cfg["FAIL_TO_PASS"]}
     return any(t in f2p_files for t in targets)
+
+
+def list_task_ids() -> list[str]:
+    """List every task-dir name in the HF repo from one tree listing.
+
+    A repo-tree listing is a handful of paginated API calls — unlike the
+    per-file "resolver" requests of a download, it does not eat into the
+    free-tier 5000-per-5-minutes quota.
+    """
+    from huggingface_hub import HfApi
+
+    files = HfApi().list_repo_files(REPO_ID, repo_type="dataset")
+    return sorted({f.split("/", 1)[0] for f in files if "/" in f})
+
+
+def spread_task_ids(ids: list[str], n: int) -> list[str]:
+    """Pick ``n`` ids round-robin across repos (id prefix before the first dot).
+
+    A plain ``sorted(ids)[:n]`` would land entirely on the alphabetically
+    first repo or two; training batches should see the dataset's diversity.
+    """
+    by_repo: dict[str, list[str]] = {}
+    for t in sorted(ids):
+        by_repo.setdefault(t.split(".")[0], []).append(t)
+    picked: list[str] = []
+    queues = sorted(by_repo.values(), key=lambda q: q[0])
+    while len(picked) < n and queues:
+        queues = [q for q in queues if q]
+        for q in queues:
+            if len(picked) >= n:
+                break
+            picked.append(q.pop(0))
+    return sorted(picked)
+
+
+def _snapshot_download_with_retry(patterns: list[str] | None) -> Path:
+    """``snapshot_download`` that sleeps out HF 429 rate-limit windows.
+
+    The free tier allows 5000 resolver requests per 5 minutes and every file
+    is one request, so a full-repo pull (~33K files) is guaranteed to hit the
+    limit several times. Progress is kept in the HF cache, so each retry
+    resumes where the previous attempt stopped instead of starting over.
+    """
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.errors import HfHubHTTPError
+
+    while True:
+        try:
+            return Path(snapshot_download(REPO_ID, repo_type="dataset", allow_patterns=patterns))
+        except HfHubHTTPError as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status != 429:
+                raise
+            wait = 310.0
+            retry_after = (getattr(e, "response", None) is not None and e.response.headers.get("Retry-After")) or None
+            if retry_after:
+                try:
+                    wait = float(retry_after) + 10.0
+                except ValueError:
+                    pass
+            print(f"[swesmith] HF rate limit hit (429) — sleeping {wait:.0f}s, then resuming from cache ...", flush=True)
+            time.sleep(wait)
 
 
 def patch_task_toml(task_dir: Path, resources: dict | None = None) -> None:
@@ -110,8 +178,10 @@ def build_benchmark(
         catalog_entry: Optional catalog entry (datasets.json); ``description``/
             ``default_agent``/``limit`` are read from it when present.
         task_ids: Build only these instance ids (downloads just their files).
-            Default: the full repo.
-        limit: Keep only the first N solvable tasks (sorted by id).
+            Default: derived from ``limit`` when given, else the full repo.
+        limit: Keep only N solvable tasks. Without explicit ``task_ids`` the
+            download itself is capped to ``limit`` (+screen margin) ids picked
+            round-robin across repos — not first-N-alphabetical.
         default_agent: ``default_agent`` written into dataset.toml.
         clean: Remove ``out_dir`` before building.
         register: Also register ``task_path`` rows in ``DatasetRegistry`` so
@@ -120,8 +190,6 @@ def build_benchmark(
     Returns:
         Path to the built benchmark directory.
     """
-    from huggingface_hub import snapshot_download
-
     if catalog_entry:
         default_agent = catalog_entry.get("default_agent") or default_agent
         limit = limit if limit is not None else catalog_entry.get("limit")
@@ -132,9 +200,21 @@ def build_benchmark(
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
 
+    # With a limit but no explicit ids, select the download set up front from
+    # one repo-tree listing so a capped build never fetches all ~33K files.
+    if task_ids is None and limit is not None:
+        task_ids = spread_task_ids(list_task_ids(), int(limit * _SCREEN_MARGIN) + 10)
+        print(f"[swesmith] selected {len(task_ids)} candidate tasks across repos for limit={limit}", flush=True)
+
     patterns = [f"{t}/*" for t in task_ids] if task_ids else None
-    logger.info("[swesmith] downloading %s (%s) ...", REPO_ID, f"{len(task_ids)} tasks" if task_ids else "full repo")
-    cache = Path(snapshot_download(REPO_ID, repo_type="dataset", allow_patterns=patterns))
+    if task_ids:
+        print(f"[swesmith] downloading {len(task_ids)} task dirs (~{7 * len(task_ids)} files) from {REPO_ID} ...", flush=True)
+    else:
+        print(
+            f"[swesmith] downloading the FULL {REPO_ID} repo (~4.8K tasks, ~33K files).\n[swesmith] HF free-tier rate limits make this take ~35-40 min; progress resumes from cache if interrupted.",
+            flush=True,
+        )
+    cache = _snapshot_download_with_retry(patterns)
 
     candidates = sorted(d for d in cache.iterdir() if d.is_dir() and (d / "task.toml").exists())
     if task_ids:

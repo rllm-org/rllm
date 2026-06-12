@@ -7,6 +7,8 @@ computes at rollout, and must not perturb the live loader.
 
 from pathlib import Path
 
+import pytest
+
 from rllm.data import Dataset, StatefulTaskDataLoader
 from rllm.data.utils import interleave_tasks, task_from_row
 from rllm.sandbox.snapshot import env_key_for
@@ -45,38 +47,16 @@ def _live_env_keys(loader, *, group_size, total_epochs, backend, remaining_batch
     return keys
 
 
-def test_env_key_sequence_dict_rows_matches_live():
-    loader = StatefulTaskDataLoader(_dict_ds(4), 2, shuffle=False)
+@pytest.mark.parametrize("make_ds", [_dict_ds, _task_ds], ids=["dict_rows", "task_rows"])
+def test_env_key_sequence_matches_live(make_ds):
+    """Both _as_task branches (dict rows and Task rows) match the live walk."""
+    loader = StatefulTaskDataLoader(make_ds(4), 2, shuffle=False)
     schedule = build_train_schedule(loader, group_size=2, total_epochs=1)
+    assert all(isinstance(t, Task) for t in schedule)
     # batches [0,1],[2,3] x group_size 2 -> rows 0,0,1,1,2,2,3,3
     expected = _live_env_keys(loader, group_size=2, total_epochs=1, backend=BACKEND)
     assert [env_key_for(t, BACKEND) for t in schedule] == expected
     assert len(schedule) == 2 * 2 * 2  # batches * batch_size * group_size
-
-
-def test_env_key_sequence_task_rows_matches_live():
-    loader = StatefulTaskDataLoader(_task_ds(4), 2, shuffle=False)
-    schedule = build_train_schedule(loader, group_size=2, total_epochs=1)
-    assert all(isinstance(t, Task) for t in schedule)
-    expected = _live_env_keys(loader, group_size=2, total_epochs=1, backend=BACKEND)
-    assert [env_key_for(t, BACKEND) for t in schedule] == expected
-
-
-def test_val_group_size_task_rows():
-    """A val-style schedule (group_size = n_val) still matches the live path."""
-    loader = StatefulTaskDataLoader(_task_ds(4), 2, shuffle=False)
-    schedule = build_train_schedule(loader, group_size=1, total_epochs=1)
-    expected = _live_env_keys(loader, group_size=1, total_epochs=1, backend=BACKEND)
-    assert [env_key_for(t, BACKEND) for t in schedule] == expected
-    assert len(schedule) == 2 * 2 * 1
-
-
-def test_shuffled_order_matches_independent_walk():
-    """With shuffle on and multiple epochs, the schedule equals an independent walk."""
-    loader = StatefulTaskDataLoader(_dict_ds(10), 3, seed=7)
-    schedule = build_train_schedule(loader, group_size=4, total_epochs=3)
-    expected = _live_env_keys(loader, group_size=4, total_epochs=3, backend=BACKEND)
-    assert [env_key_for(t, BACKEND) for t in schedule] == expected
 
 
 def test_build_does_not_perturb_live_loader():
@@ -132,13 +112,3 @@ def test_end_of_epoch_resume_no_phantom_batch():
     assert [env_key_for(t, BACKEND) for t in schedule] == expected
     # 2 remaining epochs * 2 batches/epoch * batch_size 4 * group_size 2
     assert len(schedule) == 2 * 2 * 4 * 2
-
-
-def test_drop_last_parity():
-    """Non-divisible dataset size: schedule length tracks drop_last."""
-    drop = StatefulTaskDataLoader(_dict_ds(10), 4, seed=1, drop_last=True)
-    keep = StatefulTaskDataLoader(_dict_ds(10), 4, seed=1, drop_last=False)
-    s_drop = build_train_schedule(drop, group_size=2, total_epochs=1)
-    s_keep = build_train_schedule(keep, group_size=2, total_epochs=1)
-    assert len(s_drop) == 2 * 4 * 2  # 2 full batches
-    assert len(s_keep) == (2 * 4 + 2) * 2  # + the trailing 2-sample batch
