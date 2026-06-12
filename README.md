@@ -14,7 +14,7 @@
 
 </div>
 
-rLLM is an open-source framework for training language agents with reinforcement learning. Bring any harness — Claude Code, Codex, mini-swe-agent, opencode, Terminus-2, or your own — run it inside any sandbox (Docker, Daytona, Modal, local), and rLLM captures the rollouts, computes rewards, and updates the policy. Switch the training backend (verl, tinker, fireworks) with one flag; the same agent code runs both eval and training.
+rLLM is an open-source framework for training language agents with reinforcement learning. Bring any harness, run it in any sandbox, and switch training backends with one flag — the same agent code drives both eval and training.
 
 ## Core features
 
@@ -22,7 +22,7 @@ rLLM is an open-source framework for training language agents with reinforcement
 - **Any sandbox.** Docker, Daytona, Modal, or local — with snapshot + warm-pool acceleration to keep rollouts cheap at training-scale.
 - **Multiple training backends, one API.** `verl` (distributed multi-GPU), `tinker` (single-machine), `fireworks` (Fireworks platform). Switch with one flag.
 - **60+ integrated benchmarks.** Math, code, MCQ, QA, search, VLM, translation, agentic — Terminal-Bench 2.0, SWE-bench, SkillsBench, AIME, MATH-500, GPQA, and more. `rllm eval <name>` auto-pulls and runs.
-- **Multiple RL algorithms.** GRPO, REINFORCE, RLOO, rejection sampling, and more.
+- **Multiple training methods.** GRPO, REINFORCE, RLOO, SFT, on-policy distillation, and more.
 - **Battle-tested.** State-of-the-art open-source results (DeepScaleR-1.5B, DeepCoder-14B, DeepSWE-32B, FinQA-4B). Adopted by academic labs and industry research teams (see [Community Projects](#community-projects) below).
 
 Read more on our [documentation site](https://docs.rllm-project.com/).
