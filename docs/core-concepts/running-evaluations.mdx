@@ -151,6 +151,10 @@ These flags shape how the evaluation executes and what it leaves behind.
   How many tasks run in parallel. Lower it if you hit provider rate limits; raise it for throughput.
 </ParamField>
 
+<ParamField path="--attempts" type="int" default="1">
+  Independent rollouts per task. With `--attempts N` the results report unbiased pass@k for every k from 1 to N alongside per-rollout accuracy. Use a temperature above 0 so attempts actually differ.
+</ParamField>
+
 <ParamField path="--evaluator" type="string">
   Override the scorer for every task (a registry name or `module:class`). By default each benchmark brings its own.
 </ParamField>

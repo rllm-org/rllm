@@ -128,7 +128,8 @@
               "cookbooks/deepcoder",
               "cookbooks/finqa",
               "cookbooks/geo3k",
-              "cookbooks/solver_judge_flow"
+              "cookbooks/solver_judge_flow",
+              "cookbooks/terminal_bench"
             ]
           }
         ]
