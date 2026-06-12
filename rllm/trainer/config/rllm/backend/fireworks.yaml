@@ -76,7 +76,7 @@ rllm:
       top_k: 0 # -1 is not accepted
   algorithm:
     rollout_correction:
-      bypass_mode: True
+      bypass_mode: false
 
 
 # Fireworks Sampling concurrency control (cookbook ConcurrencyConfig)
