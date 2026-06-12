@@ -172,18 +172,25 @@ def test_builder_writes_skills_into_build_context(tmp_path, synthetic_parquet):
     assert (skills_root / other[0] / "SKILL.md").read_text().startswith("# beta")
 
 
-def test_builder_patches_dockerfile_when_skills_present(tmp_path, synthetic_parquet):
-    """The Dockerfile gains a COPY skills /root/.claude/skills line."""
+def test_builder_patches_dockerfile_with_neutral_path_and_symlinks(tmp_path, synthetic_parquet):
+    """The Dockerfile gains a neutral COPY + symlinks for every agent path."""
     out = tmp_path / "skillsbench_out"
     sb.build_benchmark(name="skillsbench", split="train", out_dir=out, register=False)
 
     dockerfile = (out / "skill-task" / "environment" / "Dockerfile").read_text()
-    assert "COPY skills /root/.claude/skills/" in dockerfile
+    # Neutral copy — single source of truth in the image.
+    assert "COPY skills /opt/skills/" in dockerfile
+    # Symlinks land at every well-known agent discovery path.
+    assert "ln -sfn /opt/skills /root/.claude/skills" in dockerfile
+    assert "ln -sfn /opt/skills /root/.agents/skills" in dockerfile
+    assert "ln -sfn /opt/skills /root/.terminus/skills" in dockerfile
+    assert "ln -sfn /opt/skills /etc/codex/skills" in dockerfile
     assert sb._SKILLS_COPY_MARKER in dockerfile
 
-    # Tasks with no skills get no patch — no spurious COPY line.
+    # Tasks with no skills get no patch — no spurious COPY/RUN lines.
     hello_dockerfile = (out / "hello-world" / "environment" / "Dockerfile").read_text()
     assert "COPY skills" not in hello_dockerfile
+    assert "/opt/skills" not in hello_dockerfile
 
 
 def test_builder_omits_skills_when_disabled(tmp_path, synthetic_parquet):
@@ -198,9 +205,10 @@ def test_builder_omits_skills_when_disabled(tmp_path, synthetic_parquet):
 
     skills_root = out / "skill-task" / "environment" / "skills"
     assert not skills_root.exists()
-    # And the Dockerfile must NOT have the COPY line — otherwise Docker would
-    # fail to build because the source directory is missing.
+    # Dockerfile must not reference /opt/skills — otherwise Docker would fail
+    # to build because the source directory is missing.
     dockerfile = (out / "skill-task" / "environment" / "Dockerfile").read_text()
+    assert "/opt/skills" not in dockerfile
     assert "COPY skills" not in dockerfile
 
 

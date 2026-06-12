@@ -14,13 +14,17 @@ disk, which the rLLM ``BenchmarkLoader`` already understands.
 
 Skills injection: SkillsBench task authors place skill scripts under
 ``environment/skills/<name>/scripts/`` but the row's Dockerfile does
-*not* COPY them — they assume the harness (Harbor's, or ours) mounts
-them at ``/root/.claude/skills/`` at runtime. To keep the
-rllm-native execution path image-driven (no host-side mounts), the
-builder writes each skill's ``SKILL.md`` into the Docker build context
-alongside the existing scripts and appends a single ``COPY skills
-/root/.claude/skills/`` line to each task's Dockerfile when skills are
-present and ``include_skills`` is True.
+*not* COPY them — they assume the harness mounts them at the right
+agent-specific path at runtime. Different agents look in different
+places (Claude Code: ``~/.claude/skills/``; Codex: ``~/.agents/skills/``
+and ``/etc/codex/skills/``; Terminus: ``/root/.terminus/skills/``). To
+match BenchFlow's official "neutral path + symlinks" pattern without
+host-side mounts, the builder writes each skill's ``SKILL.md`` into
+the Docker build context alongside the scripts and patches the
+Dockerfile with a single COPY to a neutral ``/opt/skills/`` plus
+symlinks to every well-known per-agent discovery path. Result:
+whichever agent the harness picks up finds the skills at *its* own
+conventional location.
 
 Invoked from:
 - ``rllm dataset pull skillsbench`` (via the ``builder`` field in
@@ -180,9 +184,9 @@ def _write_skills(task_dir: Path, row: dict) -> int:
     Each entry is a struct with ``name``, ``description``, ``skill_md``. The
     body is written to ``environment/skills/<safe_name>/SKILL.md`` so it sits
     alongside any per-skill ``scripts/`` files already placed by
-    :func:`_write_files_list`, and so a single ``COPY skills
-    /root/.claude/skills/`` line in the Dockerfile pulls both into the image
-    at the path SkillsBench solve.sh scripts expect.
+    :func:`_write_files_list`, and so the patched Dockerfile's
+    ``COPY skills /opt/skills/`` line pulls both into the image at the
+    neutral path symlinked to every agent's discovery dir.
 
     Returns the number of skill bodies written.
     """
@@ -210,13 +214,42 @@ def _write_skills(task_dir: Path, row: dict) -> int:
 # (e.g. when rerunning the builder without --clean).
 _SKILLS_COPY_MARKER = "# rllm-skillsbench: skills injection"
 
+# Per-agent discovery paths the skills tree gets symlinked into.
+#
+# Choices justified:
+# - Claude Code scans ``$HOME/.claude/skills/`` (user-level) and
+#   ``<cwd>/.claude/skills/`` (project-level). With ``$HOME=/root`` (the
+#   image's default), the user-level symlink at ``/root/.claude/skills``
+#   covers it across any cwd.
+# - Codex CLI scans ``$HOME/.agents/skills/``, ``/etc/codex/skills``, and
+#   ``<cwd>/.agents/skills/`` (per OpenAI's Codex skills docs). The
+#   ``$HOME/.agents/skills`` symlink covers it across any cwd.
+# - Terminus scans ``/root/.claude/skills`` and ``/root/.terminus/skills``.
+# - ``/root/.agents/skills`` doubles as a generic catch-all for AGENTS.md-
+#   aware agents (Cursor, Cline, Gemini CLI) that look in ``~/.agents/``.
+#
+# All symlinks point at the single neutral copy under ``/opt/skills``, so
+# disk usage stays flat and per-agent paths stay consistent.
+_AGENT_SKILL_PATHS: tuple[str, ...] = (
+    "/root/.claude/skills",
+    "/root/.agents/skills",
+    "/root/.terminus/skills",
+    "/etc/codex/skills",
+)
+
 
 def _patch_dockerfile_for_skills(task_dir: Path) -> bool:
-    """Append a ``COPY skills /root/.claude/skills/`` to the task's Dockerfile.
+    """Patch the task's Dockerfile to expose skills at every agent's path.
 
-    No-op if the Dockerfile is missing, if there's no ``environment/skills/``
-    directory to copy from, or if the marker is already present. Returns
-    True when a patch was applied.
+    Implements BenchFlow's "neutral path + symlinks" convention: the skills
+    tree is COPY'd once to ``/opt/skills/`` and then symlinked into each
+    well-known agent-specific discovery path (Claude Code, Codex,
+    Terminus, …). A single neutral copy keeps disk usage flat while letting
+    any agent find skills at its own conventional location.
+
+    No-op if the Dockerfile is missing, there's no ``environment/skills/``
+    to copy from, or the marker is already present. Returns True when a
+    patch was applied.
     """
     dockerfile = task_dir / "environment" / "Dockerfile"
     skills_dir = task_dir / "environment" / "skills"
@@ -225,7 +258,14 @@ def _patch_dockerfile_for_skills(task_dir: Path) -> bool:
     text = dockerfile.read_text()
     if _SKILLS_COPY_MARKER in text:
         return False
-    suffix = f"\n\n{_SKILLS_COPY_MARKER}\nCOPY skills /root/.claude/skills/\n"
+
+    # The RUN that creates parent dirs + symlinks must be a single layer so
+    # failures are atomic (no half-linked state in the image).
+    link_cmds = " && \\\n    ".join(f"ln -sfn /opt/skills {p}" for p in _AGENT_SKILL_PATHS)
+    parent_dirs = sorted({str(Path(p).parent) for p in _AGENT_SKILL_PATHS})
+    mkdir_cmd = "mkdir -p " + " ".join(parent_dirs)
+
+    suffix = f"\n\n{_SKILLS_COPY_MARKER}\nCOPY skills /opt/skills/\nRUN {mkdir_cmd} && \\\n    {link_cmds}\n"
     if not text.endswith("\n"):
         suffix = "\n" + suffix
     dockerfile.write_text(text + suffix)
