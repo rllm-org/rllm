@@ -83,6 +83,7 @@
             "pages": [
               "backends/verl",
               "backends/tinker",
+              "backends/fireworks",
               "backends/comparison"
             ]
           },
