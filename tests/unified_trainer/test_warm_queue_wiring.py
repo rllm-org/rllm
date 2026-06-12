@@ -6,31 +6,28 @@ context manager and the guard that decides whether a queue is built at all.
 
 from types import SimpleNamespace
 
+import pytest
 from omegaconf import OmegaConf
 
 from rllm.trainer.unified_trainer import UnifiedTrainer, _detached_warm_queue
 
 
-def test_detached_warm_queue_restores():
+def test_detached_warm_queue_detaches_and_restores():
+    # Normal path: detached inside the block, restored after.
     hooks = SimpleNamespace(warm_queue="Q")
     with _detached_warm_queue(hooks):
         assert hooks.warm_queue is None
     assert hooks.warm_queue == "Q"
 
-
-def test_detached_warm_queue_restores_on_exception():
-    hooks = SimpleNamespace(warm_queue="Q")
-    try:
+    # Exception path: restored via finally.
+    with pytest.raises(RuntimeError):
         with _detached_warm_queue(hooks):
             raise RuntimeError("boom")
-    except RuntimeError:
-        pass
     assert hooks.warm_queue == "Q"
 
-
-def test_detached_warm_queue_handles_none_hooks():
+    # None hooks: no-op, must not raise.
     with _detached_warm_queue(None):
-        pass  # must not raise
+        pass
 
 
 def _fake_trainer(warm_queue_size, sandbox_backend, hooks_present=True):
@@ -45,20 +42,18 @@ def _fake_trainer(warm_queue_size, sandbox_backend, hooks_present=True):
     return SimpleNamespace(rllm_config=rllm_config, agent_workflow_engine=engine, _total_training_steps=10), hooks
 
 
-def test_start_warm_queue_returns_none_when_disabled():
-    trainer, hooks = _fake_trainer(warm_queue_size=0, sandbox_backend="daytona")
+@pytest.mark.parametrize(
+    ("warm_queue_size", "sandbox_backend", "hooks_present"),
+    [
+        pytest.param(0, "daytona", True, id="disabled"),
+        pytest.param(-1, None, True, id="without_backend"),
+        pytest.param(-1, "daytona", False, id="without_hooks"),
+    ],
+)
+def test_start_warm_queue_guard_returns_none(warm_queue_size, sandbox_backend, hooks_present):
+    """Each clause of the guard if independently disables the queue."""
+    trainer, hooks = _fake_trainer(warm_queue_size=warm_queue_size, sandbox_backend=sandbox_backend, hooks_present=hooks_present)
     result = UnifiedTrainer._start_train_warm_queue(trainer, None, SimpleNamespace(global_step=1), 2, False, hooks)
     assert result is None
-    assert hooks.warm_queue is None
-
-
-def test_start_warm_queue_returns_none_without_backend():
-    trainer, hooks = _fake_trainer(warm_queue_size=-1, sandbox_backend=None)
-    result = UnifiedTrainer._start_train_warm_queue(trainer, None, SimpleNamespace(global_step=1), 2, False, hooks)
-    assert result is None
-
-
-def test_start_warm_queue_returns_none_without_hooks():
-    trainer, _ = _fake_trainer(warm_queue_size=-1, sandbox_backend="daytona", hooks_present=False)
-    result = UnifiedTrainer._start_train_warm_queue(trainer, None, SimpleNamespace(global_step=1), 2, False, None)
-    assert result is None
+    if hooks is not None:
+        assert hooks.warm_queue is None

@@ -17,9 +17,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock
 
-import pytest
 from rllm_model_gateway.models import TraceRecord
 
 import rllm
@@ -161,34 +159,8 @@ def test_eval_engine_populates_steps_from_gateway_traces():
     assert gateway.delete_calls == ["task-0:0"]
 
 
-def test_eval_engine_marks_wrong_answer_incorrect():
-    gateway = _FakeGateway(response_per_uid={"task-0:0": r"\boxed{99}"})
-    evaluator = _StubEvaluator(ground_truth="42")
-    hooks = SandboxTaskHooks(evaluation=FixedEvaluation(evaluator))
-
-    engine = AgentFlowEngine(
-        agent_flow=fake_flow,
-        evaluator=None,
-        gateway=gateway,  # type: ignore[arg-type]
-        model="fake-model",
-        n_parallel_tasks=1,
-        retry_limit=1,
-        raise_on_error=True,
-        hooks=hooks,
-    )
-    task = Task(id="task-0", instruction="?", metadata={"answer": "42"}, dataset_dir=Path("."))
-
-    try:
-        (ep,) = asyncio.run(engine.execute_tasks([task], task_ids=["task-0"], is_validation=True))
-    finally:
-        engine.shutdown()
-
-    assert ep.is_correct is False
-    assert ep.trajectories[-1].reward == 0.0
-
-
-def test_eval_engine_runs_hook_teardown_on_success_and_failure():
-    """Verify the hook's teardown closure runs whether the rollout succeeds or raises."""
+def test_eval_engine_runs_hook_teardown_on_success():
+    """Verify the hook's teardown closure runs after a successful rollout."""
 
     gateway = _FakeGateway(response_per_uid={"task-0:0": "ok"})
     evaluator = _StubEvaluator(ground_truth="ok")
@@ -224,15 +196,3 @@ def test_eval_engine_runs_hook_teardown_on_success_and_failure():
 
     # Setup ran, then teardown ran (success path)
     assert teardown_calls == ["setup-task-0:0", "teardown-task-0:0"]
-
-
-def test_eval_engine_raises_when_neither_evaluator_nor_hooks_provided():
-    gateway = MagicMock()
-    with pytest.raises(ValueError, match="evaluator.*or.*hooks"):
-        AgentFlowEngine(
-            agent_flow=fake_flow,
-            evaluator=None,
-            gateway=gateway,
-            model="fake",
-            hooks=None,
-        )

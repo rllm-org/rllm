@@ -70,9 +70,13 @@ def build_train_config(
     )
 
     # If user provided a --config file, merge it on top
+    user_workflow_timeout = None
     if config_file:
         user_cfg = OmegaConf.load(config_file)
         merged = OmegaConf.merge(merged, user_cfg)
+        # The CLI override block below sets a rollout timeout default; a
+        # timeout declared in the user's --config must survive it.
+        user_workflow_timeout = OmegaConf.select(user_cfg, "rllm.workflow.workflow_args.timeout")
 
     # Apply CLI overrides (only non-default values)
     overrides = OmegaConf.create(
@@ -100,7 +104,8 @@ def build_train_config(
                 "workflow": {
                     "use_workflow": True,
                     "workflow_args": {
-                        "timeout": 300,  # 5-minute timeout per rollout
+                        # Default rollout timeout; a --config-declared value wins.
+                        "timeout": user_workflow_timeout if user_workflow_timeout is not None else 300,
                     },
                 },
             },
