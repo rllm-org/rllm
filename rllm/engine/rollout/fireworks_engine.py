@@ -113,7 +113,8 @@ class FireworksEngine(TinkerEngine):
                 sub-dicts for default sampling kwargs.
             disable_thinking: Suppress thinking tokens in the prompt.
             accumulate_reasoning: Accumulate reasoning across turns.
-            reasoning_effort: Reasoning effort hint for the parser.
+            reasoning_effort: Reasoning effort for the chat parser and Fireworks
+                completions API (e.g. ``low``, ``medium``, ``high``, ``none``).
             sample_timeout: HTTP timeout (seconds) for sampling calls.
             processor: Optional ``ProcessorMixin`` for multimodal models.
             router_replay: If True, request and propagate routing matrices
@@ -174,7 +175,11 @@ class FireworksEngine(TinkerEngine):
             kwargs["user"] = application_id
 
         version = self.weight_version
-        sampled_sequence = await self.get_token_output_from_token_input(token_input=token_input, **kwargs)
+        sampled_sequence = await self.get_token_output_from_token_input(
+            token_input=token_input,
+            reasoning_effort=reasoning_effort,
+            **kwargs,
+        )
         result = self.assemble_model_output(token_input=token_input, token_output=sampled_sequence)
         result.weight_version = version
         result.routing_matrices = sampled_sequence.routing_matrices
@@ -232,9 +237,12 @@ class FireworksEngine(TinkerEngine):
         requested_max_tokens = sampling_params.pop("max_tokens", requested_max_tokens)
         max_tokens = self._prepare_max_tokens(requested_max_tokens, input_length)
 
-        for key in ("temperature", "top_p", "top_k", "user"):
+        for key in ("temperature", "top_p", "top_k", "user", "reasoning_effort"):
             if key in kwargs:
                 sampling_params[key] = kwargs.pop(key)
+
+        if "reasoning_effort" not in sampling_params and self.reasoning_effort is not None:
+            sampling_params["reasoning_effort"] = self.reasoning_effort
 
         if self.router_replay:
             sampling_params["include_routing_matrix"] = True
