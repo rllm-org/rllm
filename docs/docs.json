@@ -186,16 +186,11 @@
             ]
           }
         ]
+      },
+      {
+        "tab": "Blog",
+        "href": "https://rllm-project.com/blog.html"
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Blog",
-          "href": "https://rllm-project.com/blog.html",
-          "icon": "newspaper"
-        }
-      ]
-    }
+    ]
   }
 }
