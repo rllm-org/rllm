@@ -18,12 +18,12 @@ rLLM is an open-source framework for training language agents with reinforcement
 
 ## Core features
 
-- **Any harness.** 10+ built-in CLI harnesses (Claude Code, Codex, Terminus-2, mini-swe-agent, opencode, qwen-code, aider, kimi-cli, zeroclaw) plus Harbor-compatible task directories. For custom agents, wrap any framework — LangGraph, SmolAgent, Strands, OpenAI Agents SDK, Google ADK, or plain `openai.OpenAI` — with `@rllm.rollout` and the same code runs in eval and in training.
-- **Any sandbox.** Run harnesses inside Docker, Daytona, Modal, or local execution. Pre-built snapshots and a warm-pool scheduler keep rollouts cheap at training-scale.
-- **Multiple training backends, one API.** `verl` for distributed multi-GPU training, `tinker` for single-machine / Tinker API, `fireworks` for the Fireworks training platform. Switch with `--backend`; agent and eval don't change.
-- **60+ integrated benchmarks.** Evaluate across math, code, MCQ, QA, instruction following, search, vision-language, translation, and agentic suites — Terminal-Bench 2.0, SkillsBench, SWEbench-Verified, AIME, MATH-500, GPQA, and 50+ more. `rllm eval <name>` auto-pulls and runs.
+- **Any harness.** 10+ CLI harnesses (Claude Code, Codex, Terminus-2, mini-swe-agent, opencode, ...) plus Harbor-compatible task dirs. Or wrap your own agent — LangGraph, OpenAI Agents SDK, `openai.OpenAI` — with `@rllm.rollout`.
+- **Any sandbox.** Docker, Daytona, Modal, or local — with snapshot + warm-pool acceleration to keep rollouts cheap at training-scale.
+- **Multiple training backends, one API.** `verl` (distributed multi-GPU), `tinker` (single-machine), `fireworks` (Fireworks platform). Switch with one flag.
+- **60+ integrated benchmarks.** Math, code, MCQ, QA, search, VLM, translation, agentic — Terminal-Bench 2.0, SWE-bench, SkillsBench, AIME, MATH-500, GPQA, and more. `rllm eval <name>` auto-pulls and runs.
 - **Multiple RL algorithms.** GRPO, REINFORCE, RLOO, rejection sampling, and more.
-- **Battle-tested.** rLLM-trained agents have set open-source state of the art — DeepScaleR-1.5B surpassing O1-Preview on math, DeepCoder-14B matching O3-mini, DeepSWE-32B on SWE-bench, and a 4B finance model outperforming 235B. Adopted by academic labs and industry research teams, with community projects including Tongyi DeepResearch, PettingLLMs, SETA, and Terminal-Bench-RL (see [Community Projects](#community-projects) below).
+- **Battle-tested.** State-of-the-art open-source results (DeepScaleR-1.5B, DeepCoder-14B, DeepSWE-32B, FinQA-4B). Adopted by academic labs and industry research teams (see [Community Projects](#community-projects) below).
 
 Read more on our [documentation site](https://docs.rllm-project.com/).
 
