@@ -40,7 +40,7 @@ dependencies = [
     "hydra-core",
     "codetiming",
     "tinker>=0.22.2 ; python_version >= '3.11'",
-    "tinker-cookbook==0.4.1 ; python_version >= '3.11'",
+    "tinker-cookbook>=0.4.1 ; python_version >= '3.11'",
 ]
 
 [project.scripts]
@@ -88,7 +88,7 @@ verl = [
 
 tinker = [
     "tinker>=0.22.2 ; python_version >= '3.11'",
-    "tinker_cookbook==0.4.1 ; python_version >= '3.11'",
+    "tinker-cookbook>=0.4.1 ; python_version >= '3.11'",
 ]
 
 fireworks = [

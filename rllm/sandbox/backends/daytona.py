@@ -264,6 +264,24 @@ class DaytonaSandbox:
 
         logger.debug("Uploaded dir %s -> %s in sandbox %s", local_path, remote_path, self.name)
 
+    def is_alive(self) -> bool:
+        """One API GET: refresh sandbox data and check it is still started.
+
+        A Daytona sandbox auto-stops after ``auto_stop_interval`` idle
+        minutes; a stopped (or errored/deleted) sandbox fails its first
+        exec with "no IP address found", so anything not ``started``
+        counts as dead here.
+        """
+        if self._closed:
+            return False
+        try:
+            self._sandbox.refresh_data()
+            state = getattr(self._sandbox, "state", None)
+            return str(getattr(state, "value", state) or "").lower() == "started"
+        except Exception:
+            logger.debug("DaytonaSandbox %s is_alive check failed — treating as dead", self.name, exc_info=True)
+            return False
+
     def close(self) -> None:
         """Delete the Daytona sandbox and release resources."""
         if self._closed:
