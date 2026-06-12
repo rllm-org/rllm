@@ -180,11 +180,12 @@ def _resolve_backend(task: Task, sandbox_backend: str | None) -> str:
     return sandbox_backend or task.metadata.get("sandbox_backend") or "docker"
 
 
-def _create_base_sandbox(task: Task, backend: str, *, image: str | None = None, name: str | None = None) -> Sandbox:
+def _create_base_sandbox(task: Task, backend: str, *, image: str | None = None, name: str | None = None, **backend_kwargs) -> Sandbox:
     """Create a sandbox from a base ``image`` — no Dockerfile RUN replay.
 
     ``image`` defaults to the task's resolved base image; pass a snapshot
-    ref to boot from a pre-warmed environment instead.
+    ref to boot from a pre-warmed environment instead. ``backend_kwargs``
+    pass through to the backend constructor (e.g. Modal's ``timeout``).
     """
     from rllm.sandbox.sandboxed_flow import create_sandbox
 
@@ -192,7 +193,7 @@ def _create_base_sandbox(task: Task, backend: str, *, image: str | None = None, 
     if name is None:
         safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "-", task.id)
         name = f"rllm-{safe_id}-{uuid.uuid4().hex[:6]}"
-    return create_sandbox(backend, name=name, image=image, **_sandbox_resource_kwargs(task, backend))
+    return create_sandbox(backend, name=name, image=image, **_sandbox_resource_kwargs(task, backend), **backend_kwargs)
 
 
 def _replay_dockerfile(task: Task, sandbox: Sandbox, backend: str) -> None:

@@ -24,8 +24,11 @@ import click
 from rich.table import Table
 
 from rllm.cli._ui import console, fail, info_panel, not_found, parse_index_spec
+from rllm.env import env_int
 
-_MAX_BUILD_WORKERS = 4  # snapshot builds are network/IO-bound; a few in parallel is a real win
+# Snapshot builds are network/IO-bound; a few in parallel is a real win. Raise
+# the env var for large benchmarks (cloud builders absorb 10+ comfortably).
+_MAX_BUILD_WORKERS = env_int("RLLM_SNAPSHOT_BUILD_WORKERS", 4)
 
 # Build outcome → cell markup (status is carried as a plain code, styled only at render).
 _STATUS_MARKUP = {
