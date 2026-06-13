@@ -748,6 +748,30 @@
       "transform": "rllm.data.transforms:swebench_transform",
       "instruction_field": "question"
     },
+    "swebench_pro": {
+      "description": "SWE-bench Pro (Public): 731 enterprise-grade SWE tasks across 41 repos, evaluated against pre-built jefzda/sweap-images Docker images",
+      "source": "ScaleAI/SWE-bench_Pro",
+      "category": "code",
+      "splits": [
+        "test"
+      ],
+      "default_agent": "swe",
+      "reward_fn": "swebench_pro_reward_fn",
+      "eval_split": "test",
+      "transform": "rllm.data.transforms:swebench_pro_transform",
+      "instruction_field": "question"
+    },
+    "deepswe": {
+      "description": "DeepSWE: 113 long-horizon SWE tasks across 91 repos in 5 languages (Harbor format; per-task tests/test.sh verifier)",
+      "source": "https://github.com/datacurve-ai/deep-swe",
+      "builder": "rllm.data.deepswe_builder:build_benchmark",
+      "category": "agentic",
+      "splits": [
+        "test"
+      ],
+      "eval_split": "test",
+      "default_agent": "mini-swe-agent"
+    },
     "omnidocbench": {
       "description": "OmniDocBench: Comprehensive document understanding benchmark with structured eval",
       "source": "rwood-97/english_OmniDocBench_with_eval",
