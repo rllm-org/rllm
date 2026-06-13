@@ -417,6 +417,40 @@ def _build_solution_script(patch: str) -> str:
     return "#!/bin/bash\nset -e\ncd /app\ngit config --global --add safe.directory /app 2>/dev/null || true\ngit apply -v /solution/gold.patch\n"
 
 
+def _purge_row_materialize_artifacts(out: Path) -> None:
+    """Remove artifacts written by the HF-row materialize path.
+
+    ``swebench_pro`` shipped briefly as an HF-row dataset (a previous
+    revision of this PR). Its first ``rllm dataset pull`` landed:
+
+        ~/.rllm/datasets/swebench_pro/
+        ├── dataset.toml          # transform-style: no [verifier]
+        ├── data/test.jsonl       # the row dump
+        └── instruction.md.tpl    # row→prompt template
+
+    A subsequent ``pull`` with the sandbox builder writes the new
+    ``dataset.toml`` + ``<instance_id>/`` task tree alongside them — but
+    leaves ``data/`` in place. ``BenchmarkLoader._has_data_file`` then
+    sees ``data/`` and routes through ``_load_data_dataset`` (one Task
+    per row, ``sub_dir=None``, ``task.id`` numeric) instead of
+    ``_load_sandbox_dataset``. Symptom: every task fails with
+    ``missing reference solution at <dataset_root>/solution/solve.sh``
+    because ``task.task_dir`` == dataset root, not the instance dir.
+
+    Wipe the conflicting paths up front so re-pulls converge regardless
+    of the previous shape this dataset was pulled in.
+    """
+    for stale in ("data", "images", "instruction.md.tpl"):
+        target = out / stale
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+        elif target.exists():
+            try:
+                target.unlink()
+            except OSError:
+                pass
+
+
 def _write_dataset_toml(out: Path, *, name: str, split: str, description: str, default_agent: str) -> None:
     content = "\n".join(
         [
@@ -555,6 +589,7 @@ def build_benchmark(
         logger.info("[swebench_pro] removing existing %s", out)
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
+    _purge_row_materialize_artifacts(out)
 
     logger.info("[swebench_pro] loading HF dataset %s split=%s ...", HF_REPO_ID, hf_split)
     rows = _load_rows(hf_split)
