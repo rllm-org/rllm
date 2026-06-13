@@ -755,7 +755,7 @@
       "splits": [
         "test"
       ],
-      "default_agent": "swe",
+      "default_agent": "mini-swe-agent",
       "reward_fn": "swebench_pro_reward_fn",
       "eval_split": "test",
       "transform": "rllm.data.transforms:swebench_pro_transform",
