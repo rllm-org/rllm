@@ -318,9 +318,22 @@ PATCH_BYTES=$(wc -c < "$MODEL_PATCH" 2>/dev/null || echo 0)
 log "Captured patch: $PATCH_BYTES bytes"
 
 # Step 2: reset to base_commit so the patch applies on a clean tree.
+#
+# ``git reset --hard`` only touches tracked files — runtime artifacts the
+# image build process left behind (Redis ``appendonlydir/*.aof``,
+# ``dump.rdb``, Python ``__pycache__/``, …) stay as untracked files. They
+# end up in the captured patch as ``new file`` entries via ``git add -A``,
+# and ``git apply`` then aborts atomically with
+# ``error: <path>: already exists in working directory`` because those
+# files still exist after the reset. Atomic apply means *no* hunk lands —
+# so P2P tests pass (they're baseline behavior) but F2P silently fails
+# because the gold patch never touches the source tree. ``git clean -fd``
+# clears the untracked junk; the patch's own new-file entries then
+# recreate anything the test runner legitimately needs.
 log "Resetting to base_commit"
 git reset --hard "$BASE_COMMIT" >/dev/null 2>&1 || log "git reset --hard failed (continuing)"
 git checkout "$BASE_COMMIT" >/dev/null 2>&1 || log "git checkout failed (continuing)"
+git clean -fd >/dev/null 2>&1 || log "git clean -fd failed (continuing)"
 
 # Step 3: re-apply the agent's patch.
 if [ -s "$MODEL_PATCH" ]; then
