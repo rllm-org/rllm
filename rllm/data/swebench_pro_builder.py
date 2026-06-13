@@ -300,12 +300,18 @@ if [ -z "$BASE_COMMIT" ]; then
     exit 0
 fi
 
-# Step 1: capture the agent's diff vs HEAD (the image checks out base_commit
-# at build time, so HEAD ≡ base_commit when the agent starts).
-log "Capturing agent diff vs HEAD ($BASE_COMMIT)"
+# Step 1: capture the agent's diff vs base_commit.
+#
+# Don't trust HEAD — the ``jefzda/sweap-images:*`` images ship with /app
+# checked out to some "ready-to-test" commit which may or may not equal
+# base_commit. ``git diff --cached <base_commit>`` ignores HEAD entirely
+# and diffs the index against the recorded base_commit tree, so the
+# captured patch is always the right "agent's edits vs base_commit"
+# regardless of what the harness or the image left HEAD pointing at.
+log "Capturing agent diff vs base_commit ($BASE_COMMIT)"
 MODEL_PATCH=/tmp/model_patch.diff
 git add -A . >/dev/null 2>&1 || true
-git diff --cached --binary > "$MODEL_PATCH" 2>/dev/null || true
+git diff --cached --binary "$BASE_COMMIT" > "$MODEL_PATCH" 2>/dev/null || true
 git reset >/dev/null 2>&1 || true
 
 PATCH_BYTES=$(wc -c < "$MODEL_PATCH" 2>/dev/null || echo 0)
@@ -418,12 +424,62 @@ def _build_verifier_script() -> str:
     return _VERIFIER_TEMPLATE
 
 
-def _build_solution_script(patch: str) -> str:
+def _build_solution_script(base_commit: str) -> str:
     """``solution/solve.sh`` applies the gold patch — used by the ``oracle`` harness.
 
-    Mirrors :func:`swesmith_builder.build_benchmark`'s solution layout.
+    Hard-resets to ``base_commit`` first. The ``jefzda/sweap-images:*`` images
+    don't guarantee ``/app``'s HEAD is at base_commit — upstream's
+    ``swe_bench_pro_eval.py:create_entryscript`` always does an explicit
+    ``git reset --hard {base_commit} && git checkout {base_commit}`` before
+    applying the agent's patch for exactly this reason. Without the reset,
+    ``git apply`` may succeed against the wrong base, and the verifier's
+    subsequent ``git diff --cached HEAD`` captures a diff that doesn't
+    represent the gold patch — F2P tests then silently fail.
     """
-    return "#!/bin/bash\nset -e\ncd /app\ngit config --global --add safe.directory /app 2>/dev/null || true\ngit apply -v /solution/gold.patch\n"
+    return (
+        "#!/bin/bash\n"
+        "set -e\n"
+        "cd /app\n"
+        "git config --global --add safe.directory /app 2>/dev/null || true\n"
+        f'git reset --hard "{base_commit}"\n'
+        f'git checkout "{base_commit}"\n'
+        "git apply -v /solution/gold.patch\n"
+    )
+
+
+def _refresh_synthesized_files(out: Path) -> int:
+    """Rewrite ``tests/test.sh`` and ``solution/solve.sh`` for existing tasks.
+
+    Both files are pure templates of this module — the per-task knobs
+    live in ``tests/instance.json``. When the templates change (verifier
+    fix, oracle reset added, etc.), re-pulling would rebuild from
+    scratch but is heavy (clones the SWE-bench_Pro-os repo for files we
+    already have). This helper walks the task tree, reads each
+    ``instance.json`` for ``base_commit``, and overwrites the two
+    synthesized scripts in place. Returns the number of tasks refreshed.
+    """
+    refreshed = 0
+    for task_dir in sorted(out.iterdir()):
+        if not task_dir.is_dir():
+            continue
+        inst_json = task_dir / "tests" / "instance.json"
+        if not inst_json.is_file():
+            continue
+        try:
+            inst = json.loads(inst_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        base_commit = inst.get("base_commit", "")
+        tests_dir = task_dir / "tests"
+        if tests_dir.is_dir():
+            (tests_dir / "test.sh").write_text(_build_verifier_script(), encoding="utf-8")
+            (tests_dir / "test.sh").chmod(0o755)
+        sol_dir = task_dir / "solution"
+        if sol_dir.is_dir():
+            (sol_dir / "solve.sh").write_text(_build_solution_script(base_commit), encoding="utf-8")
+            (sol_dir / "solve.sh").chmod(0o755)
+        refreshed += 1
+    return refreshed
 
 
 def _patch_existing_dockerfiles(out: Path) -> int:
@@ -581,7 +637,7 @@ def _materialize_task(
     sol_dst.mkdir(parents=True, exist_ok=True)
     patch = row.get("patch") or ""
     (sol_dst / "gold.patch").write_text(patch, encoding="utf-8")
-    (sol_dst / "solve.sh").write_text(_build_solution_script(patch), encoding="utf-8")
+    (sol_dst / "solve.sh").write_text(_build_solution_script(base_commit), encoding="utf-8")
     (sol_dst / "solve.sh").chmod(0o755)
 
     return {"f2p": len(instance_data["fail_to_pass"]), "p2p": len(instance_data["pass_to_pass"])}
@@ -640,6 +696,9 @@ def build_benchmark(
     backfilled = _patch_existing_dockerfiles(out)
     if backfilled:
         logger.info("[swebench_pro] backfilled ENTRYPOINT [] into %d existing Dockerfiles", backfilled)
+    refreshed = _refresh_synthesized_files(out)
+    if refreshed:
+        logger.info("[swebench_pro] refreshed test.sh + solve.sh in %d existing task dirs", refreshed)
 
     logger.info("[swebench_pro] loading HF dataset %s split=%s ...", HF_REPO_ID, hf_split)
     rows = _load_rows(hf_split)
