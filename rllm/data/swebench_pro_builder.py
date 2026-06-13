@@ -185,13 +185,22 @@ def _build_instruction(row: dict) -> str:
 
 
 def _build_dockerfile(dockerhub_tag: str) -> str:
-    """Single-line Dockerfile pulling jefzda/sweap-images:<tag>.
+    """Dockerfile that pulls jefzda/sweap-images:<tag> and clears the base ENTRYPOINT.
 
     The image already ships with the repo at ``/app`` checked out to
     ``base_commit``, plus the test-runner dependencies (npm/pytest/go).
-    No extra RUN steps needed at the rLLM layer.
+
+    The base SWE-bench Pro images declare ``ENTRYPOINT ["/bin/bash"]``.
+    rLLM's docker backend (``rllm/sandbox/backends/docker.py``) starts
+    containers with ``command="sleep infinity"`` to keep them alive for
+    the agent + verifier execs — but the inherited entrypoint turns the
+    invocation into ``/bin/bash sleep infinity``, which bash interprets
+    as ``read script file 'sleep'`` and exits immediately. The container
+    dies before the first exec, then every ``sandbox.exec`` returns
+    HTTP 409 ``container is not running``. Reset ENTRYPOINT to ``[]``
+    so docker uses our ``sleep infinity`` command directly.
     """
-    return f"FROM {DOCKERHUB_NAMESPACE}:{dockerhub_tag}\nWORKDIR /app\n"
+    return f"FROM {DOCKERHUB_NAMESPACE}:{dockerhub_tag}\nENTRYPOINT []\nWORKDIR /app\n"
 
 
 def _build_task_toml(
@@ -417,6 +426,44 @@ def _build_solution_script(patch: str) -> str:
     return "#!/bin/bash\nset -e\ncd /app\ngit config --global --add safe.directory /app 2>/dev/null || true\ngit apply -v /solution/gold.patch\n"
 
 
+def _patch_existing_dockerfiles(out: Path) -> int:
+    """Backfill ``ENTRYPOINT []`` into Dockerfiles written by older revisions.
+
+    The first sandbox-builder revision emitted a 2-line Dockerfile (just
+    ``FROM`` + ``WORKDIR``). Without ``ENTRYPOINT []`` the inherited base
+    entrypoint (``["/bin/bash"]``) eats rLLM's ``sleep infinity`` start
+    command and the container exits immediately. Re-walk existing task
+    dirs and inject the missing line so a re-pull isn't required —
+    callers that already have ~/.rllm/datasets/swebench_pro/<id>/ from
+    a prior pull pick up the fix on the next build. New tasks are
+    written with the corrected line directly by :func:`_build_dockerfile`.
+    """
+    patched = 0
+    for task_dir in out.iterdir():
+        if not task_dir.is_dir():
+            continue
+        dockerfile = task_dir / "environment" / "Dockerfile"
+        if not dockerfile.is_file():
+            continue
+        text = dockerfile.read_text(encoding="utf-8")
+        if "ENTRYPOINT" in text:
+            continue
+        # Inject after the first FROM line. Plain string ops — these
+        # Dockerfiles are 2 lines today; no need for a parser.
+        lines = text.splitlines()
+        new_lines: list[str] = []
+        injected = False
+        for line in lines:
+            new_lines.append(line)
+            if not injected and line.lstrip().upper().startswith("FROM "):
+                new_lines.append("ENTRYPOINT []")
+                injected = True
+        if injected:
+            dockerfile.write_text("\n".join(new_lines) + ("\n" if text.endswith("\n") else ""), encoding="utf-8")
+            patched += 1
+    return patched
+
+
 def _purge_row_materialize_artifacts(out: Path) -> None:
     """Remove artifacts written by the HF-row materialize path.
 
@@ -590,6 +637,9 @@ def build_benchmark(
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
     _purge_row_materialize_artifacts(out)
+    backfilled = _patch_existing_dockerfiles(out)
+    if backfilled:
+        logger.info("[swebench_pro] backfilled ENTRYPOINT [] into %d existing Dockerfiles", backfilled)
 
     logger.info("[swebench_pro] loading HF dataset %s split=%s ...", HF_REPO_ID, hf_split)
     rows = _load_rows(hf_split)
