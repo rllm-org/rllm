@@ -1298,47 +1298,6 @@ def swebench_transform(row: dict) -> dict:
     }
 
 
-def swebench_pro_transform(row: dict) -> dict:
-    """Transform SWE-bench Pro row (``ScaleAI/SWE-bench_Pro``) to standard format.
-
-    SWE-bench Pro mirrors SWE-bench Verified's schema with a few additions:
-    - ``dockerhub_tag``: image at ``jefzda/sweap-images:<tag>`` used as the
-      per-instance evaluation container (instead of swebench-style on-the-fly
-      image builds).
-    - ``requirements`` / ``interface``: extra problem context the model gets.
-    - ``before_repo_set_cmd``, ``selected_test_files_to_run``: hints for the
-      verifier about how to bootstrap and which tests to run.
-    - ``fail_to_pass`` / ``pass_to_pass``: lowercase here (vs SWE-bench's
-      uppercase). We surface both casings so downstream evaluators that only
-      know the SWE-bench names keep working.
-    """
-    fail_to_pass = row.get("fail_to_pass") or row.get("FAIL_TO_PASS", "")
-    pass_to_pass = row.get("pass_to_pass") or row.get("PASS_TO_PASS", "")
-    return {
-        "question": row.get("problem_statement", ""),
-        "ground_truth": row.get("instance_id", ""),
-        "instance_id": row.get("instance_id", ""),
-        "repo": row.get("repo", ""),
-        "repo_language": row.get("repo_language", ""),
-        "base_commit": row.get("base_commit", ""),
-        "patch": row.get("patch", ""),
-        "test_patch": row.get("test_patch", ""),
-        "problem_statement": row.get("problem_statement", ""),
-        "requirements": row.get("requirements", "") or "",
-        "interface": row.get("interface", "") or "",
-        "FAIL_TO_PASS": fail_to_pass,
-        "PASS_TO_PASS": pass_to_pass,
-        "fail_to_pass": fail_to_pass,
-        "pass_to_pass": pass_to_pass,
-        "issue_specificity": row.get("issue_specificity", ""),
-        "issue_categories": row.get("issue_categories", ""),
-        "before_repo_set_cmd": row.get("before_repo_set_cmd", ""),
-        "selected_test_files_to_run": row.get("selected_test_files_to_run", ""),
-        "dockerhub_tag": row.get("dockerhub_tag", ""),
-        "data_source": "swebench_pro",
-    }
-
-
 def bfcl_transform(row: dict) -> dict:
     """Transform BFCL exec row to standard function-calling format.
 

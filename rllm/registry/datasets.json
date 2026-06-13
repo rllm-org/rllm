@@ -749,17 +749,15 @@
       "instruction_field": "question"
     },
     "swebench_pro": {
-      "description": "SWE-bench Pro (Public): 731 enterprise-grade SWE tasks across 41 repos, evaluated against pre-built jefzda/sweap-images Docker images",
+      "description": "SWE-bench Pro (Public): 731 enterprise-grade SWE tasks across 41 repos, evaluated against pre-built jefzda/sweap-images Docker images (Harbor format; F2P/P2P verifier)",
       "source": "ScaleAI/SWE-bench_Pro",
+      "builder": "rllm.data.swebench_pro_builder:build_benchmark",
       "category": "code",
       "splits": [
         "test"
       ],
-      "default_agent": "mini-swe-agent",
-      "reward_fn": "swebench_pro_reward_fn",
       "eval_split": "test",
-      "transform": "rllm.data.transforms:swebench_pro_transform",
-      "instruction_field": "question"
+      "default_agent": "mini-swe-agent"
     },
     "deepswe": {
       "description": "DeepSWE: 113 long-horizon SWE tasks across 91 repos in 5 languages (Harbor format; per-task tests/test.sh verifier)",
