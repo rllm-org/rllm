@@ -26,10 +26,10 @@ python -u train.py \
     training.group_size=8 \
     training.learning_rate=2e-5 \
     training.max_length=32768 \
-    sampling.train.temperature=1.0 \
-    sampling.train.top_p=1.0 \
-    sampling.val.temperature=0.7 \
-    sampling.val.top_p=0.8 \
+    rllm.rollout.train.temperature=1.0 \
+    rllm.rollout.train.top_p=1.0 \
+    rllm.rollout.val.temperature=0.7 \
+    rllm.rollout.val.top_p=0.8 \
     data.max_prompt_length=32768 \
     data.max_response_length=8192 \
     data.train_batch_size=1 \
@@ -50,8 +50,6 @@ python -u train.py \
     rllm.remote_runtime.harbor.environment_type=daytona \
     rllm.remote_runtime.session_timeout=1800.0 \
     rllm.gateway.port=9090 \
-    rllm.gateway.public_url=null \
-    rllm.gateway.sampling_params_priority=session \
     rllm.trainer.total_epochs=1 \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='swe-rl' \
