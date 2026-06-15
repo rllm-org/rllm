@@ -544,17 +544,30 @@ def save_config(config: RllmConfig) -> str:
     Creates parent directories as needed and sets file permissions to 0o600
     (owner read/write only) since the file contains API keys.
 
+    Merges into any existing file so unrelated keys (e.g. ``ui_api_key``
+    written by ``rllm login``) survive provider/model changes instead of
+    being clobbered.
+
     Returns the path that was written.
     """
     path = _config_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    data: dict[str, object] = {
-        "provider": config.provider,
-        "model": config.model,
-        "api_keys": dict(config.api_keys),
-    }
+    data: dict[str, object] = {}
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    data["provider"] = config.provider
+    data["model"] = config.model
+    data["api_keys"] = dict(config.api_keys)
     if config.base_url:
         data["base_url"] = config.base_url
+    else:
+        data.pop("base_url", None)
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
         f.write("\n")
