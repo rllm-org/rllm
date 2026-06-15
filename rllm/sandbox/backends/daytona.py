@@ -349,9 +349,7 @@ def build_daytona_snapshot(task, key: str, *, force: bool = False, install_scrip
     img = Image.base(_resolve_image(task, "daytona"))
     # Honor [environment].replay_dockerfile: fully-built task images opt out so
     # their RUN steps aren't double-applied on top of the prebuilt image.
-    run_commands = (
-        [_as_single_run_line(c) for c in _dockerfile_run_commands(task)] if _should_replay_dockerfile(task) else []
-    )
+    run_commands = [_as_single_run_line(c) for c in _dockerfile_run_commands(task)] if _should_replay_dockerfile(task) else []
     if install_script:
         run_commands.append(_as_single_run_line(install_script))
     if run_commands:

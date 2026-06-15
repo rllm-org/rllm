@@ -33,10 +33,7 @@ def _task_with_dockerfile(tmp_path: Path, dockerfile: str, metadata: dict | None
 def test_multiline_run_joins_with_space_not_newline(tmp_path):
     task = _task_with_dockerfile(
         tmp_path,
-        "FROM ubuntu:24.04\n"
-        "RUN apt-get update && apt-get install -y \\\n"
-        "    python3-pip \\\n"
-        "    && rm -rf /var/lib/apt/lists/*\n",
+        "FROM ubuntu:24.04\nRUN apt-get update && apt-get install -y \\\n    python3-pip \\\n    && rm -rf /var/lib/apt/lists/*\n",
     )
     cmds = _dockerfile_run_commands(task)
     assert cmds == ["apt-get update && apt-get install -y python3-pip && rm -rf /var/lib/apt/lists/*"]
@@ -47,10 +44,7 @@ def test_multiline_run_joins_with_space_not_newline(tmp_path):
 def test_copy_directives_are_skipped(tmp_path):
     task = _task_with_dockerfile(
         tmp_path,
-        "FROM ubuntu:24.04\n"
-        "COPY input_files/data.json /app/data.json\n"
-        "RUN echo hi\n"
-        "ADD x.tar /app/\n",
+        "FROM ubuntu:24.04\nCOPY input_files/data.json /app/data.json\nRUN echo hi\nADD x.tar /app/\n",
     )
     assert _dockerfile_run_commands(task) == ["echo hi"]
 
@@ -85,8 +79,6 @@ def test_replay_flag_read_from_task_toml(tmp_path):
     """End-to-end: [environment].replay_dockerfile in task.toml reaches metadata."""
     (tmp_path / "environment").mkdir()
     (tmp_path / "environment" / "Dockerfile").write_text("FROM ubuntu:24.04\nRUN echo hi\n")
-    (tmp_path / "task.toml").write_text(
-        '[environment]\ndocker_image = "org/img:t"\nreplay_dockerfile = false\n'
-    )
+    (tmp_path / "task.toml").write_text('[environment]\ndocker_image = "org/img:t"\nreplay_dockerfile = false\n')
     task = _load_task_from_dir(tmp_path, dataset_dir=tmp_path)
     assert _should_replay_dockerfile(task) is False
