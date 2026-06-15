@@ -70,9 +70,10 @@ def env_key(backend: str, base_image: str, run_commands: list[str], install_scri
 
 def env_key_for(task: Task, backend: str, install_script: str = "") -> str:
     """Fingerprint a task's environment via the shared image/RUN resolution."""
-    from rllm.eval._resolution import _dockerfile_run_commands, _resolve_image
+    from rllm.eval._resolution import _dockerfile_run_commands, _resolve_image, _should_replay_dockerfile
 
-    return env_key(backend, _resolve_image(task, backend), _dockerfile_run_commands(task), install_script)
+    run_commands = _dockerfile_run_commands(task) if _should_replay_dockerfile(task) else []
+    return env_key(backend, _resolve_image(task, backend), run_commands, install_script)
 
 
 def install_script_for(agent_flow: object) -> str:
