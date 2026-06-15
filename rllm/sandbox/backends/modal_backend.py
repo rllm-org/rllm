@@ -322,7 +322,12 @@ def build_modal_snapshot(task, key: str, prior_ref: str | None = None, *, force:
     (stored as a diff from the base). A failed install fails the build — a
     snapshot keyed on the install must actually contain it.
     """
-    from rllm.eval._resolution import _create_base_sandbox, _dockerfile_run_commands, _replay_dockerfile
+    from rllm.eval._resolution import (
+        _create_base_sandbox,
+        _dockerfile_run_commands,
+        _replay_dockerfile,
+        _should_replay_dockerfile,
+    )
 
     if prior_ref and not force and _modal_ref_alive(prior_ref):
         logger.info("modal snapshot %s already live (%s) — reusing", key, prior_ref)
@@ -333,7 +338,8 @@ def build_modal_snapshot(task, key: str, prior_ref: str | None = None, *, force:
     # full bound), plus the install bound and pull/capture slack. With the
     # 30-min default, two hung steps killed the sandbox mid-build.
     install_budget = env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 900) if install_script else 0
-    build_timeout = max(_DEFAULT_TIMEOUT, 900 * len(_dockerfile_run_commands(task)) + install_budget + 600)
+    n_replay = len(_dockerfile_run_commands(task)) if _should_replay_dockerfile(task) else 0
+    build_timeout = max(_DEFAULT_TIMEOUT, 900 * n_replay + install_budget + 600)
     sb = _create_base_sandbox(task, "modal", name=f"{key}-build", timeout=build_timeout)
     try:
         _replay_dockerfile(task, sb, "modal")
