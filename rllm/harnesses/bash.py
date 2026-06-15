@@ -42,19 +42,18 @@ _DONE_MARKERS = ("task completed", "task is complete", "done", "finished", "i ha
 class BashHarness(SandboxedAgentFlow):
     """Sandbox bash-loop harness.
 
-    The Runner sets the sandbox via ``set_sandbox()`` before ``run()`` is called.
+    The engine passes the per-task sandbox in as ``env``; the LLM client
+    loop runs on the host and only command execution happens in-sandbox.
     """
 
     name = "bash"
     sandbox_backend = "docker"
     max_concurrent = 4
 
-    def run(self, task: Task, config) -> Episode:
+    def run(self, task: Task, config, *, env) -> Episode:
         from openai import OpenAI
 
-        sandbox = self.sandbox
-        if sandbox is None:
-            raise RuntimeError("BashHarness requires a sandbox. The Runner should set one before calling run().")
+        sandbox = env
 
         client = OpenAI(base_url=config.base_url, api_key="EMPTY")
         max_turns = int(task.metadata.get("rllm", {}).get("max_turns") or 50)

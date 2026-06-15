@@ -50,7 +50,7 @@ rllm dataset inspect gsm8k -n 3      # peek at a few real rows
 ```
 
 <Tip>
-The [Supported datasets](/datasets) page lists every benchmark with its size, source, and default evaluator. Use it to find the exact name to pass to `rllm eval`.
+The [Supported datasets](/datasets/overview) page lists every benchmark with its size, source, and default evaluator. Use it to find the exact name to pass to `rllm eval`.
 </Tip>
 
 You can evaluate three kinds of dataset sources:
@@ -149,6 +149,10 @@ These flags shape how the evaluation executes and what it leaves behind.
 
 <ParamField path="--concurrency" type="int" default="64">
   How many tasks run in parallel. Lower it if you hit provider rate limits; raise it for throughput.
+</ParamField>
+
+<ParamField path="--attempts" type="int" default="1">
+  Independent rollouts per task. With `--attempts N` the results report unbiased pass@k for every k from 1 to N alongside per-rollout accuracy. Use a temperature above 0 so attempts actually differ.
 </ParamField>
 
 <ParamField path="--evaluator" type="string">

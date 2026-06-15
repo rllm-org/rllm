@@ -29,6 +29,7 @@ For Tinker backends, an in-process handler is injected into the gateway
 from __future__ import annotations
 
 import logging
+import re
 import socket
 import subprocess
 import sys
@@ -58,6 +59,26 @@ def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def container_reachable_url(url: str, backend: str | None) -> str:
+    """Rewrite host loopback addresses so a process inside a container can reach the gateway.
+
+    The gateway binds to 127.0.0.1 on the host; inside a Docker container
+    that loopback addresses the container itself. Docker Desktop resolves
+    ``host.docker.internal`` to the host, and on Linux Docker 20.10+ the
+    same hostname works when the container is started with
+    ``--add-host=host.docker.internal:host-gateway``. Keyed on the backend
+    that actually provisioned the task's sandbox; a no-op for everything
+    but ``docker`` (remote backends get a public tunnel URL instead).
+    """
+    if backend != "docker":
+        return url
+    return re.sub(
+        r"(https?://)(?:127\.0\.0\.1|localhost)(:\d+|/|$)",
+        r"\1host.docker.internal\2",
+        url,
+    )
 
 
 def _normalize_worker_url(raw_url: str) -> str:
@@ -263,8 +284,16 @@ class GatewayManager:
         sp = sampling_params if sampling_params is not None else (self._val_sampling_params if is_validation else self._train_sampling_params)
         return self.client.create_session(session_id=session_id, sampling_params=sp or None)
 
-    def get_session_url(self, session_id: str) -> str:
-        if self.public_url:
+    def get_session_url(self, session_id: str, *, public: bool = True) -> str:
+        """Session-scoped base URL for the flow's LLM client.
+
+        ``public=False`` returns the host-local gateway URL even when a tunnel
+        is up — for flows whose LLM client runs on the host (e.g. a sandboxed
+        bash loop driving the sandbox via ``exec``). The tunnel hostname only
+        matters to clients *inside* the env, and free quick-tunnel hostnames
+        can die mid-run; host-side clients should never depend on them.
+        """
+        if public and self.public_url:
             base = self.public_url.rstrip("/")
             return f"{base}/sessions/{session_id}/v1"
         return self.client.get_session_url(session_id)

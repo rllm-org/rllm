@@ -63,7 +63,7 @@ class QwenCodeHarness(BaseCliHarness):
         return _INSTALL_SCRIPT
 
     def build_env(self, task: Task, config: AgentConfig) -> dict[str, str]:
-        gateway_url = self._container_url(config.base_url)
+        gateway_url = config.base_url
         # Qwen Code uses the OpenAI-compatible client, so a bare model
         # id (the part after ``provider/``) is what the wire expects;
         # the gateway routes by model name, not by env var.

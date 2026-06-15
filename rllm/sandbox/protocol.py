@@ -41,6 +41,17 @@ class Sandbox(Protocol):
         """Destroy the sandbox and release resources."""
         ...
 
+    def is_alive(self) -> bool:
+        """Return whether the sandbox is still usable, via a cheap backend API query.
+
+        Remote sandboxes can die out-of-band (provider idle auto-stop,
+        lifetime timeout, external deletion); callers that hold a sandbox
+        without using it (e.g. the warm queue) check this before handing
+        it to a consumer. Implementations must not raise: any error in
+        the check means ``False``.
+        """
+        ...
+
 
 def _safe_exec(sandbox: Sandbox, command: str, timeout: float | None = None) -> str:
     """Execute command, returning stderr on non-zero exit instead of raising."""

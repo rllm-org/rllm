@@ -1,0 +1,144 @@
+# @package _global_
+
+# Fireworks Backend Configuration for rLLM
+# This config is used when training agents with Fireworks backend
+# Unified configuration supporting both workflow and agent training modes
+
+# Fireworks-specific settings
+fireworks_base_url: "https://api.fireworks.ai"  # Fireworks service URL
+fuse_forward_backward_and_optim_step: false  # Must be false for Fireworks backend
+
+# Model Configuration
+model:
+  name: accounts/fireworks/models/qwen3-4b-instruct-2507
+  tokenizer_model: Qwen/Qwen3-4B-Instruct-2507
+  lora_rank: 32         # LoRA rank 0 means no LoRA fine-tuning, which is compatible with Fireworks backend
+  train_unembed: false  # Train LoRA on output embedding layer
+  train_attn: true     # Train LoRA on attention layers
+  train_mlp: true      # Train LoRA on MLP layers
+
+# Training Configuration (fireworks-specific)
+training:
+  group_size: ???  # Number of rollouts per prompt
+  learning_rate: 1e-5
+  lr_schedule: "constant"  # "constant", "linear", "cosine"
+  warmup_steps_ratio: 0.0  # Warmup steps as ratio of total steps (between 0 and 1)
+  # Adam optimizer parameters
+  beta1: 0.9
+  beta2: 0.95
+  eps: 1e-8
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+  max_length: null  # Auto-derived from training shape if null
+  client_timeout: 3600  # Timeout for forward / forward_backward / optim_step calls (seconds)
+  resume_from_fireworks_job_id: null  # Source trainer job id for loading a DCP checkpoint
+  resume_from_dcp_checkpoint: null  # Explicit DCP name to load; null uses latest on the source/current job
+
+fireworks_config:
+  policy_trainer_shape_id: accounts/fireworks/trainingShapes/qwen3-4b-minimum-lora
+  policy_trainer_replica_count: 1
+  rollout_deployment_replica_count: 1
+  # Only needed for full-parameter RFT with KL (kl_beta > 0).
+  reference_trainer_shape_id: accounts/fireworks/trainingShapes/qwen3-4b-minimum-lora
+  reference_trainer_replica_count: 0
+
+# Validation Configuration
+validation:
+  group_size: ???
+
+# Rollout Engine Configuration
+rollout_engine:
+  reasoning_effort: "medium"
+  accumulate_reasoning: false
+  disable_thinking: false
+  bypass_render_with_parser: false
+  renderer_name: null
+
+# Data Configuration
+data:
+  train_files: null
+  val_files: null
+  max_prompt_length: 30720
+  max_response_length: 2048
+  train_batch_size: 32
+  val_batch_size: 32
+
+# Overriding the rLLM-common config with Fireworks-specific ones
+# Only override if the algorithm values are not None, otherwise still use the rLLM-common config
+rllm:
+  backend: fireworks
+  rollout:
+    n: ${oc.select:training.group_size, 8}
+    n_val: ${oc.select:validation.group_size, 1}
+    train:
+      top_k: 0 # -1 is not accepted
+    val:
+      top_k: 0 # -1 is not accepted
+  algorithm:
+    rollout_correction:
+      bypass_mode: false
+
+
+# Fireworks Sampling concurrency control (cookbook ConcurrencyConfig)
+concurrency:
+  mode: adaptive                   # adaptive | fixed
+  initial_window: null             # Starting window for adaptive mode (null = 8 * replica_count)
+  min_window: 1
+  max_window: 256
+  prefill_queue_target: 0.5        # Target prefill queue duration (seconds)
+
+
+# Do not change this section, unless you are familiar with Fireworks backend.
+fireworks_infra:
+  # Fireworks RFT (reinforcement fine-tuning) provisioning.
+  # RFT and RL are the same training mode.
+  common:
+    base_model: ${model.name}
+    tokenizer_model: ${model.tokenizer_model}
+    lora_rank: ${model.lora_rank}            # 0 = full-parameter training
+    learning_rate: 1e-5      # placeholder for fireworks managed flow. Should be overridden in the training codes.
+    max_seq_len: null        # null = use the training shape's default context length
+    step_timeout: 3600       # SDK default (3600s)
+    weight_sync_timeout: 600
+
+  deployments:
+    rollout:
+      deployment_id: null # null = create a new deployment; set to reattach to an existing deployment
+      deployment_shape: null # Leave deployment_shape null so the SDK uses the shape linked to the training shape.
+      replica_count: ${fireworks_config.rollout_deployment_replica_count}
+      sample_timeout: 600
+      disable_speculative_decoding: false
+      extra_values: null
+
+  trainers:
+    policy:
+      training_shape_id: ${fireworks_config.policy_trainer_shape_id}
+      weight_sync_deployment: rollout # deployment that receives hot-loaded trainer weights
+      job_id: null           # null = create a new job; set to reattach to an existing job
+      replica_count: ${fireworks_config.policy_trainer_replica_count}
+      # Optional fields for admin users.
+      custom_image_tag: null
+      region: null           # optional explicit trainer region; prefer leaving unset
+      timeout_s: 3600       # trainer startup/readiness timeout, not per-step timeout
+      extra_args: null
+      skip_validations: false
+
+    # Only needed for full-parameter RFT with KL (kl_beta > 0).
+    # LoRA reuses the policy as its frozen reference, so leave it unwired otherwise.
+    reference:
+      training_shape_id: ${fireworks_config.reference_trainer_shape_id}
+      job_id: null           # null = create a new job; set to reattach
+      replica_count: ${fireworks_config.reference_trainer_replica_count}
+      # Optional fields for admin users.
+      custom_image_tag: null
+      region: null           # optional explicit trainer region; prefer leaving unset
+      timeout_s: 3600       # trainer startup/readiness timeout, not per-step timeout
+      extra_args: null
+      skip_validations: false
+
+  recipe:
+    # `rft` is an alias for `rl` (same training mode).
+    rft:
+      trainer: policy
+      deployment: rollout
+      # reference_trainer: reference   # uncomment for full-param RFT with reference KL

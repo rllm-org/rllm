@@ -16,6 +16,7 @@ Module is private (``_resolution``) — external callers should go through
 
 from __future__ import annotations
 
+import base64
 import importlib
 import inspect
 import logging
@@ -117,7 +118,8 @@ def _resolve_evaluator(
         for base in (task.task_dir, task.dataset_dir):
             try:
                 ev = PythonModuleEvaluator.from_module(base, module, function)
-                return _wrap_with_sandbox_if_needed(ev, sandbox)
+                ev.sandbox = sandbox
+                return ev
             except FileNotFoundError:
                 continue
         raise FileNotFoundError(f"Verifier module '{module}' not found in {task.task_dir} or {task.dataset_dir}")
@@ -139,6 +141,18 @@ def _resolve_evaluator(
     raise RuntimeError(f"No verifier configured for task '{task.id}' (dataset_dir={task.dataset_dir})")
 
 
+def dataset_verifier_kind(dataset_dir: Path, sub_dir: Path | None = None) -> str:
+    """The dataset-level verifier kind (``"missing"`` when none is configured).
+
+    Used by the train CLI to distinguish env-style verifiers (resolved per
+    task inside the sandbox — leave the trainer's ``evaluator`` unset) from a
+    genuinely missing verifier (fail fast).
+    """
+    probe = Task(id="", instruction="", metadata={}, dataset_dir=dataset_dir, sub_dir=sub_dir)
+    kind, _ = _detect_verifier(probe)
+    return kind
+
+
 def build_dataset_evaluator(dataset_dir: Path, sub_dir: Path | None = None) -> Evaluator | None:
     """Build a single :class:`Evaluator` from a dataset's ``[verifier]`` config.
 
@@ -156,36 +170,9 @@ def build_dataset_evaluator(dataset_dir: Path, sub_dir: Path | None = None) -> E
     return _resolve_evaluator(probe, sandbox=None, kind=kind, verifier_config=config)
 
 
-def _wrap_with_sandbox_if_needed(ev: PythonModuleEvaluator, sandbox: Sandbox | None) -> Evaluator:
-    """If the user's evaluate() signature includes ``sandbox``, inject it."""
-    if sandbox is None:
-        return ev
-    if any(p.name == "sandbox" for p in ev._params):  # noqa: SLF001
-        # Bind the sandbox into kwargs at call time
-        original_build = ev._build_kwargs  # noqa: SLF001
-
-        def build_with_sandbox(task: Task, episode: Episode) -> dict:
-            kwargs = original_build(task, episode)
-            kwargs["sandbox"] = sandbox
-            return kwargs
-
-        ev._build_kwargs = build_with_sandbox  # type: ignore[method-assign]
-    return ev
-
-
 # ---------------------------------------------------------------------------
 # Sandbox setup (extracted from rllm/tasks/runner.py)
 # ---------------------------------------------------------------------------
-
-
-def _needs_sandbox(task: Task, verifier_kind: str) -> bool:
-    """Decide whether the Runner should set up a sandbox."""
-    if verifier_kind in ("sandbox-shell", "python-hybrid"):
-        return True
-    # If the task ships an environment/, treat it as sandboxed
-    if (task.task_dir / "environment").is_dir() or (task.dataset_dir / "environment").is_dir():
-        return True
-    return False
 
 
 def _resolve_backend(task: Task, sandbox_backend: str | None) -> str:
@@ -193,11 +180,12 @@ def _resolve_backend(task: Task, sandbox_backend: str | None) -> str:
     return sandbox_backend or task.metadata.get("sandbox_backend") or "docker"
 
 
-def _create_base_sandbox(task: Task, backend: str, *, image: str | None = None, name: str | None = None) -> Sandbox:
+def _create_base_sandbox(task: Task, backend: str, *, image: str | None = None, name: str | None = None, **backend_kwargs) -> Sandbox:
     """Create a sandbox from a base ``image`` — no Dockerfile RUN replay.
 
     ``image`` defaults to the task's resolved base image; pass a snapshot
-    ref to boot from a pre-warmed environment instead.
+    ref to boot from a pre-warmed environment instead. ``backend_kwargs``
+    pass through to the backend constructor (e.g. Modal's ``timeout``).
     """
     from rllm.sandbox.sandboxed_flow import create_sandbox
 
@@ -205,7 +193,7 @@ def _create_base_sandbox(task: Task, backend: str, *, image: str | None = None, 
     if name is None:
         safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "-", task.id)
         name = f"rllm-{safe_id}-{uuid.uuid4().hex[:6]}"
-    return create_sandbox(backend, name=name, image=image, **_sandbox_resource_kwargs(task, backend))
+    return create_sandbox(backend, name=name, image=image, **_sandbox_resource_kwargs(task, backend), **backend_kwargs)
 
 
 def _replay_dockerfile(task: Task, sandbox: Sandbox, backend: str) -> None:
@@ -253,6 +241,10 @@ def _sandbox_resource_kwargs(task: Task, backend: str) -> dict:
             kw["memory"] = max(1, round(mem_mb / 1024))
         if disk_mb:
             kw["disk"] = max(1, round(disk_mb / 1024))
+        # First boot of a from-image sandbox includes the registry pull, which
+        # for multi-GB SWE images routinely exceeds the SDK's 120s default.
+        # Honor the task's declared build timeout, with a pull-friendly floor.
+        kw["create_timeout"] = float(env.get("build_timeout_sec") or 600.0)
     return kw
 
 
@@ -288,6 +280,19 @@ def _dockerfile_run_commands(task: Task) -> list[str]:
                 commands.append(cmd)
         i += 1
     return commands
+
+
+def _as_single_run_line(cmd: str) -> str:
+    """Collapse a multi-line shell command into one line for a Dockerfile ``RUN``.
+
+    Daytona builds snapshots declaratively: each command becomes a raw
+    ``RUN <command>`` line, which a multi-line script breaks. ``bash`` (not
+    ``sh``) matches how :meth:`Sandbox.exec` runs the same scripts live.
+    """
+    if "\n" not in cmd:
+        return cmd
+    encoded = base64.b64encode(cmd.encode("utf-8")).decode("ascii")
+    return f"echo {encoded} | base64 -d | bash"
 
 
 def _resolve_image(task: Task, backend: str) -> str:
@@ -396,8 +401,10 @@ class _FunctionEvaluator:
 def _adapt_legacy_evaluator(ev: Any) -> Evaluator:
     """Adapt evaluators with ``evaluate(task: dict, episode)`` to ``evaluate(task: Task, episode)``.
 
-    With ``from __future__ import annotations`` annotations are strings,
-    so we compare both ``is dict`` and string forms.
+    Only an explicit ``dict`` annotation (string form included — with
+    ``from __future__ import annotations`` annotations are strings) or a
+    legacy parameter name opts into the dict calling convention; an
+    unannotated evaluator gets the ``Task``.
     """
     sig = inspect.signature(ev.evaluate)
     params = list(sig.parameters.values())
@@ -407,7 +414,7 @@ def _adapt_legacy_evaluator(ev: Any) -> Evaluator:
     annotation = first.annotation if first.annotation is not inspect.Parameter.empty else None
 
     is_dict_annotation = annotation is dict or annotation == "dict" or (isinstance(annotation, str) and annotation.startswith("dict"))
-    if is_dict_annotation or first.name in ("task_data", "task_info") or annotation is None:
+    if is_dict_annotation or first.name in ("task_data", "task_info"):
         return _LegacyDictAdapter(ev)
     return ev
 

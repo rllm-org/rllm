@@ -2,7 +2,7 @@
 
 # rLLM
 
-**Train your AI agents with RL. Any framework. Minimal code changes.**
+**Agentic RL on any harness, with any backend, on any benchmark.**
 
 [![Documentation](https://img.shields.io/badge/Documentation-blue?style=for-the-badge&logo=googledocs&logoColor=white)](https://docs.rllm-project.com/)
 [![Slack](https://img.shields.io/badge/Slack-4A154B?style=for-the-badge&logo=slack&logoColor=white)](https://join.slack.com/t/rllmproject/shared_invite/zt-3pyblo6ef-m9kqAoInI8xSyUBkpuOyXA)
@@ -14,16 +14,16 @@
 
 </div>
 
-rLLM is an open-source framework for training AI agents with reinforcement learning. Swap in a tracked client, define a reward function, and let RL handle the rest — no matter what agent framework you use.
+rLLM is an open-source framework for training language agents with reinforcement learning. Bring any harness, run it in any sandbox, and switch training backends with one flag — the same agent code drives both eval and training.
 
-## Core Features
+## Core features
 
-- **Works with any agent framework** — LangGraph, SmolAgent, Strands, OpenAI Agents SDK, Google ADK, or plain `openai.OpenAI`. Just swap the client. 🔌
-- **Near-zero code changes** — Add `@rllm.rollout` to wrap your agent code, and rLLM traces every LLM call automatically. 🪄
-- **CLI-first workflow** — Eval and train from the command line with 50+ built-in benchmarks. `rllm eval gsm8k` just works. ⚡
-- **Battle-tested results** — rLLM-trained agents beat models 50x their size (4B → outperforms 235B on finance, 1.5B → surpasses O1-Preview on math). 📈
-- **Multiple RL algorithms** — GRPO, REINFORCE, RLOO, rejection sampling, and more. 🧠
-- **Two training backends** — `verl` for distributed multi-GPU training, `tinker` for single-machine / CPU setups. Same API either way. 🔧
+- **Any harness.** 10+ CLI harnesses (Claude Code, Codex, Terminus-2, mini-swe-agent, opencode, ...) plus Harbor-compatible task dirs. Or wrap your own agent — LangGraph, OpenAI Agents SDK, `openai.OpenAI` — with `@rllm.rollout`.
+- **Any sandbox.** Docker, Daytona, Modal, or local — with snapshot + warm-pool acceleration to keep rollouts cheap at training-scale.
+- **Multiple training backends, one API.** `verl` (distributed multi-GPU), `tinker` (single-machine), `fireworks` (Fireworks platform). Switch with one flag.
+- **60+ integrated benchmarks.** Math, code, MCQ, QA, search, VLM, translation, agentic — Terminal-Bench 2.0, SWE-bench, SkillsBench, AIME, MATH-500, GPQA, and more. `rllm eval <name>` auto-pulls and runs.
+- **Multiple training methods.** GRPO, REINFORCE, RLOO, SFT, on-policy distillation, and more.
+- **Battle-tested.** State-of-the-art open-source results (DeepScaleR-1.5B, DeepCoder-14B, DeepSWE-32B, FinQA-4B). Adopted by academic labs and industry research teams (see [Community Projects](#community-projects) below).
 
 Read more on our [documentation site](https://docs.rllm-project.com/).
 
@@ -35,13 +35,14 @@ rLLM requires `Python >= 3.11`. You can install it either directly via pip or bu
 uv pip install "rllm @ git+https://github.com/rllm-org/rllm.git"
 ```
 
-this installs dependencies for running rllm cli, which uses Tinker as the training backend. 
-
-To use `verl` as the training backend (GPU machine required), install via 
+This installs dependencies for running `rllm` CLI with the `tinker` backend (single-machine, Tinker API). For other backends:
 
 ```bash
-# For distributed GPU training (verl + vLLM/SGLang)
-uv pip install rllm[verl] @ git+https://github.com/rllm-org/rllm.git
+# Distributed multi-GPU training (verl + vLLM/SGLang)
+uv pip install "rllm[verl] @ git+https://github.com/rllm-org/rllm.git"
+
+# Fireworks training platform
+uv pip install "rllm[fireworks] @ git+https://github.com/rllm-org/rllm.git"
 ```
 
 For building from source or Docker, see the [installation guide](https://docs.rllm-project.com/installation).
@@ -134,7 +135,7 @@ Under the hood:
 - **Workflow Engine** runs N parallel agent instances to collect rollouts
 - **Model Gateway** routes requests and captures token IDs + logprobs
 - **Transform Pipeline** groups trajectories for advantage computation
-- **Training Backend** (verl or tinker) handles the policy update
+- **Training Backend** (verl, tinker, or fireworks) handles the policy update
 
 ## Community Projects
 

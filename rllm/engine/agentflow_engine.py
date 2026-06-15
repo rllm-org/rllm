@@ -2,13 +2,14 @@
 
 Single execution engine for both training and eval. Each rollout:
 
-1. ``hooks.setup(task, agent_flow, uid)`` runs (if hooks provided) — eval
-   uses this to create a per-task sandbox + resolve a per-task verifier;
-   training leaves hooks unset.
+1. ``hooks.setup(task, agent_flow, uid)`` runs — sandbox-style hooks create
+   a per-task sandbox + resolve a per-task verifier; a bare ``evaluator=``
+   is wrapped in :class:`rllm.hooks.FixedEvaluatorHooks` so the engine has
+   exactly one execution path.
 2. The agent flow runs against the gateway session URL.
-3. Traces are fetched and the Episode is enriched with token-level Steps.
-4. The evaluator scores the enriched Episode (per-task evaluator from the
-   hook context if hooks set; otherwise the engine-bound ``self.evaluator``).
+3. Traces are fetched and the Episode is enriched with token-level Steps
+   (strict for training, relaxed for validation).
+4. The hook-resolved evaluator scores the enriched Episode.
 5. Reward is written back; the hook context is torn down. Sessions are
    batch-deleted from the trace store at the end of the step.
 
@@ -30,9 +31,11 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from tqdm import tqdm
 
+from rllm.data.utils import task_from_row
 from rllm.engine.trace_converter import compute_step_metrics, trace_record_to_step
 from rllm.eval.types import EvalOutput
-from rllm.types import AgentConfig, Episode, Step, Task, Trajectory, run_agent_flow
+from rllm.gateway.manager import container_reachable_url
+from rllm.types import AgentConfig, Episode, Step, Task, Trajectory, flow_accepts_env, run_agent_flow
 from rllm.utils import colorful_print
 from rllm.workflows.workflow import TerminationReason
 
@@ -62,14 +65,15 @@ class TaskContext:
     """Per-task state returned by :meth:`TaskHooks.setup`.
 
     Encapsulates the per-task evaluator (resolved by the hook from a task's
-    [verifier] config, or pre-bound by the caller), an optional per-task
-    agent flow (so SandboxedAgentFlow's per-task sandbox can't leak across
-    parallel rollouts), and a teardown callback that releases any per-task
+    [verifier] config, or pre-bound by the caller), the task's live sandbox
+    (``env``, ``None`` for host-only rollouts) with the backend that
+    provisioned it, and a teardown callback that releases any per-task
     resources (sandboxes, temp dirs, ...).
     """
 
     evaluator: Evaluator
-    agent_flow: Any = None  # AgentFlow | None — kept loose for the import-cycle reason below
+    env: Any = None  # Sandbox | None — kept loose for the import-cycle reason below
+    env_backend: str | None = None  # backend that actually provisioned env
     teardown: Any = None  # Callable[[], None] | None — kept loose to avoid Callable import loop
 
     def run_teardown(self) -> None:
@@ -87,9 +91,9 @@ class TaskHooks(Protocol):
 
     The engine calls :meth:`setup` before the agent flow runs and
     :meth:`TaskContext.run_teardown` after the evaluator runs (or on failure).
-    Eval installs hooks that create a sandbox and resolve a per-task verifier;
-    training leaves hooks unset and the engine uses ``self.evaluator``
-    directly.
+    Sandbox-style hooks create a sandbox and resolve a per-task verifier;
+    :class:`rllm.hooks.FixedEvaluatorHooks` binds one evaluator to every task
+    and provisions nothing.
     """
 
     def setup(self, task: Task, agent_flow: AgentFlow, uid: str) -> TaskContext: ...
@@ -348,10 +352,17 @@ class AgentFlowEngine:
         val_sampling_params: dict | None = None,
     ) -> None:
         if evaluator is None and hooks is None:
-            raise ValueError("AgentFlowEngine requires either an `evaluator` (single evaluator, typical training) or `hooks` (per-task evaluator + setup/teardown, typical eval). Both cannot be None.")
+            raise ValueError("AgentFlowEngine requires either an `evaluator` (single evaluator for every task) or `hooks` (per-task evaluator + setup/teardown). Both cannot be None.")
+        if hooks is None:
+            from rllm.hooks import FixedEvaluatorHooks
+
+            hooks = FixedEvaluatorHooks(evaluator)
+
+        self._flow_accepts_env = flow_accepts_env(agent_flow)
+        if getattr(agent_flow, "needs_env", False) and not self._flow_accepts_env:
+            raise TypeError(f"{type(agent_flow).__name__} declares needs_env but its run/arun has no keyword-only 'env' parameter; declare run(self, task, config, *, env).")
 
         self.agent_flow = agent_flow
-        self.evaluator = evaluator
         self.gateway = gateway
         self.model = model
         self.n_parallel_tasks = n_parallel_tasks
@@ -459,19 +470,7 @@ class AgentFlowEngine:
         the new attempt's enrich doesn't see a mix of trace records.
         """
         task_for_episode = task.metadata if isinstance(task, Task) else task
-        from pathlib import Path
-
-        if isinstance(task, Task):
-            task_obj = task
-            task_dict = task.metadata
-        else:
-            task_dict = task
-            task_obj = Task(
-                id=str(task_id),
-                instruction=str(task.get("question", task.get("instruction", ""))),
-                metadata=task,
-                dataset_dir=Path("."),
-            )
+        task_obj = task if isinstance(task, Task) else task_from_row(task, task_id)
 
         async with self._semaphore:
             for retry_attempt in range(1, self.retry_limit + 1):
@@ -482,7 +481,7 @@ class AgentFlowEngine:
                     except Exception as cleanup_err:
                         logger.warning("[%s] failed to clear prior traces before retry: %s", uid, cleanup_err)
                 try:
-                    episode = await self._run_single(task_obj, task_dict, uid, is_validation=is_validation)
+                    episode = await self._run_single(task_obj, uid, is_validation=is_validation)
                     episode.id = uid
                     episode.task = task_for_episode
 
@@ -524,7 +523,7 @@ class AgentFlowEngine:
 
             raise RuntimeError(f"[{task_id}:{rollout_idx}] Exhausted all retries")
 
-    async def _run_single(self, task_obj: Task, task_dict: dict, uid: str, is_validation: bool = False) -> Episode:
+    async def _run_single(self, task_obj: Task, uid: str, is_validation: bool = False) -> Episode:
         """Run one full per-task pipeline: flow → fetch traces → enrich → evaluate.
 
         Records ``time/<phase>_s`` for setup/agentflow/traces/evaluator/
@@ -539,7 +538,6 @@ class AgentFlowEngine:
 
         raw_episode, ctx = await self._run_flow_only(
             task_obj=task_obj,
-            task_dict=task_dict,
             uid=uid,
             is_validation=is_validation,
             _timings=timings,
@@ -554,8 +552,8 @@ class AgentFlowEngine:
                 traces=traces,
                 uid=uid,
                 task_obj=task_obj,
-                task_dict=task_dict,
                 ctx=ctx,
+                is_validation=is_validation,
                 _timings=timings,
             )
             enriched.metrics.update(timings)
@@ -563,13 +561,12 @@ class AgentFlowEngine:
             return enriched
         finally:
             # Offload Modal's blocking terminate()/detach() to the executor.
-            if ctx is not None:
-                t = time.perf_counter()
-                try:
-                    await loop.run_in_executor(self.executor, ctx.run_teardown)
-                except Exception:
-                    logger.exception("[%s] task teardown failed; continuing", uid)
-                timings["time/teardown_s"] = time.perf_counter() - t
+            t = time.perf_counter()
+            try:
+                await loop.run_in_executor(self.executor, ctx.run_teardown)
+            except Exception:
+                logger.exception("[%s] task teardown failed; continuing", uid)
+            timings["time/teardown_s"] = time.perf_counter() - t
             timings["time/rollout_s"] = time.perf_counter() - rollout_start
             ep = result_holder.get("episode")
             if ep is not None:
@@ -578,11 +575,10 @@ class AgentFlowEngine:
     async def _run_flow_only(
         self,
         task_obj: Task,
-        task_dict: dict,
         uid: str,
         is_validation: bool = False,
         _timings: dict[str, float] | None = None,
-    ) -> tuple[Episode, TaskContext | None]:
+    ) -> tuple[Episode, TaskContext]:
         """Run hook setup + the agent flow. Returns ``(raw_episode, ctx)``.
 
         On flow failure, tears down ``ctx`` and re-raises. On success, the
@@ -594,26 +590,37 @@ class AgentFlowEngine:
             _timings = {}
 
         # Offload hook setup (blocking Modal/docker I/O) to the executor.
-        ctx: TaskContext | None = None
-        if self.hooks is not None:
-            t = time.perf_counter()
-            ctx = await loop.run_in_executor(
-                self.executor,
-                self.hooks.setup,
-                task_obj,
-                self.agent_flow,
-                uid,
-            )
-            _timings["time/setup_s"] = time.perf_counter() - t
+        t = time.perf_counter()
+        ctx: TaskContext = await loop.run_in_executor(
+            self.executor,
+            self.hooks.setup,
+            task_obj,
+            self.agent_flow,
+            uid,
+        )
+        _timings["time/setup_s"] = time.perf_counter() - t
 
         try:
+            if getattr(self.agent_flow, "needs_env", False) and ctx.env is None:
+                raise RuntimeError(
+                    f"{type(self.agent_flow).__name__} needs a sandbox but hooks {type(self.hooks).__name__} provisioned none — pass hooks=SandboxTaskHooks(...) or run via AgentTrainer / run_dataset."
+                )
+
             # Attach resolved sampling params to the session so the gateway
             # enforces them on every LLM call; skip when there are none.
             session_sampling_params = (self.val_sampling_params if is_validation else self.train_sampling_params) or None
             if session_sampling_params:
                 await self.gateway.acreate_session(uid, is_validation=is_validation, sampling_params=session_sampling_params)
 
-            session_url = self.gateway.get_session_url(uid)
+            # Flows whose LLM client runs *inside* the env (CLI harnesses)
+            # need the publicly-reachable URL — rewritten for in-container
+            # networking on the backend that actually provisioned this task's
+            # sandbox. Host-side flows keep the local gateway URL so they
+            # never depend on a tunnel hostname.
+            llm_inside_env = getattr(self.agent_flow, "llm_inside_env", False)
+            session_url = self.gateway.get_session_url(uid, public=llm_inside_env)
+            if llm_inside_env and ctx.env is not None:
+                session_url = container_reachable_url(session_url, ctx.env_backend)
 
             config = AgentConfig(
                 base_url=session_url,
@@ -622,23 +629,18 @@ class AgentFlowEngine:
                 is_validation=is_validation,
                 sampling_params=session_sampling_params or {},
             )
-
-            # Prefer the per-task flow from the hook so parallel tasks don't
-            # share mutable sandbox state on the engine-bound flow.
-            flow_for_task = ctx.agent_flow if (ctx is not None and ctx.agent_flow is not None) else self.agent_flow
             logger.debug("[%s] Starting agent flow at %s", uid, session_url)
             t = time.perf_counter()
-            episode = await run_agent_flow(flow_for_task, task_obj, config, executor=self.executor)
+            episode = await run_agent_flow(self.agent_flow, task_obj, config, executor=self.executor, env=ctx.env if self._flow_accepts_env else None)
             _timings["time/agentflow_s"] = time.perf_counter() - t
             logger.debug("[%s] Agent flow completed, %d trajectories", uid, len(episode.trajectories))
             return episode, ctx
         except BaseException:
             # Tear down on failure; success path defers teardown to the caller.
-            if ctx is not None:
-                try:
-                    await loop.run_in_executor(self.executor, ctx.run_teardown)
-                except Exception:
-                    logger.exception("[%s] hook teardown failed during error recovery", uid)
+            try:
+                await loop.run_in_executor(self.executor, ctx.run_teardown)
+            except Exception:
+                logger.exception("[%s] hook teardown failed during error recovery", uid)
             raise
 
     async def _finish_episode(
@@ -647,14 +649,18 @@ class AgentFlowEngine:
         traces: list[TraceRecord],
         uid: str,
         task_obj: Task,
-        task_dict: dict,
-        ctx: TaskContext | None,
+        ctx: TaskContext,
+        is_validation: bool = False,
         _timings: dict[str, float] | None = None,
     ) -> Episode:
         """Enrich the raw episode with traces, run the evaluator, apply rewards.
 
-        Records ``time/evaluator_s``, ``time/agentflow_llm_{sum,wall}_s``, and
-        ``n_turns`` when ``_timings`` is provided.
+        Training rollouts enrich strictly (empty token IDs raise so the retry
+        path reissues — they're required for loss math); validation relaxes
+        (non-vLLM upstreams legitimately return no token IDs and evaluators
+        read message text). Records ``time/evaluator_s``,
+        ``time/agentflow_llm_{sum,wall}_s``, and ``n_turns`` when ``_timings``
+        is provided.
         """
         loop = asyncio.get_event_loop()
 
@@ -662,27 +668,19 @@ class AgentFlowEngine:
             raw_episode,
             traces,
             uid,
-            task_dict,
-            strict=self.hooks is None,
+            task_obj.metadata,
+            strict=not is_validation,
         )
 
-        # Hook-resolved evaluator wins; receives Task. Engine-bound takes the dict.
+        # The hook-resolved evaluator always receives the Task (legacy
+        # dict-style evaluators are adapted at hook-construction time).
         t = time.perf_counter()
-        if ctx is not None:
-            eval_output: EvalOutput = await loop.run_in_executor(
-                self.executor,
-                ctx.evaluator.evaluate,
-                task_obj,
-                enriched,
-            )
-        else:
-            assert self.evaluator is not None  # __init__ guarantees one of evaluator/hooks
-            eval_output = await loop.run_in_executor(
-                self.executor,
-                self.evaluator.evaluate,
-                task_dict,
-                enriched,
-            )
+        eval_output: EvalOutput = await loop.run_in_executor(
+            self.executor,
+            ctx.evaluator.evaluate,
+            task_obj,
+            enriched,
+        )
         if _timings is not None:
             _timings["time/evaluator_s"] = time.perf_counter() - t
             _agentflow_s = _timings.get("time/agentflow_s", 0.0)

@@ -99,6 +99,15 @@ class DockerSandbox:
         tar_stream.seek(0)
         self._container.put_archive(remote_parent, tar_stream)
 
+    def is_alive(self) -> bool:
+        """Refresh container state from the Docker daemon and check it is running."""
+        try:
+            self._container.reload()
+            return self._container.status == "running"
+        except Exception:
+            logger.debug("DockerSandbox %s is_alive check failed — treating as dead", self.name, exc_info=True)
+            return False
+
     def close(self) -> None:
         """Stop and remove the container."""
         try:

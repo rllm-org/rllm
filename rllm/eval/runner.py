@@ -16,7 +16,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from rllm.eval.results import EvalItem, EvalResult
-from rllm.hooks import SandboxTaskHooks
+from rllm.hooks import FixedEvaluation, SandboxTaskHooks
 from rllm.types import AgentFlow, Evaluator
 from rllm.workflows.workflow import TerminationReason
 
@@ -39,15 +39,16 @@ async def run_dataset(
     agent_name: str = "",
     dataset_name: str = "unknown",
     on_episode_complete=None,
-    evaluator_override: Evaluator | None = None,
+    evaluator: Evaluator | None = None,
     gateway: GatewayManager | None = None,
     sampling_params: dict | None = None,
+    attempts: int = 1,
 ) -> tuple[EvalResult, list]:
     """Run a list of :class:`rllm.types.Task` objects through :class:`AgentFlowEngine`.
 
     Per-task: the engine creates a gateway session, runs the agent flow
     against the session URL, fetches traces, enriches the Episode, then
-    runs the per-task evaluator (or ``evaluator_override`` if set).
+    runs the per-task evaluator (or the fixed ``evaluator`` if set).
 
     Args:
         gateway: Optional pre-started gateway. When ``None``, this function
@@ -55,13 +56,17 @@ async def run_dataset(
             ``base_url`` and tears it down on exit. When provided, the
             caller owns the lifecycle (used by ``rllm.cli.eval`` so the
             gateway can stay up across multiple runs).
-        evaluator_override: Bind a single evaluator to all tasks (CLI's
-            ``--evaluator`` flag). When ``None``, ``SandboxTaskHooks``
-            resolves a per-task verifier from the task's ``[verifier]``
-            config.
+        evaluator: Bind a single evaluator to all tasks (CLI's
+            ``--evaluator`` flag; the hooks' ``FixedEvaluation`` policy).
+            When ``None``, ``SandboxTaskHooks`` resolves a per-task verifier
+            from the task's ``[verifier]`` config.
         sampling_params: Resolved sampling params from the CLI, attached to each
             gateway session so the gateway enforces them on every LLM call. ``None``
             or empty → flows/harnesses keep their own params.
+        attempts: Independent rollouts per task (pass@k). Each task is expanded
+            into ``attempts`` adjacent copies; the engine numbers sibling rollouts
+            ``task_id:0..n-1`` (training's GRPO convention) and the EvalResult
+            groups them back by task to compute ``pass_at``.
 
     Returns ``(EvalResult, list[Episode])``.
     """
@@ -72,6 +77,13 @@ async def run_dataset(
     from rllm.engine.agentflow_engine import AgentFlowEngine
     from rllm.gateway.manager import EvalGatewayManager
     from rllm.gateway.tunnel import is_local_sandbox_backend
+
+    # pass@k: expand each task into `attempts` adjacent copies. Everything
+    # downstream (warm queue, engine, episode callbacks) sees one entry per
+    # rollout; only the EvalItem aggregation below folds attempts back onto
+    # their task index.
+    if attempts > 1:
+        tasks = [task for task in tasks for _ in range(attempts)]
 
     # Cap concurrency by the agent flow's hint, if any. The engine's
     # internal semaphore enforces this on the rollout side.
@@ -88,7 +100,7 @@ async def run_dataset(
         gateway = EvalGatewayManager(upstream_url=base_url, model=model, tunnel=gateway_tunnel)
         gateway.start()
 
-    hooks = SandboxTaskHooks(evaluator_override=evaluator_override, sandbox_backend=sandbox_backend, use_snapshot=use_snapshot)
+    hooks = SandboxTaskHooks(evaluation=FixedEvaluation(evaluator) if evaluator is not None else None, sandbox_backend=sandbox_backend, use_snapshot=use_snapshot)
 
     engine = AgentFlowEngine(
         agent_flow=agent_flow,
@@ -108,10 +120,11 @@ async def run_dataset(
         # Negative size means "match concurrency"; it only helps when sandboxes
         # are actually created, so gate on a chosen sandbox backend.
         if warm_queue_size != 0 and sandbox_backend:
+            from rllm.sandbox.snapshot import install_script_for
             from rllm.sandbox.warm_queue import WarmQueue
 
             size = effective_concurrency if warm_queue_size < 0 else warm_queue_size
-            warm_queue = WarmQueue(list(tasks), sandbox_backend, hooks.registry, size)
+            warm_queue = WarmQueue(list(tasks), sandbox_backend, hooks.registry, size, install_script=install_script_for(agent_flow))
             hooks.warm_queue = warm_queue
             warm_queue.start()
 
@@ -130,12 +143,14 @@ async def run_dataset(
             except Exception:
                 logger.exception("gateway.stop() raised; suppressing")
 
-    # Aggregate per-task EvalItems for the report.
+    # Aggregate per-rollout EvalItems for the report; with attempts > 1 the
+    # expanded index folds back to (task index, attempt).
     items: list[EvalItem] = []
     surviving_episodes: list = []
     for idx, episode in enumerate(episodes):
+        task_idx, attempt = divmod(idx, attempts) if attempts > 1 else (idx, 0)
         if episode is None:
-            items.append(EvalItem(idx=idx, reward=0.0, is_correct=False, error="missing episode"))
+            items.append(EvalItem(idx=task_idx, attempt=attempt, reward=0.0, is_correct=False, error="missing episode"))
             continue
 
         error_msg = None
@@ -159,7 +174,8 @@ async def run_dataset(
 
         items.append(
             EvalItem(
-                idx=idx,
+                idx=task_idx,
+                attempt=attempt,
                 reward=reward,
                 is_correct=bool(episode.is_correct),
                 signals=signals,
@@ -169,4 +185,4 @@ async def run_dataset(
         if error_msg is None:
             surviving_episodes.append(episode)
 
-    return (EvalResult.from_items(dataset_name, model, agent_name, items), surviving_episodes)
+    return (EvalResult.from_items(dataset_name, model, agent_name, items, attempts=attempts), surviving_episodes)

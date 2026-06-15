@@ -21,12 +21,18 @@ import tarfile
 import threading
 import weakref
 
+from rllm.env import env_int
 from rllm.sandbox.protocol import SnapshotNotFound
 
 logger = logging.getLogger(__name__)
 
-# Default sandbox timeout: 30 minutes (Modal default is 5 min).
-_DEFAULT_TIMEOUT = 30 * 60
+# Default sandbox lifetime: 30 minutes (Modal default is 5 min). Raise via the
+# env var for workloads whose single rollout can exceed it (e.g. long builds).
+_DEFAULT_TIMEOUT = env_int("RLLM_MODAL_SANDBOX_TIMEOUT_S", 30 * 60)
+
+# Modal caps an exec's total argv at 64 KiB (ARG_MAX); payloads above this go
+# through a chunked temp-file path instead of being inlined in the command.
+_B64_ARGV_LIMIT = 50_000
 
 # atexit-tracked sandboxes; terminated on process exit to avoid leaks.
 _LIVE_SANDBOXES: weakref.WeakSet = weakref.WeakSet()
@@ -152,11 +158,30 @@ class ModalSandbox:
             raise RuntimeError(f"Command failed (exit {exit_code}) in sandbox {self.name}: {command}\n{stderr[:500]}")
         return stdout
 
+    def _push_b64(self, b64: str, consume: str) -> None:
+        """Feed a base64 payload to ``consume`` (a shell command reading stdin).
+
+        Modal rejects execs whose argv exceeds 64 KiB, so a small payload is
+        inlined while a large one is appended to a sandbox temp file in
+        argv-sized chunks and streamed from there.
+        """
+        if len(b64) <= _B64_ARGV_LIMIT:
+            self._exec_unchecked(f"echo '{b64}' | {consume}")
+            return
+        import uuid as _uuid
+
+        tmp = f"/tmp/.rllm-b64-{_uuid.uuid4().hex[:8]}"
+        self._exec_unchecked(f": > {tmp}")
+        for i in range(0, len(b64), _B64_ARGV_LIMIT):
+            self._exec_unchecked(f"printf %s '{b64[i : i + _B64_ARGV_LIMIT]}' >> {tmp}")
+        # Brace group so the stdin redirect feeds the FIRST pipeline member
+        # (`cmd1 | cmd2 < f` would bind f to cmd2 and leave cmd1 blocked).
+        self._exec_unchecked(f"{{ {consume}; }} < {tmp}; rc=$?; rm -f {tmp}; exit $rc")
+
     def upload_file(self, local_path: str, remote_path: str) -> None:
         """Upload a single file into the Modal sandbox.
 
-        Uses ``cat`` via exec to write file contents since Modal's file
-        API is in alpha.
+        Uses exec to write file contents since Modal's file API is in alpha.
         """
         remote_dir = os.path.dirname(remote_path)
         if remote_dir:
@@ -169,7 +194,7 @@ class ModalSandbox:
         import base64
 
         b64 = base64.b64encode(content).decode("ascii")
-        self._exec_unchecked(f"echo '{b64}' | base64 -d > {remote_path}")
+        self._push_b64(b64, f"base64 -d > {remote_path}")
         logger.debug("Uploaded %s -> %s in sandbox %s", local_path, remote_path, self.name)
 
     def upload_dir(self, local_path: str, remote_path: str) -> None:
@@ -197,8 +222,26 @@ class ModalSandbox:
         # Write tar to sandbox and extract. --no-same-owner: don't restore the
         # host's uid/gid (root extraction would otherwise chown to nonexistent
         # ids and error); permissions are kept so executables stay +x.
-        self._exec_unchecked(f"echo '{b64}' | base64 -d | tar xzf - --no-same-owner -C {remote_parent}")
+        self._push_b64(b64, f"base64 -d | tar xzf - --no-same-owner -C {remote_parent}")
         logger.debug("Uploaded dir %s -> %s in sandbox %s", local_path, remote_path, self.name)
+
+    def is_alive(self) -> bool:
+        """One API call: ``poll()`` returns ``None`` while the sandbox is still running.
+
+        A Modal sandbox dies for good when its ``timeout`` (total lifetime,
+        not idle time) elapses or it is terminated; ``poll()`` then returns
+        an exit code (verified live: a box past its lifetime polls ``124``).
+        Caveat: ``poll()`` can lag a *just*-issued terminate by a few
+        seconds, so this is a "has it died" check, not a fence against
+        in-flight termination — fine for callers like the warm queue,
+        whose dead boxes have been dead for minutes by the time they're
+        checked.
+        """
+        try:
+            return self._sandbox.poll() is None
+        except Exception:
+            logger.debug("ModalSandbox %s is_alive check failed — treating as dead", self.name, exc_info=True)
+            return False
 
     def close(self) -> None:
         """Terminate and detach from the Modal sandbox."""
@@ -266,7 +309,7 @@ def _modal_ref_absent(ref: str) -> bool:
         return False
 
 
-def build_modal_snapshot(task, key: str, prior_ref: str | None = None, *, force: bool = False) -> str | None:
+def build_modal_snapshot(task, key: str, prior_ref: str | None = None, *, force: bool = False, install_script: str = "") -> str | None:
     """Build a Modal filesystem snapshot of ``task``'s environment; return its image id.
 
     Mirrors Daytona's idempotency: when a ``prior_ref`` is known and still live
@@ -274,18 +317,28 @@ def build_modal_snapshot(task, key: str, prior_ref: str | None = None, *, force:
     filesystem — every fresh capture orphans the old image forever. ``force``
     bypasses reuse and always rebuilds.
 
-    Create a base sandbox, replay the Dockerfile RUN steps, then capture the
-    live filesystem as a ``modal.Image`` (stored as a diff from the base).
+    Create a base sandbox, replay the Dockerfile RUN steps, run the install
+    script (if any), then capture the live filesystem as a ``modal.Image``
+    (stored as a diff from the base). A failed install fails the build — a
+    snapshot keyed on the install must actually contain it.
     """
-    from rllm.eval._resolution import _create_base_sandbox, _replay_dockerfile
+    from rllm.eval._resolution import _create_base_sandbox, _dockerfile_run_commands, _replay_dockerfile
 
     if prior_ref and not force and _modal_ref_alive(prior_ref):
         logger.info("modal snapshot %s already live (%s) — reusing", key, prior_ref)
         return prior_ref
 
-    sb = _create_base_sandbox(task, "modal", name=f"{key}-build")
+    # Size the build sandbox's lifetime to the worst-case replay: each RUN is
+    # bounded at 900s (a step that hangs against a prebuilt image burns its
+    # full bound), plus the install bound and pull/capture slack. With the
+    # 30-min default, two hung steps killed the sandbox mid-build.
+    install_budget = env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 900) if install_script else 0
+    build_timeout = max(_DEFAULT_TIMEOUT, 900 * len(_dockerfile_run_commands(task)) + install_budget + 600)
+    sb = _create_base_sandbox(task, "modal", name=f"{key}-build", timeout=build_timeout)
     try:
         _replay_dockerfile(task, sb, "modal")
+        if install_script:
+            sb.exec(install_script, timeout=env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 900), user="root")
         image = sb._sandbox.snapshot_filesystem()  # noqa: SLF001 — modal.Image
         logger.info("modal snapshot built: %s -> %s", key, image.object_id)
         return image.object_id

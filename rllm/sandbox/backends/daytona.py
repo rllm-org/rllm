@@ -264,6 +264,24 @@ class DaytonaSandbox:
 
         logger.debug("Uploaded dir %s -> %s in sandbox %s", local_path, remote_path, self.name)
 
+    def is_alive(self) -> bool:
+        """One API GET: refresh sandbox data and check it is still started.
+
+        A Daytona sandbox auto-stops after ``auto_stop_interval`` idle
+        minutes; a stopped (or errored/deleted) sandbox fails its first
+        exec with "no IP address found", so anything not ``started``
+        counts as dead here.
+        """
+        if self._closed:
+            return False
+        try:
+            self._sandbox.refresh_data()
+            state = getattr(self._sandbox, "state", None)
+            return str(getattr(state, "value", state) or "").lower() == "started"
+        except Exception:
+            logger.debug("DaytonaSandbox %s is_alive check failed — treating as dead", self.name, exc_info=True)
+            return False
+
     def close(self) -> None:
         """Delete the Daytona sandbox and release resources."""
         if self._closed:
@@ -301,7 +319,7 @@ def create_daytona_sandbox(name: str, image: str = "python:3.11-slim", **kwargs)
     return DaytonaSandbox(name=name, image=image, **kwargs)
 
 
-def build_daytona_snapshot(task, key: str, *, force: bool = False) -> str | None:
+def build_daytona_snapshot(task, key: str, *, force: bool = False, install_script: str = "") -> str | None:
     """Declaratively bake ``task``'s base image + RUN steps into a named snapshot; return the name.
 
     Idempotent: an already-registered snapshot is reused unless ``force``, which
@@ -309,7 +327,7 @@ def build_daytona_snapshot(task, key: str, *, force: bool = False) -> str | None
     """
     from daytona import CreateSnapshotParams, Daytona, DaytonaNotFoundError, Image, Resources
 
-    from rllm.eval._resolution import _dockerfile_run_commands, _resolve_image, _sandbox_resource_kwargs
+    from rllm.eval._resolution import _as_single_run_line, _dockerfile_run_commands, _resolve_image, _sandbox_resource_kwargs
 
     client = Daytona()
     try:
@@ -323,7 +341,9 @@ def build_daytona_snapshot(task, key: str, *, force: bool = False) -> str | None
         pass
 
     img = Image.base(_resolve_image(task, "daytona"))
-    run_commands = _dockerfile_run_commands(task)
+    run_commands = [_as_single_run_line(c) for c in _dockerfile_run_commands(task)]
+    if install_script:
+        run_commands.append(_as_single_run_line(install_script))
     if run_commands:
         img = img.run_commands(*run_commands)
 

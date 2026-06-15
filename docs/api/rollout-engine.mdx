@@ -3,7 +3,7 @@ title: RolloutEngine
 description: Model inference engine for agent rollouts
 ---
 
-The `RolloutEngine` provides an abstraction for model inference across different backends (OpenAI, Fireworks, vLLM, etc.).
+The `RolloutEngine` provides an abstraction for model inference across different backends (OpenAI, vLLM, etc.).
 
 ## RolloutEngine
 
@@ -159,21 +159,6 @@ engine = OpenAIEngine(
 <ParamField path="model" type="str">
   Model identifier.
 </ParamField>
-
----
-
-## FireworksEngine
-
-Rollout engine using Fireworks AI API.
-
-```python
-from rllm.engine.rollout import FireworksEngine
-
-engine = FireworksEngine(
-    api_key="your_fireworks_key",
-    model="accounts/fireworks/models/deepseek-r1"
-)
-```
 
 ---
 

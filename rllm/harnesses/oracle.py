@@ -45,10 +45,8 @@ class OracleHarness(SandboxedAgentFlow):
     # comparing the two implementations doesn't trip on path drift.
     _SOLUTION_DIR = "/solution"
 
-    def run(self, task: Task, config: AgentConfig) -> Episode:
-        sandbox = self.sandbox
-        if sandbox is None:
-            raise RuntimeError("OracleHarness requires a sandbox; the eval hooks should set one before run().")
+    def run(self, task: Task, config: AgentConfig, *, env) -> Episode:
+        sandbox = env
 
         solution_dir = task.task_dir / "solution"
         solve_path = solution_dir / "solve.sh"
@@ -68,6 +66,11 @@ class OracleHarness(SandboxedAgentFlow):
         solution_env = (task.metadata.get("solution", {}) or {}).get("env", {}) or {}
         env_prefix = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in solution_env.items())
         cmd = (env_prefix + " " if env_prefix else "") + container_solve
+        # solve.sh scripts assume they run in the task workdir (e.g. swesmith's
+        # ``git apply`` needs cwd inside /testbed); exec defaults elsewhere.
+        workdir = task.metadata.get("workdir")
+        if workdir:
+            cmd = f"cd {shlex.quote(workdir)} && {cmd}"
 
         try:
             output = sandbox.exec(cmd, timeout=timeout, user=agent_user)

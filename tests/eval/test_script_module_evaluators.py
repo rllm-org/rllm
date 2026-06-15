@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from rllm.eval.module_evaluator import PythonModuleEvaluator, _coerce_eval_result
 from rllm.eval.script_evaluator import ShellScriptEvaluator
 from rllm.eval.types import EvalOutput, Signal
@@ -73,22 +75,20 @@ def _bench(tmp_path: Path) -> Path:
 class TestShellScriptEvaluator:
     def test_reads_reward_txt(self, tmp_path):
         bench = _bench(tmp_path)
-        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "0.75"})
-        ev = ShellScriptEvaluator(sandbox=sb)
         task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
 
-        out = ev.evaluate(task, _episode())
-
+        # Partial score: not correct
+        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "0.75"})
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
         assert out.reward == 0.75
         assert out.is_correct is False  # 0.75 < 1.0
+        # The evaluator copies tests/ to /tests in the sandbox
+        assert any(dst == "/tests" for _, dst in sb.uploads)
 
-    def test_reward_txt_full_score_marks_correct(self, tmp_path):
-        bench = _bench(tmp_path)
+        # Full score: correct
         sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "1.0"})
-        ev = ShellScriptEvaluator(sandbox=sb)
-        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
-
-        out = ev.evaluate(task, _episode())
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert out.reward == 1.0
         assert out.is_correct is True
 
     def test_reads_reward_json(self, tmp_path):
@@ -155,16 +155,6 @@ class TestShellScriptEvaluator:
         assert out.reward == 0.0
         assert "no" in out.metadata.get("error", "")
 
-    def test_uploads_tests_to_sandbox(self, tmp_path):
-        bench = _bench(tmp_path)
-        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "1.0"})
-        ev = ShellScriptEvaluator(sandbox=sb)
-        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
-
-        ev.evaluate(task, _episode())
-        # The evaluator copies tests/ to /tests in the sandbox
-        assert any(dst == "/tests" for _, dst in sb.uploads)
-
 
 # ---------------------------------------------------------------------------
 # PythonModuleEvaluator
@@ -215,24 +205,19 @@ def evaluate(metadata, trajectory):
         assert out.reward == 1.0
         assert out.is_correct is True
 
-    def test_dotted_module_path(self, tmp_path):
+    def test_dotted_and_path_like_module_paths(self, tmp_path):
+        """Both module-path forms — dotted and file-path-like — load the verifier."""
         bench = _verifier_dir(
             tmp_path,
             "def evaluate(task, episode): return 0.5\n",
         )
-        ev = PythonModuleEvaluator.from_module(bench, module_path="tests.evaluate")
         task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
-        out = ev.evaluate(task, Episode())
-        assert out.reward == 0.5
 
-    def test_path_like_module(self, tmp_path):
-        bench = _verifier_dir(
-            tmp_path,
-            "def evaluate(task, episode): return 0.25\n",
-        )
+        ev = PythonModuleEvaluator.from_module(bench, module_path="tests.evaluate")
+        assert ev.evaluate(task, Episode()).reward == 0.5
+
         ev = PythonModuleEvaluator.from_module(bench, module_path="tests/evaluate.py")
-        out = ev.evaluate(Task(id="0", instruction="", metadata={}, dataset_dir=bench), Episode())
-        assert out.reward == 0.25
+        assert ev.evaluate(task, Episode()).reward == 0.5
 
     def test_alternate_function_name(self, tmp_path):
         bench = _verifier_dir(
@@ -247,7 +232,6 @@ def evaluate(metadata, trajectory):
     def test_missing_file_raises(self, tmp_path):
         bench = tmp_path / "empty"
         bench.mkdir()
-        import pytest
 
         with pytest.raises(FileNotFoundError):
             PythonModuleEvaluator.from_module(bench)
@@ -274,23 +258,21 @@ class TestCoerceEvalResult:
         original = EvalOutput(reward=0.42, is_correct=True)
         assert _coerce_eval_result(original) is original
 
-    def test_bool(self):
-        assert _coerce_eval_result(True).reward == 1.0
-        assert _coerce_eval_result(False).reward == 0.0
-
-    def test_float(self):
-        out = _coerce_eval_result(0.5)
-        assert out.reward == 0.5
-        assert out.is_correct is False
-
-    def test_float_one_marks_correct(self):
-        out = _coerce_eval_result(1.0)
-        assert out.is_correct is True
-
-    def test_tuple(self):
-        out = _coerce_eval_result((0.5, True))
-        assert out.reward == 0.5
-        assert out.is_correct is True
+    @pytest.mark.parametrize(
+        ("raw", "reward", "is_correct"),
+        [
+            (True, 1.0, True),
+            (False, 0.0, False),
+            (0.5, 0.5, False),
+            (1.0, 1.0, True),
+            ((0.5, True), 0.5, True),
+        ],
+        ids=["bool-true", "bool-false", "float-partial", "float-one", "tuple"],
+    )
+    def test_coercion_table(self, raw, reward, is_correct):
+        out = _coerce_eval_result(raw)
+        assert out.reward == reward
+        assert out.is_correct is is_correct
 
     def test_dict_with_signals(self):
         out = _coerce_eval_result({"reward": 0.7, "is_correct": True, "signals": {"acc": 0.7}})

@@ -13,6 +13,43 @@
       "default_agent": "zeroclaw",
       "reward_fn": "claw_eval_reward_fn"
     },
+    "rllm-swesmith": {
+      "description": "SWE-smith filtered: ~4.7K solvable bug-fixing tasks across 105 Python repos (sandbox; in-sandbox pytest grading)",
+      "source": "kylemontgomery/swesmith-filtered",
+      "builder": "rllm.data.swesmith_builder:build_benchmark",
+      "category": "agentic",
+      "splits": [
+        "train"
+      ],
+      "eval_split": "train",
+      "train_split": "train",
+      "default_agent": "mini-swe-agent"
+    },
+    "skillsbench": {
+      "description": "SkillsBench: 91 expert-curated agentic tasks measuring how AI agents use skills across industrial, software, scientific, office, finance, and security domains (Harbor task format; per-task tests/test.sh verifier).",
+      "source": "benchflow/skillsbench",
+      "builder": "rllm.data.skillsbench_builder:build_benchmark",
+      "category": "agentic",
+      "splits": [
+        "train"
+      ],
+      "eval_split": "train",
+      "default_agent": "claude-code"
+    },
+    "skillsbench-no-skills": {
+      "description": "SkillsBench baseline without the per-task skills/ tree, for measuring the gain from skills augmentation.",
+      "source": "benchflow/skillsbench",
+      "builder": "rllm.data.skillsbench_builder:build_benchmark",
+      "builder_kwargs": {
+        "include_skills": false
+      },
+      "category": "agentic",
+      "splits": [
+        "train"
+      ],
+      "eval_split": "train",
+      "default_agent": "claude-code"
+    },
     "gsm8k": {
       "description": "Grade school math word problems (8.5K train, 1.3K test)",
       "source": "openai/gsm8k",
@@ -710,6 +747,28 @@
       "eval_split": "test",
       "transform": "rllm.data.transforms:swebench_transform",
       "instruction_field": "question"
+    },
+    "swebench_pro": {
+      "description": "SWE-bench Pro (Public): 731 enterprise-grade SWE tasks across 41 repos, evaluated against pre-built jefzda/sweap-images Docker images (Harbor format; F2P/P2P verifier)",
+      "source": "ScaleAI/SWE-bench_Pro",
+      "builder": "rllm.data.swebench_pro_builder:build_benchmark",
+      "category": "code",
+      "splits": [
+        "test"
+      ],
+      "eval_split": "test",
+      "default_agent": "mini-swe-agent"
+    },
+    "deepswe": {
+      "description": "DeepSWE: 113 long-horizon SWE tasks across 91 repos in 5 languages (Harbor format; per-task tests/test.sh verifier)",
+      "source": "https://github.com/datacurve-ai/deep-swe",
+      "builder": "rllm.data.deepswe_builder:build_benchmark",
+      "category": "agentic",
+      "splits": [
+        "test"
+      ],
+      "eval_split": "test",
+      "default_agent": "mini-swe-agent"
     },
     "omnidocbench": {
       "description": "OmniDocBench: Comprehensive document understanding benchmark with structured eval",

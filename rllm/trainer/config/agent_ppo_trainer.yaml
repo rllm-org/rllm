@@ -82,12 +82,6 @@ rllm:
       mode: subprocess  # external | subprocess
       admin_token: my-shared-secret
 
-fireworks:
-  deployment_id: null
-  model_id_prefix: test-model
-  concurrency: 32
-  return_token_ids: True
-
 trainer:
   log_episodes: false
   episode_log_dir: logs/${trainer.project_name}/${trainer.experiment_name}

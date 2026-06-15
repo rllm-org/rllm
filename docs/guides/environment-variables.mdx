@@ -16,6 +16,8 @@ Every one of these parses through the typed readers in `rllm/env.py` (`env_int` 
 | Environment variable | Default | What it controls |
 | -------------------- | ------- | ---------------- |
 | `RLLM_SNAPSHOT_TTL_HOURS` | `168.0` | Snapshot-registry trust horizon (hours) before eviction |
+| `RLLM_SNAPSHOT_BUILD_WORKERS` | `4` | Parallel environment builds in `rllm snapshot create` |
+| `RLLM_MODAL_SANDBOX_TIMEOUT_S` | `1800` | Modal sandbox lifetime; raise when a single rollout can outlive 30 minutes |
 | `RLLM_OPENAI_REQUEST_TIMEOUT_S` | `3600` | Per-request HTTP timeout for OpenAI-compatible rollout calls |
 | `RLLM_GATEWAY_HEALTH_TIMEOUT_S` | `30.0` | Wait for the gateway subprocess to report healthy |
 | `RLLM_TUNNEL_READY_TIMEOUT_S` | `30.0` | Wait for cloudflared to publish a public URL |
@@ -73,7 +75,7 @@ The `RLLM_*` knobs that are read inside Ray workers (the `TaskRunner` actor) inc
 - `RLLM_HARBOR_SESSION_TIMEOUT_S`
 
 <Note>
-  The primary verl rollout uses `VerlEngine` (talking to in-process vLLM servers via `AsyncLLMServerManager`), **not** `OpenAIEngine`, so `RLLM_OPENAI_REQUEST_TIMEOUT_S` does not affect it. That timeout applies only when `OpenAIEngine` is used — as the teacher engine for distillation, or in the eval-protocol / Fireworks engines — and even then it runs inside the `TaskRunner` actor.
+  The primary verl rollout uses `VerlEngine` (talking to in-process vLLM servers via `AsyncLLMServerManager`), **not** `OpenAIEngine`, so `RLLM_OPENAI_REQUEST_TIMEOUT_S` does not affect it. That timeout applies only when `OpenAIEngine` is used — e.g. as the teacher engine for distillation — and even then it runs inside the `TaskRunner` actor.
 </Note>
 
 ### Client-side knobs (not read in training workers)

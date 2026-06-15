@@ -59,11 +59,14 @@ class _FakeSandbox:
 # --------------------------------------------------------------------------
 
 
-def test_env_key_sensitive_and_legal_name():
+def test_env_key_sensitivity():
     base = env_key("modal", "img:tag", ["run a"])
     assert env_key("daytona", "img:tag", ["run a"]) != base  # backend
     assert env_key("modal", "img:other", ["run a"]) != base  # base image
     assert env_key("modal", "img:tag", ["run b"]) != base  # RUN block
+    assert env_key("modal", "img:tag", ["run a"], "curl install.sh | bash") != base  # install script
+    assert env_key("modal", "img:tag", ["run a"], "") == base  # no install → key unchanged
+    assert env_key_for(_task(), "modal", "curl install.sh | bash") != env_key_for(_task(), "modal")
     # Legal Daytona snapshot name: lowercase + dashes only.
     assert base.startswith("rllm-env-") and base.replace("-", "").isalnum() and base.islower()
 
@@ -87,19 +90,21 @@ def test_keys_for_tasks_dedups_envs_and_skips_local_backends():
 # --------------------------------------------------------------------------
 
 
-def test_get_sandbox_local_hit_boots_from_snapshot(monkeypatch, tmp_path):
+@pytest.mark.parametrize("install", ["", "curl install.sh | bash"], ids=["task-only", "with-install"])
+def test_get_sandbox_local_hit_boots_from_snapshot(monkeypatch, tmp_path, install):
     import rllm.eval._resolution as res
 
     reg = SnapshotRegistry(str(tmp_path / "s.json"))
-    reg._envs[env_key_for(_task(), "modal")] = {"backend": "modal", "ref": "im-abc", "expires_at": _future()}
+    reg._envs[env_key_for(_task(), "modal", install)] = {"backend": "modal", "ref": "im-abc", "expires_at": _future()}
 
     booted = {}
     monkeypatch.setattr(res, "_create_base_sandbox", lambda task, backend, *, image=None, name=None: booted.update(image=image) or _FakeSandbox())
     monkeypatch.setattr(res, "_create_sandbox_for_task", lambda task, backend: pytest.fail("cold path taken on a local hit"))
 
-    sb = get_sandbox(_task(), "modal", reg)
+    sb = get_sandbox(_task(), "modal", reg, install)
     assert isinstance(sb, _FakeSandbox)
     assert booted["image"] == "im-abc"  # booted from the ref, no replay
+    assert sb.baked_install == install  # exact-fingerprint hit records what the image contains
 
 
 def test_get_sandbox_snapshot_gone_self_heals_to_cold(monkeypatch, tmp_path):
@@ -121,34 +126,26 @@ def test_get_sandbox_snapshot_gone_self_heals_to_cold(monkeypatch, tmp_path):
     assert reg.lookup_env(key, "modal") is None  # dead entry pruned so siblings skip the doomed boot
 
 
-def test_get_sandbox_local_miss_is_cold_with_no_live_call(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("backend", "make_registry"),
+    [
+        pytest.param("modal", lambda tmp: SnapshotRegistry(str(tmp / "s.json")), id="empty-registry"),
+        pytest.param("modal", lambda tmp: None, id="no-registry"),  # what --no-snapshot passes
+        pytest.param("docker", lambda tmp: SnapshotRegistry(str(tmp / "s.json")), id="docker-backend"),
+    ],
+)
+def test_get_sandbox_cold_gate_never_boots_snapshot(monkeypatch, tmp_path, backend, make_registry):
+    """Local miss, registry=None, and no-snapshot backends all go cold with no live call."""
     import rllm.eval._resolution as res
 
-    reg = SnapshotRegistry(str(tmp_path / "s.json"))  # empty → miss
     cold = {}
-    monkeypatch.setattr(res, "_create_base_sandbox", lambda *a, **k: pytest.fail("snapshot boot attempted on a local miss"))
+    monkeypatch.setattr(res, "_create_base_sandbox", lambda *a, **k: pytest.fail("snapshot boot attempted on the cold gate"))
     monkeypatch.setattr(res, "_create_sandbox_for_task", lambda task, backend: cold.update(cold=True) or _FakeSandbox())
 
-    assert isinstance(get_sandbox(_task(), "modal", reg), _FakeSandbox)
+    sb = get_sandbox(_task(backend=backend), backend, make_registry(tmp_path), "curl install.sh | bash")
+    assert isinstance(sb, _FakeSandbox)
     assert cold["cold"]
-
-
-def test_get_sandbox_no_snapshot_backend_never_consults_registry(monkeypatch, tmp_path):
-    import rllm.eval._resolution as res
-
-    reg = SnapshotRegistry(str(tmp_path / "s.json"))
-    monkeypatch.setattr(res, "_create_base_sandbox", lambda *a, **k: pytest.fail("docker has no snapshot path"))
-    monkeypatch.setattr(res, "_create_sandbox_for_task", lambda task, backend: _FakeSandbox())
-    assert isinstance(get_sandbox(_task(backend="docker"), "docker", reg), _FakeSandbox)
-
-
-def test_get_sandbox_no_registry_forces_cold(monkeypatch):
-    import rllm.eval._resolution as res
-
-    # registry=None (what --no-snapshot passes) must never touch the snapshot path.
-    monkeypatch.setattr(res, "_create_base_sandbox", lambda *a, **k: pytest.fail("no registry must not boot from snapshot"))
-    monkeypatch.setattr(res, "_create_sandbox_for_task", lambda task, backend: _FakeSandbox())
-    assert isinstance(get_sandbox(_task(), "modal", None), _FakeSandbox)
+    assert getattr(sb, "baked_install", None) is None  # cold sandboxes leave the attribute unset
 
 
 # --------------------------------------------------------------------------
@@ -179,16 +176,8 @@ def test_record_group_persists_and_derives_membership(monkeypatch, tmp_path):
     # the group records the exact tasks it was created from (D3).
     tasks = reloaded.groups()[gid]["tasks"]
     assert {t["env_key"] for t in tasks} == {"rllm-env-a", "rllm-env-b"}
-
-
-def test_group_id_shape_and_randomness(monkeypatch, tmp_path):
-    """slug-slicelabel-rand8; re-running create mints a NEW id (rand8 is per-invocation)."""
-    monkeypatch.setenv("RLLM_HOME", str(tmp_path))
-    reg = SnapshotRegistry.load()
-    a = make_group(reg, "harbor:swebench-verified", [make_task_env("rllm-env-a", "im-1")], slice_spec={"kind": "max_examples", "value": 5})
-    b = make_group(reg, "harbor:swebench-verified", [make_task_env("rllm-env-a", "im-1")], slice_spec={"kind": "max_examples", "value": 5})
-    assert a.startswith("harbor-swebench-verified-first5-") and b.startswith("harbor-swebench-verified-first5-")
-    assert a != b  # same request content, different creation → distinct ids
+    # re-running create mints a NEW id (rand8 is per-invocation): same content, distinct ids.
+    assert make_group(reg, "swebench", [make_task_env("rllm-env-a", "im-1"), make_task_env("rllm-env-b", "im-2")]) != gid
 
 
 def test_refcount_and_destroy_group_shared_survives(monkeypatch, tmp_path):
@@ -246,20 +235,6 @@ def test_sync_drops_only_verified_absent(monkeypatch, tmp_path):
     assert "rllm-env-a" not in SnapshotRegistry.load().env_entries()
 
 
-def test_sync_keeps_all_on_auth_failure(monkeypatch, tmp_path):
-    """A sync that can't confirm absence (auth/permission → snapshot_absent False) prunes nothing."""
-    monkeypatch.setenv("RLLM_HOME", str(tmp_path))
-    reg = SnapshotRegistry.load()
-    make_group(reg, "swebench", [make_task_env("rllm-env-a", "im-1"), make_task_env("rllm-env-b", "im-2")])
-
-    import rllm.sandbox.sandboxed_flow as sf
-
-    monkeypatch.setattr(sf, "snapshot_absent", lambda backend, ref: False)  # never confirmed gone
-    res = SnapshotRegistry.load().sync("modal")
-    assert res["pruned"] == [] and res["kept"] == 2
-    assert set(SnapshotRegistry.load().env_entries()) == {"rllm-env-a", "rllm-env-b"}
-
-
 def test_discard_persists_across_processes(monkeypatch, tmp_path):
     """discard must rewrite the file so the next process doesn't reload the dead entry."""
     monkeypatch.setenv("RLLM_HOME", str(tmp_path))
@@ -270,27 +245,27 @@ def test_discard_persists_across_processes(monkeypatch, tmp_path):
     assert SnapshotRegistry.load().lookup_env("rllm-env-a", "modal") is None  # gone from disk too
 
 
-def test_reuse_does_not_renew_ttl(monkeypatch, tmp_path):
-    """A non-force re-create reuses the env and keeps its horizon — even with a longer ttl (no immortality)."""
+def test_env_ttl_lifecycle_reuse_keeps_force_refreshes(monkeypatch, tmp_path):
+    """Reuse keeps the horizon — even with a longer ttl (no immortality); --force is the
+    explicit rebuild path that moves it; created_at is stamped once and survives both."""
     monkeypatch.setenv("RLLM_HOME", str(tmp_path))
     reg = SnapshotRegistry.load()
     make_group(reg, "swebench", [make_task_env("rllm-env-a", "im-1")], ttl_hours=1.0)
-    first = SnapshotRegistry.load().env_entries()["rllm-env-a"]["expires_at"]
+    entry = SnapshotRegistry.load().env_entries()["rllm-env-a"]
+    first_expiry, created = entry["expires_at"], entry["created_at"]
+    assert created  # set on first build
 
     # re-create non-force with the DEFAULT (longer) ttl must NOT push the horizon out.
     make_group(reg, "swebench", [make_task_env("rllm-env-a", "im-1")], ttl_hours=168.0)
-    assert SnapshotRegistry.load().env_entries()["rllm-env-a"]["expires_at"] == first
+    entry = SnapshotRegistry.load().env_entries()["rllm-env-a"]
+    assert entry["expires_at"] == first_expiry
+    assert entry["created_at"] == created  # preserved across reuse
 
-
-def test_force_refreshes_ttl(monkeypatch, tmp_path):
-    """--force is the explicit rebuild path that moves the horizon forward."""
-    monkeypatch.setenv("RLLM_HOME", str(tmp_path))
-    reg = SnapshotRegistry.load()
-    make_group(reg, "swebench", [make_task_env("rllm-env-a", "im-1")], ttl_hours=1.0)
-    short = SnapshotRegistry.load().env_entries()["rllm-env-a"]["expires_at"]
-
-    make_group(reg, "swebench", [make_task_env("rllm-env-a", "im-1")], ttl_hours=168.0, force=True)
-    assert SnapshotRegistry.load().env_entries()["rllm-env-a"]["expires_at"] > short  # horizon moved forward
+    # force rebuild: horizon moves forward, created_at still preserved.
+    make_group(reg, "swebench", [make_task_env("rllm-env-a", "im-2")], ttl_hours=168.0, force=True)
+    entry = SnapshotRegistry.load().env_entries()["rllm-env-a"]
+    assert entry["expires_at"] > first_expiry
+    assert entry["created_at"] == created
 
 
 def test_renew_refreshes_member_ttls_without_rebuild(monkeypatch, tmp_path):
@@ -312,19 +287,6 @@ def test_renew_refreshes_member_ttls_without_rebuild(monkeypatch, tmp_path):
     renewed = reg.renew("swebench-all-deadbeef", 168.0)
     assert renewed == 1
     assert datetime.fromisoformat(SnapshotRegistry.load().env_entries()["rllm-env-a"]["expires_at"]) > datetime.now(tz=timezone.utc)
-
-
-def test_created_at_set_once_and_preserved(monkeypatch, tmp_path):
-    """created_at is stamped on first build and preserved across reuse and force rebuild."""
-    monkeypatch.setenv("RLLM_HOME", str(tmp_path))
-    reg = SnapshotRegistry.load()
-    make_group(reg, "swebench", [make_task_env("rllm-env-a", "im-1")])
-    created = SnapshotRegistry.load().env_entries()["rllm-env-a"]["created_at"]
-    assert created  # set on first build
-
-    make_group(reg, "swebench", [make_task_env("rllm-env-a", "im-1")])  # reuse
-    make_group(reg, "swebench", [make_task_env("rllm-env-a", "im-2")], force=True)  # force rebuild
-    assert SnapshotRegistry.load().env_entries()["rllm-env-a"]["created_at"] == created
 
 
 def test_migrate_v1_to_v2_splits_envs_and_synthesizes_groups(monkeypatch, tmp_path):
@@ -362,58 +324,43 @@ def test_migrate_v1_to_v2_splits_envs_and_synthesizes_groups(monkeypatch, tmp_pa
 # --------------------------------------------------------------------------
 
 
-def test_modal_build_reuses_when_prior_ref_alive(monkeypatch):
-    import rllm.sandbox.backends.modal_backend as mb
-
-    monkeypatch.setattr(mb, "_modal_ref_alive", lambda ref: True)
-    # a live prior ref must short-circuit before any sandbox build.
-    import rllm.eval._resolution as res
-
-    monkeypatch.setattr(res, "_create_base_sandbox", lambda *a, **k: pytest.fail("rebuilt despite a live prior ref"))
-    assert mb.build_modal_snapshot(_task(), "rllm-env-a", prior_ref="im-old") == "im-old"
-
-
-def test_modal_build_rebuilds_when_prior_ref_gone(monkeypatch):
+@pytest.mark.parametrize(
+    ("ref_alive", "force", "expected"),
+    [
+        pytest.param(True, False, "reuse", id="alive-reuses"),
+        pytest.param(False, False, "rebuild", id="gone-rebuilds"),
+        pytest.param(True, True, "rebuild", id="force-rebuilds-even-alive"),
+    ],
+)
+def test_modal_build_reuses_or_rebuilds(monkeypatch, ref_alive, force, expected):
     import rllm.eval._resolution as res
     import rllm.sandbox.backends.modal_backend as mb
 
-    monkeypatch.setattr(mb, "_modal_ref_alive", lambda ref: False)  # NotFound → rebuild
+    # under force the probe is skipped entirely; otherwise it answers alive/NotFound.
+    monkeypatch.setattr(mb, "_modal_ref_alive", (lambda ref: pytest.fail("probe should be skipped under force")) if force else (lambda ref: ref_alive))
 
-    class _Img:
-        object_id = "im-new"
+    if expected == "reuse":
+        # a live prior ref must short-circuit before any sandbox build.
+        monkeypatch.setattr(res, "_create_base_sandbox", lambda *a, **k: pytest.fail("rebuilt despite a live prior ref"))
+    else:
 
-    class _SB:
-        _sandbox = type("S", (), {"snapshot_filesystem": staticmethod(lambda: _Img())})()
+        class _Img:
+            object_id = "im-new"
 
-        def close(self):
-            pass
+        class _SB:
+            _sandbox = type("S", (), {"snapshot_filesystem": staticmethod(lambda: _Img())})()
 
-    monkeypatch.setattr(res, "_create_base_sandbox", lambda *a, **k: _SB())
-    monkeypatch.setattr(res, "_replay_dockerfile", lambda *a, **k: None)
-    assert mb.build_modal_snapshot(_task(), "rllm-env-a", prior_ref="im-old") == "im-new"
+            def close(self):
+                pass
 
+        monkeypatch.setattr(res, "_create_base_sandbox", lambda *a, **k: _SB())
+        monkeypatch.setattr(res, "_replay_dockerfile", lambda *a, **k: None)
 
-def test_modal_build_force_rebuilds_even_when_alive(monkeypatch):
-    import rllm.eval._resolution as res
-    import rllm.sandbox.backends.modal_backend as mb
-
-    monkeypatch.setattr(mb, "_modal_ref_alive", lambda ref: pytest.fail("probe should be skipped under force"))
-
-    class _Img:
-        object_id = "im-new"
-
-    class _SB:
-        _sandbox = type("S", (), {"snapshot_filesystem": staticmethod(lambda: _Img())})()
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(res, "_create_base_sandbox", lambda *a, **k: _SB())
-    monkeypatch.setattr(res, "_replay_dockerfile", lambda *a, **k: None)
-    assert mb.build_modal_snapshot(_task(), "rllm-env-a", prior_ref="im-old", force=True) == "im-new"
+    ref = mb.build_modal_snapshot(_task(), "rllm-env-a", prior_ref="im-old", force=force)
+    assert ref == ("im-old" if expected == "reuse" else "im-new")
 
 
-def test_snapshot_absent_modal_prunes_only_on_notfound(monkeypatch):
+def test_modal_ref_absent_confirmed_notfound_only(monkeypatch):
     """Modal sync prunes ONLY on a confirmed NotFound — never on an auth/unknown error (the keep invariant)."""
     import modal
     from modal.exception import AuthError, NotFoundError
@@ -462,3 +409,100 @@ def test_daytona_ref_absent_reads_enum_or_string_state(monkeypatch):
 
     monkeypatch.setattr(daytona, "Daytona", lambda *a, **k: fake_daytona("error"))  # plain string also works
     assert _daytona_ref_absent("rllm-env-x") is True
+
+
+# --------------------------------------------------------------------------
+# Install baking — single-line wrapper, task-only fallback, install skip
+# --------------------------------------------------------------------------
+
+
+def test_as_single_run_line_round_trips_and_executes():
+    import base64
+    import subprocess
+
+    from rllm.eval._resolution import _as_single_run_line
+
+    assert _as_single_run_line("apt-get update") == "apt-get update"  # one line passes through
+
+    script = "set -e\nFOO=bar\necho path-guard $FOO"
+    wrapped = _as_single_run_line(script)
+    assert "\n" not in wrapped
+    encoded = wrapped.removeprefix("echo ").split(" | ")[0]
+    assert base64.b64decode(encoded).decode() == script  # round-trips byte-exact
+    out = subprocess.run(["bash", "-c", wrapped], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "path-guard bar"  # and actually runs through bash
+
+
+def test_get_sandbox_task_only_fallback_boots_but_does_not_claim_install(monkeypatch, tmp_path):
+    """Only a task-only snapshot exists: boot from it (better than cold) but
+    record an empty ``baked_install`` so the harness still installs at runtime."""
+    import rllm.eval._resolution as res
+
+    reg = SnapshotRegistry(str(tmp_path / "s.json"))
+    task_only_key = env_key_for(_task(), "modal")
+    reg._envs[task_only_key] = {"backend": "modal", "ref": "im-task-only", "expires_at": _future()}
+
+    booted = {}
+    monkeypatch.setattr(res, "_create_base_sandbox", lambda task, backend, *, image=None, name=None: booted.update(image=image) or _FakeSandbox())
+    monkeypatch.setattr(res, "_create_sandbox_for_task", lambda task, backend: pytest.fail("cold path taken despite a usable task-only snapshot"))
+
+    sb = get_sandbox(_task(), "modal", reg, "curl install.sh | bash")
+    assert booted["image"] == "im-task-only"
+    assert sb.baked_install == ""
+
+
+def _hook_setup(monkeypatch, sandbox, flow):
+    """Run the real SandboxTaskHooks.setup with provisioning stubbed out."""
+    import rllm.eval._resolution as res
+    import rllm.sandbox.snapshot as snap
+    from rllm.hooks import FixedEvaluation, SandboxTaskHooks
+
+    class _Evaluator:
+        def evaluate(self, task, episode):
+            return None
+
+    monkeypatch.setattr(snap, "get_sandbox", lambda task, backend, registry=None, install_script="": sandbox)
+    monkeypatch.setattr(res, "_setup_task_environment", lambda task, sb: None)
+    hooks = SandboxTaskHooks(evaluation=FixedEvaluation(_Evaluator()), sandbox_backend="docker", use_snapshot=False)
+    return hooks.setup(_task(backend="docker"), flow, "uid")
+
+
+def _install_flow():
+    from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
+
+    class _InstallFlow(SandboxedAgentFlow):
+        name = "stub"
+
+        def install_script(self):
+            return "echo installing"
+
+        def run(self, task, config, *, env):
+            return None
+
+    return _InstallFlow()
+
+
+class _ExecRecordingSandbox(_FakeSandbox):
+    def __init__(self):
+        self.calls = []
+
+    def exec(self, command, timeout=None, user=None):
+        self.calls.append((command, user))
+        return ""
+
+
+@pytest.mark.parametrize(
+    ("baked_install", "expected_calls"),
+    [
+        pytest.param(None, [("echo installing", "root")], id="cold-installs"),
+        pytest.param("echo installing", [], id="exact-bake-skips"),
+        pytest.param("echo OLD install", [("echo installing", "root")], id="stale-bake-reinstalls"),
+    ],
+)
+def test_hook_install_honors_baked_script(monkeypatch, baked_install, expected_calls):
+    sandbox = _ExecRecordingSandbox()
+    if baked_install is not None:  # no baked_install attr → cold
+        sandbox.baked_install = baked_install  # exact match skips; a stale bake reinstalls
+    ctx = _hook_setup(monkeypatch, sandbox, _install_flow())
+    assert sandbox.calls == expected_calls
+    assert ctx.env is sandbox

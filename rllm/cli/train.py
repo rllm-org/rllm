@@ -70,9 +70,13 @@ def build_train_config(
     )
 
     # If user provided a --config file, merge it on top
+    user_workflow_timeout = None
     if config_file:
         user_cfg = OmegaConf.load(config_file)
         merged = OmegaConf.merge(merged, user_cfg)
+        # The CLI override block below sets a rollout timeout default; a
+        # timeout declared in the user's --config must survive it.
+        user_workflow_timeout = OmegaConf.select(user_cfg, "rllm.workflow.workflow_args.timeout")
 
     # Apply CLI overrides (only non-default values)
     overrides = OmegaConf.create(
@@ -83,6 +87,10 @@ def build_train_config(
             "data": {"train_batch_size": batch_size},
             "rllm": {
                 "model_name": model_name,
+                # Post-#627 the loader reads rllm.data directly, so the CLI batch
+                # size must land here too (sync_config keeps the native data.* in
+                # parity); writing both keeps them consistent before sync runs.
+                "data": {"train_batch_size": batch_size},
                 "trainer": {
                     "total_epochs": total_epochs,
                     "test_freq": val_freq,
@@ -96,7 +104,8 @@ def build_train_config(
                 "workflow": {
                     "use_workflow": True,
                     "workflow_args": {
-                        "timeout": 300,  # 5-minute timeout per rollout
+                        # Default rollout timeout; a --config-declared value wins.
+                        "timeout": user_workflow_timeout if user_workflow_timeout is not None else 300,
                     },
                 },
             },
@@ -184,8 +193,22 @@ def _run_train(
     val_ds_name = val_dataset_name or benchmark
 
     if BenchmarkLoader.is_local_benchmark(benchmark):
+        from rllm.data.dataset import Dataset as _Dataset
+
+        # --train/--val-dataset may each point at a separate local benchmark dir;
+        # an unset (or non-local) --val-dataset falls back to reusing the train tasks.
+        train_dir = train_dataset_name if (train_dataset_name and BenchmarkLoader.is_local_benchmark(train_dataset_name)) else benchmark
+        val_dir = val_dataset_name if (val_dataset_name and BenchmarkLoader.is_local_benchmark(val_dataset_name)) else None
+        if val_dataset_name and val_dir is None:
+            console.print(f"  [key]--val-dataset '{val_dataset_name}' is not a local benchmark dir; reusing train tasks for validation.[/]")
+
         # For local sandbox tasks, --agent picks the AgentFlow.
-        bench_result = BenchmarkLoader.load(benchmark, harness_name=agent_name)
+        bench_result = BenchmarkLoader.load(train_dir, sandbox_backend=sandbox_backend, harness_name=agent_name)
+        # dataset.toml's default_sandbox applies when --sandbox-backend wasn't
+        # given (same rule as the eval CLI).
+        if not sandbox_backend and bench_result.sandbox_backend:
+            sandbox_backend = bench_result.sandbox_backend
+        train_ds_name = bench_result.name
         catalog_entry = {
             "description": bench_result.description,
             "category": bench_result.category,
@@ -199,47 +222,45 @@ def _run_train(
         except (KeyError, ImportError, AttributeError, TypeError) as e:
             fail(f"Cannot load agent '{agent_name}': {e}")
 
-        # Evaluator: --evaluator > dataset.toml [verifier].
-        # Sandbox-shell verifiers aren't supported here (per-task sandbox
-        # lifecycle lives inside Runner) — use --evaluator to override.
-        evaluator_display = "N/A"
+        # Evaluator: --evaluator > train dataset.toml [verifier]; a host-side
+        # evaluator scores both train and val. Env-style verifiers
+        # (sandbox-shell / python-hybrid) resolve per task inside the sandbox
+        # via SandboxTaskHooks, so leave ``evaluator`` unset for those.
         if evaluator_name is not None:
             evaluator = load_evaluator(evaluator_name)
             evaluator_display = evaluator_name
         else:
             from pathlib import Path as _Path
 
-            from rllm.eval._resolution import build_dataset_evaluator
+            from rllm.eval._resolution import build_dataset_evaluator, dataset_verifier_kind
 
-            evaluator = build_dataset_evaluator(_Path(benchmark).resolve())
-            if evaluator is None:
-                fail(
-                    "Could not resolve a verifier for this benchmark. "
-                    "Declare a host-side verifier in dataset.toml ([verifier].name / "
-                    ".module / .import_path) or pass --evaluator explicitly. "
-                    "Sandbox-shell verifiers aren't supported in training yet."
-                )
-            evaluator_display = f"{type(evaluator).__name__} (from dataset.toml)"
-
-        # Datasets: pass the Task list as both train and val for now
-        from rllm.data.dataset import Dataset as _Dataset
+            train_dir_path = _Path(train_dir).resolve()
+            evaluator = build_dataset_evaluator(train_dir_path)
+            if evaluator is not None:
+                evaluator_display = f"{type(evaluator).__name__} (from dataset.toml)"
+            else:
+                kind = dataset_verifier_kind(train_dir_path)
+                if kind == "missing":
+                    fail("Could not resolve a verifier for this benchmark. Declare a verifier in dataset.toml ([verifier].name / .module / .import_path / .script) or pass --evaluator explicitly.")
+                evaluator_display = f"per-task ({kind}, in-sandbox)"
 
         if train_split is None:
             train_split = bench_result.split or "train"
-        train_dataset = _Dataset(
-            data=list(bench_result.tasks),
-            name=bench_result.name,
-            split=train_split,
-        )
+        train_dataset = _Dataset(data=list(bench_result.tasks), name=bench_result.name, split=train_split)
         if max_examples is not None and max_examples < len(train_dataset):
             train_dataset = train_dataset.select(range(max_examples))
-        val_dataset = _Dataset(
-            data=list(bench_result.tasks),
-            name=bench_result.name,
-            split=bench_result.split or "test",
-        )
-        if val_split is None:
-            val_split = train_dataset.split or "test"
+
+        if val_dir is not None:
+            val_result = BenchmarkLoader.load(val_dir, harness_name=agent_name)
+            val_ds_name = val_result.name
+            if val_split is None:
+                val_split = val_result.split or "test"
+            val_dataset = _Dataset(data=list(val_result.tasks), name=val_result.name, split=val_split)
+        else:
+            val_ds_name = bench_result.name
+            if val_split is None:
+                val_split = bench_result.split or "test"
+            val_dataset = _Dataset(data=list(bench_result.tasks), name=bench_result.name, split=val_split)
 
     # ------------------------------------------------------------------
     # Catalog / Harbor path (existing behavior)
@@ -259,8 +280,10 @@ def _run_train(
                 console.print(f"  [success]Found Harbor dataset:[/] [val]{harbor_name}[/]")
                 benchmark = harbor_name
 
-        # ---- Docker check for Harbor datasets ----
-        if catalog_entry and catalog_entry.get("source", "").startswith("harbor:"):
+        # ---- Docker check for Harbor datasets (local backends only) ----
+        from rllm.gateway.tunnel import is_local_sandbox_backend
+
+        if catalog_entry and catalog_entry.get("source", "").startswith("harbor:") and is_local_sandbox_backend(sandbox_backend):
             from rllm.integrations.harbor.utils import diagnose_docker
 
             ok, reason, hint = diagnose_docker()
@@ -463,9 +486,9 @@ def _describe_sandbox_routing(
 ) -> str | None:
     """One-line description of sandbox + gateway routing for the header. Returns ``None`` when no sandbox is needed."""
     from rllm.gateway.tunnel import is_local_sandbox_backend, parse_tunnel
-    from rllm.hooks import needs_sandbox_isolation
+    from rllm.hooks import scan_env_requirements
 
-    if not needs_sandbox_isolation(agent_flow, train_dataset, val_dataset):
+    if not scan_env_requirements(agent_flow, train_dataset, val_dataset, sandbox_backend=sandbox_backend).needs_env:
         return None
 
     backend = (sandbox_backend or "docker").lower()
