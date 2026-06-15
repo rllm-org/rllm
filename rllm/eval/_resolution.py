@@ -196,15 +196,37 @@ def _create_base_sandbox(task: Task, backend: str, *, image: str | None = None, 
     return create_sandbox(backend, name=name, image=image, **_sandbox_resource_kwargs(task, backend), **backend_kwargs)
 
 
+def _should_replay_dockerfile(task: Task) -> bool:
+    """Whether to replay the Dockerfile's ``RUN`` steps on non-docker backends.
+
+    Two task conventions are supported via ``[environment].replay_dockerfile``:
+
+    * **SWE-bench style** (default, ``true``): the configured ``docker_image``
+      is a *base*; the Dockerfile's ``RUN`` steps (e.g. ``uv``, needed by the
+      grader) are not in that image and must be replayed on top.
+    * **Terminal-bench / Harbor style** (``false``): the configured
+      ``docker_image`` is the *fully built* task image, so replaying its ``RUN``
+      steps double-applies the build (``git clone ... already exists``, missing
+      ``COPY``'d files, etc.). These tasks set
+      ``[environment]\nreplay_dockerfile = false`` to boot the image as-is.
+    """
+    env = task.metadata.get("environment", {}) or {}
+    return bool(env.get("replay_dockerfile", True))
+
+
 def _replay_dockerfile(task: Task, sandbox: Sandbox, backend: str) -> None:
     """Replay the Dockerfile RUN steps on a live sandbox (stage C).
 
     Non-docker backends pull the Dockerfile's FROM base instead of building
     it, so the RUN steps (e.g. swebench's ``uv``, needed by the grader) must
     be replayed. Best-effort: a failed step shouldn't abort the task. Docker
-    builds the image, so its RUN steps already ran — skip.
+    builds the image, so its RUN steps already ran — skip. Tasks that boot a
+    fully-built image opt out via ``[environment].replay_dockerfile = false``
+    (see :func:`_should_replay_dockerfile`).
     """
     if backend == "docker":
+        return
+    if not _should_replay_dockerfile(task):
         return
     for cmd in _dockerfile_run_commands(task):
         _safe_exec(sandbox, cmd, timeout=900)
@@ -249,9 +271,13 @@ def _sandbox_resource_kwargs(task: Task, backend: str) -> dict:
 
 
 def _dockerfile_run_commands(task: Task) -> list[str]:
-    """Return a task's ``environment/Dockerfile`` ``RUN`` shell steps (joining
-    ``\\``-continuations). Non-``RUN`` directives — ``COPY``/``ADD`` etc. — are
-    skipped; only ``RUN`` is replayable on a live sandbox.
+    """Return a task's ``environment/Dockerfile`` ``RUN`` shell steps.
+
+    ``\\``-continuations are joined into a single logical command with a space
+    (matching shell line-continuation semantics) so multi-line ``RUN`` steps
+    stay valid when re-executed via ``bash -c``. Non-``RUN`` directives —
+    ``COPY``/``ADD`` etc. — are skipped; only ``RUN`` is replayable on a live
+    sandbox.
     """
     dockerfile = task.task_dir / "environment" / "Dockerfile"
     if not dockerfile.exists():
@@ -275,7 +301,7 @@ def _dockerfile_run_commands(task: Task) -> list[str]:
                 if i >= len(lines):
                     break
                 parts.append(lines[i])
-            cmd = "\n".join(parts).strip()
+            cmd = " ".join(part.strip() for part in parts).strip()
             if cmd:
                 commands.append(cmd)
         i += 1
