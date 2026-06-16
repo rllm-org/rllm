@@ -568,7 +568,17 @@ class ReverseProxy:
             def _sse(data: str) -> str:
                 return f"data: {data}\n\n"
 
-            yield _sse(json.dumps({"id": chat_id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]}))
+            yield _sse(
+                json.dumps(
+                    {
+                        "id": chat_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
+                    }
+                )
+            )
             yield _sse(
                 json.dumps(
                     _sanitize_chunk(
@@ -583,7 +593,18 @@ class ReverseProxy:
                     )
                 )
             )
-            yield _sse(json.dumps({"id": chat_id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}], "usage": usage}))
+            yield _sse(
+                json.dumps(
+                    {
+                        "id": chat_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+                        "usage": usage,
+                    }
+                )
+            )
             yield _sse("[DONE]")
 
         return StreamingResponse(event_generator(), media_type="text/event-stream", status_code=200)
