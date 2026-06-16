@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Train an SWE agent on rllm-swesmith with the verl (distributed) backend.
+# Train an SWE agent on R2E-Gym with the verl (distributed) backend.
 #
 # Prerequisites:
 #   1. Install rllm with verl extras:     uv pip install -e ".[verl]"
@@ -8,12 +8,21 @@
 #   4. Pull the datasets:                  python cookbooks/swe-rl/prepare_data.py
 #
 # Verl runs vLLM rollouts + FSDP/Megatron training across N GPUs. Mini-swe-agent
-# still executes inside per-task sandboxes (Daytona by default); only the policy
-# rollout traffic flows through the gateway back to the verl-hosted vLLM engine.
+# still executes inside per-task sandboxes via rLLM's own SandboxedAgentFlow path
+# (AgentFlowEngine, not the remote Harbor runtime); only the policy rollout
+# traffic flows through the gateway back to the verl-hosted vLLM engine.
+#
+# Sandbox backend is chosen by SWE_SANDBOX_BACKEND (docker | local | modal |
+# daytona; default modal). modal needs `pip install modal` + `modal token new`;
+# daytona needs `pip install daytona` + DAYTONA_API_KEY. Per-rollout agent
+# timeout: RLLM_HARNESS_RUN_TIMEOUT_S.
 
 set -euo pipefail
 
 unset ROCR_VISIBLE_DEVICES 2>/dev/null || true
+
+export SWE_SANDBOX_BACKEND="${SWE_SANDBOX_BACKEND:-modal}"
+export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
 
 MODEL_PATH=Qwen/Qwen3.5-9B
 
@@ -56,15 +65,11 @@ python -u train.py \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     rllm.workflow.n_parallel_tasks=64 \
-    rllm.remote_runtime.enabled=true \
-    rllm.remote_runtime.backend=harbor \
-    rllm.remote_runtime.harbor.agent=mini-swe-agent \
-    rllm.remote_runtime.harbor.environment_type=daytona \
-    rllm.remote_runtime.session_timeout=1800.0 \
+    rllm.workflow.raise_on_error=false \
     rllm.gateway.port=9090 \
     trainer.logger="['console','wandb']" \
     trainer.project_name=swe-rl \
-    trainer.experiment_name=swesmith-mini-swe-agent-qwen3.5-9b-verl \
+    trainer.experiment_name=r2egym-mini-swe-agent-qwen3.5-9b-verl \
     trainer.val_before_train=true \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \

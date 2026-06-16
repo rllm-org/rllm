@@ -17,6 +17,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from rllm.engine.rollout.tinker_engine import TinkerEngine
+from rllm.workflows import TerminationEvent, TerminationReason
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +131,33 @@ def create_tinker_handler(engine: TinkerEngine) -> Callable[[dict[str, Any]], Aw
         if tools:
             kwargs["tools"] = tools
 
-        model_output = await engine.get_model_response(messages, **kwargs)
+        try:
+            model_output = await engine.get_model_response(messages, **kwargs)
+        except TerminationEvent as e:
+            # The engine signals an unrecoverable per-call limit (e.g. the
+            # prompt crossed max_prompt_length). For CLI harnesses the agent
+            # loop runs inside the sandbox, so the ONLY way to stop it is the
+            # HTTP response — propagating this as a 500 makes the harness's
+            # LLM client retry the (still-too-long) call until the harness
+            # run-timeout SIGKILLs it, stalling the whole group. Instead,
+            # return the OpenAI-standard ``context_length_exceeded`` 400:
+            # litellm/openai SDKs map it to a NON-retryable
+            # ContextWindowExceededError, so the in-sandbox agent raises and
+            # the rollout returns immediately with the turns so far.
+            from fastapi import HTTPException
+
+            is_prompt_limit = e.reason == TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": {
+                        "message": f"Rollout terminated: {e.reason}. The conversation exceeded the model's prompt window.",
+                        "type": "invalid_request_error",
+                        "code": "context_length_exceeded" if is_prompt_limit else "rollout_terminated",
+                        "param": "messages",
+                    }
+                },
+            ) from e
 
         response_text = model_output.content or model_output.text or ""
         prompt_ids = list(model_output.prompt_ids) if model_output.prompt_ids else []

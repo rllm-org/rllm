@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Train an SWE agent on rllm-swesmith, eval on SWE-bench Verified.
+# Train an SWE agent on R2E-Gym, eval on SWE-bench Verified.
 #
 # Prerequisites:
 #   1. Install rllm with tinker extras:   uv pip install -e ".[tinker]"
@@ -8,16 +8,25 @@
 #
 # What this configures, in plain English:
 #   - Async GRPO with compact filtering (drop too-long rollouts before grad).
-#   - 64 tasks rolled out in parallel; each rollout boots a Daytona sandbox
-#     and runs mini-swe-agent against it. The gateway routes every LLM call
-#     back to the trainer-hosted model.
+#   - 64 tasks rolled out in parallel; each rollout boots a sandbox (rLLM's
+#     own SandboxedAgentFlow path, AgentFlowEngine) and runs mini-swe-agent
+#     against it. The gateway routes every LLM call back to the trainer-hosted
+#     model. This is NOT the remote-runtime / RemoteAgentFlowEngine path.
 #   - 32K prompt window, 8K response budget per turn (mini-swe-agent runs
 #     many turns; the per-turn cap keeps the optimizer batch shape sane).
+#
+# Sandbox backend is chosen by SWE_SANDBOX_BACKEND (docker | local | modal |
+# daytona; default modal). modal needs `pip install modal` + `modal token new`;
+# daytona needs `pip install daytona` + DAYTONA_API_KEY. Per-rollout agent
+# timeout: RLLM_HARNESS_RUN_TIMEOUT_S.
 #
 # Override anything by passing extra Hydra args after the script:
 #   bash train_tinker.sh model.name=Qwen/Qwen3-8B training.group_size=4
 
 set -euo pipefail
+
+export SWE_SANDBOX_BACKEND="${SWE_SANDBOX_BACKEND:-modal}"
+export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
 
 python -u train.py \
     rllm/backend=tinker \
@@ -28,8 +37,8 @@ python -u train.py \
     training.max_length=32768 \
     rllm.rollout.train.temperature=1.0 \
     rllm.rollout.train.top_p=1.0 \
-    rllm.rollout.val.temperature=0.7 \
-    rllm.rollout.val.top_p=0.8 \
+    rllm.rollout.val.temperature=1.0 \
+    rllm.rollout.val.top_p=1.0 \
     data.max_prompt_length=32768 \
     data.max_response_length=8192 \
     data.train_batch_size=1 \
@@ -44,17 +53,13 @@ python -u train.py \
     rllm.async_training.trigger_parameter_sync_step=1 \
     rllm.async_training.partial_rollout=true \
     rllm.workflow.n_parallel_tasks=64 \
-    rllm.remote_runtime.enabled=true \
-    rllm.remote_runtime.backend=harbor \
-    rllm.remote_runtime.harbor.agent=mini-swe-agent \
-    rllm.remote_runtime.harbor.environment_type=daytona \
-    rllm.remote_runtime.session_timeout=1800.0 \
+    rllm.workflow.raise_on_error=false \
     rllm.gateway.port=9090 \
     rllm.trainer.total_epochs=1 \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='swe-rl' \
-    rllm.trainer.experiment_name='swesmith-mini-swe-agent-qwen3.5-9b' \
-    rllm.trainer.val_before_train=true \
+    rllm.trainer.experiment_name='r2egym-mini-swe-agent-qwen3.5-9b' \
+    rllm.trainer.val_before_train=false \
     rllm.trainer.test_freq=10 \
     rllm.trainer.save_freq=-1 \
     "$@"

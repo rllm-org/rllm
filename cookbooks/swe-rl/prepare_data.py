@@ -2,9 +2,10 @@
 
 Both are sandbox-format benchmarks (per-task ``environment/Dockerfile`` +
 ``tests/test.sh`` verifier). The training set is rLLM's native
-``rllm-swesmith`` (filtered SWE-smith, ~4.7K bug-fix tasks across 105
-Python repos). The eval set is ``harbor:swebench-verified`` (500
-real-world GitHub issues, evaluated against the official SWE-bench
+``r2egym`` (R2E-Gym Subset, 4,578 bug-fix tasks across 12 Python repos,
+each shipped as a per-instance Docker image graded by the image's own
+``/testbed/run_tests.sh``). The eval set is ``harbor:swebench-verified``
+(500 real-world GitHub issues, evaluated against the official SWE-bench
 harness inside the sandbox).
 
 This script is a thin wrapper around ``rllm dataset pull`` so the
@@ -24,7 +25,7 @@ import argparse
 import subprocess
 import sys
 
-TRAIN_DATASET = "rllm-swesmith"
+TRAIN_DATASET = "r2egym"
 VAL_DATASET = "harbor:swebench-verified"
 
 
@@ -42,7 +43,7 @@ def main() -> None:
         "--train-limit",
         type=int,
         default=None,
-        help="Cap training tasks (default: full ~4.7K). Useful for smoke runs.",
+        help="Cap training tasks (default: full ~4.6K). Useful for smoke runs.",
     )
     ap.add_argument(
         "--val-limit",

@@ -1,52 +1,86 @@
-"""Train an SWE agent on rllm-swesmith, validate on SWE-bench Verified.
+"""Train an SWE agent on R2E-Gym, validate on SWE-bench Verified.
 
 This cookbook deliberately ships no custom AgentFlow or evaluator:
 
-* The **agent** is the in-tree ``mini-swe-agent`` harness — a CLI scaffold
-  installed inside each task's sandbox. The rLLM gateway intercepts every
-  LLM call, so the trainer sees full trajectories without the harness
-  knowing it's being trained.
-* The **evaluator** is each task's own ``tests/test.sh`` (sandbox-shell
-  verifier) — pytest for rllm-swesmith, the SWE-bench harness for the
-  Verified split. The verifier writes a reward to
-  ``/logs/verifier/reward.txt`` and rLLM reads it back.
+* The **agent** is the in-tree ``mini-swe-agent`` harness
+  (:class:`rllm.harnesses.mini_swe_agent.MiniSweAgentHarness`) — a
+  :class:`~rllm.sandbox.sandboxed_flow.SandboxedAgentFlow` that installs the
+  ``mini-swe-agent`` CLI inside each task's sandbox. The rLLM gateway
+  intercepts every LLM call, so the trainer sees full trajectories without
+  the harness knowing it's being trained.
+* The **evaluator** is each task's own verifier (sandbox-shell), resolved
+  per-task by :class:`rllm.hooks.SandboxTaskHooks`. For r2egym it runs the
+  image's own ``/testbed/run_tests.sh`` and checks pytest-output equality
+  against the row's expected output; for the Verified split it runs the
+  task's bundled ``tests/test.sh``. The verifier writes a reward that rLLM
+  reads back.
 
-So ``train.py`` only wires the two datasets into :class:`AgentTrainer`;
-everything else is configured by Hydra overrides on the command line
-(see ``train_tinker.sh`` / ``train_verl.sh`` for working defaults).
+Because we pass an ``agent_flow`` (and no explicit ``evaluator``/``hooks``),
+:class:`AgentTrainer` runs the **rLLM-native SandboxedAgentFlow path**
+(``AgentFlowEngine``) — sandboxes are created locally by ``SandboxTaskHooks``
+via a pluggable ``sandbox_backend`` (``docker`` | ``local`` | ``modal`` |
+``daytona``). This is NOT the remote-runtime / ``RemoteAgentFlowEngine`` path.
+
+The sandbox backend is selected by the ``SWE_SANDBOX_BACKEND`` env var
+(default ``modal``). For ``modal`` install ``pip install modal`` and run
+``modal token new``; for ``daytona`` install ``pip install daytona`` and set
+``DAYTONA_API_KEY``. Everything else is configured by Hydra overrides on the
+command line (see ``train_tinker.sh`` / ``train_verl.sh`` for working defaults).
 
 Usage (from rllm repo root)::
 
-    python cookbooks/swe-rl/train.py rllm/backend=tinker
+    SWE_SANDBOX_BACKEND=modal python cookbooks/swe-rl/train.py rllm/backend=tinker
 """
 
 from __future__ import annotations
+
+import os
 
 import hydra
 from omegaconf import DictConfig
 
 from rllm.data.dataset import DatasetRegistry
+from rllm.harnesses.mini_swe_agent import MiniSweAgentHarness
 from rllm.trainer import AgentTrainer
 
-TRAIN_DATASET = "rllm-swesmith"
+TRAIN_DATASET = "r2egym"
 VAL_DATASET = "swebench-verified"
+
+# Sandbox backend for the SandboxedAgentFlow path: docker | local | modal | daytona.
+SANDBOX_BACKEND = os.environ.get("SWE_SANDBOX_BACKEND", "modal")
+
+# Optional cap on the validation set size. SWE-bench Verified is 500 tasks;
+# validation runs ALL of them every time it fires, which is slow. Set
+# SWE_VAL_MAX=N to validate on the first N tasks instead (0/unset = all 500).
+SWE_VAL_MAX = int(os.environ.get("SWE_VAL_MAX", "0"))
 
 
 @hydra.main(config_path="pkg://rllm.trainer.config", config_name="unified", version_base=None)
 def main(config: DictConfig) -> None:
     train_dataset = DatasetRegistry.load_dataset(TRAIN_DATASET, "train")
-    val_dataset = DatasetRegistry.load_dataset(VAL_DATASET, "test")
+    val_dataset = DatasetRegistry.load_dataset(VAL_DATASET, "default")
 
     if train_dataset is None:
         raise RuntimeError(f"Dataset '{TRAIN_DATASET}' not found. Run: rllm dataset pull {TRAIN_DATASET} (or: python cookbooks/swe-rl/prepare_data.py)")
     if val_dataset is None:
         raise RuntimeError(f"Dataset '{VAL_DATASET}' not found. Run: rllm dataset pull harbor:swebench-verified (or: python cookbooks/swe-rl/prepare_data.py)")
 
+    if SWE_VAL_MAX > 0 and SWE_VAL_MAX < len(val_dataset):
+        val_dataset = val_dataset.select(range(SWE_VAL_MAX))
+
+    # mini-swe-agent as a SandboxedAgentFlow. Passing ``agent_flow`` (with no
+    # explicit evaluator/hooks) makes AgentTrainer auto-wire SandboxTaskHooks
+    # for the sandbox lifecycle + per-task verifier, and route rollouts through
+    # AgentFlowEngine — rLLM's own runtime, not the remote Harbor runtime.
+    agent_flow = MiniSweAgentHarness(sandbox_backend=SANDBOX_BACKEND)
+
     trainer = AgentTrainer(
         backend=config.rllm.get("backend", "tinker"),
         config=config,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
+        agent_flow=agent_flow,
+        sandbox_backend=SANDBOX_BACKEND,
     )
     trainer.train()
 
