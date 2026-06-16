@@ -67,7 +67,6 @@ class OpenCodeHarness(BaseCliHarness):
 
     name = "opencode"
     sandbox_backend = "docker"
-    max_concurrent = 4
     stdout_log_path = "/tmp/opencode.log"
 
     # Provider name we register the gateway under inside opencode.json.

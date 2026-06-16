@@ -66,7 +66,6 @@ class KimiCliHarness(BaseCliHarness):
 
     name = "kimi-cli"
     sandbox_backend = "docker"
-    max_concurrent = 4
     stdout_log_path = "/tmp/kimi-cli.log"
 
     def install_script(self) -> str:

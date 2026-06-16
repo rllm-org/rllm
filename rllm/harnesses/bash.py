@@ -48,7 +48,6 @@ class BashHarness(SandboxedAgentFlow):
 
     name = "bash"
     sandbox_backend = "docker"
-    max_concurrent = 4
 
     def run(self, task: Task, config, *, env) -> Episode:
         from openai import OpenAI

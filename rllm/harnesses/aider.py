@@ -65,7 +65,6 @@ class AiderHarness(BaseCliHarness):
 
     name = "aider"
     sandbox_backend = "docker"
-    max_concurrent = 4
     stdout_log_path = "/tmp/aider.log"
 
     def install_script(self) -> str:
