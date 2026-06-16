@@ -55,7 +55,7 @@ python -u train.py \
     rllm.workflow.n_parallel_tasks=64 \
     rllm.workflow.raise_on_error=false \
     rllm.gateway.port=9090 \
-    rllm.gateway.cumulative_token_mode=true \
+    rllm.gateway.cumulative_token_mode=false \
     rllm.gateway.renderer_family=qwen3.5 \
     rllm.trainer.total_epochs=1 \
     rllm.trainer.logger='[wandb]' \
