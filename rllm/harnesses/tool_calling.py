@@ -23,10 +23,10 @@ class ToolCallingMixin:
     Usage::
 
         class MyAgent(SandboxedAgentFlow, ToolCallingMixin):
-            def run(self, task, config):
+            def run(self, task, config, *, env):
                 steps, messages, final = self.run_tool_loop(
                     client, config.model, messages,
-                    tools=[BashTool()], sandbox=self.sandbox,
+                    tools=[BashTool()], sandbox=env,
                 )
     """
 

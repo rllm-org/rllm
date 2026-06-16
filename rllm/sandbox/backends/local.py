@@ -66,6 +66,10 @@ class LocalSandbox:
 
         shutil.copytree(local_path, dest, ignore=_ignore)
 
+    def is_alive(self) -> bool:
+        """The sandbox is just a temp working directory; alive while it exists."""
+        return os.path.isdir(self._workdir)
+
     def close(self) -> None:
         """Clean up the temp directory."""
         if os.path.exists(self._workdir):

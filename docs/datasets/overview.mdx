@@ -3,12 +3,14 @@ title: Supported datasets
 description: All benchmark datasets available for evaluation and training with rllm eval
 ---
 
-rLLM ships with a built-in catalog of 50+ benchmark datasets spanning math, code, question answering, instruction following, search, vision-language, translation, and agentic tasks. All datasets are auto-pulled from HuggingFace on first use.
+rLLM ships with a built-in catalog of 60+ benchmark datasets spanning math, code, question answering, instruction following, search, vision-language, translation, and agentic tasks. All datasets are auto-pulled from HuggingFace on first use.
 
 ```bash
 rllm dataset list --all    # See all available datasets
 rllm eval gsm8k            # Auto-pulls and evaluates
 ```
+
+To add your own dataset (catalog entry, ad-hoc directory, or Harbor package), see [Bring your own dataset](/datasets/byo-dataset).
 
 ## Math
 
@@ -16,6 +18,8 @@ rllm eval gsm8k            # Auto-pulls and evaluates
 |---------|-------------|------|--------|-----------|
 | `gsm8k` | Grade school math word problems | 8.5K train, 1.3K test | [openai/gsm8k](https://huggingface.co/datasets/openai/gsm8k) | `math_reward_fn` |
 | `math500` | MATH-500 competition math benchmark | 500 test | [HuggingFaceH4/MATH-500](https://huggingface.co/datasets/HuggingFaceH4/MATH-500) | `math_reward_fn` |
+| `hendrycks_math` | MATH: Competition mathematics across 7 subjects | 7.5K train, 5K test | [EleutherAI/hendrycks_math](https://huggingface.co/datasets/EleutherAI/hendrycks_math) | `math_reward_fn` |
+| `deepscaler_math` | DeepScaleR-Preview: ~40K problems (AIME/AMC/Omni-MATH/STILL) | ~40K train | [agentica-org/DeepScaleR-Preview-Dataset](https://huggingface.co/datasets/agentica-org/DeepScaleR-Preview-Dataset) | `math_reward_fn` |
 | `countdown` | Countdown arithmetic puzzle | 1K train, 500 test | [predibase/countdown](https://huggingface.co/datasets/predibase/countdown) | `countdown_reward_fn` |
 | `hmmt` | HMMT Feb 2025: Harvard-MIT Mathematics Tournament | train | [MathArena/hmmt_feb_2025](https://huggingface.co/datasets/MathArena/hmmt_feb_2025) | `math_reward_fn` |
 | `hmmt_nov` | HMMT Nov 2025: Harvard-MIT Mathematics Tournament | 30 problems | [MathArena/hmmt_nov_2025](https://huggingface.co/datasets/MathArena/hmmt_nov_2025) | `math_reward_fn` |
@@ -79,12 +83,26 @@ Datasets in this category use the `search` agent, which requires a search backen
 
 ## Agentic
 
-| Dataset | Description | Size | Source | Evaluator |
-|---------|-------------|------|--------|-----------|
-| `bfcl` | BFCL: Berkeley Function Calling Leaderboard (exec_simple) | test | [gorilla-llm/Berkeley-Function-Calling-Leaderboard](https://huggingface.co/datasets/gorilla-llm/Berkeley-Function-Calling-Leaderboard) | `bfcl_reward_fn` |
-| `multichallenge` | MultiChallenge: Multi-turn conversation evaluation | test | [nmayorga7/multichallenge](https://huggingface.co/datasets/nmayorga7/multichallenge) | `llm_judge_reward_fn` |
-| `frozenlake` | FrozenLake: Grid navigation (procedurally generated) | train, test | Generated | `frozenlake_reward_fn` |
-| `claw_eval` | Claw-Eval: personal-assistant agent tasks in sandbox workspaces (run with `--agent zeroclaw`) | general (161) | [claw-eval/Claw-Eval](https://huggingface.co/datasets/claw-eval/Claw-Eval) | `claw_eval_reward_fn` |
+Most agentic datasets are sandboxed — they ship per-task Dockerfiles and shell verifiers. See [Sandboxes](/core-concepts/sandbox) for how to pick `--sandbox-backend` and [Tasks (Harbor-compatible)](/core-concepts/tasks) for the on-disk format.
+
+| Dataset | Description | Size | Source | Default agent |
+|---------|-------------|------|--------|---------------|
+| `bfcl` | BFCL: Berkeley Function Calling Leaderboard (exec_simple) | test | [gorilla-llm/Berkeley-Function-Calling-Leaderboard](https://huggingface.co/datasets/gorilla-llm/Berkeley-Function-Calling-Leaderboard) | `react` |
+| `multichallenge` | MultiChallenge: Multi-turn conversation evaluation | test | [nmayorga7/multichallenge](https://huggingface.co/datasets/nmayorga7/multichallenge) | `react` |
+| `claw_eval` | Claw-Eval: 161 personal-assistant agent tasks in sandbox workspaces (LLM-judge graded) | 161 general | [claw-eval/Claw-Eval](https://huggingface.co/datasets/claw-eval/Claw-Eval) | `zeroclaw` |
+| `rllm-swesmith` | SWE-smith filtered: solvable bug-fixing tasks across 105 Python repos (in-sandbox pytest grading) | ~4.7K train | [kylemontgomery/swesmith-filtered](https://huggingface.co/datasets/kylemontgomery/swesmith-filtered) | `mini-swe-agent` |
+| `skillsbench` | SkillsBench: 91 expert-curated agentic tasks measuring skill use (per-task `tests/test.sh` verifier) | 91 train | [benchflow/skillsbench](https://huggingface.co/datasets/benchflow/skillsbench) | `claude-code` |
+| `skillsbench-no-skills` | SkillsBench baseline without the per-task `skills/` tree, for measuring skills-augmentation gain | 91 train | [benchflow/skillsbench](https://huggingface.co/datasets/benchflow/skillsbench) | `claude-code` |
+
+### Harbor packages (no registry entry)
+
+Terminal-Bench 2.0 and other [Harbor](https://github.com/laude-institute/t-bench) task packages are not in the catalog — they're resolved from Harbor at run time:
+
+```bash
+rllm eval harbor:laude-institute/t-bench-2 --agent terminus2 --sandbox-backend modal
+```
+
+See the [Terminal-Bench cookbook](/cookbooks/terminal_bench) for the full walkthrough.
 
 ## Translation
 
@@ -123,13 +141,10 @@ These datasets contain images and require a vision-capable model.
 
 ## Using custom datasets
 
-You can register your own datasets for use with `rllm eval` and `rllm train`:
+Three paths for adding your own dataset:
 
-```bash
-rllm dataset register my-dataset --file data.jsonl --category math
-rllm eval my-dataset --agent react --evaluator math_reward_fn
-```
+- **Ad-hoc directory** — point `rllm eval` at a folder on disk; the loader autodetects the shape.
+- **Catalog entry + builder** — register a builder in `rllm/registry/datasets.json` so collaborators can `rllm dataset pull <name>`.
+- **Harbor package** — drop in any Harbor task package with the `harbor:` prefix.
 
-Your data file should contain `question` and `ground_truth` fields. Supported formats: JSON, JSONL, CSV, and Parquet.
-
-For more details, see [rllm dataset](/core-concepts/cli-and-ui).
+See [Bring your own dataset](/datasets/byo-dataset) for the full walkthrough.

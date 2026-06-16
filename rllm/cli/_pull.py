@@ -298,7 +298,9 @@ def _pull_built_dataset(name: str, catalog_entry: dict, builder_path: str) -> No
     The builder is specified as ``module:function`` and materializes the
     benchmark directory under ``~/.rllm/datasets/<name>/`` directly (the
     ``rllm eval`` materialised-benchmark redirect then resolves it by name).
-    It receives ``name``, ``split``, ``out_dir`` and ``catalog_entry`` kwargs.
+    It receives ``name``, ``split``, ``out_dir`` and ``catalog_entry`` kwargs,
+    plus any ``builder_kwargs`` from the catalog entry (used to back two
+    variants of the same dataset off one builder, e.g. skills-on vs. -off).
 
     Unlike HF/generator datasets (which emit row data), sandbox datasets are
     whole workspaces, so they bypass the row-materialize path entirely.
@@ -306,7 +308,8 @@ def _pull_built_dataset(name: str, catalog_entry: dict, builder_path: str) -> No
     build_fn = _load_transform(builder_path)
     out_dir = os.path.join(_DATASETS_ROOT, name)
     split = catalog_entry.get("eval_split") or (catalog_entry.get("splits") or ["test"])[0]
-    build_fn(name=name, split=split, out_dir=out_dir, catalog_entry=catalog_entry)
+    extra_kwargs = dict(catalog_entry.get("builder_kwargs") or {})
+    build_fn(name=name, split=split, out_dir=out_dir, catalog_entry=catalog_entry, **extra_kwargs)
     logger.info("Built sandbox benchmark '%s' at %s", name, out_dir)
 
 

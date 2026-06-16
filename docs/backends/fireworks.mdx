@@ -1,0 +1,759 @@
+---
+title: Fireworks Backend
+description: Training with Fireworks AI — managed RL infrastructure with async-first unified trainer
+---
+
+The **fireworks** backend is rLLM's managed-training backend for Fireworks AI. It extends the [tinker backend](/backends/tinker) architecture with Fireworks-specific infrastructure: trainer jobs and inference deployments are provisioned via the Fireworks training cookbook, rollouts run through `FireworksEngine` (`DeploymentSampler`), and policy updates use `FireworksPolicyTrainer` with `WeightSyncer` for hot-loading weights into the inference deployment.
+
+## Overview
+
+Fireworks backend features:
+
+- **Managed infrastructure**: Trainer jobs and inference deployments are provisioned and torn down automatically at startup/shutdown
+- **Async-first design**: Native async/await support inherited from the tinker backend path
+- **Unified architecture**: Same `AgentTrainer` API for agent and workflow training
+- **Server-side losses**: Builtin GRPO, DAPO, CISPO, and GSPO kernels on Firetitan
+- **Weight hot-loading**: `WeightSyncer` syncs trainer weights to the rollout deployment after each step
+
+<Note>
+  **Python version**: Requires Python >= 3.11 (same as tinker; Fireworks training SDK depends on tinker types).
+</Note>
+
+<Note>
+  **API key**: Set `FIREWORKS_API_KEY` in your environment before training. The trainer job and inference deployment are created on Fireworks at startup and deleted on shutdown.
+</Note>
+
+## Installation
+
+Install rLLM with the Fireworks backend:
+
+<CodeGroup>
+```bash Direct Installation
+uv pip install "rllm[fireworks] @ git+https://github.com/rllm-org/rllm.git"
+```
+
+```bash From Source
+git clone https://github.com/rllm-org/rllm.git
+cd rllm
+uv venv --python 3.11  # Python 3.11+ required
+source .venv/bin/activate
+uv pip install -e .[fireworks]
+```
+</CodeGroup>
+
+Export your API key:
+
+```bash
+export FIREWORKS_API_KEY=your-api-key
+```
+
+## Dependencies
+
+The Fireworks backend includes (from `pyproject.toml`):
+
+```toml
+fireworks = [
+    "fireworks-ai[training]==1.2.0a79",
+    "fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git#subdirectory=training",
+]
+```
+
+The cookbook provides `training.provision.init_fireworks_infra` and the RL loss utilities used by `FireworksPolicyTrainer`.
+
+## Models and training shapes
+
+Fireworks RL training uses two kinds of IDs from the shared public catalog under the `fireworks` account:
+
+| Concept | ID format | rLLM config field |
+|---------|-----------|-------------------|
+| **Base model** | `accounts/fireworks/models/<model>` | `model.name` |
+| **Training shape** | `accounts/fireworks/trainingShapes/<shape>` | `fireworks_config.policy_trainer_shape_id` |
+
+A **base model** is the model you fine-tune (for example `accounts/fireworks/models/qwen3-4b`). A **training shape** is a pre-configured GPU and runtime profile — you pass the full path (for example `accounts/fireworks/trainingShapes/qwen3-4b-minimum-lora`) and the SDK resolves the pinned version, image tag, GPU layout, and linked deployment shape for you. See the [Fireworks training shapes documentation](https://docs.fireworks.ai/fine-tuning/training-api/training-shapes) for the searchable catalog, per-model RFT support matrix, and shape roles.
+
+<Info>
+  For rLLM you only need to pick a compatible **model + training shape pair** from that catalog. You do not need to specify versioned shape refs, image tags, or GPU counts manually — the shape owns that infrastructure.
+</Info>
+
+### Shape roles (RFT / RL)
+
+During reinforcement fine-tuning (RFT), Fireworks deploys separate trainer and inference resources. The catalog lists shapes by **role**:
+
+| Role | Use in rLLM | When |
+|------|-------------|------|
+| **LoRA Policy** | `fireworks_config.policy_trainer_shape_id` with `model.lora_rank > 0` | Default path — parameter-efficient RL; policy trainer also serves as frozen reference |
+| **Policy** | `fireworks_config.policy_trainer_shape_id` with `model.lora_rank=0` | Full-parameter training |
+| **Forward-only** | `fireworks_config.reference_trainer_shape_id` | Separate frozen reference for full-parameter RL with KL (`kl_beta > 0`) |
+
+The rollout **inference deployment** is provisioned automatically from the shape linked to your policy trainer; you do not pick a deployment shape separately unless you reattach via `fireworks_infra.deployments.rollout.deployment_id`.
+
+### Picking a model for RL
+
+In the [training shapes catalog](https://docs.fireworks.ai/fine-tuning/training-api/training-shapes), select a model and check the **RFT LoRA** or **RFT Full-Param** row in the training method support matrix. Only models marked supported there can be used with the Fireworks backend for RL.
+
+Examples of models with **RFT LoRA** support (see the live catalog for GPU totals and context limits):
+
+| Model | Base model ID | Example LoRA training shape |
+|-------|---------------|----------------------------|
+| Qwen 3 4B | `accounts/fireworks/models/qwen3-4b` | `accounts/fireworks/trainingShapes/qwen3-4b-minimum-lora` |
+| Qwen 3 8B | `accounts/fireworks/models/qwen3-8b` | `accounts/fireworks/trainingShapes/qwen3-8b-256k-h200-lora` |
+| Qwen 3.5 9B | `accounts/fireworks/models/qwen3p5-9b` | `accounts/fireworks/trainingShapes/qwen3p5-9b-256k-lora` |
+| Qwen 3.5 35B A3B | `accounts/fireworks/models/qwen3p5-35b-a3b` | `accounts/fireworks/trainingShapes/qwen3p5-35b-a3b-256k-lora` |
+| Llama 3.3 70B Instruct | `accounts/fireworks/models/llama-v3p3-70b-instruct` | `accounts/fireworks/trainingShapes/llama-v3p3-70b-instruct-128k-lora-b200` |
+
+Wire a chosen pair into Hydra overrides:
+
+```bash
+python -m examples.countdown.unified_trainer.train_countdown_unified_fireworks \
+  rllm/backend=fireworks \
+  model.name=accounts/fireworks/models/qwen3-4b \
+  model.tokenizer_model=Qwen/Qwen3-4B \
+  model.lora_rank=32 \
+  fireworks_config.policy_trainer_shape_id=accounts/fireworks/trainingShapes/qwen3-4b-minimum-lora
+```
+
+<Warning>
+  Use the full training shape path including the `accounts/fireworks/trainingShapes/` prefix. Do not override shape-owned fields (`accelerator_type`, `accelerator_count`, `node_count`, `custom_image_tag`, or linked deployment shape) — configure `lora_rank`, `learning_rate`, and replica counts instead. See [What you can and can't change](https://docs.fireworks.ai/fine-tuning/training-api/training-shapes#what-you-can-and-cant-change) in the Fireworks docs.
+</Warning>
+
+## Basic Usage
+
+### Workflow Training
+
+Train a countdown workflow on Fireworks using the unified trainer. See [`examples/countdown/unified_trainer/`](https://github.com/rllm-org/rllm/tree/main/examples/countdown/unified_trainer) for the full example:
+
+```python train_countdown_unified_fireworks.py
+import hydra
+
+from rllm.data.dataset import DatasetRegistry
+from rllm.rewards.countdown_reward import countdown_reward_fn
+from rllm.trainer import AgentTrainer
+from rllm.workflows.simple_workflow import SimpleWorkflow
+
+
+@hydra.main(config_path="pkg://rllm.trainer.config", config_name="unified", version_base=None)
+def main(config):
+    train_dataset = DatasetRegistry.load_dataset("countdown", "train")
+    test_dataset = DatasetRegistry.load_dataset("countdown", "test")
+
+    trainer = AgentTrainer(
+        workflow_class=SimpleWorkflow,
+        workflow_args={"reward_function": countdown_reward_fn},
+        config=config,
+        train_dataset=train_dataset,
+        val_dataset=test_dataset,
+        backend="fireworks",
+    )
+    trainer.train()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+Run with async training (recommended for throughput):
+
+```bash
+bash examples/countdown/unified_trainer/train_countdown_unified_fireworks_async.sh
+```
+
+Or invoke Hydra directly:
+
+```bash
+python -m examples.countdown.unified_trainer.train_countdown_unified_fireworks \
+  rllm/backend=fireworks \
+  model.name=accounts/fireworks/models/qwen3-4b-instruct-2507 \
+  model.tokenizer_model=Qwen/Qwen3-4B-Instruct-2507 \
+  model.lora_rank=32 \
+  fireworks_config.policy_trainer_shape_id=accounts/fireworks/trainingShapes/qwen3-4b-minimum-lora \
+  training.group_size=8 \
+  training.learning_rate=1e-5 \
+  rllm.async_training.enable=true
+```
+
+### Agent Training
+
+Use the same `AgentTrainer` API with an `AgentFlow` and `Evaluator` (see the [math cookbook](/cookbooks/math)):
+
+```python
+trainer = AgentTrainer(
+    backend="fireworks",
+    agent_flow=math_flow,
+    evaluator=math_evaluator,
+    config=config,
+    train_dataset=train_dataset,
+    val_dataset=test_dataset,
+)
+trainer.train()
+```
+
+Select the Fireworks backend via Hydra:
+
+```bash
+python train.py rllm/backend=fireworks model.lora_rank=32 training.group_size=8
+```
+
+## Architecture
+
+Fireworks backend extends `TinkerBackend` and overrides only what differs:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     rLLM UnifiedTrainer                     │
+│                                                             │
+│  ┌──────────────────┐         ┌──────────────────────────┐│
+│  │ FireworksEngine  │ rollout │  FireworksPolicyTrainer  ││
+│  │ (DeploymentSampler)│◄──────│  (ReconnectableClient)   ││
+│  └────────┬─────────┘  sync   └────────────┬─────────────┘│
+│           │                                  │              │
+│           ▼                                  ▼              │
+│  ┌──────────────────┐         ┌──────────────────────────┐│
+│  │ Inference        │ hotload │  Firetitan trainer job   ││
+│  │ deployment       │◄────────│  (policy)                ││
+│  └──────────────────┘         └──────────────────────────┘│
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Inherited unchanged from tinker**: dataloader, episode generation, advantage computation, batch transforms, validation hooks.
+
+**Fireworks-specific**: infrastructure provisioning, `FireworksEngine`, `FireworksPolicyTrainer`, DCP checkpointing, weight sync, and model promotion.
+
+## Configuration
+
+The Fireworks backend uses `fireworks.yaml` (selected when `rllm/backend=fireworks`):
+
+### Model Configuration
+
+<ParamField path="model.name" type="string" default="accounts/fireworks/models/qwen3-4b-instruct-2507">
+  Fireworks model ID (accounts path)
+</ParamField>
+
+<ParamField path="model.tokenizer_model" type="string" default="Qwen/Qwen3-4B-Instruct-2507">
+  HuggingFace tokenizer model for chat template rendering
+</ParamField>
+
+<ParamField path="model.lora_rank" type="integer" default="32">
+  LoRA rank. Set to `0` for full-parameter training (requires reference trainer for KL)
+</ParamField>
+
+<ParamField path="model.train_unembed" type="boolean" default="false">
+  Train LoRA on output embedding layer
+</ParamField>
+
+<ParamField path="model.train_attn" type="boolean" default="true">
+  Train LoRA on attention layers
+</ParamField>
+
+<ParamField path="model.train_mlp" type="boolean" default="true">
+  Train LoRA on MLP layers
+</ParamField>
+
+### Training Configuration
+
+<ParamField path="training.group_size" type="integer" required>
+  Number of rollouts per prompt (for GRPO)
+</ParamField>
+
+<ParamField path="training.learning_rate" type="float" default="1e-5">
+  Learning rate for Adam optimizer
+</ParamField>
+
+<ParamField path="training.lr_schedule" type="string" default="constant">
+  LR schedule: `"constant"`, `"linear"`, or `"cosine"`
+</ParamField>
+
+<ParamField path="training.warmup_steps_ratio" type="float" default="0.0">
+  Warmup steps as a ratio of total steps (0 to 1)
+</ParamField>
+
+<ParamField path="training.max_length" type="integer" default="null">
+  Maximum sequence length. Auto-derived from the training shape when null
+</ParamField>
+
+<ParamField path="training.client_timeout" type="integer" default="3600">
+  Timeout for forward / forward_backward / optim_step calls (seconds)
+</ParamField>
+
+<ParamField path="training.resume_from_fireworks_job_id" type="string" default="null">
+  Source trainer job ID for loading a DCP checkpoint from another job
+</ParamField>
+
+<ParamField path="training.resume_from_dcp_checkpoint" type="string" default="null">
+  Explicit DCP checkpoint name to load; null uses the latest on the source/current job
+</ParamField>
+
+### Fireworks Trainer / Deployment Shapes
+
+<ParamField path="fireworks_config.policy_trainer_shape_id" type="string" default="accounts/fireworks/trainingShapes/qwen3-4b-minimum-lora">
+  Training shape for the policy trainer job
+</ParamField>
+
+<ParamField path="fireworks_config.policy_trainer_replica_count" type="integer" default="1">
+  Replica count for the policy trainer
+</ParamField>
+
+<ParamField path="fireworks_config.rollout_deployment_replica_count" type="integer" default="1">
+  Replica count for the inference deployment used during rollouts
+</ParamField>
+
+<ParamField path="fireworks_config.reference_trainer_shape_id" type="string" default="accounts/fireworks/trainingShapes/qwen3-4b-minimum-lora">
+  Reference trainer shape (only needed for full-parameter RFT with `kl_beta > 0`)
+</ParamField>
+
+<ParamField path="fireworks_config.reference_trainer_replica_count" type="integer" default="0">
+  Reference trainer replica count. Leave at `0` for LoRA (policy serves as frozen reference)
+</ParamField>
+
+### Validation Configuration
+
+<ParamField path="validation.group_size" type="integer" required>
+  Number of rollouts per validation prompt
+</ParamField>
+
+### Data Configuration
+
+<ParamField path="data.train_batch_size" type="integer" default="32">
+  Training batch size
+</ParamField>
+
+<ParamField path="data.val_batch_size" type="integer" default="32">
+  Validation batch size
+</ParamField>
+
+<ParamField path="data.max_prompt_length" type="integer" default="30720">
+  Maximum prompt length in tokens
+</ParamField>
+
+<ParamField path="data.max_response_length" type="integer" default="2048">
+  Maximum response length in tokens
+</ParamField>
+
+### Trainer Configuration
+
+<ParamField path="rllm.trainer.total_epochs" type="integer" default="10">
+  Number of training epochs
+</ParamField>
+
+<ParamField path="rllm.trainer.test_freq" type="integer" default="5">
+  Validation frequency (in steps)
+</ParamField>
+
+<ParamField path="rllm.trainer.save_freq" type="integer" default="20">
+  Checkpoint save frequency (in steps). In async mode, must be a multiple of `trigger_parameter_sync_step`
+</ParamField>
+
+<ParamField path="rllm.trainer.experiment_name" type="string" default="default">
+  Experiment name (used for promoted model IDs: `{experiment_name}-step-{step}`)
+</ParamField>
+
+## Fireworks Infrastructure
+
+The `fireworks_infra` section controls provisioning. rLLM mirrors key training knobs into this document before calling the cookbook's `init_fireworks_infra`. You typically configure shapes and replica counts via `fireworks_config` rather than editing `fireworks_infra` directly.
+
+<Warning>
+  Do not change `fireworks_infra` unless you are familiar with the Fireworks provisioning API. Use `fireworks_config` for common overrides.
+</Warning>
+
+Key provisioning fields:
+
+<ParamField path="fireworks_infra.deployments.rollout.deployment_id" type="string" default="null">
+  Attach to an existing deployment (`null` creates a new one per run)
+</ParamField>
+
+<ParamField path="fireworks_infra.trainers.policy.job_id" type="string" default="null">
+  Attach to an existing trainer job (`null` creates a new job)
+</ParamField>
+
+<ParamField path="fireworks_infra.common.weight_sync_timeout" type="integer" default="600">
+  Timeout for weight hot-loading into the deployment (seconds)
+</ParamField>
+
+<ParamField path="fireworks_base_url" type="string" default="https://api.fireworks.ai">
+  Fireworks API base URL
+</ParamField>
+
+Resources are cleaned up on shutdown (`cleanup_on_close=True`, `cleanup_existing=True`). Each run provisions fresh trainer and deployment resources unless you explicitly set `job_id` or `deployment_id` to reattach.
+
+## LoRA Training
+
+LoRA is the default path (`model.lora_rank=32`). With LoRA, the frozen reference policy is reused from the policy trainer — leave `reference_trainer_replica_count=0`.
+
+```bash
+python -m examples.countdown.unified_trainer.train_countdown_unified_fireworks \
+  rllm/backend=fireworks \
+  model.lora_rank=32 \
+  model.train_attn=true \
+  model.train_mlp=true \
+  model.train_unembed=false
+```
+
+For **full-parameter training** (`model.lora_rank=0`), enable a reference trainer for KL divergence:
+
+```yaml
+fireworks_config:
+  reference_trainer_replica_count: 1
+
+fireworks_infra:
+  recipe:
+    rft:
+      trainer: policy
+      deployment: rollout
+      reference_trainer: reference  # uncomment for full-param RFT with reference KL
+```
+
+## Sampling Configuration
+
+Rollout sampling uses `rllm.rollout` (not a separate `sampling` block):
+
+<ParamField path="rllm.rollout.train.temperature" type="float" default="1.0">
+  Training sampling temperature
+</ParamField>
+
+<ParamField path="rllm.rollout.train.top_p" type="float" default="1.0">
+  Training top-p (nucleus) sampling
+</ParamField>
+
+<ParamField path="rllm.rollout.val.temperature" type="float" default="1.0">
+  Validation sampling temperature
+</ParamField>
+
+<ParamField path="rllm.rollout.val.top_p" type="float" default="1.0">
+  Validation top-p sampling
+</ParamField>
+
+<Warning>
+  **Important**: Setting `temperature` or `top_p` away from `1.0` can cause logprob accuracy issues. Keep both at `1.0` unless you understand the off-policy implications.
+</Warning>
+
+## Rollout Engine Configuration
+
+<ParamField path="rollout_engine.reasoning_effort" type="string" default="medium">
+  Reasoning effort level: `"low"`, `"medium"`, `"high"`
+</ParamField>
+
+<ParamField path="rollout_engine.accumulate_reasoning" type="boolean" default="false">
+  Accumulate reasoning tokens across steps
+</ParamField>
+
+<ParamField path="rollout_engine.disable_thinking" type="boolean" default="false">
+  Disable thinking tokens in responses
+</ParamField>
+
+<ParamField path="rollout_engine.bypass_render_with_parser" type="boolean" default="false">
+  Bypass renderer and use parser directly
+</ParamField>
+
+<ParamField path="rollout_engine.renderer_name" type="string" default="null">
+  Optional renderer name for chat template rendering
+</ParamField>
+
+## Concurrency
+
+Fireworks rollout concurrency is controlled via the cookbook `ConcurrencyConfig`:
+
+<ParamField path="concurrency.mode" type="string" default="adaptive">
+  Concurrency mode: `"adaptive"` or `"fixed"`
+</ParamField>
+
+<ParamField path="concurrency.initial_window" type="integer" default="null">
+  Starting window for adaptive mode (`null` = 8 × replica count)
+</ParamField>
+
+<ParamField path="concurrency.max_window" type="integer" default="256">
+  Maximum concurrent requests
+</ParamField>
+
+<ParamField path="concurrency.prefill_queue_target" type="float" default="0.5">
+  Target prefill queue duration (seconds) for adaptive mode
+</ParamField>
+
+## Algorithm Configuration
+
+Fireworks uses **server-side builtin loss kernels**. Configure via `rllm.algorithm`:
+
+<ParamField path="rllm.algorithm.adv_estimator" type="string" default="grpo">
+  Advantage estimator: `"grpo"`, `"reinforce"`, etc.
+</ParamField>
+
+<ParamField path="rllm.algorithm.loss_fn" type="string" default="null">
+  Policy loss: `null` (GRPO default), `"dapo"`, `"cispo"`, or `"gspo"`
+</ParamField>
+
+<ParamField path="rllm.algorithm.loss_agg_mode" type="string" default="null">
+  Loss aggregation: `null` (backend default), `"token-mean"`, `"seq-mean-token-sum"`, or `"seq-mean-token-mean"`
+</ParamField>
+
+<ParamField path="rllm.algorithm.router_replay" type="string" default="disabled">
+  Router replay mode: `"disabled"` or `"R3"` (`"R2"` is not supported)
+</ParamField>
+
+<ParamField path="rllm.algorithm.rollout_correction.bypass_mode" type="boolean" default="true">
+  When `true`, rollout logprobs are used as proximal policy (decoupled PPO bypass). Set `false` for active TIS correction
+</ParamField>
+
+<ParamField path="rllm.algorithm.rollout_correction.tis_mode" type="string" default="null">
+  Truncated importance sampling mode: `null`, `"token"`, or `"sequence"` (requires `bypass_mode=false`)
+</ParamField>
+
+## Async Training
+
+Async training overlaps rollouts with policy updates for higher throughput:
+
+```yaml
+rllm:
+  async_training:
+    enable: true
+    mini_batch_size: 32
+    fwd_bwd_group_size: 8
+    staleness_threshold: 0.5
+    trigger_parameter_sync_step: 1
+    partial_rollout: true
+```
+
+<Info>
+  When async training is enabled, `save_freq` must be a multiple of `trigger_parameter_sync_step`. Checkpoint promotion requires a sampler snapshot created at sync time.
+</Info>
+
+## Checkpointing
+
+Fireworks checkpoints are stored as **DCP** (Distributed Checkpoint) on the trainer job. After each sync step, weights are hot-loaded to the inference deployment. When saving, checkpoints can be **promoted** to a Fireworks model ID.
+
+### Automatic Checkpointing
+
+```yaml
+rllm:
+  trainer:
+    save_freq: 20  # Must align with trigger_parameter_sync_step in async mode
+```
+
+On training end, a final DCP checkpoint is saved and weights are synced.
+
+### Resume from Checkpoint
+
+Resume from the latest DCP on the current or source job:
+
+```bash
+python -m examples.countdown.unified_trainer.train_countdown_unified_fireworks \
+  training.resume_from_fireworks_job_id=your-trainer-job-id
+```
+
+Resume from a specific checkpoint:
+
+```bash
+python -m examples.countdown.unified_trainer.train_countdown_unified_fireworks \
+  training.resume_from_dcp_checkpoint=step-50
+```
+
+Or from another job:
+
+```bash
+python -m examples.countdown.unified_trainer.train_countdown_unified_fireworks \
+  training.resume_from_dcp_checkpoint=other-job-id:step-50
+```
+
+Promoted models are named `{experiment_name}-step-{global_step}`.
+
+## Limitations
+
+<Warning>
+  `fuse_forward_backward_and_optim_step` must be `false` for the Fireworks backend. The fused optimizer path is not supported.
+</Warning>
+
+| Feature | Fireworks support |
+|---------|-------------------|
+| `fuse_forward_backward_and_optim_step` | ❌ Not supported |
+| `router_replay: R2` | ❌ Use `R3` or `disabled` |
+| `router_replay: R3` | ✅ Supported |
+| Distillation (`adv_estimator: distill`) | ❌ Not documented / tested |
+| Full-parameter + KL | ✅ Requires reference trainer |
+| LoRA + KL | ✅ Policy reused as reference |
+
+## Example Configuration
+
+Complete configuration for countdown workflow training:
+
+```yaml config.yaml
+# Fireworks service
+fireworks_base_url: "https://api.fireworks.ai"
+fuse_forward_backward_and_optim_step: false
+
+# Model
+model:
+  name: accounts/fireworks/models/qwen3-4b-instruct-2507
+  tokenizer_model: Qwen/Qwen3-4B-Instruct-2507
+  lora_rank: 32
+  train_unembed: false
+  train_attn: true
+  train_mlp: true
+
+# Training
+training:
+  group_size: 8
+  learning_rate: 1e-5
+  max_length: null
+
+fireworks_config:
+  policy_trainer_shape_id: accounts/fireworks/trainingShapes/qwen3-4b-minimum-lora
+  policy_trainer_replica_count: 1
+  rollout_deployment_replica_count: 1
+
+validation:
+  group_size: 1
+
+# Data
+data:
+  train_batch_size: 1
+  val_batch_size: 1024
+  max_prompt_length: 2048
+  max_response_length: 2048
+
+# Rollout engine
+rollout_engine:
+  reasoning_effort: "medium"
+  accumulate_reasoning: false
+  disable_thinking: false
+
+# rLLM
+rllm:
+  backend: fireworks
+  rollout:
+    train:
+      temperature: 1.0
+      top_p: 1.0
+      top_k: 0
+    val:
+      temperature: 1.0
+      top_p: 1.0
+      top_k: 0
+  algorithm:
+    adv_estimator: grpo
+    norm_adv_by_std_in_grpo: true
+    rollout_correction:
+      bypass_mode: true
+  async_training:
+    enable: true
+    mini_batch_size: 32
+    trigger_parameter_sync_step: 1
+  trainer:
+    total_epochs: 1
+    test_freq: 10
+    save_freq: -1
+    logger: ['console']
+    project_name: 'rllm-countdown'
+    experiment_name: 'countdown-fireworks'
+  workflow:
+    n_parallel_tasks: 256
+    retry_limit: 1
+    raise_on_error: false
+
+concurrency:
+  mode: adaptive
+  max_window: 256
+```
+
+## Performance Optimization
+
+<CardGroup cols={2}>
+  <Card title="Enable async training" icon="bolt">
+    Set `rllm.async_training.enable=true` to overlap rollouts and policy updates
+  </Card>
+  <Card title="Tune concurrency" icon="layer-group">
+    Increase `concurrency.max_window` and deployment `replica_count` for higher rollout throughput
+  </Card>
+  <Card title="Use LoRA" icon="compress">
+    LoRA training (`model.lora_rank > 0`) is faster and avoids provisioning a reference trainer
+  </Card>
+  <Card title="Parallel workflows" icon="rocket">
+    Increase `rllm.workflow.n_parallel_tasks` for workflow-based training
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="FIREWORKS_API_KEY not set">
+    Export your API key before launching training:
+    ```bash
+    export FIREWORKS_API_KEY=your-api-key
+    ```
+  </Accordion>
+
+  <Accordion title="fuse_forward_backward_and_optim_step error">
+    The Fireworks backend does not support fused optimizer steps:
+    ```yaml
+    fuse_forward_backward_and_optim_step: false
+    ```
+  </Accordion>
+
+  <Accordion title="save_freq / sync interval mismatch">
+    In async mode, `save_freq` must be a multiple of `trigger_parameter_sync_step`:
+    ```yaml
+    rllm:
+      trainer:
+        save_freq: 20
+      async_training:
+        trigger_parameter_sync_step: 1  # save_freq % sync_interval == 0
+    ```
+  </Accordion>
+
+  <Accordion title="Sampling parameter warning">
+    Keep rollout temperature and top_p at 1.0:
+    ```yaml
+    rllm:
+      rollout:
+        train:
+          temperature: 1.0
+          top_p: 1.0
+        val:
+          temperature: 1.0
+          top_p: 1.0
+    ```
+  </Accordion>
+
+  <Accordion title="Resources still running after crash">
+    If training exits abnormally before `shutdown()`, trainer jobs and deployments may keep running on Fireworks. Reattach with `job_id` / `deployment_id` or delete them from the Fireworks console.
+  </Accordion>
+
+  <Accordion title="router_replay R2 not supported">
+    Use `R3` or `disabled`:
+    ```yaml
+    rllm:
+      algorithm:
+        router_replay: disabled  # or R3
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Comparison with tinker
+
+| Feature | Fireworks | tinker |
+|---------|-----------|--------|
+| Infrastructure | Managed (trainer job + deployment) | Local or remote tinker service |
+| Weight sync | `WeightSyncer` hot-load to deployment | Tinker sampler paths |
+| Checkpoint format | DCP on trainer job + model promotion | Tinker checkpoint URIs |
+| Fused optim step | ❌ Not supported | ✅ Supported |
+| API key / account | `FIREWORKS_API_KEY` required | Optional (local service) |
+| Server-side losses | Firetitan builtin kernels | Tinker forward-backward |
+| Async training | ✅ Recommended | ✅ Supported |
+
+See [Backend Comparison](/backends/comparison) for the full verl vs tinker feature matrix.
+
+## See Also
+
+<CardGroup cols={2}>
+  <Card title="tinker Backend" icon="cube" href="/backends/tinker">
+    Local or remote tinker service training
+  </Card>
+  <Card title="verl Backend" icon="server" href="/backends/verl">
+    Distributed training with verl
+  </Card>
+  <Card title="Backend Comparison" icon="scale-balanced" href="/backends/comparison">
+    Compare training backends
+  </Card>
+  <Card title="Unified Trainer" icon="robot" href="/training/unified-trainer">
+    Learn about the unified trainer architecture
+  </Card>
+  <Card title="Fireworks Training Cookbook" icon="book" href="https://github.com/fw-ai/cookbook/tree/main/training">
+    Official Fireworks training cookbook
+  </Card>
+</CardGroup>

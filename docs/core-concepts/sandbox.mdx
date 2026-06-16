@@ -1,0 +1,109 @@
+---
+title: Sandboxes
+description: Run agent harnesses inside Docker, Daytona, Modal, or local environments — with snapshot acceleration and warm-pool scheduling
+---
+
+A *sandbox* is the isolated environment a harness runs inside. Every sandboxed task (SWE-bench, Terminal-Bench, rllm-swesmith, …) is graded by spawning an agent in a fresh sandbox, running the verifier inside it, and tearing it down. rLLM abstracts the backend so the same `--agent` runs on Docker locally and on Modal at training-scale.
+
+## Backends
+
+| Backend | Where it runs | When to use |
+|---------|---------------|-------------|
+| `docker` | local Docker daemon | development; small eval runs; you have a GPU box with Docker |
+| `local` | host process (no isolation) | smoke tests; environments that don't need isolation |
+| `daytona` | Daytona cloud | hosted execution without managing a Docker host |
+| `modal` | Modal cloud | training-scale eval and rollouts (best concurrency, snapshot support, pay-per-use) |
+
+Pick one with `--sandbox-backend`, or let the dataset declare its preferred backend in `dataset.toml`:
+
+```toml
+# In a dataset.toml
+default_sandbox = "modal"
+```
+
+The flag wins over the dataset declaration; the dataset declaration wins over the harness class default. If neither is set, you'll be prompted.
+
+## When you need a sandbox
+
+A task needs a sandbox when its environment ships a Dockerfile, its verifier is a shell script (`tests/test.sh`), or its agent needs to execute commands (bash, file edits, network). One-shot LLM benchmarks (gsm8k, MATH-500, MCQ) skip the sandbox entirely.
+
+The Runner detects the requirement from `dataset.toml` / `task.toml` and provisions the sandbox before invoking the harness. Harnesses that always run inside a sandbox (`bash`, `claude-code`, `codex`, `terminus2`, …) declare it on the class; the engine joins all sources of truth into a single requirement so you can't accidentally run a sandboxed harness on the local backend.
+
+## Snapshots
+
+Booting from a Dockerfile costs minutes; building 89 Terminal-Bench tasks back-to-back costs hours. A *snapshot* is a backend artifact that bakes the base image + Dockerfile `RUN` steps into a ready-to-attach image, keyed by `env_key(task)`. Boot time drops to seconds.
+
+```bash
+# Build snapshots for every environment in the dataset
+rllm snapshot create terminal-bench-2 --backend modal
+
+# Run with snapshots automatically picked up
+rllm eval terminal-bench-2 --sandbox-backend modal
+```
+
+Snapshots are backend-specific (Modal and Daytona support them; Docker and local always take the cold path). They're built and destroyed only by `rllm snapshot`, never by an eval or training run. Concurrency is `RLLM_SNAPSHOT_BUILD_WORKERS` (default 4) — bump to 10+ for benchmarks with many environments.
+
+## Warm queue (training-time)
+
+During training, each step kicks off a wave of rollouts. Without preparation, every wave pays the sandbox-creation cost up front. The *warm queue* is a per-run prefetcher that walks the task schedule with background threads and parks ready sandboxes ahead of the consumption frontier:
+
+- Snapshot-agnostic: a snapshot hit just makes a fill faster.
+- Bounded: `size` caps how many sandboxes are warm at once.
+- Liveness-checked: `pop` never returns a dead sandbox. If a remote provider's idle auto-stop killed a parked box, the queue transparently replaces it before handing one to a consumer.
+- Schedule-aware: a miss that self-serves leaves a *credit* so the filler skips the matching schedule entry — fillers don't waste work building sandboxes nobody will pop.
+
+The warm queue is enabled automatically when `rllm train` uses a sandboxed harness. Tune via `RLLM_WARM_QUEUE_SIZE` and `RLLM_WARM_QUEUE_FILLERS`.
+
+## Lifetimes and timeouts
+
+Remote sandboxes get killed by their provider after an idle timeout (Daytona's auto-stop is 30 min) or a lifetime cap. For long-running rollouts:
+
+```bash
+# Modal: raise per-sandbox lifetime (default 30 min)
+export RLLM_MODAL_SANDBOX_TIMEOUT_S=3600
+
+# Bigger build sandboxes for snapshot builds with slow RUN steps
+export RLLM_SNAPSHOT_BUILD_WORKERS=10
+```
+
+Per-task overrides go in `task.toml`:
+
+```toml
+[environment]
+build_timeout_sec = 1800   # Daytona create_timeout floors at this value
+```
+
+See [Environment variables](/guides/environment-variables) for the full list.
+
+## Resource limits
+
+Remote backends OOM on multi-GB image pulls or memory-hungry verifiers (e.g. SWE-smith's `uv install`). Declare resources in `task.toml`:
+
+```toml
+[environment]
+memory = "4 GiB"
+cpu = 2
+```
+
+Builders for catalog datasets (rllm-swesmith, SkillsBench) patch in sensible defaults; ad-hoc directories without resource limits use the backend's default and may fail on heavy environments.
+
+## Programmatic use
+
+```python
+from rllm.sandbox import create_sandbox
+
+sandbox = create_sandbox(backend="modal", task=task)
+try:
+    stdout = sandbox.exec("pytest tests/", timeout=300)
+    sandbox.upload_file("local/patch.diff", "/workspace/patch.diff")
+finally:
+    sandbox.close()
+```
+
+The protocol is in `rllm.sandbox.protocol.Sandbox`: `exec`, `upload_file`, `upload_dir`, `close`, `is_alive`. Backends implement it directly; the warm queue and snapshot machinery work against the protocol, not a concrete backend.
+
+## Related
+
+- [Tasks (Harbor-compatible)](/core-concepts/tasks) — the on-disk format that declares a task's environment + verifier.
+- [Harnesses](/core-concepts/harnesses) — built-in agents that run inside a sandbox.
+- [Running evaluations](/datasets/running-evaluations) — `rllm eval` CLI surface.

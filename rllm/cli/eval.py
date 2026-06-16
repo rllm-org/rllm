@@ -19,6 +19,7 @@ from rllm import paths
 from rllm.cli._pull import load_dataset_catalog, pull_dataset
 from rllm.cli._sampling import SAMPLING_PARAMS_HELP as _SAMPLING_PARAMS_HELP
 from rllm.cli._ui import console, fail, info_panel, not_found, parse_index_spec
+from rllm.types import Task
 
 logger = logging.getLogger(__name__)
 
@@ -30,19 +31,30 @@ def _suggest_benchmarks(name: str, catalog_names: list[str], max_suggestions: in
     return get_close_matches(name, catalog_names, n=max_suggestions, cutoff=0.5)
 
 
-def _dict_rows_to_tasks(rows: list[dict]) -> list:
+def _apply_sandbox_overrides(agent, agent_metadata: dict | None) -> None:
+    """Route CLI sandbox flags through the flow's ``configure()`` and warn about leftovers."""
+    if not agent_metadata:
+        return
+    configure = getattr(agent, "configure", None)
+    leftovers = dict(configure(dict(agent_metadata)) if callable(configure) else agent_metadata)
+    # run_dataset / the sandbox hooks consume the backend regardless of the flow.
+    leftovers.pop("sandbox_backend", None)
+    for flag in leftovers:
+        logger.warning("--%s has no effect for agent %s", flag.replace("_", "-"), type(agent).__name__)
+
+
+def _dict_rows_to_tasks(rows: list[dict]) -> list[Task]:
     """Wrap dict-rows from a catalog dataset as Task objects.
 
     Harbor rows carry ``task_path``; we root the Task there and merge the task's
     ``task.toml`` + ``environment/Dockerfile`` metadata (workdir, verifier
     timeout, per-task image) so per-task verifier resolution and an rllm-native
     harness get the right sandbox. Other rows get ``dataset_dir=Path(".")`` and
-    rely on ``evaluator_override``.
+    rely on the fixed-evaluator policy.
     """
     from pathlib import Path
 
     from rllm.tasks.loader import _merge_task_toml_metadata
-    from rllm.types import Task
 
     tasks: list[Task] = []
     for idx, row in enumerate(rows):
@@ -83,6 +95,7 @@ def _run_eval(
     use_snapshot: bool = True,
     warm_queue_size: int = 0,
     sampling_config=None,
+    attempts: int = 1,
 ):
     """Core eval logic, extracted for clean proxy lifecycle management."""
     from rllm.data import DatasetRegistry
@@ -136,6 +149,13 @@ def _run_eval(
             "category": bench_result.category,
         }
 
+        # dataset.toml's default_sandbox applies when --sandbox-backend wasn't
+        # given; it reaches the agent and hooks through agent_metadata like the
+        # CLI flag would.
+        if not sandbox_backend and bench_result.sandbox_backend:
+            agent_metadata = dict(agent_metadata or {})
+            agent_metadata["sandbox_backend"] = bench_result.sandbox_backend
+
         if split is None:
             split = bench_result.split or "test"
 
@@ -150,15 +170,7 @@ def _run_eval(
         except (KeyError, ImportError, AttributeError, TypeError) as e:
             fail(f"Cannot load agent '{agent_name}': {e}")
 
-        # Apply CLI sandbox overrides
-        if agent_metadata:
-            from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
-
-            if isinstance(agent, SandboxedAgentFlow):
-                if "sandbox_backend" in agent_metadata:
-                    agent.sandbox_backend = agent_metadata["sandbox_backend"]
-                if "sandbox_concurrency" in agent_metadata:
-                    agent.max_concurrent = agent_metadata["sandbox_concurrency"]
+        _apply_sandbox_overrides(agent, agent_metadata)
 
         # Evaluator: comes from each Task's [verifier] config by default.
         # CLI --evaluator (when provided) overrides for every task.
@@ -243,19 +255,7 @@ def _run_eval(
         except (KeyError, ImportError, AttributeError, TypeError) as e:
             fail(f"Error loading agent '{agent_name}': {e}")
 
-        # Apply sandbox CLI overrides
-        if agent_metadata:
-            from rllm.integrations.harbor.runtime import HarborRuntime
-            from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
-
-            if isinstance(agent, HarborRuntime):
-                if "sandbox_backend" in agent_metadata:
-                    agent.environment_type = agent_metadata["sandbox_backend"]
-            elif isinstance(agent, SandboxedAgentFlow):
-                if "sandbox_backend" in agent_metadata:
-                    agent.sandbox_backend = agent_metadata["sandbox_backend"]
-                if "sandbox_concurrency" in agent_metadata:
-                    agent.max_concurrent = agent_metadata["sandbox_concurrency"]
+        _apply_sandbox_overrides(agent, agent_metadata)
 
         # Resolve evaluator: explicit --evaluator > catalog auto-resolve >
         # catalog reward_fn > None. When ``evaluator`` is None ``SandboxTaskHooks``
@@ -399,6 +399,7 @@ def _run_eval(
             "agent": agent_name,
             "split": split,
             "timestamp": timestamp,
+            "attempts": attempts,
         }
     )
     episode_store = run_store if save_episodes else None
@@ -474,8 +475,9 @@ def _run_eval(
             agent_name=agent_name,
             dataset_name=getattr(dataset, "name", benchmark) or benchmark,
             on_episode_complete=on_episode_complete,
-            evaluator_override=evaluator,
+            evaluator=evaluator,
             sampling_params=(sampling_config.as_dict() if sampling_config is not None else None),
+            attempts=attempts,
         )
     )
 
@@ -494,6 +496,8 @@ def _run_eval(
         ("Accuracy", f"[{score_style}]{pct}[/]  [dim]({result.correct}/{result.total})[/]"),
         ("Errors", f"[{error_style}]{result.errors}[/]"),
     ]
+    for k, v in sorted(result.pass_at.items()):
+        res_rows.append((f"pass@{k}", f"[bold]{v * 100:.1f}%[/]"))
 
     # Display signal breakdown if any
     if result.signal_averages:
@@ -539,6 +543,7 @@ def _run_eval(
 @click.option("--model", default=None, help="Model name to evaluate. Defaults to configured model from 'rllm setup'.")
 @click.option("--split", default=None, help="Dataset split (default: from catalog eval_split).")
 @click.option("--concurrency", default=64, type=int, help="Number of parallel requests.")
+@click.option("--attempts", default=1, type=int, help="Independent rollouts per task; reports pass@k for k=1..N (default: 1).")
 @click.option("--max-examples", default=None, type=int, help="Limit number of examples (for dev/testing).")
 @click.option("--task-indices", default=None, type=str, help="Comma-separated task indices to evaluate (e.g., '0', '3,7,12', '0-9').")
 @click.option("--output", "output_path", default=None, help="Output file path for results JSON.")
@@ -578,6 +583,7 @@ def eval_cmd(
     model: str | None,
     split: str | None,
     concurrency: int,
+    attempts: int,
     max_examples: int | None,
     task_indices: str | None,
     output_path: str | None,
@@ -600,6 +606,8 @@ def eval_cmd(
         sampling_config = resolve_eval_sampling(sampling_params, temperature, top_p, max_tokens)
     except (ValueError, FileNotFoundError, TypeError) as e:
         fail(f"Invalid --sampling-params: {e}")
+    if attempts < 1:
+        fail("--attempts must be >= 1.")
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
     _ui_explicit = enable_ui is not None
     if enable_ui is None:
@@ -685,6 +693,7 @@ def eval_cmd(
             use_snapshot=use_snapshot,
             warm_queue_size=warm_queue_size,
             sampling_config=sampling_config,
+            attempts=attempts,
         )
     finally:
         if proxy_manager is not None:

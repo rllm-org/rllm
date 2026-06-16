@@ -143,7 +143,7 @@ def test_eval_run_dataset_enforces_sampling(mock_upstream):
             base_url=mock_upstream.url,
             model="mock-model",
             concurrency=2,
-            evaluator_override=e2e_eval,
+            evaluator=e2e_eval,
             sampling_params=sampling,
         )
     )

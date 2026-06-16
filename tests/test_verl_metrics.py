@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-_METRICS_PATH = Path(__file__).resolve().parents[1] / "rllm" / "experimental" / "verl" / "metrics.py"
+_METRICS_PATH = Path(__file__).resolve().parents[1] / "rllm" / "trainer" / "verl" / "metrics.py"
 _SPEC = importlib.util.spec_from_file_location("rllm_test_verl_metrics", _METRICS_PATH)
 assert _SPEC is not None and _SPEC.loader is not None
 _METRICS_MODULE = importlib.util.module_from_spec(_SPEC)
