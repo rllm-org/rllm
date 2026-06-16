@@ -309,29 +309,40 @@ class ReverseProxy:
         token_ids: list[int],
         originally_requested_logprobs: bool = False,
     ) -> Response:
-        """Non-streaming cumulative turn: send non-streaming to vLLM, return JSON."""
+        """Non-streaming cumulative turn: send pre-tokenized prompt, return JSON.
+
+        Routes to the in-process ``local_handler`` (e.g. Tinker) when present,
+        otherwise POSTs ``/v1/completions`` to a vLLM worker. Both return a
+        completions-style body carrying ``prompt_token_ids`` + ``token_ids``.
+        """
         t0 = time.perf_counter()
 
-        worker = self.router.route(session_id)
-        url = self._build_url(worker.api_url, "/v1/completions", "")
-        headers = self._forward_headers(request)
-        raw_body = json.dumps(completions_body).encode()
-        try:
-            resp = await self._send_with_retry(
-                method="POST",
-                url=url,
-                content=raw_body,
-                headers=headers,
-            )
-            content = resp.content
-            status_code = resp.status_code
-        finally:
-            self.router.release(worker.url)
+        if self.local_handler is not None:
+            # In-process path (Tinker): sample directly from the pre-tokenized
+            # prompt; no HTTP worker, no re-tokenization.
+            response_body = await self.local_handler(completions_body)
+            status_code = 200
+        else:
+            worker = self.router.route(session_id)
+            url = self._build_url(worker.api_url, "/v1/completions", "")
+            headers = self._forward_headers(request)
+            raw_body = json.dumps(completions_body).encode()
+            try:
+                resp = await self._send_with_retry(
+                    method="POST",
+                    url=url,
+                    content=raw_body,
+                    headers=headers,
+                )
+                content = resp.content
+                status_code = resp.status_code
+            finally:
+                self.router.release(worker.url)
 
-        try:
-            response_body = json.loads(content)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            response_body = {}
+            try:
+                response_body = json.loads(content)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                response_body = {}
 
         latency_ms = (time.perf_counter() - t0) * 1000
 
@@ -375,6 +386,11 @@ class ReverseProxy:
         token_ids: list[int],
     ) -> StreamingResponse:
         """Streaming cumulative turn: stream from vLLM, translate chunks to chat format."""
+        if self.local_handler is not None:
+            # In-process backends (Tinker) don't stream; synthesize an SSE
+            # stream from a single pre-tokenized completion call.
+            return await self._handle_cumulative_streaming_local(request, request_body, completions_body, session_id, acc, token_ids)
+
         completions_body["stream"] = True
 
         worker = self.router.route(session_id)
@@ -501,6 +517,76 @@ class ReverseProxy:
             media_type="text/event-stream",
             status_code=resp.status_code,
         )
+
+    async def _handle_cumulative_streaming_local(
+        self,
+        request: Request,
+        request_body: dict[str, Any],
+        completions_body: dict[str, Any],
+        session_id: str,
+        acc: TokenAccumulator,
+        token_ids: list[int],
+    ) -> StreamingResponse:
+        """Cumulative streaming via the in-process handler (fake-streaming).
+
+        The local handler returns a full completion in one shot; we ingest its
+        token IDs into the accumulator, translate to chat format, and emit it as
+        a synthesized SSE stream (role → content+tokens → finish → [DONE]).
+        """
+        assert self.local_handler is not None
+        t0 = time.perf_counter()
+        response_body = await self.local_handler(completions_body)
+        latency_ms = (time.perf_counter() - t0) * 1000
+
+        prompt_token_ids = extract_prompt_token_ids(response_body) or token_ids
+        completion_token_ids = extract_completion_token_ids(response_body)
+        acc.ingest_turn(prompt_token_ids, completion_token_ids)
+        acc.update_prefix(request_body.get("messages", []))
+
+        choices = response_body.get("choices") or []
+        content = choices[0].pop("text", "") if choices else ""
+        finish_reason = (choices[0].get("finish_reason") if choices else None) or "stop"
+        completion_logprobs = choices[0].get("logprobs") if choices else None
+
+        if session_id and response_body:
+            chat_body = dict(response_body)
+            chat_body["object"] = "chat.completion"
+            if chat_body.get("choices"):
+                chat_body["choices"][0]["message"] = {"role": "assistant", "content": content}
+            trace = build_trace_record(session_id, request_body, chat_body, latency_ms, weight_version=request.state.weight_version)
+            await self._persist(trace)
+
+        chat_id = response_body.get("id", "chatcmpl-local")
+        created = response_body.get("created", int(time.time()))
+        model = response_body.get("model", "")
+        usage = response_body.get("usage", {})
+
+        def _sanitize_chunk(chunk: dict[str, Any]) -> dict[str, Any]:
+            return strip_vllm_fields(chunk) if self.strip_vllm else chunk
+
+        async def event_generator():
+            def _sse(data: str) -> str:
+                return f"data: {data}\n\n"
+
+            yield _sse(json.dumps({"id": chat_id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]}))
+            yield _sse(
+                json.dumps(
+                    _sanitize_chunk(
+                        {
+                            "id": chat_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None, "token_ids": completion_token_ids, "logprobs": completion_logprobs}],
+                            "prompt_token_ids": prompt_token_ids,
+                        }
+                    )
+                )
+            )
+            yield _sse(json.dumps({"id": chat_id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}], "usage": usage}))
+            yield _sse("[DONE]")
+
+        return StreamingResponse(event_generator(), media_type="text/event-stream", status_code=200)
 
     # ------------------------------------------------------------------
     # Streaming (SSE)
