@@ -7,7 +7,7 @@ import sys
 
 from rllm.utils.logging import configure_logging_from_env
 
-__all__ = ["BaseAgent", "Action", "Step", "Trajectory", "Episode", "rollout", "evaluator", "Task", "Runner"]
+__all__ = ["BaseAgent", "Action", "Step", "Trajectory", "Episode", "rollout", "evaluator", "Task"]
 
 configure_logging_from_env()
 
