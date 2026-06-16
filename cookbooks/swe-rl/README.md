@@ -68,6 +68,14 @@ SWE_SANDBOX_BACKEND=docker bash cookbooks/swe-rl/train_tinker.sh \
     rllm.workflow.n_parallel_tasks=32
 ```
 
+For a simpler on-policy loop (generate a full batch, then one optimizer step — easier to debug), use the synchronous variant:
+
+```bash
+bash cookbooks/swe-rl/train_tinker_sync.sh
+```
+
+It drops `async_training` and uses a real `data.train_batch_size` (default 4; effective batch = `train_batch_size × group_size`).
+
 ### Verl (distributed GPU)
 
 ```bash
@@ -109,6 +117,7 @@ by `SandboxTaskHooks`. Pick a backend via the `SWE_SANDBOX_BACKEND` env var:
 | `prepare_data.py` | Pulls `r2egym` (train) and `harbor:swebench-verified` (eval) |
 | `train.py` | Loads the two datasets, hands them to `AgentTrainer` |
 | `train_tinker.sh` | Tinker backend — Qwen3.5-9B LoRA, GRPO + async, Modal sandboxes |
+| `train_tinker_sync.sh` | Tinker backend — synchronous (on-policy) variant, simpler for testing |
 | `train_verl.sh` | Verl backend — same recipe with vLLM + FSDP |
 | `test.py` | Catalog wiring + harness import smoke tests |
 | `pyproject.toml` | Cookbook metadata (no entry points — the harness is in-tree) |
