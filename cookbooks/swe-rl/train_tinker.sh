@@ -34,12 +34,12 @@ python -u train.py \
     model.lora_rank=32 \
     training.group_size=8 \
     training.learning_rate=2e-5 \
-    training.max_length=32768 \
+    training.max_length=65536 \
     rllm.rollout.train.temperature=1.0 \
     rllm.rollout.train.top_p=1.0 \
     rllm.rollout.val.temperature=1.0 \
     rllm.rollout.val.top_p=1.0 \
-    data.max_prompt_length=32768 \
+    data.max_prompt_length=57344 \
     data.max_response_length=8192 \
     data.train_batch_size=1 \
     data.val_batch_size=-1 \
@@ -55,11 +55,13 @@ python -u train.py \
     rllm.workflow.n_parallel_tasks=64 \
     rllm.workflow.raise_on_error=false \
     rllm.gateway.port=9090 \
+    rllm.gateway.cumulative_token_mode=true \
+    rllm.gateway.renderer_family=qwen3.5 \
     rllm.trainer.total_epochs=1 \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='swe-rl' \
     rllm.trainer.experiment_name='r2egym-mini-swe-agent-qwen3.5-9b' \
     rllm.trainer.val_before_train=false \
     rllm.trainer.test_freq=10 \
-    rllm.trainer.save_freq=-1 \
+    rllm.trainer.save_freq=10 \
     "$@"
