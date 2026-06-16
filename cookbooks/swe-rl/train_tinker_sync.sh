@@ -26,7 +26,7 @@ export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
 
 python -u train.py \
     rllm/backend=tinker \
-    model.name=Qwen/Qwen3.5-9B \
+    model.name=Qwen/Qwen3.5-4B \
     model.lora_rank=32 \
     training.group_size=8 \
     training.learning_rate=2e-5 \
@@ -45,12 +45,12 @@ python -u train.py \
     rllm.workflow.n_parallel_tasks=64 \
     rllm.workflow.raise_on_error=false \
     rllm.gateway.port=9090 \
-    rllm.gateway.cumulative_token_mode=false \
+    rllm.gateway.cumulative_token_mode=true \
     rllm.gateway.renderer_family=qwen3.5 \
     rllm.trainer.total_epochs=1 \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='swe-rl' \
-    rllm.trainer.experiment_name='r2egym-mini-swe-agent-qwen3.5-9b-sync' \
+    rllm.trainer.experiment_name='r2egym-terminus2-qwen3.5-4b-sync' \
     rllm.trainer.val_before_train=false \
     rllm.trainer.test_freq=10 \
     rllm.trainer.save_freq=10 \

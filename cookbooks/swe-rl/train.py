@@ -2,10 +2,10 @@
 
 This cookbook deliberately ships no custom AgentFlow or evaluator:
 
-* The **agent** is the in-tree ``mini-swe-agent`` harness
-  (:class:`rllm.harnesses.mini_swe_agent.MiniSweAgentHarness`) — a
-  :class:`~rllm.sandbox.sandboxed_flow.SandboxedAgentFlow` that installs the
-  ``mini-swe-agent`` CLI inside each task's sandbox. The rLLM gateway
+* The **agent** is the in-tree ``terminus2`` harness
+  (:class:`rllm.harnesses.terminus2.Terminus2Harness`) — a
+  :class:`~rllm.sandbox.sandboxed_flow.SandboxedAgentFlow` that runs the
+  terminus2 CLI agent inside each task's sandbox. The rLLM gateway
   intercepts every LLM call, so the trainer sees full trajectories without
   the harness knowing it's being trained.
 * The **evaluator** is each task's own verifier (sandbox-shell), resolved
@@ -40,7 +40,7 @@ import hydra
 from omegaconf import DictConfig
 
 from rllm.data.dataset import DatasetRegistry
-from rllm.harnesses.mini_swe_agent import MiniSweAgentHarness
+from rllm.harnesses.terminus2 import Terminus2Harness
 from rllm.trainer import AgentTrainer
 
 TRAIN_DATASET = "r2egym"
@@ -68,11 +68,11 @@ def main(config: DictConfig) -> None:
     if SWE_VAL_MAX > 0 and SWE_VAL_MAX < len(val_dataset):
         val_dataset = val_dataset.select(range(SWE_VAL_MAX))
 
-    # mini-swe-agent as a SandboxedAgentFlow. Passing ``agent_flow`` (with no
+    # terminus2 as a SandboxedAgentFlow. Passing ``agent_flow`` (with no
     # explicit evaluator/hooks) makes AgentTrainer auto-wire SandboxTaskHooks
     # for the sandbox lifecycle + per-task verifier, and route rollouts through
     # AgentFlowEngine — rLLM's own runtime, not the remote Harbor runtime.
-    agent_flow = MiniSweAgentHarness(sandbox_backend=SANDBOX_BACKEND)
+    agent_flow = Terminus2Harness(sandbox_backend=SANDBOX_BACKEND)
 
     trainer = AgentTrainer(
         backend=config.rllm.get("backend", "tinker"),

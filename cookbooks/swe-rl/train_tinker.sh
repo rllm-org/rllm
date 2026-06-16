@@ -9,10 +9,10 @@
 # What this configures, in plain English:
 #   - Async GRPO with compact filtering (drop too-long rollouts before grad).
 #   - 64 tasks rolled out in parallel; each rollout boots a sandbox (rLLM's
-#     own SandboxedAgentFlow path, AgentFlowEngine) and runs mini-swe-agent
+#     own SandboxedAgentFlow path, AgentFlowEngine) and runs terminus2
 #     against it. The gateway routes every LLM call back to the trainer-hosted
 #     model. This is NOT the remote-runtime / RemoteAgentFlowEngine path.
-#   - 32K prompt window, 8K response budget per turn (mini-swe-agent runs
+#   - 32K prompt window, 8K response budget per turn (terminus2 runs
 #     many turns; the per-turn cap keeps the optimizer batch shape sane).
 #
 # Sandbox backend is chosen by SWE_SANDBOX_BACKEND (docker | local | modal |
@@ -30,7 +30,7 @@ export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
 
 python -u train.py \
     rllm/backend=tinker \
-    model.name=Qwen/Qwen3.5-9B \
+    model.name=Qwen/Qwen3.5-4B \
     model.lora_rank=32 \
     training.group_size=8 \
     training.learning_rate=2e-5 \
@@ -55,12 +55,12 @@ python -u train.py \
     rllm.workflow.n_parallel_tasks=64 \
     rllm.workflow.raise_on_error=false \
     rllm.gateway.port=9090 \
-    rllm.gateway.cumulative_token_mode=false \
+    rllm.gateway.cumulative_token_mode=true \
     rllm.gateway.renderer_family=qwen3.5 \
     rllm.trainer.total_epochs=1 \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='swe-rl' \
-    rllm.trainer.experiment_name='r2egym-mini-swe-agent-qwen3.5-9b' \
+    rllm.trainer.experiment_name='r2egym-terminus2-qwen3.5-4b' \
     rllm.trainer.val_before_train=false \
     rllm.trainer.test_freq=10 \
     rllm.trainer.save_freq=10 \

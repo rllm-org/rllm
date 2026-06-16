@@ -24,7 +24,7 @@ unset ROCR_VISIBLE_DEVICES 2>/dev/null || true
 export SWE_SANDBOX_BACKEND="${SWE_SANDBOX_BACKEND:-modal}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
 
-MODEL_PATH=Qwen/Qwen3.5-9B
+MODEL_PATH=Qwen/Qwen3.5-4B
 
 python -u train.py \
     rllm/backend=verl \
@@ -69,7 +69,7 @@ python -u train.py \
     rllm.gateway.port=9090 \
     trainer.logger="['console','wandb']" \
     trainer.project_name=swe-rl \
-    trainer.experiment_name=r2egym-mini-swe-agent-qwen3.5-9b-verl \
+    trainer.experiment_name=r2egym-terminus2-qwen3.5-4b-verl \
     trainer.val_before_train=true \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
