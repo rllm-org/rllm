@@ -58,8 +58,6 @@ class BaseCliHarness(SandboxedAgentFlow):
     sandbox_backend: str = "docker"
     # Default container image. Tasks usually override via per-task images.
     image: str = "python:3.11-slim"
-    # Concurrency hint for the eval runner.
-    max_concurrent: int = 4
     # Container user the CLI runs as. ``None`` uses the image default.
     agent_user: str | None = None
     # Path inside the sandbox where the CLI's stdout is teed.

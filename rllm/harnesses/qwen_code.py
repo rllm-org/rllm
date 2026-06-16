@@ -56,7 +56,6 @@ class QwenCodeHarness(BaseCliHarness):
 
     name = "qwen-code"
     sandbox_backend = "docker"
-    max_concurrent = 4
     stdout_log_path = "/tmp/qwen-code.log"
 
     def install_script(self) -> str:

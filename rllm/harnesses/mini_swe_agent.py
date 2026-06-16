@@ -79,7 +79,6 @@ class MiniSweAgentHarness(BaseCliHarness):
 
     name = "mini-swe-agent"
     sandbox_backend = "docker"
-    max_concurrent = 4
     stdout_log_path = "/tmp/mini-swe-agent.log"
 
     def install_script(self) -> str:

@@ -36,7 +36,11 @@ class SandboxedAgentFlow(ABC):
     llm_inside_env: bool = False
     sandbox_backend: str = "docker"
     image: str = "python:3.11-slim"
-    max_concurrent: int = 4
+    # Default cap on concurrent sandboxes. The eval/train runner clamps
+    # effective concurrency to this value, so it is the single source of
+    # truth for sandboxed flows. Subclasses override only to deviate;
+    # ``--sandbox-concurrency`` overrides it per-run.
+    max_concurrent: int = 64
 
     def __init__(self, **kwargs):
         for k, v in kwargs.items():
