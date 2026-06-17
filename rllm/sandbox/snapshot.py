@@ -173,6 +173,15 @@ class SnapshotRegistry:
         self._groups: dict[str, dict] = groups if groups is not None else {}
         self._lock = threading.Lock()
 
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        del state["_lock"]
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        self._lock = threading.Lock()
+
     @classmethod
     def load(cls) -> SnapshotRegistry:
         path = _registry_path()

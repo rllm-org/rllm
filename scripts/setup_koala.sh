@@ -143,7 +143,8 @@ _default_env_setup() {
 
     if [[ -n "${EXTRA_DEPS:-}" ]]; then
         echo "  Installing extra deps: ${EXTRA_DEPS}"
-        uv pip install ${PIP_PYTHON} ${EXTRA_DEPS}
+        read -ra _deps <<< "${EXTRA_DEPS}"
+        uv pip install ${PIP_PYTHON} "${_deps[@]}"
     fi
 
     if [[ -n "${EXTRA_APT:-}" ]]; then
@@ -199,7 +200,10 @@ setup_s3_sync() {
     done) &
     local SYNC_PID=$!
     echo "  PID=${SYNC_PID} syncing to ${OUTPUT_S3} every 5 min"
-    trap "kill ${SYNC_PID} 2>/dev/null || true; aws s3 sync ${OUTPUT_LOCAL}/ ${OUTPUT_S3}/ --quiet 2>/dev/null || true" EXIT
+    # Chain-merge with any pre-existing EXIT trap; sed assumes no embedded single-quotes in the prior body
+    local _prev_trap
+    _prev_trap=$(trap -p EXIT | sed "s/trap -- '\\(.*\\)' EXIT/\\1/" 2>/dev/null || true)
+    trap "${_prev_trap:+${_prev_trap}; }kill ${SYNC_PID} 2>/dev/null || true; aws s3 sync ${OUTPUT_LOCAL}/ ${OUTPUT_S3}/ --quiet 2>/dev/null || true" EXIT TERM INT
 }
 
 _default_verify() {

@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 _status = Console()
 
 # Sandbox backends that share network with the gateway host.
-LOCAL_SANDBOX_BACKENDS: frozenset[str] = frozenset({"docker", "local", "apple-container"})
+LOCAL_SANDBOX_BACKENDS: frozenset[str] = frozenset({"docker", "local", "apple-container", "bwrap"})
 
 
 def is_local_sandbox_backend(name: str | None) -> bool:
