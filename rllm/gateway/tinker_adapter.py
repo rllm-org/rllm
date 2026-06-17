@@ -17,6 +17,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from rllm.engine.rollout.tinker_engine import TinkerEngine
+from rllm.workflows import TerminationEvent, TerminationReason
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,32 @@ def _to_openai_tool_calls(tool_calls: list) -> list[dict[str, Any]]:
             }
         )
     return result
+
+
+def _termination_http_error(reason: TerminationReason) -> Exception:
+    """Map a ``TerminationEvent`` to a non-retryable OpenAI-style 400.
+
+    For CLI harnesses the agent loop runs inside the sandbox, so the only way
+    to stop it is the HTTP response — a 500 makes the LLM client retry the
+    (still-too-long) call until the harness run-timeout SIGKILLs it, stalling
+    the whole group. ``context_length_exceeded`` maps to a NON-retryable
+    ContextWindowExceededError in litellm/openai SDKs, so the agent raises and
+    the rollout returns immediately with the turns so far.
+    """
+    from fastapi import HTTPException
+
+    is_prompt_limit = reason == TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED
+    return HTTPException(
+        status_code=400,
+        detail={
+            "error": {
+                "message": f"Rollout terminated: {reason}. The conversation exceeded the model's prompt window.",
+                "type": "invalid_request_error",
+                "code": "context_length_exceeded" if is_prompt_limit else "rollout_terminated",
+                "param": "messages",
+            }
+        },
+    )
 
 
 async def _token_prompt_completion(
@@ -122,7 +149,10 @@ def create_tinker_handler(engine: TinkerEngine) -> Callable[[dict[str, Any]], Aw
         # path the HTTP backend uses for the same feature.
         prompt = request_body.get("prompt")
         if isinstance(prompt, list) and prompt and isinstance(prompt[0], int):
-            return await _token_prompt_completion(engine, request_body, prompt, sampling_kwargs)
+            try:
+                return await _token_prompt_completion(engine, request_body, prompt, sampling_kwargs)
+            except TerminationEvent as e:
+                raise _termination_http_error(e.reason) from e
 
         messages = request_body.get("messages", [])
         tools = request_body.get("tools", [])
@@ -130,7 +160,10 @@ def create_tinker_handler(engine: TinkerEngine) -> Callable[[dict[str, Any]], Aw
         if tools:
             kwargs["tools"] = tools
 
-        model_output = await engine.get_model_response(messages, **kwargs)
+        try:
+            model_output = await engine.get_model_response(messages, **kwargs)
+        except TerminationEvent as e:
+            raise _termination_http_error(e.reason) from e
 
         response_text = model_output.content or model_output.text or ""
         prompt_ids = list(model_output.prompt_ids) if model_output.prompt_ids else []
