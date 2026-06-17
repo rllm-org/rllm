@@ -66,6 +66,7 @@ def trace_record_to_step(trace: TraceRecord) -> Step:
         chat_completions=chat_completions,
         model_output=model_output,
         model_response=content,
+        output=content,
         thought=reasoning,
         metadata=trace.metadata,
         weight_version=trace.weight_version,
