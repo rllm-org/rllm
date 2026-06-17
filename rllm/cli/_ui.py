@@ -227,6 +227,10 @@ def _select_model(provider: str, existing, api_key: str | None = None) -> str:
     from rllm.eval.config import PROVIDER_MODELS
 
     models = PROVIDER_MODELS.get(provider, [])
+    # Display labels, one per entry in ``models``. Defaults to the model IDs
+    # themselves; a provider branch may override to annotate entries (e.g.
+    # Fireworks marks account models that need a dedicated deployment).
+    labels: list[str] | None = None
 
     if provider == "tinker":
         from rllm.eval.config import fetch_tinker_models
@@ -239,6 +243,21 @@ def _select_model(provider: str, existing, api_key: str | None = None) -> str:
         else:
             console.print("  [dim]Could not fetch live catalog — showing curated list (or enter a tinker:// path manually).[/]")
 
+    if provider == "fireworks":
+        from rllm.eval.config import fetch_fireworks_deployed_models, fetch_fireworks_models
+
+        with console.status("[dim]Fetching Fireworks model catalog...[/]"):
+            serverless = fetch_fireworks_models(api_key)
+            deployed = fetch_fireworks_deployed_models(api_key)
+        if serverless or deployed:
+            # Both are runnable now: public serverless models, plus the
+            # account's own actively deployed models (flagged for provenance).
+            models = list(serverless) + list(deployed)
+            labels = list(serverless) + [f"{m}  (your deployment)" for m in deployed]
+            console.print(f"  [success]Loaded {len(serverless)} serverless + {len(deployed)} deployed models[/] [dim](you can also enter any accounts/.../models/... ID manually)[/]")
+        else:
+            console.print("  [dim]Could not fetch live catalog — showing curated list (or enter a model ID manually).[/]")
+
     # For custom provider or providers with no curated list, prompt for free-text
     if provider == "custom" or not models:
         default = existing.model if existing.model else ""
@@ -247,7 +266,11 @@ def _select_model(provider: str, existing, api_key: str | None = None) -> str:
             fail("Model is required.")
         return model
 
-    choices = list(models) + ["Other (enter manually)"]
+    # ``models`` holds the selectable IDs; ``labels`` holds what's shown (they
+    # differ when a provider annotates entries). Keep them index-aligned.
+    if labels is None:
+        labels = list(models)
+    choices = labels + ["Other (enter manually)"]
 
     cursor = 0
     if existing.model in models:
@@ -265,7 +288,7 @@ def _select_model(provider: str, existing, api_key: str | None = None) -> str:
         if not model:
             fail("Model is required.")
     else:
-        model = choices[idx]
+        model = models[idx]
 
     return model
 
