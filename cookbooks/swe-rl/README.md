@@ -86,6 +86,24 @@ bash cookbooks/swe-rl/train_verl.sh
 
 vLLM rollouts + FSDP/Megatron training. Sandboxes still run mini-swe-agent — only the trainer hosting changes.
 
+### Fireworks (managed, LoRA)
+
+```bash
+uv pip install -e ".[fireworks]"
+export FIREWORKS_API_KEY=...
+bash cookbooks/swe-rl/train_fireworks.sh
+```
+
+Same async GRPO + compact-filtering recipe as `train_tinker.sh`, but the trainer
+job and inference deployment are provisioned on Fireworks at startup and torn
+down on shutdown. Defaults to `accounts/fireworks/models/qwen3p5-9b` + LoRA rank
+32 on the `qwen3p5-9b-256k-lora` training shape (Fireworks ships a 3.5-9B LoRA
+shape but no 3.5-4B; swap `model.name` / `model.tokenizer_model` /
+`fireworks_config.policy_trainer_shape_id` together to change it — see
+[`docs/backends/fireworks.mdx`](../../docs/backends/fireworks.mdx) for the
+model/shape catalog). The synchronous (on-policy) variant is
+`train_fireworks_sync.sh`.
+
 ## Evaluation (no training)
 
 ```bash
@@ -118,6 +136,8 @@ by `SandboxTaskHooks`. Pick a backend via the `SWE_SANDBOX_BACKEND` env var:
 | `train.py` | Loads the two datasets, hands them to `AgentTrainer` |
 | `train_tinker.sh` | Tinker backend — Qwen3.5-9B LoRA, GRPO + async, Modal sandboxes |
 | `train_tinker_sync.sh` | Tinker backend — synchronous (on-policy) variant, simpler for testing |
+| `train_fireworks.sh` | Fireworks backend — Qwen3.5-9B LoRA, GRPO + async, managed trainer/deployment |
+| `train_fireworks_sync.sh` | Fireworks backend — synchronous (on-policy) variant, simpler for testing |
 | `train_verl.sh` | Verl backend — same recipe with vLLM + FSDP |
 | `test.py` | Catalog wiring + harness import smoke tests |
 | `pyproject.toml` | Cookbook metadata (no entry points — the harness is in-tree) |
