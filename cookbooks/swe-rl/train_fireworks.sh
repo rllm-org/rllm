@@ -58,6 +58,10 @@ python -u train.py \
     data.max_response_length=8192 \
     data.train_batch_size=1 \
     data.val_batch_size=-1 \
+    rllm.data.max_prompt_length=57344 \
+    rllm.data.max_response_length=8192 \
+    rllm.data.train_batch_size=1 \
+    rllm.data.val_batch_size=-1 \
     rllm.compact_filtering.enable=true \
     rllm.algorithm.adv_estimator=grpo \
     rllm.algorithm.norm_adv_by_std_in_grpo=true \
