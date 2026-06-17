@@ -159,8 +159,8 @@ class GatewayManager:
         from rllm.gateway.tunnel import parse_tunnel
 
         self.public_url, self.tunnel_backend = parse_tunnel(gw_cfg.get("tunnel", None))
-        # The gateway always pins ``body.model`` to whatever the trainer is serving
-        self.model: str | None = config.get("model", {}).get("name", None)
+        _model_cfg = config.get("model", {})
+        self.model: str | None = _model_cfg.get("tokenizer_model") or _model_cfg.get("name", None)
 
         # Cumulative token mode: drift-free multi-turn token forwarding. The
         # gateway loads the tokenizer from the served model path. renderers
