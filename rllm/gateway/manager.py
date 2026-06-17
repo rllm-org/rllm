@@ -4,7 +4,7 @@ Two classes share most of the lifecycle (uvicorn-on-thread or subprocess,
 trace store, session API). They differ in how upstream workers are
 registered and what request-body injection the middleware applies.
 
-* :class:`GatewayManager` — training. Workers come from a verl/tinker
+* :class:`GatewayManager` — training. Workers come from a verl/tinker/fireworks
   rollout engine via :meth:`start(rollout_engine)`. Injects ``logprobs``
   and ``return_token_ids`` into request bodies (vLLM needs both for the
   loss math downstream).
@@ -159,8 +159,8 @@ class GatewayManager:
         from rllm.gateway.tunnel import parse_tunnel
 
         self.public_url, self.tunnel_backend = parse_tunnel(gw_cfg.get("tunnel", None))
-        # The gateway always pins ``body.model`` to whatever the trainer is serving
-        self.model: str | None = config.get("model", {}).get("name", None)
+        _model_cfg = config.get("model", {})
+        self.model: str | None = _model_cfg.get("tokenizer_model") or _model_cfg.get("name", None)
 
         # Cumulative token mode: drift-free multi-turn token forwarding. The
         # gateway loads the tokenizer from the served model path. renderers
@@ -207,11 +207,11 @@ class GatewayManager:
         """Start the gateway and register inference workers.
 
         For VerlEngine: registers the existing vLLM server addresses.
-        For TinkerEngine: creates an in-process handler (no sidecar needed).
+        For TinkerEngine / FireworksEngine: creates an in-process handler (no sidecar needed).
         """
         engine_cls = type(rollout_engine).__name__
 
-        if engine_cls == "TinkerEngine":
+        if engine_cls in ("TinkerEngine", "FireworksEngine"):
             # In-process handler — no HTTP backend, no worker registration
             from rllm.gateway.tinker_adapter import create_tinker_handler
 
@@ -227,6 +227,7 @@ class GatewayManager:
             for url in worker_urls:
                 worker_id = self.client.add_worker(url=url)
                 logger.info("Registered worker %s -> %s", worker_id, url)
+        
         else:
             logger.warning("Unknown engine type %s — no workers registered", engine_cls)
 
