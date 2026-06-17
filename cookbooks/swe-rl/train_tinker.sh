@@ -52,7 +52,7 @@ python -u train.py \
     rllm.async_training.staleness_threshold=0.5 \
     rllm.async_training.trigger_parameter_sync_step=1 \
     rllm.async_training.partial_rollout=true \
-    rllm.workflow.n_parallel_tasks=64 \
+    rllm.workflow.n_parallel_tasks=128 \
     rllm.workflow.raise_on_error=false \
     rllm.gateway.port=9090 \
     rllm.gateway.cumulative_token_mode=true \

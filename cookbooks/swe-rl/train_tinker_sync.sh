@@ -42,7 +42,7 @@ python -u train.py \
     rllm.compact_filtering.enable=true \
     rllm.algorithm.adv_estimator=grpo \
     rllm.algorithm.norm_adv_by_std_in_grpo=true \
-    rllm.workflow.n_parallel_tasks=64 \
+    rllm.workflow.n_parallel_tasks=128 \
     rllm.workflow.raise_on_error=false \
     rllm.gateway.port=9090 \
     rllm.gateway.cumulative_token_mode=true \
