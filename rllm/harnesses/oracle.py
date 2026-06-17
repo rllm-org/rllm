@@ -39,7 +39,6 @@ class OracleHarness(SandboxedAgentFlow):
 
     name = "oracle"
     sandbox_backend = "docker"
-    max_concurrent = 4
 
     # Mirror Harbor's ``env_paths.solution_dir`` convention so anyone
     # comparing the two implementations doesn't trip on path drift.

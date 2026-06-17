@@ -61,7 +61,15 @@ if ! command -v mini-swe-agent >/dev/null 2>&1; then
         curl -LsSf https://astral.sh/uv/install.sh | sh
     fi
     export PATH="$HOME/.local/bin:$PATH"
-    uv tool install mini-swe-agent
+    # Pin a modern interpreter for the tool's ISOLATED venv. mini-swe-agent
+    # uses PEP 604 ``X | Y`` type syntax (requires Python >=3.10), but
+    # ``uv tool install`` otherwise builds the venv with whatever python it
+    # discovers — which on many task images (e.g. R2E-Gym's Python 3.9
+    # testbeds) is too old, so the CLI crashes on import with
+    # ``TypeError: unsupported operand type(s) for |`` and exits before any
+    # LLM call (zero traces, score 0). uv fetches a managed CPython 3.12 if
+    # one isn't present; this venv is independent of the task's own python.
+    uv tool install --python 3.12 mini-swe-agent
 fi
 """
 
@@ -71,7 +79,6 @@ class MiniSweAgentHarness(BaseCliHarness):
 
     name = "mini-swe-agent"
     sandbox_backend = "docker"
-    max_concurrent = 4
     stdout_log_path = "/tmp/mini-swe-agent.log"
 
     def install_script(self) -> str:

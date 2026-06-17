@@ -770,6 +770,30 @@
       "eval_split": "test",
       "default_agent": "mini-swe-agent"
     },
+    "r2egym": {
+      "description": "R2E-Gym Subset: 4,578 Python SWE tasks across 12 repos (aiohttp, orange3, numpy, pandas, pillow, scrapy, ...), per-instance Docker images at namanjain12/* graded by the image's own /testbed/run_tests.sh (pytest-output equality against expected_output_json)",
+      "source": "R2E-Gym/R2E-Gym-Subset",
+      "builder": "rllm.data.r2egym_builder:build_benchmark",
+      "category": "code",
+      "splits": [
+        "train"
+      ],
+      "eval_split": "train",
+      "train_split": "train",
+      "default_agent": "mini-swe-agent"
+    },
+    "r2egym_lite": {
+      "description": "R2E-Gym Lite: ~11.8K rows across train + dev_*pr_v* splits (3.66 GB total), same image namespace and verifier as r2egym",
+      "source": "R2E-Gym/R2E-Gym-Lite",
+      "builder": "rllm.data.r2egym_builder:build_benchmark",
+      "category": "code",
+      "splits": [
+        "train"
+      ],
+      "eval_split": "train",
+      "train_split": "train",
+      "default_agent": "mini-swe-agent"
+    },
     "omnidocbench": {
       "description": "OmniDocBench: Comprehensive document understanding benchmark with structured eval",
       "source": "rwood-97/english_OmniDocBench_with_eval",

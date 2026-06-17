@@ -82,7 +82,6 @@ class Terminus2Harness(BaseCliHarness):
     name = "terminus2"
     # Default to Modal for this integration; override via --sandbox-backend.
     sandbox_backend = "modal"
-    max_concurrent = 4
     stdout_log_path = "/tmp/terminus2.log"
 
     # ---- Terminus-2 knobs (overridable via agent kwargs / configure) ----

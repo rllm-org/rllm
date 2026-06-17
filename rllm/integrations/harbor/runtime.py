@@ -39,7 +39,7 @@ class HarborRuntime:
     """
 
     # Used by run_dataset / Runner to cap concurrency.
-    max_concurrent: int = 4
+    max_concurrent: int = 64
 
     def __init__(
         self,

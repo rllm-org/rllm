@@ -75,7 +75,6 @@ class ZeroClawHarness(BaseCliHarness):
 
     name = "zeroclaw"
     sandbox_backend = "docker"  # overridden to "daytona" via --sandbox-backend
-    max_concurrent = 8
     stdout_log_path = "/tmp/zeroclaw.log"
 
     def install_script(self) -> str:
