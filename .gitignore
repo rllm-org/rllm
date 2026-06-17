@@ -226,3 +226,6 @@ gcp-key.json
 
 # IDE
 .vscode/
+
+# Graphify
+graphify-out/

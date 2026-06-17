@@ -1,9 +1,4 @@
-"""Prepare a simple code generation dataset for bwrap sandbox training.
-
-Each task is a simple programming problem with a deterministic expected output.
-"""
-
-import json
+"""Prepare simple coding tasks for sandbox code execution training."""
 
 from rllm.data.dataset import DatasetRegistry
 
@@ -43,32 +38,19 @@ TASKS = [
 ]
 
 
-def prepare_bwrap_code_data():
-    """Split tasks into train/test and register with DatasetRegistry."""
+def prepare_sandbox_code_data():
     test_size = 8
     train_tasks = TASKS[test_size:]
     test_tasks = TASKS[:test_size]
 
-    # Add required fields
-    for i, task in enumerate(train_tasks):
-        task["data_source"] = "bwrap_code"
+    for task in train_tasks + test_tasks:
+        task["data_source"] = "sandbox_code"
         task["question"] = task["prompt"]
-    for i, task in enumerate(test_tasks):
-        task["data_source"] = "bwrap_code"
-        task["question"] = task["prompt"]
+        task["instruction"] = task["prompt"]
 
-    train_dataset = DatasetRegistry.register_dataset(
-        "bwrap_code", train_tasks, "train"
-    )
-    test_dataset = DatasetRegistry.register_dataset(
-        "bwrap_code", test_tasks, "test"
-    )
-
-    print(f"Train: {len(train_tasks)} tasks, Test: {len(test_tasks)} tasks")
-    print(f"Train path: {train_dataset.get_data_path()}")
-    print(f"Test path: {test_dataset.get_data_path()}")
-    print(f"\nSample: {json.dumps(train_tasks[0], indent=2)}")
+    DatasetRegistry.register_dataset("sandbox_code", train_tasks, "train")
+    DatasetRegistry.register_dataset("sandbox_code", test_tasks, "test")
 
 
 if __name__ == "__main__":
-    prepare_bwrap_code_data()
+    prepare_sandbox_code_data()

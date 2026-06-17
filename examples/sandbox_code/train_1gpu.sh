@@ -8,20 +8,24 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:False"
 export VLLM_USE_V1=1
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export CUDA_VISIBLE_DEVICES=0
 
-python3 -m examples.bwrap_code.train_bwrap_code \
-    data.train_batch_size=8 \
+MODEL_PATH=Qwen/Qwen3-0.6B
+
+python3 -m examples.sandbox_code.train \
+    +sandbox_backend=bwrap \
+    +model.name=$MODEL_PATH \
+    data.train_batch_size=4 \
     data.max_prompt_length=1024 \
     data.max_response_length=512 \
-    actor_rollout_ref.model.path=Qwen/Qwen3.5-9B \
+    actor_rollout_ref.model.path=$MODEL_PATH \
     actor_rollout_ref.actor.optim.lr=5e-7 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=8 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=8192 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=4 \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
@@ -38,14 +42,14 @@ python3 -m examples.bwrap_code.train_bwrap_code \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.temperature=1.0 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
-    actor_rollout_ref.rollout.n=8 \
+    actor_rollout_ref.rollout.n=4 \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=5120 \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
     algorithm.adv_estimator=grpo \
     critic.model.path=null \
     rllm.compact_filtering.enable=False \
@@ -53,15 +57,14 @@ python3 -m examples.bwrap_code.train_bwrap_code \
     rllm.stepwise_advantage.enable=False \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
-    trainer.project_name='rllm-bwrap-code' \
-    trainer.experiment_name='bwrap_code_9b' \
+    trainer.project_name='rllm-sandbox-code' \
+    trainer.experiment_name='sandbox_code_bwrap_1gpu_smoke' \
     trainer.val_before_train=True \
-    trainer.n_gpus_per_node=8 \
+    trainer.n_gpus_per_node=1 \
     trainer.nnodes=1 \
     trainer.save_freq=1000 \
-    trainer.test_freq=5 \
+    trainer.test_freq=2 \
     trainer.default_hdfs_dir=null \
-    trainer.total_epochs=50 \
-    rllm.workflow.use_workflow=True
+    trainer.total_epochs=5
 
 pkill -9 -f 'ray::WorkerDict'
