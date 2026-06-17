@@ -25,9 +25,14 @@ def reduce_metrics_by_trajectory_name(trajectory_groups: list[TrajectoryGroup], 
     metrics, rewards_by_traj_name = {}, {}
     for group in trajectory_groups:
         for traj in group.trajectories:
-            rewards_by_traj_name[traj.name] = traj.reward
+            if traj.name not in rewards_by_traj_name:
+                rewards_by_traj_name[traj.name] = []
+            if traj.reward is not None:
+                rewards_by_traj_name[traj.name].append(traj.reward)
 
     for traj_name, rewards in rewards_by_traj_name.items():
+        if not rewards:
+            continue
         metrics[f"{prefix}/{traj_name}/mean"] = np.mean(rewards)
         metrics[f"{prefix}/{traj_name}/max"] = np.max(rewards)
         metrics[f"{prefix}/{traj_name}/min"] = np.min(rewards)
