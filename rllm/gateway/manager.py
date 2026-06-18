@@ -227,7 +227,7 @@ class GatewayManager:
             for url in worker_urls:
                 worker_id = self.client.add_worker(url=url)
                 logger.info("Registered worker %s -> %s", worker_id, url)
-        
+
         else:
             logger.warning("Unknown engine type %s — no workers registered", engine_cls)
 
