@@ -48,6 +48,7 @@ python -u train.py \
     model.tokenizer_model=Qwen/Qwen3.5-9B \
     model.lora_rank=32 \
     fireworks_config.policy_trainer_shape_id=accounts/fireworks/trainingShapes/qwen3p5-9b-256k-lora \
+    fireworks_config.rollout_deployment_replica_count=4 \
     training.group_size=8 \
     training.learning_rate=2e-5 \
     training.max_length=65536 \
