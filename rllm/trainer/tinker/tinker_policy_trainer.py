@@ -35,11 +35,15 @@ logger = logging.getLogger(__name__)
 
 
 # Mapping from rLLMAdvantageEstimator to their default Tinker loss function (overriding is allowed through config)
+# ECHO uses the same GRPO/`ppo` policy-gradient loss on action tokens; its extra
+# environment-prediction term is applied as a separate gradient-accumulated
+# ``cross_entropy`` pass (see ``_get_env_loss_futures``).
 ADV_TO_LOSS_FN_AUTO_MAP = {
     rLLMAdvantageEstimator.REINFORCE: "importance_sampling",
     rLLMAdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE: "importance_sampling",
     rLLMAdvantageEstimator.GRPO: "ppo",
     rLLMAdvantageEstimator.RLOO: "importance_sampling",
+    rLLMAdvantageEstimator.ECHO: "ppo",
     rLLMAdvantageEstimator.OTHER: "importance_sampling",
 }
 
@@ -165,13 +169,91 @@ class TinkerPolicyTrainer:
             loss_fn_inputs={k: v for k, v in datum.loss_fn_inputs.items() if k != "mask"},
         )
 
+    @staticmethod
+    def _build_env_datum(datum: tinker.Datum, coef: float) -> tinker.Datum | None:
+        """Build the ECHO environment-prediction datum for a training datum.
+
+        Returns a ``cross_entropy`` datum over the same tokens, weighting each
+        environment-observation token (``mask == 0``) by ``coef`` and every
+        action token by 0. Tinker's ``cross_entropy`` loss is
+        ``-sum_t weights_t * logprob(target_t)``, so this contributes
+        ``coef * sum_obs -logprob`` to the (gradient-accumulated) update. Returns
+        ``None`` when the datum has no observation tokens (nothing to train).
+        """
+        from tinker.types.tensor_data import TensorData
+
+        mask = datum.loss_fn_inputs["mask"].data  # 1.0 on action tokens, 0.0 on observation tokens
+        env_weights = [coef if float(m) == 0.0 else 0.0 for m in mask]
+        if not any(w != 0.0 for w in env_weights):
+            return None
+        return tinker.Datum(
+            model_input=datum.model_input,
+            loss_fn_inputs={
+                "target_tokens": datum.loss_fn_inputs["target_tokens"],
+                "weights": TensorData(data=env_weights, dtype="float32"),
+            },
+        )
+
+    @require_training_client
+    async def _get_env_loss_futures(
+        self,
+        training_datums: list[tinker.Datum] | dict[str, list[tinker.Datum]],
+        algorithm_config: AlgorithmConfig,
+    ) -> list[tinker.APIFuture]:
+        """Submit the ECHO environment-prediction (``cross_entropy``) pass.
+
+        ECHO (arXiv:2605.24517) adds a cross-entropy loss on environment tokens.
+        Tinker accumulates gradients across ``forward_backward`` calls until the
+        next ``optim_step``, and its ``optim_step`` applies no extra
+        normalization, so this extra pass adds ``env_loss_coef * grad(L_env)``
+        on top of the policy-gradient pass without rescaling it. No extra rollout
+        is needed — only one more backward over the rollouts already collected.
+        """
+        coef = float(algorithm_config.env_loss_coef or 0.0)
+        if coef <= 0.0:
+            return []
+        if isinstance(training_datums, dict):
+            flat = [d for datums in training_datums.values() for d in datums]
+        else:
+            flat = training_datums
+        env_datums = [self._build_env_datum(d, coef) for d in flat]
+        env_datums = [d for d in env_datums if d is not None]
+        if not env_datums:
+            return []
+        fwd_bwd_future = await self.training_client.forward_backward_async(
+            env_datums,
+            loss_fn="cross_entropy",  # type: ignore[attr-defined]
+        )
+        return [fwd_bwd_future]
+
+    @staticmethod
+    async def _record_env_loss_metrics(env_futures: list[tinker.APIFuture], adv_metrics: dict) -> None:
+        """Await the ECHO env-prediction futures (so their gradients are applied)
+        and surface any server-side metrics under ``train/env_*``."""
+        if not env_futures:
+            return
+        env_results = await asyncio.gather(*env_futures)
+        for env_result in env_results:
+            if env_result.metrics:
+                for k, v in env_result.metrics.items():
+                    if k.startswith("clock_cycle"):
+                        continue
+                    adv_metrics[f"train/env_{k.replace(':', '/')}"] = v
+
     @require_training_client
     async def _get_forward_backward_futures(
         self,
         training_datums: list[tinker.Datum] | dict[str, list[tinker.Datum]],
         estimator_map: dict[str, rLLMAdvantageEstimator | str],
         algorithm_config: AlgorithmConfig,
-    ) -> list[tinker.APIFuture]:
+    ) -> tuple[list[tinker.APIFuture], list[tinker.APIFuture]]:
+        """Submit the policy-gradient pass(es) plus the optional ECHO env pass.
+
+        Returns ``(policy_futures, env_futures)``. The env futures are submitted
+        *before* any subsequent ``optim_step`` so their gradients accumulate, but
+        are returned separately so callers extract training logprobs only from
+        the policy-gradient futures (keeping per-datum alignment).
+        """
         fwd_bwd_futures = []
         if isinstance(training_datums, dict):
             for group_role, datums in training_datums.items():
@@ -193,7 +275,8 @@ class TinkerPolicyTrainer:
             )
             fwd_bwd_futures.append(fwd_bwd_future)
 
-        return fwd_bwd_futures
+        env_futures = await self._get_env_loss_futures(training_datums, algorithm_config)
+        return fwd_bwd_futures, env_futures
 
     @require_training_client
     async def forward_backward_from_trajectory_groups(
@@ -226,8 +309,8 @@ class TinkerPolicyTrainer:
             algorithm_config=algorithm_config,
         )
 
-        # Forward-backward pass
-        fwd_bwd_futures = await self._get_forward_backward_futures(
+        # Forward-backward pass (plus the optional ECHO env-prediction pass)
+        fwd_bwd_futures, env_futures = await self._get_forward_backward_futures(
             training_datums=training_datums,
             estimator_map=algorithm_config.estimator_map,
             algorithm_config=algorithm_config,
@@ -248,6 +331,8 @@ class TinkerPolicyTrainer:
                     if k.startswith("clock_cycle"):
                         continue
                     adv_metrics[f"train/{k.replace(':', '/')}"] = v
+
+        await self._record_env_loss_metrics(env_futures, adv_metrics)
 
         return training_datums, training_logprobs, adv_metrics
 
@@ -299,8 +384,11 @@ class TinkerPolicyTrainer:
             algorithm_config=self.algorithm_config,
         )
 
-        # Forward-backward and optimizer future together
-        fwd_bwd_futures = await self._get_forward_backward_futures(
+        # Forward-backward and optimizer future together. The ECHO env-prediction
+        # pass (if enabled) is submitted inside _get_forward_backward_futures —
+        # i.e. before the optim_step below — so its gradient accumulates into the
+        # same step.
+        fwd_bwd_futures, env_futures = await self._get_forward_backward_futures(
             training_datums=training_datums,
             estimator_map=self.algorithm_config.estimator_map,
             algorithm_config=self.algorithm_config,
@@ -328,6 +416,8 @@ class TinkerPolicyTrainer:
                     if k.startswith("clock_cycle"):
                         continue
                     adv_metrics[f"train/{k.replace(':', '/')}"] = v
+
+        await self._record_env_loss_metrics(env_futures, adv_metrics)
 
         return training_datums, training_logprobs, adv_metrics, scheduled_learning_rate
 

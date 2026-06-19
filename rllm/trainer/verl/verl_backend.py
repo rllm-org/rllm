@@ -61,19 +61,30 @@ _VERL_KNOWN_LOSSES: set[str] | None = None
 
 
 class CustomPPOLoss:
-    """Wraps Verl's ``ppo_loss`` to support per-call loss mode override.
+    """Wraps Verl's ``ppo_loss`` to support per-call loss mode override and the
+    ECHO auxiliary environment-prediction loss.
 
     When the data TensorDict contains ``policy_loss_mode_override``,
     the loss mode is temporarily overridden for that call.  Instances
     are serialised via cloudpickle and sent to remote workers through
     Verl's ``set_loss_fn`` RPC.
+
+    ECHO (arXiv:2605.24517): when ``env_loss_coef > 0`` we add
+    ``env_loss_coef * L_env`` to the policy loss, where ``L_env`` is the
+    cross-entropy on environment-observation tokens — the tokens the policy
+    conditions on (tool/terminal output) but that GRPO masks out of its loss.
+    The log-probs are already produced by the same forward pass; we only gather
+    them at a different set of positions, so ECHO costs no extra rollout or
+    forward pass (exactly as in the paper).
     """
 
-    def __init__(self, config):
+    def __init__(self, config, env_loss_coef: float = 0.0, pad_token_id: int | None = None):
         # Convert OmegaConf DictConfig → ActorConfig dataclass
         from verl.utils.config import omega_conf_to_dataclass
 
         self.config = omega_conf_to_dataclass(config)
+        self.env_loss_coef = float(env_loss_coef or 0.0)
+        self.pad_token_id = pad_token_id
 
     def __call__(self, model_output, data, dp_group=None):
         from verl.utils import tensordict_utils as _tu
@@ -84,10 +95,65 @@ class CustomPPOLoss:
             original = self.config.policy_loss.get("loss_mode", "vanilla")
             self.config.policy_loss["loss_mode"] = override
             try:
-                return ppo_loss(self.config, model_output, data, dp_group)
+                policy_loss, metrics = ppo_loss(self.config, model_output, data, dp_group)
             finally:
                 self.config.policy_loss["loss_mode"] = original
-        return ppo_loss(self.config, model_output, data, dp_group)
+        else:
+            policy_loss, metrics = ppo_loss(self.config, model_output, data, dp_group)
+
+        if self.env_loss_coef > 0.0:
+            policy_loss, metrics = self._add_env_loss(policy_loss, metrics, model_output, data)
+        return policy_loss, metrics
+
+    def _add_env_loss(self, policy_loss, metrics, model_output, data):
+        """Add ``env_loss_coef * L_env`` (ECHO) to the policy loss.
+
+        ``L_env`` is the cross-entropy on environment-observation tokens. Those
+        are the response-region tokens that are *not* action tokens
+        (``response_mask == 0``) and are not right-padding — i.e. the
+        ``[obs1, obs2, ...]`` segments merged into each multi-turn row by
+        ``transform._process_trajectory``. We reuse the per-token log-probs
+        already computed for the policy update (``model_output["log_probs"]``)
+        and aggregate with the same ``loss_agg_mode``/global-batch normalization
+        as the policy gradient, so ``env_loss_coef`` is on a comparable scale.
+        """
+        import torch
+        from verl.trainer.ppo.core_algos import agg_loss
+        from verl.utils.metric import AggregationType, Metric
+        from verl.workers.utils.padding import no_padding_2_padding
+
+        # Per-token current-policy log-probs over the whole response, repadded to
+        # (bs, response_length) — already computed; ppo_loss used the same call.
+        log_prob = no_padding_2_padding(model_output["log_probs"], data)
+        response_mask = data["response_mask"].to(torch.bool)
+
+        # Observation tokens: real (non-pad) response tokens that GRPO did not
+        # train on. We detect padding the same way rLLM built the response
+        # attention mask (responses != pad_token_id); fall back to the response
+        # attention slice when pad_token_id is unavailable.
+        if self.pad_token_id is not None:
+            non_pad = data["responses"] != self.pad_token_id
+        else:
+            resp_len = response_mask.shape[-1]
+            non_pad = data["attention_mask"][:, -resp_len:].to(torch.bool)
+        obs_mask = non_pad & (~response_mask)
+
+        env_ce = agg_loss(
+            loss_mat=-log_prob,
+            loss_mask=obs_mask.to(log_prob.dtype),
+            loss_agg_mode=self.config.loss_agg_mode,
+            **self.config.global_batch_info,
+        )
+        policy_loss = policy_loss + self.env_loss_coef * env_ce
+
+        # Mirror ppo_loss's metric aggregation choice (SUM when the loss is
+        # normalized over the global batch, else MEAN).
+        gbi = self.config.global_batch_info
+        distributed = gbi.get("dp_size", 1) > 1 or gbi.get("batch_num_tokens") is not None or gbi.get("global_batch_size") is not None or self.config.loss_scale_factor is not None
+        agg = AggregationType.SUM if distributed else AggregationType.MEAN
+        metrics["actor/env_loss"] = Metric(value=env_ce, aggregation=agg)
+        metrics["actor/env_token_frac"] = Metric(value=obs_mask.float().mean(), aggregation=AggregationType.MEAN)
+        return policy_loss, metrics
 
 
 def _get_verl_known_losses() -> set[str]:
@@ -310,11 +376,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
         assert self.async_rollout_manager is not None
 
-        if hasattr(self.actor_rollout_wg, "set_loss_fn"):
-            self.actor_rollout_wg.set_loss_fn(CustomPPOLoss(self.config.actor_rollout_ref.actor))
-        else:
-            logger.warning("RayWorkerGroup.set_loss_fn not available — skipping custom loss injection")
-
         servers = zip(self.async_rollout_manager.server_addresses, self.async_rollout_manager.server_handles, strict=True)
         if self.is_separated:
             from rllm.trainer.verl.async_agent_loop import FullyAsyncLLMServerManager
@@ -333,6 +394,24 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         )
 
         self.algorithm_config = kwargs.get("algorithm_config")
+
+        # Install the custom actor loss. Carries the ECHO env-loss coefficient
+        # (0.0 = plain GRPO) and the pad token id so the worker can identify
+        # environment-observation tokens. Installed after algorithm_config is
+        # resolved so env_loss_coef reflects the `echo` default.
+        if hasattr(self.actor_rollout_wg, "set_loss_fn"):
+            env_loss_coef = self.algorithm_config.env_loss_coef if self.algorithm_config is not None else 0.0
+            self.actor_rollout_wg.set_loss_fn(
+                CustomPPOLoss(
+                    self.config.actor_rollout_ref.actor,
+                    env_loss_coef=env_loss_coef,
+                    pad_token_id=getattr(self.tokenizer, "pad_token_id", None),
+                )
+            )
+            if env_loss_coef and env_loss_coef > 0.0:
+                logger.info(f"ECHO enabled: adding env-observation cross-entropy loss with coefficient {env_loss_coef}")
+        else:
+            logger.warning("RayWorkerGroup.set_loss_fn not available — skipping custom loss injection")
 
         return self.rollout_engine
 

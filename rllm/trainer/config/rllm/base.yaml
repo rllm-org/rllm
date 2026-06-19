@@ -73,11 +73,16 @@ trainer:
 
 # Algorithm Configuration
 algorithm:
-  adv_estimator: grpo # [grpo, reinforce, reinforce_plus_plus_baseline, rloo]
+  adv_estimator: grpo # [grpo, reinforce, reinforce_plus_plus_baseline, rloo, echo]
   norm_adv_by_std_in_grpo: true
   use_rllm: null  # deprecated, unified trainer only support rllm advantage estimators
   use_precomputed_advantage: false # use pre-computed step.advantage from the workflow (e.g. distillation)
   loss_fn: null           # backend-specific values; null = backend default
+  # ECHO (arXiv:2605.24517): auxiliary cross-entropy on environment-observation
+  # tokens, added as `env_loss_coef * L_env` to the GRPO loss. null = auto
+  # (0.05 when adv_estimator=echo, else 0.0 = disabled / plain GRPO). Works on
+  # verl, tinker, and fireworks via the unified trainer.
+  env_loss_coef: null
   loss_agg_mode: null     # [null, token-mean, seq-mean-token-sum, seq-mean-token-mean]
   lr_schedule: constant   # [constant, linear, cosine]
   warmup_steps: -1        # Absolute optimizer-step warmup; <=0 uses warmup_steps_ratio

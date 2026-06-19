@@ -104,6 +104,37 @@ shape but no 3.5-4B; swap `model.name` / `model.tokenizer_model` /
 model/shape catalog). The synchronous (on-policy) variant is
 `train_fireworks_sync.sh`.
 
+### ECHO (train on environment feedback)
+
+[ECHO](https://arxiv.org/abs/2605.24517) adds a cross-entropy loss on the
+environment-observation tokens (tool/terminal output) that the policy already
+conditions on but GRPO never trains. For a terminal/SWE agent this turns every
+rollout — including the many that fail — into dense supervision, at no extra
+rollout or forward-pass cost. It uses GRPO's advantages unchanged; the only
+difference is the extra loss term.
+
+Flip GRPO → ECHO with one override on any backend (verl / tinker / fireworks):
+
+```bash
+# tinker (async or sync), verl, or fireworks — same switch:
+bash cookbooks/swe-rl/train_tinker.sh    rllm.algorithm.adv_estimator=echo
+bash cookbooks/swe-rl/train_verl.sh      algorithm.adv_estimator=echo
+bash cookbooks/swe-rl/train_fireworks.sh rllm.algorithm.adv_estimator=echo
+```
+
+`adv_estimator=echo` defaults the env-loss weight λ to the paper's 0.05. Tune it
+explicitly with `rllm.algorithm.env_loss_coef=<λ>` (productive range 0.01–0.05;
+`0.0` reproduces plain GRPO). It is implemented as an `env_prediction`
+[auxiliary loss](../../design/auxiliary-losses.md); watch
+`actor/aux_env_prediction_loss` (verl) / `train/aux_*` (tinker, fireworks) to
+confirm the environment-prediction loss is falling.
+
+> On verl the env term shares GRPO's single forward pass (free, exact). On
+> tinker/fireworks (managed training services with fixed server-side loss
+> kernels) it is a second, gradient-accumulated `cross_entropy` pass over the
+> same rollouts — no extra rollouts, but one extra backward. λ may need
+> per-backend retuning since loss normalization differs across services.
+
 ## Evaluation (no training)
 
 ```bash

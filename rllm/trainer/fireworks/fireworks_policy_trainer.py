@@ -273,6 +273,39 @@ class FireworksPolicyTrainer:
 
         return clean_datums, advantages, inf_logprobs, prompt_lens, num_loss_tokens
 
+    @staticmethod
+    def _build_env_datums(raw_datums: list[tinker.Datum], coef: float, n_seq: int) -> list[tinker.Datum]:
+        """Build ECHO (arXiv:2605.24517) environment-prediction cross_entropy datums.
+
+        For each rollout we emit a ``cross_entropy`` datum over the same tokens,
+        weighting every environment-observation token (``mask == 0``) by
+        ``coef / (n_seq * |O_i|)`` and every action token by 0. Under
+        ``GradAccNormalization.NONE`` the summed gradient of these datums equals
+        ``coef * d/dtheta [ mean_i (1/|O_i|) sum_{t in O_i} -log p(target_t) ]``,
+        i.e. lambda times the paper's length-normalized environment loss. Datums
+        without observation tokens are skipped.
+        """
+        from tinker.types.tensor_data import TensorData
+
+        env_datums: list[tinker.Datum] = []
+        for datum in raw_datums:
+            mask = datum.loss_fn_inputs["mask"].data  # 1.0 on action tokens, 0.0 on observation tokens
+            obs_count = sum(1 for m in mask if float(m) == 0.0)
+            if obs_count == 0:
+                continue
+            scale = coef / (n_seq * obs_count)
+            weights = [scale if float(m) == 0.0 else 0.0 for m in mask]
+            env_datums.append(
+                tinker.Datum(
+                    model_input=datum.model_input,
+                    loss_fn_inputs={
+                        "target_tokens": datum.loss_fn_inputs["target_tokens"],
+                        "weights": TensorData(data=weights, dtype="float32"),
+                    },
+                )
+            )
+        return env_datums
+
     async def _compute_proximal_logprobs(
         self,
         datums: list[tinker.Datum],
@@ -455,6 +488,30 @@ class FireworksPolicyTrainer:
             for i in range(len(advantages)):
                 advantages[i] /= max(1, num_loss_tokens[i])
 
+        # ECHO (arXiv:2605.24517): build a second, gradient-accumulated
+        # cross_entropy pass over environment-observation tokens. Fireworks'
+        # optim_step normalizes the *summed* gradient by token/sequence counts
+        # across BOTH passes, which would rescale the policy gradient. To keep the
+        # policy-gradient term identical to a non-ECHO run, we fold the
+        # normalization optim would have applied into the advantages here and
+        # force GradAccNormalization.NONE at optim_step (see optim_step()). The
+        # env datums carry their own per-sequence length normalization so the env
+        # term equals exactly ``env_loss_coef * grad(L_env)``.
+        echo_coef = float(algorithm_config.env_loss_coef or 0.0)
+        env_datums: list[tinker.Datum] = []
+        if echo_coef > 0.0:
+            n_seq = max(1, len(raw_datums))
+            agg = algorithm_config.loss_agg_mode
+            if agg in ("seq-mean-token-sum", "seq-mean-token-mean"):
+                for i in range(len(advantages)):
+                    advantages[i] /= n_seq  # optim would divide by NUM_SEQUENCES
+            elif agg == "token-mean":
+                total_action_tokens = max(1, sum(num_loss_tokens))
+                for i in range(len(advantages)):
+                    advantages[i] /= total_action_tokens  # optim would divide by NUM_LOSS_TOKENS
+            # agg None/other => optim NONE => no fold needed.
+            env_datums = self._build_env_datums(raw_datums, echo_coef, n_seq)
+
         # Proximal logprobs
         t0 = time.perf_counter()
         if rc.bypass_mode:
@@ -495,6 +552,21 @@ class FireworksPolicyTrainer:
             for k, v in fwd_bwd_result.metrics.items():
                 if k not in self._METRIC_SKIP_KEYS:
                     adv_metrics[f"train/{k}"] = v
+
+        # ECHO env-prediction pass: accumulates gradients on top of the policy
+        # gradient before the (externally invoked) optim_step.
+        if env_datums:
+            env_fwd_bwd = await asyncio.to_thread(
+                self.training_client.forward_backward,
+                env_datums,
+                "cross_entropy",
+            )
+            if hasattr(env_fwd_bwd, "metrics") and env_fwd_bwd.metrics:
+                for k, v in env_fwd_bwd.metrics.items():
+                    if k not in self._METRIC_SKIP_KEYS:
+                        adv_metrics[f"train/env_{k}"] = v
+            adv_metrics["train/env_loss_coef"] = echo_coef
+            adv_metrics["train/env_sequences"] = len(env_datums)
 
         return raw_datums, [], adv_metrics
 
@@ -538,6 +610,13 @@ class FireworksPolicyTrainer:
             "seq-mean-token-mean": GradAccNormalization.NUM_SEQUENCES,
         }
         grad_norm = _LOSS_AGG_MAP.get(self.algorithm_config.loss_agg_mode)
+        # ECHO accumulates a second (env-prediction) gradient before this step and
+        # folds the intended normalization into the per-datum weights/advantages
+        # (see forward_backward_from_trajectory_groups). Re-normalizing here by
+        # token/sequence counts that span both passes would rescale the policy
+        # gradient, so we disable server-side grad-accumulation normalization.
+        if self.algorithm_config.env_loss_coef and self.algorithm_config.env_loss_coef > 0.0:
+            grad_norm = GradAccNormalization.NONE
         optim_result = await asyncio.to_thread(
             self.training_client.optim_step,
             adam_params,

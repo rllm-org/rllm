@@ -250,6 +250,10 @@ class rLLMAdvantageEstimator(str, Enum):
     REINFORCE_PLUS_PLUS_BASELINE = "reinforce_plus_plus_baseline"
     PRPO = "prpo"
     RLOO = "rloo"
+    # ECHO (arXiv:2605.24517): GRPO advantages + an auxiliary cross-entropy loss
+    # on environment-observation tokens. The advantage math is identical to GRPO;
+    # selecting `echo` flips on the env-loss term (see `env_loss_coef`).
+    ECHO = "echo"
     OTHER = "other"
 
     @classmethod
@@ -285,6 +289,13 @@ class AlgorithmConfig:
     use_precomputed_advantage: bool = False
     # Global loss function (backend-specific values; null = backend default)
     loss_fn: str | None = None
+    # ECHO (arXiv:2605.24517) auxiliary environment-prediction loss weight (lambda).
+    # The total loss is L_GRPO + env_loss_coef * L_env, where L_env is the
+    # length-normalized cross-entropy on environment-observation tokens (tool
+    # output) that the policy conditions on but GRPO never trains. None = auto:
+    # resolved in __post_init__ to 0.05 when adv_estimator=echo, else 0.0
+    # (disabled). Backends read the resolved float; 0.0 reproduces plain GRPO.
+    env_loss_coef: float | None = None
     lr_schedule: Literal["linear", "cosine", "constant"] = "constant"
     warmup_steps: int = -1
     warmup_steps_ratio: float = 0.0
@@ -328,6 +339,7 @@ class AlgorithmConfig:
             norm_adv_by_std_in_grpo=algorithm_config.get("norm_adv_by_std_in_grpo", True),
             use_precomputed_advantage=algorithm_config.get("use_precomputed_advantage", False),
             loss_fn=algorithm_config.get("loss_fn", None),
+            env_loss_coef=algorithm_config.get("env_loss_coef", None),
             lr_schedule=algorithm_config.get("lr_schedule", "constant"),
             warmup_steps=algorithm_config.get("warmup_steps", -1),
             warmup_steps_ratio=algorithm_config.get("warmup_steps_ratio", 0.0),
@@ -348,6 +360,12 @@ class AlgorithmConfig:
                 DeprecationWarning,
                 stacklevel=2,
             )
+
+        # ECHO: resolve the auxiliary env-loss coefficient. `adv_estimator=echo`
+        # implies the paper's default lambda (0.05) unless the user set
+        # `env_loss_coef` explicitly; any other estimator defaults to 0.0 (off).
+        if self.env_loss_coef is None:
+            self.env_loss_coef = 0.05 if self.estimator == rLLMAdvantageEstimator.ECHO else 0.0
 
         # Normalize estimator_map: split (estimator, loss_fn) tuples.
         normalized_map: dict[str, rLLMAdvantageEstimator | str] = {}
