@@ -1,8 +1,18 @@
 # Design: Auxiliary Losses in rLLM
 
-- **Status:** Draft
+- **Status:** Prototype landed — migration steps 1–3 implemented on PR #668; steps 4–5 (SDAR's `AuxForward` + dynamic weights, escape hatch) pending.
 - **Related:** PR #668 (ECHO, arXiv:2605.24517) — the first client of this framework
 - **Scope:** the unified trainer (`UnifiedTrainer`) and its three backends — verl, tinker, fireworks
+
+> **Implementation status.** The framework is prototyped on PR #668:
+> `rllm/trainer/algorithms/aux_loss.py` (the `AuxiliaryLoss` spec, the
+> `register_aux_loss` registry, `EnvPredictionLoss`, and `build_aux_losses` with
+> the `env_loss_coef`/`adv_estimator=echo` back-compat sugar);
+> `rllm/trainer/tinker/aux_loss.py` (the shared managed datum builder); the verl
+> in-process executor in `CustomPPOLoss._apply_aux_losses`; and the tinker
+> (`_get_aux_loss_futures`) / fireworks (`_build_aux_datums`) managed executors.
+> ECHO is ported onto it as `env_prediction`. The `requires` field (AuxForward)
+> raises `NotImplementedError` until step 4. See `tests/unified_trainer/test_aux_loss.py`.
 
 ## Summary
 
@@ -336,16 +346,19 @@ Managed backends reject `type: custom` (no in-process loss control).
 
 ## Migration / incremental plan
 
-1. **Data layer** — emit `aux_masks` (`action`, `observation`) from the shared
-   transform; add the `AuxContext` builders. Low risk; no behavior change.
-2. **Registry + executors** — land `AuxiliaryLoss`, `register_aux_loss`, and the
-   two executors. Wire `algorithm.aux_losses` into each backend's `update_policy`.
-3. **Port ECHO** — reimplement ECHO as `EnvPredictionLoss`; keep
-   `adv_estimator=echo` / `env_loss_coef` as sugar. Delete the bespoke ECHO code.
-   The PR #668 numerical checks become regression tests for the executors.
-4. **Add `AuxForward` + dynamic `weight`** — the SDAR-driven extensions; land
-   gap-gated SDAR as the second client + the capability checks.
-5. **Escape hatch + entropy capability** — `type: custom` on verl; entropy
+1. **Data layer** ✅ — named token subsets (`action`, `observation`) are resolved
+   by each executor from the merged row's existing masks (no new tensor plumbing
+   in this prototype; the `aux_masks`-in-transform option, including the paper's
+   `O′`, remains a future refinement).
+2. **Registry + executors** ✅ — `AuxiliaryLoss`, `register_aux_loss`, and the two
+   executors landed; `algorithm.aux_losses` is wired into each backend.
+3. **Port ECHO** ✅ — reimplemented as `EnvPredictionLoss`; `adv_estimator=echo` /
+   `env_loss_coef` kept as sugar; bespoke ECHO code removed. PR #668's numerical
+   checks are preserved as executor-math regression tests.
+4. **Add `AuxForward` + dynamic `weight`** ⏳ — the SDAR-driven extensions; land
+   gap-gated SDAR as the second client + the capability checks. (`requires`
+   currently raises `NotImplementedError`.)
+5. **Escape hatch + entropy capability** ⏳ — `type: custom` on verl; entropy
    output plumbing or explicit rejection on managed backends.
 
 Steps 1–3 are a pure refactor (ECHO behavior preserved); 4–5 are additive.

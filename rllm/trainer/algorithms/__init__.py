@@ -5,6 +5,16 @@ This module provides shared functionality across different trainer backends (ver
 """
 
 from rllm.trainer.algorithms.advantage import collect_reward_and_advantage_from_trajectory_groups
+from rllm.trainer.algorithms.aux_loss import (
+    AUX_LOSS_REGISTRY,
+    MASK_ACTION,
+    MASK_OBSERVATION,
+    AuxiliaryLoss,
+    EnvPredictionLoss,
+    build_aux_losses,
+    get_aux_loss,
+    register_aux_loss,
+)
 from rllm.trainer.algorithms.config import (
     AlgorithmConfig,
     AsyncTrainingConfig,
@@ -43,6 +53,15 @@ __all__ = [
     # Advantage computation
     "rLLMAdvantageEstimator",
     "collect_reward_and_advantage_from_trajectory_groups",
+    # Auxiliary losses
+    "AuxiliaryLoss",
+    "EnvPredictionLoss",
+    "build_aux_losses",
+    "register_aux_loss",
+    "get_aux_loss",
+    "AUX_LOSS_REGISTRY",
+    "MASK_ACTION",
+    "MASK_OBSERVATION",
     # Metrics
     "reduce_metrics_by_trajectory_name",
     "reduce_metrics_lists",
