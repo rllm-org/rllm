@@ -122,8 +122,8 @@ def _build_trajectory_groups(episodes: list[Episode], compact_filtering_config: 
         for trajectory in episode.trajectories:
             if len(trajectory.steps) == 0:
                 continue
-            trajectories_by_name[f"{task_id}:{trajectory.name}"].append(trajectory)
-            metadata_by_name[f"{task_id}:{trajectory.name}"].append(
+            trajectories_by_name[task_id].append(trajectory)
+            metadata_by_name[task_id].append(
                 {
                     "episode_id": episode.id,
                     "termination_reason": episode.termination_reason,
