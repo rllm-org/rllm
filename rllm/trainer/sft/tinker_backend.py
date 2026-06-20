@@ -203,7 +203,9 @@ class TinkerSFTBackend(SFTBackend):
             start_epoch = 0
             start_batch = 0
 
-        n_batches = len(train_dataset)
+        # len(dataset) floors examples//batch_size; keep the final partial batch
+        # when the dataset is smaller than one batch (else 0 steps).
+        n_batches = max(1, len(train_dataset))
         total_epochs = config.trainer.get("total_epochs", 1)
         total_steps = n_batches * total_epochs
         progress_denominator = total_steps if total_steps > 0 else 1
