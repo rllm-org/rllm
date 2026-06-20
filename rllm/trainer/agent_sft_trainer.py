@@ -1,105 +1,69 @@
-import logging
+"""Unified SFT trainer (dispatcher).
 
-from torch.distributed.device_mesh import init_device_mesh
+``AgentSFTTrainer`` is the SFT analogue of the RL stack's ``AgentTrainer``: it
+takes a backend-agnostic :class:`~rllm.trainer.sft.spec.SFTSpec`, picks a
+backend, and runs it. Backends own their own training loop
+(see :class:`rllm.trainer.sft.backend.SFTBackend`); this dispatcher owns the
+backend-agnostic concerns: backend selection and launch topology (in-process for
+hosted backends, a distributed launcher for verl).
 
-from rllm.types import Trajectory
+    from rllm.trainer.agent_sft_trainer import AgentSFTTrainer
+    from rllm.trainer.sft import SFTSpec
 
-logger = logging.getLogger(__name__)
+    spec = SFTSpec(model="Qwen/Qwen2.5-7B-Instruct", train_dataset=ds)
+    AgentSFTTrainer(spec, backend="tinker").train()
+"""
+
+from __future__ import annotations
+
+import os
+from typing import TYPE_CHECKING
+
+from rllm.trainer.sft.backend import SFTConfigError
+
+if TYPE_CHECKING:
+    from rllm.trainer.sft.backend import SFTBackend
+    from rllm.trainer.sft.spec import SFTSpec
+
+# Backends available today. verl/fireworks land in milestone 4.
+_IMPLEMENTED = {"tinker"}
+_PLANNED = {"verl", "fireworks"}
+
+
+def _inside_torchrun() -> bool:
+    """True when already running inside a torchrun/distributed process group."""
+    return os.environ.get("RLLM_SFT_IN_TORCHRUN") == "1" or "RANK" in os.environ
 
 
 class AgentSFTTrainer:
-    def __init__(self, config, train_dataset=None, val_dataset=None, backend="verl"):
-        self.config = config
-        self.train_dataset = train_dataset
-        self.val_dataset = val_dataset
-        self.backend = backend
+    """Dispatches an :class:`SFTSpec` to the selected SFT backend."""
 
-        assert self.backend in ["verl", "tinker"], f"Unsupported backend: {self.backend}, must be one of ['verl', 'tinker']"
+    def __init__(self, spec: SFTSpec, backend: str = "tinker"):
+        self.spec = spec
+        self.backend_name = backend
 
-    def train(self):
-        """Start training with the selected backend."""
-        if self.backend == "verl":
-            self._train_verl()
-        elif self.backend == "tinker":
-            self._train_tinker()
+    def train(self) -> None:
+        backend = self._make_backend()
+        backend.validate_spec()
+        backend.build_config()
+        backend.prepare_data()
+        if backend.requires_distributed and not _inside_torchrun():
+            self._launch_distributed(backend)
+        else:
+            backend.fit()
 
-    def _train_verl(self):
-        from verl.trainer.sft_trainer import SFTTrainer
-        from verl.utils import hf_tokenizer
-        from verl.utils.device import get_device_name
-        from verl.utils.distributed import destroy_global_process_group, initialize_global_process_group
-        from verl.utils.fs import copy_to_local
+    def _make_backend(self) -> SFTBackend:
+        name = self.backend_name
+        if name == "tinker":
+            from rllm.trainer.sft.tinker_backend import TinkerSFTBackend
 
-        from rllm.trainer.verl.sft_dataset import RLLMSFTDataset
+            return TinkerSFTBackend(self.spec)
+        if name in _PLANNED:
+            raise SFTConfigError(f"SFT backend {name!r} is not wired yet (lands in milestone 4). Use backend='tinker' for now.")
+        raise SFTConfigError(f"Unknown SFT backend {name!r}. Available: {', '.join(sorted(_IMPLEMENTED))}.")
 
-        config = self.config
-        device_name = get_device_name()
-        local_rank, rank, world_size = initialize_global_process_group()
-
-        device_mesh = init_device_mesh(device_type=device_name, mesh_shape=(world_size,), mesh_dim_names=("fsdp",))
-        dp_size = world_size // config.ulysses_sequence_parallel_size
-        ulysses_device_mesh = init_device_mesh(
-            device_type=device_name,
-            mesh_shape=(dp_size, config.ulysses_sequence_parallel_size),
-            mesh_dim_names=("dp", "sp"),
-        )
-        # build tokenizer and datasets first
-        local_model_path = copy_to_local(src=config.model.partial_pretrain, verbose=True)
-        tokenizer = hf_tokenizer(local_model_path, trust_remote_code=config.model.trust_remote_code)
-
-        train_dataset = RLLMSFTDataset(config.data.train_files, tokenizer, config.data)
-        val_dataset = RLLMSFTDataset(config.data.val_files, tokenizer, config.data)
-
-        trainer = SFTTrainer(
-            config=config,
-            device_mesh=device_mesh,
-            ulysses_device_mesh=ulysses_device_mesh,
-            tokenizer=tokenizer,
-            train_dataset=train_dataset,
-            val_dataset=val_dataset,
-        )
-
-        trainer.fit()
-
-        destroy_global_process_group()
-
-    def _train_tinker(self):
-        """Train using Tinker backend."""
-        from rllm.trainer.deprecated.tinker_sft_trainer import TinkerSFTTrainer
-
-        trainer = TinkerSFTTrainer(
-            config=self.config,
-            train_dataset=self.train_dataset,
-            val_dataset=self.val_dataset,
-        )
-        trainer.fit_sft()
-
-    @staticmethod
-    def process_trajectories(trajectories: list[Trajectory], reward_threshold: float):
-        """Process trajectories into SFT format."""
-        sft_data = []
-
-        for traj in trajectories:
-            if not traj:
-                continue
-
-            reward = traj.reward
-
-            if reward < reward_threshold:
-                continue
-
-            # Get chat_completions from the last step of the trajectory
-            messages = None
-            if traj.steps and hasattr(traj.steps[-1], "chat_completions"):
-                messages = traj.steps[-1].chat_completions
-
-            if not messages:
-                continue
-
-            clean_messages = [{"role": msg["role"], "content": str(msg["content"]).strip()} for msg in messages if isinstance(msg, dict) and msg.get("role") and str(msg.get("content", "")).strip()]
-
-            if len(clean_messages) >= 2:
-                sft_data.append({"messages": clean_messages})
-
-        print(f"Processed {len(trajectories)} trajectories -> {len(sft_data)} valid examples")
-        return sft_data
+    def _launch_distributed(self, backend: SFTBackend) -> None:
+        # The torchrun launcher for distributed backends (verl) lands in
+        # milestone 4. Until then, distributed backends must be run inside an
+        # existing torchrun process group.
+        raise SFTConfigError(f"Backend {backend.name!r} requires a distributed launcher (milestone 4). Run inside torchrun, or use backend='tinker'.")
