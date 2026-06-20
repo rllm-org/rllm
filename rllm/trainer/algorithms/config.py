@@ -248,6 +248,7 @@ class rLLMAdvantageEstimator(str, Enum):
     GRPO = "grpo"
     REINFORCE = "reinforce"
     REINFORCE_PLUS_PLUS_BASELINE = "reinforce_plus_plus_baseline"
+    PRPO = "prpo"
     RLOO = "rloo"
     OTHER = "other"
 

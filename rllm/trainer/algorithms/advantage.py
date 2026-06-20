@@ -111,6 +111,24 @@ def calculate_reinforce_plus_plus_baseline_advantages(rewards: list[np.ndarray],
     return advantages_by_group, advantages_by_group
 
 
+@register_rllm_adv_estimator(rLLMAdvantageEstimator.PRPO)
+def calculate_prpo_advantages(rewards: list[np.ndarray], algorithm_config: AlgorithmConfig, epsilon: float = 1e-6, **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """PRPO advantage estimator, centering and normalizing rewards across the batch. See https://rllm-project.com/post.html?post=continual_learning.md
+
+    This implementation flattens all rewards across groups, then centers by batch mean and normalizes by batch std.
+    """
+    if len(rewards) == 0:
+        return [], []
+
+    all_rewards = np.concatenate(rewards)
+    batch_mean = np.mean(all_rewards)
+    batch_std = np.std(all_rewards)
+
+    advantages_by_group = [(group_rewards - batch_mean) / (batch_std + epsilon) for group_rewards in rewards]
+
+    return advantages_by_group, advantages_by_group
+
+
 @register_rllm_adv_estimator(rLLMAdvantageEstimator.RLOO)
 def calculate_rloo_advantages(rewards: list[np.ndarray], algorithm_config: AlgorithmConfig, **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Reinforce Leave-one-out (RLOO): https://arxiv.org/abs/2402.14740"""
