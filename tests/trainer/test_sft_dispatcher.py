@@ -101,8 +101,8 @@ def test_fireworks_build_config_uses_fireworks_template():
     assert cfg.model.lora_rank == 8
     assert cfg.data.max_length == 4096
     # Fireworks keeps its FW model path + HF tokenizer; a bare HF --model does NOT clobber it.
-    assert cfg.model.name == "accounts/fireworks/models/qwen3p5-4b"
-    assert cfg.model.tokenizer_model == "Qwen/Qwen3.5-4B"
+    assert cfg.model.name == "accounts/fireworks/models/qwen3p5-9b"
+    assert cfg.model.tokenizer_model == "Qwen/Qwen3.5-9B"
     assert "fireworks_infra" in cfg
 
 
@@ -138,10 +138,10 @@ def test_fireworks_provision_doc_parses_sft():
     finally:
         p.unlink(missing_ok=True)
     assert mode == "sft"
-    assert pc.base_model == "accounts/fireworks/models/qwen3p5-4b"
-    assert pc.tokenizer_model == "Qwen/Qwen3.5-4B"
+    assert pc.base_model == "accounts/fireworks/models/qwen3p5-9b"
+    assert pc.tokenizer_model == "Qwen/Qwen3.5-9B"
     assert pc.serverless is False
-    assert pc.trainer.training_shape_id == "accounts/fireworks/trainingShapes/qwen3p5-4b-256k-lora"
+    assert pc.trainer.training_shape_id == "accounts/fireworks/trainingShapes/qwen3p5-9b-256k"
 
 
 def test_fireworks_inherits_validation():

@@ -9,25 +9,21 @@
 # Fireworks needs a FW model path + HF tokenizer + matching training shape (not a
 # bare HF name). Swap model.name / model.tokenizer_model /
 # fireworks_config.policy_trainer_shape_id *together* to change the model.
-# Pattern from cookbooks/swe-rl/train_fireworks_sync.sh (which uses 3.5-9B).
-# NOTE: Fireworks' public catalog ships a 3.5-9B LoRA shape; if `qwen3p5-4b-*`
-# is not in your account's catalog, swap to the 9B identifiers:
-#   model.name=accounts/fireworks/models/qwen3p5-9b
-#   model.tokenizer_model=Qwen/Qwen3.5-9B
-#   fireworks_config.policy_trainer_shape_id=accounts/fireworks/trainingShapes/qwen3p5-9b-256k-lora
+# Defaults to Qwen3.5-9B: Fireworks ships a 3.5-9B shape but not a 3.5-4B one
+# (pattern from cookbooks/swe-rl/train_fireworks_sync.sh).
 
 fireworks_base_url: "https://api.fireworks.ai"
 
 model:
-  name: accounts/fireworks/models/qwen3p5-4b      # Fireworks base-model path
-  tokenizer_model: Qwen/Qwen3.5-4B                # HF tokenizer (for rendering/tokenization)
+  name: accounts/fireworks/models/qwen3p5-9b      # Fireworks base-model path
+  tokenizer_model: Qwen/Qwen3.5-9B                # HF tokenizer (for rendering/tokenization)
   lora_rank: 32
   train_unembed: true
   train_attn: true
   train_mlp: true
 
 fireworks_config:
-  policy_trainer_shape_id: accounts/fireworks/trainingShapes/qwen3p5-4b-256k-lora
+  policy_trainer_shape_id: accounts/fireworks/trainingShapes/qwen3p5-9b-256k
   policy_trainer_replica_count: 1
 
 data:
