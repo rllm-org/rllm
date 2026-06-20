@@ -12,16 +12,14 @@ from __future__ import annotations
 
 import logging
 import os
-import uuid
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 import tinker
-import torch
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 
-from rllm.data import Dataset
+from rllm.data.utils import interleave_tasks
 from rllm.engine.rollout import RolloutEngine, TinkerEngine
 from rllm.trainer.algorithms import AlgorithmConfig, simple_timer
 from rllm.trainer.backend_protocol import BackendProtocol
@@ -38,20 +36,6 @@ if TYPE_CHECKING:
     from rllm.trainer.unified_trainer import TrainerState
 
 logger = logging.getLogger(__name__)
-
-
-def _build_interleave_batch(batch: list, group_size: int) -> tuple[list, list[str]]:
-    """Interleave each task ``group_size`` times; return ``(batch, task_ids)``
-    with one shared uid per group for GRPO grouping. Items may be dicts or
-    :class:`rllm.types.Task` objects."""
-    interleave_batch: list = []
-    task_ids: list[str] = []
-    for batch_item in batch:
-        uid = str(uuid.uuid4())
-        for _ in range(group_size):
-            interleave_batch.append(batch_item)
-            task_ids.append(uid)
-    return interleave_batch, task_ids
 
 
 class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
@@ -195,37 +179,6 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         if router_replay_mode != "disabled":
             raise ValueError(f"router_replay={router_replay_mode!r} is not supported by the Tinker backend.")
 
-    def get_dataloader(self, dataset: Dataset | None, trainer_state: TrainerState) -> Iterable:
-        """Get dataloader for the given dataset.
-
-        For Tinker, we create standard PyTorch DataLoaders.
-
-        Args:
-            dataset: The dataset to create dataloader from.
-            trainer_state: The trainer state.
-
-        Returns:
-            DataLoader wrapped dataset.
-        """
-        if dataset is None:
-            raise ValueError("Dataset cannot be None for TinkerBackend")
-
-        if trainer_state.is_training:
-            batch_size = self.full_config.data.train_batch_size
-            shuffle = True
-        else:
-            batch_size = self.full_config.data.get("val_batch_size", self.full_config.data.train_batch_size)
-            if batch_size == -1:
-                batch_size = len(dataset)
-            shuffle = False
-
-        return torch.utils.data.DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            collate_fn=lambda x: x,  # Return batches as lists
-        )
-
     def shutdown(self) -> None:
         """Shutdown the backend and cleanup resources."""
         super().shutdown()
@@ -268,7 +221,7 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             group_size = self.full_config.rllm.rollout.n_val
         else:
             group_size = self.full_config.rllm.rollout.n
-        interleaved_batch, task_ids = _build_interleave_batch(batch, group_size)
+        interleaved_batch, task_ids = interleave_tasks(batch, group_size)
 
         # Execute tasks using the agent workflow engine (async)
         episodes = await agent_workflow_engine.execute_tasks(interleaved_batch, task_ids, is_validation=is_validation, **kwargs)
@@ -421,19 +374,16 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Ensure checkpoint directory exists
         os.makedirs(self.full_config.training.default_local_dir, exist_ok=True)
 
-        # Initialize training client and load checkpoint
-        # Auto-resume from local checkpoints is disabled: the checkpoint dir is shared across
-        # all experiments, so it can load wrong model weights. To resume, use
-        # training.resume_from_tinker_id=tinker://... to target a specific checkpoint.
-        # TODO: enable auto-resume once checkpoint dir is scoped per-experiment.
-        resume = bool(self.full_config.training.resume_from_tinker_id)
-        start_batch, self.sampling_client = await self.policy_trainer.initialize_async(resume_from_checkpoint=resume)
+        # Resume per training.resume_mode: auto = latest global_step_<N>, resume_path = explicit folder, disable = fresh.
+        start_batch, self.sampling_client, dataloader_state = await self.policy_trainer.initialize_async()
 
         # Propagate sampling_client to rollout engine so it can make inference calls
         self.rollout_engine.set_sampling_client(self.sampling_client)
 
         # Update trainer state with the start batch from checkpoint
         trainer_state.global_step = start_batch
+        if dataloader_state is not None and trainer_state.train_dataloader is not None:
+            trainer_state.train_dataloader.load_state_dict(dataloader_state)
 
     async def on_train_end(self, trainer_state: TrainerState) -> None:
         """Called at the end of training."""
@@ -442,7 +392,8 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         # Save final checkpoint if we didn't just save it in the last batch
         if trainer_state.global_step % self.full_config.rllm.trainer.save_freq != 0:
             logger.info(f"Saving final checkpoint at step {trainer_state.global_step}")
-            await self.policy_trainer.save_checkpoint_and_get_sampling_client(trainer_state.global_step, kind="both", do_save=True)
+            dataloader_state = trainer_state.train_dataloader.state_dict() if trainer_state.train_dataloader is not None else None
+            await self.policy_trainer.save_checkpoint_and_get_sampling_client(trainer_state.global_step, do_save=True, dataloader_state=dataloader_state)
 
     async def on_policy_updated(self, trainer_state: TrainerState) -> None:
         """Save checkpoint and update sampling_client after policy update."""
@@ -452,7 +403,8 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
         global_step = trainer_state.global_step
         save_freq = self.full_config.rllm.trainer.save_freq
         do_save = save_freq > 0 and global_step % save_freq == 0
-        self.sampling_client = await self.policy_trainer.save_checkpoint_and_get_sampling_client(global_step, kind="both", do_save=do_save)
+        dataloader_state = trainer_state.train_dataloader.state_dict() if do_save and trainer_state.train_dataloader is not None else None
+        self.sampling_client = await self.policy_trainer.save_checkpoint_and_get_sampling_client(global_step, do_save=do_save, dataloader_state=dataloader_state)
 
         # Propagate updated sampling_client to rollout engine for async weight sync
         self.rollout_engine.set_sampling_client(self.sampling_client)

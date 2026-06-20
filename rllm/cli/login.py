@@ -13,6 +13,7 @@ def login_cmd(relogin):
 
     import httpx
 
+    from rllm.cli._ui import fail
     from rllm.eval.config import load_ui_config, save_ui_config
 
     ui_url = os.getenv("RLLM_UI_URL", "https://ui.rllm-project.com")
@@ -45,8 +46,7 @@ def login_cmd(relogin):
     if api_key.startswith("RLLM_API_KEY="):
         api_key = api_key.split("=", 1)[1]
     if not api_key:
-        click.echo("Error: API key cannot be empty.", err=True)
-        raise SystemExit(1)
+        fail("API key cannot be empty.")
 
     # Validate key against the UI backend
     try:
@@ -60,13 +60,11 @@ def login_cmd(relogin):
         user = resp.json()
     except httpx.HTTPStatusError as e:
         if e.response.status_code in (401, 403):
-            click.echo("Error: Invalid API key.", err=True)
+            fail("Invalid API key.")
         else:
-            click.echo(f"Error: Server returned {e.response.status_code}.", err=True)
-        raise SystemExit(1) from None
+            fail(f"Server returned {e.response.status_code}.")
     except httpx.ConnectError:
-        click.echo(f"Error: Could not connect to {ui_url}.", err=True)
-        raise SystemExit(1) from None
+        fail(f"Could not connect to {ui_url}.")
 
     save_ui_config(ui_api_key=api_key)
     email = user.get("email", "unknown")

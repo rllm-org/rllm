@@ -18,6 +18,8 @@ import time
 
 from rich.console import Console
 
+from rllm.env import env_float
+
 logger = logging.getLogger(__name__)
 
 _status = Console()
@@ -47,7 +49,8 @@ def parse_tunnel(value: str | None) -> tuple[str | None, str | None]:
 
 
 _TRYCF_URL_RE = re.compile(r"https?://[a-zA-Z0-9.-]+\.trycloudflare\.com")
-_DEFAULT_READY_TIMEOUT = 30.0
+_DEFAULT_READY_TIMEOUT = env_float("RLLM_TUNNEL_READY_TIMEOUT_S", 30.0)  # set env var: export RLLM_TUNNEL_READY_TIMEOUT_S=xxx
+_DEFAULT_REACHABLE_TIMEOUT = env_float("RLLM_TUNNEL_REACHABLE_TIMEOUT_S", 120.0)  # set env var: export RLLM_TUNNEL_REACHABLE_TIMEOUT_S=xxx
 # Retry transient Cloudflare QuickTunnel allocator 5xx blips.
 _DEFAULT_MAX_ATTEMPTS = 4
 
@@ -105,6 +108,7 @@ class CloudflaredTunnel:
         for attempt in range(1, self.max_attempts + 1):
             try:
                 url = self._start_once()
+                self._wait_reachable(url)
                 _status.print(f"  [bold green]✓[/] Tunnel ready: [bold]{url}[/]")
                 return url
             except TunnelStartError as e:
@@ -128,6 +132,35 @@ class CloudflaredTunnel:
                 raise
         assert last_error is not None
         raise last_error
+
+    def _wait_reachable(self, url: str, timeout: float = _DEFAULT_REACHABLE_TIMEOUT) -> None:
+        """Block until the public URL answers over HTTP, or warn and continue.
+
+        cloudflared printing the URL only means the hostname was *assigned* —
+        not that this host can resolve it or that the edge has connected to
+        the origin. Any response with status < 500 (404 included) proves
+        DNS + edge + origin are live. Timeout is warn-not-raise: an
+        in-sandbox consumer may still resolve the hostname through its own
+        (cloud) DNS even when this host's resolver lags.
+        """
+        import urllib.error
+        import urllib.request
+
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                with urllib.request.urlopen(urllib.request.Request(url, method="GET"), timeout=5) as resp:
+                    if resp.status < 500:
+                        return
+            except urllib.error.HTTPError as e:
+                if e.code < 500:  # 4xx: resolvable and the origin answered
+                    return
+            except Exception:  # noqa: S110 — DNS/connect failures: keep polling
+                pass
+            if time.monotonic() > deadline:
+                logger.warning("tunnel %s not reachable from this host after %.0fs — continuing (in-sandbox DNS may still resolve it)", url, timeout)
+                return
+            time.sleep(2)
 
     def _reset_state(self) -> None:
         """Clear per-attempt state before a retry."""

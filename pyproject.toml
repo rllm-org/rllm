@@ -39,8 +39,8 @@ dependencies = [
     "aiosqlite",
     "hydra-core",
     "codetiming",
-    "tinker>=0.22.3 ; python_version >= '3.11'",
-    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook ; python_version >= '3.11'",
+    "tinker>=0.22.2 ; python_version >= '3.11'",
+    "tinker-cookbook>=0.4.1 ; python_version >= '3.11'",
 ]
 
 [project.scripts]
@@ -58,12 +58,8 @@ tools = [
     "mcp",
 ]
 
-eval-protocol = [
-    "eval-protocol",
-]
-
 all = [
-    "rllm[train,rewards,tools,eval-protocol]",
+    "rllm[train,rewards,tools]",
 ]
 
 ui = [
@@ -91,8 +87,13 @@ verl = [
 ]
 
 tinker = [
-    "tinker>=0.22.3 ; python_version >= '3.11'",
-    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook ; python_version >= '3.11'",
+    "tinker>=0.22.2 ; python_version >= '3.11'",
+    "tinker-cookbook>=0.4.1 ; python_version >= '3.11'",
+]
+
+fireworks = [
+    "fireworks-ai[training]==1.2.0a79 ; python_version >= '3.11'",
+    "fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git#subdirectory=training ; python_version >= '3.11'",
 ]
 
 opentelemetry = [
@@ -196,7 +197,6 @@ ignore = [
 "examples/fully_async/deepresearch/refine_agent.py" = ["E501"]
 "examples/fully_async/deepresearch/search_agent.py" = ["E501"]
 "examples/countdown/prepare_countdown_data.py" = ["E501"]
-"examples/eval_protocol/prepare_frozen_lake_data.py" = ["E501"]
 "cookbooks/solver_judge_flow/solver_judge_flow.py" = ["E501"]
 "rllm/cli/main.py" = ["E501"]
 "rllm/eval/visualizer.py" = ["E501"]

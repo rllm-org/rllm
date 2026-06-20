@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import uuid
 from collections import defaultdict
 from collections.abc import Iterable
 from functools import reduce
@@ -11,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf, open_dict
 from verl import DataProto
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
@@ -30,7 +29,7 @@ from verl.utils.metric import reduce_metrics
 from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
-from rllm.data import Dataset
+from rllm.data.utils import interleave_tasks
 from rllm.engine.rollout import RolloutEngine, VerlEngine
 from rllm.trainer.algorithms import (
     AlgorithmConfig,
@@ -43,7 +42,6 @@ from rllm.trainer.verl.metrics import calculate_debug_metrics_compat
 from rllm.trainer.verl.utils import (
     balance_batch,
     build_wg_kwargs,
-    create_dataloaders,
     load_checkpoint,
     save_checkpoint,
     start_profiling,
@@ -144,12 +142,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         self.checkpoint_manager: CheckpointEngineManager | None = None
         self.rollout_engine: VerlEngine | None = None
         self.algorithm_config: AlgorithmConfig | None = None
-
-        self.train_dataloader, self.val_dataloader, self.total_training_steps = create_dataloaders(
-            config,
-            tokenizer,
-            processor,
-        )
 
     def _init_colocated_workers(self) -> None:
         """Create worker groups for colocated (hybrid engine) mode."""
@@ -303,6 +295,20 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
 
         patch_verl_tensordict_jagged_layout()
 
+        # Set actor.optim.total_training_steps before workers build the LR scheduler;
+        # a verl-native trainer.total_training_steps override wins over the computed count.
+        total_training_steps = kwargs.get("total_training_steps")
+        if total_training_steps is not None:
+            if self.config.trainer.get("total_training_steps") is not None:
+                total_training_steps = self.config.trainer.total_training_steps
+            try:
+                OmegaConf.set_struct(self.config, True)
+                with open_dict(self.config):
+                    if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
+                        self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
+            except Exception as e:
+                logger.warning(f"Could not set total_training_steps on actor.optim: {e}")
+
         if self.is_separated:
             self._init_separated_workers()
         else:
@@ -374,15 +380,6 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             if strategy != "megatron":
                 raise ValueError(f"router_replay={router_replay_mode!r} requires actor.strategy='megatron', got {strategy!r}")
 
-    def get_dataloader(self, dataset: Dataset | None, trainer_state: TrainerState) -> Iterable:
-        """Get dataloader. Note that for Verl backend, the RayPPOTrainer init already creates the dataloaders."""
-        if trainer_state.is_training:
-            return self.train_dataloader
-        elif self.val_dataloader is not None:
-            return self.val_dataloader
-        else:
-            raise ValueError("No validation dataloader available. Please check the configuration.")
-
     async def generate_episodes(self, batch: Any, agent_workflow_engine: UnifiedWorkflowEngine, is_validation: bool = False, **kwargs) -> list[Episode]:
         """Generate episodes using the workflow engine.
 
@@ -394,42 +391,29 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         4. Return the episodes.
 
         Args:
-            batch: Input batch (dict format from dataloader).
+            batch: Input batch (list of rllm task dicts from the dataloader).
             agent_workflow_engine: The workflow engine to use.
             **kwargs: Additional arguments.
 
         Returns:
             List of generated episodes.
         """
-        # Step 1: build interleaved batch
-        if isinstance(batch, dict):
-            batch = DataProto.from_single_dict(batch)
-
-        batch.non_tensor_batch["task_ids"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
-        if is_validation:
-            repeat_times = self.full_config.rllm.rollout.n_val
-        else:
-            repeat_times = self.full_config.rllm.rollout.n
-        batch = batch.repeat(repeat_times=repeat_times)
-        # Step 2: execute tasks using the agent workflow engine (async)
-        episodes = await self._execute_tasks_async(batch, agent_workflow_engine, is_validation=is_validation, **kwargs)
-        # Step 3: sleep the replicas to free kv_cache before weight sync (colocated only).
-        # Skip during validation (no weight sync follows) and in separated mode
-        # (rollout servers run on their own resources; sleeping is a separated-mode no-op).
+        repeat_times = self.full_config.rllm.rollout.n_val if is_validation else self.full_config.rllm.rollout.n
+        tasks, task_ids = interleave_tasks(batch, repeat_times)
+        episodes = await self._execute_tasks_async(tasks, task_ids, agent_workflow_engine, is_validation=is_validation, **kwargs)
+        # Sleep the replicas to free kv_cache before weight sync (colocated only). Skip during
+        # validation (no weight sync follows) and in separated mode (rollout on own resources).
         if not is_validation and not self.is_separated:
             await self.checkpoint_manager.sleep_replicas()
         return episodes
 
-    async def _execute_tasks_async(self, batch: DataProto, agent_workflow_engine: UnifiedWorkflowEngine, **kwargs) -> list[Episode]:
+    async def _execute_tasks_async(self, tasks: list, task_ids: list[str], agent_workflow_engine: UnifiedWorkflowEngine, **kwargs) -> list[Episode]:
         """A Verl-specific helper function to execute tasks asynchronously."""
         assert self.rollout_engine is not None, "rollout_engine is not initialized."
-        tasks = batch.non_tensor_batch["extra_info"].tolist()
-        task_ids = batch.non_tensor_batch["task_ids"].tolist()
         episodes = await agent_workflow_engine.execute_tasks(tasks, task_ids, **kwargs)
-        # handle data sources in the input dataproto
-        if "data_source" in batch.non_tensor_batch:
-            data_sources = batch.non_tensor_batch["data_source"].tolist()
-            for episode, data_source in zip(episodes, data_sources, strict=True):
+        for episode, task in zip(episodes, tasks, strict=True):
+            data_source = task.get("data_source") if isinstance(task, dict) else None
+            if data_source is not None:
                 episode.info["data_source"] = data_source
         return episodes
 
@@ -509,24 +493,69 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         if dp_size is None:
             return batch
 
-        # From verl RayPPOTrainer._update_actor: ppo_mini_batch_size is multiplied
-        # by rollout.n before being passed as mini_batch_size to update_actor and
-        # make_iterator enforces batch_per_gpu % mini_batch_size == 0. Globally this
-        # requires batch_size % (ppo_mini_batch_size * rollout.n) == 0.
+        # Multi-turn rollouts are prefix-merged into training rows on a best-effort
+        # basis; the merge frequently breaks (chat-template re-render, context
+        # management), so the real row count N is much larger than the rollout
+        # count and varies step-to-step. We make the number of optimizer steps a
+        # deterministic quantity r derived from config, and decouple the two batch
+        # sizes the verl worker consumes (which it treats independently):
+        #   - mini_batch_size = m  (ROWS per optimizer step) controls how
+        #     train_mini_batch chunks the batch, hence the update count. Verl
+        #     requires m % dp_size == 0 and total_rows % m == 0.
+        #   - global_batch_size = gbs (ROLLOUTS per update) is the seq-mean loss
+        #     denominator. Keeping it at the constant rollout count R_total // r
+        #     (not the drifting row count) gives the conventional per-example loss
+        #     scale and keeps it stable across steps regardless of merge ratio.
         rollout_n = self.config.actor_rollout_ref.rollout.n
         ppo_mbs = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
-        mini_batch_global = ppo_mbs * rollout_n
-        divisor = math.lcm(dp_size, mini_batch_global)
+        train_batch_size = self.config.data.train_batch_size
+        r = max(1, train_batch_size // ppo_mbs)  # desired optimizer steps per generation batch
+        r_total = train_batch_size * rollout_n  # total rollouts in this generation batch
 
         batch = self._remove_padding(batch)  # Remove any padded steps from the batch (just in case)
         original_batch_size = batch.batch["prompts"].shape[0]
+        n_rows = original_batch_size
+
+        # m = smallest multiple of dp_size that is >= ceil(N / r). Padding N up to
+        # the next multiple of m then yields exactly r chunks (one optimizer step
+        # each). Rounding m up to dp_size can rarely overshoot so that N spans only
+        # r-1 multiples; in that case accept the smaller achievable count.
+        #
+        # Infeasibility (actual_r < r): each mini-batch must split across the
+        # dp_size ranks, so m >= dp_size always. The most chunks N can be cut into
+        # is therefore ceil(N / dp_size); requesting r > ceil(N / dp_size) is
+        # physically impossible (e.g. N=10, dp_size=8, r=4 -> m=8 -> only 2 chunks).
+        # This requires a tiny (heavily filtered) batch or an extreme
+        # train_batch_size // ppo_mini_batch_size ratio; it does not occur for
+        # normal configs where N (hundreds-thousands) >> dp_size * r. actual_r
+        # is always <= r, so this only ever lowers the update count, never raises it.
+        per_update = math.ceil(n_rows / r)
+        m = math.ceil(per_update / dp_size) * dp_size
+        actual_r = math.ceil(n_rows / m)
+        if actual_r != r:
+            logger.warning(f"[update-count] requested r={r} infeasible after dp_size rounding (N={n_rows}, m={m}); using r={actual_r}")
+            r = actual_r
+        gbs = max(1, r_total // r)
+        divisor = m
+
         batch, pad_size = pad_dataproto_to_divisor(batch, divisor)
+
+        # Stash the decoupled sizes; read back in _update_actor_with_loss_routing.
+        # They are computed here (pad time) because the pad divisor and the
+        # update-time sizes must agree, and these run in different trainer phases.
+        batch.meta_info["rllm_actor_mini_batch_size"] = m
+        batch.meta_info["rllm_actor_global_batch_size"] = gbs
+        batch.meta_info["rllm_actor_num_updates"] = r
+        batch.meta_info["rllm_actor_rows_pre_pad"] = n_rows
 
         # Neutralise the padded rows. `advantages=0` (set by
         # update_dataproto_with_advantages via is_pad_step) zeros the loss
-        # numerator; zeroing `response_mask` keeps pad tokens out of
-        # `batch_num_tokens` so the loss denominator equals the real-token
-        # count and loss magnitude is invariant to pad_size.
+        # numerator; zeroing `response_mask` keeps pad tokens out of the loss.
+        # The seq-mean denominator (global_batch_size = gbs) is a fixed rollout
+        # count, not a live row/token count, so pad rows do not dilute it at r=1.
+        # At r>1 the single chunk holding the pad rows is under-scaled by ~pad/m
+        # (bounded by r*dp_size rows total), but the aggregate over all r updates
+        # is exact — an accepted trade-off vs. a variable per-step denominator.
         pad_start, pad_end = original_batch_size, original_batch_size + pad_size
         batch.batch["response_mask"][pad_start:pad_end] = 0
         batch.non_tensor_batch["is_last_step"][pad_start:pad_end] = False
@@ -554,6 +583,14 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             # pad batch size to world size for batch balancing
             batch = self._pad_dataproto_to_world_size(batch=batch)
             balance_batch(batch, self.actor_rollout_wg, metrics=metrics, use_prefix_grouper=self.use_prefix_grouper)
+            # Surface the now-deterministic update count and the decoupled batch
+            # sizes computed in _pad_dataproto_to_world_size.
+            if "rllm_actor_num_updates" in batch.meta_info:
+                metrics["actor/num_updates_per_epoch"] = batch.meta_info["rllm_actor_num_updates"]
+                metrics["actor/mini_batch_rows"] = batch.meta_info["rllm_actor_mini_batch_size"]
+                metrics["actor/global_batch_rollouts"] = batch.meta_info["rllm_actor_global_batch_size"]
+                metrics["batch/rows_pre_pad"] = batch.meta_info["rllm_actor_rows_pre_pad"]
+                metrics["batch/rows_post_pad"] = batch.batch["prompts"].shape[0]
 
         # Set meta_info needed by workers
         batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
@@ -702,19 +739,30 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         loss_fn_map = self.algorithm_config.loss_fn_map if self.algorithm_config is not None else {}
         group_roles = batch.non_tensor_batch.get("group_roles") if hasattr(batch, "non_tensor_batch") and batch.non_tensor_batch is not None else None
 
-        # Common training metadata
+        # Common training metadata. mini_batch_size (ROWS per optimizer step) and
+        # global_batch_size (ROLLOUTS, the seq-mean loss denominator) are decoupled
+        # and computed in _pad_dataproto_to_world_size; read them back here. The
+        # fallback (both = ppo_mini_batch_size * rollout.n) preserves the legacy
+        # behavior when balance_batch is off and no meta was stashed.
         rollout_n = self.config.actor_rollout_ref.rollout.n
         actor_cfg = self.config.actor_rollout_ref.actor
-        ppo_mbs = actor_cfg.ppo_mini_batch_size * rollout_n
+        default_mbs = actor_cfg.ppo_mini_batch_size * rollout_n
+        full_mini_batch_size = batch.meta_info.get("rllm_actor_mini_batch_size", default_mbs)
+        full_global_batch_size = batch.meta_info.get("rllm_actor_global_batch_size", default_mbs)
 
-        def _send_actor_update(sub_batch: DataProto, loss_override: str | None = None) -> None:
+        def _send_actor_update(
+            sub_batch: DataProto,
+            loss_override: str | None = None,
+            mini_batch_size: int | None = None,
+            global_batch_size: int | None = None,
+        ) -> None:
             """Convert DataProto to TensorDict, inject metadata, send to worker."""
             batch_td = sub_batch.to_tensordict()
             batch_td = left_right_2_no_padding(batch_td)
             metadata: dict[str, Any] = dict(
                 calculate_entropy=(actor_cfg.entropy_coeff != 0.0),
-                global_batch_size=ppo_mbs,
-                mini_batch_size=ppo_mbs,
+                global_batch_size=global_batch_size if global_batch_size is not None else full_global_batch_size,
+                mini_batch_size=mini_batch_size if mini_batch_size is not None else full_mini_batch_size,
                 epochs=actor_cfg.ppo_epochs,
                 seed=actor_cfg.data_loader_seed,
                 dataloader_kwargs={"shuffle": actor_cfg.shuffle},
@@ -752,12 +800,14 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             return
 
         # Multiple distinct losses: split batch by loss group, update each.
+        # TODO: multi-loss path still uses flat ppo_mbs*rollout_n semantics;
+        # needs per-group padding when exercised with the new const-steps logic.
         for loss_name, roles in loss_to_roles.items():
             role_set = set(roles)
-            mask = np.array([r in role_set for r in group_roles])
+            mask = np.array([role in role_set for role in group_roles])
             indices = np.where(mask)[0]
             sub_batch = batch[indices]
-            _send_actor_update(sub_batch, loss_name)
+            _send_actor_update(sub_batch, loss_name, mini_batch_size=default_mbs, global_batch_size=default_mbs)
 
     def shutdown(self) -> None:
         """Free GPU memory held by the rollout replicas.
@@ -779,11 +829,11 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
     async def on_train_start(self, trainer_state: TrainerState) -> None:
         """Called at the start of training."""
         self.global_steps = trainer_state.global_step
-        self.global_steps = load_checkpoint(self.config, self.actor_rollout_wg, train_dataloader=self.train_dataloader)
+        self.global_steps = load_checkpoint(self.config, self.actor_rollout_wg, train_dataloader=trainer_state.train_dataloader)
         await self.checkpoint_manager.update_weights(self.global_steps)
         # we need to set trainer's global_steps to sync with the loaded checkpoint
         trainer_state.global_step = self.global_steps
-        trainer_state.epoch = self.global_steps // len(self.train_dataloader)
+        trainer_state.epoch = trainer_state.train_dataloader.epoch if trainer_state.train_dataloader is not None else 0
 
     async def on_batch_start(self, trainer_state: TrainerState) -> None:
         """Called at the start of each batch."""
@@ -805,7 +855,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         # Save checkpoint if configured
         if self.config.trainer.save_freq > 0 and trainer_state.global_step % self.config.trainer.save_freq == 0:
             with simple_timer("save_checkpoint", trainer_state.timing_dict):
-                save_checkpoint(self.config, self.global_steps, self.actor_rollout_wg, train_dataloader=self.train_dataloader)
+                save_checkpoint(self.config, self.global_steps, self.actor_rollout_wg, train_dataloader=trainer_state.train_dataloader)
 
         # Weight synchronization (colocated only — separated mode syncs in on_policy_updated)
         if not self.is_separated:

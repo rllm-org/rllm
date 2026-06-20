@@ -39,15 +39,11 @@ async def solver_judge_flow(task: Task, config: AgentConfig) -> Episode:
 
 
 async def _generate_solutions(client: AsyncOpenAI, config: AgentConfig, problem: str) -> list[Trajectory]:
-    # top_k is not a chat.completions parameter; drop it from the rollout sampling params.
-    sampling = {k: v for k, v in config.sampling_params.items() if k != "top_k"}
-
     async def _solve() -> Trajectory:
         messages = [{"role": "user", "content": f"{problem}. Output the final answer within <answer>...</answer>"}]
         response = await client.chat.completions.create(
             model=config.model,
             messages=messages,
-            **sampling,
         )
         content = response.choices[0].message.content or ""
         parsed = _parse_answer(content)
@@ -68,12 +64,9 @@ async def _generate_solutions(client: AsyncOpenAI, config: AgentConfig, problem:
 async def _judge_solutions(client: AsyncOpenAI, config: AgentConfig, problem: str, solutions: list[str]) -> Trajectory:
     prompt = _create_judge_prompt(problem, solutions)
     messages = [{"role": "user", "content": prompt}]
-    # top_k is not a chat.completions parameter; drop it from the rollout sampling params.
-    sampling = {k: v for k, v in config.sampling_params.items() if k != "top_k"}
     response = await client.chat.completions.create(
         model=config.model,
         messages=messages,
-        **sampling,
     )
     content = response.choices[0].message.content or ""
     selected = _parse_judge_response(content, solutions)

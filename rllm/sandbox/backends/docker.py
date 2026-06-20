@@ -6,7 +6,6 @@ import io
 import logging
 import os
 import tarfile
-import time
 
 logger = logging.getLogger(__name__)
 
@@ -100,41 +99,14 @@ class DockerSandbox:
         tar_stream.seek(0)
         self._container.put_archive(remote_parent, tar_stream)
 
-    def start_agent_process(self, command: str, port: int) -> None:
-        """Start a background process in the container using nohup."""
-        bg_command = f"nohup {command} > /tmp/worker.log 2>&1 &"
-        self._container.exec_run(["bash", "-c", bg_command], detach=True)
-
-        # Wait for the server to become ready
-        self._wait_for_ready(port, timeout=30.0)
-        logger.info("Agent process started in container %s on port %d", self.name, port)
-
-    def _wait_for_ready(self, port: int, timeout: float = 30.0) -> None:
-        """Poll the health endpoint inside the container."""
-        start = time.time()
-        while time.time() - start < timeout:
-            exit_code, _ = self._container.exec_run(
-                ["bash", "-c", f"curl -s http://127.0.0.1:{port}/health"],
-            )
-            if exit_code == 0:
-                return
-            time.sleep(0.5)
-        raise TimeoutError(f"Worker server did not start within {timeout}s in container {self.name}")
-
-    def get_endpoint(self, port: int) -> tuple[str, dict[str, str]]:
-        """Return the URL to reach the given port.
-
-        For Docker containers, we use the container's internal IP.
-        """
-        self._container.reload()
-        networks = self._container.attrs["NetworkSettings"]["Networks"]
-        # Use the first available network's IP
-        for net_info in networks.values():
-            ip = net_info.get("IPAddress")
-            if ip:
-                return f"http://{ip}:{port}", {}
-        # Fallback to localhost (works if port is published)
-        return f"http://127.0.0.1:{port}", {}
+    def is_alive(self) -> bool:
+        """Refresh container state from the Docker daemon and check it is running."""
+        try:
+            self._container.reload()
+            return self._container.status == "running"
+        except Exception:
+            logger.debug("DockerSandbox %s is_alive check failed — treating as dead", self.name, exc_info=True)
+            return False
 
     def close(self) -> None:
         """Stop and remove the container."""

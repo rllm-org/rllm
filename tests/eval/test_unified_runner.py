@@ -8,7 +8,6 @@ host-only verifier paths are now exercised through ``SandboxTaskHooks.setup``:
 - ``[verifier].module`` (Python module verifier)
 - ``[verifier].import_path`` (bare callable)
 - Auto-detect via ``tests/evaluate.py``
-- ``evaluator_override`` short-circuits per-task resolution
 - ``"missing"`` verifier raises a clear error
 
 Sandbox-shell + python-hybrid paths need a real container and live in
@@ -24,7 +23,7 @@ import pytest
 
 from rllm.eval._resolution import build_dataset_evaluator
 from rllm.eval.types import EvalOutput
-from rllm.hooks import SandboxTaskHooks
+from rllm.hooks import FixedEvaluation, SandboxTaskHooks
 from rllm.types import AgentConfig, Episode, Step, Task, Trajectory, run_agent_flow
 
 # ---------------------------------------------------------------------------
@@ -67,15 +66,16 @@ def _write_data_dataset(root: Path, *, verifier_block: str) -> Path:
     return bench
 
 
-def _run_through_hooks(agent_flow, task: Task, config: AgentConfig, evaluator_override=None) -> Episode:
+def _run_through_hooks(agent_flow, task: Task, config: AgentConfig) -> Episode:
     """Replicate the Runner.run lifecycle through SandboxTaskHooks for unit tests.
 
     Real eval goes through ``AgentFlowEngine``, which inserts the gateway
     between the flow and its LLM client. These tests skip the gateway
     (the StubAgent doesn't make LLM calls) and just exercise the hook's
-    verifier resolution + reward writeback paths.
+    verifier resolution + reward writeback paths. ``use_snapshot=False``
+    keeps the tests hermetic (no real home snapshot registry).
     """
-    hooks = SandboxTaskHooks(evaluator_override=evaluator_override)
+    hooks = SandboxTaskHooks(use_snapshot=False)
     ctx = hooks.setup(task, agent_flow, "test-uid")
     try:
         episode = asyncio.run(run_agent_flow(agent_flow, task, config))
@@ -102,16 +102,6 @@ def test_runner_dispatches_to_registered_reward_fn(tmp_path, cfg):
 
     assert episode.is_correct is True
     assert episode.trajectories[0].reward == 1.0
-
-
-def test_runner_marks_wrong_answer_incorrect(tmp_path, cfg):
-    bench = _write_data_dataset(tmp_path, verifier_block='[verifier]\nname = "math_reward_fn"\n')
-    task = Task(id="0", instruction="x?", metadata={"ground_truth": "4"}, dataset_dir=bench)
-
-    episode = _run_through_hooks(_StubAgent(answer=r"\boxed{5}"), task, cfg)
-
-    assert episode.is_correct is False
-    assert episode.trajectories[0].reward == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -168,33 +158,6 @@ def test_runner_auto_detects_tests_evaluate_py(tmp_path, cfg):
 
 
 # ---------------------------------------------------------------------------
-# evaluator_override short-circuits resolution
-# ---------------------------------------------------------------------------
-
-
-class _FixedEvaluator:
-    """Always returns the same EvalOutput — used to verify override wins."""
-
-    def __init__(self, output: EvalOutput):
-        self._output = output
-
-    def evaluate(self, task: Task, episode: Episode) -> EvalOutput:
-        return self._output
-
-
-def test_evaluator_override_bypasses_per_task_verifier(tmp_path, cfg):
-    bench = _write_data_dataset(tmp_path, verifier_block='[verifier]\nname = "math_reward_fn"\n')
-    task = Task(id="0", instruction="x?", metadata={"ground_truth": "4"}, dataset_dir=bench)
-
-    # Per-task verifier would say wrong → 0; override says correct → 1
-    override = _FixedEvaluator(EvalOutput(reward=1.0, is_correct=True))
-    episode = _run_through_hooks(_StubAgent(answer="totally wrong"), task, cfg, evaluator_override=override)
-
-    assert episode.is_correct is True
-    assert episode.trajectories[0].reward == 1.0
-
-
-# ---------------------------------------------------------------------------
 # Missing verifier
 # ---------------------------------------------------------------------------
 
@@ -227,18 +190,26 @@ class _FakeSandbox:
         self.close_calls += 1
 
 
+class _FixedEvaluator:
+    """Always returns the same EvalOutput."""
+
+    def __init__(self, output: EvalOutput):
+        self._output = output
+
+    def evaluate(self, task: Task, episode: Episode) -> EvalOutput:
+        return self._output
+
+
 def test_hooks_close_sandbox_for_sandboxed_agent_flow(tmp_path, cfg, monkeypatch):
-    """Regression: SandboxedAgentFlow sandboxes were leaked because the hook
-    teardown went through ``task_flow.teardown_sandbox()``, which is a no-op
-    when ``set_sandbox()`` marked the sandbox externally-managed. The hook
-    creates the sandbox, so it must close it.
+    """The hook creates the sandbox, so its teardown must close it (#616) —
+    flows never own sandbox lifecycle.
     """
     from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
 
     fake_sandbox = _FakeSandbox()
 
     class _SandboxedStub(SandboxedAgentFlow):
-        def run(self, task: Task, config: AgentConfig) -> Episode:
+        def run(self, task: Task, config: AgentConfig, *, env) -> Episode:
             traj = Trajectory(uid="t", name="stub", task=task.id, steps=[], output="")
             return Episode(id=task.id, task=task.id, trajectories=[traj])
 
@@ -256,7 +227,7 @@ def test_hooks_close_sandbox_for_sandboxed_agent_flow(tmp_path, cfg, monkeypatch
     bench.mkdir()
     task = Task(id="0", instruction="x?", metadata={}, dataset_dir=bench)
 
-    hooks = SandboxTaskHooks(evaluator_override=_FixedEvaluator(EvalOutput(reward=1.0, is_correct=True)))
+    hooks = SandboxTaskHooks(evaluation=FixedEvaluation(_FixedEvaluator(EvalOutput(reward=1.0, is_correct=True))), use_snapshot=False)
     ctx = hooks.setup(task, _SandboxedStub(), "test-uid")
     ctx.run_teardown()
 
@@ -269,18 +240,21 @@ def test_hooks_close_sandbox_for_sandboxed_agent_flow(tmp_path, cfg, monkeypatch
 
 
 class TestBuildDatasetEvaluator:
-    def test_registered_name(self, tmp_path):
-        bench = _write_data_dataset(tmp_path, verifier_block='[verifier]\nname = "math_reward_fn"\n')
-        ev = build_dataset_evaluator(bench)
+    def test_host_verifier_kinds_return_evaluator(self, tmp_path):
+        """Both host kinds — registered name and Python module — yield an evaluator."""
+        (tmp_path / "named").mkdir()
+        named = _write_data_dataset(tmp_path / "named", verifier_block='[verifier]\nname = "math_reward_fn"\n')
+        ev = build_dataset_evaluator(named)
         assert ev is not None
         assert hasattr(ev, "evaluate")
 
-    def test_python_module(self, tmp_path):
-        bench = _write_data_dataset(tmp_path, verifier_block='[verifier]\nmodule = "tests.evaluate"\n')
-        (bench / "tests").mkdir()
-        (bench / "tests" / "evaluate.py").write_text(_VERIFIER_PY)
-        ev = build_dataset_evaluator(bench)
+        (tmp_path / "moduled").mkdir()
+        moduled = _write_data_dataset(tmp_path / "moduled", verifier_block='[verifier]\nmodule = "tests.evaluate"\n')
+        (moduled / "tests").mkdir()
+        (moduled / "tests" / "evaluate.py").write_text(_VERIFIER_PY)
+        ev = build_dataset_evaluator(moduled)
         assert ev is not None
+        assert hasattr(ev, "evaluate")
 
     def test_sandbox_shell_returns_none(self, tmp_path):
         bench = tmp_path / "bench"

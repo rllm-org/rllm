@@ -1,30 +1,144 @@
-"""Shared UI helpers for the rLLM CLI."""
+"""Shared UI toolkit for the rLLM CLI.
+
+Single source of truth for the CLI's visual language: the themed ``console``,
+the brand palette, the error/abort helpers, and the table/panel builders every
+command shares. Command modules should import ``console`` (never construct their
+own ``Console``) and render through ``fail``/``not_found``/``abort`` and the
+table helpers rather than hand-rolling Rich objects or raising ``SystemExit``.
+"""
 
 from __future__ import annotations
 
 import sys
+from typing import NoReturn
 
+import click
+from rich import box
 from rich.console import Console
+from rich.markup import escape
+from rich.panel import Panel
 from rich.prompt import Prompt
+from rich.table import Table
 from rich.theme import Theme
-
-from rllm.eval.config import (
-    PROVIDER_MODELS,
-    PROVIDER_REGISTRY,
-    RllmConfig,
-)
 
 theme = Theme(
     {
-        "option": "cyan",
-        "option.selected": "bold cyan",
+        # semantic
         "label": "dim",
         "success": "bold green",
         "error": "bold red",
+        "val": "bold",
         "key": "yellow",
+        "option": "cyan",
+        "option.selected": "bold cyan",
+        # brand palette (formerly inline hex in dataset.py / main.py)
+        "brand": "#00D4FF",
+        "accent": "#00CCFF",
+        "header": "bold #00D4FF",
+        "border": "dim #0077FF",
+        "highlight": "#FFD700",
+        "muted": "#88BBFF",
     }
 )
 console = Console(theme=theme)
+_err_console = Console(theme=theme, stderr=True)
+
+
+# --- errors / exits ---------------------------------------------------------
+
+
+class CliError(click.ClickException):
+    """A CLI error rendered through the themed console (stderr, exit code 1)."""
+
+    def show(self, file=None) -> None:
+        # Escape the message: it routinely interpolates user input (paths,
+        # dataset names) that must not be parsed as Rich markup.
+        _err_console.print(f"  [error]Error:[/] {escape(self.message)}")
+
+
+def fail(message: str) -> NoReturn:
+    """Abort the command with an error message (stderr, exit code 1)."""
+    raise CliError(message)
+
+
+def not_found(thing: str, name: str, hint: str | None = None) -> NoReturn:
+    """Abort with a consistent ``<thing> '<name>' not found`` error."""
+    fail(f"{thing} '{name}' not found." + (f" {hint}" if hint else ""))
+
+
+def abort() -> NoReturn:
+    """Cancel an interactive flow (prints ``Aborted!``, exit code 1)."""
+    raise click.Abort()
+
+
+def parse_index_spec(spec: str) -> list[int]:
+    """Parse an index spec (``"5"``, ``"3,7,12"``, ``"0-9"``, ``"2,5-8,11"``) into a list of ints.
+
+    Raises ``click.BadParameter`` on malformed input (non-integer or reversed range).
+    """
+    indices: list[int] = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            if "-" in part:
+                lo, hi = (int(x) for x in part.split("-", 1))
+                if lo > hi:
+                    raise ValueError
+                indices.extend(range(lo, hi + 1))
+            else:
+                indices.append(int(part))
+        except ValueError:
+            raise click.BadParameter(f"invalid index spec {part!r}; expected N or N-M (e.g. '0', '3,7', '0-9')") from None
+    return indices
+
+
+# --- tables / panels --------------------------------------------------------
+
+
+def info_panel(
+    rows: list[tuple[str, str]],
+    *,
+    title: str | None = None,
+    border: str = "brand",
+    label_width: int = 12,
+) -> Panel:
+    """A key/value detail panel for ``info`` / ``show`` / summary screens."""
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column(style="label", width=label_width)
+    table.add_column()
+    for label, value in rows:
+        table.add_row(label, value)
+    return Panel(table, title=title, border_style=border, expand=False)
+
+
+def catalog_table(title: str | None = None, *, width: int | None = None) -> Table:
+    """An empty ROUNDED catalog table in the brand palette; caller adds the columns."""
+    return Table(
+        box=box.ROUNDED,
+        show_header=True,
+        header_style="header",
+        border_style="border",
+        title=title,
+        title_style="bold",
+        padding=(0, 1),
+        expand=False,
+        width=width,
+    )
+
+
+def simple_table(headers: list[str], rows: list[list[str]], *, title: str | None = None) -> Table:
+    """A flat themed table (replaces the old plain-ASCII ``format_table``)."""
+    table = catalog_table(title)
+    for header in headers:
+        table.add_column(header)
+    for row in rows:
+        table.add_row(*row)
+    return table
+
+
+# --- interactive selection --------------------------------------------------
 
 
 def _mask_key(key: str) -> str:
@@ -87,8 +201,10 @@ def _select_from_menu(title: str, choices: list[str], cursor: int = 0) -> int | 
         console.print(f"  [error]Please enter a number between 1 and {len(choices)}.[/]")
 
 
-def _select_provider(existing: RllmConfig) -> str:
+def _select_provider(existing) -> str:
     """Interactive provider selection using display labels."""
+    from rllm.eval.config import PROVIDER_REGISTRY
+
     choices = [p.label for p in PROVIDER_REGISTRY]
     provider_ids = [p.id for p in PROVIDER_REGISTRY]
 
@@ -98,18 +214,23 @@ def _select_provider(existing: RllmConfig) -> str:
 
     idx = _select_from_menu("Provider", choices, cursor)
     if idx is None:
-        console.print("\n  [dim]Aborted.[/]")
-        raise SystemExit(1)
+        abort()
     return provider_ids[idx]
 
 
-def _select_model(provider: str, existing: RllmConfig, api_key: str | None = None) -> str:
+def _select_model(provider: str, existing, api_key: str | None = None) -> str:
     """Interactive model selection with option to enter a custom model.
 
     For Tinker, the model list is pulled live from the server's capabilities
     (``api_key`` lets the fetch authenticate); the curated list is the fallback.
     """
+    from rllm.eval.config import PROVIDER_MODELS
+
     models = PROVIDER_MODELS.get(provider, [])
+    # Display labels, one per entry in ``models``. Defaults to the model IDs
+    # themselves; a provider branch may override to annotate entries (e.g.
+    # Fireworks marks account models that need a dedicated deployment).
+    labels: list[str] | None = None
 
     if provider == "tinker":
         from rllm.eval.config import fetch_tinker_models
@@ -122,16 +243,34 @@ def _select_model(provider: str, existing: RllmConfig, api_key: str | None = Non
         else:
             console.print("  [dim]Could not fetch live catalog — showing curated list (or enter a tinker:// path manually).[/]")
 
+    if provider == "fireworks":
+        from rllm.eval.config import fetch_fireworks_deployed_models, fetch_fireworks_models
+
+        with console.status("[dim]Fetching Fireworks model catalog...[/]"):
+            serverless = fetch_fireworks_models(api_key)
+            deployed = fetch_fireworks_deployed_models(api_key)
+        if serverless or deployed:
+            # Both are runnable now: public serverless models, plus the
+            # account's own actively deployed models (flagged for provenance).
+            models = list(serverless) + list(deployed)
+            labels = list(serverless) + [f"{m}  (your deployment)" for m in deployed]
+            console.print(f"  [success]Loaded {len(serverless)} serverless + {len(deployed)} deployed models[/] [dim](you can also enter any accounts/.../models/... ID manually)[/]")
+        else:
+            console.print("  [dim]Could not fetch live catalog — showing curated list (or enter a model ID manually).[/]")
+
     # For custom provider or providers with no curated list, prompt for free-text
     if provider == "custom" or not models:
         default = existing.model if existing.model else ""
         model = Prompt.ask("  Enter model name", default=default or None, console=console).strip()
         if not model:
-            console.print("  [error]Model is required.[/]")
-            raise SystemExit(1)
+            fail("Model is required.")
         return model
 
-    choices = list(models) + ["Other (enter manually)"]
+    # ``models`` holds the selectable IDs; ``labels`` holds what's shown (they
+    # differ when a provider annotates entries). Keep them index-aligned.
+    if labels is None:
+        labels = list(models)
+    choices = labels + ["Other (enter manually)"]
 
     cursor = 0
     if existing.model in models:
@@ -141,17 +280,15 @@ def _select_model(provider: str, existing: RllmConfig, api_key: str | None = Non
 
     idx = _select_from_menu("Model", choices, cursor)
     if idx is None:
-        console.print("\n  [dim]Aborted.[/]")
-        raise SystemExit(1)
+        abort()
 
     if idx == len(models):
         default = existing.model if existing.model and existing.model not in models else ""
         model = Prompt.ask("  Enter model name", default=default or None, console=console).strip()
         if not model:
-            console.print("  [error]Model is required.[/]")
-            raise SystemExit(1)
+            fail("Model is required.")
     else:
-        model = choices[idx]
+        model = models[idx]
 
     return model
 
@@ -161,6 +298,5 @@ def _prompt_base_url() -> str:
     console.print("  [dim]Examples: http://localhost:8000/v1, https://my-api.example.com/v1[/]")
     url = Prompt.ask("  [label]Base URL[/]", console=console).strip()
     if not url:
-        console.print("  [error]Base URL is required for custom provider.[/]")
-        raise SystemExit(1)
+        fail("Base URL is required for custom provider.")
     return url

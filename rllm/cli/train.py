@@ -15,15 +15,10 @@ import os
 from pathlib import Path
 
 import click
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
-from rich.theme import Theme
 
 from rllm.cli._pull import load_dataset_catalog, pull_dataset
-
-theme = Theme({"label": "dim", "success": "bold green", "error": "bold red", "val": "bold", "key": "yellow"})
-console = Console(theme=theme)
+from rllm.cli._sampling import SAMPLING_PARAMS_HELP as _SAMPLING_PARAMS_HELP
+from rllm.cli._ui import console, fail, info_panel
 
 # Path to the bundled YAML config templates
 _CONFIG_PKG = Path(__file__).resolve().parent.parent / "trainer" / "config"
@@ -75,9 +70,13 @@ def build_train_config(
     )
 
     # If user provided a --config file, merge it on top
+    user_workflow_timeout = None
     if config_file:
         user_cfg = OmegaConf.load(config_file)
         merged = OmegaConf.merge(merged, user_cfg)
+        # The CLI override block below sets a rollout timeout default; a
+        # timeout declared in the user's --config must survive it.
+        user_workflow_timeout = OmegaConf.select(user_cfg, "rllm.workflow.workflow_args.timeout")
 
     # Apply CLI overrides (only non-default values)
     overrides = OmegaConf.create(
@@ -88,6 +87,10 @@ def build_train_config(
             "data": {"train_batch_size": batch_size},
             "rllm": {
                 "model_name": model_name,
+                # Post-#627 the loader reads rllm.data directly, so the CLI batch
+                # size must land here too (sync_config keeps the native data.* in
+                # parity); writing both keeps them consistent before sync runs.
+                "data": {"train_batch_size": batch_size},
                 "trainer": {
                     "total_epochs": total_epochs,
                     "test_freq": val_freq,
@@ -101,7 +104,8 @@ def build_train_config(
                 "workflow": {
                     "use_workflow": True,
                     "workflow_args": {
-                        "timeout": 300,  # 5-minute timeout per rollout
+                        # Default rollout timeout; a --config-declared value wins.
+                        "timeout": user_workflow_timeout if user_workflow_timeout is not None else 300,
                     },
                 },
             },
@@ -164,6 +168,10 @@ def _run_train(
     enable_ui: bool = False,
     sandbox_backend: str | None = None,
     sandbox_concurrency: int | None = None,
+    sampling_params: str | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    max_tokens: int | None = None,
 ):
     """Core training logic: resolve catalog, load data, build config, launch trainer."""
 
@@ -172,9 +180,7 @@ def _run_train(
         from rllm.eval.evaluator_loader import load_evaluator, resolve_evaluator_from_catalog
         from rllm.trainer import AgentTrainer
     except ImportError as e:
-        console.print(f"  [error]Missing training dependencies: {e}[/]")
-        console.print("  Install with: [bold]pip install rllm\\[train][/]")
-        raise SystemExit(1) from None
+        fail(f"Missing training dependencies: {e}\n  Install with: pip install 'rllm[train]'")
 
     # ------------------------------------------------------------------
     # Local benchmark path: directory with dataset.toml / task.toml
@@ -187,8 +193,22 @@ def _run_train(
     val_ds_name = val_dataset_name or benchmark
 
     if BenchmarkLoader.is_local_benchmark(benchmark):
+        from rllm.data.dataset import Dataset as _Dataset
+
+        # --train/--val-dataset may each point at a separate local benchmark dir;
+        # an unset (or non-local) --val-dataset falls back to reusing the train tasks.
+        train_dir = train_dataset_name if (train_dataset_name and BenchmarkLoader.is_local_benchmark(train_dataset_name)) else benchmark
+        val_dir = val_dataset_name if (val_dataset_name and BenchmarkLoader.is_local_benchmark(val_dataset_name)) else None
+        if val_dataset_name and val_dir is None:
+            console.print(f"  [key]--val-dataset '{val_dataset_name}' is not a local benchmark dir; reusing train tasks for validation.[/]")
+
         # For local sandbox tasks, --agent picks the AgentFlow.
-        bench_result = BenchmarkLoader.load(benchmark, harness_name=agent_name)
+        bench_result = BenchmarkLoader.load(train_dir, sandbox_backend=sandbox_backend, harness_name=agent_name)
+        # dataset.toml's default_sandbox applies when --sandbox-backend wasn't
+        # given (same rule as the eval CLI).
+        if not sandbox_backend and bench_result.sandbox_backend:
+            sandbox_backend = bench_result.sandbox_backend
+        train_ds_name = bench_result.name
         catalog_entry = {
             "description": bench_result.description,
             "category": bench_result.category,
@@ -200,51 +220,47 @@ def _run_train(
         try:
             agent_flow = load_agent(agent_name)
         except (KeyError, ImportError, AttributeError, TypeError) as e:
-            console.print(f"  [error]Cannot load agent '{agent_name}': {e}[/]")
-            raise SystemExit(1) from None
+            fail(f"Cannot load agent '{agent_name}': {e}")
 
-        # Evaluator: --evaluator > dataset.toml [verifier].
-        # Sandbox-shell verifiers aren't supported here (per-task sandbox
-        # lifecycle lives inside Runner) — use --evaluator to override.
-        evaluator_display = "N/A"
+        # Evaluator: --evaluator > train dataset.toml [verifier]; a host-side
+        # evaluator scores both train and val. Env-style verifiers
+        # (sandbox-shell / python-hybrid) resolve per task inside the sandbox
+        # via SandboxTaskHooks, so leave ``evaluator`` unset for those.
         if evaluator_name is not None:
             evaluator = load_evaluator(evaluator_name)
             evaluator_display = evaluator_name
         else:
             from pathlib import Path as _Path
 
-            from rllm.eval._resolution import build_dataset_evaluator
+            from rllm.eval._resolution import build_dataset_evaluator, dataset_verifier_kind
 
-            evaluator = build_dataset_evaluator(_Path(benchmark).resolve())
-            if evaluator is None:
-                console.print(
-                    "  [error]Could not resolve a verifier for this benchmark. "
-                    "Declare a host-side verifier in dataset.toml ([verifier].name / "
-                    ".module / .import_path) or pass --evaluator explicitly. "
-                    "Sandbox-shell verifiers aren't supported in training yet.[/]"
-                )
-                raise SystemExit(1)
-            evaluator_display = f"{type(evaluator).__name__} (from dataset.toml)"
-
-        # Datasets: pass the Task list as both train and val for now
-        from rllm.data.dataset import Dataset as _Dataset
+            train_dir_path = _Path(train_dir).resolve()
+            evaluator = build_dataset_evaluator(train_dir_path)
+            if evaluator is not None:
+                evaluator_display = f"{type(evaluator).__name__} (from dataset.toml)"
+            else:
+                kind = dataset_verifier_kind(train_dir_path)
+                if kind == "missing":
+                    fail("Could not resolve a verifier for this benchmark. Declare a verifier in dataset.toml ([verifier].name / .module / .import_path / .script) or pass --evaluator explicitly.")
+                evaluator_display = f"per-task ({kind}, in-sandbox)"
 
         if train_split is None:
             train_split = bench_result.split or "train"
-        train_dataset = _Dataset(
-            data=list(bench_result.tasks),
-            name=bench_result.name,
-            split=train_split,
-        )
+        train_dataset = _Dataset(data=list(bench_result.tasks), name=bench_result.name, split=train_split)
         if max_examples is not None and max_examples < len(train_dataset):
             train_dataset = train_dataset.select(range(max_examples))
-        val_dataset = _Dataset(
-            data=list(bench_result.tasks),
-            name=bench_result.name,
-            split=bench_result.split or "test",
-        )
-        if val_split is None:
-            val_split = train_dataset.split or "test"
+
+        if val_dir is not None:
+            val_result = BenchmarkLoader.load(val_dir, harness_name=agent_name)
+            val_ds_name = val_result.name
+            if val_split is None:
+                val_split = val_result.split or "test"
+            val_dataset = _Dataset(data=list(val_result.tasks), name=val_result.name, split=val_split)
+        else:
+            val_ds_name = bench_result.name
+            if val_split is None:
+                val_split = bench_result.split or "test"
+            val_dataset = _Dataset(data=list(bench_result.tasks), name=bench_result.name, split=val_split)
 
     # ------------------------------------------------------------------
     # Catalog / Harbor path (existing behavior)
@@ -264,30 +280,30 @@ def _run_train(
                 console.print(f"  [success]Found Harbor dataset:[/] [val]{harbor_name}[/]")
                 benchmark = harbor_name
 
-        # ---- Docker check for Harbor datasets ----
-        if catalog_entry and catalog_entry.get("source", "").startswith("harbor:"):
+        # ---- Docker check for Harbor datasets (local backends only) ----
+        from rllm.gateway.tunnel import is_local_sandbox_backend
+
+        if catalog_entry and catalog_entry.get("source", "").startswith("harbor:") and is_local_sandbox_backend(sandbox_backend):
             from rllm.integrations.harbor.utils import diagnose_docker
 
             ok, reason, hint = diagnose_docker()
             if not ok:
-                console.print(f"  [error]Harbor tasks require Docker — {reason}.[/]")
+                message = f"Harbor tasks require Docker — {reason}."
                 if hint:
-                    console.print(f"  [dim]{hint}[/]")
-                raise SystemExit(1)
+                    message += f"\n  [dim]{hint}[/]"
+                fail(message)
 
         # ---- Resolve agent ----
         if agent_name is None:
             if catalog_entry and "default_agent" in catalog_entry:
                 agent_name = catalog_entry["default_agent"]
             else:
-                console.print(f"  [error]No --agent specified and no default_agent in catalog for '{benchmark}'.[/]")
-                raise SystemExit(1)
+                fail(f"No --agent specified and no default_agent in catalog for '{benchmark}'.")
 
         try:
             agent_flow = load_agent(agent_name)
         except (KeyError, ImportError, AttributeError, TypeError) as e:
-            console.print(f"  [error]Error loading agent '{agent_name}': {e}[/]")
-            raise SystemExit(1) from None
+            fail(f"Error loading agent '{agent_name}': {e}")
 
         _is_harbor_source = bool(catalog_entry) and catalog_entry.get("source", "").startswith("harbor:")
         _is_harbor_agent = bool(agent_name) and agent_name.startswith("harbor:")
@@ -302,8 +318,7 @@ def _run_train(
                 evaluator = load_evaluator(evaluator_name)
                 evaluator_display = f"{evaluator_name} (overrides per-task verifier)"
             except (KeyError, ImportError, AttributeError, TypeError) as e:
-                console.print(f"  [error]Error loading evaluator '{evaluator_name}': {e}[/]")
-                raise SystemExit(1) from None
+                fail(f"Error loading evaluator '{evaluator_name}': {e}")
         else:
             _harbor_reward_fn_skipped = _is_harbor_source and catalog_entry.get("reward_fn") == "harbor_reward_fn" and not _is_harbor_agent
             if _harbor_reward_fn_skipped:
@@ -321,8 +336,7 @@ def _run_train(
                         pass
 
         if evaluator is None and not _is_harbor_source:
-            console.print(f"  [error]No evaluator found for '{benchmark}'. Specify --evaluator explicitly.[/]")
-            raise SystemExit(1)
+            fail(f"No evaluator found for '{benchmark}'. Specify --evaluator explicitly.")
 
         # ---- Resolve dataset names ----
         train_ds_name = train_dataset_name or benchmark
@@ -347,8 +361,7 @@ def _run_train(
         # ---- Load training dataset ----
         train_dataset = _load_or_pull_dataset(train_ds_name, train_split, catalog, train_entry)
         if train_dataset is None:
-            console.print(f"  [error]Could not load training dataset '{train_ds_name}' split '{train_split}'.[/]")
-            raise SystemExit(1)
+            fail(f"Could not load training dataset '{train_ds_name}' split '{train_split}'.")
 
         if max_examples is not None and max_examples < len(train_dataset):
             train_dataset = train_dataset.select(range(max_examples))
@@ -384,6 +397,20 @@ def _run_train(
         config_file=config_file,
     )
 
+    # Layer --sampling-params over base.yaml rollout.{train,val}; gateway-enforced.
+    from omegaconf import OmegaConf
+
+    from rllm.cli._sampling import resolve_train_sampling
+
+    base_train = OmegaConf.to_container(config.rllm.rollout.train, resolve=True)
+    base_val = OmegaConf.to_container(config.rllm.rollout.val, resolve=True)
+    try:
+        train_sc, val_sc = resolve_train_sampling(sampling_params, temperature, top_p, max_tokens, base_train=base_train, base_val=base_val)
+    except (ValueError, FileNotFoundError, TypeError) as e:
+        fail(f"Invalid --sampling-params: {e}")
+    config.rllm.rollout.train = train_sc.as_dict()
+    config.rllm.rollout.val = val_sc.as_dict()
+
     # ---- Wire UI logging ----
     if enable_ui:
         if not os.environ.get("RLLM_UI_URL"):
@@ -403,32 +430,36 @@ def _run_train(
         )
 
     # ---- Display header ----
-    table = Table(show_header=False, box=None, padding=(0, 2))
-    table.add_column(style="label", width=14)
-    table.add_column()
-    table.add_row("Benchmark", f"[val]{benchmark}[/]")
-    table.add_row("Model", f"[val]{model}[/]")
-    table.add_row("Agent", f"[val]{agent_name}[/]")
-    table.add_row("Evaluator", f"[dim]{evaluator_display}[/]")
-    table.add_row("Train data", f"[val]{train_ds_name}[/]  [dim]({train_split}, {len(train_dataset)} examples)[/]")
     val_info = f"[val]{val_ds_name}[/]  [dim]({val_split}, {len(val_dataset)} examples)[/]" if val_dataset else "[dim]None[/]"
-    table.add_row("Val data", val_info)
+    rows = [
+        ("Benchmark", f"[val]{benchmark}[/]"),
+        ("Model", f"[val]{model}[/]"),
+        ("Agent", f"[val]{agent_name}[/]"),
+        ("Evaluator", f"[dim]{evaluator_display}[/]"),
+        ("Train data", f"[val]{train_ds_name}[/]  [dim]({train_split}, {len(train_dataset)} examples)[/]"),
+        ("Val data", val_info),
+    ]
     tunnel_cfg = (config.rllm.get("gateway", {}) or {}).get("tunnel")
     sandbox_row = _describe_sandbox_routing(agent_flow, train_dataset, val_dataset, sandbox_backend, sandbox_concurrency, tunnel_cfg)
     if sandbox_row is not None:
-        table.add_row("Sandbox", sandbox_row)
-    table.add_row("Group size", f"[dim]{group_size}[/]")
-    table.add_row("Batch size", f"[dim]{batch_size}[/]")
-    table.add_row("Learning rate", f"[dim]{lr}[/]")
-    table.add_row("LoRA rank", f"[dim]{lora_rank}[/]")
+        rows.append(("Sandbox", sandbox_row))
+    train_sp = train_sc.as_dict()
+    val_sp = val_sc.as_dict()
+    if train_sp or val_sp:
+        sp_text = f"train={train_sp}" + (f"  val={val_sp}" if val_sp != train_sp else "")
+        rows.append(("Sampling", f"[dim]{sp_text} (gateway-enforced)[/]"))
+    rows.append(("Group size", f"[dim]{group_size}[/]"))
+    rows.append(("Batch size", f"[dim]{batch_size}[/]"))
+    rows.append(("Learning rate", f"[dim]{lr}[/]"))
+    rows.append(("LoRA rank", f"[dim]{lora_rank}[/]"))
     epochs_str = f"[dim]{total_epochs}[/]"
     if total_steps is not None:
         epochs_str += f"  [dim](max {total_steps} steps)[/]"
-    table.add_row("Epochs", epochs_str)
+    rows.append(("Epochs", epochs_str))
     if enable_ui:
-        table.add_row("Live UI", f"[val]{os.environ['RLLM_UI_URL']}[/]")
+        rows.append(("Live UI", f"[val]{os.environ['RLLM_UI_URL']}[/]"))
     console.print()
-    console.print(Panel(table, title="[bold]rLLM Train[/]", border_style="cyan", expand=False))
+    console.print(info_panel(rows, title="[bold]rLLM Train[/]", label_width=14))
     console.print()
 
     # ---- Launch training ----
@@ -451,13 +482,13 @@ def _describe_sandbox_routing(
     val_dataset,
     sandbox_backend: str | None,
     sandbox_concurrency: int | None,
-    tunnel: str | None = None,
+    tunnel: str | None,
 ) -> str | None:
     """One-line description of sandbox + gateway routing for the header. Returns ``None`` when no sandbox is needed."""
     from rllm.gateway.tunnel import is_local_sandbox_backend, parse_tunnel
-    from rllm.hooks import needs_sandbox_isolation
+    from rllm.hooks import scan_env_requirements
 
-    if not needs_sandbox_isolation(agent_flow, train_dataset, val_dataset):
+    if not scan_env_requirements(agent_flow, train_dataset, val_dataset, sandbox_backend=sandbox_backend).needs_env:
         return None
 
     backend = (sandbox_backend or "docker").lower()
@@ -553,7 +584,12 @@ def _load_or_pull_dataset(name: str, split: str, catalog: dict, catalog_entry_ov
     type=click.Choice(["docker", "local", "modal", "daytona", "e2b", "runloop", "gke", "apple-container"], case_sensitive=False),
     help="Sandbox backend for SandboxedAgentFlow harnesses (default: per-task or docker). Remote backends auto-spawn a cloudflared tunnel for the gateway.",
 )
-@click.option("--sandbox-concurrency", "sandbox_concurrency", default=None, type=int, help="Override max concurrent sandboxes (default: agent's max_concurrent — usually 4).")
+@click.option("--sandbox-concurrency", "sandbox_concurrency", default=None, type=int, help="Override max concurrent sandboxes (default: agent's max_concurrent — usually 64).")
+# Sampling options (resolved into rollout.{train,val}; gateway-enforced)
+@click.option("--sampling-params", "sampling_params", default=None, help=_SAMPLING_PARAMS_HELP)
+@click.option("--temperature", default=None, type=float, help="Sampling temperature for train+val (shortcut for --sampling-params temperature=...).")
+@click.option("--top-p", "top_p", default=None, type=float, help="Nucleus sampling top_p for train+val (shortcut).")
+@click.option("--max-tokens", "max_tokens", default=None, type=int, help="Max generated tokens per call for train+val (shortcut).")
 def train_cmd(
     benchmark: str,
     train_dataset: str | None,
@@ -579,6 +615,10 @@ def train_cmd(
     enable_ui: bool | None,
     sandbox_backend: str | None,
     sandbox_concurrency: int | None,
+    sampling_params: str | None,
+    temperature: float | None,
+    top_p: float | None,
+    max_tokens: int | None,
 ):
     """Train a model on a benchmark dataset using RL."""
     # Auto-detect UI logging: enable if user is logged in (has ui_api_key or RLLM_API_KEY)
@@ -620,4 +660,8 @@ def train_cmd(
         enable_ui=enable_ui,
         sandbox_backend=sandbox_backend,
         sandbox_concurrency=sandbox_concurrency,
+        sampling_params=sampling_params,
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
     )

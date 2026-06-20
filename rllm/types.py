@@ -18,6 +18,7 @@ as a backward-compat re-export shim.
 from __future__ import annotations
 
 import asyncio
+import functools
 import inspect
 import uuid
 from copy import deepcopy
@@ -422,6 +423,8 @@ class AgentConfig:
     session_uid: str
     metadata: dict = field(default_factory=dict)
     is_validation: bool = False
+    # Informational copy of the gateway-enforced sampling config; not authoritative
+    # (the gateway applies it server-side regardless of what the flow passes).
     sampling_params: dict = field(default_factory=dict)
 
 
@@ -435,6 +438,11 @@ class AgentFlow(Protocol):
     Implementations may provide either ``run`` (sync) or ``arun``
     (async). If both are present, callers should prefer ``arun`` when
     running inside an event loop — see :func:`run_agent_flow`.
+
+    Flows that work against a sandbox declare ``needs_env = True`` and
+    accept it as a keyword-only argument: ``run(self, task, config, *,
+    env)`` — see :func:`flow_accepts_env`. The engine provisions the
+    sandbox and passes it in; flows hold no sandbox state.
 
     Return value: ``Episode`` for full control (multi-trajectory flows
     must use this), a ``Trajectory`` (auto-wrapped in an Episode), or
@@ -493,26 +501,53 @@ class Evaluator(Protocol):
     def evaluate(self, task: Any, episode: Episode) -> EvalOutput: ...
 
 
+def flow_accepts_env(agent: AgentFlow) -> bool:
+    """True when the flow's entry point declares a keyword-only ``env`` parameter.
+
+    Flows that work inside a sandbox receive it as a call argument
+    (``run(self, task, config, *, env)``) instead of holding it as state.
+    Checked once at engine bind time, not per rollout.
+    """
+    fn = agent.arun if hasattr(agent, "arun") and inspect.iscoroutinefunction(getattr(agent, "arun", None)) else getattr(agent, "run", None)
+    if fn is None:
+        return False
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    env_param = params.get("env")
+    if env_param is not None and env_param.kind is inspect.Parameter.KEYWORD_ONLY:
+        return True
+    # A **kwargs entry point (proxy/decorator wrappers) forwards env fine.
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
 async def run_agent_flow(
     agent: AgentFlow,
     task: Any,
     config: AgentConfig,
     executor=None,
+    env: Any = None,
 ) -> Episode:
     """Run an :class:`AgentFlow`, preferring its async ``arun`` when present.
 
     Falls back to running ``run`` in *executor* (a ``ThreadPoolExecutor``)
     so that sync agent flows don't block the event loop.
 
+    ``env`` (a live :class:`~rllm.sandbox.protocol.Sandbox`, when the rollout
+    has one) is forwarded keyword-only to flows that declare it — see
+    :func:`flow_accepts_env`; pass ``None`` for flows that don't.
+
     The return value is coerced into an :class:`Episode` via
     :func:`_coerce_to_episode`, so flows may return ``Episode``,
     ``Trajectory``, or ``None``.
     """
+    kwargs = {"env": env} if env is not None else {}
     if hasattr(agent, "arun") and inspect.iscoroutinefunction(agent.arun):
-        result = await agent.arun(task, config)
+        result = await agent.arun(task, config, **kwargs)
     else:
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(executor, agent.run, task, config)
+        result = await loop.run_in_executor(executor, functools.partial(agent.run, task, config, **kwargs))
 
     traj_name = getattr(agent, "name", None) or _DEFAULT_TRAJ_NAME
     return _coerce_to_episode(result, task, traj_name)

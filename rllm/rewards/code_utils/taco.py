@@ -18,6 +18,7 @@ from unittest.mock import mock_open, patch
 
 import numpy as np
 
+from rllm.env import env_int
 from rllm.rewards.code_utils.pyext2 import RuntimeModule
 
 from .utils import BASE_IMPORTS
@@ -70,7 +71,7 @@ try:
     signal.signal(signal.SIGALRM, timeout_handler)
 except ValueError:
     pass  # signal only works in main thread; skip in Ray workers
-TIMEOUT = 90  # seconds
+TIMEOUT = env_int("RLLM_TACO_EXEC_TIMEOUT_S", 90)  # set env var: export RLLM_TACO_EXEC_TIMEOUT_S=xxx
 
 EXECUTION_RESULTS = {1: "passed", 0: "false", -1: "timeout", -2: "runtime_error", -3: "returncode:{code}", -4: "compile_error"}
 

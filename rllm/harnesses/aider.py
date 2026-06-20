@@ -65,14 +65,13 @@ class AiderHarness(BaseCliHarness):
 
     name = "aider"
     sandbox_backend = "docker"
-    max_concurrent = 4
     stdout_log_path = "/tmp/aider.log"
 
     def install_script(self) -> str:
         return _INSTALL_SCRIPT
 
     def build_env(self, task: Task, config: AgentConfig) -> dict[str, str]:
-        gateway_url = self._container_url(config.base_url)
+        gateway_url = config.base_url
         provider, _, _ = self.ensure_provider_prefix(config.model)
         api_key = self.gateway_api_key(config, _PROVIDER_KEY_VAR.get(provider, "OPENAI_API_KEY"))
 

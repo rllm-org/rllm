@@ -29,6 +29,7 @@ For Tinker backends, an in-process handler is injected into the gateway
 from __future__ import annotations
 
 import logging
+import re
 import socket
 import subprocess
 import sys
@@ -39,6 +40,8 @@ from typing import TYPE_CHECKING, Any
 from rllm_model_gateway.client import AsyncGatewayClient, GatewayClient
 from rllm_model_gateway.models import TraceRecord
 
+from rllm.env import env_float
+
 if TYPE_CHECKING:
     from omegaconf import DictConfig
 
@@ -47,7 +50,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _HEALTH_POLL_INTERVAL = 0.5
-_HEALTH_POLL_TIMEOUT = 30.0
+_HEALTH_POLL_TIMEOUT = env_float("RLLM_GATEWAY_HEALTH_TIMEOUT_S", 30.0)  # set env var: export RLLM_GATEWAY_HEALTH_TIMEOUT_S=xxx
 _TRACE_API_TIMEOUT = 600.0
 
 
@@ -56,6 +59,26 @@ def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def container_reachable_url(url: str, backend: str | None) -> str:
+    """Rewrite host loopback addresses so a process inside a container can reach the gateway.
+
+    The gateway binds to 127.0.0.1 on the host; inside a Docker container
+    that loopback addresses the container itself. Docker Desktop resolves
+    ``host.docker.internal`` to the host, and on Linux Docker 20.10+ the
+    same hostname works when the container is started with
+    ``--add-host=host.docker.internal:host-gateway``. Keyed on the backend
+    that actually provisioned the task's sandbox; a no-op for everything
+    but ``docker`` (remote backends get a public tunnel URL instead).
+    """
+    if backend != "docker":
+        return url
+    return re.sub(
+        r"(https?://)(?:127\.0\.0\.1|localhost)(:\d+|/|$)",
+        r"\1host.docker.internal\2",
+        url,
+    )
 
 
 def _normalize_worker_url(raw_url: str) -> str:
@@ -136,7 +159,6 @@ class GatewayManager:
         from rllm.gateway.tunnel import parse_tunnel
 
         self.public_url, self.tunnel_backend = parse_tunnel(gw_cfg.get("tunnel", None))
-        self.sampling_params_priority: str = gw_cfg.get("sampling_params_priority", "client")
         # The gateway always pins ``body.model`` to whatever the trainer is serving
         self.model: str | None = config.get("model", {}).get("name", None)
 
@@ -258,12 +280,20 @@ class GatewayManager:
 
     # -- Session / trace API -------------------------------------------------
 
-    def create_session(self, session_id: str, is_validation: bool = False) -> str:
-        sp = self._val_sampling_params if is_validation else self._train_sampling_params
+    def create_session(self, session_id: str, is_validation: bool = False, sampling_params: dict[str, Any] | None = None) -> str:
+        sp = sampling_params if sampling_params is not None else (self._val_sampling_params if is_validation else self._train_sampling_params)
         return self.client.create_session(session_id=session_id, sampling_params=sp or None)
 
-    def get_session_url(self, session_id: str) -> str:
-        if self.public_url:
+    def get_session_url(self, session_id: str, *, public: bool = True) -> str:
+        """Session-scoped base URL for the flow's LLM client.
+
+        ``public=False`` returns the host-local gateway URL even when a tunnel
+        is up — for flows whose LLM client runs on the host (e.g. a sandboxed
+        bash loop driving the sandbox via ``exec``). The tunnel hostname only
+        matters to clients *inside* the env, and free quick-tunnel hostnames
+        can die mid-run; host-side clients should never depend on them.
+        """
+        if public and self.public_url:
             base = self.public_url.rstrip("/")
             return f"{base}/sessions/{session_id}/v1"
         return self.client.get_session_url(session_id)
@@ -274,8 +304,8 @@ class GatewayManager:
 
     # -- Async session / trace API -------------------------------------------
 
-    async def acreate_session(self, session_id: str, is_validation: bool = False) -> str:
-        sp = self._val_sampling_params if is_validation else self._train_sampling_params
+    async def acreate_session(self, session_id: str, is_validation: bool = False, sampling_params: dict[str, Any] | None = None) -> str:
+        sp = sampling_params if sampling_params is not None else (self._val_sampling_params if is_validation else self._train_sampling_params)
         return await self.async_client.create_session(session_id=session_id, sampling_params=sp or None)
 
     async def aget_traces(self, session_id: str) -> list[TraceRecord]:
@@ -325,8 +355,6 @@ class GatewayManager:
         cmd.extend(["--store", self.store])
         if self.db_path:
             cmd.extend(["--db-path", self.db_path])
-        if self.sampling_params_priority != "client":
-            cmd.extend(["--sampling-params-priority", self.sampling_params_priority])
         if self.model:
             cmd.extend(["--model", self.model])
         if self.cumulative_token_mode:
@@ -367,7 +395,6 @@ class GatewayManager:
             port=self.port,
             db_path=self.db_path,
             store_worker=self.store,
-            sampling_params_priority=self.sampling_params_priority,
             model=self.model,
             add_logprobs=self.add_logprobs,
             add_return_token_ids=self.add_return_token_ids,

@@ -1,183 +1,343 @@
+"""RolloutEngine backed by Fireworks ``DeploymentSampler``.
+
+Inherits from ``TinkerEngine``. The only differences are:
+
+1. ``__init__``: creates a ``DeploymentSampler`` instead of requiring a
+   ``tinker.ServiceClient``.  The sampler is stored as ``self.sampling_client``
+   so that the inherited ``set_sampling_client`` / ``generate_episodes`` flow
+   works unchanged.
+2. ``get_token_output_from_token_input``: calls ``DeploymentSampler.completions``
+   (token-in / token-out) and wraps the response in a ``SampledSequence``-compatible
+   adapter so that the inherited ``assemble_model_output`` works unchanged.
+
+Everything else, including ``get_model_response``, ``assemble_model_output``,
+``set_sampling_client``, ``_prepare_max_tokens``, and chat-template rendering,
+is inherited from ``TinkerEngine``.
+"""
+
+from __future__ import annotations
+
 import asyncio
-import json
-import os
-import time
-from urllib.parse import urljoin
+import dataclasses
+import logging
+from typing import Any
 
-import openai
-import requests
-from fireworks.control_plane.generated.protos_grpcio.gateway.deployed_model_pb2 import (
-    DeployedModel as SyncDeployedModel,
-)
-from fireworks.control_plane.generated.protos_grpcio.gateway.deployed_model_pb2 import (
-    ListDeployedModelsRequest as SyncListDeployedModelsRequest,
-)
-from fireworks.gateway import Gateway
+from fireworks.training.sdk import DeploymentSampler
+from typing_extensions import override
 
-from rllm.engine.rollout.openai_engine import OpenAIEngine
 from rllm.engine.rollout.rollout_engine import ModelOutput
-from rllm.globals import THOUGHT_DELIMITER_END, THOUGHT_DELIMITER_START
+from rllm.engine.rollout.tinker_engine import (
+    TinkerEngine,
+    _flat_token_input_length,
+)
+from rllm.engine.rollout.types import (
+    TinkerTokenInput,
+    TinkerTokenOutput,
+    Tokenizer,
+)
+from rllm.workflows import TerminationEvent, TerminationReason
+
+logger = logging.getLogger(__name__)
+
+_MAX_SAMPLE_ATTEMPTS = 5
+_TRANSIENT_ERROR_MARKERS = (
+    "502",
+    "503",
+    "425",
+    "Connection",
+    "incomplete chunked read",
+    "_SSETruncationError",
+    "closed the SSE stream mid-generation",
+)
 
 
-class FireworksEngine(OpenAIEngine):
+class _EmptyCompletionIdsError(RuntimeError):
+    pass
+
+
+class _SampledSequenceAdapter:
+    """Lightweight adapter so that a ``DeploymentSampler.completions`` response
+    exposes the same ``.tokens``, ``.logprobs``, ``.stop_reason`` interface
+    that ``tinker.SampledSequence`` (``TinkerTokenOutput``) provides."""
+
+    __slots__ = ("tokens", "logprobs", "stop_reason", "routing_matrices", "server_metrics")
+
     def __init__(
         self,
-        deployment_id: str,
-        tokenizer=None,
-        api_retries: int = 3,
-        base_url: str = "https://api.fireworks.ai/inference/v1",
-        api_key: str = os.getenv("FIREWORKS_API_KEY"),
+        tokens: list[int],
+        logprobs: list[float] | None,
+        stop_reason: str | None,
+        routing_matrices: list[str] | None = None,
+        server_metrics: dict | None = None,
+    ):
+        self.tokens = tokens
+        self.logprobs = logprobs
+        self.stop_reason = stop_reason
+        self.routing_matrices = routing_matrices
+        self.server_metrics = server_metrics
+
+
+class FireworksEngine(TinkerEngine):
+    """``TinkerEngine`` subclass that uses a Fireworks ``DeploymentSampler``
+    for inference instead of a Tinker ``SamplingClient``.
+
+    ``DeploymentSampler`` supports token-in / token-out via the
+    ``/inference/v1/completions`` endpoint, so ``TinkerTokenInput`` and
+    ``TinkerTokenOutput`` are fully supported.
+    """
+
+    def __init__(
+        self,
+        tokenizer: Tokenizer,
+        sampler: DeploymentSampler,
+        max_prompt_length: int = 4096,
+        max_response_length: int = 4096,
+        max_model_length: int = 32768,
         sampling_params: dict | None = None,
+        disable_thinking: bool = False,
+        accumulate_reasoning: bool = False,
+        reasoning_effort: str = "medium",
+        sample_timeout: int = 600,
+        processor=None,
+        router_replay: bool = False,
         **kwargs,
     ):
-        gateway = Gateway()
-        self._account_id = gateway.account_id()
-        self._deployment_id = deployment_id
+        """
+        Args:
+            tokenizer: HuggingFace tokenizer for chat-template rendering.
+            sampler: Pre-built ``DeploymentSampler``.
+            max_prompt_length: Hard cap on prompt token length.
+            max_response_length: Default max completion tokens.
+            max_model_length: Total context window.
+            sampling_params: Dict with optional ``"train"`` / ``"val"``
+                sub-dicts for default sampling kwargs.
+            disable_thinking: Suppress thinking tokens in the prompt.
+            accumulate_reasoning: Accumulate reasoning across turns.
+            reasoning_effort: Reasoning effort for the chat parser and Fireworks
+                completions API (e.g. ``low``, ``medium``, ``high``, ``none``).
+            sample_timeout: HTTP timeout (seconds) for sampling calls.
+            processor: Optional ``ProcessorMixin`` for multimodal models.
+            router_replay: If True, request and propagate routing matrices
+                for Router Replay (R3) training.
+        """
+        from rllm.engine.rollout.rollout_engine import RolloutEngine
+        from rllm.parser import ChatTemplateParser
 
-        formatted_deployment_id = f"accounts/{self._account_id}/deployments/{deployment_id}"
-        deployment = gateway.get_deployment_sync(formatted_deployment_id)
-        self._base_model = deployment.base_model
+        # Skip TinkerEngine.__init__ (it requires tinker.ServiceClient);
+        # set up the same attributes directly.
+        RolloutEngine.__init__(self)
 
-        list_model_request = SyncListDeployedModelsRequest(filter=f'deployment="{formatted_deployment_id}"')
-        list_model_response = gateway.list_deployed_models_sync(list_model_request)
-        assert list_model_response.total_size == 1, f"Expected only one model under deployment {formatted_deployment_id}"
-        deployed_model = list_model_response.deployed_models[0]
-        model_name = deployed_model.name
-        assert deployed_model.state == SyncDeployedModel.DEPLOYED, f"Expected {model_name} in state DEPLOYED"
+        self.tokenizer = tokenizer
+        self.max_prompt_length = max_prompt_length
+        self.max_response_length = max_response_length
+        self.max_model_length = max_model_length - 1 if max_model_length is not None else max_prompt_length + max_response_length - 1
+        self.accumulate_reasoning = accumulate_reasoning
+        self.reasoning_effort = reasoning_effort
 
-        super().__init__(
-            model=model_name,
-            tokenizer=tokenizer,
-            api_retries=api_retries,
-            base_url=base_url,
-            api_key=api_key,
-            sampling_params=sampling_params,
+        self.train_sampling_params = dict((sampling_params or {}).get("train", {}))
+        self.val_sampling_params = dict((sampling_params or {}).get("val", {}))
+
+        # Chat template parser (same setup as TinkerEngine bypass mode)
+        self.bypass_render_with_parser = True
+        self.chat_parser = ChatTemplateParser.get_parser(
+            tokenizer,
+            processor=processor,
+            disable_thinking=disable_thinking,
+        )
+
+        self.sample_timeout = sample_timeout
+        self.router_replay = router_replay
+        self.sampling_client = sampler
+
+    # ------------------------------------------------------------------
+    # Token-in / token-out override
+    # ------------------------------------------------------------------
+
+    @override
+    async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
+        application_id = kwargs.pop("application_id", None)
+
+        tools = kwargs.pop("tools", [])
+        accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
+        reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
+
+        prompt = self.chat_parser.parse(
+            messages,
+            add_generation_prompt=True,
+            is_first_msg=True,
+            tools=tools,
+            reasoning_effort=reasoning_effort,
+            accumulate_reasoning=accumulate_reasoning,
+        )
+        token_input = self.tokenizer.encode(prompt, add_special_tokens=False)
+
+        if application_id is not None:
+            kwargs["user"] = application_id
+
+        version = self.weight_version
+        sampled_sequence = await self.get_token_output_from_token_input(
+            token_input=token_input,
+            reasoning_effort=reasoning_effort,
             **kwargs,
         )
-        self._use_chat_completions = True  # Always True for Fireworks
+        result = self.assemble_model_output(token_input=token_input, token_output=sampled_sequence)
+        result.weight_version = version
+        result.routing_matrices = sampled_sequence.routing_matrices
+        result.metrics = sampled_sequence.server_metrics
+        return result
 
-    def update_model_weights(self, fireworks_model_id: str, lora_adapter_path: dict) -> bool:
-        self._upload_lora(fireworks_model_id, lora_adapter_path, self._base_model, self._account_id)
-        self._hot_load_lora(fireworks_model_id, self._deployment_id, self._account_id)
+    @override
+    async def get_model_response_from_tokens(self, token_input, **kwargs) -> ModelOutput:
+        application_id = kwargs.pop("application_id", None)
+        if application_id is not None:
+            kwargs["user"] = application_id
 
-        self.model = f"{self._account_id}/{fireworks_model_id}#{self._account_id}/{self._deployment_id}"
-        is_deployment_ready = asyncio.run(self._probe_deployment(self.model))
-        return is_deployment_ready
+        version = self.weight_version
+        sampled_sequence = await self.get_token_output_from_token_input(token_input=token_input, **kwargs)
+        result = self.assemble_model_output(token_input=token_input, token_output=sampled_sequence)
+        result.weight_version = version
+        result.routing_matrices = sampled_sequence.routing_matrices
+        result.metrics = sampled_sequence.server_metrics
+        return result
 
-    def _upload_lora(self, fireworks_model_id, lora_adapter_path: str, base_model: str, account_id: str) -> None:
-        upload_model_command = f"firectl create model {fireworks_model_id} {lora_adapter_path} --base-model {base_model} -a {account_id} --output json"
-        print(f"running command: {upload_model_command}")
-        upload_model_output = os.popen(upload_model_command).read()
-        print("Fireworks upload model message: ", upload_model_output)
-        upload_model_output = json.loads(upload_model_output)
+    @property
+    def supports_token_in_token_out(self) -> bool:
+        return True
 
-        assert fireworks_model_id in upload_model_output.get("name")
-        assert upload_model_output["state"].lower() == "ready"
-        print(f"Successfully uploaded model {fireworks_model_id}")
+    async def compute_logprobs(self, ids: list[int]) -> list[float]:
+        raise NotImplementedError("compute_logprobs is not supported by FireworksEngine.")
 
-    def _hot_load_lora(self, model_id: str, deployment: str, account_id: str) -> None:
-        load_lora_command = f"firectl load-lora {model_id} --deployment {deployment} --replace-merged-addon -a {account_id}"
-        print(f"Running command: {load_lora_command}")
-        load_lora_output = os.popen(load_lora_command).read()
-        print(load_lora_output)
+    @override
+    async def get_token_output_from_token_input(self, token_input: TinkerTokenInput, **kwargs) -> TinkerTokenOutput:
+        """Sample from the Fireworks deployment using pre-tokenized IDs.
 
-    async def _probe_deployment(self, model_name) -> bool:
-        print("Probing model: ", model_name)
-        while True:
+        Returns a ``SampledSequence``-compatible object so that the inherited
+        ``assemble_model_output`` works unchanged.
+        """
+        if self.sampling_client is None:
+            raise RuntimeError("Sampling client not set. Call set_sampling_client() first.")
+
+        input_length = _flat_token_input_length(token_input)
+
+        enforce_max_prompt_length = kwargs.pop("enforce_max_prompt_length", True)
+        if enforce_max_prompt_length and (input_length > self.max_prompt_length or input_length >= self.max_model_length):
+            raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
+
+        # Flatten TinkerTokenInput to plain list[int]
+        prompt_ids: list[int] = []
+        for elem in token_input:
+            if isinstance(elem, int):
+                prompt_ids.append(elem)
+            else:
+                # tinker.EncodedTextChunk
+                prompt_ids.extend(elem.tokens)
+
+        sampling_params = self.val_sampling_params.copy() if self.is_validation else self.train_sampling_params.copy()
+        requested_max_tokens = kwargs.pop("max_tokens", kwargs.pop("max_new_tokens", self.max_response_length))
+        requested_max_tokens = sampling_params.pop("max_tokens", requested_max_tokens)
+        max_tokens = self._prepare_max_tokens(requested_max_tokens, input_length)
+
+        for key in ("temperature", "top_p", "top_k", "user", "reasoning_effort"):
+            if key in kwargs:
+                sampling_params[key] = kwargs.pop(key)
+
+        if "reasoning_effort" not in sampling_params and self.reasoning_effort is not None:
+            sampling_params["reasoning_effort"] = self.reasoning_effort
+
+        if self.router_replay:
+            sampling_params["include_routing_matrix"] = True
+
+        raw, server_metrics = await self._completions_with_retry(
+            prompt_ids,
+            max_tokens,
+            sampling_params,
+        )
+
+        choice = raw["choices"][0]
+        completion_ids: list[int] = list((choice.get("raw_output") or {}).get("completion_token_ids") or [])
+
+        logprobs: list[float] | None = None
+        content: list[dict] | None = None
+        lp_data = choice.get("logprobs")
+        if lp_data and isinstance(lp_data, dict):
+            content = lp_data.get("content")
+            if isinstance(content, list) and content:
+                logprobs = [tok.get("logprob", 0.0) for tok in content]
+
+        finish_reason = choice.get("finish_reason", "stop")
+
+        routing_matrices = None
+        if self.router_replay and content:
+            matrices = [tok.get("routing_matrix", "") for tok in content]
+            if any(matrices):
+                routing_matrices = matrices
+            else:
+                logger.debug("router_replay enabled but API returned no routing matrices")
+
+        if logprobs is not None and len(logprobs) != len(completion_ids):
+            raise RuntimeError(f"Fireworks response length mismatch: {len(logprobs)} logprobs vs {len(completion_ids)} completion tokens")
+        if routing_matrices is not None and len(routing_matrices) != len(completion_ids):
+            raise RuntimeError(f"Fireworks response length mismatch: {len(routing_matrices)} routing matrices vs {len(completion_ids)} completion tokens")
+
+        return _SampledSequenceAdapter(  # type: ignore[return-value]
+            tokens=completion_ids,
+            logprobs=logprobs,
+            stop_reason=finish_reason,
+            routing_matrices=routing_matrices,
+            server_metrics=server_metrics,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal retry helper
+    # ------------------------------------------------------------------
+
+    async def _completions_with_retry(
+        self,
+        prompt_ids: list[int],
+        max_tokens: int,
+        sampling_kwargs: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict | None]:
+        """Call ``DeploymentSampler.async_completions_stream`` with transient-error retries.
+
+        Returns (response_dict, server_metrics_dict)."""
+
+        for attempt in range(_MAX_SAMPLE_ATTEMPTS):
             try:
-                _ = await self.client.chat.completions.create(model=model_name, messages=[{"role": "user", "content": "hi"}])
-
-                # TODO(tianyi): Remove after landing https://github.com/BerriAI/litellm/pull/15938/
-                gateway = Gateway()
-                formatted_deployment_id = f"accounts/{self._account_id}/deployments/{self._deployment_id}"
-                list_model_request = SyncListDeployedModelsRequest(filter=f'deployment="{formatted_deployment_id}"')
-                list_model_response = gateway.list_deployed_models_sync(list_model_request)
-                assert list_model_response.total_size == 1, f"Expected only one model under deployment {formatted_deployment_id}"
-                deployed_model = list_model_response.deployed_models[0]
-                self.model = deployed_model.name
-
-                return True
-            except Exception as e:
-                error_message = str(e).lower()
-                print(error_message)
-                if "404" in error_message:
-                    time.sleep(10)
-                    continue
-                if "502" in error_message:
-                    time.sleep(10)
-                    continue
-                else:
-                    return False
-
-    async def chat_completion(self, messages: list[dict], **kwargs) -> ModelOutput:
-        kwargs.pop("application_id", None)
-        kwargs.pop("validate", None)
-        kwargs.pop("model", None)
-        kwargs.pop("enforce_max_prompt_length", None)
-
-        sampling_params = self.sampling_params.copy()
-        sampling_params.update(kwargs)
-
-        create_params = self._prepare_max_tokens_param(sampling_params)
-
-        retries = self.api_retries
-        while retries > 0:
-            try:
-                merged_sampling_params = {**create_params, **sampling_params}
-                response = self._fireworks_chat_completion(messages=messages, sampling_params=merged_sampling_params)
-                content = response["choices"][0]["message"]["content"]
-                reasoning = response["choices"][0]["message"].get("reasoning", "")
-                tool_calls = response["choices"][0]["message"].get("tool_calls", [])
-
-                # Build text with reasoning if available, otherwise use content
-                if reasoning:
-                    text = f"{THOUGHT_DELIMITER_START}\n{reasoning}\n{THOUGHT_DELIMITER_END}\n\n{content}"
-                else:
-                    text = content
-
-                prompt_length = response["usage"]["prompt_tokens"]
-                completion_length = response["usage"]["completion_tokens"]
-                finish_reason = response["choices"][0]["finish_reason"]
-
-                prompt_token_ids = response["prompt_token_ids"]
-                completion_token_ids = response["choices"][0]["token_ids"]
-                return ModelOutput(
-                    text=text,
-                    content=content,
-                    reasoning=reasoning,
-                    tool_calls=tool_calls,
-                    prompt_ids=prompt_token_ids,
-                    completion_ids=completion_token_ids,
-                    prompt_length=prompt_length,
-                    completion_length=completion_length,
-                    finish_reason=finish_reason,
+                result, server_metrics = await self.sampling_client.async_completions_stream(
+                    prompt=prompt_ids,
+                    max_tokens=max_tokens,
+                    raw_output=True,
+                    logprobs=True,
+                    http_timeout=self.sample_timeout,
+                    **sampling_kwargs,
                 )
-
-            except openai.RateLimitError:
-                retries -= 1
-                if retries == 0:
-                    raise Exception("Rate limit reached and retries exhausted.") from None
-                print("Sleep for 5 seconds for API limit.")
-                await asyncio.sleep(5)
-
-            except Exception as e:
-                retries -= 1
-                if retries == 0:
-                    raise Exception(f"Error processing content after retries: {e}") from e
-                print(f"Error: {e}, retrying...")
-                await asyncio.sleep(1)
-
-    def _fireworks_chat_completion(self, messages, sampling_params):
-        url = urljoin(str(self.client.base_url), "chat/completions")
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            **sampling_params,
-        }
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.client.api_key}",
-        }
-        response = requests.request("POST", url, headers=headers, data=json.dumps(payload))
-        return response.json()
+                metrics_dict = {k: v for k, v in dataclasses.asdict(server_metrics).items() if v is not None} if server_metrics else None
+                choice = (result.get("choices") or [{}])[0]
+                completion_ids = (choice.get("raw_output") or {}).get("completion_token_ids") or []
+                if not completion_ids:
+                    raise _EmptyCompletionIdsError("Fireworks response included empty completion_token_ids")
+                return result, metrics_dict
+            except Exception as exc:
+                err = str(exc)
+                exc_name = exc.__class__.__name__
+                transient = isinstance(exc, _EmptyCompletionIdsError) or any(marker in err or marker in exc_name for marker in _TRANSIENT_ERROR_MARKERS)
+                if transient and attempt < _MAX_SAMPLE_ATTEMPTS - 1:
+                    wait = 10 * (attempt + 1)
+                    logger.debug(
+                        "Attempt %d/%d failed (%s), retrying in %ds...",
+                        attempt + 1,
+                        _MAX_SAMPLE_ATTEMPTS,
+                        exc,
+                        wait,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                resp_text = getattr(getattr(exc, "response", None), "text", None)
+                logger.error(
+                    "Sampling failed permanently after %d attempts: %s\n%s",
+                    attempt + 1,
+                    exc,
+                    resp_text or "",
+                )
+                raise
+        raise RuntimeError("unreachable")

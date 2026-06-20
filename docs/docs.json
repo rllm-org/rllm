@@ -56,19 +56,27 @@
             "group": "rLLM CLI & UI",
             "pages": [
               "core-concepts/cli-and-ui",
-              "experimental/ui",
-              "datasets"
+              "experimental/ui"
             ]
           },
           {
             "group": "Core concepts",
             "pages": [
               "core-concepts/episodes-trajectories-steps",
-              "core-concepts/task-and-runner",
+              "core-concepts/tasks",
               "core-concepts/agentflow-evaluator",
-              "core-concepts/reward-functions",
               "core-concepts/harnesses",
+              "core-concepts/sandbox",
               "core-concepts/training"
+            ]
+          },
+          {
+            "group": "Datasets & Evaluation",
+            "pages": [
+              "datasets/overview",
+              "datasets/running-evaluations",
+              "datasets/reward-functions",
+              "datasets/byo-dataset"
             ]
           },
           {
@@ -82,6 +90,7 @@
             "pages": [
               "backends/verl",
               "backends/tinker",
+              "backends/fireworks",
               "backends/comparison"
             ]
           },
@@ -90,7 +99,8 @@
             "pages": [
               "guides/customizing-training",
               "guides/distributed-training",
-              "guides/ray-runtime-env"
+              "guides/ray-runtime-env",
+              "guides/environment-variables"
             ]
           },
           {
@@ -104,6 +114,7 @@
           {
             "group": "Advanced algorithms",
             "pages": [
+              "training/capability-matrix",
               "training/advantage-estimator",
               "training/precompute-advantage"
             ]
@@ -124,7 +135,8 @@
               "cookbooks/deepcoder",
               "cookbooks/finqa",
               "cookbooks/geo3k",
-              "cookbooks/solver_judge_flow"
+              "cookbooks/solver_judge_flow",
+              "cookbooks/terminal_bench"
             ]
           }
         ]
@@ -184,16 +196,11 @@
             ]
           }
         ]
+      },
+      {
+        "tab": "Blog",
+        "href": "https://rllm-project.com/blog.html"
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Blog",
-          "href": "https://rllm-project.com/blog.html",
-          "icon": "newspaper"
-        }
-      ]
-    }
+    ]
   }
 }

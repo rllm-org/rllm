@@ -13,7 +13,6 @@ class AgentTrainer:
     Backends:
 
     * ``verl`` (default): distributed PPO via the verl framework.
-    * ``fireworks``: pipeline-based variant for the Fireworks workflow API.
 
     For the tinker backend, use
     :class:`rllm.trainer.unified_trainer.AgentTrainer` instead — the
@@ -32,7 +31,7 @@ class AgentTrainer:
         config: dict[str, Any] | list[str] | None = None,
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
-        backend: Literal["verl", "fireworks"] = "verl",
+        backend: Literal["verl"] = "verl",
     ):
         """Initialize the AgentTrainer.
 
@@ -45,10 +44,10 @@ class AgentTrainer:
                 (e.g. ``["data.train_batch_size=8"]``).
             train_dataset: Optional train dataset.
             val_dataset: Optional validation dataset.
-            backend: Training backend (``'verl'`` | ``'fireworks'``). For
-                tinker, use :class:`rllm.trainer.unified_trainer.AgentTrainer`.
+            backend: Training backend (``'verl'``). For tinker, use
+                :class:`rllm.trainer.unified_trainer.AgentTrainer`.
         """
-        assert backend in ("verl", "fireworks"), f"Unsupported backend: {backend}; must be one of ('verl', 'fireworks'). For tinker, use rllm.trainer.unified_trainer.AgentTrainer."
+        assert backend == "verl", f"Unsupported backend: {backend}; must be 'verl'. For tinker, use rllm.trainer.unified_trainer.AgentTrainer."
         self.backend = backend
 
         if workflow_class is None:
@@ -69,8 +68,6 @@ class AgentTrainer:
     def train(self):
         if self.backend == "verl":
             self._train_verl()
-        elif self.backend == "fireworks":
-            self._train_fireworks()
 
     def _train_verl(self):
         """Train using the standard verl backend."""
@@ -87,29 +84,6 @@ class AgentTrainer:
 
         runner_cls = ray.remote(num_cpus=1)(TaskRunner)
         runner = runner_cls.remote()
-
-        ray.get(
-            runner.run.remote(
-                config=self.config,
-                workflow_class=self.workflow_class,
-                workflow_args=self.workflow_args,
-            )
-        )
-
-    def _train_fireworks(self):
-        """Train using the fireworks (pipeline) backend — workflow-only."""
-        import ray
-
-        if not ray.is_initialized():
-            # TODO: check whether we need a separate function to retrieve the runtime environment (for fireworks)
-            from verl.trainer.constants_ppo import get_ppo_ray_runtime_env as get_fireworks_ray_runtime_env
-
-            ray.init(runtime_env=get_fireworks_ray_runtime_env(), num_cpus=self.config.ray_init.num_cpus)
-
-        # Lazy import to avoid requiring fireworks package for users who don't use it
-        from rllm.trainer.verl.train_workflow_pipeline import PipelineTaskRunner
-
-        runner = PipelineTaskRunner.remote()
 
         ray.get(
             runner.run.remote(

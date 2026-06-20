@@ -16,6 +16,7 @@ import os
 import shlex
 
 from rllm.harnesses.cli_harness import BaseCliHarness
+from rllm.sandbox.protocol import Sandbox
 from rllm.types import AgentConfig, Task
 
 # Map ``provider`` (left side of provider/model) to the env var holding
@@ -66,7 +67,6 @@ class OpenCodeHarness(BaseCliHarness):
 
     name = "opencode"
     sandbox_backend = "docker"
-    max_concurrent = 4
     stdout_log_path = "/tmp/opencode.log"
 
     # Provider name we register the gateway under inside opencode.json.
@@ -88,7 +88,7 @@ class OpenCodeHarness(BaseCliHarness):
 
     def build_env(self, task: Task, config: AgentConfig) -> dict[str, str]:
         provider, _, _ = self._split_provider(config.model)
-        gateway_url = self._container_url(config.base_url)
+        gateway_url = config.base_url
 
         env: dict[str, str] = {
             # opencode uses an OpenAI-shaped client for openai/anthropic
@@ -108,12 +108,13 @@ class OpenCodeHarness(BaseCliHarness):
 
     def write_configs(
         self,
+        sandbox: Sandbox,
         task: Task,
         config: AgentConfig,
         env: dict[str, str],
     ) -> None:
         _, model_id, _ = self._split_provider(config.model)
-        gateway_url = self._container_url(config.base_url)
+        gateway_url = config.base_url
         api_key_var = _PROVIDER_AUTH.get(self._split_provider(config.model)[0], "OPENAI_API_KEY")
         # Same key build_env injected — bearer token when gateway is
         # exposed, else the user's real provider key.
@@ -145,7 +146,7 @@ class OpenCodeHarness(BaseCliHarness):
         # giving the misleading ``ProviderModelNotFoundError``.
         marker = f"_RLLM_OPENCODE_EOF_{os.urandom(4).hex()}"
         cmd = f"mkdir -p $HOME/.config/opencode && cat > $HOME/.config/opencode/opencode.json << '{marker}'\n{content}\n{marker}"
-        self._exec_agent(cmd, env=env)
+        self._exec_agent(sandbox, cmd, env=env)
 
     def build_invocation(
         self,

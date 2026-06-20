@@ -11,6 +11,7 @@ import asyncio
 import logging
 from typing import Any
 
+from rllm.env import env_float
 from rllm.integrations.harbor.trial_helper import (
     MODEL_PLACEHOLDER,
     HarborTaskOutcome,
@@ -21,6 +22,8 @@ from rllm.integrations.harbor.trial_helper import (
 )
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_SESSION_TIMEOUT_S = env_float("RLLM_HARBOR_SESSION_TIMEOUT_S", 900.0)  # set env var: export RLLM_HARBOR_SESSION_TIMEOUT_S=xxx
 
 
 class HarborRuntime:
@@ -36,7 +39,7 @@ class HarborRuntime:
     """
 
     # Used by run_dataset / Runner to cap concurrency.
-    max_concurrent: int = 4
+    max_concurrent: int = 64
 
     def __init__(
         self,
@@ -48,7 +51,7 @@ class HarborRuntime:
         verifier_timeout_multiplier: float | None = None,
         agent_setup_timeout_multiplier: float | None = None,
         environment_build_timeout_multiplier: float | None = None,
-        session_timeout: float = 900.0,
+        session_timeout: float = _DEFAULT_SESSION_TIMEOUT_S,
     ):
         self.agent_name = agent_name
         self.environment_type = environment_type
@@ -59,6 +62,21 @@ class HarborRuntime:
         self.environment_build_timeout_multiplier = environment_build_timeout_multiplier
         self.session_timeout = session_timeout
         self._initialized = False
+
+    def configure(self, overrides: dict) -> dict:
+        """Apply caller/CLI overrides this runtime understands; return the rest.
+
+        Harbor provisions its own environments, so ``sandbox_backend`` maps
+        to harbor's ``environment_type``.
+        """
+        leftovers = dict(overrides)
+        backend = leftovers.pop("sandbox_backend", None)
+        if backend is not None:
+            self.environment_type = backend
+        concurrency = leftovers.pop("sandbox_concurrency", None)
+        if concurrency is not None:
+            self.max_concurrent = concurrency
+        return leftovers
 
     # ------------------------------------------------------------------
     # Shared initialization

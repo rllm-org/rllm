@@ -102,7 +102,6 @@ class ClaudeCodeHarness(BaseCliHarness):
 
     name = "claude-code"
     sandbox_backend = "docker"
-    max_concurrent = 4
     stdout_log_path = "/tmp/claude-code.log"
 
     def install_script(self) -> str:
@@ -111,7 +110,7 @@ class ClaudeCodeHarness(BaseCliHarness):
     def build_env(self, task: Task, config: AgentConfig) -> dict[str, str]:
         # Anthropic's SDK appends ``/v1/messages`` itself, so strip a
         # trailing ``/v1`` from the gateway URL or it doubles up.
-        gateway_url = self._container_url(config.base_url)
+        gateway_url = config.base_url
         anthropic_url = gateway_url.rstrip("/").removesuffix("/v1") or gateway_url
         api_key = self.gateway_api_key(config, "ANTHROPIC_API_KEY")
         model = config.model

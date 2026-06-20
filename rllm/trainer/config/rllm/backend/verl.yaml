@@ -21,12 +21,6 @@ actor_rollout_ref:
     val_kwargs:
       do_sample: true
 
-data:
-  gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
-  return_multi_modal_inputs: false
-  max_prompt_length: 30720
-  max_response_length: 2048
-
 rollout:
   nnodes: 1
   n_gpus_per_node: 8

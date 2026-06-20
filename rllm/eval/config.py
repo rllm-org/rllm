@@ -17,6 +17,14 @@ from rllm import paths
 # https://tinker-docs.thinkingmachines.ai/tinker/compatible-apis/openai/
 TINKER_OAI_BASE_URL = "https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1"
 
+# Fireworks' control-plane model catalog. ``GET {base}/v1/accounts/fireworks/models``
+# lists the full public model library (~280 entries) with rich metadata
+# (``supportsServerless``, ``kind``, ``contextLength``). We filter this to
+# serverless chat LLMs. (The OpenAI-compatible ``/inference/v1/models`` endpoint
+# only returns a small curated subset, so it's not used here.) See
+# https://docs.fireworks.ai/api-reference/list-models
+FIREWORKS_CONTROL_BASE_URL = "https://api.fireworks.ai/v1"
+
 
 @dataclass
 class ProviderInfo:
@@ -149,11 +157,18 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         label="Fireworks",
         litellm_prefix="fireworks_ai",
         env_key="FIREWORKS_API_KEY",
-        default_model="accounts/fireworks/models/llama4-maverick-instruct-basic",
+        default_model="accounts/fireworks/models/deepseek-v4-flash",
+        # Curated fallback shown when the live catalog can't be fetched
+        # (offline / no key). ``rllm model setup`` pulls the full, live list of
+        # serverless chat models from the control-plane catalog when possible.
         models=[
-            "accounts/fireworks/models/llama4-maverick-instruct-basic",
-            "accounts/fireworks/models/deepseek-r1",
-            "accounts/fireworks/models/qwen2p5-72b-instruct",
+            "accounts/fireworks/models/deepseek-v4-flash",
+            "accounts/fireworks/models/deepseek-v4-pro",
+            "accounts/fireworks/models/glm-5p2",
+            "accounts/fireworks/models/gpt-oss-120b",
+            "accounts/fireworks/models/gpt-oss-20b",
+            "accounts/fireworks/models/kimi-k2p6",
+            "accounts/fireworks/models/minimax-m3",
         ],
     ),
     ProviderInfo(
@@ -320,6 +335,95 @@ def fetch_tinker_models(api_key: str | None = None) -> list[str]:
             os.environ.pop("TINKER_API_KEY", None)
         else:
             os.environ["TINKER_API_KEY"] = prev
+
+
+def _fireworks_get(path: str, key: str, params: dict | None = None) -> dict:
+    """GET a Fireworks control-plane path and return the parsed JSON dict."""
+    import urllib.parse
+    import urllib.request
+
+    url = f"{FIREWORKS_CONTROL_BASE_URL}/{path}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}", "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.load(resp)
+
+
+def _fireworks_paged(path: str, key: str, list_key: str) -> list[dict]:
+    """Return every item under a paged control-plane list endpoint.
+
+    ``path`` is e.g. ``accounts/fireworks/models``; ``list_key`` is the array
+    field in the response (e.g. ``models``, ``deployedModels``).
+    """
+    items: list[dict] = []
+    page_token = ""
+    # Bound the loop so a misbehaving cursor can't spin forever (200/page).
+    for _ in range(20):
+        params = {"pageSize": "200"}
+        if page_token:
+            params["pageToken"] = page_token
+        payload = _fireworks_get(path, key, params)
+        items.extend(payload.get(list_key, []))
+        page_token = payload.get("nextPageToken") or ""
+        if not page_token:
+            break
+    return items
+
+
+def _fireworks_account_ids(key: str) -> list[str]:
+    """Return the caller's account IDs, excluding the shared public namespace."""
+    accounts = _fireworks_get("accounts", key).get("accounts", [])
+    ids = [a["name"].split("/", 1)[1] for a in accounts if a.get("name", "").startswith("accounts/")]
+    return [i for i in ids if i != "fireworks"]
+
+
+def fetch_fireworks_models(api_key: str | None = None) -> list[str]:
+    """Return Fireworks' live serverless chat-model catalog (best-effort).
+
+    Pages through the control-plane ``accounts/fireworks/models`` endpoint and
+    keeps only models that are (a) serverless-available and (b) text base
+    models (``kind == "HF_BASE_MODEL"``) — i.e. the ones you can sample without
+    spinning up a dedicated deployment. IDs are returned in the
+    ``accounts/fireworks/models/<slug>`` form the inference engine and config
+    already use.
+
+    Returns an empty list on any failure (no API key, network error, bad
+    response) so callers can fall back to the curated static list.
+    """
+    key = api_key or os.environ.get("FIREWORKS_API_KEY", "")
+    if not key:
+        return []
+    try:
+        models = _fireworks_paged("accounts/fireworks/models", key, "models")
+        return sorted(m["name"] for m in models if m.get("supportsServerless") and m.get("kind") == "HF_BASE_MODEL" and m.get("name"))
+    except Exception:
+        return []
+
+
+def fetch_fireworks_deployed_models(api_key: str | None = None) -> list[str]:
+    """Return the caller's actively deployed model IDs (best-effort).
+
+    Discovers the caller's account ID(s) via ``GET /v1/accounts``, then lists
+    each account's ``deployedModels`` that are in state ``DEPLOYED`` — i.e.
+    models currently serving inference on a dedicated deployment (not merely
+    uploaded). These can be sampled with no further setup. The shared public
+    ``fireworks`` namespace is excluded (see :func:`fetch_fireworks_models`).
+
+    Returns an empty list on any failure so callers can degrade gracefully.
+    """
+    key = api_key or os.environ.get("FIREWORKS_API_KEY", "")
+    if not key:
+        return []
+    try:
+        names: list[str] = []
+        for account in _fireworks_account_ids(key):
+            for dm in _fireworks_paged(f"accounts/{account}/deployedModels", key, "deployedModels"):
+                if dm.get("state") == "DEPLOYED" and dm.get("model"):
+                    names.append(dm["model"])
+        return sorted(set(names))
+    except Exception:
+        return []
 
 
 def _config_path() -> str:

@@ -1,0 +1,279 @@
+---
+title: Running evaluations
+description: A practical walkthrough of rllm eval — choosing a dataset, picking an agent harness, and tuning every flag that shapes a run
+---
+
+`rllm eval` runs a model against a benchmark and reports how well it did. A single command pulls the dataset, spins up the agent, routes model calls, scores each result, and prints accuracy:
+
+```bash
+rllm eval gsm8k
+```
+
+This guide walks through the whole workflow — from picking *what* to evaluate to controlling *how* the run executes — without assuming any knowledge of rLLM's internals.
+
+<Note>
+New to the CLI? Start with the [Quick start](/quickstart-cli) to configure a model provider (`rllm model setup`). Everything below assumes you've done that once.
+</Note>
+
+## The shape of a command
+
+```bash
+rllm eval <benchmark> [--agent <harness>] [--model <name>] [options]
+```
+
+Only the benchmark is required. When you omit the rest, rLLM fills in sensible defaults: the dataset's default agent, your configured model, and the benchmark's built-in scorer.
+
+<Steps>
+  <Step title="Choose a dataset">
+    What you want to measure — math, coding, QA, agentic tasks.
+  </Step>
+  <Step title="Choose an agent harness">
+    How the model attempts each task — a single call, a tool loop, or a full coding CLI in a sandbox.
+  </Step>
+  <Step title="Point at a model">
+    Your configured provider, or any OpenAI-compatible endpoint.
+  </Step>
+  <Step title="Tune the run">
+    Limit examples, set concurrency, save outputs.
+  </Step>
+</Steps>
+
+## Step 1 — Choose a dataset
+
+rLLM ships a catalog of 50+ benchmarks across math, code, QA, instruction-following, search, vision-language, and agentic tasks. Browse and preview them before committing to a run.
+
+```bash
+rllm dataset list --all          # the full catalog
+rllm dataset list --category code # filter by category
+rllm dataset info swebench-verified  # splits, size, default agent
+rllm dataset inspect gsm8k -n 3      # peek at a few real rows
+```
+
+<Tip>
+The [Supported datasets](/datasets/overview) page lists every benchmark with its size, source, and default evaluator. Use it to find the exact name to pass to `rllm eval`.
+</Tip>
+
+You can evaluate three kinds of dataset sources:
+
+<Tabs>
+  <Tab title="Catalog benchmark">
+    A name from the built-in catalog. Auto-pulled from HuggingFace on first use.
+
+    ```bash
+    rllm eval gsm8k
+    rllm eval humaneval
+    ```
+  </Tab>
+  <Tab title="Harbor (agentic) dataset">
+    Sandboxed SWE-style tasks (each task ships its own environment + verifier). Use the `harbor:` prefix.
+
+    ```bash
+    rllm eval harbor:swebench-verified --sandbox-backend modal
+    ```
+  </Tab>
+  <Tab title="Local directory">
+    Your own benchmark folder (`dataset.toml` / `task.toml`).
+
+    ```bash
+    rllm eval ./my-benchmark --agent react
+    ```
+  </Tab>
+</Tabs>
+
+## Step 2 — Choose an agent harness
+
+The **agent harness** decides how the model actually attempts each task. Pass it with `--agent`; if you omit it, the dataset's default is used (`react` for most data benchmarks).
+
+```bash
+rllm agent list   # see every built-in harness
+```
+
+| Harness | What it does | Good for |
+|---------|--------------|----------|
+| `react` | One-shot LLM call | Math, multiple-choice, QA — the default for data tasks |
+| `bash` | Multi-turn ReAct bash loop in a sandbox | General agentic / shell tasks |
+| `mini-swe-agent` | Lightweight SWE agent in a sandbox | SWE-bench-style code repair |
+| `claude-code`, `codex`, `aider`, `opencode`, `qwen-code`, `kimi-cli`, `zeroclaw` | Run a real coding-agent CLI inside the sandbox | Benchmarking coding agents on repo tasks |
+| `oracle` | Runs the task's reference solution (no LLM) | Smoke-testing that an environment + verifier work before spending tokens |
+
+```bash
+# Evaluate a coding agent on a sandboxed benchmark
+rllm eval harbor:swebench-verified --agent mini-swe-agent --sandbox-backend modal
+
+# Sanity-check the environment with no model calls
+rllm eval harbor:swebench-verified --agent oracle --sandbox-backend modal
+```
+
+<Tip>
+`--agent oracle` is the cheapest way to confirm a sandboxed benchmark is wired correctly: it runs the gold solution and should score ~100%. If it doesn't, the problem is the environment, not your model.
+</Tip>
+
+You can also point `--agent` at your own scaffold — a registry name (`rllm init my-agent`) or a `module:object` import path.
+
+## Step 3 — Point at a model
+
+By default, `eval` uses the model from `rllm model setup` and starts a local LiteLLM proxy to route requests. Override either piece:
+
+<Tabs>
+  <Tab title="Configured provider">
+    ```bash
+    rllm eval gsm8k --model gpt-4o
+    ```
+    Uses your saved provider + API key; the proxy is started for you.
+  </Tab>
+  <Tab title="Your own endpoint">
+    ```bash
+    rllm eval gsm8k \
+      --base-url http://localhost:30000/v1 \
+      --model Qwen/Qwen3-4B
+    ```
+    Any OpenAI-compatible server (vLLM, SGLang, etc.). `--model` is required here.
+  </Tab>
+</Tabs>
+
+## Step 4 — Tune the run
+
+These flags shape how the evaluation executes and what it leaves behind.
+
+<ParamField path="--max-examples" type="int">
+  Evaluate only the first N examples. Ideal for a quick smoke test before a full run.
+</ParamField>
+
+<ParamField path="--task-indices" type="string">
+  Run specific rows only: `'0'`, `'3,7,12'`, or a range `'0-9'`. Great for re-running a handful of failures.
+</ParamField>
+
+<ParamField path="--split" type="string">
+  Which dataset split to use (defaults to the benchmark's eval split, usually `test`).
+</ParamField>
+
+<ParamField path="--concurrency" type="int" default="64">
+  How many tasks run in parallel. Lower it if you hit provider rate limits; raise it for throughput.
+</ParamField>
+
+<ParamField path="--attempts" type="int" default="1">
+  Independent rollouts per task. With `--attempts N` the results report unbiased pass@k for every k from 1 to N alongside per-rollout accuracy. Use a temperature above 0 so attempts actually differ.
+</ParamField>
+
+<ParamField path="--evaluator" type="string">
+  Override the scorer for every task (a registry name or `module:class`). By default each benchmark brings its own.
+</ParamField>
+
+<ParamField path="--output" type="string">
+  Where to write the results JSON. Defaults to a timestamped run directory under `~/.rllm/eval_results/`.
+</ParamField>
+
+<ParamField path="--save-episodes / --no-save-episodes" default="enabled">
+  Save each task's full trajectory as JSON for later inspection with `rllm view`.
+</ParamField>
+
+```bash
+# A fast, reproducible dev loop
+rllm eval gsm8k --max-examples 20 --concurrency 16
+
+# Re-run just three rows and save results to a known path
+rllm eval gsm8k --task-indices 4,11,27 --output runs/retry.json
+```
+
+When the run finishes, rLLM prints accuracy, an error count, and per-signal metrics, and tells you how to browse the saved episodes:
+
+```bash
+rllm view <run-id>
+```
+
+## Sandboxed (agentic) evaluations
+
+Coding agents and Harbor tasks run inside an isolated **sandbox** — a container with the task's repo, dependencies, and test suite. Pick where those sandboxes run with `--sandbox-backend`:
+
+| Backend | Where it runs | Notes |
+|---------|---------------|-------|
+| `docker` | Your local Docker daemon | Default; requires Docker installed |
+| `local` | The host machine directly | No isolation; fastest |
+| `modal`, `daytona`, `e2b`, `runloop`, `gke` | Cloud | No local Docker needed; scales out |
+
+```bash
+rllm eval harbor:swebench-verified \
+  --agent mini-swe-agent \
+  --sandbox-backend modal \
+  --sandbox-concurrency 8
+```
+
+<Note>
+`--sandbox-concurrency` caps how many sandboxes exist at once, independent of `--concurrency`. Use it to stay within a cloud backend's limits.
+</Note>
+
+## Accelerating cold start with snapshots
+
+Every sandboxed task pays a **cold start** before any real work happens: the backend pulls a (often multi-gigabyte) image and replays the environment's setup steps. For large or repeated evaluations this can dominate wall-clock time. A **snapshot** bakes that one-time work into a reusable backend artifact, so tasks boot from a warmed environment in roughly a second.
+
+Snapshots are managed like datasets — you create them once, they persist, and `rllm eval` uses them automatically:
+
+<Steps>
+  <Step title="Create snapshots for a dataset (or a slice)">
+    ```bash
+    # Build snapshots for the whole benchmark, or just the slice you'll evaluate
+    rllm snapshot create harbor:swebench-verified --sandbox-backend modal
+    rllm snapshot create harbor:swebench-verified --sandbox-backend modal --max-examples 5
+    ```
+  </Step>
+  <Step title="Evaluate — snapshots are used transparently">
+    ```bash
+    # Boots from a snapshot whenever one exists; falls back to cold otherwise
+    rllm eval harbor:swebench-verified --sandbox-backend modal
+    ```
+  </Step>
+  <Step title="Inspect or remove them">
+    ```bash
+    rllm snapshot list                                            # what you have, by dataset
+    rllm snapshot destroy harbor:swebench-verified --sandbox-backend modal
+    ```
+  </Step>
+</Steps>
+
+### What a snapshot is
+
+<AccordionGroup>
+  <Accordion title="A per-environment artifact, shared widely">
+    A snapshot is keyed by the **environment** — its base image plus Dockerfile setup steps — not by an individual task. So every task that shares an environment uses the same snapshot, and one set of snapshots is reused by **eval and training alike** (including all the group copies a training run makes of a task). The agent harness is *not* part of the key, so the same snapshots serve any harness.
+  </Accordion>
+  <Accordion title="Persistent and user-managed, unlike a sandbox">
+    A **sandbox** is ephemeral — created for one rollout and torn down right after. A **snapshot** persists until you remove it, like a dataset. Evaluation never creates or destroys snapshots; it only reads them. Building and removing them is always an explicit `rllm snapshot create` / `destroy`.
+  </Accordion>
+  <Accordion title="Storage, not running compute">
+    Snapshots are stored as image diffs, so they cost almost nothing while idle (no sandbox is running). Each carries a local **time-to-live** (`--ttl-hours`, default 7 days): past it, rLLM stops trusting the local entry and falls back to cold rather than risk a stale boot.
+  </Accordion>
+</AccordionGroup>
+
+| | Cold (default fallback) | Snapshot |
+|---|:---:|:---:|
+| Setup re-paid per task | Yes | No — boots from the warmed environment |
+| Idle cost | None | Negligible (storage only) |
+| Reused across runs | — | Yes, by eval **and** training |
+| Created by | — | `rllm snapshot create` (never by a run) |
+
+Snapshots are available only on cloud backends with a snapshot mechanism (`modal`, `daytona`); `docker` / `local` always take the cold path (their local image cache already amortizes it). To force the cold path on a backend that has snapshots — for A/B timing, say — pass `--no-snapshot`:
+
+```bash
+rllm eval harbor:swebench-verified --sandbox-backend modal --no-snapshot
+```
+
+<Note>
+If a snapshot was removed on the backend out of band, the eval notices on boot and transparently falls back to cold for that task — a run never fails because a snapshot went missing.
+</Note>
+
+## What's next
+
+<CardGroup cols={2}>
+  <Card title="Supported datasets" icon="database" href="/datasets">
+    Every benchmark with its size, source, and evaluator
+  </Card>
+  <Card title="CLI reference" icon="terminal" href="/core-concepts/cli-and-ui">
+    All commands, flags, and the web UI
+  </Card>
+  <Card title="Agent harnesses" icon="robot" href="/core-concepts/harnesses">
+    How harnesses drive the model through a task
+  </Card>
+  <Card title="Evaluators" icon="check" href="/core-concepts/agentflow-evaluator">
+    How results are scored
+  </Card>
+</CardGroup>

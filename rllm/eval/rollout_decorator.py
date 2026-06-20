@@ -62,6 +62,10 @@ class AgentFlowFn:
     :func:`run_agent_flow` can await it directly.
     """
 
+    # Host-only by declaration: @rollout flows run on the host and never
+    # require a sandbox themselves (the task/verifier may still bring one).
+    needs_env: bool = False
+
     def __init__(self, fn: Callable, *, name: str = "solver") -> None:
         self._fn = fn
         self._name = name

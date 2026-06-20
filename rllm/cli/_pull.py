@@ -72,16 +72,6 @@ def _remap_fields(row: dict, field_map: dict) -> dict:
     return new_row
 
 
-def _is_pil_image(obj: object) -> bool:
-    """Check if an object is a PIL Image without importing PIL at module level."""
-    try:
-        from PIL import Image
-
-        return isinstance(obj, Image.Image)
-    except ImportError:
-        return False
-
-
 def _disable_image_decoding(hf_dataset):
     """Cast Image columns to decode=False so raw bytes are preserved.
 
@@ -157,76 +147,6 @@ def _flatten_image_dicts(data_list: list[dict]) -> list[dict]:
             if isinstance(vals, list):
                 row[col] = [v["bytes"] if _is_image_dict(v) else None for v in vals]
 
-    return data_list
-
-
-def _extract_and_save_images(data_list: list[dict], name: str, split: str) -> list[dict]:
-    """Scan rows for PIL Image columns, save to disk, and replace with relative paths.
-
-    Images are saved to ``{DATASETS_ROOT}/{name}/images/{split}_{idx}_{col}.png``.
-    The PIL objects are replaced with paths relative to ``{DATASETS_ROOT}/`` so
-    that agent flows can resolve them at runtime.
-
-    This is a no-op for datasets without PIL Image columns.
-
-    .. note:: This is the legacy path kept for backward compatibility. New pulls
-       use ``_disable_image_decoding`` + ``_flatten_image_dicts`` instead.
-
-    Args:
-        data_list: List of row dicts (potentially containing PIL Images).
-        name: Dataset name (used in the image directory).
-        split: Split name.
-
-    Returns:
-        The same list with PIL Image objects replaced by relative path strings.
-    """
-    if not data_list:
-        return data_list
-
-    # Detect image columns from the first row
-    first_row = data_list[0]
-    image_cols: list[str] = []
-    list_image_cols: list[str] = []
-
-    for col, val in first_row.items():
-        if _is_pil_image(val):
-            image_cols.append(col)
-        elif isinstance(val, list) and val and _is_pil_image(val[0]):
-            list_image_cols.append(col)
-
-    if not image_cols and not list_image_cols:
-        return data_list
-
-    # Create image directory
-    images_dir = os.path.join(_DATASETS_ROOT, name, "images")
-    os.makedirs(images_dir, exist_ok=True)
-
-    logger.info(f"  Extracting images for {name}/{split} (cols: {image_cols + list_image_cols})...")
-
-    for idx, row in enumerate(data_list):
-        for col in image_cols:
-            img = row.get(col)
-            if _is_pil_image(img):
-                fname = f"{split}_{idx}_{col}.png"
-                fpath = os.path.join(images_dir, fname)
-                img.save(fpath)
-                row[col] = os.path.join(name, "images", fname)
-            else:
-                row[col] = None
-
-        for col in list_image_cols:
-            imgs = row.get(col, [])
-            paths = []
-            if isinstance(imgs, list):
-                for j, img in enumerate(imgs):
-                    if _is_pil_image(img):
-                        fname = f"{split}_{idx}_{col}_{j}.png"
-                        fpath = os.path.join(images_dir, fname)
-                        img.save(fpath)
-                        paths.append(os.path.join(name, "images", fname))
-            row[col] = paths
-
-    logger.info(f"  Saved images to {images_dir}")
     return data_list
 
 
@@ -378,7 +298,9 @@ def _pull_built_dataset(name: str, catalog_entry: dict, builder_path: str) -> No
     The builder is specified as ``module:function`` and materializes the
     benchmark directory under ``~/.rllm/datasets/<name>/`` directly (the
     ``rllm eval`` materialised-benchmark redirect then resolves it by name).
-    It receives ``name``, ``split``, ``out_dir`` and ``catalog_entry`` kwargs.
+    It receives ``name``, ``split``, ``out_dir`` and ``catalog_entry`` kwargs,
+    plus any ``builder_kwargs`` from the catalog entry (used to back two
+    variants of the same dataset off one builder, e.g. skills-on vs. -off).
 
     Unlike HF/generator datasets (which emit row data), sandbox datasets are
     whole workspaces, so they bypass the row-materialize path entirely.
@@ -386,7 +308,8 @@ def _pull_built_dataset(name: str, catalog_entry: dict, builder_path: str) -> No
     build_fn = _load_transform(builder_path)
     out_dir = os.path.join(_DATASETS_ROOT, name)
     split = catalog_entry.get("eval_split") or (catalog_entry.get("splits") or ["test"])[0]
-    build_fn(name=name, split=split, out_dir=out_dir, catalog_entry=catalog_entry)
+    extra_kwargs = dict(catalog_entry.get("builder_kwargs") or {})
+    build_fn(name=name, split=split, out_dir=out_dir, catalog_entry=catalog_entry, **extra_kwargs)
     logger.info("Built sandbox benchmark '%s' at %s", name, out_dir)
 
 

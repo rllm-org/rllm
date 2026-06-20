@@ -25,6 +25,7 @@ from __future__ import annotations
 import shlex
 
 from rllm.harnesses.cli_harness import BaseCliHarness
+from rllm.sandbox.protocol import Sandbox
 from rllm.types import AgentConfig, Task
 
 # apt branch hardened against arm64 ubuntu-ports GPG flakes — same
@@ -70,14 +71,13 @@ class CodexHarness(BaseCliHarness):
 
     name = "codex"
     sandbox_backend = "docker"
-    max_concurrent = 4
     stdout_log_path = "/tmp/codex.log"
 
     def install_script(self) -> str:
         return _INSTALL_SCRIPT
 
     def build_env(self, task: Task, config: AgentConfig) -> dict[str, str]:
-        gateway_url = self._container_url(config.base_url)
+        gateway_url = config.base_url
         return {
             # Custom CODEX_HOME so auth/config files don't touch $HOME/.codex.
             "CODEX_HOME": _CODEX_HOME,
@@ -92,6 +92,7 @@ class CodexHarness(BaseCliHarness):
 
     def write_configs(
         self,
+        sandbox: Sandbox,
         task: Task,
         config: AgentConfig,
         env: dict[str, str],
@@ -107,7 +108,7 @@ class CodexHarness(BaseCliHarness):
           required (and was the source of the silent no-op in earlier
           versions of this harness).
         """
-        gateway_url = self._container_url(config.base_url)
+        gateway_url = config.base_url
         api_key = env.get("OPENAI_API_KEY", self.gateway_api_key(config, "OPENAI_API_KEY"))
 
         # JSON has to be escaped enough to survive a single-quoted heredoc
@@ -131,7 +132,7 @@ class CodexHarness(BaseCliHarness):
             f"{config_toml}"
             "_RLLM_CODEX_CFG_EOF"
         )
-        self._exec_agent(cmd, env=env)
+        self._exec_agent(sandbox, cmd, env=env)
 
     def build_invocation(
         self,

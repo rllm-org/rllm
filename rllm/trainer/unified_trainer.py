@@ -4,7 +4,8 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pprint import pprint
 from typing import Any, Literal
@@ -13,7 +14,7 @@ import numpy as np
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
-from rllm.data import Dataset
+from rllm.data import Dataset, StatefulTaskDataLoader
 from rllm.engine.rollout import RolloutEngine
 from rllm.engine.unified_workflow_engine import UnifiedWorkflowEngine
 from rllm.trainer.algorithms.advantage import (
@@ -49,6 +50,21 @@ from rllm.workflows.workflow import TerminationReason, Workflow
 logger = logging.getLogger(__name__)
 
 
+@contextmanager
+def _detached_warm_queue(hooks):
+    """Temporarily detach a training warm queue so the enclosed work (validation,
+    whose tasks aren't in the train schedule) falls back to direct sandbox creation."""
+    if hooks is None:
+        yield
+        return
+    saved = hooks.warm_queue
+    hooks.warm_queue = None
+    try:
+        yield
+    finally:
+        hooks.warm_queue = saved
+
+
 @dataclass
 class TrainerState:
     """Common trainer state that's backend-agnostic. Reset at each training step."""
@@ -59,6 +75,7 @@ class TrainerState:
     total_steps: int = 0
     is_training: bool = True
     weight_version: int = 0
+    train_dataloader: StatefulTaskDataLoader | None = None
     # For timing and metrics
     timing_dict: dict = field(default_factory=dict)
     metrics: dict = field(default_factory=dict)
@@ -152,11 +169,14 @@ class UnifiedTrainer:
 
         self.async_config = AsyncTrainingConfig.from_config(self.rllm_config.get("async_training", {}))
 
+        self._init_dataloaders()
+
         rollout_engine: RolloutEngine = self.backend.init_rollout_engine(
             cf_config=self.cf_config,
             transform_config=self.transform_config,
             rs_config=self.rs_config,
             algorithm_config=self.algorithm_config,
+            total_training_steps=self._total_training_steps,
         )
 
         # Determine which engine path to use:
@@ -179,15 +199,8 @@ class UnifiedTrainer:
             gateway_mode = "process" if kwargs.get("backend_name") == "verl" else "thread"
             self._gateway = GatewayManager(self.config, mode=gateway_mode)
 
-            # merge the data.max_response_length into the sampling_params; TODO(listar2000): refactor the data config group
-            training_sampling_params = {
-                **OmegaConf.to_container(self.rllm_config.rollout.train, resolve=True),
-                "max_tokens": self.config.data.max_response_length,
-            }
-            val_sampling_params = {
-                **OmegaConf.to_container(self.rllm_config.rollout.val, resolve=True),
-                "max_tokens": self.config.data.max_response_length,
-            }
+            training_sampling_params = OmegaConf.to_container(self.rllm_config.rollout.train, resolve=True)
+            val_sampling_params = OmegaConf.to_container(self.rllm_config.rollout.val, resolve=True)
 
             self.agent_workflow_engine = AgentFlowEngine(
                 agent_flow=agent_flow,
@@ -202,6 +215,7 @@ class UnifiedTrainer:
                 val_sampling_params=val_sampling_params,
                 hooks=hooks,
             )
+
         elif remote_runtime_cfg.get("enabled", False):
             from rllm.engine.remote_agent_flow_engine import (
                 RemoteAgentFlowEngine,
@@ -235,6 +249,7 @@ class UnifiedTrainer:
                 n_parallel_tasks=self.rllm_config.workflow.n_parallel_tasks,
                 episode_logger=self.episode_logger,
             )
+
         else:
             self.agent_workflow_engine = UnifiedWorkflowEngine(
                 workflow_cls=self.workflow_class,
@@ -254,6 +269,35 @@ class UnifiedTrainer:
         self.tokenizer = None
         if hasattr(self.backend, "tokenizer"):
             self.tokenizer = self.backend.tokenizer
+
+    def _init_dataloaders(self) -> None:
+        """Build the train and val dataloaders from their datasets."""
+        self._train_dataloader: StatefulTaskDataLoader | None = None
+        self._val_dataloader: StatefulTaskDataLoader | None = None
+        self._total_training_steps: int | None = None
+
+        if self.train_dataset is not None:
+            batch_size = 1 if self.async_config.enable else int(self.rllm_config.data.train_batch_size * self.rllm_config.rejection_sample.multiplier)
+            self._train_dataloader = StatefulTaskDataLoader(
+                self.train_dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                seed=self.rllm_config.data.seed,
+                drop_last=True,
+            )
+            total_batches = self.rllm_config.trainer.get("total_batches")
+            use_total_batches = total_batches is not None and total_batches > 0
+            if use_total_batches:
+                self._total_training_steps = total_batches
+            else:
+                total_task_batches = len(self._train_dataloader) * self.rllm_config.trainer.total_epochs
+                self._total_training_steps = total_task_batches // self.async_config.mini_batch_size if self.async_config.enable else total_task_batches
+
+        if self.val_dataset is not None:
+            val_batch_size = self.rllm_config.data.val_batch_size
+            if val_batch_size == -1:
+                val_batch_size = len(self.val_dataset)
+            self._val_dataloader = StatefulTaskDataLoader(self.val_dataset, batch_size=val_batch_size, shuffle=False, drop_last=False)
 
     def _validate_and_setup_configs(self):
         """Validate and setup common configs."""
@@ -324,6 +368,7 @@ class UnifiedTrainer:
             await self.agent_workflow_engine.initialize_pool()
 
         trainer_state = TrainerState()
+        trainer_state.train_dataloader = self._train_dataloader
 
         await self.backend.on_train_start(trainer_state)
 
@@ -357,57 +402,88 @@ class UnifiedTrainer:
 
     async def _fit_on_policy(self, trainer_state: TrainerState) -> None:
         """Synchronous training loop (the most vanilla, standalone case that does not support minibatching or off-policy training)."""
-        # TODO(kylemontgomery1): dataloader should be backend-agnostic
-        train_dataloader: Iterable = self.backend.get_dataloader(self.train_dataset, trainer_state)
-        break_via_total_batches = False  # used to break the training loop via the `total_batches` parameter
+        train_dataloader = self._train_dataloader
+        assert train_dataloader is not None, "train_dataset is required for training"
+        total_epochs = self.rllm_config.trainer.total_epochs
         use_total_batches = self.rllm_config.trainer.get("total_batches") is not None and self.rllm_config.trainer.total_batches > 0
+        trainer_state.total_steps = self._total_training_steps
+        break_via_total_batches = False
 
-        if use_total_batches:
-            trainer_state.total_steps = self.rllm_config.trainer.total_batches
-        else:
-            trainer_state.total_steps = len(train_dataloader) * self.rllm_config.trainer.total_epochs
-
-        for epoch in range(self.rllm_config.trainer.total_epochs):
-            # recursively break through the outer loop
-            if break_via_total_batches:
-                break
-
-            pprint(f"epoch {epoch}, step {trainer_state.global_step} started")
-            trainer_state.epoch = epoch
-            await self.backend.on_epoch_start(trainer_state)
-
-            for batch in train_dataloader:
-                trainer_state.reset_batch()
-
-                await self.backend.on_batch_start(trainer_state)
-                with simple_timer("step", trainer_state.timing_dict):
-                    await self._train_batch_async(batch, trainer_state)
-                await self.backend.on_batch_end(trainer_state)
-
-                print_metrics_table(trainer_state.metrics, trainer_state.global_step)
-                self.logger.log(
-                    data=trainer_state.metrics,
-                    step=trainer_state.global_step,
-                    episodes=trainer_state.episodes,
-                    trajectory_groups=trainer_state.trajectory_groups,
-                )
-
-                # if the config specifies the `total_batches` parameter, then we check if we should stop
-                if use_total_batches and trainer_state.global_step >= self.rllm_config.trainer.total_batches:
-                    break_via_total_batches = True
+        hooks = getattr(self.agent_workflow_engine, "hooks", None)
+        warm_queue = self._start_train_warm_queue(train_dataloader, trainer_state, total_epochs, use_total_batches, hooks)
+        try:
+            for epoch in range(train_dataloader.epoch, total_epochs):
+                if break_via_total_batches:
                     break
+                trainer_state.epoch = epoch
+                pprint(f"epoch {epoch}, step {trainer_state.global_step} started")
+                await self.backend.on_epoch_start(trainer_state)
 
-                # periodic validation
-                if self.rllm_config.trainer.test_freq > 0 and trainer_state.global_step % self.rllm_config.trainer.test_freq == 0:
-                    await self._validate_async(trainer_state)
+                for batch in train_dataloader:
+                    trainer_state.reset_batch()
+                    await self.backend.on_batch_start(trainer_state)
+                    with simple_timer("step", trainer_state.timing_dict):
+                        await self._train_batch_async(batch, trainer_state)
+                    await self.backend.on_batch_end(trainer_state)
 
-                trainer_state.global_step += 1
+                    print_metrics_table(trainer_state.metrics, trainer_state.global_step)
+                    self.logger.log(
+                        data=trainer_state.metrics,
+                        step=trainer_state.global_step,
+                        episodes=trainer_state.episodes,
+                        trajectory_groups=trainer_state.trajectory_groups,
+                    )
 
-            await self.backend.on_epoch_end(trainer_state)
+                    # if the config specifies the `total_batches` parameter, then we check if we should stop
+                    if use_total_batches and trainer_state.global_step >= self.rllm_config.trainer.total_batches:
+                        break_via_total_batches = True
+                        break
 
-        # final validation after training
+                    # periodic validation
+                    if self.rllm_config.trainer.test_freq > 0 and trainer_state.global_step % self.rllm_config.trainer.test_freq == 0:
+                        with _detached_warm_queue(hooks):
+                            await self._validate_async(trainer_state)
+
+                    trainer_state.global_step += 1
+
+                await self.backend.on_epoch_end(trainer_state)
+        finally:
+            if warm_queue is not None:
+                warm_queue.shutdown()
+                hooks.warm_queue = None
+
+        # final validation after training (queue already shut down + detached above)
         if self.rllm_config.trainer.test_freq > 0:
             await self._validate_async(trainer_state)
+
+    def _start_train_warm_queue(self, train_dataloader, trainer_state, total_epochs, use_total_batches, hooks):
+        """Prefetch upcoming sandboxes ahead of rollout, mirroring eval's warm pool.
+
+        Returns a started :class:`WarmQueue` attached to ``hooks`` (the caller shuts
+        it down), or ``None`` when there is no sandbox backend or the knob is 0.
+        Size ``-1`` matches the sandbox-creation frontier (``agent_flow.max_concurrent``).
+        """
+        warm_queue_size = self.rllm_config.workflow.get("warm_queue_size", -1)
+        if hooks is None or not getattr(hooks, "sandbox_backend", None) or warm_queue_size == 0:
+            return None
+
+        from rllm.sandbox.snapshot import install_script_for
+        from rllm.sandbox.train_schedule import build_train_schedule
+        from rllm.sandbox.warm_queue import WarmQueue
+
+        flow = getattr(self.agent_workflow_engine, "agent_flow", None)
+        frontier = getattr(flow, "max_concurrent", 8)
+        size = frontier if warm_queue_size < 0 else warm_queue_size
+        consumed = trainer_state.global_step - 1  # global_step is 1-based once fit_async starts
+        remaining = self._total_training_steps - consumed
+        if use_total_batches:
+            remaining = min(remaining, self.rllm_config.trainer.total_batches - consumed)
+        schedule = build_train_schedule(train_dataloader, group_size=self.rllm_config.rollout.n, total_epochs=total_epochs, remaining_batches=remaining)
+        warm_queue = WarmQueue(schedule, hooks.sandbox_backend, hooks.registry, size, install_script=install_script_for(flow))
+        hooks.warm_queue = warm_queue
+        warm_queue.start()
+        logger.info("training warm queue started: %d ahead over %d scheduled tasks", size, len(schedule))
+        return warm_queue
 
     async def _train_batch_async(self, batch: Any, trainer_state: TrainerState) -> None:
         """Train a batch (async implementation)."""
@@ -475,7 +551,7 @@ class UnifiedTrainer:
 
     async def _fit_fully_async(self, trainer_state: TrainerState) -> None:
         """Fully-async generation + training with group-level streaming."""
-        assert self.config.data.train_batch_size == 1, f"Async training requires train_batch_size=1, got {self.config.data.train_batch_size}"
+        assert self.rllm_config.data.train_batch_size == 1, f"Async training requires train_batch_size=1, got {self.rllm_config.data.train_batch_size}"
         assert not getattr(self.agent_workflow_engine, "raise_on_error", False), "Async training requires raise_on_error=False so that process_task_with_retry always returns an episode"
         coord_config = SyncCoordinatorConfig(
             mini_batch_size=self.async_config.mini_batch_size,
@@ -497,13 +573,9 @@ class UnifiedTrainer:
             trajectory_group_offload_dir=self.async_config.trajectory_group_offload_dir,
         )
 
-        # Compute total_steps for LR scheduling
-        train_dataloader = self.backend.get_dataloader(self.train_dataset, trainer_state)
-        use_total_batches = self.rllm_config.trainer.get("total_batches", -1) > 0
-        if use_total_batches:
-            trainer_state.total_steps = self.rllm_config.trainer.total_batches
-        else:
-            trainer_state.total_steps = len(train_dataloader) * self.rllm_config.trainer.total_epochs
+        train_dataloader = self._train_dataloader
+        assert train_dataloader is not None, "train_dataset is required for training"
+        trainer_state.total_steps = self._total_training_steps
 
         total_tasks = len(train_dataloader) * self.rllm_config.trainer.total_epochs
         pbar = tqdm(total=total_tasks, desc="Tasks", unit="task")
@@ -529,17 +601,16 @@ class UnifiedTrainer:
     ) -> None:
         """Generate episodes and stream to TrajectoryGroupBuffer."""
         group_size = self.rllm_config.rollout.n
+        train_dataloader = self._train_dataloader
+        assert train_dataloader is not None, "train_dataset is required for training"
 
         try:
-            for epoch in range(self.rllm_config.trainer.total_epochs):
+            for epoch in range(train_dataloader.epoch, self.rllm_config.trainer.total_epochs):
                 await self.backend.on_epoch_start(trainer_state)
-                train_dataloader = self.backend.get_dataloader(self.train_dataset, trainer_state)
                 self.agent_workflow_engine.set_training_step(trainer_state.global_step, mode="train", epoch=epoch)
 
                 for batch in train_dataloader:
-                    # Tinker dataloader: list of task dicts. Verl dataloader: dict with
-                    # per-sample fields under "extra_info".
-                    task = batch["extra_info"][0] if isinstance(batch, dict) else batch[0]
+                    task = batch[0]
 
                     await coordinator.wait_for_generation_allowed()
                     if not coordinator.has_quota():
@@ -733,6 +804,8 @@ class UnifiedTrainer:
 
     async def _validate_async(self, trainer_state: TrainerState) -> dict:
         """Validate the model (async implementation)."""
+        if self._val_dataloader is None:
+            return {}
         n_val_samples = self.rllm_config.rollout.n_val
         val_metrics = defaultdict(list)
 
@@ -745,8 +818,7 @@ class UnifiedTrainer:
         is_correct_lst, uid_lst, data_source_lst = [], [], []
         workflow_metrics_by_source = defaultdict(lambda: defaultdict(list))
 
-        val_dataloader: Iterable = self.backend.get_dataloader(self.val_dataset, trainer_state)
-        for batch in val_dataloader:
+        for batch in self._val_dataloader:
             # Generate episodes and transform to trajectory groups
             val_episodes = await self.backend.generate_episodes(batch, agent_workflow_engine=self.agent_workflow_engine, is_validation=True)
             val_trajectory_groups, _ = transform_episodes_to_trajectory_groups(val_episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook)
@@ -878,11 +950,13 @@ class AgentTrainer:
 
     This trainer will simply delegate the task to the corresponding launcher class.
 
-    Provide exactly one of ``workflow_class`` or ``agent_flow``. For sandbox-style
-    flows (``SandboxedAgentFlow`` agent or tasks with ``task_path`` metadata),
-    ``hooks`` and gateway loopback are auto-wired via
-    :class:`rllm.hooks.SandboxTaskHooks`; pass ``hooks=`` or ``evaluator=``
-    explicitly to override.
+    Provide exactly one of ``workflow_class`` or ``agent_flow``. When the run
+    needs sandboxes (the flow declares ``needs_env``, or any dataset row
+    carries an environment — see :func:`rllm.hooks.scan_env_requirements`),
+    :class:`rllm.hooks.SandboxTaskHooks` and gateway loopback/tunnel are
+    auto-wired. A passed ``evaluator`` becomes the hooks' FixedEvaluation
+    policy (it does not disable the sandbox lifecycle); pass ``hooks=``
+    explicitly to take over per-task setup entirely.
 
     Args:
         sandbox_backend: Backend for the auto-wired sandbox hooks
@@ -899,7 +973,7 @@ class AgentTrainer:
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
         workflow_args: dict | None = None,
-        backend: Literal["verl", "tinker"] = "verl",
+        backend: Literal["verl", "tinker", "fireworks"] = "verl",
         agent_flow: Any = None,
         evaluator: Any = None,
         hooks: Any = None,
@@ -908,32 +982,45 @@ class AgentTrainer:
         store: Store | None = None,
         **kwargs,
     ):
-        # Auto-wire sandbox hooks + gateway loopback unless caller set hooks/evaluator.
-        if agent_flow is not None and hooks is None and evaluator is None:
+        # Loopback/tunnel pinning must happen here, before the launcher
+        # constructs GatewayManager, and applies to explicitly-passed hooks too.
+        if agent_flow is not None:
+            from rllm.gateway.tunnel import is_local_sandbox_backend
             from rllm.hooks import (
+                FixedEvaluation,
                 SandboxTaskHooks,
-                enable_tunnel_for_remote_sandbox,
-                needs_sandbox_isolation,
+                enable_gateway_tunnel,
                 pin_gateway_host_loopback,
+                scan_env_requirements,
             )
 
-            if needs_sandbox_isolation(agent_flow, train_dataset, val_dataset):
-                hooks = SandboxTaskHooks(sandbox_backend=sandbox_backend)
+            scan = scan_env_requirements(agent_flow, train_dataset, val_dataset, sandbox_backend=sandbox_backend)
+            if hooks is None and scan.needs_env:
+                hooks = SandboxTaskHooks(
+                    evaluation=FixedEvaluation(evaluator) if evaluator is not None else None,
+                    sandbox_backend=sandbox_backend,
+                )
+                evaluator = None
+            if hooks is not None and scan.needs_env:
                 config = pin_gateway_host_loopback(config)
-                config = enable_tunnel_for_remote_sandbox(config, sandbox_backend)
+                # The hooks-backend clause matters only for explicitly-passed
+                # hooks; auto-wired hooks share `sandbox_backend`, already
+                # folded into `scan.any_remote`.
+                hooks_backend = getattr(hooks, "sandbox_backend", None)
+                if scan.any_remote or not is_local_sandbox_backend(hooks_backend):
+                    config = enable_gateway_tunnel(config)
 
-        # Forward concurrency + backend overrides onto a SandboxedAgentFlow.
-        if agent_flow is not None and (sandbox_concurrency is not None or sandbox_backend is not None):
-            try:
-                from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
-
-                if isinstance(agent_flow, SandboxedAgentFlow):
-                    if sandbox_concurrency is not None:
-                        agent_flow.max_concurrent = sandbox_concurrency
-                    if sandbox_backend is not None:
-                        agent_flow.sandbox_backend = sandbox_backend
-            except ImportError:
-                pass
+        # Forward CLI overrides through the flow's configure(); the wiring
+        # warns about anything it returns unconsumed.
+        overrides = {k: v for k, v in {"sandbox_backend": sandbox_backend, "sandbox_concurrency": sandbox_concurrency}.items() if v is not None}
+        if agent_flow is not None and overrides:
+            configure = getattr(agent_flow, "configure", None)
+            leftovers = dict(configure(overrides) if callable(configure) else overrides)
+            if hooks is not None:
+                # The sandbox hooks consume the backend regardless of the flow.
+                leftovers.pop("sandbox_backend", None)
+            for flag in leftovers:
+                logger.warning("--%s has no effect for agent %s", flag.replace("_", "-"), type(agent_flow).__name__)
 
         has_agent_flow = agent_flow is not None and (evaluator is not None or hooks is not None)
         remote_runtime_enabled = config.rllm.get("remote_runtime", {}).get("enabled", False)
@@ -972,6 +1059,20 @@ class AgentTrainer:
                 store=store,
                 **kwargs,
             )
+        elif backend == "fireworks":
+            from rllm.trainer.fireworks.fireworks_launcher import FireworksTrainerLauncher
+
+            self.launcher = FireworksTrainerLauncher(
+                config=config,
+                workflow_class=workflow_class,
+                train_dataset=train_dataset,
+                val_dataset=val_dataset,
+                workflow_args=workflow_args,
+                store=store,
+                **kwargs,
+            )
+        else:
+            raise ValueError(f"Unsupported backend: {backend}")
 
     def train(self):
         self.launcher.train()

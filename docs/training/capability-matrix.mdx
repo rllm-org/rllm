@@ -1,0 +1,260 @@
+---
+title: "Trainer capability matrix"
+description: "A dimension-by-dimension map of what the unified trainer supports across backends, launch methods, execution flows, and dataset types — and where the silent gaps are."
+---
+
+<Note>
+**Modules**: `rllm.trainer.unified_trainer`, `rllm.cli.train`
+</Note>
+
+rLLM unifies training behind a single `UnifiedTrainer`, but "unified" does **not** mean "uniform." A feature can be available on one backend and a silent no-op on the other; reachable from a Python script but not the CLI; active for a sandboxed agent but not a plain workflow. This page is the map: it walks the **four dimensions** along which capabilities vary, so you can predict what a given combination will and won't do before you launch a run.
+
+This page is a *cross-cutting* view that assumes you already know rLLM's runtime vocabulary. For the per-backend deep dives see [Backend comparison](/backends/comparison); for the loop mechanics and the **gateway** see [Unified trainer](/training/unified-trainer) and [Training concepts](/core-concepts/training); for **AgentFlow** and **hooks** see the [AgentFlow API](/api/agentflow); for the full field list see [Configuration](/training/configuration).
+
+<Tip>
+**Glyphs used in the tables below:** ✅ supported · ❌ not supported (or a **silent no-op** — set it and nothing happens, no error) · ⚠️ supported with a caveat called out in the same row · — not applicable. A "silent no-op" is worse than "not supported," because the config looks like it took effect; those are the rows worth memorizing.
+</Tip>
+
+## The four dimensions
+
+<CardGroup cols={2}>
+  <Card title="Backend" icon="server">
+    **tinker** vs **verl** — single-machine RL-as-a-service vs Ray-distributed. Decides which *algorithm knobs* actually take effect.
+  </Card>
+  <Card title="Launch method" icon="terminal">
+    **`rllm train` CLI** vs **Hydra/Python script** — the CLI is a strict *subset* of the script surface.
+  </Card>
+  <Card title="Execution flow" icon="diagram-project">
+    **regular** vs **sandboxed** vs **remote runtime** — decides whether the gateway, hooks, and the sandbox warm pool engage.
+  </Card>
+  <Card title="Dataset type" icon="database">
+    **rLLM-native rows** vs **harbor task dirs** — decides whether `env_key`/snapshots are meaningful and how rows become `Task`s.
+  </Card>
+</CardGroup>
+
+<Warning>
+**The golden rule: the CLI is a subset of the script surface.** `rllm train` hardcodes the **tinker** backend and one execution flow, and exposes only a fixed set of flags. Everything reachable from the CLI is reachable from a script; the reverse is not true. If a capability below is "script-only," reach for `AgentTrainer(...)` in Python (or a Hydra entry point), not a CLI flag.
+</Warning>
+
+## Dimension 1 — Backend
+
+Both backends share the same advantage-estimation layer and training loop. They diverge on **infrastructure** (only verl is distributed) and, more subtly, on **which `algorithm.*` knobs are honored**.
+
+<Tabs>
+  <Tab title="tinker">
+    Single-machine, **LoRA-only** — on the unified tinker backend there is no full-fine-tune code path (every training client is a LoRA client). Async-native. Distributed concerns (GPUs, nodes, FSDP) are delegated to the Tinker service and are not configurable from rLLM.
+
+    Adds over the shared baseline: an advantage-estimator → loss-fn auto-map (`GRPO → ppo`, everything else → `importance_sampling`), an rLLM-side LR schedule with warmup, and a fused forward-backward-optim step (async overlap of the forward-backward and optimizer requests, per Tinker's best practice).
+  </Tab>
+  <Tab title="verl">
+    Ray-distributed: multi-GPU / multi-node, FSDP / Megatron / tensor-parallel, vLLM / SGLang rollout, colocated hybrid engine.
+
+    Owns the entire family of PPO-style knobs below (clip, KL-in-loss, loss aggregation, truncated importance sampling, router replay). These are wired into verl's native config by `sync_config`.
+  </Tab>
+</Tabs>
+
+### Algorithm knobs that are not portable
+
+These live in the backend-agnostic `AlgorithmConfig` / `base.yaml`, so they *look* portable. On verl they take effect; **on tinker several of them parse cleanly and then do nothing** — there is no warning, because tinker has no validation guard for them.
+
+| `algorithm.*` knob | verl | tinker | If you set it on tinker… |
+|---|:--:|:--:|---|
+| `adv_estimator` (GRPO / REINFORCE / RLOO / REINFORCE++) | ✅ | ✅ | Works (shared registry) |
+| `kl_beta` (KL **in the loss**) | ✅ | ❌ | **Silent no-op.** tinker logs KL as a *diagnostic metric* only; it is never added to the loss |
+| `eps_clip` / `eps_clip_high` (PPO clip) | ✅ | ❌ | **Silent no-op.** tinker applies its own fixed PPO clip inside the service; rLLM cannot read or set it |
+| `loss_agg_mode` | ✅ | ❌ | **Silent no-op** (tinker aggregation is fixed per-Datum) |
+| `rollout_correction` — truncated importance sampling, TIS (`tis_mode`, `tis_cap`, `bypass_mode`) | ✅ | ❌ | **Silent no-op** — see the callout below |
+| `router_replay` — R2 / R3 router-replay modes (MoE) | ✅ (Megatron only) | ❌ | Hard error: tinker rejects any non-`disabled` value at startup |
+| `mask_truncated_samples` | ✅ | ❌ | **Silent no-op** (only verl reads it) |
+| `loss_fn` | ✅ (verl loss names) | ✅ (tinker loss names) | Works, but the *valid value space differs per backend* |
+| `lr_schedule` + warmup | ✅ | ✅ | Works on both (different implementations) |
+
+<Warning>
+**`rollout_correction.bypass_mode` on tinker is documentation, not control.** `tinker.yaml` ships `rllm.algorithm.rollout_correction.bypass_mode: true`, but **no tinker code reads `rollout_correction` at all**. The value merely *describes* tinker's intrinsic behavior: tinker treats the log-probs captured at rollout time as the behavior policy (π_old), so there is nothing for truncated importance sampling to correct. Setting `tis_mode='token'` on tinker does nothing and raises no error. TIS is a **verl-only** feature.
+</Warning>
+
+<Info>
+**Don't confuse "verl can do X" with "the unified trainer can do X".** Critic / value-function (GAE — generalized advantage estimation), KL-**in-reward**, true `per_step` stepwise advantage, and distillation are genuine verl capabilities — but they live on the **legacy** `AgentWorkflowPPOTrainer` (`rllm.trainer.agent_trainer.AgentTrainer` → `train_agent_ppo.py`), **not** on the `UnifiedTrainer` `VerlBackend` (which is the subject of this page; see the [two-`AgentTrainer`-classes warning](#dimension-2-launch-method) below). On the unified path `use_critic` is hardcoded `False`, KL-in-reward is rejected, and `per_step` is **silently coerced to `broadcast` with a `DeprecationWarning`** (it is never honored — a footgun in its own right).
+</Info>
+
+## Dimension 2 — Launch method
+
+<Info>
+**AgentFlow vs `workflow_class`.** An **AgentFlow** is the newer rollout abstraction (an async function decorated with `@rllm.rollout`); a **`workflow_class`** is the older class-based `Workflow` API. You pass one or the other to the trainer, and they select *different engines* (see Dimension 3). The CLI always uses an AgentFlow.
+</Info>
+
+<Tabs>
+  <Tab title="rllm train (CLI)">
+    A Click command. It **hardcodes `backend="tinker"`**, always builds the *AgentFlow + evaluator/hooks* execution flow, and writes only a fixed subset of config overrides (model, batch size, group size, epochs/steps, a few `trainer.*` keys, sampling). It is **not** a Hydra entry point — there is no `key=value` dotlist passthrough.
+
+    The one escape hatch to other config keys is `--config <your.yaml>`, merged on top of the defaults. Note it **cannot switch the backend** (backend is a constructor argument, not read from config).
+  </Tab>
+  <Tab title="AgentTrainer (script / Hydra)">
+    The full surface. Construct `AgentTrainer(backend="verl" | "tinker", ...)` in a Python script (or use the verl `@hydra.main` entry points). Every `rllm.*` and backend-native key is reachable via Hydra overrides, plus Python-object arguments that have no config representation at all (see below).
+  </Tab>
+</Tabs>
+
+### Reachability at a glance
+
+| You want to… | CLI | Script | How (script) |
+|---|:--:|:--:|---|
+| Train with **verl** | ❌ | ✅ | `AgentTrainer(backend="verl")` |
+| Use a `workflow_class` (no gateway) | ❌ | ✅ | `AgentTrainer(workflow_class=...)` |
+| Use a **remote runtime** (harbor / agentcore) | ❌ | ✅ | `rllm.remote_runtime.enabled=true` |
+| Set `adv_estimator` / `loss_fn` / `kl_beta` / clip | ⚠️ `--config` only | ✅ | `rllm.algorithm.*=` |
+| Rejection sampling / compact filtering / stepwise | ⚠️ `--config` only | ✅ | `rllm.{rejection_sample,compact_filtering,stepwise_advantage}.*=` |
+| Fully-async training | ⚠️ `--config` only | ✅ | `rllm.async_training.enable=true` |
+| Per-role advantage estimators / custom hooks | ❌ | ✅ | Python kwargs (below) |
+| LoRA per-module flags (`train_attn/mlp/unembed`) | ❌ | ✅ | `model.train_*=` (CLI exposes only `--lora-rank`) |
+| Resume mode `resume_path` / `disable` | ⚠️ `--config` only | ✅ | `training.resume_mode=` (CLI does `auto` by default) |
+
+(⚠️ here means "no first-class flag; reachable only by hand-writing a `--config` YAML.")
+
+<Tip>
+**Some powerful features have no config representation at all** — they are Python-object arguments to `AgentTrainer`, so they are *script-only by construction*: `traj_group_adv_estimator_map` (per-role estimators), `traj_grouping_hook`, and `store`. There is no CLI flag and no YAML key for these. See [Advantage estimator](/training/advantage-estimator) for the per-role map.
+</Tip>
+
+### Reaching a script-only feature from a CLI habit
+
+<Steps>
+  <Step title="Start from the CLI mental model">
+    `rllm train <dataset> --agent <agent>` gives you tinker + GRPO + the AgentFlow path. Good for a vanilla run.
+  </Step>
+  <Step title="Hit a wall (verl, a script-only knob, a remote runtime)">
+    The CLI has no flag for it, and `--config` either can't express it (backend) or you'd rather not hand-edit YAML.
+  </Step>
+  <Step title="Switch to a ~15-line Python script">
+    ```python
+    from rllm.trainer import AgentTrainer  # the EXPORTED unified one
+
+    trainer = AgentTrainer(
+        config=config,                 # composed Hydra config
+        agent_flow=my_flow,
+        evaluator=my_evaluator,
+        backend="verl",                # now reachable
+        traj_group_adv_estimator_map={"solver": "grpo", "judge": "reinforce"},
+    )
+    trainer.train()
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+**There are two classes named `AgentTrainer`.** Import the exported one: `from rllm.trainer import AgentTrainer` (this is `rllm.trainer.unified_trainer.AgentTrainer`, supporting `verl` and `tinker`). The class in `rllm/trainer/agent_trainer.py` is the **legacy** trainer (`verl`/`fireworks`, workflow-only) and is *not* what the CLI or launchers use. `fireworks` exists only on the legacy class; the unified one silently no-ops on an unrecognized backend.
+</Warning>
+
+## Dimension 3 — Execution flow
+
+The trainer creates a gateway (a local proxy that captures each LLM call as a training `Step` and pushes sampling params / weight versions) for the agent-based flows, and auto-wires **hooks** (the `SandboxTaskHooks` lifecycle that provisions a sandbox per task) for the sandboxed flow. Which engine you get is decided from what you pass to the trainer:
+
+<AccordionGroup>
+  <Accordion title="Regular — plain AgentFlow (AgentFlowEngine, with gateway)" icon="robot">
+    `agent_flow` + an `evaluator`, no sandbox. Runs through `AgentFlowEngine` **with a gateway**, so trace→Step capture, session sampling params, and weight-version push all apply.
+  </Accordion>
+  <Accordion title="Regular — workflow_class (UnifiedWorkflowEngine, no gateway)" icon="diagram-project">
+    A `workflow_class` and no `agent_flow`. Runs through `UnifiedWorkflowEngine` **without** a gateway. Gateway-mediated features do *not* apply here, and there are no hooks — so no warm pool and no snapshot.
+  </Accordion>
+  <Accordion title="Sandboxed — SandboxedAgentFlow + SandboxTaskHooks" icon="box">
+    A `SandboxedAgentFlow` (or a harbor-task dataset), for which `AgentTrainer` auto-wires `SandboxTaskHooks`. The created/warm-pooled sandbox *is* the agent's execution environment. This is the **only** flow where the warm pool and snapshot boot engage.
+  </Accordion>
+  <Accordion title="Remote runtime — harbor / agentcore (RemoteAgentFlowEngine)" icon="cloud">
+    `rllm.remote_runtime.enabled=true`. The in-container agent manages its **own** environment, so rLLM's sandbox features are not applicable. Correctness comes from the runtime's reward (a fixed `reward >= 1.0` threshold), not a pluggable host-side evaluator. See [AgentCore runtime](/agent-runtimes/agentcore).
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+**"Regular" is two engines, not one.** A plain AgentFlow uses the gateway; a `workflow_class` does not. When you read "the regular path supports X," check *which* regular path — they have opposite gateway behavior.
+</Note>
+
+### What attaches to each flow
+
+| Capability | regular (AgentFlow) | sandboxed | remote runtime | regular (workflow_class) |
+|---|:--:|:--:|:--:|:--:|
+| Gateway (trace capture, session params) | ✅ | ✅ | ✅ | ❌ |
+| `SandboxTaskHooks` lifecycle | — | ✅ | — | — |
+| **Warm-pool prefetch** | ❌ | ✅ | ❌ | ❌ |
+| **Snapshot cold-start boot** | ❌ | ✅ | ❌ | ❌ |
+| Pluggable host-side `Evaluator` | ✅ | ✅ | ❌ (reward threshold only) | ❌ (the workflow computes its own reward) |
+| Per-rollout retry | ✅ | ✅ | ❌ (single attempt) | ✅ |
+
+<Warning>
+**Warm pool + snapshot accelerate the sandboxed flow only** — and only in the **default synchronous on-policy loop** (the standard generate→update cycle). They engage because only `AgentFlowEngine` carries the `hooks` object that builds the snapshot registry and the warm queue. The plain-workflow and remote-runtime flows have no hooks; the opt-in **fully-async loop** (`rllm.async_training.enable=true`, which overlaps generation and updates) never starts the training warm queue. Snapshots are also a no-op on `docker`/`local` sandbox backends.
+</Warning>
+
+## Dimension 4 — Dataset type
+
+An `env_key` is the identity rLLM uses to decide which tasks can share a pre-built sandbox image: tasks with the same buildable environment get the same key and reuse one snapshot. rLLM-native parquet rows carry no per-task Dockerfile, so they all collapse to one constant `env_key` (a single default image) and a snapshot has nothing to differentiate — whereas harbor task dirs ship a Dockerfile, giving each environment a meaningful key.
+
+| Capability | rLLM-native rows | harbor task dirs |
+|---|:--:|:--:|
+| `StatefulTaskDataLoader` (deterministic, resumable) | ✅ | ✅ |
+| Meaningful `env_key` / snapshot acceleration | ⚠️ degenerate (one constant key) | ✅ |
+| Remote-runtime (harbor) training | ❌ raises | ✅ |
+| CLI val-set `Task`-wrapping | ✅ | ⚠️ only if a harbor `val_entry` is resolved |
+
+For rLLM-native rows run through a `SandboxedAgentFlow`, the warm pool still runs but the snapshot gives no real speedup (the single `env_key`). Plain rLLM-native rows on a **non-sandboxed** AgentFlow engage no sandbox or warm pool at all. The harbor **remote-runtime** training path additionally *requires* a `task_path`; plain parquet rows without one raise an error. On the harbor CLI path the *train* dataset is always `Task`-wrapped, but the *val* dataset is wrapped only when a harbor `val_entry` is resolved — otherwise a harbor val set stays as raw dicts and loses its verifier/environment resolution.
+
+## Gotchas worth memorizing
+
+<AccordionGroup>
+  <Accordion title="Silent no-ops on tinker" icon="ghost">
+    `kl_beta`, `eps_clip`/`eps_clip_high`, `loss_agg_mode`, `rollout_correction`/TIS, and `mask_truncated_samples` are honored on verl and silently ignored on tinker. They live in backend-agnostic config, so they look settable everywhere.
+  </Accordion>
+  <Accordion title="per_step advantage is silently downgraded" icon="ghost">
+    Setting `stepwise_advantage.mode=per_step` on the unified path does **not** error — it is silently coerced to `broadcast` with a `DeprecationWarning` on both backends. True `per_step` advantage exists only on the legacy verl `AgentWorkflowPPOTrainer`.
+  </Accordion>
+  <Accordion title="filter_token_mismatch does nothing" icon="ghost">
+    `filter_token_mismatch` ships `True` in `base.yaml` but no rLLM-side Python reads it (it is a leftover verl-native knob, still present in `agent_ppo_trainer.yaml`). A dead knob on both unified backends.
+  </Accordion>
+  <Accordion title="val_before_train default disagrees with itself" icon="triangle-exclamation">
+    The code falls back to `True` if the key is absent, but the shipped `base.yaml` sets `false`. On normal CLI/Hydra runs the yaml wins; a hand-built config that *omits* the key will validate-before-train — the opposite of the shipped default. Set it explicitly in programmatic configs.
+  </Accordion>
+  <Accordion title="CLI --sandbox-backend doesn't reach a harbor agent's environment" icon="triangle-exclamation">
+    For a `harbor:<scaffold>` agent, `rllm eval` maps `--sandbox-backend` onto the harbor environment type, but `rllm train` does not — train has no harbor-runtime handling and routes the agent through the local AgentFlow path instead. Configure harbor training as a remote runtime from a script.
+  </Accordion>
+  <Accordion title="R3 router replay is incompatible with gateway rollout on verl" icon="triangle-exclamation">
+    `router_replay="R3"` + verl + a gateway-based engine (sandboxed or remote-runtime flow) raises at construction. R3 on verl works only through the direct `workflow_class` path.
+  </Accordion>
+</AccordionGroup>
+
+## Putting it together
+
+A few worked combinations and what to expect:
+
+<Tabs>
+  <Tab title="Quick GRPO on a math dataset">
+    `rllm train` → tinker + AgentFlowEngine + GRPO. Everything you need is a CLI flag. No clip/KL tuning available without `--config`, but GRPO doesn't need them.
+  </Tab>
+  <Tab title="Multi-GPU verl run with KL-in-loss and TIS">
+    Script-only: `AgentTrainer(backend="verl", ...)` with `rllm.algorithm.kl_beta`, `eps_clip`, and `rollout_correction.tis_mode` set. None of this is reachable (or effective) on the tinker CLI.
+  </Tab>
+  <Tab title="Sandboxed SWE agent with warm-pool acceleration">
+    `SandboxedAgentFlow` (or a harbor-task dataset) on tinker; the warm pool engages automatically in the on-policy loop. The additional *snapshot* speedup requires a snapshot-capable sandbox backend (e.g. Daytona), not `docker`/`local`. Not accelerated under a remote runtime or fully-async.
+  </Tab>
+  <Tab title="Per-role estimators for a solver-judge workflow">
+    Script-only: pass `traj_group_adv_estimator_map={"solver": "grpo", "judge": "reinforce"}` to `AgentTrainer`. Works on both backends; no CLI/YAML route exists.
+  </Tab>
+</Tabs>
+
+## See also
+
+<CardGroup cols={2}>
+  <Card title="Training concepts" icon="book" href="/core-concepts/training">
+    Gateway, episodes, and the end-to-end training picture
+  </Card>
+  <Card title="AgentFlow API" icon="robot" href="/api/agentflow">
+    The AgentFlow abstraction and hooks
+  </Card>
+  <Card title="Backend comparison" icon="server" href="/backends/comparison">
+    tinker vs verl — architecture, install, resources
+  </Card>
+  <Card title="Unified trainer" icon="gears" href="/training/unified-trainer">
+    The training loop and the 8-stage pipeline
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/training/configuration">
+    Full config field reference and the verl `sync_config` table
+  </Card>
+  <Card title="Advantage estimator" icon="calculator" href="/training/advantage-estimator">
+    Built-in estimators, per-role maps, and custom registration
+  </Card>
+</CardGroup>

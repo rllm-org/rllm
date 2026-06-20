@@ -5,6 +5,7 @@ from .types import TinkerTokenInput, TinkerTokenOutput, TokenInput, Tokenizer, T
 __all__ = [
     "ModelOutput",
     "RolloutEngine",
+    "FireworksEngine",
     "OpenAIEngine",
     "TinkerEngine",
     "VerlEngine",
@@ -20,6 +21,10 @@ __all__ = [
 
 
 def __getattr__(name):
+    if name == "FireworksEngine":
+        from .fireworks_engine import FireworksEngine as _FireworksEngine
+
+        return _FireworksEngine
     if name == "OpenAIEngine":
         from .openai_engine import OpenAIEngine as _OpenAIEngine
 
