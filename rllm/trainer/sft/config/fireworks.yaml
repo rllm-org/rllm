@@ -23,7 +23,9 @@ model:
   train_mlp: true
 
 fireworks_config:
-  policy_trainer_shape_id: accounts/fireworks/trainingShapes/qwen3p5-9b-256k
+  # LoRA-validated shape (we train LoRA → LORA_TRAINER mode). The non-`-lora`
+  # shape resolves but is not validated for LoRA. Matches swe-rl's RL recipe.
+  policy_trainer_shape_id: accounts/fireworks/trainingShapes/qwen3p5-9b-256k-lora
   policy_trainer_replica_count: 1
 
 data:

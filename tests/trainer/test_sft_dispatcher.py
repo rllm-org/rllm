@@ -141,7 +141,7 @@ def test_fireworks_provision_doc_parses_sft():
     assert pc.base_model == "accounts/fireworks/models/qwen3p5-9b"
     assert pc.tokenizer_model == "Qwen/Qwen3.5-9B"
     assert pc.serverless is False
-    assert pc.trainer.training_shape_id == "accounts/fireworks/trainingShapes/qwen3p5-9b-256k"
+    assert pc.trainer.training_shape_id == "accounts/fireworks/trainingShapes/qwen3p5-9b-256k-lora"
 
 
 def test_fireworks_inherits_validation():
