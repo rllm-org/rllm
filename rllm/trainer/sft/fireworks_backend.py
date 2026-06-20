@@ -124,7 +124,6 @@ class FireworksSFTBackend(TinkerSFTBackend):
 
         try:
             import tinker
-            from tinker_cookbook.supervised.common import compute_mean_nll
             from tinker_cookbook.utils.lr_scheduling import compute_schedule_lr_multiplier
             from training.utils.checkpoints import TrainingCheckpoints
             from training.utils.client import DEFAULT_TIMEOUT_S
@@ -198,21 +197,23 @@ class FireworksSFTBackend(TinkerSFTBackend):
                 step, lr, data, fb_fut, opt_fut, t0 = in_flight.popleft()
                 fb_result = fb_fut.result(timeout=DEFAULT_TIMEOUT_S)
                 opt_fut.result(timeout=DEFAULT_TIMEOUT_S)
-                logprobs = [x["logprobs"] for x in fb_result.loss_fn_outputs]
-                weights = [datum.loss_fn_inputs["weights"] for datum in data]
-                train_nll = compute_mean_nll(logprobs, weights)
+                # Fireworks' cross_entropy forward_backward returns aggregate
+                # metrics (loss:sum / response_tokens), not per-token logprobs.
+                fb_metrics = getattr(fb_result, "metrics", {}) or {}
+                n_loss_tokens = fb_metrics.get("response_tokens") or 0
+                train_loss = (fb_metrics.get("loss:sum", 0.0) / n_loss_tokens) if n_loss_tokens else 0.0
                 metrics = {
                     "learning_rate": lr,
                     "progress": min((step + 1) / progress_denominator, 1.0),
                     "num_sequences": len(data),
-                    "num_loss_tokens": sum(sum(d.loss_fn_inputs["weights"].data) for d in data),
-                    "train_mean_nll": train_nll,
+                    "num_loss_tokens": n_loss_tokens,
+                    "train_loss": train_loss,
                     "time/total": time.time() - t0,
                 }
                 if val_dataset and eval_every > 0 and step % eval_every == 0 and step > 0:
-                    metrics.update(self._validate(client, val_dataset, compute_mean_nll, DEFAULT_TIMEOUT_S))
+                    metrics.update(self._validate(client, val_dataset, DEFAULT_TIMEOUT_S))
                 tracking_logger.log(data=metrics, step=step)
-                logger.info(f"Step {step}: train_nll={train_nll:.4f}, lr={lr:.2e}")
+                logger.info(f"Step {step}: train_loss={train_loss:.4f}, lr={lr:.2e}")
                 if save_every > 0 and step % save_every == 0 and step > 0:
                     logger.info(f"Saving checkpoint at step {step}")
                     ckpt.save(f"step-{step}", resumable=True, promotable=False)
@@ -240,18 +241,16 @@ class FireworksSFTBackend(TinkerSFTBackend):
             infra.close()
 
     @staticmethod
-    def _validate(client, val_dataset, compute_mean_nll, timeout) -> dict[str, float]:
+    def _validate(client, val_dataset, timeout) -> dict[str, float]:
         logger.info("Running validation...")
-        total_nll = 0.0
+        total_loss = 0.0
         total_tokens = 0
         for batch_idx in range(len(val_dataset)):
             data = val_dataset.get_batch(batch_idx)
             fb_result = client.submit_forward_backward(data, loss_fn="cross_entropy").result(timeout=timeout)
-            logprobs = [x["logprobs"] for x in fb_result.loss_fn_outputs]
-            weights = [datum.loss_fn_inputs["weights"] for datum in data]
-            batch_tokens = sum(sum(d.loss_fn_inputs["weights"].data) for d in data)
-            total_nll += compute_mean_nll(logprobs, weights) * batch_tokens
-            total_tokens += batch_tokens
-        val_nll = total_nll / total_tokens if total_tokens > 0 else 0.0
-        logger.info(f"Validation NLL: {val_nll:.4f}")
-        return {"test/mean_nll": val_nll}
+            m = getattr(fb_result, "metrics", {}) or {}
+            total_loss += m.get("loss:sum", 0.0)
+            total_tokens += m.get("response_tokens") or 0
+        val_loss = total_loss / total_tokens if total_tokens > 0 else 0.0
+        logger.info(f"Validation loss: {val_loss:.4f}")
+        return {"test/loss": val_loss}
