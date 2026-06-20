@@ -269,11 +269,17 @@ backend: `prepare_data()` picks `.parquet` (tinker Dataset) or `_verl.parquet`
 
 ## Milestones
 
-1. **Curation engine** — `rllm/eval/curation.py` + `filter_dsl.py` (pure, unit-testable against a saved run dir, no GPU). *Highest value; lands first.*
-2. **`rllm dataset from-eval`** + `--dry-run`.
-3. **SFT abstraction** — `SFTSpec` + `SFTBackend` + `AgentSFTTrainer` dispatcher + `TinkerSFTBackend`; new `rllm/cli/sft.py` registered; delete old SFT code. → loop works on tinker.
-4. **`VerlSFTBackend`** + `verl_entry` torchrun launcher + `--gpus`. → `--backend verl` validated multi-GPU.
-5. Polish (`--dedup`, `shortest`, multi-run pooling tests, `--val-run`); optional fused `rllm distill`.
+1. **Curation engine** — `rllm/eval/curation.py` + `filter_dsl.py` (pure, unit-testable against a saved run dir, no GPU). *Done.*
+2. **`rllm dataset from-eval`** + `--dry-run`. *Done.*
+3. **SFT abstraction** — `SFTSpec` + `SFTBackend` + `AgentSFTTrainer` dispatcher + `TinkerSFTBackend`; new `rllm/cli/sft.py` registered; delete old SFT code. → loop works on tinker. *Done.*
+4. **`FireworksSFTBackend`** — subclasses `TinkerSFTBackend`, reuses the shared `build_sft_data` pipeline + `build_config`, overrides `fit()` with a synchronous pipelined loop (`build_service_client` → `create_training_client` → `ReconnectableClient` → `TrainingCheckpoints`). Hosted/managed like tinker (`requires_distributed=False`), so no launcher needed. *Done.*
+5. **`VerlSFTBackend`** + `verl_entry` torchrun launcher + `--gpus`. → `--backend verl` validated multi-GPU.
+6. Polish (`shortest`, multi-run pooling tests, `--val-run`); optional fused `rllm distill`.
+
+> The `messages` data pipeline is shared across managed backends via
+> `rllm.trainer.sft.tinker_backend.build_sft_data` (tinker-cookbook renderers →
+> tinker Datums). Fireworks reuses it wholesale; only client creation and
+> checkpointing differ. The default model for managed SFT is `Qwen/Qwen3.5-4B`.
 
 ## Open questions
 

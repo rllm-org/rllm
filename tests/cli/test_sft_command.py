@@ -60,4 +60,4 @@ def test_sft_verl_backend_reports_milestone(runner, tmp_rllm_home):
     name = _register_toy()
     result = runner.invoke(cli, ["sft", name, "--backend", "verl"])
     assert result.exit_code == 1
-    assert "milestone 4" in result.output
+    assert "not wired yet" in result.output

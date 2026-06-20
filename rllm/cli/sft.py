@@ -26,7 +26,7 @@ from rllm.cli._ui import console, fail
 @click.option("--val-split", default=None, help="Validation split for a registered DATASET (default: try 'test').")
 @click.option("--max-examples", default=None, type=int, help="Limit number of training examples.")
 # Model / backend
-@click.option("--model", default="Qwen/Qwen2.5-7B-Instruct", help="Model name/path (default: Qwen/Qwen2.5-7B-Instruct).")
+@click.option("--model", default="Qwen/Qwen3.5-4B", help="Model name/path (default: Qwen/Qwen3.5-4B).")
 @click.option("--backend", default="tinker", type=click.Choice(["tinker", "verl", "fireworks"]), help="SFT backend (default: tinker).")
 @click.option("--lora-rank", default=32, type=int, help="LoRA rank (default: 32).")
 # Hyperparameters
@@ -70,7 +70,7 @@ def sft_cmd(
 
     \b
     Examples:
-      rllm sft math500-rft --model Qwen/Qwen2.5-7B-Instruct --backend tinker --epochs 3
+      rllm sft math500-rft --model Qwen/Qwen3.5-4B --backend tinker --epochs 3
       rllm sft --train-file data.parquet --lr 1e-5
     """
     from rllm.cli._ui import info_panel

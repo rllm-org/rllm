@@ -1,0 +1,41 @@
+# Native config for the Fireworks SFT backend.
+# Shares the tinker-shaped schema (the data/renderer pipeline is identical);
+# only the training-client creation + checkpointing differ at fit() time.
+# Requires FIREWORKS_API_KEY in the environment.
+
+fireworks_base_url: "https://api.fireworks.ai"
+
+model:
+  name: "Qwen/Qwen3.5-4B"
+  lora_rank: 32
+  train_unembed: true
+  train_attn: true
+  train_mlp: true
+
+data:
+  train_files: null
+  val_files: null
+  train_batch_size: 32
+  micro_batch_size_per_gpu: 32
+  train_max_samples: -1
+  val_max_samples: -1
+  max_length: 2048
+  renderer_name: "role_colon"
+  rllm:
+    tokenize_and_mask_method: cumulative
+
+optim:
+  lr: 1e-5
+  betas: [0.9, 0.95]
+  eps: 1e-8
+  lr_scheduler: constant
+  warmup_steps_ratio: 0.1
+
+trainer:
+  total_epochs: 1
+  logger: ['console']
+  project_name: 'rllm-fireworks-sft'
+  experiment_name: 'default'
+  save_freq: 20
+  test_freq: 10
+  default_local_dir: '/tmp/rllm-fireworks-sft-checkpoints'

@@ -25,9 +25,9 @@ if TYPE_CHECKING:
     from rllm.trainer.sft.backend import SFTBackend
     from rllm.trainer.sft.spec import SFTSpec
 
-# Backends available today. verl/fireworks land in milestone 4.
-_IMPLEMENTED = {"tinker"}
-_PLANNED = {"verl", "fireworks"}
+# Backends available today. verl lands in milestone 4.
+_IMPLEMENTED = {"tinker", "fireworks"}
+_PLANNED = {"verl"}
 
 
 def _inside_torchrun() -> bool:
@@ -58,12 +58,16 @@ class AgentSFTTrainer:
             from rllm.trainer.sft.tinker_backend import TinkerSFTBackend
 
             return TinkerSFTBackend(self.spec)
+        if name == "fireworks":
+            from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
+
+            return FireworksSFTBackend(self.spec)
         if name in _PLANNED:
-            raise SFTConfigError(f"SFT backend {name!r} is not wired yet (lands in milestone 4). Use backend='tinker' for now.")
+            raise SFTConfigError(f"SFT backend {name!r} is not wired yet. Use backend='tinker' or 'fireworks' for now.")
         raise SFTConfigError(f"Unknown SFT backend {name!r}. Available: {', '.join(sorted(_IMPLEMENTED))}.")
 
     def _launch_distributed(self, backend: SFTBackend) -> None:
-        # The torchrun launcher for distributed backends (verl) lands in
-        # milestone 4. Until then, distributed backends must be run inside an
-        # existing torchrun process group.
-        raise SFTConfigError(f"Backend {backend.name!r} requires a distributed launcher (milestone 4). Run inside torchrun, or use backend='tinker'.")
+        # The torchrun launcher for distributed backends (verl) is not wired
+        # yet. Until then, distributed backends must be run inside an existing
+        # torchrun process group.
+        raise SFTConfigError(f"Backend {backend.name!r} requires a distributed launcher (not wired yet). Run inside torchrun, or use a managed backend (tinker/fireworks).")

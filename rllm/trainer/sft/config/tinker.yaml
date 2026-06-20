@@ -5,7 +5,7 @@
 tinker_base_url: null  # Tinker service URL (null for default)
 
 model:
-  name: "Qwen/Qwen2.5-7B-Instruct"
+  name: "Qwen/Qwen3.5-4B"
   lora_rank: 32
   train_unembed: true   # LoRA on output embedding
   train_attn: true      # LoRA on attention

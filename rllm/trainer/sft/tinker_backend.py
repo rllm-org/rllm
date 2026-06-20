@@ -29,6 +29,51 @@ logger = logging.getLogger(__name__)
 _CONFIG_FILE = Path(__file__).resolve().parent / "config" / "tinker.yaml"
 
 
+def resolve_train_on_what(tokenize_method: str):
+    """Map rLLM's tokenize_and_mask_method to tinker's TrainOnWhat."""
+    from tinker_cookbook.renderers import TrainOnWhat
+
+    if tokenize_method == "stepwise":
+        return TrainOnWhat.LAST_ASSISTANT_MESSAGE
+    if tokenize_method not in ("cumulative", "hf_template"):
+        logger.warning(f"Unknown tokenize_and_mask_method '{tokenize_method}', defaulting to ALL_ASSISTANT_MESSAGES")
+    return TrainOnWhat.ALL_ASSISTANT_MESSAGES
+
+
+def build_sft_data(config, train_data, val_data):
+    """Build (tokenizer, train_dataset, val_dataset) from a backend config.
+
+    Shared by the tinker and fireworks SFT backends: both render rLLM
+    ``messages`` rows into tinker Datums via tinker_cookbook renderers.
+    """
+    from tinker_cookbook.renderers import get_renderer
+    from tinker_cookbook.tokenizer_utils import get_tokenizer
+
+    from rllm.trainer.sft.tinker_dataset import create_tinker_sft_datasets
+
+    tokenizer = get_tokenizer(config.model.name)
+    renderer_name = config.data.get("renderer_name", "role_colon")
+    renderer = get_renderer(renderer_name, tokenizer)
+    tokenize_method = config.data.get("rllm", {}).get("tokenize_and_mask_method", "cumulative")
+    train_on_what = resolve_train_on_what(tokenize_method)
+    logger.info(f"Using renderer: {renderer_name}, train_on_what: {train_on_what}")
+
+    train_batch_size = config.data.get("train_batch_size", 32)
+    val_batch_size = config.data.get("micro_batch_size_per_gpu", train_batch_size)
+    train_dataset, val_dataset = create_tinker_sft_datasets(
+        train_data=train_data,
+        val_data=val_data,
+        renderer=renderer,
+        batch_size=train_batch_size,
+        val_batch_size=val_batch_size,
+        max_length=config.data.get("max_length", None),
+        train_on_what=train_on_what,
+        max_train_samples=config.data.get("train_max_samples", -1),
+        max_val_samples=config.data.get("val_max_samples", -1),
+    )
+    return tokenizer, train_dataset, val_dataset
+
+
 @dataclass
 class _SubmittedBatch:
     """A batch submitted to Tinker (forward-backward + optim step in flight)."""
@@ -60,10 +105,14 @@ class TinkerSFTBackend(SFTBackend):
         if self.spec.val_dataset is not None:
             validate_messages_dataset(self.spec.val_dataset, "val")
 
+    def _config_template(self) -> Path:
+        """Path to the backend's native config template (overridden per backend)."""
+        return _CONFIG_FILE
+
     def build_config(self) -> DictConfig:
-        """SFTSpec → the DictConfig shape the tinker loop reads."""
+        """SFTSpec → the DictConfig shape the tinker/fireworks loop reads."""
         spec = self.spec
-        base = OmegaConf.load(str(_CONFIG_FILE))
+        base = OmegaConf.load(str(self._config_template()))
         overrides = OmegaConf.create(
             {
                 "model": {"name": spec.model, "lora_rank": spec.lora_rank},
@@ -111,13 +160,10 @@ class TinkerSFTBackend(SFTBackend):
         import tinker
         from tinker_cookbook import checkpoint_utils
         from tinker_cookbook.display import colorize_example
-        from tinker_cookbook.renderers import TrainOnWhat, get_renderer
         from tinker_cookbook.supervised.common import compute_mean_nll
-        from tinker_cookbook.tokenizer_utils import get_tokenizer
         from tinker_cookbook.utils.lr_scheduling import compute_schedule_lr_multiplier
         from tinker_cookbook.utils.misc_utils import timed
 
-        from rllm.trainer.sft.tinker_dataset import create_tinker_sft_datasets
         from rllm.utils.tracking import Tracking
 
         config = self._config
@@ -134,34 +180,7 @@ class TinkerSFTBackend(SFTBackend):
             config=OmegaConf.to_container(config, resolve=True),
         )
 
-        tokenizer = get_tokenizer(config.model.name)
-        renderer_name = config.data.get("renderer_name", "role_colon")
-        renderer = get_renderer(renderer_name, tokenizer)
-
-        tokenize_method = config.data.get("rllm", {}).get("tokenize_and_mask_method", "cumulative")
-        if tokenize_method == "stepwise":
-            train_on_what = TrainOnWhat.LAST_ASSISTANT_MESSAGE
-        else:
-            if tokenize_method not in ("cumulative", "hf_template"):
-                logger.warning(f"Unknown tokenize_and_mask_method '{tokenize_method}', defaulting to ALL_ASSISTANT_MESSAGES")
-            train_on_what = TrainOnWhat.ALL_ASSISTANT_MESSAGES
-        logger.info(f"Using renderer: {renderer_name}, train_on_what: {train_on_what}")
-
-        max_length = config.data.get("max_length", None)
-        train_batch_size = config.data.get("train_batch_size", 32)
-        val_batch_size = config.data.get("micro_batch_size_per_gpu", train_batch_size)
-
-        train_dataset, val_dataset = create_tinker_sft_datasets(
-            train_data=self.spec.train_dataset,
-            val_data=self.spec.val_dataset,
-            renderer=renderer,
-            batch_size=train_batch_size,
-            val_batch_size=val_batch_size,
-            max_length=max_length,
-            train_on_what=train_on_what,
-            max_train_samples=config.data.get("train_max_samples", -1),
-            max_val_samples=config.data.get("val_max_samples", -1),
-        )
+        tokenizer, train_dataset, val_dataset = build_sft_data(config, self.spec.train_dataset, self.spec.val_dataset)
 
         resume_info = checkpoint_utils.get_last_checkpoint(config.trainer.default_local_dir)
         if resume_info:

@@ -71,12 +71,46 @@ def test_dispatch_tinker_runs_lifecycle(monkeypatch):
     assert calls == ["fit"]
 
 
-@pytest.mark.parametrize("backend", ["verl", "fireworks"])
-def test_dispatch_planned_backends_raise(backend):
-    with pytest.raises(SFTConfigError, match="milestone 4"):
-        AgentSFTTrainer(_spec(), backend=backend).train()
+def test_dispatch_fireworks_runs_lifecycle(monkeypatch):
+    from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
+
+    calls = []
+    monkeypatch.setattr(FireworksSFTBackend, "fit", lambda self: calls.append("fit"))
+    AgentSFTTrainer(_spec(), backend="fireworks").train()
+    assert calls == ["fit"]
+
+
+def test_dispatch_planned_backends_raise():
+    with pytest.raises(SFTConfigError, match="not wired yet"):
+        AgentSFTTrainer(_spec(), backend="verl").train()
 
 
 def test_dispatch_unknown_backend_raises():
     with pytest.raises(SFTConfigError, match="Unknown SFT backend"):
         AgentSFTTrainer(_spec(), backend="nope").train()
+
+
+def test_fireworks_build_config_uses_fireworks_template():
+    from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
+
+    cfg = FireworksSFTBackend(_spec(lr=2e-5, lora_rank=8, max_length=4096)).build_config()
+    # fireworks template carries fireworks_base_url (tinker's does not); spec overrides still apply
+    assert "fireworks_base_url" in cfg
+    assert "tinker_base_url" not in cfg
+    assert cfg.optim.lr == 2e-5
+    assert cfg.model.lora_rank == 8
+    assert cfg.data.max_length == 4096
+
+
+def test_fireworks_inherits_validation():
+    from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
+
+    bad = Dataset(data=[{"text": "x"}], name="bad", split="train")
+    with pytest.raises(SFTConfigError):
+        FireworksSFTBackend(_spec(train_dataset=bad)).validate_spec()
+
+
+def test_default_model_is_qwen35_4b():
+    # SFTSpec default + both backend templates resolve to the same default model.
+    assert SFTSpec(train_dataset=_ds()).model == "Qwen/Qwen3.5-4B"
+    assert TinkerSFTBackend(SFTSpec(train_dataset=_ds())).build_config().model.name == "Qwen/Qwen3.5-4B"

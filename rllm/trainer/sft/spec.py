@@ -32,8 +32,8 @@ class SFTSpec:
             hatch for backend-specific knobs not surfaced as fields.
     """
 
-    model: str
-    train_dataset: Dataset
+    model: str = "Qwen/Qwen3.5-4B"
+    train_dataset: Dataset | None = None
     val_dataset: Dataset | None = None
     lr: float = 1e-5
     lr_schedule: str = "constant"
