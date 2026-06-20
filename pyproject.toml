@@ -85,8 +85,8 @@ verl = [
     "ray",
     "torch>=2.10.0",
     "torchvision>=0.23.0",
-    "vllm==0.21.0",
-    "flash-attn==2.8.1",
+    "vllm==0.22.1",
+    "flash-attn==2.8.3",
     "qwen-vl-utils",
 ]
 
