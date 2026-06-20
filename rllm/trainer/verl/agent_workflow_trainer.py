@@ -11,7 +11,6 @@ import torch
 from omegaconf import OmegaConf
 from tensordict import TensorDict
 from verl import DataProto
-from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
 from verl.protocol import pad_dataproto_to_divisor
 from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.core_algos import (
@@ -112,22 +111,17 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
     def init_workers(self):
         super().init_workers()
 
-        servers = zip(
-            self.async_rollout_manager.server_addresses,
-            self.async_rollout_manager.server_handles,
-            strict=True,
-        )
-        server_manager = AsyncLLMServerManager(
-            self.config,
-            servers=servers,
-            load_balancer_handle=self.async_rollout_manager.global_load_balancer,
-        )
+        # verl 0.8.0: the unified engine exposes an LLMServerClient via the
+        # LLMServerManager that RayPPOTrainer.init_workers() created. Reuse it
+        # instead of the removed experimental AsyncLLMServerManager.
+        server_client = self.llm_server_manager.get_client()
         rollout_engine = VerlEngine(
             config=self.config,
-            server_manager=server_manager,
+            server_manager=server_client,
             tokenizer=self.tokenizer,
             processor=self.processor,
         )
+        rollout_engine.server_addresses = self.llm_server_manager.get_addresses()
 
         # Create episode logger if enabled in config
         episode_logger = None
