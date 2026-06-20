@@ -132,8 +132,24 @@ def sft_cmd(
         output_dir=output_dir,
     )
 
+    # Build + configure the backend up front (local, no provisioning) so the
+    # summary reflects the *resolved* model — e.g. Fireworks maps to its FW
+    # model path + HF tokenizer rather than the bare --model default.
+    trainer = AgentSFTTrainer(spec, backend=backend)
+    try:
+        be = trainer.prepare()
+    except SFTConfigError as e:
+        fail(str(e))
+    cfg = be.config
+    resolved_model = cfg.model.get("name", model)
+    tokenizer_model = cfg.model.get("tokenizer_model")
+
     rows = [
-        ("Model", f"[val]{model}[/]"),
+        ("Model", f"[val]{resolved_model}[/]"),
+    ]
+    if tokenizer_model and tokenizer_model != resolved_model:
+        rows.append(("Tokenizer", f"[dim]{tokenizer_model}[/]"))
+    rows += [
         ("Backend", f"[val]{backend}[/]"),
         ("Train data", f"[val]{source_label}[/]  [dim]({len(train_dataset)} examples)[/]"),
         ("Val data", f"[dim]{len(val_dataset)} examples[/]" if val_dataset else "[dim]none[/]"),
@@ -148,7 +164,7 @@ def sft_cmd(
     console.print()
 
     try:
-        AgentSFTTrainer(spec, backend=backend).train()
+        trainer.train()
     except SFTConfigError as e:
         fail(str(e))
     except ImportError as e:

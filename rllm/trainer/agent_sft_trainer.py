@@ -41,12 +41,25 @@ class AgentSFTTrainer:
     def __init__(self, spec: SFTSpec, backend: str = "tinker"):
         self.spec = spec
         self.backend_name = backend
+        self._backend: SFTBackend | None = None
+
+    def prepare(self) -> SFTBackend:
+        """Instantiate + configure the backend without provisioning/training.
+
+        Runs ``validate_spec`` → ``build_config`` → ``prepare_data`` (all local,
+        no network) and caches the backend so callers can read the resolved
+        ``backend.config`` (e.g. for a CLI summary) before ``train()``.
+        """
+        if self._backend is None:
+            backend = self._make_backend()
+            backend.validate_spec()
+            backend.build_config()
+            backend.prepare_data()
+            self._backend = backend
+        return self._backend
 
     def train(self) -> None:
-        backend = self._make_backend()
-        backend.validate_spec()
-        backend.build_config()
-        backend.prepare_data()
+        backend = self.prepare()
         if backend.requires_distributed and not _inside_torchrun():
             self._launch_distributed(backend)
         else:

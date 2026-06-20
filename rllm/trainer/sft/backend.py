@@ -57,6 +57,14 @@ class SFTBackend(ABC):
 
     def __init__(self, spec: SFTSpec):
         self.spec = spec
+        self._config: DictConfig | None = None
+
+    @property
+    def config(self) -> DictConfig:
+        """The resolved backend-native config (built on first access)."""
+        if self._config is None:
+            self._config = self.build_config()
+        return self._config
 
     @abstractmethod
     def validate_spec(self) -> None:
