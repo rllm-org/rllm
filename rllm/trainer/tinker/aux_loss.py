@@ -48,7 +48,7 @@ def build_aux_ce_datum(model_input, target_tokens, positions: list[bool], scale)
     """
     if not any(positions):
         return None
-    if isinstance(scale, (int, float)):
+    if isinstance(scale, int | float):
         weights = [float(scale) if p else 0.0 for p in positions]
     else:
         weights = [float(scale[i]) if p else 0.0 for i, p in enumerate(positions)]
