@@ -51,7 +51,10 @@ def build_sft_data(config, train_data, val_data):
 
     from rllm.trainer.sft.tinker_dataset import create_tinker_sft_datasets
 
-    tokenizer = get_tokenizer(config.model.name)
+    # Fireworks' model.name is a FW model path (accounts/fireworks/models/...),
+    # not HF-resolvable, so render/tokenize from the HF tokenizer_model when set.
+    tokenizer_name = config.model.get("tokenizer_model") or config.model.name
+    tokenizer = get_tokenizer(tokenizer_name)
     renderer_name = config.data.get("renderer_name", "role_colon")
     renderer = get_renderer(renderer_name, tokenizer)
     tokenize_method = config.data.get("rllm", {}).get("tokenize_and_mask_method", "cumulative")

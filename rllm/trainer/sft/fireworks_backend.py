@@ -1,28 +1,33 @@
 """Fireworks SFT backend.
 
 Mirrors how the RL stack's ``FireworksBackend`` extends ``TinkerBackend``:
-:class:`FireworksSFTBackend` subclasses :class:`TinkerSFTBackend` and reuses
-``validate_spec`` / ``build_config`` / ``prepare_data`` and the shared
-tinker-cookbook data pipeline (``build_sft_data``). It overrides only what
-differs — training-client creation (Fireworks' SDK-managed client instead of a
-``tinker.ServiceClient``) and checkpointing — and runs a **synchronous**
-pipelined loop because Fireworks' ``ReconnectableClient`` is sync (blocking
-``forward_backward``/``optim_step`` plus future-returning ``submit_*``), unlike
-tinker's async client.
+:class:`FireworksSFTBackend` subclasses :class:`TinkerSFTBackend`, reuses the
+shared tinker-cookbook data pipeline (``build_sft_data``) and ``validate_spec``,
+and overrides only what differs — provisioning and checkpointing.
 
-Requires ``FIREWORKS_API_KEY`` in the environment. Imports of the Fireworks SDK
-are deferred to :meth:`fit` so the dispatcher/CLI import without it installed.
+Provisioning is identical to the RL backend's: a ``fireworks_infra`` provision
+document (carrying ``trainers.policy.training_shape_id``) is parsed by
+``training.provision.load_yaml_provision`` and handed to
+``init_fireworks_infra("sft", ...)``. Because the document names a training
+shape, the SDK takes the **training-shape path** (not the manual-infra path), so
+it works on standard accounts. ``infra.policy`` is the same sync
+``ReconnectableClient`` the RL path uses; the training loop is a synchronous
+pipeline over it (Fireworks has no async client, unlike tinker).
+
+Requires ``FIREWORKS_API_KEY``. Fireworks SDK imports are deferred to
+:meth:`fit` so the dispatcher/CLI import without it installed.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import tempfile
 import time
 from collections import deque
 from pathlib import Path
 
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 from rllm.trainer.sft.backend import SFTConfigError
 from rllm.trainer.sft.tinker_backend import TinkerSFTBackend, build_sft_data
@@ -41,17 +46,86 @@ class FireworksSFTBackend(TinkerSFTBackend):
     def _config_template(self) -> Path:
         return _CONFIG_FILE
 
+    def build_config(self) -> DictConfig:
+        """SFTSpec → Fireworks config.
+
+        Unlike tinker, Fireworks needs a FW model path + HF tokenizer + matching
+        training shape (configured in the template). So ``--model`` only replaces
+        the FW base model when it is itself a FW path (``accounts/...``);
+        otherwise the template's ``model.name``/``tokenizer_model`` are kept.
+        """
+        spec = self.spec
+        base = OmegaConf.load(str(self._config_template()))
+        model_override = {"lora_rank": spec.lora_rank}
+        if str(spec.model).startswith("accounts/"):
+            model_override["name"] = spec.model
+        overrides = OmegaConf.create(
+            {
+                "model": model_override,
+                "data": {
+                    "train_batch_size": spec.batch_size,
+                    "micro_batch_size_per_gpu": spec.batch_size,
+                    "max_length": spec.max_length,
+                    "rllm": {"tokenize_and_mask_method": spec.tokenize_method},
+                },
+                "optim": {"lr": spec.lr, "lr_scheduler": spec.lr_schedule},
+                "trainer": {
+                    "total_epochs": spec.epochs,
+                    "save_freq": spec.save_freq,
+                    "test_freq": spec.val_freq,
+                    "project_name": spec.project,
+                    "experiment_name": spec.experiment or "default",
+                },
+            }
+        )
+        cfg = OmegaConf.merge(base, overrides)
+        if spec.output_dir:
+            cfg = OmegaConf.merge(cfg, OmegaConf.create({"trainer": {"default_local_dir": spec.output_dir}}))
+        if spec.overrides:
+            cfg = OmegaConf.merge(cfg, OmegaConf.create(spec.overrides))
+        self._config = cfg
+        return cfg
+
+    def _provision(self, config, api_key: str, base_url: str):
+        """Provision a dedicated SFT trainer via the shape path (like RL)."""
+        import yaml
+        from training.provision import init_fireworks_infra, load_yaml_provision
+
+        # Parse the fireworks_infra provision document; inject runtime knobs the
+        # way the RL backend does (learning rate, optional max_seq_len).
+        doc = OmegaConf.to_container(config.fireworks_infra, resolve=True)
+        common = doc.setdefault("common", {})
+        common["learning_rate"] = float(config.optim.lr)
+        if config.data.get("max_length"):
+            common["max_seq_len"] = config.data.max_length
+
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
+            yaml.safe_dump(doc, fh)
+            doc_path = Path(fh.name)
+        try:
+            _mode, provision_cfg = load_yaml_provision(mode="sft", recipe=None, path=doc_path)
+        finally:
+            doc_path.unlink(missing_ok=True)
+
+        # cleanup_existing/cleanup_on_close mirror the RL backend: rllm provisions
+        # a fresh trainer per run and tears it down on exit.
+        return init_fireworks_infra(
+            "sft",
+            provision_cfg,
+            base_url=base_url,
+            cleanup_on_close=True,
+            cleanup_existing=True,
+        )
+
     def fit(self) -> None:
         if self._config is None:
             self.build_config()
         config = self._config
 
-        # -- Fireworks SDK (deferred import) -------------------------------
         try:
             import tinker
             from tinker_cookbook.supervised.common import compute_mean_nll
             from tinker_cookbook.utils.lr_scheduling import compute_schedule_lr_multiplier
-            from training.utils import ReconnectableClient, TrainerConfig, build_service_client
             from training.utils.checkpoints import TrainingCheckpoints
             from training.utils.client import DEFAULT_TIMEOUT_S
         except ImportError as e:
@@ -66,7 +140,6 @@ class FireworksSFTBackend(TinkerSFTBackend):
 
         os.makedirs(config.trainer.default_local_dir, exist_ok=True)
         lora_rank = config.model.get("lora_rank", 32)
-        max_length = config.data.get("max_length", None)
 
         logger_backend = config.trainer.logger
         if isinstance(logger_backend, str):
@@ -78,41 +151,15 @@ class FireworksSFTBackend(TinkerSFTBackend):
             config=OmegaConf.to_container(config, resolve=True),
         )
 
-        # -- Data (shared tinker-cookbook pipeline) ------------------------
         _tokenizer, train_dataset, val_dataset = build_sft_data(config, self.spec.train_dataset, self.spec.val_dataset)
 
-        # -- Provision the SDK-managed training client ---------------------
-        service = build_service_client(
-            api_key=api_key,
-            base_url=base_url,
-            additional_headers=None,
-            base_model=config.model.name,
-            tokenizer_model=config.model.name,
-            lora_rank=lora_rank,
-            max_context_length=max_length,
-            learning_rate=config.optim.lr,
-            trainer=TrainerConfig(),
-        )
+        infra = self._provision(config, api_key, base_url)
         try:
-            training_client = service.create_training_client(
-                config.model.name,
-                lora_rank=lora_rank,
-                train_mlp=OmegaConf.select(config, "model.train_mlp", default=True),
-                train_attn=OmegaConf.select(config, "model.train_attn", default=True),
-                train_unembed=OmegaConf.select(config, "model.train_unembed", default=True),
-            )
-            client = ReconnectableClient.from_training_client(
-                training_client,
-                base_model=config.model.name,
-                lora_rank=lora_rank,
-                job_id=service.trainer_job_id,
-                default_timeout=DEFAULT_TIMEOUT_S,
-                service=service,
-            )
+            client = infra.policy
             ckpt = TrainingCheckpoints(
                 client,
-                service,
-                trainer_id=service.trainer_job_id,
+                infra.service,
+                trainer_id=infra.policy_job_id,
                 log_path=config.trainer.default_local_dir,
                 lora_rank=lora_rank,
             )
@@ -188,7 +235,7 @@ class FireworksSFTBackend(TinkerSFTBackend):
                 pass
             logger.info("Training completed successfully")
         finally:
-            service.close()
+            infra.close()
 
     @staticmethod
     def _validate(client, val_dataset, compute_mean_nll, timeout) -> dict[str, float]:

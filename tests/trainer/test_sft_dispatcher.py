@@ -94,12 +94,54 @@ def test_fireworks_build_config_uses_fireworks_template():
     from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
 
     cfg = FireworksSFTBackend(_spec(lr=2e-5, lora_rank=8, max_length=4096)).build_config()
-    # fireworks template carries fireworks_base_url (tinker's does not); spec overrides still apply
+    # fireworks template carries fireworks_base_url (tinker's does not); hyperparams apply
     assert "fireworks_base_url" in cfg
     assert "tinker_base_url" not in cfg
     assert cfg.optim.lr == 2e-5
     assert cfg.model.lora_rank == 8
     assert cfg.data.max_length == 4096
+    # Fireworks keeps its FW model path + HF tokenizer; a bare HF --model does NOT clobber it.
+    assert cfg.model.name == "accounts/fireworks/models/qwen3p5-4b"
+    assert cfg.model.tokenizer_model == "Qwen/Qwen3.5-4B"
+    assert "fireworks_infra" in cfg
+
+
+def test_fireworks_model_override_requires_fw_path():
+    from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
+
+    # a FW path replaces the base model; a bare HF name does not
+    cfg = FireworksSFTBackend(_spec(model="accounts/fireworks/models/custom")).build_config()
+    assert cfg.model.name == "accounts/fireworks/models/custom"
+
+
+def test_fireworks_provision_doc_parses_sft():
+    """The fireworks_infra doc must parse offline into a valid SFT provision
+    config on the training-shape path (no network, no superuser)."""
+    pytest.importorskip("training.provision")
+    import tempfile
+    from pathlib import Path
+
+    import yaml
+    from omegaconf import OmegaConf
+    from training.provision import load_yaml_provision
+
+    from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
+
+    cfg = FireworksSFTBackend(_spec()).build_config()
+    doc = OmegaConf.to_container(cfg.fireworks_infra, resolve=True)
+    doc["common"]["learning_rate"] = float(cfg.optim.lr)
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as fh:
+        yaml.safe_dump(doc, fh)
+        p = Path(fh.name)
+    try:
+        mode, pc = load_yaml_provision(mode="sft", recipe=None, path=p)
+    finally:
+        p.unlink(missing_ok=True)
+    assert mode == "sft"
+    assert pc.base_model == "accounts/fireworks/models/qwen3p5-4b"
+    assert pc.tokenizer_model == "Qwen/Qwen3.5-4B"
+    assert pc.serverless is False
+    assert pc.trainer.training_shape_id == "accounts/fireworks/trainingShapes/qwen3p5-4b-256k-lora"
 
 
 def test_fireworks_inherits_validation():
