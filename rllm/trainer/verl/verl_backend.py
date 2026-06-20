@@ -361,6 +361,20 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             )
             if async_cfg.get("partial_rollout", False) and self.config.rllm.get("remote_runtime", {}).get("enabled", False):
                 raise ValueError("VerlBackend: async_training.partial_rollout is not supported with remote_runtime; set it to false.")
+            # Separated mode does trainer->rollout weight sync via verl's 'nccl' checkpoint
+            # engine, which imports cupy. verl's checkpoint_engine/__init__ swallows a missing
+            # cupy in a silent try/except, so the failure otherwise surfaces only as a confusing
+            # "ValueError: Checkpoint engine nccl not registered" deep in actor_init_model.
+            # Fail fast here with an actionable message instead.
+            try:
+                import cupy  # noqa: F401
+            except ImportError as e:
+                raise RuntimeError(
+                    "Separated/async training (rllm.async_training.enable=true) requires cupy for "
+                    "verl's 'nccl' checkpoint engine (trainer->rollout weight sync). Install the wheel "
+                    "matching your CUDA toolkit: `pip install cupy-cuda12x` (CUDA 12.x) or "
+                    "`pip install cupy-cuda13x` (CUDA 13.x)."
+                ) from e
         if self.config.rllm.stepwise_advantage.mode != "broadcast":
             # automatically set the stepwise_advantage_mode to "broadcast", the warning is already shown in AlgorithmConfig.from_config
             self.config.rllm.stepwise_advantage.mode = "broadcast"
