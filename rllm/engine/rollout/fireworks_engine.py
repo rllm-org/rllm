@@ -52,9 +52,6 @@ _TRANSIENT_ERROR_MARKERS = (
 )
 
 
-# How often to log a rolling Fireworks prompt-cache-hit summary (per engine).
-_CACHE_LOG_EVERY = 50
-
 # Per-request inference headers (e.g. Fireworks session-affinity) injected into
 # DeploymentSampler requests. ``DeploymentSampler.async_completions_stream`` only
 # forwards body params and a fixed set of client-level headers, so there is no
@@ -191,13 +188,6 @@ class FireworksEngine(TinkerEngine):
         self.router_replay = router_replay
         self.sampling_client = sampler
 
-        # Rolling Fireworks prompt-cache accounting (logged every
-        # ``_CACHE_LOG_EVERY`` completions). Low hit-ratio ⇒ session affinity not
-        # routing a trajectory's turns to the same replica.
-        self._cache_cached_tokens = 0
-        self._cache_prompt_tokens = 0
-        self._cache_calls = 0
-
     # ------------------------------------------------------------------
     # Token-in / token-out override
     # ------------------------------------------------------------------
@@ -303,9 +293,9 @@ class FireworksEngine(TinkerEngine):
         # Fireworks routes requests carrying the same session id to the same
         # replica, so its per-replica prompt-prefix KV is reused across a
         # trajectory's turns. Set once per turn from the trajectory id.
-        affinity_headers = None
+        session_headers = None
         if session_id:
-            affinity_headers = {
+            session_headers = {
                 "x-multi-turn-session-id": str(session_id),
                 "x-session-affinity": str(session_id),
             }
@@ -314,7 +304,7 @@ class FireworksEngine(TinkerEngine):
             prompt_ids,
             max_tokens,
             sampling_params,
-            affinity_headers=affinity_headers,
+            session_headers=session_headers,
         )
 
         choice = raw["choices"][0]
@@ -355,49 +345,23 @@ class FireworksEngine(TinkerEngine):
     # Internal retry helper
     # ------------------------------------------------------------------
 
-    def _record_prompt_cache(self, server_metrics, metrics_dict: dict | None) -> None:
-        """Accumulate Fireworks prompt-cache stats; log a rolling summary.
-
-        ``cached_prompt_tokens`` / ``prompt_tokens`` are only present on
-        dedicated deployments (``None`` on serverless), so this is a no-op
-        otherwise. Adds a per-call ``prompt_cache_hit_ratio`` to ``metrics_dict``
-        and logs a rolling hit-ratio every ``_CACHE_LOG_EVERY`` completions.
-        """
-        if server_metrics is None or not getattr(server_metrics, "prompt_tokens", None):
-            return
-        cached = getattr(server_metrics, "cached_prompt_tokens", None) or 0
-        prompt = server_metrics.prompt_tokens
-        if metrics_dict is not None:
-            metrics_dict["prompt_cache_hit_ratio"] = cached / prompt
-        self._cache_cached_tokens += cached
-        self._cache_prompt_tokens += prompt
-        self._cache_calls += 1
-        if self._cache_calls % _CACHE_LOG_EVERY == 0 and self._cache_prompt_tokens:
-            logger.info(
-                "Fireworks prompt cache: hit_ratio=%.3f (cached=%d / prompt=%d over %d completions)",
-                self._cache_cached_tokens / self._cache_prompt_tokens,
-                self._cache_cached_tokens,
-                self._cache_prompt_tokens,
-                self._cache_calls,
-            )
-
     async def _completions_with_retry(
         self,
         prompt_ids: list[int],
         max_tokens: int,
         sampling_kwargs: dict[str, Any],
-        affinity_headers: dict[str, str] | None = None,
+        session_headers: dict[str, str] | None = None,
     ) -> tuple[dict[str, Any], dict | None]:
         """Call ``DeploymentSampler.async_completions_stream`` with transient-error retries.
 
-        ``affinity_headers``, when given, are merged into the request's HTTP
+        ``session_headers``, when given, are merged into the request's HTTP
         headers (via the ``_inference_headers`` patch) so Fireworks routes this
         request to the trajectory's pinned replica. Returns
         (response_dict, server_metrics_dict)."""
 
         for attempt in range(_MAX_SAMPLE_ATTEMPTS):
             try:
-                token = _per_request_headers.set(affinity_headers) if affinity_headers else None
+                token = _per_request_headers.set(session_headers) if session_headers else None
                 try:
                     result, server_metrics = await self.sampling_client.async_completions_stream(
                         prompt=prompt_ids,
@@ -415,7 +379,6 @@ class FireworksEngine(TinkerEngine):
                 completion_ids = (choice.get("raw_output") or {}).get("completion_token_ids") or []
                 if not completion_ids:
                     raise _EmptyCompletionIdsError("Fireworks response included empty completion_token_ids")
-                self._record_prompt_cache(server_metrics, metrics_dict)
                 return result, metrics_dict
             except Exception as exc:
                 err = str(exc)
