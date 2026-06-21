@@ -402,13 +402,19 @@ def fetch_fireworks_models(api_key: str | None = None) -> list[str]:
 
 
 def fetch_fireworks_deployed_models(api_key: str | None = None) -> list[str]:
-    """Return the caller's actively deployed model IDs (best-effort).
+    """Return the caller's runnable dedicated-deployment IDs (best-effort).
 
-    Discovers the caller's account ID(s) via ``GET /v1/accounts``, then lists
-    each account's ``deployedModels`` that are in state ``DEPLOYED`` — i.e.
-    models currently serving inference on a dedicated deployment (not merely
-    uploaded). These can be sampled with no further setup. The shared public
-    ``fireworks`` namespace is excluded (see :func:`fetch_fireworks_models`).
+    Discovers the caller's account ID(s) via ``GET /v1/accounts``, then collects
+    two complementary sources (the shared public ``fireworks`` namespace is
+    excluded — see :func:`fetch_fireworks_models`):
+
+    * ``deployedModels`` in state ``DEPLOYED`` — a custom/fine-tuned model bound
+      to a deployment; addressed for inference by its ``model`` id.
+    * ``deployments`` in state ``READY`` — a dedicated deployment of a base
+      model has no ``deployedModel`` entry (``model`` is null) and is addressed
+      for inference by its own ``accounts/<acct>/deployments/<id>`` name. Without
+      this, base-model deployments are invisible to the picker even though
+      that's the exact id evals run against.
 
     Returns an empty list on any failure so callers can degrade gracefully.
     """
@@ -421,6 +427,9 @@ def fetch_fireworks_deployed_models(api_key: str | None = None) -> list[str]:
             for dm in _fireworks_paged(f"accounts/{account}/deployedModels", key, "deployedModels"):
                 if dm.get("state") == "DEPLOYED" and dm.get("model"):
                     names.append(dm["model"])
+            for dep in _fireworks_paged(f"accounts/{account}/deployments", key, "deployments"):
+                if dep.get("state") == "READY" and dep.get("name"):
+                    names.append(dep["name"])
         return sorted(set(names))
     except Exception:
         return []

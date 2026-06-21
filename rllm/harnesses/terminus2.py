@@ -88,7 +88,10 @@ class Terminus2Harness(BaseCliHarness):
     harbor_version: str = "0.3.0"
     terminus_python: str = "3.12"
     parser_name: str = "json"  # "json" or "xml"
-    temperature: float = 0.7
+    # Temperature the agent requests; in `rllm eval`/training the gateway
+    # enforces its own sampling params on top (default 1.0), so this is the
+    # value used only when sampling isn't gateway-enforced. Kept at 1.0 to match.
+    temperature: float = 1.0
     # Per-rollout turn cap. ``None`` = don't impose one — let Harbor's own
     # (effectively unbounded) default apply, so the agent isn't artificially
     # cut short; the per-rollout run timeout (RLLM_HARNESS_RUN_TIMEOUT_S) still
@@ -270,7 +273,7 @@ async def _main():
     # as its own (effectively unbounded) default.
     _max_turns = os.environ.get("RLLM_TERMINUS_MAX_TURNS")
     max_turns = int(_max_turns) if _max_turns else None
-    temperature = float(os.environ.get("RLLM_TERMINUS_TEMPERATURE", "0.7"))
+    temperature = float(os.environ.get("RLLM_TERMINUS_TEMPERATURE", "1.0"))
     record = os.environ.get("RLLM_TERMINUS_RECORD", "0") == "1"
     logs_dir = Path(os.environ.get("RLLM_TERMINUS_LOGS_DIR", "/tmp/terminus2/logs"))
     logs_dir.mkdir(parents=True, exist_ok=True)
