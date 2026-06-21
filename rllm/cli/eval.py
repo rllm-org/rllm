@@ -43,6 +43,40 @@ def _apply_sandbox_overrides(agent, agent_metadata: dict | None) -> None:
         logger.warning("--%s has no effect for agent %s", flag.replace("_", "-"), type(agent).__name__)
 
 
+# Agent knobs surfaced in the eval header, in display order. Each entry is
+# (attribute, label, formatter); a flow that doesn't expose an attribute (or
+# leaves it ``None``) simply omits that pair, so this works across harnesses.
+_AGENT_CONFIG_SPECS = (
+    ("max_turns", "max turns", str),
+    ("max_steps", "max steps", str),
+    ("max_concurrent", "max concurrent", str),
+    ("temperature", "temperature", lambda v: f"{v:g}"),
+    ("run_timeout", "run timeout", lambda v: f"{v}s"),
+    ("install_timeout", "install timeout", lambda v: f"{v}s"),
+)
+
+
+def _agent_config_rows(agent) -> list[tuple[str, str]]:
+    """Build the ``Config`` panel row from the loaded flow's effective knobs.
+
+    Reads the curated attributes off the agent instance (max turns, temperature,
+    timeouts, …) and renders each present one as a ``key value`` chip — dim key,
+    bold value — with chips separated by a dim ``·``. Spaces *within* a chip are
+    non-breaking (`` ``) so a pair never splits across a line wrap; wraps
+    fall on the separators instead. Returns an empty list when the flow exposes
+    none of the knobs.
+    """
+    chips = []
+    for attr, label, fmt in _AGENT_CONFIG_SPECS:
+        value = getattr(agent, attr, None)
+        if value is not None:
+            key = label.replace(" ", " ")
+            chips.append(f"[dim]{key}[/] [val]{fmt(value)}[/]")
+    if not chips:
+        return []
+    return [("Config", "  [dim]·[/]  ".join(chips))]
+
+
 def _dict_rows_to_tasks(rows: list[dict]) -> list[Task]:
     """Wrap dict-rows from a catalog dataset as Task objects.
 
@@ -363,6 +397,7 @@ def _run_eval(
         ("Benchmark", f"[val]{benchmark}[/]  [dim]({split}, {len(dataset)} examples)[/]"),
         ("Model", f"[val]{model}[/]"),
         ("Agent", agent_text),
+        *_agent_config_rows(agent),
         ("Evaluator", f"[dim]{evaluator_display}[/]"),
     ]
     if not use_snapshot:
