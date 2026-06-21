@@ -108,7 +108,10 @@ async def run_dataset(
         gateway=gateway,
         model=model,
         n_parallel_tasks=effective_concurrency,
-        retry_limit=1,  # eval doesn't retry on flow errors
+        # One retry: rollout errors are usually transient infra (sandbox reaped,
+        # flaky create, install blip), not flow bugs. Without it they become
+        # permanent zeros that depress the score; only errored tasks re-run.
+        retry_limit=2,
         raise_on_error=False,  # capture per-task errors as error Episodes
         hooks=hooks,
         val_sampling_params=sampling_params or None,  # eval is always validation
