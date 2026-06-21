@@ -198,7 +198,11 @@ class ReverseProxy:
         t0 = time.perf_counter()
 
         if self.local_handler is not None:
-            # In-process path: call handler directly, no HTTP
+            # In-process path: call handler directly, no HTTP.
+            # Forward the rollout session id so affinity-aware engines (Fireworks)
+            # can pin a trajectory's turns to one replica for prefix-cache reuse.
+            if session_id:
+                request_body["rllm_session_id"] = session_id
             response_body = await self.local_handler(request_body)
             status_code = 200
         else:
@@ -320,6 +324,8 @@ class ReverseProxy:
         if self.local_handler is not None:
             # In-process path (Tinker): sample directly from the pre-tokenized
             # prompt; no HTTP worker, no re-tokenization.
+            if session_id:
+                completions_body["rllm_session_id"] = session_id
             response_body = await self.local_handler(completions_body)
             status_code = 200
         else:
@@ -535,6 +541,8 @@ class ReverseProxy:
         """
         assert self.local_handler is not None
         t0 = time.perf_counter()
+        if session_id:
+            completions_body["rllm_session_id"] = session_id
         response_body = await self.local_handler(completions_body)
         latency_ms = (time.perf_counter() - t0) * 1000
 
