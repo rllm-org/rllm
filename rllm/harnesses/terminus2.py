@@ -89,7 +89,11 @@ class Terminus2Harness(BaseCliHarness):
     terminus_python: str = "3.12"
     parser_name: str = "json"  # "json" or "xml"
     temperature: float = 0.7
-    max_turns: int = 50
+    # Per-rollout turn cap. ``None`` = don't impose one — let Harbor's own
+    # (effectively unbounded) default apply, so the agent isn't artificially
+    # cut short; the per-rollout run timeout (RLLM_HARNESS_RUN_TIMEOUT_S) still
+    # bounds wall-clock. Set a value (e.g. via the train_*.sh scripts) to cap.
+    max_turns: int | None = None
     # Asciinema recording needs an extra dep and a writable trial dir; off by
     # default since rLLM scores from the verifier, not the cast.
     record_terminal_session: bool = False
@@ -118,12 +122,14 @@ class Terminus2Harness(BaseCliHarness):
             "RLLM_TERMINUS_API_BASE": gateway_url,
             "RLLM_TERMINUS_WORKDIR": str(task.metadata.get("workdir") or ""),
             "RLLM_TERMINUS_PARSER": self.parser_name,
-            "RLLM_TERMINUS_MAX_TURNS": str(self.max_turns),
             "RLLM_TERMINUS_TEMPERATURE": str(self.temperature),
             "RLLM_TERMINUS_RECORD": "1" if self.record_terminal_session else "0",
             "RLLM_TERMINUS_INSTRUCTION_FILE": _INSTRUCTION_PATH,
             "RLLM_TERMINUS_LOGS_DIR": _LOGS_DIR,
         }
+        # Only pass a turn cap when one is set; absent var = no artificial limit.
+        if self.max_turns is not None:
+            env["RLLM_TERMINUS_MAX_TURNS"] = str(self.max_turns)
         return env
 
     def write_configs(
@@ -260,7 +266,10 @@ async def _main():
     api_base = os.environ.get("RLLM_TERMINUS_API_BASE") or None
     workdir = os.environ.get("RLLM_TERMINUS_WORKDIR") or None
     parser = os.environ.get("RLLM_TERMINUS_PARSER", "json")
-    max_turns = int(os.environ.get("RLLM_TERMINUS_MAX_TURNS", "50"))
+    # Unset/empty = no artificial cap; Harbor's Terminus2 treats max_turns=None
+    # as its own (effectively unbounded) default.
+    _max_turns = os.environ.get("RLLM_TERMINUS_MAX_TURNS")
+    max_turns = int(_max_turns) if _max_turns else None
     temperature = float(os.environ.get("RLLM_TERMINUS_TEMPERATURE", "0.7"))
     record = os.environ.get("RLLM_TERMINUS_RECORD", "0") == "1"
     logs_dir = Path(os.environ.get("RLLM_TERMINUS_LOGS_DIR", "/tmp/terminus2/logs"))

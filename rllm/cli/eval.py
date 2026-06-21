@@ -575,6 +575,17 @@ def _run_eval(
 @click.option("--temperature", default=None, type=float, help="Sampling temperature (shortcut for --sampling-params temperature=...).")
 @click.option("--top-p", "top_p", default=None, type=float, help="Nucleus sampling top_p (shortcut for --sampling-params top_p=...).")
 @click.option("--max-tokens", "max_tokens", default=None, type=int, help="Max generated tokens per call (shortcut for --sampling-params max_tokens=...).")
+@click.option(
+    "--agent-timeout",
+    "agent_timeout",
+    default=None,
+    type=int,
+    metavar="SECONDS",
+    help=(
+        "Per-rollout agent wall-clock timeout in seconds for sandboxed CLI harnesses (e.g. terminus2). "
+        "Default 3600. Sandbox lifetimes are sized to outlast this, so the environment isn't torn down mid-rollout."
+    ),
+)
 def eval_cmd(
     benchmark: str,
     agent_name: str | None,
@@ -598,6 +609,7 @@ def eval_cmd(
     temperature: float | None,
     top_p: float | None,
     max_tokens: int | None,
+    agent_timeout: int | None,
 ):
     """Evaluate a model on a benchmark dataset."""
     from rllm.cli._sampling import resolve_eval_sampling
@@ -671,6 +683,17 @@ def eval_cmd(
         agent_metadata["sandbox_backend"] = sandbox_backend
     if sandbox_concurrency is not None:
         agent_metadata["sandbox_concurrency"] = sandbox_concurrency
+    if agent_timeout is not None:
+        if agent_timeout < 1:
+            fail("--agent-timeout must be >= 1 second.")
+        # Consumed by BaseCliHarness.configure() → sets the harness run_timeout.
+        agent_metadata["agent_timeout"] = agent_timeout
+        # Also publish it as the canonical env knob so the Modal backend derives
+        # a sandbox lifetime with headroom over it (else a raised timeout would
+        # still be reaped at the default lifetime).
+        import os
+
+        os.environ["RLLM_HARNESS_RUN_TIMEOUT_S"] = str(agent_timeout)
 
     parsed_indices = parse_index_spec(task_indices) if task_indices is not None else None
 

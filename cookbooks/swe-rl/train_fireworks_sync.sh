@@ -40,6 +40,8 @@ set -euo pipefail
 
 export SWE_SANDBOX_BACKEND="${SWE_SANDBOX_BACKEND:-modal}"
 export SWE_VAL_MAX="${SWE_VAL_MAX:-16}"
+# Per-rollout turn cap for terminus2 (read by train.py). Empty = uncapped.
+export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-100}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
 
 python -u train.py \

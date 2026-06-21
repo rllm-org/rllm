@@ -26,9 +26,28 @@ from rllm.sandbox.protocol import SnapshotNotFound
 
 logger = logging.getLogger(__name__)
 
-# Default sandbox lifetime: 30 minutes (Modal default is 5 min). Raise via the
-# env var for workloads whose single rollout can exceed it (e.g. long builds).
-_DEFAULT_TIMEOUT = env_int("RLLM_MODAL_SANDBOX_TIMEOUT_S", 30 * 60)
+# Headroom the sandbox lifetime keeps *beyond* the agent run timeout + install,
+# to cover the post-run verifier, teardown, and scheduling slack.
+_SANDBOX_LIFETIME_HEADROOM_S = 10 * 60
+
+
+def _default_sandbox_timeout() -> int:
+    """Default Modal sandbox lifetime (seconds) — must outlast a full rollout.
+
+    The lifetime clock starts at ``Sandbox.create()``, *before* the cold-path
+    install, the agent run, and the verifier. If it doesn't exceed their sum the
+    container is reaped mid-rollout (exit 137 + "Sandbox already shut down").
+    So derive it from the agent run-timeout knob with headroom for install +
+    verify + teardown. ``RLLM_MODAL_SANDBOX_TIMEOUT_S`` overrides outright.
+    (Modal's own default is only 5 min.)
+    """
+    explicit = env_int("RLLM_MODAL_SANDBOX_TIMEOUT_S", 0)
+    if explicit > 0:
+        return explicit
+    run_timeout = env_int("RLLM_HARNESS_RUN_TIMEOUT_S", 3600)
+    install_timeout = env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 600)
+    return run_timeout + install_timeout + _SANDBOX_LIFETIME_HEADROOM_S
+
 
 # Modal caps an exec's total argv at 64 KiB (ARG_MAX); payloads above this go
 # through a chunked temp-file path instead of being inlined in the command.
@@ -84,7 +103,7 @@ class ModalSandbox:
 
         self.name = name
         self._image_spec = image
-        self._timeout = kwargs.pop("timeout", _DEFAULT_TIMEOUT)
+        self._timeout = kwargs.pop("timeout", None) or _default_sandbox_timeout()
         self._app_name = kwargs.pop("app_name", "rllm-sandbox")
 
         # A stored snapshot ref is a bare Modal image id ("im-…", no registry/tag);
@@ -335,11 +354,12 @@ def build_modal_snapshot(task, key: str, prior_ref: str | None = None, *, force:
 
     # Size the build sandbox's lifetime to the worst-case replay: each RUN is
     # bounded at 900s (a step that hangs against a prebuilt image burns its
-    # full bound), plus the install bound and pull/capture slack. With the
-    # 30-min default, two hung steps killed the sandbox mid-build.
+    # full bound), plus the install bound and pull/capture slack — floored at
+    # the rollout default. Without this floor, two hung steps killed the
+    # sandbox mid-build.
     install_budget = env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 900) if install_script else 0
     n_replay = len(_dockerfile_run_commands(task)) if _should_replay_dockerfile(task) else 0
-    build_timeout = max(_DEFAULT_TIMEOUT, 900 * n_replay + install_budget + 600)
+    build_timeout = max(_default_sandbox_timeout(), 900 * n_replay + install_budget + 600)
     sb = _create_base_sandbox(task, "modal", name=f"{key}-build", timeout=build_timeout)
     try:
         _replay_dockerfile(task, sb, "modal")
