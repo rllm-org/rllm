@@ -114,6 +114,7 @@
           {
             "group": "Advanced algorithms",
             "pages": [
+              "core-concepts/rl-algorithms",
               "training/capability-matrix",
               "training/advantage-estimator",
               "training/precompute-advantage"
