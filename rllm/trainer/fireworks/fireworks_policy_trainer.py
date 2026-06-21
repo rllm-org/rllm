@@ -28,6 +28,7 @@ from rllm.trainer.algorithms import (
     AlgorithmConfig,
     CompactFilteringConfig,
     TransformConfig,
+    build_aux_losses,
 )
 from rllm.trainer.tinker.tinker_policy_trainer import (
     compute_schedule_lr_multiplier,
@@ -273,6 +274,31 @@ class FireworksPolicyTrainer:
 
         return clean_datums, advantages, inf_logprobs, prompt_lens, num_loss_tokens
 
+    @staticmethod
+    def _build_aux_datums(raw_datums: list[tinker.Datum], aux, n_seq: int) -> list[tinker.Datum]:
+        """Build ``cross_entropy`` datums for one auxiliary loss (ECHO, ...).
+
+        For each rollout we emit a datum over the same tokens, weighting every
+        selected token (``aux.mask``) by ``coef / (n_seq * |selected_i|)`` and the
+        rest by 0. Under ``GradAccNormalization.NONE`` the summed gradient equals
+        ``coef * d/dtheta [ mean_i (1/|selected_i|) sum_t -log p(target_t) ]``,
+        i.e. ``coef`` times the length-normalized, sequence-mean auxiliary loss
+        (for ECHO, the paper's L_env). Datums with no selected token are skipped.
+        """
+        from rllm.trainer.tinker.aux_loss import aux_positions, build_aux_ce_datum
+
+        out: list[tinker.Datum] = []
+        for datum in raw_datums:
+            positions = aux_positions(aux, datum.loss_fn_inputs["mask"].data)
+            count = sum(1 for p in positions if p)
+            if count == 0:
+                continue
+            scale = aux.coef / (n_seq * count)
+            built = build_aux_ce_datum(datum.model_input, datum.loss_fn_inputs["target_tokens"], positions, scale)
+            if built is not None:
+                out.append(built)
+        return out
+
     async def _compute_proximal_logprobs(
         self,
         datums: list[tinker.Datum],
@@ -455,6 +481,33 @@ class FireworksPolicyTrainer:
             for i in range(len(advantages)):
                 advantages[i] /= max(1, num_loss_tokens[i])
 
+        # Auxiliary losses (ECHO, ...): build a second, gradient-accumulated
+        # cross_entropy pass per loss. Fireworks' optim_step normalizes the
+        # *summed* gradient by token/sequence counts across ALL passes, which
+        # would rescale the policy gradient. To keep the policy-gradient term
+        # identical to a non-aux run, we fold the normalization optim would have
+        # applied into the advantages here and force GradAccNormalization.NONE at
+        # optim_step (see optim_step()). The aux datums carry their own
+        # per-sequence length normalization so each term equals exactly
+        # ``coef * grad(aux_loss)``.
+        aux_losses = build_aux_losses(algorithm_config)
+        aux_passes: list[tuple] = []  # (aux, datums)
+        if aux_losses:
+            n_seq = max(1, len(raw_datums))
+            agg = algorithm_config.loss_agg_mode
+            if agg in ("seq-mean-token-sum", "seq-mean-token-mean"):
+                for i in range(len(advantages)):
+                    advantages[i] /= n_seq  # optim would divide by NUM_SEQUENCES
+            elif agg == "token-mean":
+                total_action_tokens = max(1, sum(num_loss_tokens))
+                for i in range(len(advantages)):
+                    advantages[i] /= total_action_tokens  # optim would divide by NUM_LOSS_TOKENS
+            # agg None/other => optim NONE => no fold needed.
+            for aux in aux_losses:
+                datums = self._build_aux_datums(raw_datums, aux, n_seq)
+                if datums:
+                    aux_passes.append((aux, datums))
+
         # Proximal logprobs
         t0 = time.perf_counter()
         if rc.bypass_mode:
@@ -495,6 +548,21 @@ class FireworksPolicyTrainer:
             for k, v in fwd_bwd_result.metrics.items():
                 if k not in self._METRIC_SKIP_KEYS:
                     adv_metrics[f"train/{k}"] = v
+
+        # Auxiliary-loss passes: each accumulates gradients on top of the policy
+        # gradient before the (externally invoked) optim_step.
+        for aux, datums in aux_passes:
+            aux_fwd_bwd = await asyncio.to_thread(
+                self.training_client.forward_backward,
+                datums,
+                "cross_entropy",
+            )
+            if hasattr(aux_fwd_bwd, "metrics") and aux_fwd_bwd.metrics:
+                for k, v in aux_fwd_bwd.metrics.items():
+                    if k not in self._METRIC_SKIP_KEYS:
+                        adv_metrics[f"train/aux_{aux.name}_{k}"] = v
+            adv_metrics[f"train/aux_{aux.name}_coef"] = aux.coef
+            adv_metrics[f"train/aux_{aux.name}_sequences"] = len(datums)
 
         return raw_datums, [], adv_metrics
 
@@ -538,6 +606,13 @@ class FireworksPolicyTrainer:
             "seq-mean-token-mean": GradAccNormalization.NUM_SEQUENCES,
         }
         grad_norm = _LOSS_AGG_MAP.get(self.algorithm_config.loss_agg_mode)
+        # Auxiliary losses accumulate extra gradient passes before this step and
+        # fold the intended normalization into the per-datum weights/advantages
+        # (see forward_backward_from_trajectory_groups). Re-normalizing here by
+        # token/sequence counts that span all passes would rescale the policy
+        # gradient, so we disable server-side grad-accumulation normalization.
+        if build_aux_losses(self.algorithm_config):
+            grad_norm = GradAccNormalization.NONE
         optim_result = await asyncio.to_thread(
             self.training_client.optim_step,
             adam_params,

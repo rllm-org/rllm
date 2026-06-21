@@ -16,6 +16,7 @@ _spec = importlib.util.spec_from_file_location("rllm_common_config", _CONFIG_PAT
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 AlgorithmConfig = _mod.AlgorithmConfig
+rLLMAdvantageEstimator = _mod.rLLMAdvantageEstimator
 
 
 def _make_config(norm_adv_by_std_in_grpo: bool = True, warmup_steps: int = -1):
@@ -63,3 +64,47 @@ def test_warmup_steps_from_algorithm():
     config = _make_config(warmup_steps=25)
     algo_config = AlgorithmConfig.from_config(config.rllm.algorithm, stepwise_advantage_mode=config.rllm.stepwise_advantage.mode)
     assert algo_config.warmup_steps == 25
+
+
+# --- ECHO (arXiv:2605.24517) -------------------------------------------------
+
+
+def _echo_config(adv_estimator: str = "echo", env_loss_coef=None):
+    section = {
+        "adv_estimator": adv_estimator,
+        "norm_adv_by_std_in_grpo": True,
+    }
+    if env_loss_coef is not None:
+        section["env_loss_coef"] = env_loss_coef
+    return OmegaConf.create({"rllm": {"algorithm": section, "stepwise_advantage": {"mode": "broadcast"}}})
+
+
+def test_echo_estimator_resolves():
+    """adv_estimator=echo resolves to the ECHO enum (not OTHER)."""
+    config = _echo_config()
+    algo_config = AlgorithmConfig.from_config(config.rllm.algorithm)
+    assert algo_config.estimator == rLLMAdvantageEstimator.ECHO
+
+
+def test_echo_defaults_lambda_to_paper_value():
+    """echo with no explicit coef defaults env_loss_coef to the paper's 0.05."""
+    algo_config = AlgorithmConfig.from_config(_echo_config().rllm.algorithm)
+    assert algo_config.env_loss_coef == 0.05
+
+
+def test_grpo_disables_env_loss_by_default():
+    """Non-echo estimators leave env_loss_coef at 0.0 (plain GRPO, no env loss)."""
+    algo_config = AlgorithmConfig.from_config(_echo_config(adv_estimator="grpo").rllm.algorithm)
+    assert algo_config.env_loss_coef == 0.0
+
+
+def test_echo_explicit_coef_overrides_default():
+    """An explicit env_loss_coef wins over the echo default."""
+    algo_config = AlgorithmConfig.from_config(_echo_config(env_loss_coef=0.02).rllm.algorithm)
+    assert algo_config.env_loss_coef == 0.02
+
+
+def test_env_loss_coef_can_enable_on_grpo():
+    """env_loss_coef is the real switch: it can enable the env loss with adv_estimator=grpo."""
+    algo_config = AlgorithmConfig.from_config(_echo_config(adv_estimator="grpo", env_loss_coef=0.05).rllm.algorithm)
+    assert algo_config.env_loss_coef == 0.05
