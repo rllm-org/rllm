@@ -136,6 +136,18 @@ def calculate_rloo_advantages(rewards: list[np.ndarray], algorithm_config: Algor
     return advantages_by_group, returns_by_group
 
 
+@register_rllm_adv_estimator(rLLMAdvantageEstimator.ECHO)
+def calculate_echo_advantages(rewards: list[np.ndarray], algorithm_config: AlgorithmConfig, **kwargs) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """ECHO (arXiv:2605.24517): advantages are identical to GRPO.
+
+    ECHO's only departure from GRPO is an auxiliary cross-entropy loss on
+    environment-observation tokens, added in each backend's loss path and gated
+    by ``algorithm_config.env_loss_coef``. The advantage estimation here is just
+    GRPO so the policy-gradient term is unchanged.
+    """
+    return calculate_grpo_advantages(rewards, algorithm_config, **kwargs)
+
+
 def _collect_precomputed_advantages(group: TrajectoryGroup, group_role: str) -> list[float]:
     """Collect pre-computed per-token advantages from all steps.
 
