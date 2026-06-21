@@ -58,6 +58,13 @@ SANDBOX_BACKEND = os.environ.get("TERMINAL_SANDBOX_BACKEND", "modal")
 # TB_VAL_MAX=N to validate on the first N tasks instead (0/unset = all).
 TB_VAL_MAX = int(os.environ.get("TB_VAL_MAX", "0"))
 
+# Per-rollout turn cap for the terminus2 agent. Unset = no artificial cap
+# (Harbor's own default); the per-rollout RLLM_HARNESS_RUN_TIMEOUT_S still
+# bounds wall-clock. The train_*.sh scripts default this to 100; set
+# TERMINUS_MAX_TURNS=N to override (empty/0 = uncapped).
+_terminus_max_turns = os.environ.get("TERMINUS_MAX_TURNS")
+TERMINUS_MAX_TURNS = int(_terminus_max_turns) if _terminus_max_turns and int(_terminus_max_turns) > 0 else None
+
 
 @hydra.main(config_path="pkg://rllm.trainer.config", config_name="unified", version_base=None)
 def main(config: DictConfig) -> None:
@@ -76,7 +83,7 @@ def main(config: DictConfig) -> None:
     # explicit evaluator/hooks) makes AgentTrainer auto-wire SandboxTaskHooks
     # for the sandbox lifecycle + per-task verifier, and route rollouts through
     # AgentFlowEngine — rLLM's own runtime, not the remote Harbor runtime.
-    agent_flow = Terminus2Harness(sandbox_backend=SANDBOX_BACKEND)
+    agent_flow = Terminus2Harness(sandbox_backend=SANDBOX_BACKEND, max_turns=TERMINUS_MAX_TURNS)
 
     trainer = AgentTrainer(
         backend=config.rllm.get("backend", "tinker"),

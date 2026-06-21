@@ -47,6 +47,8 @@
 set -euo pipefail
 
 export TERMINAL_SANDBOX_BACKEND="${TERMINAL_SANDBOX_BACKEND:-modal}"
+# Per-rollout turn cap for terminus2 (read by train.py). Empty = uncapped.
+export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-100}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
 # Modal sandbox LIFETIME (not idle time). Must exceed the agent run timeout
 # above plus setup/verify, or sandboxes get reaped mid-rollout — surfacing as
@@ -62,16 +64,16 @@ python -u train.py \
     fireworks_config.rollout_deployment_replica_count=6 \
     training.group_size=8 \
     training.learning_rate=2e-5 \
-    training.max_length=65536 \
+    training.max_length=131072 \
     rllm.rollout.train.temperature=1.0 \
     rllm.rollout.train.top_p=1.0 \
     rllm.rollout.val.temperature=1.0 \
     rllm.rollout.val.top_p=1.0 \
-    data.max_prompt_length=57344 \
+    data.max_prompt_length=122880 \
     data.max_response_length=8192 \
     data.train_batch_size=1 \
     data.val_batch_size=-1 \
-    rllm.data.max_prompt_length=57344 \
+    rllm.data.max_prompt_length=122880 \
     rllm.data.max_response_length=8192 \
     rllm.data.train_batch_size=1 \
     rllm.data.val_batch_size=-1 \
@@ -81,13 +83,13 @@ python -u train.py \
     rllm.async_training.enable=true \
     rllm.async_training.mini_batch_size=16 \
     rllm.async_training.fwd_bwd_group_size=1 \
-    rllm.async_training.staleness_threshold=1.0 \
+    rllm.async_training.staleness_threshold=0.5 \
     rllm.async_training.trigger_parameter_sync_step=1 \
     rllm.async_training.partial_rollout=true \
     rllm.workflow.n_parallel_tasks=192 \
     rllm.workflow.raise_on_error=false \
     rllm.gateway.port=9090 \
-    rllm.gateway.cumulative_token_mode=false \
+    rllm.gateway.cumulative_token_mode=true \
     rllm.gateway.renderer_family=qwen3.5 \
     rllm.trainer.total_epochs=1 \
     rllm.trainer.logger='[wandb]' \
