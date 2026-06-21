@@ -248,6 +248,8 @@ def _sandbox_resource_kwargs(task: Task, backend: str) -> dict:
     OOM-kills compile-heavy graders (e.g. ``go test ./...``). Modal takes memory
     in MB; Daytona takes memory/disk in GB. Docker/local ignore the values.
     """
+    from rllm.env import env_int
+
     env = task.metadata.get("environment", {}) or {}
     cpus, mem_mb, disk_mb = env.get("cpus"), env.get("memory_mb"), env.get("storage_mb")
     kw: dict = {}
@@ -256,6 +258,15 @@ def _sandbox_resource_kwargs(task: Task, backend: str) -> dict:
             kw["cpu"] = float(cpus)
         if mem_mb:
             kw["memory"] = int(mem_mb)
+        # Size the sandbox lifetime to this task's own budget so the box always
+        # outlives the agent + verifier it hosts (both run here). A flat global
+        # default could be shorter than agent+verifier and reap the box mid-run
+        # ("Sandbox already shut down"). max() keeps an explicit override as a floor.
+        agent_t = float(task.metadata.get("agent_timeout") or env_int("RLLM_HARNESS_RUN_TIMEOUT_S", 3600))
+        verifier_t = float(task.metadata.get("verifier_timeout") or 600.0)
+        install_t = float(env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 600))
+        per_task_floor = int(agent_t + verifier_t + install_t + 600)  # +600s teardown/scheduling slack
+        kw["timeout"] = max(per_task_floor, env_int("RLLM_MODAL_SANDBOX_TIMEOUT_S", 0))
     elif backend == "daytona":
         if cpus:
             kw["cpu"] = int(cpus)

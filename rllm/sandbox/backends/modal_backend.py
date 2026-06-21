@@ -19,10 +19,11 @@ import logging
 import os
 import tarfile
 import threading
+import time
 import weakref
 
-from rllm.env import env_int
-from rllm.sandbox.protocol import SnapshotNotFound
+from rllm.env import env_float, env_int
+from rllm.sandbox.protocol import SandboxCommandTimeout, SnapshotNotFound
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,64 @@ _B64_ARGV_LIMIT = 50_000
 # atexit-tracked sandboxes; terminated on process exit to avoid leaks.
 _LIVE_SANDBOXES: weakref.WeakSet = weakref.WeakSet()
 _LIVE_LOCK = threading.Lock()
+
+
+class _CreateRateLimiter:
+    """Process-global token bucket pacing ``Sandbox.create()``.
+
+    Modal's create cap is a **token bucket**, not a flat cap: it absorbs an
+    initial burst, then refills at the rate its ``RESOURCE_EXHAUSTED`` error
+    advertises (~5/s). That shape is why a batch of ~192 concurrent creates can
+    sail through while ~256 trips it — the burst fits the bucket, then the extra
+    creates outrun the refill and Modal's client spends the batch in
+    retry/backoff (the repeated rate-limit warnings).
+
+    This mirrors that bucket on our side, gating every create through the one
+    chokepoint (:meth:`ModalSandbox.__init__`): up to ``burst`` go through
+    immediately, after which creates are paced at ``rate``/s. Tuned under
+    Modal's envelope, the startup burst is absorbed and only the long tail is
+    throttled — so creates queue locally instead of failing-and-retrying, with
+    little added latency for batches within the burst.
+
+    Thread-safe; token accounting is serialized under the lock while the wait
+    sleeps outside it, so concurrent callers self-correct on the next loop and
+    never collectively exceed ``rate``. Scope is per-process, which matches the
+    AgentFlowEngine path (all creates happen in the driver process).
+    """
+
+    def __init__(self, rate: float, burst: float) -> None:
+        self._rate = rate
+        self._capacity = max(1.0, burst)
+        self._tokens = self._capacity
+        self._last = time.monotonic()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        if self._rate <= 0:  # disabled — e.g. account limit was raised
+            return
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                self._tokens = min(self._capacity, self._tokens + (now - self._last) * self._rate)
+                self._last = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+                wait = (1.0 - self._tokens) / self._rate
+            time.sleep(wait)
+
+
+# Defaults sit inside the envelope observed live: a burst of ~192 concurrent
+# creates is fine, ~256 trips the limit, and the error advertises a ~5/s
+# refill. So allow a 150 burst (comfortably under the 192 that worked) and
+# refill at 4/s (under the stated 5/s) as a backstop for the long tail.
+# Steady-state create rate is usually far below the refill anyway (rollouts
+# free slots only as tasks finish), so in practice this just smooths startup.
+# Tune RLLM_MODAL_SANDBOX_CREATE_BURST / _RPS for your account; set _RPS=0 to
+# disable entirely (e.g. once Modal raises your limit).
+_CREATE_RATE_RPS = env_float("RLLM_MODAL_SANDBOX_CREATE_RPS", 4.0)
+_CREATE_BURST = env_float("RLLM_MODAL_SANDBOX_CREATE_BURST", 150.0)
+_CREATE_LIMITER = _CreateRateLimiter(_CREATE_RATE_RPS, _CREATE_BURST)
 
 
 def _terminate_all_live() -> None:
@@ -128,6 +187,8 @@ class ModalSandbox:
                 if key in kwargs:
                     create_kwargs[key] = kwargs.pop(key)
 
+            # Pace creates under Modal's account-wide rate cap (see _CreateRateLimiter).
+            _CREATE_LIMITER.acquire()
             self._sandbox = modal.Sandbox.create(**create_kwargs)
         except modal.exception.NotFoundError as e:
             if from_snapshot:
@@ -158,6 +219,7 @@ class ModalSandbox:
         if timeout is not None:
             exec_kwargs["timeout"] = int(timeout)
 
+        start = time.monotonic()
         process = self._sandbox.exec("bash", "-c", command, **exec_kwargs)
 
         stdout = process.stdout.read()
@@ -166,8 +228,21 @@ class ModalSandbox:
         # Wait for the process to complete and get exit code
         process.wait()
         exit_code = process.returncode
+        elapsed = time.monotonic() - start
 
         if exit_code != 0:
+            # A timeout SIGKILL surfaces as a negative returncode; flag it so an
+            # agent that simply spent its time budget isn't reported as a failure.
+            timed_out = timeout is not None and exit_code < 0 and elapsed >= timeout * 0.95
+            if timed_out:
+                logger.warning(
+                    "Command hit its %ds timeout in sandbox %s (killed after %.0fs): %s",
+                    int(timeout),
+                    self.name,
+                    elapsed,
+                    command[:200],
+                )
+                raise SandboxCommandTimeout(f"Command hit its {int(timeout)}s timeout in sandbox {self.name} (killed after {elapsed:.0f}s)")
             logger.warning(
                 "Command failed in sandbox %s: %s\nstderr: %s",
                 self.name,
