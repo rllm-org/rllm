@@ -28,6 +28,8 @@
 set -euo pipefail
 
 export TERMINAL_SANDBOX_BACKEND="${TERMINAL_SANDBOX_BACKEND:-modal}"
+# Per-rollout turn cap for terminus2 (read by train.py). Empty = uncapped.
+export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-100}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
 # Modal sandbox LIFETIME (not idle time). Must exceed the agent run timeout
 # above plus setup/verify, or sandboxes get reaped mid-rollout — surfacing as

@@ -64,7 +64,22 @@ class BaseCliHarness(SandboxedAgentFlow):
     stdout_log_path: str = "/tmp/agent-stdout.log"
     # Per-call timeouts (seconds). Tasks may override via metadata.
     install_timeout: int = env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 600)  # set env var: export RLLM_HARNESS_INSTALL_TIMEOUT_S=xxx
-    run_timeout: int = env_int("RLLM_HARNESS_RUN_TIMEOUT_S", 1800)  # set env var: export RLLM_HARNESS_RUN_TIMEOUT_S=xxx
+    run_timeout: int = env_int("RLLM_HARNESS_RUN_TIMEOUT_S", 3600)  # set env var: export RLLM_HARNESS_RUN_TIMEOUT_S=xxx
+
+    def configure(self, overrides: dict) -> dict:
+        """Consume CLI overrides this harness understands, then defer to the base.
+
+        ``agent_timeout`` (seconds) caps a single rollout's wall-clock — it's the
+        timeout handed to the in-sandbox ``exec``. ``rllm eval --agent-timeout``
+        routes here. Backends with a hard sandbox lifetime (e.g. Modal, see
+        ``modal_backend._default_sandbox_timeout``) size it to exceed this so the
+        environment can't be reaped before the agent's own timeout fires.
+        """
+        leftovers = super().configure(overrides)
+        timeout = leftovers.pop("agent_timeout", None)
+        if timeout is not None:
+            self.run_timeout = int(timeout)
+        return leftovers
 
     # ---------------------------------------------------------------------
     # Sandbox helpers
