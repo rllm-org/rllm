@@ -140,6 +140,13 @@ def create_tinker_handler(engine: TinkerEngine) -> Callable[[dict[str, Any]], Aw
         if request_body.get("max_completion_tokens") is not None:
             sampling_kwargs["max_completion_tokens"] = request_body["max_completion_tokens"]
 
+        # Per-trajectory session id (injected by the gateway) — forwarded only to
+        # engines that use it for inference session affinity (Fireworks prefix-cache
+        # reuse across a rollout's turns). Popped so it never reaches a chat body.
+        session_id = request_body.pop("rllm_session_id", None)
+        if session_id and getattr(engine, "supports_session_affinity", False):
+            sampling_kwargs["rllm_session_id"] = session_id
+
         # Cumulative-token-mode path: the gateway rewrites turn 2+ to a
         # completions-style request whose ``prompt`` is raw token IDs built by
         # ``renderers.bridge_to_next_turn`` (= prior turns' prompt+completion
