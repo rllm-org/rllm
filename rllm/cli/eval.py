@@ -46,11 +46,14 @@ def _apply_sandbox_overrides(agent, agent_metadata: dict | None) -> None:
 # Agent knobs surfaced in the eval header, in display order. Each entry is
 # (attribute, label, formatter); a flow that doesn't expose an attribute (or
 # leaves it ``None``) simply omits that pair, so this works across harnesses.
+# NB: temperature is intentionally omitted — sampling params (temperature,
+# top_p, …) are shown in the gateway-enforced "Sampling" row, which is
+# authoritative; listing the harness's requested temperature here too just
+# duplicated it with a (usually different, since the gateway wins) value.
 _AGENT_CONFIG_SPECS = (
     ("max_turns", "max turns", str),
     ("max_steps", "max steps", str),
     ("max_concurrent", "max concurrent", str),
-    ("temperature", "temperature", lambda v: f"{v:g}"),
     ("run_timeout", "run timeout", lambda v: f"{v}s"),
     ("install_timeout", "install timeout", lambda v: f"{v}s"),
 )
