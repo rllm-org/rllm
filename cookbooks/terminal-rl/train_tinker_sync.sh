@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Train a terminal agent on a local terminal-agent task set with the tinker
+# backend in SYNCHRONOUS mode.
+#
+# This is the simpler, on-policy variant of train_tinker.sh (which uses
+# fully-async GRPO). Each step generates a full batch of rollouts, then takes
+# one optimizer step — easier to reason about for testing/debugging. Mirrors
+# the synchronous tinker recipe other cookbooks use (e.g. deepcoder).
+#
+# Differences from train_tinker.sh:
+#   - No rllm.async_training.* (async disabled → synchronous generate→train).
+#   - data.train_batch_size is the real per-step task count (async forces it to 1).
+#   - The effective batch is train_batch_size x group_size rollouts per step.
+#
+# Sandbox backend: TERMINAL_SANDBOX_BACKEND (docker | local | modal | daytona;
+# default modal). Cap the eval set with TB_VAL_MAX. Per-rollout agent timeout:
+# RLLM_HARNESS_RUN_TIMEOUT_S.
+#
+# Override anything by passing extra Hydra args after the script:
+#   bash train_tinker_sync.sh data.train_batch_size=2 training.group_size=4
+
+set -euo pipefail
+
+export TERMINAL_SANDBOX_BACKEND="${TERMINAL_SANDBOX_BACKEND:-modal}"
+export TB_VAL_MAX="${TB_VAL_MAX:-16}"
+export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
+# Modal sandbox LIFETIME (not idle time). Must exceed the agent run timeout
+# above plus setup/verify, or sandboxes get reaped mid-rollout — surfacing as
+# "Sandbox has already shut down" (NotFoundError) and exit-137 kills.
+export RLLM_MODAL_SANDBOX_TIMEOUT_S="${RLLM_MODAL_SANDBOX_TIMEOUT_S:-2400}"
+
+python -u train.py \
+    rllm/backend=tinker \
+    model.name=Qwen/Qwen3.5-4B \
+    model.lora_rank=32 \
+    training.group_size=8 \
+    training.learning_rate=2e-5 \
+    training.max_length=65536 \
+    rllm.rollout.train.temperature=1.0 \
+    rllm.rollout.train.top_p=1.0 \
+    rllm.rollout.val.temperature=1.0 \
+    rllm.rollout.val.top_p=1.0 \
+    data.max_prompt_length=57344 \
+    data.max_response_length=8192 \
+    data.train_batch_size=16 \
+    data.val_batch_size=-1 \
+    rllm.compact_filtering.enable=true \
+    rllm.algorithm.adv_estimator=grpo \
+    rllm.algorithm.norm_adv_by_std_in_grpo=true \
+    rllm.workflow.n_parallel_tasks=128 \
+    rllm.workflow.raise_on_error=false \
+    rllm.gateway.port=9090 \
+    rllm.gateway.cumulative_token_mode=true \
+    rllm.gateway.renderer_family=qwen3.5 \
+    rllm.trainer.total_epochs=1 \
+    rllm.trainer.logger='[wandb]' \
+    rllm.trainer.project_name='terminal-rl' \
+    rllm.trainer.experiment_name='terminal-rl-terminus2-qwen3.5-4b-sync' \
+    rllm.trainer.val_before_train=false \
+    rllm.trainer.test_freq=10 \
+    rllm.trainer.save_freq=10 \
+    "$@"
