@@ -209,7 +209,7 @@ class ReverseProxy:
             # HTTP proxy path
             worker = self.router.route(session_id)
             url = self._build_url(worker.api_url, request.url.path, str(request.url.query))
-            headers = self._forward_headers(request)
+            headers = self._forward_headers(request, session_id)
             try:
                 resp = await self._send_with_retry(
                     method=request.method,
@@ -331,7 +331,7 @@ class ReverseProxy:
         else:
             worker = self.router.route(session_id)
             url = self._build_url(worker.api_url, "/v1/completions", "")
-            headers = self._forward_headers(request)
+            headers = self._forward_headers(request, session_id)
             raw_body = json.dumps(completions_body).encode()
             try:
                 resp = await self._send_with_retry(
@@ -401,7 +401,7 @@ class ReverseProxy:
 
         worker = self.router.route(session_id)
         url = self._build_url(worker.api_url, "/v1/completions", "")
-        headers = self._forward_headers(request)
+        headers = self._forward_headers(request, session_id)
         raw_body = json.dumps(completions_body).encode()
 
         assert self._http is not None
@@ -634,7 +634,7 @@ class ReverseProxy:
 
         worker = self.router.route(session_id)
         url = self._build_url(worker.api_url, request.url.path, str(request.url.query))
-        headers = self._forward_headers(request)
+        headers = self._forward_headers(request, session_id)
 
         assert self._http is not None
         upstream = self._http.stream(
@@ -915,5 +915,13 @@ class ReverseProxy:
         return url
 
     @staticmethod
-    def _forward_headers(request: Request) -> dict[str, str]:
-        return {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
+    def _forward_headers(request: Request, session_id: str | None = None) -> dict[str, str]:
+        headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
+        # Pin a trajectory's turns to one replica so Fireworks reuses its
+        # prompt-prefix KV (caching is per-replica). The training path sets these
+        # via the rollout engine; the HTTP path (eval) does it here. No-op for
+        # non-Fireworks upstreams; setdefault lets a client pin its own value.
+        if session_id:
+            headers.setdefault("x-session-affinity", str(session_id))
+            headers.setdefault("x-multi-turn-session-id", str(session_id))
+        return headers
