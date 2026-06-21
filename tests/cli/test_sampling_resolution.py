@@ -12,12 +12,15 @@ BASE = {"temperature": 1.0, "top_p": 1.0, "top_k": -1, "max_tokens": 2048}
 # -- eval: single config, empty base, always validation ---------------------
 
 
-def test_eval_empty_by_default():
-    assert resolve_eval_sampling(None).is_empty
+def test_eval_default_sampling():
+    # Eval seeds temperature=1.0, top_p=1.0 (mirrors the cookbook training rollout).
+    assert resolve_eval_sampling(None).as_dict() == {"temperature": 1.0, "top_p": 1.0}
 
 
 def test_eval_string_only():
-    assert resolve_eval_sampling("temperature=0.3,top_k=20").as_dict() == {"temperature": 0.3, "top_k": 20}
+    # User params override the defaults (temperature) and add new keys (top_k);
+    # the unspecified default (top_p) stays.
+    assert resolve_eval_sampling("temperature=0.3,top_k=20").as_dict() == {"temperature": 0.3, "top_p": 1.0, "top_k": 20}
 
 
 def test_eval_flags_beat_string():
@@ -31,7 +34,7 @@ def test_eval_standalone_flags_only():
 def test_eval_flat_file(tmp_path):
     p = tmp_path / "sp.yaml"
     p.write_text("temperature: 0.42\npresence_penalty: 0.3\n")
-    assert resolve_eval_sampling(f"@{p}").as_dict() == {"temperature": 0.42, "presence_penalty": 0.3}
+    assert resolve_eval_sampling(f"@{p}").as_dict() == {"temperature": 0.42, "top_p": 1.0, "presence_penalty": 0.3}
 
 
 def test_eval_nonmapping_file_raises(tmp_path):
