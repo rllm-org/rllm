@@ -425,20 +425,25 @@ class AgentFlowEngine:
             futures.append(self.process_task_with_retry(task, task_id, rollout_idx, idx, is_validation=is_validation))
 
         results: list[Episode | None] = [None] * len(tasks)
+        # Running tallies for a live accuracy/reward readout on the progress bar.
+        n_correct = 0
+        reward_sum = 0.0
+        n_scored = 0
         with tqdm(total=len(tasks), desc="Generating trajectories") as pbar:
-            n_done = 0
-            reward_sum = 0.0
             for future in asyncio.as_completed(futures):
                 task_id, rollout_idx, result_idx, episode = await future
                 results[result_idx] = episode
-                # Surface a running average reward on the progress bar so the
-                # current score is visible live (not just per-rollout lines).
-                if episode is not None:
-                    rewards = [t.reward for t in episode.trajectories if t.reward is not None]
-                    reward_sum += (sum(rewards) / len(rewards)) if rewards else (1.0 if episode.is_correct else 0.0)
-                    n_done += 1
-                    pbar.set_postfix(avg_reward=f"{reward_sum / n_done:.3f}")
+                done = pbar.n + 1
+                if episode is not None and episode.is_correct:
+                    n_correct += 1
+                if episode is not None and episode.trajectories and episode.trajectories[0].reward is not None:
+                    reward_sum += float(episode.trajectories[0].reward)
+                    n_scored += 1
                 pbar.update(1)
+                postfix = f"acc {n_correct}/{done}={100.0 * n_correct / done:.1f}%"
+                if n_scored:
+                    postfix += f" reward={reward_sum / n_scored:.3f}"
+                pbar.set_postfix_str(postfix)
 
         ordered_results: list[Episode] = results  # type: ignore[assignment]
 

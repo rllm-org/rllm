@@ -13,6 +13,14 @@ class SnapshotNotFound(Exception):
     """
 
 
+class SandboxCommandTimeout(RuntimeError):
+    """Raised by a backend's ``exec`` when a command is killed for exceeding its
+    own ``timeout``. Distinct from a genuine non-zero exit so callers can treat
+    "the agent spent its whole time budget" as expected, not a failure.
+    Subclasses ``RuntimeError`` so existing handlers keep catching it.
+    """
+
+
 @runtime_checkable
 class Sandbox(Protocol):
     """Protocol for sandbox backends (Docker, Local, Modal, etc.)."""

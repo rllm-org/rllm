@@ -34,7 +34,7 @@ import uuid
 from abc import abstractmethod
 
 from rllm.env import env_int
-from rllm.sandbox.protocol import Sandbox
+from rllm.sandbox.protocol import Sandbox, SandboxCommandTimeout
 from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
 from rllm.types import AgentConfig, Task
 
@@ -307,6 +307,10 @@ class BaseCliHarness(SandboxedAgentFlow):
 
         try:
             self._exec_agent(sandbox, cmd, timeout=timeout, env=env_vars)
+        except SandboxCommandTimeout as e:
+            # Expected, not a failure: the agent spent its whole time budget; the
+            # captured steps are still scored by the verifier. INFO, not WARNING.
+            logger.info("%s reached its time budget: %s", type(self).__name__, e)
         except Exception as e:
             # Surface as a warning for operator visibility; the engine
             # still gets None and the gateway traces (if any LLM calls
