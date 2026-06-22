@@ -202,6 +202,12 @@ class ReverseProxy:
                         reason = f"prefix not append-only: msg {idx} (role={role}) changed vs verified prefix"
                     elif kind == "shrunk":
                         reason = f"history shrank to {idx} msgs (verified prefix was {acc.message_count}); summarization/unwind"
+                    elif kind == "duplicate":
+                        reason = (
+                            f"duplicate request — identical to the already-processed turn ({idx} msgs); "
+                            "the agent re-sent it, typically a retried sampling call (check the agent-side "
+                            "error logged just before this)"
+                        )
                     else:
                         reason = f"non-cumulative message list (len={len(messages)} <= prefix {acc.message_count})"
                     acc.reset(reason)

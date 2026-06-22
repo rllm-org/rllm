@@ -279,6 +279,12 @@ class TestDivergenceDiagnostics:
         assert acc.is_cumulative(shorter) is False
         assert acc.divergence(shorter) == ("shrunk", 1)
 
+    def test_divergence_duplicate_on_identical_resend(self):
+        acc, base = self._acc()
+        # Re-send the exact same messages the gateway already folded (a retry).
+        assert acc.is_cumulative(list(base)) is False  # len == message_count
+        assert acc.divergence(list(base)) == ("duplicate", 2)
+
     def test_reset_accepts_reason(self):
         acc, _ = self._acc()
         acc.reset("prefix not append-only: msg 1 (role=user) changed")

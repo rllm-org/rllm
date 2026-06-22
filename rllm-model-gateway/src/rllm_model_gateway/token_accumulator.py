@@ -130,6 +130,9 @@ class TokenAccumulator:
           - ``("shrunk", n)``: the overlap matches but ``messages`` has only ``n``
             messages (fewer than the verified prefix) — the conversation got
             *shorter*, i.e. summarization / history unwind.
+          - ``("duplicate", n)``: ``messages`` is byte-identical to the verified
+            prefix (same length, every message matches) — the agent re-sent an
+            already-processed request, i.e. a retried / replayed sampling call.
           - ``("clean", -1)``: no divergence found.
 
         Only called on a reset (after ``is_cumulative`` already returned False),
@@ -142,6 +145,8 @@ class TokenAccumulator:
                 return ("changed", i)
         if len(messages) < len(prior):
             return ("shrunk", len(messages))
+        if len(messages) == len(prior):
+            return ("duplicate", len(messages))
         return ("clean", -1)
 
     def ingest_turn(self, prompt_token_ids: list[int], completion_token_ids: list[int]) -> None:
