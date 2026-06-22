@@ -74,6 +74,11 @@ class TokenAccumulator:
         # trace_id of the most recently folded turn, so a duplicate/retried
         # request can overwrite that turn's trace instead of appending a new one.
         self.last_trace_id: str | None = None
+        # Outcome of the most recently folded/resampled turn, for diagnosing *why*
+        # a duplicate re-send happened (empty completion / length / normal-but-
+        # rejected). Set on every fold + resample.
+        self.last_finish_reason: str | None = None
+        self.last_completion_len: int = 0
 
     @property
     def cumulative_ids(self) -> list[int]:
@@ -123,6 +128,14 @@ class TokenAccumulator:
         self._prefix_fingerprint = ""
         self._prefix_msg_fingerprints = []
         self.last_trace_id = None
+        self.last_finish_reason = None
+        self.last_completion_len = 0
+
+    def record_outcome(self, finish_reason: str | None, completion_len: int) -> None:
+        """Remember the last folded/resampled turn's sampling outcome so a
+        subsequent duplicate re-send can report *why* the agent likely retried."""
+        self.last_finish_reason = finish_reason
+        self.last_completion_len = completion_len
 
     def divergence(self, messages: list[dict[str, Any]]) -> tuple[str, int]:
         """Diagnose why ``messages`` is not a cumulative extension of the stored

@@ -293,6 +293,15 @@ class TestDivergenceDiagnostics:
         assert acc.turn_count == 1  # NOT advanced — same turn re-sampled
         assert acc.message_count == 2  # unchanged
 
+    def test_record_outcome_and_reset(self):
+        acc, _ = self._acc()
+        acc.record_outcome("length", 16384)
+        assert acc.last_finish_reason == "length"
+        assert acc.last_completion_len == 16384
+        acc.reset()
+        assert acc.last_finish_reason is None
+        assert acc.last_completion_len == 0
+
     def test_reset_accepts_reason(self):
         acc, _ = self._acc()
         acc.reset("prefix not append-only: msg 1 (role=user) changed")

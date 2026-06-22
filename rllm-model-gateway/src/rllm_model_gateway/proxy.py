@@ -201,9 +201,16 @@ class ReverseProxy:
                     # trajectory isn't split into two steps. Non-streaming only;
                     # streaming retries fall through to reset below.
                     if kind == "duplicate" and not is_stream and acc.prev_prompt_ids:
+                        # Report the prior attempt's outcome so the *cause* of the
+                        # re-send is visible: finish_reason=length → still length;
+                        # completion=0 → empty/failed response (deployment/infra);
+                        # finish_reason=stop with completion>0 → a valid response
+                        # the agent rejected (look agent-side, e.g. parse).
                         logger.info(
-                            "Re-sampling duplicate request in place (turn %d, %d msgs); chain preserved",
-                            acc.turn_count, acc.message_count,
+                            "Re-sampling duplicate request in place (session=%s, turn=%d, %d msgs); "
+                            "prior attempt: finish_reason=%s, completion=%d tok — chain preserved",
+                            session_id, acc.turn_count, acc.message_count,
+                            acc.last_finish_reason, acc.last_completion_len,
                         )
                         return await self._handle_cumulative_turn(
                             request,
@@ -326,6 +333,7 @@ class ReverseProxy:
                         # Remember this turn's trace so a duplicate/retried turn-0
                         # request can overwrite it instead of appending a new row.
                         acc.last_trace_id = trace.trace_id
+                        acc.record_outcome((response_body.get("choices") or [{}])[0].get("finish_reason"), len(completion_ids))
 
         # Sanitise response
         needs_strip_vllm = self.strip_vllm
@@ -452,6 +460,8 @@ class ReverseProxy:
         else:
             acc.ingest_turn(prompt_token_ids, completion_token_ids)
             acc.update_prefix(request_body.get("messages", []))
+        # Record this turn's outcome so a later duplicate re-send can report why.
+        acc.record_outcome((response_body.get("choices") or [{}])[0].get("finish_reason"), len(completion_token_ids))
 
         # Translate completions response → chat format. Parse the completion into
         # the structured shape the chat endpoint returns (clean content +
