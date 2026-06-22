@@ -267,6 +267,19 @@ class TrajectoryGroupBuffer:
         self._queue_update_event.set()
         self._record_classified_prompt_group()
 
+        # Per-task fine-grained accounting: a task is consumed as one GRPO group,
+        # which collapses into training rows/datums under prefix-merge. Surface
+        # trajectories / steps (turns) / datums (rows after merge) so the merge
+        # ratio is visible per task, not just as a batch aggregate.
+        n_traj = sum(len(g.trajectories) for g in traj_groups)
+        n_steps = sum(len(t.steps) for g in traj_groups for t in g.trajectories)
+        n_datums = sum(self._segment_count(t) for g in traj_groups for t in g.trajectories)
+        logger.info(
+            "Task %s queued: %d group(s), %d trajectories, %d steps -> %d datums (rows) [%.2f steps/datum]",
+            task_id, len(traj_groups), n_traj, n_steps, n_datums,
+            (n_steps / n_datums) if n_datums else 0.0,
+        )
+
         self._log_prompt_group_finished(
             task_id=task_id,
             episodes=episodes,
@@ -368,6 +381,24 @@ class TrajectoryGroupBuffer:
     @staticmethod
     def _termination_value(reason: TerminationReason | str) -> str:
         return str(getattr(reason, "value", reason))
+
+    @staticmethod
+    def _segment_count(traj) -> int:
+        """Number of training rows/datums a trajectory becomes under prefix-merge.
+
+        Each step whose ``prompt_ids`` is NOT a byte-prefix-extension of the
+        running cumulative sequence starts a new row — mirroring the backend
+        transform's datum split. =1 for a healthy cumulative trajectory (all
+        turns merge into one row); >1 when the prefix chain breaks.
+        """
+        full: list[int] | None = None
+        segments = 0
+        for step in traj.steps:
+            ids = list(step.prompt_ids)
+            if full is None or ids[: len(full)] != full:
+                segments += 1
+            full = ids + list(step.response_ids)
+        return max(segments, 1)
 
     def _log_prompt_group_finished(
         self,
