@@ -426,9 +426,18 @@ class AgentFlowEngine:
 
         results: list[Episode | None] = [None] * len(tasks)
         with tqdm(total=len(tasks), desc="Generating trajectories") as pbar:
+            n_done = 0
+            reward_sum = 0.0
             for future in asyncio.as_completed(futures):
                 task_id, rollout_idx, result_idx, episode = await future
                 results[result_idx] = episode
+                # Surface a running average reward on the progress bar so the
+                # current score is visible live (not just per-rollout lines).
+                if episode is not None:
+                    rewards = [t.reward for t in episode.trajectories if t.reward is not None]
+                    reward_sum += (sum(rewards) / len(rewards)) if rewards else (1.0 if episode.is_correct else 0.0)
+                    n_done += 1
+                    pbar.set_postfix(avg_reward=f"{reward_sum / n_done:.3f}")
                 pbar.update(1)
 
         ordered_results: list[Episode] = results  # type: ignore[assignment]
