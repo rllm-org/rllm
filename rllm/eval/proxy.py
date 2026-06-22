@@ -95,6 +95,7 @@ class _ProxyManagerBase:
         if self._proxy_process is None:
             return
 
+        self._shutting_down = True  # tell the monitor this exit is expected
         logger.info("Shutting down proxy subprocess...")
         self._proxy_process.terminate()
         try:
@@ -202,7 +203,7 @@ class EvalProxyManager(_ProxyManagerBase):
         logger.info("Starting proxy subprocess: %s", " ".join(cmd))
         self._proxy_process = subprocess.Popen(
             cmd,
-            stdout=subprocess.DEVNULL,
+            stdout=stderr_file,  # capture stdout too (litellm logs + crash output) so a death leaves a trail
             stderr=stderr_file,
             env=env,
             preexec_fn=set_limits,
@@ -220,7 +221,34 @@ class EvalProxyManager(_ProxyManagerBase):
 
         atexit.register(self.shutdown_proxy)
         logger.info("Proxy subprocess ready (PID: %s)", self._proxy_process.pid)
+        self._start_proxy_monitor()
         return snapshot_path
+
+    def _start_proxy_monitor(self) -> None:
+        """Watch the proxy subprocess; if it dies mid-run, scream loudly with its
+        captured output. Otherwise the gateway silently routes to a dead worker
+        and every subsequent rollout returns empty completions (scoring 0) with
+        no visible cause — exactly the failure that's been impossible to debug.
+        """
+        import threading
+
+        proc = self._proxy_process
+        if proc is None:
+            return
+
+        def _monitor() -> None:
+            rc = proc.wait()  # blocks until the proxy process exits
+            if getattr(self, "_shutting_down", False):
+                return  # expected teardown at end of run
+            tail = self._read_stderr_tail(max_lines=60)
+            logger.error(
+                "\n🚨🚨🚨 LITELLM PROXY DIED MID-RUN (exit code %s) 🚨🚨🚨\n"
+                "Every subsequent LLM call now returns EMPTY and all remaining rollouts "
+                "score 0. THIS is why the run is failing. Proxy stdout/stderr tail:\n%s\n",
+                rc, tail or "(nothing captured — likely SIGKILL / OOM / external kill)",
+            )
+
+        threading.Thread(target=_monitor, daemon=True, name="rllm-proxy-monitor").start()
 
     def _wait_for_proxy(self, timeout: float = 30.0) -> None:
         if self._proxy_process is None:
