@@ -384,6 +384,38 @@ class GatewayManager:
         self._process.terminate()
         raise TimeoutError(f"Gateway did not become healthy within {_HEALTH_POLL_TIMEOUT}s")
 
+    def _build_cumulative_renderer(self) -> Any:
+        """Build the cumulative-mode renderer on the rllm side for injection.
+
+        Returns ``None`` when cumulative mode is off or no model is set (the
+        gateway then builds a prime-rl renderer from config itself). Routes via
+        ``rllm.renderers.resolve``: prime-rl for supported models (token bridge),
+        the tinker/Fireworks adapter (with a generic bridge) for the rest
+        (DeepSeek-V4, Gemma-4, …).
+        """
+        if not self.cumulative_token_mode or not self.model:
+            return None
+        try:
+            from transformers import AutoTokenizer
+
+            from rllm.renderers import resolve
+
+            tokenizer = AutoTokenizer.from_pretrained(self.model)
+            family = self.renderer_family if self.renderer_family and self.renderer_family != "auto" else None
+            renderer = resolve(self.model, tokenizer, renderer_family=family)
+            logger.info(
+                "Injecting %s for cumulative token mode (model=%s, has_bridge=%s)",
+                type(renderer).__name__, self.model, getattr(renderer, "has_bridge", "?"),
+            )
+            return renderer
+        except Exception as err:  # noqa: BLE001
+            logger.warning(
+                "Could not build a cumulative-mode renderer for %s (%s); the gateway "
+                "will build a prime-rl renderer from config instead.",
+                self.model, err,
+            )
+            return None
+
     def _start_thread(self, local_handler: Any = None) -> None:
         """Start gateway in a background thread using create_app + uvicorn."""
         import uvicorn
@@ -401,7 +433,15 @@ class GatewayManager:
             cumulative_token_mode=self.cumulative_token_mode,
             renderer_family=self.renderer_family,
         )
-        app = create_app(config=gw_config, local_handler=local_handler)
+
+        # In-process (thread) mode: build the cumulative-mode renderer here, on the
+        # rllm side, and inject it. This keeps the gateway package free of
+        # tinker/Fireworks deps while still supporting models prime-rl lacks (e.g.
+        # DeepSeek-V4) — rllm.renderers.resolve routes those to the tinker/Fireworks
+        # renderer with a generic cross-turn bridge. prime-rl-supported models
+        # resolve to prime-rl (token bridge), same as before.
+        injected_renderer = self._build_cumulative_renderer()
+        app = create_app(config=gw_config, local_handler=local_handler, renderer=injected_renderer)
 
         uvi_config = uvicorn.Config(
             app,

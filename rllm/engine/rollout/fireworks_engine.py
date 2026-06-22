@@ -28,7 +28,9 @@ from typing_extensions import override
 from rllm.engine.rollout.rollout_engine import ModelOutput
 from rllm.engine.rollout.tinker_engine import (
     TinkerEngine,
+    _convert_openai_messages,
     _flat_token_input_length,
+    _prepare_messages_with_tools,
 )
 from rllm.engine.rollout.types import (
     TinkerTokenInput,
@@ -137,13 +139,42 @@ class FireworksEngine(TinkerEngine):
         self.train_sampling_params = dict((sampling_params or {}).get("train", {}))
         self.val_sampling_params = dict((sampling_params or {}).get("val", {}))
 
-        # Chat template parser (same setup as TinkerEngine bypass mode)
-        self.bypass_render_with_parser = True
-        self.chat_parser = ChatTemplateParser.get_parser(
-            tokenizer,
-            processor=processor,
-            disable_thinking=disable_thinking,
-        )
+        # Rendering setup. Default: ChatTemplateParser bypass mode (Jinja
+        # chat-template models). Some models (e.g. DeepSeek-V4) ship no Jinja
+        # chat_template — they use a hand-rolled encoder exposed via the
+        # tinker/Fireworks renderer. Fall back to that renderer, using the
+        # non-bypass path the inherited assemble_model_output already supports.
+        self.renderer = None
+        try:
+            self.chat_parser = ChatTemplateParser.get_parser(
+                tokenizer,
+                processor=processor,
+                disable_thinking=disable_thinking,
+            )
+            self.bypass_render_with_parser = True
+        except Exception as err:
+            from tinker_cookbook import renderers as tc_renderers
+
+            from rllm.renderers._fw_register import ensure_registered
+            from rllm.renderers._tinker import tinker_renderer_name
+
+            model_name = getattr(tokenizer, "name_or_path", None)
+            ensure_registered()
+            renderer_name = tinker_renderer_name(model_name)
+            if renderer_name is None:
+                raise ValueError(
+                    f"FireworksEngine: tokenizer for {model_name!r} has no Jinja chat_template "
+                    "and no tinker/Fireworks renderer is registered for it. Add the model to "
+                    "rllm.renderers._tinker._FW_MODEL_RENDERER, or serve a model with a chat "
+                    "template."
+                ) from err
+            logger.info(
+                "No usable chat_template for %r (%s); rendering via tinker/Fireworks renderer %r.",
+                model_name, err, renderer_name,
+            )
+            self.chat_parser = None
+            self.bypass_render_with_parser = False
+            self.renderer = tc_renderers.get_renderer(renderer_name, tokenizer)
 
         self.sample_timeout = sample_timeout
         self.router_replay = router_replay
@@ -161,15 +192,25 @@ class FireworksEngine(TinkerEngine):
         accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
         reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
 
-        prompt = self.chat_parser.parse(
-            messages,
-            add_generation_prompt=True,
-            is_first_msg=True,
-            tools=tools,
-            reasoning_effort=reasoning_effort,
-            accumulate_reasoning=accumulate_reasoning,
-        )
-        token_input = self.tokenizer.encode(prompt, add_special_tokens=False)
+        if self.bypass_render_with_parser:
+            prompt = self.chat_parser.parse(
+                messages,
+                add_generation_prompt=True,
+                is_first_msg=True,
+                tools=tools,
+                reasoning_effort=reasoning_effort,
+                accumulate_reasoning=accumulate_reasoning,
+            )
+            token_input = self.tokenizer.encode(prompt, add_special_tokens=False)
+        else:
+            # No chat_template: render via the tinker/Fireworks renderer (same
+            # path as TinkerEngine's non-bypass mode; parsed back by the
+            # inherited assemble_model_output).
+            converted = self._convert_images_to_content_list(messages)
+            tinker_messages = _convert_openai_messages(converted)
+            if tools:
+                tinker_messages = _prepare_messages_with_tools(self.renderer, tinker_messages, tools)
+            token_input = self.renderer.build_generation_prompt(tinker_messages).to_ints()
 
         if application_id is not None:
             kwargs["user"] = application_id
