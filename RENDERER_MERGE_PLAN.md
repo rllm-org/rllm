@@ -57,13 +57,25 @@ therefore lives in `rllm.renderers`; the gateway receives a built renderer by
   injection contract in `rllm-model-gateway/tests/unit/test_renderer_injection.py`.
   Existing gateway cumulative-mode + tinker-engine tests still pass.
 
+### Tool-call bridge (validated)
+The bridge renders the new turn's delta via `build_generation_prompt(sentinel +
+new_messages)` and splits on the sentinel's N-th close token, so the renderer
+does its own turn-level tool preprocessing (merging consecutive tool results into
+one user turn, pairing them with the assistant's calls, role handling). Per-
+message rendering was wrong here — DeepSeek-V4's `render_message` rejects raw
+`tool` role outright. Validated: DeepSeek-V4 merges consecutive tool results into
+a single user turn (history kept verbatim); Qwen3.5 tool-result bridge equals
+prime-rl's hand-coded bridge byte-for-byte. Note: tinker's *Qwen* renderer
+doesn't group multi-tool, but Qwen routes to prime-rl (which does) — so only the
+tinker-served models (DeepSeek-V4, …) rely on this path, and DeepSeek's
+`build_generation_prompt` merges correctly.
+
 ### Remaining
 - Repoint `tinker_engine` at `rllm.renderers.resolve()` for consistency (§6 PR 4).
 - Migrate/retire `ChatTemplateParser` once parity is proven in the engines.
-- Validate the generic bridge on **tool-call multi-turn** flows per FW renderer
-  before relying on cumulative mode for tool-using agents (a wrong bridge
-  silently corrupts training tokens; the bridge returns `None` on uncertainty,
-  but tool framing should be parity-checked per model — terminal-rl uses tools).
+- Parity-check the bridge on the other tinker-served FW models (Gemma-4,
+  Ministral-3, Kimi-K2.7-code) before relying on cumulative mode for them; the
+  bridge returns `None` on anything it can't render (safe full-re-render fallback).
 
 ---
 
