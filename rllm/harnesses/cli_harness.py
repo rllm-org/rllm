@@ -29,6 +29,7 @@ propagates ``config.base_url`` through the appropriate env var
 from __future__ import annotations
 
 import logging
+import os
 import shlex
 import uuid
 from abc import abstractmethod
@@ -65,6 +66,12 @@ class BaseCliHarness(SandboxedAgentFlow):
     # Per-call timeouts (seconds). Tasks may override via metadata.
     install_timeout: int = env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 600)  # set env var: export RLLM_HARNESS_INSTALL_TIMEOUT_S=xxx
     run_timeout: int = env_int("RLLM_HARNESS_RUN_TIMEOUT_S", 3600)  # set env var: export RLLM_HARNESS_RUN_TIMEOUT_S=xxx
+    # When an operator sets RLLM_HARNESS_RUN_TIMEOUT_S (or --agent-timeout),
+    # run_timeout is a hard CEILING on the per-task ``agent_timeout``, not just a
+    # fallback — effective timeout = min(agent_timeout, run_timeout). When it is
+    # unset, the task's own agent_timeout governs (so eval honors each
+    # benchmark's per-task budget). Captured at import; configure() flips it on.
+    run_timeout_is_cap: bool = "RLLM_HARNESS_RUN_TIMEOUT_S" in os.environ
 
     def configure(self, overrides: dict) -> dict:
         """Consume CLI overrides this harness understands, then defer to the base.
@@ -79,6 +86,7 @@ class BaseCliHarness(SandboxedAgentFlow):
         timeout = leftovers.pop("agent_timeout", None)
         if timeout is not None:
             self.run_timeout = int(timeout)
+            self.run_timeout_is_cap = True  # an explicit --agent-timeout is a hard ceiling
         return leftovers
 
     # ---------------------------------------------------------------------
@@ -302,7 +310,17 @@ class BaseCliHarness(SandboxedAgentFlow):
         self.write_configs(sandbox, task, config, env_vars)
 
         instruction = str(task.instruction).strip()
-        timeout = float(task.metadata.get("agent_timeout", self.run_timeout))
+        # The task's own agent_timeout (from task.toml) applies, but an
+        # operator-set RLLM_HARNESS_RUN_TIMEOUT_S / --agent-timeout is a hard
+        # ceiling over it — otherwise a task declaring e.g. 3600s would ignore a
+        # 1800s cap meant to bound training-rollout wall-clock.
+        per_task = task.metadata.get("agent_timeout")
+        if per_task is None:
+            timeout = float(self.run_timeout)
+        elif self.run_timeout_is_cap:
+            timeout = min(float(per_task), float(self.run_timeout))
+        else:
+            timeout = float(per_task)
         cmd = self.build_invocation(instruction, task, config)
 
         try:
