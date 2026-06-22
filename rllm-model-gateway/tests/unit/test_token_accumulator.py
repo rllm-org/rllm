@@ -285,6 +285,14 @@ class TestDivergenceDiagnostics:
         assert acc.is_cumulative(list(base)) is False  # len == message_count
         assert acc.divergence(list(base)) == ("duplicate", 2)
 
+    def test_resample_completion_preserves_chain(self):
+        acc, _ = self._acc()  # turn 1 folded: prev_prompt=[1,2,3], prev_completion=[4,5]
+        acc.resample_completion([9, 9, 9])
+        assert acc.prev_completion_ids == [9, 9, 9]  # completion swapped
+        assert acc.prev_prompt_ids == [1, 2, 3]  # prompt unchanged
+        assert acc.turn_count == 1  # NOT advanced — same turn re-sampled
+        assert acc.message_count == 2  # unchanged
+
     def test_reset_accepts_reason(self):
         acc, _ = self._acc()
         acc.reset("prefix not append-only: msg 1 (role=user) changed")

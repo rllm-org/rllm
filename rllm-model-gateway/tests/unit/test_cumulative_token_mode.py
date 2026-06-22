@@ -152,6 +152,38 @@ class TestCumulativeTokenMode:
         # So turn 2 prompt should start with [1,2,3,4,5,10,11,12] + bridge
         assert prompt[:8] == [1, 2, 3, 4, 5, 10, 11, 12]
 
+    def test_duplicate_request_resampled_in_place_not_reset(self, cumulative_gateway):
+        """A duplicate/retried request (identical to an already-folded turn) is
+        re-sampled in place: the cumulative chain is preserved (no reset) and the
+        turn's trace is overwritten rather than appended (no trajectory split)."""
+        server, mock_vllm = cumulative_gateway
+        gw_url = server.url
+        client = GatewayClient(gw_url)
+        oai = openai.OpenAI(base_url=f"{gw_url}/sessions/dup-test/v1", api_key="dummy")
+
+        # Turn 1 (chat path)
+        oai.chat.completions.create(model="m", messages=[{"role": "user", "content": "Hello"}])
+        turn2 = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hello from mock!"},
+            {"role": "user", "content": "How are you?"},
+        ]
+        # Turn 2 (cumulative)
+        oai.chat.completions.create(model="m", messages=turn2)
+        acc = server.app.state.proxy._accumulators["dup-test"]
+        assert acc.turn_count == 2
+
+        # Re-send the EXACT same turn-2 request (a retry).
+        resp = oai.chat.completions.create(model="m", messages=turn2)
+        assert resp.choices[0].message.content  # graceful 200, not an error
+
+        # Chain preserved: not reset, turn not advanced (re-sampled in place).
+        assert acc.turn_count == 2
+        # Trace overwritten, not appended: still 2 traces (turn1 + turn2), not 3.
+        traces = client.get_session_traces("dup-test")
+        assert len(traces) == 2
+        client.close()
+
     def test_traces_have_correct_token_ids(self, cumulative_gateway):
         """Both turns produce traces with prompt_token_ids and completion_token_ids."""
         server, mock_vllm = cumulative_gateway

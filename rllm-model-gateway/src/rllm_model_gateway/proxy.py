@@ -192,22 +192,37 @@ class ReverseProxy:
             if acc.should_rewrite():
                 messages = request_body.get("messages", [])
                 if not acc.is_cumulative(messages):
-                    # Message history is not a cumulative extension of the
-                    # verified prefix — reset and fall through to the normal chat
-                    # path (treated as fresh turn-0). Log *why* so frequent
-                    # resets can be root-caused (prefix mutation vs shrink).
                     kind, idx = acc.divergence(messages)
+                    # Duplicate / retried request (byte-identical to the already-
+                    # folded turn): the agent re-sent the same turn (its prior
+                    # attempt was rejected/failed). Re-sample that turn *in place*
+                    # from its existing prompt and overwrite its trace, instead of
+                    # resetting — so the cumulative chain isn't torn down and the
+                    # trajectory isn't split into two steps. Non-streaming only;
+                    # streaming retries fall through to reset below.
+                    if kind == "duplicate" and not is_stream and acc.prev_prompt_ids:
+                        logger.info(
+                            "Re-sampling duplicate request in place (turn %d, %d msgs); chain preserved",
+                            acc.turn_count, acc.message_count,
+                        )
+                        return await self._handle_cumulative_turn(
+                            request,
+                            request_body,
+                            session_id,
+                            acc,
+                            list(acc.prev_prompt_ids),
+                            originally_requested_logprobs,
+                            is_retry=True,
+                        )
+                    # Otherwise reset and fall through to the normal chat path
+                    # (fresh turn-0). Log *why* so resets can be root-caused.
                     if kind == "changed":
                         role = messages[idx].get("role", "?") if idx < len(messages) else "?"
                         reason = f"prefix not append-only: msg {idx} (role={role}) changed vs verified prefix"
                     elif kind == "shrunk":
                         reason = f"history shrank to {idx} msgs (verified prefix was {acc.message_count}); summarization/unwind"
                     elif kind == "duplicate":
-                        reason = (
-                            f"duplicate request — identical to the already-processed turn ({idx} msgs); "
-                            "the agent re-sent it, typically a retried sampling call (check the agent-side "
-                            "error logged just before this)"
-                        )
+                        reason = f"duplicate request ({idx} msgs); resetting (streaming retry or no prior prompt to re-sample)"
                     else:
                         reason = f"non-cumulative message list (len={len(messages)} <= prefix {acc.message_count})"
                     acc.reset(reason)
@@ -308,6 +323,9 @@ class ReverseProxy:
                     if prompt_ids or completion_ids:
                         acc.ingest_turn(prompt_ids, completion_ids)
                         acc.update_prefix(request_body.get("messages", []))
+                        # Remember this turn's trace so a duplicate/retried turn-0
+                        # request can overwrite it instead of appending a new row.
+                        acc.last_trace_id = trace.trace_id
 
         # Sanitise response
         needs_strip_vllm = self.strip_vllm
@@ -338,17 +356,23 @@ class ReverseProxy:
         acc: TokenAccumulator,
         token_ids: list[int],
         originally_requested_logprobs: bool = False,
+        is_retry: bool = False,
     ) -> Response:
         """Rewrite chat/completions to /v1/completions with pre-tokenized prompt.
 
         ``token_ids`` is the full bridge-extended prompt for this turn, built
         by ``acc.build_next_prompt`` in ``handle()``.
 
+        ``is_retry``: this is a re-sample of an already-folded turn (a duplicate
+        request). The completion is swapped in place (``resample_completion``)
+        and its trace is overwritten, rather than folding a new turn — keeping
+        the cumulative chain intact. Retries are routed non-streaming.
+
         Respects the original stream setting: if the client requested streaming,
         we stream from vLLM and translate completions chunks to chat format in
         real-time.
         """
-        is_stream = request_body.get("stream", False)
+        is_stream = request_body.get("stream", False) and not is_retry
 
         # Construct completions request: forward everything except chat-specific fields
         completions_body = {k: v for k, v in request_body.items() if k not in ("messages", "stream", "stream_options", "tools", "tool_choice")}
@@ -365,6 +389,7 @@ class ReverseProxy:
             acc,
             token_ids,
             originally_requested_logprobs,
+            is_retry=is_retry,
         )
 
     async def _handle_cumulative_non_streaming(
@@ -376,6 +401,7 @@ class ReverseProxy:
         acc: TokenAccumulator,
         token_ids: list[int],
         originally_requested_logprobs: bool = False,
+        is_retry: bool = False,
     ) -> Response:
         """Non-streaming cumulative turn: send pre-tokenized prompt, return JSON.
 
@@ -419,8 +445,13 @@ class ReverseProxy:
         prompt_token_ids = extract_prompt_token_ids(response_body) or token_ids
         completion_token_ids = extract_completion_token_ids(response_body)
 
-        acc.ingest_turn(prompt_token_ids, completion_token_ids)
-        acc.update_prefix(request_body.get("messages", []))
+        if is_retry:
+            # Duplicate/retried turn: swap the completion in place (don't advance
+            # turn_count/message_count) so the cumulative chain stays intact.
+            acc.resample_completion(completion_token_ids)
+        else:
+            acc.ingest_turn(prompt_token_ids, completion_token_ids)
+            acc.update_prefix(request_body.get("messages", []))
 
         # Translate completions response → chat format. Parse the completion into
         # the structured shape the chat endpoint returns (clean content +
@@ -446,6 +477,11 @@ class ReverseProxy:
 
         if session_id and response_body:
             trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=request.state.weight_version)
+            if is_retry and acc.last_trace_id:
+                # Overwrite the rejected attempt's trace (stores upsert by
+                # trace_id), so the trajectory keeps one row for this turn.
+                trace.trace_id = acc.last_trace_id
+            acc.last_trace_id = trace.trace_id
             await self._persist(trace)
 
         sanitized = response_body

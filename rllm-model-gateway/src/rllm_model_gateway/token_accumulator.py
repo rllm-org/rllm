@@ -71,6 +71,9 @@ class TokenAccumulator:
         # Per-message fingerprints of the last verified prefix, for diagnosing
         # exactly where a non-cumulative request diverged (see divergence).
         self._prefix_msg_fingerprints: list[str] = []
+        # trace_id of the most recently folded turn, so a duplicate/retried
+        # request can overwrite that turn's trace instead of appending a new one.
+        self.last_trace_id: str | None = None
 
     @property
     def cumulative_ids(self) -> list[int]:
@@ -119,6 +122,7 @@ class TokenAccumulator:
         self.message_count = 0
         self._prefix_fingerprint = ""
         self._prefix_msg_fingerprints = []
+        self.last_trace_id = None
 
     def divergence(self, messages: list[dict[str, Any]]) -> tuple[str, int]:
         """Diagnose why ``messages`` is not a cumulative extension of the stored
@@ -160,6 +164,16 @@ class TokenAccumulator:
         self.prev_prompt_ids = list(prompt_token_ids)
         self.prev_completion_ids = list(completion_token_ids)
         self.turn_count += 1
+
+    def resample_completion(self, completion_token_ids: list[int]) -> None:
+        """Replace the most recent turn's completion *in place* — used when the
+        agent re-sends an already-folded turn (a retry). The prompt
+        (``prev_prompt_ids``), ``turn_count``, ``message_count`` and prefix
+        fingerprints are unchanged, so the cumulative chain is preserved and the
+        next real turn still extends it. Only the sampled completion is swapped
+        for the retry's fresh sample.
+        """
+        self.prev_completion_ids = list(completion_token_ids)
 
     def update_prefix(self, messages: list[dict[str, Any]]) -> None:
         """Snapshot the current message list as the verified prefix."""
