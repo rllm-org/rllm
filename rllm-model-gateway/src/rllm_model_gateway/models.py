@@ -123,6 +123,10 @@ class GatewayConfig(BaseModel):
     sync_traces: bool = False
     model: str | None = None  # When set, overrides ``body.model``
     cumulative_token_mode: bool = False
-    # renderers family for the cumulative-mode bridge. Check supported model families
-    # in MODEL_RENDERER_MAP of https://github.com/PrimeIntellect-ai/renderers/blob/main/renderers/base.py
+    # prime-rl renderer family for the gateway-built cumulative-mode renderer.
+    # "auto" matches the tokenizer's HF id against MODEL_RENDERER_MAP; set
+    # explicitly (e.g. "qwen3.5", "glm-5", "deepseek-v3") for local checkpoint
+    # paths. Models without a prime-rl renderer (e.g. DeepSeek-V4) are supported
+    # by injecting a renderer from the rllm side (in-process gateway). Families:
+    # https://github.com/PrimeIntellect-ai/renderers/blob/main/renderers/base.py
     renderer_family: str = "auto"
