@@ -65,6 +65,44 @@ def _strip_logprobs(response: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _tool_call_to_openai(tc: Any, index: int) -> dict[str, Any]:
+    """Convert a renderer ToolCall to OpenAI ``tool_calls`` entry format.
+
+    Handles the shapes ``parse_response`` may return: an object with
+    ``name``/``arguments``, an object with ``function.name``/
+    ``function.arguments``, or a dict. ``arguments`` is JSON-encoded (OpenAI
+    sends it as a string).
+    """
+    fn = getattr(tc, "function", None)
+    if fn is not None:
+        name, arguments = getattr(fn, "name", ""), getattr(fn, "arguments", {})
+    elif isinstance(tc, dict):
+        name, arguments = tc.get("name", ""), tc.get("arguments", {})
+    else:
+        name, arguments = getattr(tc, "name", ""), getattr(tc, "arguments", {})
+    if not isinstance(arguments, str):
+        arguments = json.dumps(arguments)
+    return {"id": f"call_{index}", "type": "function", "function": {"name": name, "arguments": arguments}}
+
+
+def _parsed_response_to_message(parsed: Any) -> dict[str, Any]:
+    """Build an OpenAI assistant message from a renderer ``ParsedResponse``.
+
+    Matches the shape the chat-completions endpoint returns — clean ``content``,
+    plus ``reasoning_content`` and structured ``tool_calls`` when present — so
+    cumulative-mode (token-in) turns are consumed identically to the first
+    (chat-path) turn instead of dumping the raw completion text into ``content``.
+    """
+    message: dict[str, Any] = {"role": "assistant", "content": getattr(parsed, "content", "") or ""}
+    reasoning = getattr(parsed, "reasoning_content", "") or ""
+    if reasoning:
+        message["reasoning_content"] = reasoning
+    tool_calls = getattr(parsed, "tool_calls", None) or []
+    if tool_calls:
+        message["tool_calls"] = [_tool_call_to_openai(tc, i) for i, tc in enumerate(tool_calls)]
+    return message
+
+
 class ReverseProxy:
     """Forward requests to inference workers, capture traces.
 
@@ -378,11 +416,26 @@ class ReverseProxy:
         acc.ingest_turn(prompt_token_ids, completion_token_ids)
         acc.update_prefix(request_body.get("messages", []))
 
-        # Translate to chat format
+        # Translate completions response → chat format. Parse the completion into
+        # the structured shape the chat endpoint returns (clean content +
+        # reasoning_content + tool_calls) via the renderer, so cumulative turns
+        # are consumed identically to the chat-path first turn. /v1/completions
+        # returns the model's raw text (e.g. "reasoning</think>answer" or raw
+        # tool-call markup for thinking/tool models); dumping that verbatim into
+        # `content` breaks the agent's action/tool parsing on every cumulative
+        # turn. Fall back to the raw text if the renderer can't parse it.
         choices = response_body.get("choices") or []
         if choices:
             first_choice = choices[0]
-            first_choice["message"] = {"role": "assistant", "content": first_choice.pop("text", "")}
+            raw_text = first_choice.pop("text", "")
+            message: dict[str, Any] | None = None
+            if self.renderer is not None and completion_token_ids:
+                try:
+                    parsed = self.renderer.parse_response(list(completion_token_ids))
+                    message = _parsed_response_to_message(parsed)
+                except Exception as err:  # noqa: BLE001 - never break the response on a parse error
+                    logger.warning("cumulative parse_response failed (%s); falling back to raw text", err)
+            first_choice["message"] = message if message is not None else {"role": "assistant", "content": raw_text}
         response_body["object"] = "chat.completion"
 
         if session_id and response_body:

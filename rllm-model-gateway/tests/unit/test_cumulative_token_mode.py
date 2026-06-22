@@ -449,3 +449,105 @@ class TestCumulativeStreaming:
         usage = usage_chunks[-1]["usage"]
         assert "prompt_tokens" in usage
         assert "completion_tokens" in usage
+
+
+# ---------------------------------------------------------------------------
+# Structured cumulative response (option 3): parse the completion via the
+# renderer so cumulative turns match the chat-path shape (clean content +
+# reasoning_content + structured tool_calls) instead of dumping raw text.
+# ---------------------------------------------------------------------------
+
+
+class _ParsedResp:
+    def __init__(self, content="", reasoning_content="", tool_calls=None):
+        self.content = content
+        self.reasoning_content = reasoning_content
+        self.tool_calls = tool_calls or []
+
+
+class _ToolCall:
+    def __init__(self, name, arguments):
+        self.name = name
+        self.arguments = arguments
+
+
+class _MockRendererWithParse(_MockRenderer):
+    """Adds parse_response — returns a fixed structured response distinct from
+    the mock worker's raw text, so a test can prove parse_response is used."""
+
+    def parse_response(self, token_ids):
+        return _ParsedResp(
+            content="parsed answer",
+            reasoning_content="my thinking",
+            tool_calls=[_ToolCall("run_cmd", {"cmd": "ls"})],
+        )
+
+
+class TestStructuredCumulativeResponse:
+    def test_pure_message_builder(self):
+        from rllm_model_gateway.proxy import _parsed_response_to_message
+
+        msg = _parsed_response_to_message(
+            _ParsedResp("hello", "thinking", [_ToolCall("f", {"a": 1})])
+        )
+        assert msg["role"] == "assistant"
+        assert msg["content"] == "hello"
+        assert msg["reasoning_content"] == "thinking"
+        assert msg["tool_calls"][0]["type"] == "function"
+        assert msg["tool_calls"][0]["function"]["name"] == "f"
+        import json as _json
+
+        assert _json.loads(msg["tool_calls"][0]["function"]["arguments"]) == {"a": 1}
+
+    def test_pure_message_builder_omits_empty_fields(self):
+        from rllm_model_gateway.proxy import _parsed_response_to_message
+
+        msg = _parsed_response_to_message(_ParsedResp("just text"))
+        assert msg == {"role": "assistant", "content": "just text"}  # no reasoning/tool_calls keys
+
+    def test_tool_call_function_shape(self):
+        from rllm_model_gateway.proxy import _tool_call_to_openai
+
+        class _FnTc:
+            class function:  # noqa: N801
+                name = "g"
+                arguments = '{"x": 2}'  # already a string
+
+        out = _tool_call_to_openai(_FnTc(), 3)
+        assert out["id"] == "call_3"
+        assert out["function"] == {"name": "g", "arguments": '{"x": 2}'}
+
+    def test_cumulative_turn_returns_parsed_message(self, mock_vllm):
+        """End-to-end: a cumulative (token-in) turn returns the renderer-parsed
+        message shape, not the worker's raw completion text."""
+        config = GatewayConfig(
+            store_worker="memory",
+            workers=[{"url": f"{mock_vllm.url}/v1", "worker_id": "w0"}],
+            health_check_interval=999,
+            sync_traces=True,
+            cumulative_token_mode=False,
+        )
+        app = create_app(config)
+        app.state.proxy.renderer = _MockRendererWithParse()
+        app.state.proxy.cumulative_token_mode = True
+        server = GatewayServer(app, port=0)
+        server.start()
+        try:
+            oai = openai.OpenAI(base_url=f"{server.url}/sessions/parse-test/v1", api_key="dummy")
+            oai.chat.completions.create(model="m", messages=[{"role": "user", "content": "Hi"}])  # turn 1
+            resp = oai.chat.completions.create(  # turn 2 — cumulative
+                model="m",
+                messages=[
+                    {"role": "user", "content": "Hi"},
+                    {"role": "assistant", "content": "Hello from mock!"},
+                    {"role": "user", "content": "go"},
+                ],
+            )
+        finally:
+            server.stop()
+        msg = resp.choices[0].message
+        assert msg.content == "parsed answer"  # parsed, not the raw "Hello from mock!"
+        assert msg.tool_calls[0].function.name == "run_cmd"
+        import json as _json
+
+        assert _json.loads(msg.tool_calls[0].function.arguments) == {"cmd": "ls"}
