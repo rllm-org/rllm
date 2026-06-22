@@ -68,6 +68,9 @@ class TokenAccumulator:
         self.turn_count: int = 0
         self.message_count: int = 0
         self._prefix_fingerprint: str = ""
+        # Per-message fingerprints of the last verified prefix, for diagnosing
+        # exactly where a non-cumulative request diverged (see divergence).
+        self._prefix_msg_fingerprints: list[str] = []
 
     @property
     def cumulative_ids(self) -> list[int]:
@@ -98,18 +101,48 @@ class TokenAccumulator:
         prefix = messages[: self.message_count]
         return _messages_fingerprint(prefix) == self._prefix_fingerprint
 
-    def reset(self) -> None:
-        """Clear all accumulated state, restarting this session's history."""
+    def reset(self, reason: str = "") -> None:
+        """Clear all accumulated state, restarting this session's history.
+
+        ``reason`` (optional) is logged so the cause of a cumulative-mode break
+        is visible — see the call sites in ``ReverseProxy.handle``.
+        """
         logger.info(
-            "Resetting TokenAccumulator (was at turn %d, %d messages)",
+            "Resetting TokenAccumulator (was at turn %d, %d messages)%s",
             self.turn_count,
             self.message_count,
+            f" — {reason}" if reason else "",
         )
         self.prev_prompt_ids = []
         self.prev_completion_ids = []
         self.turn_count = 0
         self.message_count = 0
         self._prefix_fingerprint = ""
+        self._prefix_msg_fingerprints = []
+
+    def divergence(self, messages: list[dict[str, Any]]) -> tuple[str, int]:
+        """Diagnose why ``messages`` is not a cumulative extension of the stored
+        prefix. Returns ``(kind, index)``:
+
+          - ``("changed", i)``: ``messages[i]`` differs from the stored prefix's
+            message ``i`` — the prefix was *mutated*, not just appended to
+            (e.g. an edited/reformatted earlier message).
+          - ``("shrunk", n)``: the overlap matches but ``messages`` has only ``n``
+            messages (fewer than the verified prefix) — the conversation got
+            *shorter*, i.e. summarization / history unwind.
+          - ``("clean", -1)``: no divergence found.
+
+        Only called on a reset (after ``is_cumulative`` already returned False),
+        so the per-message rehash here is off the hot path.
+        """
+        prior = self._prefix_msg_fingerprints
+        overlap = min(len(messages), len(prior))
+        for i in range(overlap):
+            if _messages_fingerprint([messages[i]]) != prior[i]:
+                return ("changed", i)
+        if len(messages) < len(prior):
+            return ("shrunk", len(messages))
+        return ("clean", -1)
 
     def ingest_turn(self, prompt_token_ids: list[int], completion_token_ids: list[int]) -> None:
         """Record the token IDs from a completed turn.
@@ -127,6 +160,7 @@ class TokenAccumulator:
         """Snapshot the current message list as the verified prefix."""
         self.message_count = len(messages)
         self._prefix_fingerprint = _messages_fingerprint(messages)
+        self._prefix_msg_fingerprints = [_messages_fingerprint([m]) for m in messages]
 
     def build_next_prompt(
         self,

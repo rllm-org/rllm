@@ -154,9 +154,19 @@ class ReverseProxy:
             if acc.should_rewrite():
                 messages = request_body.get("messages", [])
                 if not acc.is_cumulative(messages):
-                    # Message history diverged — reset and fall through to
-                    # normal chat path (treated as fresh turn-0).
-                    acc.reset()
+                    # Message history is not a cumulative extension of the
+                    # verified prefix — reset and fall through to the normal chat
+                    # path (treated as fresh turn-0). Log *why* so frequent
+                    # resets can be root-caused (prefix mutation vs shrink).
+                    kind, idx = acc.divergence(messages)
+                    if kind == "changed":
+                        role = messages[idx].get("role", "?") if idx < len(messages) else "?"
+                        reason = f"prefix not append-only: msg {idx} (role={role}) changed vs verified prefix"
+                    elif kind == "shrunk":
+                        reason = f"history shrank to {idx} msgs (verified prefix was {acc.message_count}); summarization/unwind"
+                    else:
+                        reason = f"non-cumulative message list (len={len(messages)} <= prefix {acc.message_count})"
+                    acc.reset(reason)
                 else:
                     new_messages = extract_new_messages(messages, acc.message_count)
                     token_ids = None
@@ -171,13 +181,23 @@ class ReverseProxy:
                             token_ids,
                             originally_requested_logprobs,
                         )
-                    # No new messages, or the renderer couldn't prove the
-                    # prefix-extension contract (e.g. DefaultRenderer, or an
-                    # assistant message in the new slice). Reset so this turn is
-                    # re-ingested as a fresh turn-0 on the chat path; otherwise
-                    # the stale prefix would drop this turn's completion tokens
-                    # from the next cumulative prompt and break prefix-extension.
-                    acc.reset()
+                    # No bridgeable new messages, or the renderer couldn't prove
+                    # the prefix-extension contract (DefaultRenderer, assistant in
+                    # the new slice, multimodal, a renderer error). Reset so this
+                    # turn is re-ingested as a fresh turn-0 on the chat path;
+                    # otherwise the stale prefix would drop this turn's completion
+                    # tokens from the next cumulative prompt and break extension.
+                    # Log which case it was + the new-slice shape to root-cause.
+                    if not new_messages:
+                        raw_roles = [m.get("role") for m in messages[acc.message_count:]]
+                        reason = f"no bridgeable new messages (raw new-slice roles={raw_roles})"
+                    else:
+                        reason = (
+                            "bridge returned None (new-slice roles="
+                            f"{[m.get('role') for m in new_messages]}, content_types="
+                            f"{[type(m.get('content')).__name__ for m in new_messages]})"
+                        )
+                    acc.reset(reason)
 
         if is_stream:
             return await self._handle_streaming(request, body, request_body, session_id, originally_requested_logprobs)
