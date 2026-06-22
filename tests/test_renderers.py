@@ -221,3 +221,86 @@ def test_tinker_adapter_parity_when_forced():
     assert r.backend == "tinker"
     msgs = [{"role": "user", "content": "hi"}]
     assert r.render_ids(msgs, add_generation_prompt=True) == _hf_ids(tok, msgs)
+
+
+# --------------------- tool-call bridge parity ---------------------
+
+_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get weather for a city",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    }
+]
+
+
+def _decode(tok, ids) -> str:
+    return "".join(tok.decode([i]) for i in ids)
+
+
+@pytest.mark.skipif(not R.PRIME_AVAILABLE or not R.TINKER_AVAILABLE, reason="need both backends")
+def test_tinker_bridge_matches_prime_gold_with_tool_result():
+    """Tool-result bridge: the tinker adapter equals prime-rl's hand-coded
+    bridge byte-for-byte for Qwen3.5 (a model both ecosystems support)."""
+    from rllm.renderers import _tinker
+
+    if not _tinker.BRIDGE_AVAILABLE:
+        pytest.skip("gateway tinker bridge unavailable")
+    tok = _load("Qwen/Qwen3.5-4B")
+    prime = R.resolve("Qwen/Qwen3.5-4B", tok)
+    tinker = R.resolve("Qwen/Qwen3.5-4B", tok, renderer_name="qwen3_5")
+    prev_prompt = prime.render_ids(
+        [{"role": "system", "content": "s"}, {"role": "user", "content": "weather in SF?"}],
+        tools=_TOOLS,
+        add_generation_prompt=True,
+    )
+    im_end = tok.convert_tokens_to_ids("<|im_end|>")
+    prev_completion = tok.encode(
+        '<tool_call>\n{"name": "get_weather", "arguments": {"city": "SF"}}\n</tool_call>',
+        add_special_tokens=False,
+    ) + [im_end]
+    new = [{"role": "tool", "content": "sunny 72F", "tool_call_id": "c1", "name": "get_weather"}]
+    g = prime.bridge_to_next_turn(prev_prompt, prev_completion, new, tools=_TOOLS)
+    t = tinker.bridge_to_next_turn(prev_prompt, prev_completion, new, tools=_TOOLS)
+    assert g is not None and t is not None
+    assert list(t.token_ids) == list(g.token_ids)
+
+
+@pytest.mark.skipif(not R.TINKER_AVAILABLE, reason="tinker_cookbook not installed")
+def test_deepseek_v4_bridge_merges_tool_results():
+    """DeepSeek-V4 (no prime-rl renderer): the bridge keeps prior tokens verbatim
+    and merges consecutive tool results into a single user turn — matching the
+    renderer's own ``build_generation_prompt`` framing."""
+    from rllm.renderers import _tinker
+
+    if not _tinker.BRIDGE_AVAILABLE:
+        pytest.skip("gateway tinker bridge unavailable")
+    tok = _load(FW_ONLY_MODEL)
+    r = R.resolve(FW_ONLY_MODEL, tok)
+    assert r.backend == "tinker" and r.has_bridge is True
+    prev_prompt = r.render_ids([{"role": "user", "content": "weather?"}], add_generation_prompt=True)
+    # Simulated sampled assistant turn (a tool call) ending at EOS (token id 1).
+    prev_completion = tok.encode("</think>\n\nchecking", add_special_tokens=False) + [1]
+    t1 = {"role": "tool", "content": "SF: sunny", "tool_call_id": "c1", "name": "get_weather"}
+    t2 = {"role": "tool", "content": "NY: rainy", "tool_call_id": "c2", "name": "get_weather"}
+
+    out = r.bridge_to_next_turn(prev_prompt, prev_completion, [t1, t2])
+    assert out is not None
+    prefix = prev_prompt + prev_completion
+    assert out.token_ids[: len(prefix)] == prefix  # prior tokens kept verbatim
+    delta = _decode(tok, out.token_ids[len(prefix):])
+    # Two tool results merge into ONE user turn (not two), then the assistant opener.
+    assert delta.count("<｜User｜>") == 1
+    assert delta.count("<tool_result>") == 2
+    assert delta.rstrip().endswith("<think>")
+
+    # Single tool result + assistant content in the new slice is still refused.
+    assert r.bridge_to_next_turn(prev_prompt, prev_completion, [t1]) is not None
+    assert r.bridge_to_next_turn(prev_prompt, prev_completion, [{"role": "assistant", "content": "x"}]) is None

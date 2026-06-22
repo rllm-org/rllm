@@ -243,6 +243,53 @@ class TinkerAdapter:
             return None
         return ids + [synthesize_close]
 
+    # A synthetic ``[user, assistant(tool_call)]`` anchor used to render the new
+    # turn's delta. The trailing assistant (with a tool call) reproduces the real
+    # boundary the new messages follow — needed because some renderers merge tool
+    # results into the preceding turn and pair them with the assistant's calls.
+    _DELTA_SENTINEL: list[Message] = [
+        {"role": "user", "content": "x"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "_b", "type": "function", "function": {"name": "_", "arguments": "{}"}}
+            ],
+        },
+    ]
+
+    def _render_delta(self, new_messages: list[Message], close_set: set[int]) -> list[int] | None:
+        """Render the new turn's tokens (framing + next assistant opener).
+
+        Renders ``build_generation_prompt(sentinel + new_messages)`` and returns
+        everything after the sentinel's last turn-close token. Going through
+        ``build_generation_prompt`` (not per-message ``render_message``) is what
+        makes this correct for tool turns: renderers do turn-level preprocessing
+        there — merging consecutive tool results into one user turn, pairing them
+        with the assistant's calls, rejecting raw ``tool`` role in
+        ``render_message`` (DeepSeek-V4). Splitting on the *count* of close tokens
+        the sentinel emits (stable regardless of current-vs-historical assistant
+        rendering) locates where the new turn begins.
+        """
+        try:
+            sentinel = _convert_messages(self._DELTA_SENTINEL)
+            new_conv = _convert_messages(new_messages)
+            anchor_ids = self._renderer.build_supervised_example(sentinel)[0].to_ints()
+            full = self._renderer.build_generation_prompt(sentinel + new_conv).to_ints()
+        except Exception as err:  # noqa: BLE001 - renderer can't handle these messages
+            logger.debug("tinker delta render failed: %s", err)
+            return None
+        n_close = sum(1 for t in anchor_ids if t in close_set)
+        if n_close == 0:
+            return None
+        seen = 0
+        for i, tok_id in enumerate(full):
+            if tok_id in close_set:
+                seen += 1
+                if seen == n_close:
+                    return full[i + 1 :]
+        return None
+
     def bridge_to_next_turn(
         self,
         previous_prompt_ids: list[int],
@@ -256,11 +303,9 @@ class TinkerAdapter:
         Returns ``None`` (caller falls back to a full re-render) when the
         prefix-extension contract can't be proven: assistant content in the new
         slice (would re-tokenize sampled tokens), a truncated prior with no
-        recoverable close token, or multimodal content.
+        recoverable close token, multimodal content, or a renderer that can't
+        render the new messages.
         """
-        import tinker
-        from tinker_cookbook.renderers.base import RenderContext
-
         if not previous_prompt_ids or not new_messages:
             return None
         if any(m.get("role") == "assistant" for m in new_messages):
@@ -270,52 +315,17 @@ class TinkerAdapter:
         close_ids = self._close_token_ids()
         if not close_ids:
             return None
+        close_set = set(close_ids)
 
         anchor = self._trim_to_turn_close(
-            previous_prompt_ids, previous_completion_ids, set(close_ids), close_ids[0]
+            previous_prompt_ids, previous_completion_ids, close_set, close_ids[0]
         )
         if anchor is None:
             return None
 
-        # Delta: render only the new (non-assistant) messages + the next
-        # assistant opener, using the same primitives build_generation_prompt
-        # uses. The new slice always follows the just-sampled assistant turn, so
-        # the first new message's render context sees a prior assistant (matters
-        # for renderers that group tool turns or vary inter-turn separators).
-        n_before = 2
-        full_len = n_before + len(new_messages)
-        last_user_index = max(
-            (n_before + j for j, m in enumerate(new_messages) if m.get("role") == "user"),
-            default=n_before - 1,
-        )
-        prior_assistant = {"role": "assistant", "content": ""}
-
-        delta_chunks: list[Any] = []
-        for j, msg in enumerate(new_messages):
-            ctx = RenderContext(
-                idx=n_before + j,
-                is_last=False,
-                prev_message=new_messages[j - 1] if j > 0 else prior_assistant,
-                last_user_index=last_user_index,
-            )
-            rm = self._renderer.render_message(msg, ctx)
-            if rm.header:
-                delta_chunks.append(rm.header)
-            delta_chunks.extend(
-                c
-                for c in rm.output
-                if not (isinstance(c, tinker.EncodedTextChunk) and not c.tokens)
-            )
-
-        suffix_ctx = RenderContext(
-            idx=full_len,
-            is_last=True,
-            prev_message=new_messages[-1],
-            last_user_index=last_user_index,
-        )
-        suffix_tokens = self._renderer._get_generation_suffix("assistant", suffix_ctx)
-
-        delta = tinker.ModelInput(chunks=delta_chunks).to_ints() + list(suffix_tokens)
+        delta = self._render_delta(new_messages, close_set)
+        if delta is None:
+            return None
         return RenderedTokens(token_ids=anchor + delta)
 
 
