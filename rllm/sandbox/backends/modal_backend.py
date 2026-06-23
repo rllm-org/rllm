@@ -17,6 +17,7 @@ import atexit
 import io
 import logging
 import os
+import shlex
 import tarfile
 import threading
 import time
@@ -134,6 +135,30 @@ def _terminate_all_live() -> None:
 atexit.register(_terminate_all_live)
 
 
+def _build_exec_command(command: str, persistent_env: dict[str, str] | None, user: str | int | None) -> str:
+    """Wrap *command* with persistent-env exports and an optional ``su`` user-switch.
+
+    Pure string transform (no Modal calls) so the exec contract is unit-testable:
+
+    * ``persistent_env`` is exported ahead of the command so every exec sees the
+      task's declared environment (a one-shot ``export`` wouldn't persist — each
+      Modal exec is a fresh shell). Mirrors harbor's per-exec env injection.
+    * ``user`` switches via ``su <user> -s /bin/bash -c <cmd>`` — Modal's SDK has
+      no ``user=`` on exec — matching ``harbor.environments.modal``'s emulation.
+      An ``int`` is treated as a uid and resolved to its name; a ``str`` is used
+      verbatim. The env exports are placed *inside* the switched shell so they
+      apply to the target user.
+    """
+    run = command
+    if persistent_env:
+        prefix = "".join(f"export {k}={shlex.quote(str(v))}; " for k, v in persistent_env.items())
+        run = prefix + run
+    if user is not None:
+        user_arg = f"$(getent passwd {user} | cut -d: -f1)" if isinstance(user, int) else shlex.quote(str(user))
+        run = f"su {user_arg} -s /bin/bash -c {shlex.quote(run)}"
+    return run
+
+
 class ModalSandbox:
     """Sandbox implementation using Modal serverless containers.
 
@@ -168,6 +193,8 @@ class ModalSandbox:
         # sandboxes (set RLLM_RUN_ID; else a random per-process id). Pass an
         # explicit app_name to override.
         self._app_name = kwargs.pop("app_name", None) or f"rllm-sandbox-{rllm_run_id()}"
+        # Env exported into every exec (populated via set_env); see exec().
+        self._persistent_env: dict[str, str] = {}
 
         # A stored snapshot ref is a bare Modal image id ("im-…", no registry/tag);
         # the ":" / "/" guard keeps real docker images off the from_id path.
@@ -196,9 +223,15 @@ class ModalSandbox:
                 if key in kwargs:
                     create_kwargs[key] = kwargs.pop(key)
 
+            # Keep the sandbox alive for exec-based use regardless of the image's
+            # own ENTRYPOINT/CMD (task images often set one that exits at once).
+            # Mirrors harbor.environments.modal's keepalive; override via the
+            # ``entrypoint`` kwarg.
+            entrypoint = kwargs.pop("entrypoint", ["sh", "-c", "sleep infinity"])
+
             # Pace creates under Modal's account-wide rate cap (see _CreateRateLimiter).
             _CREATE_LIMITER.acquire()
-            self._sandbox = modal.Sandbox.create(**create_kwargs)
+            self._sandbox = modal.Sandbox.create(*entrypoint, **create_kwargs)
         except modal.exception.NotFoundError as e:
             if from_snapshot:
                 raise SnapshotNotFound(f"modal snapshot {image} no longer exists") from e
@@ -215,21 +248,35 @@ class ModalSandbox:
             image if isinstance(image, str) else "<modal.Image>",
         )
 
-    def exec(self, command: str, timeout: float | None = None, user: str | None = None) -> str:  # noqa: ARG002
+    def set_env(self, env: dict[str, str]) -> None:
+        """Register env vars exported into every subsequent :meth:`exec`.
+
+        Modal execs are independent shells, so persistent task env (Harbor's
+        ``[environment].env``) must be re-applied per command. Mirrors how
+        Harbor injects the same vars as a per-exec Secret.
+        """
+        for k, v in (env or {}).items():
+            self._persistent_env[str(k)] = str(v)
+
+    def exec(self, command: str, timeout: float | None = None, user: str | int | None = None) -> str:
         """Execute a command inside the Modal sandbox.
 
-        ``user`` is accepted for protocol compatibility but currently ignored.
+        Runs ``bash -c <command>`` and returns stdout. Raises ``RuntimeError``
+        on non-zero exit code (matching DockerSandbox behavior).
 
-        Runs ``bash -c <command>`` and returns stdout. Raises
-        ``RuntimeError`` on non-zero exit code (matching DockerSandbox
-        behavior).
+        ``user`` switches the command to another OS user via ``su`` — Modal's
+        SDK has no ``user=`` on exec — mirroring how harbor's Modal environment
+        applies the agent/verifier user. Env registered via :meth:`set_env` is
+        exported into every command so the agent and verifier observe the task's
+        declared environment. See :func:`_build_exec_command`.
         """
         exec_kwargs = {}
         if timeout is not None:
             exec_kwargs["timeout"] = int(timeout)
 
+        run = _build_exec_command(command, self._persistent_env, user)
         start = time.monotonic()
-        process = self._sandbox.exec("bash", "-c", command, **exec_kwargs)
+        process = self._sandbox.exec("bash", "-c", run, **exec_kwargs)
 
         stdout = process.stdout.read()
         stderr = process.stderr.read()
