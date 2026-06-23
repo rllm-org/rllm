@@ -732,7 +732,7 @@ class DatasetRegistry:
                     "style": "rule",
                     "ground_truth": None,
                 },
-                "extra_info": entry,
+                "extra_info": json.dumps(entry, default=str),
             }
             processed_data.append(processed_entry)
         return processed_data
