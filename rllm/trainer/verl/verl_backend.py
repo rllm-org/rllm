@@ -468,8 +468,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
     def _get_aggregate_dp_size(self) -> int | None:
         """Compute the LCM of DP sizes across all active worker-group meshes.
 
-        Mesh names target the new EngineWorker path (verl_launcher pins
-        ``use_legacy_worker_impl='disable'``):
+        Mesh names target the EngineWorker path:
         - actor_rollout_wg -> ``engine_workers.ActorRolloutRefWorker``
             registers ``"actor"`` and ``"ref"``.
         - ref_policy_wg   -> same ``ActorRolloutRefWorker`` as actor_rollout_wg,

@@ -336,24 +336,18 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         batch.meta_info["images_seqlens"] = images_seqlens_all
                     batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
 
-                    # recompute old_log_probs
-                    # Mirror verl's RayPPOTrainer._compute_old_log_prob: the new EngineWorker
-                    # path (use_legacy_worker_impl == "disable") takes a TensorDict in no-padding
-                    # format; the legacy AsyncActorRolloutRefWorker takes a DataProto directly.
+                    # recompute old_log_probs (verl's RayPPOTrainer._compute_old_log_prob): the
+                    # EngineWorker takes a TensorDict in no-padding format.
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
-                        if self.use_legacy_worker_impl == "disable":
-                            batch_td = batch.to_tensordict()
-                            batch_td = left_right_2_no_padding(batch_td)
-                            tu.assign_non_tensor(batch_td, calculate_entropy=True, compute_loss=False, temperature=self.config.actor_rollout_ref.rollout.temperature)
-                            old_log_prob_output = self.actor_rollout_wg.compute_log_prob(batch_td)
-                            # New worker returns TensorDict in no-padding format
-                            entropy = tu.get(old_log_prob_output, "entropy")
-                            log_probs = tu.get(old_log_prob_output, "log_probs")
-                            entropy = no_padding_2_padding(entropy, batch_td)
-                            log_probs = no_padding_2_padding(log_probs, batch_td)
-                            old_log_prob = DataProto.from_tensordict(tu.get_tensordict({"old_log_probs": log_probs.float(), "entropys": entropy.float()}))
-                        else:
-                            old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                        batch_td = batch.to_tensordict()
+                        batch_td = left_right_2_no_padding(batch_td)
+                        tu.assign_non_tensor(batch_td, calculate_entropy=True, compute_loss=False, temperature=self.config.actor_rollout_ref.rollout.temperature)
+                        old_log_prob_output = self.actor_rollout_wg.compute_log_prob(batch_td)
+                        entropy = tu.get(old_log_prob_output, "entropy")
+                        log_probs = tu.get(old_log_prob_output, "log_probs")
+                        entropy = no_padding_2_padding(entropy, batch_td)
+                        log_probs = no_padding_2_padding(log_probs, batch_td)
+                        old_log_prob = DataProto.from_tensordict(tu.get_tensordict({"old_log_probs": log_probs.float(), "entropys": entropy.float()}))
                         entropys = old_log_prob.batch["entropys"]
                         response_masks = batch.batch["response_mask"]
                         loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
@@ -369,27 +363,21 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with marked_timer("ref", timing_raw, color="olive"):
-                            if self.use_legacy_worker_impl == "disable":
-                                # Reuse batch_td from old_log_prob, but override the metadata for
-                                # the ref step (verl's RayPPOTrainer._compute_ref_log_prob pattern).
-                                # When ref_in_actor (LoRA), we use the actor worker's compute_log_prob
-                                # with no_lora_adapter=True so the base model is used for ref.
-                                ref_metadata = {"calculate_entropy": False, "compute_loss": False}
-                                if self.ref_in_actor:
-                                    ref_metadata["no_lora_adapter"] = True
-                                tu.assign_non_tensor(batch_td, **ref_metadata)
-                                if self.ref_in_actor:
-                                    ref_log_prob_output = self.actor_rollout_wg.compute_log_prob(batch_td)
-                                else:
-                                    ref_log_prob_output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
-                                ref_lp = tu.get(ref_log_prob_output, "log_probs")
-                                ref_lp = no_padding_2_padding(ref_lp, batch_td)
-                                ref_log_prob = DataProto.from_tensordict(tu.get_tensordict({"ref_log_prob": ref_lp.float()}))
+                            # Reuse batch_td from old_log_prob, but override the metadata for
+                            # the ref step (verl's RayPPOTrainer._compute_ref_log_prob pattern).
+                            # When ref_in_actor (LoRA), we use the actor worker's compute_log_prob
+                            # with no_lora_adapter=True so the base model is used for ref.
+                            ref_metadata = {"calculate_entropy": False, "compute_loss": False}
+                            if self.ref_in_actor:
+                                ref_metadata["no_lora_adapter"] = True
+                            tu.assign_non_tensor(batch_td, **ref_metadata)
+                            if self.ref_in_actor:
+                                ref_log_prob_output = self.actor_rollout_wg.compute_log_prob(batch_td)
                             else:
-                                if not self.ref_in_actor:
-                                    ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
-                                else:
-                                    ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
+                                ref_log_prob_output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
+                            ref_lp = tu.get(ref_log_prob_output, "log_probs")
+                            ref_lp = no_padding_2_padding(ref_lp, batch_td)
+                            ref_log_prob = DataProto.from_tensordict(tu.get_tensordict({"ref_log_prob": ref_lp.float()}))
                             batch = batch.union(ref_log_prob)
 
                     # compute values
@@ -471,27 +459,23 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
-                        # Mirror verl's RayPPOTrainer._update_actor: meta_info goes onto the
-                        # DataProto for the legacy worker; the new EngineWorker path needs a
+                        # Mirror verl's RayPPOTrainer._update_actor: the EngineWorker path needs a
                         # TensorDict in no-padding format with training metadata set via
                         # tu.assign_non_tensor.
                         batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
                         batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
-                        if self.use_legacy_worker_impl == "disable":
-                            ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
-                            update_batch = batch.to_tensordict()
-                            update_batch = left_right_2_no_padding(update_batch)
-                            tu.assign_non_tensor(
-                                update_batch,
-                                calculate_entropy=(self.config.actor_rollout_ref.actor.entropy_coeff != 0.0),
-                                global_batch_size=ppo_mini_batch_size,
-                                mini_batch_size=ppo_mini_batch_size,
-                                epochs=self.config.actor_rollout_ref.actor.ppo_epochs,
-                                seed=self.config.actor_rollout_ref.actor.data_loader_seed,
-                                dataloader_kwargs={"shuffle": self.config.actor_rollout_ref.actor.shuffle},
-                            )
-                        else:
-                            update_batch = batch
+                        ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+                        update_batch = batch.to_tensordict()
+                        update_batch = left_right_2_no_padding(update_batch)
+                        tu.assign_non_tensor(
+                            update_batch,
+                            calculate_entropy=(self.config.actor_rollout_ref.actor.entropy_coeff != 0.0),
+                            global_batch_size=ppo_mini_batch_size,
+                            mini_batch_size=ppo_mini_batch_size,
+                            epochs=self.config.actor_rollout_ref.actor.ppo_epochs,
+                            seed=self.config.actor_rollout_ref.actor.data_loader_seed,
+                            dataloader_kwargs={"shuffle": self.config.actor_rollout_ref.actor.shuffle},
+                        )
 
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
@@ -688,17 +672,14 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                 combined_batch = DataProto.concat(batches_for_distill)
                 combined_batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
 
-                if self.use_legacy_worker_impl == "disable":
-                    # New worker path: convert to TensorDict + no-padding, then convert back.
-                    cb_td = combined_batch.to_tensordict()
-                    cb_td = left_right_2_no_padding(cb_td)
-                    tu.assign_non_tensor(cb_td, calculate_entropy=True, compute_loss=False, temperature=self.config.actor_rollout_ref.rollout.temperature)
-                    old_log_prob_output = self.actor_rollout_wg.compute_log_prob(cb_td)
-                    log_probs = tu.get(old_log_prob_output, "log_probs")
-                    log_probs = no_padding_2_padding(log_probs, cb_td)
-                    old_log_prob = DataProto.from_tensordict(tu.get_tensordict({"old_log_probs": log_probs.float()}))
-                else:
-                    old_log_prob = self.actor_rollout_wg.compute_log_prob(combined_batch)
+                # Convert to TensorDict + no-padding, then convert back.
+                cb_td = combined_batch.to_tensordict()
+                cb_td = left_right_2_no_padding(cb_td)
+                tu.assign_non_tensor(cb_td, calculate_entropy=True, compute_loss=False, temperature=self.config.actor_rollout_ref.rollout.temperature)
+                old_log_prob_output = self.actor_rollout_wg.compute_log_prob(cb_td)
+                log_probs = tu.get(old_log_prob_output, "log_probs")
+                log_probs = no_padding_2_padding(log_probs, cb_td)
+                old_log_prob = DataProto.from_tensordict(tu.get_tensordict({"old_log_probs": log_probs.float()}))
                 combined_batch = combined_batch.union(old_log_prob)
 
                 # Compute distillation advantages
