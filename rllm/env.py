@@ -19,6 +19,27 @@ parsing (and the ``RLLM_`` naming convention) lives in one place.
 from __future__ import annotations
 
 import os
+import re
+
+_RUN_ID: str | None = None
+
+
+def rllm_run_id() -> str:
+    """Stable per-process run identifier stamped onto cloud sandboxes.
+
+    Used as the Modal App name suffix and a sandbox tag so a single run's
+    sandboxes are greppable and terminable on a *shared* account (where you
+    can't just kill every ``rllm-*`` sandbox because others' runs use them).
+
+    Set ``RLLM_RUN_ID`` to a memorable value (e.g. ``alice-tb2-0621``);
+    otherwise a random 8-char id is generated once per process. Sanitized to
+    Modal's label charset (``[a-zA-Z0-9_.-]``).
+    """
+    global _RUN_ID
+    if _RUN_ID is None:
+        raw = re.sub(r"[^a-zA-Z0-9_.-]", "-", os.environ.get("RLLM_RUN_ID", "")).strip("-")
+        _RUN_ID = raw or os.urandom(4).hex()
+    return _RUN_ID
 
 
 def env_str(name: str, default: str) -> str:

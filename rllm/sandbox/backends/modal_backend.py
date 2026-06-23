@@ -22,7 +22,7 @@ import threading
 import time
 import weakref
 
-from rllm.env import env_float, env_int
+from rllm.env import env_float, env_int, rllm_run_id
 from rllm.sandbox.protocol import SandboxCommandTimeout, SnapshotNotFound
 
 logger = logging.getLogger(__name__)
@@ -163,7 +163,11 @@ class ModalSandbox:
         self.name = name
         self._image_spec = image
         self._timeout = kwargs.pop("timeout", None) or _default_sandbox_timeout()
-        self._app_name = kwargs.pop("app_name", "rllm-sandbox")
+        # Per-run App name so a run's sandboxes are isolated on a shared Modal
+        # account: `modal app stop rllm-sandbox-<run_id>` kills only this run's
+        # sandboxes (set RLLM_RUN_ID; else a random per-process id). Pass an
+        # explicit app_name to override.
+        self._app_name = kwargs.pop("app_name", None) or f"rllm-sandbox-{rllm_run_id()}"
 
         # A stored snapshot ref is a bare Modal image id ("im-…", no registry/tag);
         # the ":" / "/" guard keeps real docker images off the from_id path.
@@ -183,6 +187,11 @@ class ModalSandbox:
                 modal_image = image  # already a modal.Image
 
             create_kwargs: dict = {"app": self._app, "image": modal_image, "timeout": self._timeout}
+            # name = per-task label (visible in `modal sandbox list`); tags carry
+            # the run id so you can filter/terminate a run's sandboxes:
+            #   modal.Sandbox.list(tags={"rllm_run_id": "<id>"})  -> .terminate()
+            create_kwargs["name"] = self.name[:64]
+            create_kwargs["tags"] = {"rllm_run_id": rllm_run_id()}
             for key in ("secrets", "volumes", "workdir", "gpu", "cpu", "memory"):
                 if key in kwargs:
                     create_kwargs[key] = kwargs.pop(key)

@@ -578,6 +578,9 @@ def _run_eval(
 @click.option("--agent", "agent_name", default=None, help="Agent scaffold: registry name or module:object path.")
 @click.option("--evaluator", "evaluator_name", default=None, help="Evaluator: registry name or module:class path.")
 @click.option("--base-url", default=None, help="OpenAI-compatible API endpoint URL. If omitted, a proxy is auto-started using 'rllm setup' config.")
+@click.option(
+    "--proxy-port", "proxy_port", default=None, type=int, help="Pin the auto-started LiteLLM proxy to this port. Default: a free port is picked automatically (so concurrent eval jobs don't collide)."
+)
 @click.option("--model", default=None, help="Model name to evaluate. Defaults to configured model from 'rllm setup'.")
 @click.option("--split", default=None, help="Dataset split (default: from catalog eval_split).")
 @click.option("--concurrency", default=64, type=int, help="Number of parallel requests.")
@@ -629,6 +632,7 @@ def eval_cmd(
     agent_name: str | None,
     evaluator_name: str | None,
     base_url: str | None,
+    proxy_port: int | None,
     model: str | None,
     split: str | None,
     concurrency: int,
@@ -704,6 +708,7 @@ def eval_cmd(
                 provider=config.provider,
                 model_name=model,
                 api_key=config.api_key,
+                proxy_port=proxy_port,
             )
             with Status(f"[dim]Starting LiteLLM proxy for [bold]{config.provider}/{model}[/bold]...[/]", console=console):
                 try:

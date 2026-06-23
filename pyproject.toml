@@ -92,8 +92,8 @@ tinker = [
 ]
 
 fireworks = [
-    "fireworks-ai[training]==1.2.0a79 ; python_version >= '3.11'",
-    "fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git@bba676c6d00bd595f9453e0b2165b7457a01e0d5#subdirectory=training ; python_version >= '3.11'",
+    "fireworks-ai[training]==1.2.0a83 ; python_version >= '3.11'",
+    "fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git#subdirectory=training ; python_version >= '3.11'",
 ]
 
 opentelemetry = [
