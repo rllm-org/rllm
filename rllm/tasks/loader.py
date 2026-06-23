@@ -188,6 +188,59 @@ def _parse_dockerfile_image_workdir(dockerfile: Path) -> tuple[str | None, str |
     return base_image, workdir
 
 
+def _parse_size_to_mb(value) -> int | None:
+    """Parse a memory/disk size into whole MB, accepting Harbor's task.toml forms.
+
+    ``int``/``float`` are taken as MB already. A string may carry a
+    ``K``/``M``/``G``/``T`` suffix (case-insensitive, optional trailing
+    ``B``/``iB``): ``'4G' -> 4096``, ``'512M' -> 512``, ``'10G' -> 10240``. A
+    bare numeric string is MB. Returns ``None`` when missing/unparseable. Matches
+    harbor's ``_parse_size_to_mb`` (K = ÷1024, M = ×1, G = ×1024).
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return int(value)
+    s = str(value).strip().rstrip("Bb")
+    if s and s[-1] in "iI":  # GiB/MiB → GB/MB (treated identically here)
+        s = s[:-1]
+    if not s:
+        return None
+    mult = {"K": 1 / 1024, "M": 1.0, "G": 1024.0, "T": 1024.0 * 1024.0}
+    suffix = s[-1].upper()
+    try:
+        if suffix in mult:
+            return max(1, round(float(s[:-1]) * mult[suffix]))
+        return max(0, int(round(float(s))))
+    except (ValueError, IndexError):
+        return None
+
+
+def _normalize_env_section(env_section: dict, explicit_docker_image: bool) -> None:
+    """In-place Harbor→rLLM normalization of an ``[environment]`` block.
+
+    * A task that ships its own ``docker_image`` (a fully-built image) has
+      ``replay_dockerfile`` defaulted off: replaying that image's Dockerfile
+      ``RUN`` steps on top double-applies the build, whereas Harbor boots such
+      images as-is (``should_use_prebuilt_docker_image``). No-op when the task
+      set ``replay_dockerfile`` explicitly, or has no ``docker_image`` (SWE-bench
+      style: a base image + RUN extras, where replay-on-base is correct).
+    * Harbor size strings (``memory = '4G'``, ``storage = '10G'``) are normalized
+      into ``memory_mb`` / ``storage_mb`` ints so the declared resource limits
+      actually reach Modal/Daytona, which read the ``_mb`` keys.
+    """
+    if explicit_docker_image and "replay_dockerfile" not in env_section:
+        env_section["replay_dockerfile"] = False
+    if env_section.get("memory_mb") is None:
+        mb = _parse_size_to_mb(env_section.get("memory"))
+        if mb is not None:
+            env_section["memory_mb"] = mb
+    if env_section.get("storage_mb") is None:
+        mb = _parse_size_to_mb(env_section.get("storage"))
+        if mb is not None:
+            env_section["storage_mb"] = mb
+
+
 def _merge_task_toml_metadata(task_dir: Path, base: dict) -> dict:
     """Merge per-task ``task.toml`` metadata into *base*.
 
@@ -212,9 +265,11 @@ def _merge_task_toml_metadata(task_dir: Path, base: dict) -> dict:
     # task.toml. Surface both as fallbacks so a non-docker backend (which pulls
     # a named image rather than building the Dockerfile) still gets them; docker
     # backends rebuild the Dockerfile in _resolve_image and ignore these.
+    explicit_docker_image = bool(env_section.get("docker_image"))
     base_image, dockerfile_workdir = _parse_dockerfile_image_workdir(task_dir / "environment" / "Dockerfile")
-    if base_image and not env_section.get("docker_image"):
+    if base_image and not explicit_docker_image:
         env_section["docker_image"] = base_image
+    _normalize_env_section(env_section, explicit_docker_image)
     if env_section:
         merged["environment"] = env_section
     # Set workdir only when declared (task.toml or Dockerfile WORKDIR); else
@@ -478,12 +533,14 @@ def _load_task_from_dir(
     # Same Dockerfile lifting as _merge_task_toml_metadata (the row path):
     # FROM fills a missing docker_image so non-docker backends pull the right
     # image; WORKDIR fills a missing workdir. Explicit task.toml values win.
+    explicit_docker_image = bool(env_section.get("docker_image"))
     dockerfile = task_dir / "environment" / "Dockerfile"
     if not dockerfile.exists():
         dockerfile = dataset_dir / "environment" / "Dockerfile"
     base_image, dockerfile_workdir = _parse_dockerfile_image_workdir(dockerfile)
-    if base_image and not env_section.get("docker_image"):
+    if base_image and not explicit_docker_image:
         env_section["docker_image"] = base_image
+    _normalize_env_section(env_section, explicit_docker_image)
     if env_section:
         metadata["environment"] = env_section
     # Only set workdir when declared (task.toml or Dockerfile WORKDIR) — see
