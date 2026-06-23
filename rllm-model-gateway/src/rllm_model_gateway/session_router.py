@@ -181,7 +181,10 @@ class SessionRouter:
     async def start_health_checks(self) -> None:
         if self._health_task is not None:
             return
-        self._http = httpx.AsyncClient(timeout=httpx.Timeout(5.0))
+        # 20s (not 5s): under a concurrency spike the single proxy worker can be
+        # slow to answer /health while busy forwarding requests; a 5s timeout
+        # marked it dead → "No healthy workers available" → failed turns.
+        self._http = httpx.AsyncClient(timeout=httpx.Timeout(20.0))
         self._health_task = asyncio.create_task(self._health_loop())
 
     async def stop_health_checks(self) -> None:
