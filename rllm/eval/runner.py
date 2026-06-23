@@ -135,7 +135,7 @@ async def run_dataset(
         # downstream consumer wants it) is stable; the engine's session uid
         # becomes f"{task.id}:0" which matches training's convention.
         task_ids = [getattr(t, "id", None) or str(idx) for idx, t in enumerate(tasks)]
-        episodes = await engine.execute_tasks(tasks, task_ids=task_ids, is_validation=True)
+        episodes = await engine.execute_tasks(tasks, task_ids=task_ids, is_validation=True, on_episode_complete=on_episode_complete)
     finally:
         if warm_queue is not None:
             warm_queue.shutdown()
@@ -169,11 +169,9 @@ async def run_dataset(
         if episode.trajectories and episode.trajectories[0].reward is not None:
             reward = float(episode.trajectories[0].reward)
 
-        if on_episode_complete is not None:
-            try:
-                on_episode_complete(idx, episode)
-            except Exception:
-                logger.debug("on_episode_complete callback error", exc_info=True)
+        # NOTE: on_episode_complete is now invoked *streaming* inside
+        # engine.execute_tasks (as each rollout finishes), not here — so UI
+        # uploads + local writes happen progressively instead of in a burst.
 
         items.append(
             EvalItem(

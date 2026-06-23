@@ -395,6 +395,7 @@ class AgentFlowEngine:
         tasks: list[dict | Task],
         task_ids: list[str] | None = None,
         is_validation: bool = False,
+        on_episode_complete=None,
         **kwargs,
     ) -> list[Episode]:
         """Run AgentFlows on a list of tasks; return enriched Episodes.
@@ -429,10 +430,33 @@ class AgentFlowEngine:
         n_correct = 0
         reward_sum = 0.0
         n_scored = 0
+        n_empty_rollouts = 0  # canary: rollouts whose LLM completions are all empty (upstream down)
         with tqdm(total=len(tasks), desc="Generating trajectories") as pbar:
             for future in asyncio.as_completed(futures):
                 task_id, rollout_idx, result_idx, episode = await future
                 results[result_idx] = episode
+                # Stream each enriched+scored episode as it finishes (eval:
+                # progressive UI upload + local write) instead of a burst at the
+                # end — keeps the UI live and avoids a giant end-of-run flush.
+                if on_episode_complete is not None and episode is not None:
+                    try:
+                        on_episode_complete(result_idx, episode)
+                    except Exception:
+                        logger.debug("on_episode_complete callback error", exc_info=True)
+                # Canary: a rollout whose LLM completions are ALL empty means the
+                # upstream returned nothing (dead litellm proxy, gateway "no healthy
+                # workers", or the model itself). Surface it loudly — otherwise the
+                # run silently produces garbage (every rollout scores 0).
+                if episode is not None:
+                    _steps = [s for t in (episode.trajectories or []) for s in (t.steps or [])]
+                    if _steps and all(not (s.model_response or "").strip() for s in _steps):
+                        n_empty_rollouts += 1
+                        colorful_print(
+                            f"[{task_id}:{rollout_idx}] ⚠️  EMPTY COMPLETIONS: all {len(_steps)} LLM calls "
+                            f"returned 0 tokens — upstream likely DOWN (dead litellm proxy :4000 / gateway "
+                            f"no-healthy-workers / model). [{n_empty_rollouts} empty rollouts so far]",
+                            fg="red",
+                        )
                 done = pbar.n + 1
                 if episode is not None and episode.is_correct:
                     n_correct += 1
