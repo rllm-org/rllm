@@ -399,16 +399,29 @@ def _setup_task_environment(task: Task, sandbox: Sandbox) -> None:
 
     agent_user = task.metadata.get("agent_user")
     if agent_user:
+        # Lock the verifier/reward dirs away from the (sandboxed) agent user, but
+        # keep them owned by whoever runs the verifier — root unless the task set
+        # a distinct verifier_user — so the verifier (now actually switched to
+        # that user via the backend's su emulation) can still write reward files.
+        verifier_owner = task.metadata.get("verifier_user") or "root"
         _safe_exec(sandbox, "mkdir -p /logs/verifier /tmp/rllm /tests", timeout=10)
         _safe_exec(sandbox, "chmod 700 /logs/verifier /tmp/rllm /tests", timeout=10)
-        _safe_exec(sandbox, "chown root:root /logs/verifier /tmp/rllm /tests", timeout=10)
+        _safe_exec(sandbox, f"chown {verifier_owner} /logs/verifier /tmp/rllm /tests", timeout=10)
         if workdir:
             _safe_exec(sandbox, f"chown -R {agent_user} {workdir}", timeout=30)
 
     env_vars = task.metadata.get("env_vars", {}) or task.metadata.get("environment", {}).get("env", {})
     if env_vars:
-        exports = " && ".join(f"export {k}='{v}'" for k, v in env_vars.items())
-        _safe_exec(sandbox, exports, timeout=10)
+        # Make declared env present in *every* later exec (agent + verifier), the
+        # way Harbor injects [environment].env as a per-exec Secret. A one-shot
+        # ``export`` wouldn't survive — each exec is a fresh shell. Backends that
+        # expose ``set_env`` (e.g. Modal) honor it; others fall back to export.
+        set_env = getattr(sandbox, "set_env", None)
+        if callable(set_env):
+            set_env(env_vars)
+        else:
+            exports = " && ".join(f"export {k}='{v}'" for k, v in env_vars.items())
+            _safe_exec(sandbox, exports, timeout=10)
 
 
 def _safe_exec(sandbox: Sandbox, command: str, timeout: float | None = None, user: str | None = None) -> str:
