@@ -7,7 +7,7 @@ from typing import cast
 import torch
 from omegaconf import DictConfig
 from typing_extensions import override
-from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
+from verl.workers.rollout.llm_server import LLMServerClient
 
 from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine
 from rllm.engine.rollout.types import Processor, TokenInput, Tokenizer, TokenOutput, VerlTokenOutput
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class VerlEngine(RolloutEngine):
-    def __init__(self, config: DictConfig, server_manager: AsyncLLMServerManager, tokenizer: Tokenizer, processor: Processor | None = None, **kwargs):
+    def __init__(self, config: DictConfig, server_manager: LLMServerClient, tokenizer: Tokenizer, processor: Processor | None = None, **kwargs):
         super().__init__()
         self.config = config
 
@@ -64,7 +64,7 @@ class VerlEngine(RolloutEngine):
         input_length = len(token_input)
         application_id = kwargs.pop("application_id", str(uuid.uuid4()))
         enforce_max_prompt_length = kwargs.pop("enforce_max_prompt_length", True)
-        # Multimodal: verl's AsyncLLMServerManager.generate accepts image_data /
+        # Multimodal: verl's LLMServerClient.generate accepts image_data /
         # video_data (list of PIL.Image / video tensors) and the underlying
         # vLLM server expands the per-image <|image_pad|> placeholder in
         # ``prompt_ids`` based on each image's actual grid size.
