@@ -25,6 +25,7 @@ Each cookbook is a plain async function that calls an OpenAI-compatible endpoint
 | [`geo3k`](/cookbooks/geo3k) | VLM single-turn | Multimodal geometry on the Geometry3K dataset. |
 | [`solver_judge_flow`](/cookbooks/solver_judge_flow) | Multi-agent | Solver–judge pattern on the countdown task. |
 | [`terminal_bench`](/cookbooks/terminal_bench) | CLI-only, sandboxed harness | Evaluates Harbor's Terminus-2 terminal agent on all 89 Terminal-Bench 2.0 tasks via Modal sandboxes, snapshots, and pass@k. No plugin to install — the whole run is `rllm` CLI commands. |
+| [`migrationbench`](/cookbooks/migrationbench) | Remote AgentCore runtime, sandboxed harness | Trains a Java 8→17 migration agent that runs inside an AWS Bedrock AgentCore Runtime. The agent ships from [agentcore-rl-toolkit](https://github.com/awslabs/agentcore-rl-toolkit); rLLM drives rollouts over the network. |
 
 Click into any row for the deep-dive page — install flow, dataset, eval and train commands, and key code snippets. The full source, including the launch scripts, lives at [`cookbooks/`](https://github.com/rllm-org/rllm/tree/main/cookbooks) on GitHub.
 

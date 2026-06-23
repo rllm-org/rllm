@@ -136,7 +136,8 @@
               "cookbooks/finqa",
               "cookbooks/geo3k",
               "cookbooks/solver_judge_flow",
-              "cookbooks/terminal_bench"
+              "cookbooks/terminal_bench",
+              "cookbooks/migrationbench"
             ]
           }
         ]
