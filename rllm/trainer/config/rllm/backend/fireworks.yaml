@@ -30,7 +30,6 @@ training:
   weight_decay: 0.01
   grad_clip_norm: 1.0
   max_length: null  # Auto-derived from training shape if null
-  client_timeout: 3600  # Timeout for forward / forward_backward / optim_step calls (seconds)
   resume_from_fireworks_job_id: null  # Source trainer job id for loading a DCP checkpoint
   resume_from_dcp_checkpoint: null  # Explicit DCP name to load; null uses latest on the source/current job
 
@@ -53,6 +52,12 @@ rollout_engine:
   disable_thinking: false
   bypass_render_with_parser: false
   renderer_name: null
+  # Canonical sampling HTTP timeout (s). On a streaming SSE call this is httpx's
+  # per-read timeout — a cap on silence between tokens (TTFT + inter-token gaps),
+  # NOT total generation, so it can safely stay high. Raise it only if TTFT can
+  # legitimately exceed it (huge prefills, high-effort reasoning that buffers).
+  # fireworks_infra.deployments.rollout.sample_timeout follows this value.
+  sample_timeout: 600
 
 # Data Configuration
 data:
@@ -98,20 +103,22 @@ fireworks_infra:
     lora_rank: ${model.lora_rank}            # 0 = full-parameter training
     learning_rate: 1e-5      # placeholder for fireworks managed flow. Should be overridden in the training codes.
     max_seq_len: null        # null = use the training shape's default context length
-    step_timeout: 3600       # SDK default (3600s)
-    # Transient-fault tolerance for training-client RPCs (fwd/bwd, optim, weight
-    # hot-load). A blip on the shared training client around the per-step
-    # hot-load otherwise crashes the whole run, since the SDK does not retry.
-    step_max_retries: 2      # retries on transient errors (timeout/connection); 0 disables
-    step_retry_backoff_s: 10 # base linear backoff between retries (seconds)
-    weight_sync_timeout: 600
+    # Training-step RPCs (fwd/bwd, optim, weight hot-load): one timeout + one
+    # retry policy. Kept generous — a stalled step is expensive to abandon, and
+    # the SDK does not retry these itself, so a blip around the per-step hot-load
+    # would otherwise crash the whole run. For genuine slowness, raise the
+    # timeout rather than leaning on retries.
+    step_timeout: 3600         # per-step RPC ceiling (guards a hung call)
+    step_max_retries: 2        # retries on transient errors (timeout/connection); 0 disables
+    step_retry_backoff_s: 10   # base linear backoff between retries (seconds)
+    weight_sync_timeout: 600   # weight hot-load ceiling
 
   deployments:
     rollout:
       deployment_id: null # null = create a new deployment; set to reattach to an existing deployment
       deployment_shape: null # Leave deployment_shape null so the SDK uses the shape linked to the training shape.
       replica_count: ${fireworks_config.rollout_deployment_replica_count}
-      sample_timeout: 600
+      sample_timeout: ${rollout_engine.sample_timeout}  # follow the canonical sampling timeout
       disable_speculative_decoding: false
       extra_values: null
 
@@ -124,7 +131,7 @@ fireworks_infra:
       # Optional fields for admin users.
       custom_image_tag: null
       region: null           # optional explicit trainer region; prefer leaving unset
-      timeout_s: 3600       # trainer startup/readiness timeout, not per-step timeout
+      timeout_s: 3600       # trainer startup/readiness timeout (shared source; reference follows), not per-step
       extra_args: null
       skip_validations: false
 
@@ -137,7 +144,7 @@ fireworks_infra:
       # Optional fields for admin users.
       custom_image_tag: null
       region: null           # optional explicit trainer region; prefer leaving unset
-      timeout_s: 3600       # trainer startup/readiness timeout, not per-step timeout
+      timeout_s: ${fireworks_infra.trainers.policy.timeout_s}  # follow policy readiness timeout
       extra_args: null
       skip_validations: false
 
