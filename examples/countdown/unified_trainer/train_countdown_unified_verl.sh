@@ -44,7 +44,6 @@ python -m examples.countdown.unified_trainer.train_countdown_unified_verl \
     rllm.stepwise_advantage.enable=False \
     rllm.stepwise_advantage.mode=per_step \
     trainer.critic_warmup=0 \
-    trainer.use_legacy_worker_impl=disable \
     trainer.logger=['console','wandb'] \
     trainer.project_name='rllm-countdown' \
     trainer.experiment_name='countdown-unified-verl' \

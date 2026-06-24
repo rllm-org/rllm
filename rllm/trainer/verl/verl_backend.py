@@ -26,6 +26,7 @@ from verl.trainer.ppo.utils import Role, WorkerType, need_reference_policy
 from verl.utils import tensordict_utils as tu
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.metric import reduce_metrics
+from verl.workers.rollout.llm_server import LLMServerManager
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 from rllm.data.utils import interleave_tasks
@@ -187,17 +188,22 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
 
-        self.async_rollout_manager = AgentLoopManager.create(
+        self.llm_server_manager = LLMServerManager.create(
             config=config,
             worker_group=self.actor_rollout_wg,
             rollout_resource_pool=actor_rollout_resource_pool,
+        )
+
+        self.async_rollout_manager = AgentLoopManager.create(
+            config=config,
+            llm_client=self.llm_server_manager.get_client(),
         )
 
         ckpt_cfg = omega_conf_to_dataclass(config.actor_rollout_ref.rollout.checkpoint_engine)
         self.checkpoint_manager = CheckpointEngineManager(
             config=ckpt_cfg,
             trainer=self.actor_rollout_wg,
-            replicas=self.async_rollout_manager.rollout_replicas,
+            replicas=self.llm_server_manager.get_replicas(),
         )
         self.checkpoint_manager.sleep_replicas()
 
@@ -208,7 +214,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         Rollout servers are launched by FullyAsyncAgentLoopManager in standalone
         mode (worker_group=None), using config.actor_rollout_ref.rollout.nnodes/n_gpus_per_node.
         """
-        from rllm.trainer.verl.async_agent_loop import FullyAsyncAgentLoopManager
+        from rllm.trainer.verl.async_agent_loop import FullyAsyncAgentLoopManager, FullyAsyncLLMServerClient, FullyAsyncLLMServerManager
 
         config = self.config
         wg_kwargs = build_wg_kwargs(config, self.device_name)
@@ -256,17 +262,25 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         if self.ref_in_actor:
             self.ref_policy_wg = self.actor_rollout_wg
 
-        # Standalone rollout servers (no worker_group; resources from rollout.nnodes/n_gpus_per_node)
-        self.async_rollout_manager = FullyAsyncAgentLoopManager.create(
+        # verl 0.8.0: the LLMServerManager (not the AgentLoopManager) owns/launches the
+        # rollout replicas. Standalone servers => worker_group=None (resources come from
+        # rollout.nnodes/n_gpus_per_node). The AgentLoopManager then drives them via a
+        # partial-rollout client minted from the manager.
+        self.llm_server_manager = FullyAsyncLLMServerManager.create(
             config=config,
             worker_group=None,
+            rollout_resource_pool=None,
+        )
+        self.async_rollout_manager = FullyAsyncAgentLoopManager.create(
+            config=config,
+            llm_client=self.llm_server_manager.get_client(client_cls=FullyAsyncLLMServerClient),
         )
 
         ckpt_cfg = omega_conf_to_dataclass(config.actor_rollout_ref.rollout.checkpoint_engine)
         self.checkpoint_manager = CheckpointEngineManager(
             config=ckpt_cfg,
             trainer=self.actor_rollout_wg,
-            replicas=self.async_rollout_manager.rollout_replicas,
+            replicas=self.llm_server_manager.get_replicas(),
         )
 
     # =========================================================================
@@ -315,22 +329,22 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         else:
             logger.warning("RayWorkerGroup.set_loss_fn not available — skipping custom loss injection")
 
-        servers = zip(self.async_rollout_manager.server_addresses, self.async_rollout_manager.server_handles, strict=True)
+        # Both paths obtain the rollout client from the LLMServerManager; the separated
+        # path uses the partial-rollout-aware client so preempted rollouts can resume.
         if self.is_separated:
-            from rllm.trainer.verl.async_agent_loop import FullyAsyncLLMServerManager
+            from rllm.trainer.verl.async_agent_loop import FullyAsyncLLMServerClient
 
-            server_manager = FullyAsyncLLMServerManager(self.config, servers=servers, load_balancer_handle=self.async_rollout_manager.global_load_balancer)
+            server_client = self.llm_server_manager.get_client(client_cls=FullyAsyncLLMServerClient)
         else:
-            from verl.experimental.agent_loop.agent_loop import AsyncLLMServerManager
-
-            server_manager = AsyncLLMServerManager(self.config, servers=servers, load_balancer_handle=self.async_rollout_manager.global_load_balancer)
+            server_client = self.llm_server_manager.get_client()
 
         self.rollout_engine = VerlEngine(
             config=self.config,
-            server_manager=server_manager,
+            server_manager=server_client,
             tokenizer=self.tokenizer,
             processor=self.processor,
         )
+        self.rollout_engine.server_addresses = self.llm_server_manager.get_addresses()
 
         self.algorithm_config = kwargs.get("algorithm_config")
 
@@ -347,6 +361,20 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             )
             if async_cfg.get("partial_rollout", False) and self.config.rllm.get("remote_runtime", {}).get("enabled", False):
                 raise ValueError("VerlBackend: async_training.partial_rollout is not supported with remote_runtime; set it to false.")
+            # Separated mode does trainer->rollout weight sync via verl's 'nccl' checkpoint
+            # engine, which imports cupy. verl's checkpoint_engine/__init__ swallows a missing
+            # cupy in a silent try/except, so the failure otherwise surfaces only as a confusing
+            # "ValueError: Checkpoint engine nccl not registered" deep in actor_init_model.
+            # Fail fast here with an actionable message instead.
+            try:
+                import cupy  # noqa: F401
+            except ImportError as e:
+                raise RuntimeError(
+                    "Separated/async training (rllm.async_training.enable=true) requires cupy for "
+                    "verl's 'nccl' checkpoint engine (trainer->rollout weight sync). Install the wheel "
+                    "matching your CUDA toolkit: `pip install cupy-cuda12x` (CUDA 12.x) or "
+                    "`pip install cupy-cuda13x` (CUDA 13.x)."
+                ) from e
         if self.config.rllm.stepwise_advantage.mode != "broadcast":
             # automatically set the stepwise_advantage_mode to "broadcast", the warning is already shown in AlgorithmConfig.from_config
             self.config.rllm.stepwise_advantage.mode = "broadcast"
@@ -456,8 +484,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
     def _get_aggregate_dp_size(self) -> int | None:
         """Compute the LCM of DP sizes across all active worker-group meshes.
 
-        Mesh names target the new EngineWorker path (verl_launcher pins
-        ``use_legacy_worker_impl='disable'``):
+        Mesh names target the EngineWorker path:
         - actor_rollout_wg -> ``engine_workers.ActorRolloutRefWorker``
             registers ``"actor"`` and ``"ref"``.
         - ref_policy_wg   -> same ``ActorRolloutRefWorker`` as actor_rollout_wg,

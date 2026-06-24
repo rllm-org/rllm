@@ -24,9 +24,9 @@ python -u train.py \
     data.max_response_length=4096 \
     +model.name=$MODEL_PATH \
     actor_rollout_ref.model.path=$MODEL_PATH \
-    +actor_rollout_ref.model.lora.rank=32 \
-    +actor_rollout_ref.model.lora.alpha=32 \
-    +actor_rollout_ref.model.lora.merge=true \
+    actor_rollout_ref.model.lora.rank=32 \
+    actor_rollout_ref.model.lora.alpha=32 \
+    actor_rollout_ref.model.lora.merge=true \
     actor_rollout_ref.hybrid_engine=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.ppo_mini_batch_size=64 \
@@ -45,7 +45,7 @@ python -u train.py \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.enable_auto_tool_choice=true \
     +actor_rollout_ref.rollout.engine_kwargs.vllm.tool_call_parser=hermes \
     actor_rollout_ref.rollout.enforce_eager=False \
-    +actor_rollout_ref.rollout.max_model_len=16384 \
+    actor_rollout_ref.rollout.max_model_len=16384 \
     actor_rollout_ref.rollout.temperature=0.6 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.n=4 \

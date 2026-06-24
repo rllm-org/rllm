@@ -106,13 +106,4 @@ def get_ppo_ray_runtime_env():
         env.pop(key, None)
 
     runtime_env = {"env_vars": env}
-    # Don't set working_dir=None explicitly — Ray 2.55+'s uv_runtime_env_hook
-    # crashes on None (TypeError in _is_path). Omitting it has the same effect.
-    # Apply rLLM's verl patches (PR #5881 backport, dynamic-batch sync, etc.) on every
-    # Ray worker process so the patches take effect inside FSDP workers — driver-side
-    # monkey-patches do not propagate. The hook function is lazy and idempotent.
-    if job_runtime_env.get("worker_process_setup_hook") is None:
-        # Ray expects a dotted import path (no colon); it does
-        # ``module.rpartition('.') -> module + attr`` to load the hook.
-        runtime_env["worker_process_setup_hook"] = "rllm.trainer.verl.patch.apply_all_verl_patches"
     return runtime_env
