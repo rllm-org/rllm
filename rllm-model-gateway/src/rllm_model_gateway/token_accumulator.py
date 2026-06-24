@@ -298,8 +298,7 @@ class TokenAccumulator:
         # the model's context limit to spot token-limit-triggered compaction.
         snapshot_tokens = len(self.prev_prompt_ids) + len(self.prev_completion_ids)
         logger.info(
-            "TokenAccumulator reset (session=%s) reason=%s: %s "
-            "[turn=%d msgs=%d snapshot_tokens=%d incoming=%s incoming_tokens=%s reset_count=%d]",
+            "TokenAccumulator reset (session=%s) reason=%s: %s [turn=%d msgs=%d snapshot_tokens=%d incoming=%s incoming_tokens=%s reset_count=%d]",
             self.session_id,
             reason.value if isinstance(reason, ResetReason) else reason,
             self._explain(reason, diag),
