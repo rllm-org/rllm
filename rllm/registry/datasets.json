@@ -50,6 +50,18 @@
       "eval_split": "train",
       "default_agent": "claude-code"
     },
+    "tmax-15k": {
+      "description": "TMax-15K (Ai2): ~14.6K compositional terminal-agent RL tasks (domain/skill/persona/complexity axes) with per-instance prebuilt Docker images (hamishi740/swerl-tmax-v3) and pytest test_final_state verifiers. Built from allenai/TMax-15K (verifier) joined with allenai/tmax-15k-open-instruct (images). Training corpus behind Ai2's Tmax terminal agents (arXiv:2606.23321).",
+      "source": "allenai/TMax-15K",
+      "builder": "rllm.data.tmax_builder:build_benchmark",
+      "category": "agentic",
+      "splits": [
+        "train"
+      ],
+      "eval_split": "train",
+      "train_split": "train",
+      "default_agent": "terminus-2"
+    },
     "gsm8k": {
       "description": "Grade school math word problems (8.5K train, 1.3K test)",
       "source": "openai/gsm8k",
