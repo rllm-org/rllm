@@ -341,7 +341,7 @@ class TestCumulativeTokenMode:
             model="mock-model",
             messages=[{"role": "user", "content": "Fresh start"}],
         )
-        # is_cumulative returns False when len(messages) <= message_count, triggering reset
+        # Snapshot-covered prefix changed (PREFIX_CHANGED) -> reset -> chat path.
         assert "messages" in mock_vllm.request_log[1]  # went through chat path
 
         # Turn 3 — cumulative extension of the new history
