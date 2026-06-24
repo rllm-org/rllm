@@ -270,14 +270,25 @@ class TrajectoryGroupBuffer:
         # Per-task fine-grained accounting: a task is consumed as one GRPO group,
         # which collapses into training rows/datums under prefix-merge. Surface
         # trajectories / steps (turns) / datums (rows after merge) so the merge
-        # ratio is visible per task, not just as a batch aggregate.
+        # ratio is visible per task, not just as a batch aggregate. Also surface
+        # the group's reward distribution (mean/min/max): GRPO advantages come
+        # from within-group reward spread, so a min==max group carries no signal.
         n_traj = sum(len(g.trajectories) for g in traj_groups)
         n_steps = sum(len(t.steps) for g in traj_groups for t in g.trajectories)
         n_datums = sum(self._segment_count(t) for g in traj_groups for t in g.trajectories)
+        rewards = [r for g in traj_groups for t in g.trajectories if (r := self._traj_reward(t)) is not None]
+        mean_reward = (sum(rewards) / len(rewards)) if rewards else 0.0
         logger.info(
-            "Task %s queued: %d group(s), %d trajectories, %d steps -> %d datums (rows) [%.2f steps/datum]",
-            task_id, len(traj_groups), n_traj, n_steps, n_datums,
+            "Task %s queued: %d group(s), %d trajectories, %d steps -> %d datums (rows) [%.2f steps/datum] | reward avg=%.4f min=%.4f max=%.4f",
+            task_id,
+            len(traj_groups),
+            n_traj,
+            n_steps,
+            n_datums,
             (n_steps / n_datums) if n_datums else 0.0,
+            mean_reward,
+            min(rewards) if rewards else 0.0,
+            max(rewards) if rewards else 0.0,
         )
 
         self._log_prompt_group_finished(
@@ -399,6 +410,20 @@ class TrajectoryGroupBuffer:
                 segments += 1
             full = ids + list(step.response_ids)
         return max(segments, 1)
+
+    @staticmethod
+    def _traj_reward(traj) -> float | None:
+        """Scalar reward for a trajectory, or ``None`` if unscored.
+
+        Prefer the trajectory-level reward; fall back to the last step's reward.
+        Mirrors the extraction in ``_log_prompt_group_finished`` so the per-task
+        average matches the per-episode rewards logged there.
+        """
+        if traj.reward is not None:
+            return traj.reward
+        if traj.steps:
+            return traj.steps[-1].reward
+        return None
 
     def _log_prompt_group_finished(
         self,
