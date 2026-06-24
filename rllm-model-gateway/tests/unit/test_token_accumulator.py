@@ -294,6 +294,26 @@ class TestPlanTurnClassification:
         assert plan.diagnostics["first_divergent_index"] == 0
         assert plan.diagnostics["incoming_at_divergence"]["preview"] == "Fresh start"
 
+    def test_prefix_changed_counts_incoming_tokens(self):
+        """A compaction (prefix_changed) line carries the incoming token count."""
+        from rllm_model_gateway.token_accumulator import TokenAccumulator
+
+        class _CountingRenderer(_MockRenderer):
+            def render_ids(self, messages, *, tools=None, add_generation_prompt=False):
+                return [0] * (7 * len(messages))  # 7 fake tokens per message
+
+        acc = TokenAccumulator(renderer=_CountingRenderer(), session_id="s1")
+        acc.ingest_turn([1, 2, 3], [10, 11])
+        acc.update_prefix([{"role": "user", "content": "Hello"}])
+        plan = acc.plan_turn([{"role": "user", "content": "compacted handoff"}])
+        assert plan.diagnostics["incoming_tokens"] == 7  # 1 message * 7
+
+    def test_incoming_tokens_none_when_renderer_cannot_tokenize(self):
+        """_count_tokens never raises — falls back to None (logged as '?')."""
+        acc = self._seed([{"role": "user", "content": "Hello"}])  # _MockRenderer has no render_ids
+        plan = acc.plan_turn([{"role": "user", "content": "different"}])
+        assert plan.diagnostics["incoming_tokens"] is None
+
     def test_prefix_changed_when_history_shrinks(self):
         from rllm_model_gateway.token_accumulator import ResetReason
 
@@ -343,6 +363,8 @@ class TestResetLogging:
         assert "reason=duplicate" in msg
         assert "session=sess-xyz" in msg
         assert "reset_count=1" in msg
+        # Snapshot token count (prompt+completion of the ingested turn) is logged.
+        assert "snapshot_tokens=5" in msg
         # Plain-language explanation with the resend timing woven in.
         assert "identical to the last processed turn" in msg
         assert "0.5s" in msg

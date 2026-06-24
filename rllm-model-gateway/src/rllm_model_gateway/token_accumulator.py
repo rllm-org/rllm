@@ -233,7 +233,23 @@ class TokenAccumulator:
 
         # _REL_PREFIX_CHANGED
         diag.update(self._divergence_diag(messages))
+        # Token count of the (typically compacted) incoming request, so a
+        # prefix_changed line shows how far the history shrank — compare
+        # snapshot_tokens (pre-reset history) against the model's context limit
+        # to confirm a token-limit-triggered compaction.
+        diag["incoming_tokens"] = self._count_tokens(messages)
         return TurnPlan(action="reset", reason=ResetReason.PREFIX_CHANGED, diagnostics=diag)
+
+    def _count_tokens(self, messages: list[dict[str, Any]]) -> int | None:
+        """Best-effort token count of *messages* via the renderer.
+
+        Returns ``None`` if the renderer can't tokenize the list (e.g. a mock,
+        or content it rejects) — diagnostics must never break the reset path.
+        """
+        try:
+            return len(self.renderer.render_ids(messages))
+        except Exception:
+            return None
 
     def _divergence_diag(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
         """Locate where *messages* first diverges from the snapshot prefix."""
@@ -277,14 +293,21 @@ class TokenAccumulator:
         """
         self.reset_count += 1
         diag = diagnostics or {}
+        # snapshot_tokens = size of the accumulated history right before this
+        # reset (prompt + completion of the last ingested turn). Compare against
+        # the model's context limit to spot token-limit-triggered compaction.
+        snapshot_tokens = len(self.prev_prompt_ids) + len(self.prev_completion_ids)
         logger.info(
-            "TokenAccumulator reset (session=%s) reason=%s: %s [turn=%d msgs=%d incoming=%s reset_count=%d]",
+            "TokenAccumulator reset (session=%s) reason=%s: %s "
+            "[turn=%d msgs=%d snapshot_tokens=%d incoming=%s incoming_tokens=%s reset_count=%d]",
             self.session_id,
             reason.value if isinstance(reason, ResetReason) else reason,
             self._explain(reason, diag),
             self.turn_count,
             self.message_count,
+            snapshot_tokens,
             diag.get("incoming_len", "?"),
+            diag.get("incoming_tokens", "?"),
             self.reset_count,
         )
         self.prev_prompt_ids = []
