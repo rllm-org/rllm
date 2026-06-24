@@ -53,6 +53,9 @@ rollout_engine:
   disable_thinking: false
   bypass_render_with_parser: false
   renderer_name: null
+  # Per-call HTTP timeout (s); for streaming this caps time-to-first-token.
+  # Kept low so a backlogged replica is detected fast and the retry re-routes.
+  sample_timeout: 240
 
 # Data Configuration
 data:

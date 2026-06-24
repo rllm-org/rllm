@@ -23,6 +23,7 @@ import dataclasses
 import logging
 from typing import Any
 
+import httpx
 from fireworks.training.sdk import DeploymentSampler
 from typing_extensions import override
 
@@ -383,13 +384,21 @@ class FireworksEngine(TinkerEngine):
             except Exception as exc:
                 err = str(exc)
                 exc_name = exc.__class__.__name__
-                transient = isinstance(exc, _EmptyCompletionIdsError) or any(marker in err or marker in exc_name for marker in _TRANSIENT_ERROR_MARKERS)
+                # Timeouts/transport errors have an empty str(exc), so the string
+                # markers below miss them; classify by type instead.
+                is_network_error = isinstance(exc, (httpx.TimeoutException, httpx.TransportError))
+                transient = (
+                    isinstance(exc, _EmptyCompletionIdsError)
+                    or is_network_error
+                    or any(marker in err or marker in exc_name for marker in _TRANSIENT_ERROR_MARKERS)
+                )
                 if transient and attempt < _MAX_SAMPLE_ATTEMPTS - 1:
                     wait = 10 * (attempt + 1)
                     logger.debug(
-                        "Attempt %d/%d failed (%s), retrying in %ds...",
+                        "Attempt %d/%d failed (%s: %s), retrying in %ds...",
                         attempt + 1,
                         _MAX_SAMPLE_ATTEMPTS,
+                        exc_name,
                         exc,
                         wait,
                     )
@@ -397,8 +406,9 @@ class FireworksEngine(TinkerEngine):
                     continue
                 resp_text = getattr(getattr(exc, "response", None), "text", None)
                 logger.error(
-                    "Sampling failed permanently after %d attempts: %s\n%s",
+                    "Sampling failed permanently after %d attempts (%s): %s\n%s",
                     attempt + 1,
+                    exc_name,
                     exc,
                     resp_text or "",
                 )
