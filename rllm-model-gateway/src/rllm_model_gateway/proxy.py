@@ -26,8 +26,8 @@ from rllm_model_gateway.models import TraceRecord
 from rllm_model_gateway.session_router import SessionRouter
 from rllm_model_gateway.store.base import TraceStore
 from rllm_model_gateway.token_accumulator import (
+    ResetReason,
     TokenAccumulator,
-    extract_new_messages,
 )
 
 logger = logging.getLogger(__name__)
@@ -104,7 +104,7 @@ class ReverseProxy:
     def _get_accumulator(self, session_id: str) -> TokenAccumulator:
         """Return the TokenAccumulator for *session_id*, creating if needed."""
         if session_id not in self._accumulators:
-            self._accumulators[session_id] = TokenAccumulator(self.renderer)
+            self._accumulators[session_id] = TokenAccumulator(self.renderer, session_id=session_id)
         return self._accumulators[session_id]
 
     async def start(self) -> None:
@@ -153,16 +153,21 @@ class ReverseProxy:
             acc = self._get_accumulator(session_id)
             if acc.should_rewrite():
                 messages = request_body.get("messages", [])
-                if not acc.is_cumulative(messages):
-                    # Message history diverged — reset and fall through to
-                    # normal chat path (treated as fresh turn-0).
-                    acc.reset()
-                else:
-                    new_messages = extract_new_messages(messages, acc.message_count)
-                    token_ids = None
-                    if new_messages:
-                        token_ids = acc.build_next_prompt(new_messages, tools=request_body.get("tools"))
+                # Classify the incoming request against the accumulated snapshot.
+                # plan.action is "extend" (build a /v1/completions bridge) or
+                # "reset" (fall through to the chat path as a fresh turn-0). Every
+                # reset is logged with its classified ResetReason + diagnostics so
+                # the *why* is recoverable from the gateway log.
+                plan = acc.plan_turn(messages)
+                if plan.action == "extend":
+                    token_ids = acc.build_next_prompt(plan.new_messages, tools=request_body.get("tools"))
                     if token_ids is not None:
+                        logger.debug(
+                            "TokenAccumulator extend session=%s turn=%d +%d new msgs",
+                            session_id,
+                            acc.turn_count,
+                            len(plan.new_messages),
+                        )
                         return await self._handle_cumulative_turn(
                             request,
                             request_body,
@@ -171,13 +176,21 @@ class ReverseProxy:
                             token_ids,
                             originally_requested_logprobs,
                         )
-                    # No new messages, or the renderer couldn't prove the
-                    # prefix-extension contract (e.g. DefaultRenderer, or an
-                    # assistant message in the new slice). Reset so this turn is
-                    # re-ingested as a fresh turn-0 on the chat path; otherwise
-                    # the stale prefix would drop this turn's completion tokens
-                    # from the next cumulative prompt and break prefix-extension.
-                    acc.reset()
+                    # Structurally a valid extension, but the renderer couldn't
+                    # prove the prefix-extension contract (e.g. DefaultRenderer).
+                    # Reset so this turn is re-ingested as a fresh turn-0;
+                    # otherwise the stale prefix would drop this turn's completion
+                    # tokens from the next cumulative prompt and break extension.
+                    acc.reset(
+                        ResetReason.RENDERER_NO_BRIDGE,
+                        diagnostics={
+                            **plan.diagnostics,
+                            "renderer": type(acc.renderer).__name__,
+                            "new_roles": [m.get("role") for m in plan.new_messages],
+                        },
+                    )
+                else:
+                    acc.reset(plan.reason, diagnostics=plan.diagnostics)
 
         if is_stream:
             return await self._handle_streaming(request, body, request_body, session_id, originally_requested_logprobs)

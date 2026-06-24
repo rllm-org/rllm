@@ -243,3 +243,114 @@ class TestExtractNewMessages:
             {"role": "tool", "content": "result"},
             {"role": "user", "content": "thanks"},
         ]
+
+
+class TestPlanTurnClassification:
+    """plan_turn maps the incoming request to extend or a classified reset.
+
+    Mirrors the four mutually-exclusive ResetReasons (+ the healthy extend) the
+    gateway logs, so a reset's *why* is recoverable from one line.
+    """
+
+    def _seed(self, messages, *, prompt=(1, 2, 3), completion=(10, 11)):
+        from rllm_model_gateway.token_accumulator import TokenAccumulator
+
+        acc = TokenAccumulator(renderer=_MockRenderer(), session_id="s1")
+        acc.ingest_turn(list(prompt), list(completion))
+        acc.update_prefix(messages)
+        return acc
+
+    def test_extend_on_cumulative_growth(self):
+        acc = self._seed([{"role": "user", "content": "Hello"}])
+        plan = acc.plan_turn(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+                {"role": "user", "content": "More"},
+            ]
+        )
+        assert plan.action == "extend"
+        # The assistant turn is dropped; only the new user message is bridged.
+        assert plan.new_messages == [{"role": "user", "content": "More"}]
+
+    def test_duplicate_identical_resend(self):
+        from rllm_model_gateway.token_accumulator import ResetReason
+
+        msgs = [{"role": "user", "content": "Hello"}]
+        acc = self._seed(msgs)
+        plan = acc.plan_turn([{"role": "user", "content": "Hello"}])  # byte-identical
+        assert plan.action == "reset"
+        assert plan.reason is ResetReason.DUPLICATE
+        # age_s is populated from the snapshot time (>= 0).
+        assert plan.diagnostics.get("age_s") is not None
+
+    def test_prefix_changed_same_length_different_content(self):
+        from rllm_model_gateway.token_accumulator import ResetReason
+
+        acc = self._seed([{"role": "user", "content": "Hello"}])
+        plan = acc.plan_turn([{"role": "user", "content": "Fresh start"}])
+        assert plan.action == "reset"
+        assert plan.reason is ResetReason.PREFIX_CHANGED
+        assert plan.diagnostics["first_divergent_index"] == 0
+        assert plan.diagnostics["incoming_at_divergence"]["preview"] == "Fresh start"
+
+    def test_prefix_changed_when_history_shrinks(self):
+        from rllm_model_gateway.token_accumulator import ResetReason
+
+        acc = self._seed(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+            ]
+        )
+        plan = acc.plan_turn([{"role": "user", "content": "Hello"}])  # shorter
+        assert plan.action == "reset"
+        assert plan.reason is ResetReason.PREFIX_CHANGED
+
+    def test_empty_delta_assistant_only_extension(self):
+        from rllm_model_gateway.token_accumulator import ResetReason
+
+        acc = self._seed([{"role": "user", "content": "Hello"}])
+        # The list grows and the prefix matches, but the only new message is an
+        # assistant turn -> nothing renderable -> EMPTY_DELTA (not DUPLICATE).
+        plan = acc.plan_turn(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "sampled"},
+            ]
+        )
+        assert plan.action == "reset"
+        assert plan.reason is ResetReason.EMPTY_DELTA
+        assert plan.diagnostics["new_roles"] == ["assistant"]
+
+
+class TestResetLogging:
+    def test_reset_logs_reason_and_session(self, caplog):
+        import logging
+
+        from rllm_model_gateway.token_accumulator import ResetReason, TokenAccumulator
+
+        acc = TokenAccumulator(renderer=_MockRenderer(), session_id="sess-xyz")
+        acc.ingest_turn([1, 2, 3], [10, 11])
+        acc.update_prefix([{"role": "user", "content": "Hello"}])
+
+        with caplog.at_level(logging.INFO):
+            acc.reset(ResetReason.DUPLICATE, diagnostics={"incoming_len": 1, "age_s": 0.5})
+
+        rec = caplog.records[-1]
+        assert rec.levelno == logging.INFO
+        msg = caplog.text
+        assert "reason=duplicate" in msg
+        assert "session=sess-xyz" in msg
+        assert "reset_count=1" in msg
+        # Plain-language explanation with the resend timing woven in.
+        assert "identical to the last processed turn" in msg
+        assert "0.5s" in msg
+
+    def test_reset_count_survives_reset(self):
+        from rllm_model_gateway.token_accumulator import ResetReason, TokenAccumulator
+
+        acc = TokenAccumulator(renderer=_MockRenderer(), session_id="s")
+        acc.reset(ResetReason.MANUAL)
+        acc.reset(ResetReason.MANUAL)
+        assert acc.reset_count == 2
