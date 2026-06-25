@@ -179,8 +179,9 @@ class DaytonaSandbox:
     """Sandbox implementation using Daytona Cloud Sandboxes.
 
     Creates a Daytona Sandbox via ``daytona.create()``, executes commands
-    via ``sandbox.process.exec()``, uploads files via the native
-    ``sandbox.fs`` API, and exposes ports via ``sandbox.get_preview_link()``.
+    via ``sandbox.process.exec()``, and uploads files via the native
+    ``sandbox.fs`` API. Sandboxes are **ephemeral** by default (single-use RL
+    rollouts): deleted when stopped, on the higher ephemeral quota.
 
     The ``image`` parameter accepts either:
     - A Daytona snapshot name (e.g. ``"rllm-worker-v0"``) — passed via
@@ -192,7 +193,11 @@ class DaytonaSandbox:
 
     Optional kwargs:
     - ``daytona_config``: explicit ``DaytonaConfig`` (overrides env vars).
+    - ``ephemeral``: delete (not archive) on stop; default ``True``. Implies
+      ``auto_delete_interval=0`` unless overridden.
     - ``auto_stop_interval``: minutes; default ``30``. Pass ``0`` to disable.
+    - ``auto_delete_interval``: minutes after stop to delete; default ``0``
+      (immediate) when ephemeral, else ``-1`` (never).
     - ``auto_archive_interval``: minutes; default Daytona's own default.
     - ``cpu`` / ``memory`` / ``disk`` / ``gpu``: resource overrides (only
       effective with the from-image path).
@@ -229,8 +234,20 @@ class DaytonaSandbox:
         # execs are independent shells, so this is re-applied per command rather
         # than relying on a one-shot export. Populated via set_env().
         self._persistent_env: dict[str, str] = {}
+        # RL rollout/warm-queue sandboxes are strictly single-use (create → run →
+        # verify → delete), so default to ephemeral. Two payoffs: (1) Daytona's
+        # ephemeral tier carries a higher per-sandbox quota (disk/cpu/mem), so
+        # tasks declaring more than the standard 10 GB disk (e.g. tmax's 20 GB)
+        # schedule instead of 400-ing; (2) leak-proofing — an ephemeral sandbox is
+        # *deleted* (not left stopped) when it stops, so a SIGKILL'd run that never
+        # reaches close()/atexit doesn't strand a stopped box forever. Mirrors how
+        # harbor's Daytona environment always runs ephemeral.
+        self._ephemeral = bool(kwargs.pop("ephemeral", True))
         self._auto_stop_interval = int(kwargs.pop("auto_stop_interval", _DEFAULT_AUTO_STOP_INTERVAL))
         self._auto_archive_interval = kwargs.pop("auto_archive_interval", None)
+        # `ephemeral=True` ⟺ `auto_delete_interval=0` ("delete immediately on
+        # stop"); keep them consistent so an idle auto-stop reaps the box.
+        self._auto_delete_interval = int(kwargs.pop("auto_delete_interval", 0 if self._ephemeral else -1))
         self._create_timeout = float(kwargs.pop("create_timeout", 120.0))
 
         # Client init
@@ -240,11 +257,13 @@ class DaytonaSandbox:
         # Build common parameters
         base_kwargs: dict = {
             "name": name,
+            "ephemeral": self._ephemeral,
             "auto_stop_interval": self._auto_stop_interval,
+            "auto_delete_interval": self._auto_delete_interval,
         }
         if self._auto_archive_interval is not None:
             base_kwargs["auto_archive_interval"] = int(self._auto_archive_interval)
-        for key in ("env_vars", "labels", "os_user", "public", "volumes", "auto_delete_interval"):
+        for key in ("env_vars", "labels", "os_user", "public", "volumes"):
             if key in kwargs:
                 base_kwargs[key] = kwargs.pop(key)
 

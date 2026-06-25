@@ -230,3 +230,57 @@ def test_create_does_not_retry_non_transient(monkeypatch):
     with pytest.raises(RuntimeError, match="not found"):
         sb._create(object())
     assert calls["n"] == 1  # no retries on a non-transient error
+
+
+# ---------------------------------------------------------------------------
+# ephemeral default reaches the create params (no real SDK needed)
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_daytona(monkeypatch):
+    """Inject a fake ``daytona`` module whose param classes record their kwargs."""
+    import types
+
+    captured: dict = {}
+
+    class _Params:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+            captured["kwargs"] = kw
+
+    fake = types.ModuleType("daytona")
+    fake.CreateSandboxFromImageParams = _Params
+    fake.CreateSandboxFromSnapshotParams = _Params
+    fake.Image = type("Image", (), {})
+    fake.Resources = lambda **kw: types.SimpleNamespace(**kw)
+    fake.DaytonaNotFoundError = type("DaytonaNotFoundError", (Exception,), {})
+    fake.DaytonaValidationError = type("DaytonaValidationError", (Exception,), {})
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def create(self, params, timeout=None):
+            return SimpleNamespace(id="sb-1", delete=lambda: None, stop=lambda: None)
+
+    fake.Daytona = _FakeClient
+    monkeypatch.setitem(sys.modules, "daytona", fake)
+    return captured
+
+
+def test_ephemeral_defaults_passed_to_create(monkeypatch):
+    """Sandboxes default to ephemeral with immediate auto-delete on stop."""
+    captured = _install_fake_daytona(monkeypatch)
+    DaytonaSandbox(name="t", image="python:3.11-slim")
+    kw = captured["kwargs"]
+    assert kw["ephemeral"] is True
+    assert kw["auto_delete_interval"] == 0
+
+
+def test_ephemeral_opt_out_sets_never_delete(monkeypatch):
+    """Opting out of ephemeral falls back to never-auto-delete (-1)."""
+    captured = _install_fake_daytona(monkeypatch)
+    DaytonaSandbox(name="t", image="python:3.11-slim", ephemeral=False)
+    kw = captured["kwargs"]
+    assert kw["ephemeral"] is False
+    assert kw["auto_delete_interval"] == -1
