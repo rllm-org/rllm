@@ -80,7 +80,7 @@ rLLM's Daytona backend does a single `Daytona.create()` with no retry (`daytona.
 
 **P1-5. Task-sized lifetime instead of default idle auto-stop.**
 Daytona lifetime is governed by `auto_stop_interval` (default **30 min idle**, `daytona.py:35`). The agent budget in `train_fireworks.sh` is `RLLM_HARNESS_RUN_TIMEOUT_S=1800` (30 min) plus install plus verifier — and a stalled LLM round-trip can *look* idle. This is precisely the "sandbox reaped mid-rollout" failure that deflated Modal eval scores (see memory `terminal-bench-eval-sandbox-reaping`).
-**Change:** in `_resolution.py`'s `daytona` branch, set `auto_stop_interval` (minutes) sized from `agent_timeout + verifier_timeout + install_timeout + slack` — the same arithmetic Modal uses for its hard `timeout` (`_resolution.py:261-269`) — with an `RLLM_DAYTONA_SANDBOX_AUTOSTOP_MIN` override floor. Confirm `close()`'s `delete()`→`stop()` fallback (`daytona.py:285-302`) still frees compute promptly.
+**Change:** in `_resolution.py`'s `daytona` branch, set `auto_stop_interval` (minutes) sized from `agent_timeout + verifier_timeout + install_timeout + slack` — the same arithmetic Modal uses for its hard `timeout` — raised to the **provider-agnostic** `RLLM_SANDBOX_TIMEOUT_S` (seconds) floor, converted to minutes. The lifetime floor is computed once and shared by both backends (`_resolution.py` `_sandbox_resource_kwargs`); `RLLM_MODAL_SANDBOX_TIMEOUT_S` remains a deprecated alias (`rllm/env.py` `sandbox_timeout_override_s`). Confirm `close()`'s `delete()`→`stop()` fallback (`daytona.py:285-302`) still frees compute promptly.
 
 ### P2 — operational parity / polish
 
@@ -96,7 +96,7 @@ Daytona lifetime is governed by `auto_stop_interval` (default **30 min idle**, `
 1. `export TERMINAL_SANDBOX_BACKEND=daytona` (the only knob; read at `train.py:63`, threaded into harness + trainer).
 2. Provide Daytona auth: `DAYTONA_API_KEY` (or `DAYTONA_JWT_TOKEN` + `DAYTONA_ORGANIZATION_ID`), `DAYTONA_API_URL`, `DAYTONA_TARGET`.
 3. Gateway tunnel already correct: `train_fireworks.sh:118` pins `rllm.gateway.tunnel=https://rllm.ngrok.dev`; Daytona is remote, so the in-sandbox Terminus driver gets the public URL automatically. (Confirm ngrok URL is reachable from the Daytona region.)
-4. Add `RLLM_DAYTONA_SANDBOX_AUTOSTOP_MIN` (analogous to `RLLM_MODAL_SANDBOX_TIMEOUT_S=2400` at `train_fireworks.sh:63`) for P1-5.
+4. Set the provider-agnostic `RLLM_SANDBOX_TIMEOUT_S` (seconds) — one knob for all backends; it sizes Daytona's `auto_stop_interval` (P1-5) and Modal's hard lifetime alike.
 5. Optional warm-start: `rllm snapshot create --sandbox-backend daytona …` (already supported) to pre-bake the Terminus-2 install and avoid per-rollout `uv`/apt cost.
 
 ---

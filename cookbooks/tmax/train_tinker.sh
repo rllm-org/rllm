@@ -33,7 +33,9 @@ export TERMINAL_SANDBOX_BACKEND="${TERMINAL_SANDBOX_BACKEND:-modal}"
 export TMAX_HARNESS="${TMAX_HARNESS:-terminus2}"
 export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-64}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
-export RLLM_MODAL_SANDBOX_TIMEOUT_S="${RLLM_MODAL_SANDBOX_TIMEOUT_S:-2400}"
+# Provider-agnostic sandbox lifetime floor (seconds), honored by every backend
+# (Modal hard timeout; Daytona idle auto-stop, converted to minutes).
+export RLLM_SANDBOX_TIMEOUT_S="${RLLM_SANDBOX_TIMEOUT_S:-2400}"
 
 python -u train.py \
     rllm/backend=tinker \
