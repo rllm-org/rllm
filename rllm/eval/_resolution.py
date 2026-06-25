@@ -247,26 +247,35 @@ def _sandbox_resource_kwargs(task: Task, backend: str) -> dict:
     these a remote sandbox runs at the backend default (Daytona: 1 GiB), which
     OOM-kills compile-heavy graders (e.g. ``go test ./...``). Modal takes memory
     in MB; Daytona takes memory/disk in GB. Docker/local ignore the values.
+
+    The sandbox lifetime is sized to this task's own budget so the box always
+    outlives the agent + verifier it hosts (both run inside it). A flat default
+    could be shorter than agent+verifier and reap the box mid-rollout ("Sandbox
+    already shut down" / ENOSPC mid-run). The provider-agnostic
+    ``RLLM_SANDBOX_TIMEOUT_S`` (seconds) is a *floor* on top of that, applied the
+    same way for every backend; each backend then expresses it in its own unit
+    (Modal's hard ``timeout`` in seconds; Daytona's idle ``auto_stop_interval``
+    in minutes).
     """
-    from rllm.env import env_int
+    from rllm.env import env_int, sandbox_timeout_override_s
 
     env = task.metadata.get("environment", {}) or {}
     cpus, mem_mb, disk_mb = env.get("cpus"), env.get("memory_mb"), env.get("storage_mb")
+
+    # Per-task lifetime floor (seconds), shared across backends: agent + verifier
+    # + install + teardown/scheduling slack, raised to the operator override.
+    agent_t = float(task.metadata.get("agent_timeout") or env_int("RLLM_HARNESS_RUN_TIMEOUT_S", 3600))
+    verifier_t = float(task.metadata.get("verifier_timeout") or 600.0)
+    install_t = float(env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 600))
+    lifetime_s = max(int(agent_t + verifier_t + install_t + 600), sandbox_timeout_override_s())
+
     kw: dict = {}
     if backend == "modal":
         if cpus:
             kw["cpu"] = float(cpus)
         if mem_mb:
             kw["memory"] = int(mem_mb)
-        # Size the sandbox lifetime to this task's own budget so the box always
-        # outlives the agent + verifier it hosts (both run here). A flat global
-        # default could be shorter than agent+verifier and reap the box mid-run
-        # ("Sandbox already shut down"). max() keeps an explicit override as a floor.
-        agent_t = float(task.metadata.get("agent_timeout") or env_int("RLLM_HARNESS_RUN_TIMEOUT_S", 3600))
-        verifier_t = float(task.metadata.get("verifier_timeout") or 600.0)
-        install_t = float(env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 600))
-        per_task_floor = int(agent_t + verifier_t + install_t + 600)  # +600s teardown/scheduling slack
-        kw["timeout"] = max(per_task_floor, env_int("RLLM_MODAL_SANDBOX_TIMEOUT_S", 0))
+        kw["timeout"] = lifetime_s  # Modal's hard lifetime, in seconds
     elif backend == "daytona":
         if cpus:
             kw["cpu"] = int(cpus)
@@ -278,6 +287,10 @@ def _sandbox_resource_kwargs(task: Task, backend: str) -> dict:
         # for multi-GB SWE images routinely exceeds the SDK's 120s default.
         # Honor the task's declared build timeout, with a pull-friendly floor.
         kw["create_timeout"] = float(env.get("build_timeout_sec") or 600.0)
+        # Daytona's lifetime knob is an idle auto-stop in minutes (its default
+        # 30-min idle can reap a long task, e.g. during a stalled LLM call that
+        # looks idle). Express the shared lifetime floor in minutes, rounded up.
+        kw["auto_stop_interval"] = (lifetime_s + 59) // 60
     return kw
 
 
