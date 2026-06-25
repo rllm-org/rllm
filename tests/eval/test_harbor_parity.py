@@ -128,3 +128,52 @@ def test_daytona_resource_kwargs_convert_mb_to_gb():
     assert kw["cpu"] == 2
     assert kw["memory"] == 4  # 4096 MB → 4 GB
     assert kw["disk"] == 10  # 10240 MB → 10 GB
+
+
+# ---------------------------------------------------------------------------
+# provider-agnostic sandbox lifetime knob (RLLM_SANDBOX_TIMEOUT_S)
+# ---------------------------------------------------------------------------
+
+
+def _budget_task() -> Task:
+    return Task(
+        id="t",
+        instruction="",
+        metadata={
+            "environment": {"cpus": 1, "memory_mb": 2048, "storage_mb": 10240},
+            "agent_timeout": 900,
+            "verifier_timeout": 900,
+        },
+        dataset_dir=Path("."),
+    )
+
+
+def test_lifetime_floor_sized_from_task_budget_when_no_override(monkeypatch):
+    """No override → both backends size lifetime to agent+verifier+install+slack."""
+    monkeypatch.delenv("RLLM_SANDBOX_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("RLLM_MODAL_SANDBOX_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("RLLM_HARNESS_INSTALL_TIMEOUT_S", raising=False)
+    t = _budget_task()
+    # 900 (agent) + 900 (verifier) + 600 (install default) + 600 (slack) = 3000s
+    assert _sandbox_resource_kwargs(t, "modal")["timeout"] == 3000
+    assert _sandbox_resource_kwargs(t, "daytona")["auto_stop_interval"] == 50  # 3000s → 50 min
+
+
+def test_provider_agnostic_override_applies_to_both_backends(monkeypatch):
+    """RLLM_SANDBOX_TIMEOUT_S (seconds) floors Modal (seconds) and Daytona (minutes)."""
+    monkeypatch.delenv("RLLM_MODAL_SANDBOX_TIMEOUT_S", raising=False)
+    monkeypatch.setenv("RLLM_SANDBOX_TIMEOUT_S", "4800")
+    t = _budget_task()
+    assert _sandbox_resource_kwargs(t, "modal")["timeout"] == 4800
+    assert _sandbox_resource_kwargs(t, "daytona")["auto_stop_interval"] == 80  # 4800s → 80 min
+
+
+def test_legacy_modal_var_is_deprecated_alias(monkeypatch):
+    """RLLM_MODAL_SANDBOX_TIMEOUT_S still works; canonical name takes precedence."""
+    from rllm.env import sandbox_timeout_override_s
+
+    monkeypatch.delenv("RLLM_SANDBOX_TIMEOUT_S", raising=False)
+    monkeypatch.setenv("RLLM_MODAL_SANDBOX_TIMEOUT_S", "3600")
+    assert sandbox_timeout_override_s() == 3600
+    monkeypatch.setenv("RLLM_SANDBOX_TIMEOUT_S", "5000")  # canonical wins
+    assert sandbox_timeout_override_s() == 5000

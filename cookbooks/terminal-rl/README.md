@@ -197,9 +197,12 @@ remote Harbor runtime. Terminus-2 runs inside one sandbox per task, created by
 | `daytona` | `pip install daytona` + `DAYTONA_API_KEY` | Cloud sandboxes; scales to thousands in parallel. |
 | `docker` | local | Fastest iteration; needs the Docker daemon and ~20 GB free disk. |
 
-The scripts set two timeouts that must stay ordered — **`RLLM_MODAL_SANDBOX_TIMEOUT_S`
+The scripts set two timeouts that must stay ordered — **`RLLM_SANDBOX_TIMEOUT_S`
 (sandbox lifetime, default 2400s / 40 min) > `RLLM_HARNESS_RUN_TIMEOUT_S` (agent
-run cap, default 1800s / 30 min)**. The agent cap is the knob that actually
+run cap, default 1800s / 30 min)**. `RLLM_SANDBOX_TIMEOUT_S` is provider-agnostic
+(seconds) — every backend honors it (Modal as a hard lifetime, Daytona as an idle
+auto-stop, converted to minutes); the old `RLLM_MODAL_SANDBOX_TIMEOUT_S` remains a
+deprecated alias. The agent cap is the knob that actually
 bounds a rollout's duration/cost; the sandbox lifetime is a *ceiling*, not a
 fixed duration — a sandbox is torn down as soon as its rollout + verifier
 finish, so a higher ceiling costs nothing for normal rollouts. The two clocks
