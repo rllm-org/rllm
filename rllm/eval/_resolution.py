@@ -278,6 +278,17 @@ def _sandbox_resource_kwargs(task: Task, backend: str) -> dict:
         # for multi-GB SWE images routinely exceeds the SDK's 120s default.
         # Honor the task's declared build timeout, with a pull-friendly floor.
         kw["create_timeout"] = float(env.get("build_timeout_sec") or 600.0)
+        # Size the idle auto-stop to outlive a full rollout (agent + verifier +
+        # install, both of which run in this box). Daytona's default 30-min idle
+        # timeout can reap a long task — including during a stalled LLM call that
+        # looks idle — turning a rollout into an error. Same arithmetic Modal
+        # uses for its hard lifetime; minutes, rounded up; RLLM_DAYTONA_SANDBOX_AUTOSTOP_MIN
+        # is a floor override.
+        agent_t = float(task.metadata.get("agent_timeout") or env_int("RLLM_HARNESS_RUN_TIMEOUT_S", 3600))
+        verifier_t = float(task.metadata.get("verifier_timeout") or 600.0)
+        install_t = float(env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 600))
+        per_task_floor_min = int((agent_t + verifier_t + install_t + 600 + 59) // 60)  # +600s slack, ceil to minutes
+        kw["auto_stop_interval"] = max(per_task_floor_min, env_int("RLLM_DAYTONA_SANDBOX_AUTOSTOP_MIN", 0))
     return kw
 
 

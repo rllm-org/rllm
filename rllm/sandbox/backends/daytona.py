@@ -18,13 +18,15 @@ import atexit
 import io
 import logging
 import os
+import shlex
 import tarfile
 import threading
 import time
 import weakref
 from pathlib import Path
 
-from rllm.sandbox.protocol import SnapshotNotFound
+from rllm.env import env_float, env_int
+from rllm.sandbox.protocol import SandboxCommandTimeout, SnapshotNotFound
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,114 @@ _DEFAULT_AUTO_STOP_INTERVAL = 30  # minutes; mirrors ModalSandbox's 30-min timeo
 # atexit-tracked sandboxes; terminated on process exit to avoid leaks.
 _LIVE_SANDBOXES: weakref.WeakSet = weakref.WeakSet()
 _LIVE_LOCK = threading.Lock()
+
+
+class _CreateRateLimiter:
+    """Process-global token bucket pacing ``Daytona.create()``.
+
+    A GRPO training step spins up many sandboxes at once (one per group copy).
+    Daytona enforces a server-side create rate limit; a large concurrent burst
+    trips it and those creates fail. This mirrors Modal's backend limiter: up to
+    ``burst`` creates go through immediately, after which creates are paced at
+    ``rate``/s — so the startup burst is absorbed and only the long tail queues
+    locally instead of failing. Retry-with-backoff (:func:`_is_transient_daytona_error`)
+    is the second line of defence for anything that still slips through.
+
+    Thread-safe; token accounting is serialized under the lock while the wait
+    sleeps outside it. Scope is per-process (all creates happen in the driver).
+    """
+
+    def __init__(self, rate: float, burst: float) -> None:
+        self._rate = rate
+        self._capacity = max(1.0, burst)
+        self._tokens = self._capacity
+        self._last = time.monotonic()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        if self._rate <= 0:  # disabled via RLLM_DAYTONA_SANDBOX_CREATE_RPS=0
+            return
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                self._tokens = min(self._capacity, self._tokens + (now - self._last) * self._rate)
+                self._last = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+                wait = (1.0 - self._tokens) / self._rate
+            time.sleep(wait)
+
+
+# Create pacing + retry knobs. Generous defaults: the limiter only smooths large
+# training bursts, and retry-with-linear-backoff is the real safety net. Set
+# RLLM_DAYTONA_SANDBOX_CREATE_RPS=0 to disable pacing entirely.
+_CREATE_RATE_RPS = env_float("RLLM_DAYTONA_SANDBOX_CREATE_RPS", 8.0)
+_CREATE_BURST = env_float("RLLM_DAYTONA_SANDBOX_CREATE_BURST", 100.0)
+_CREATE_LIMITER = _CreateRateLimiter(_CREATE_RATE_RPS, _CREATE_BURST)
+_CREATE_MAX_ATTEMPTS = env_int("RLLM_DAYTONA_SANDBOX_CREATE_RETRIES", 6)
+_CREATE_BACKOFF_BASE_S = env_float("RLLM_DAYTONA_SANDBOX_CREATE_BACKOFF_S", 5.0)
+_CREATE_BACKOFF_CAP_S = 60.0
+
+
+def _is_transient_daytona_error(exc: Exception) -> bool:
+    """Whether a Daytona create error is worth retrying (rate-limit / capacity / 5xx / connection).
+
+    A vanished snapshot (``DaytonaNotFoundError``) or a real validation error is
+    *not* transient and must propagate so the caller can cold-fall back or fail.
+    """
+    try:
+        from daytona import DaytonaRateLimitError
+
+        if isinstance(exc, DaytonaRateLimitError):
+            return True
+    except Exception:  # noqa: S110 — SDK shape varies; fall through to message sniffing
+        pass
+    msg = str(exc).lower()
+    return any(
+        p in msg
+        for p in (
+            "rate limit",
+            "too many requests",
+            "429",
+            "capacity",
+            "try again",
+            "temporarily",
+            "503",
+            "502",
+            "connection reset",
+            "connection aborted",
+        )
+    )
+
+
+def _looks_like_timeout(exc: Exception) -> bool:
+    """Heuristic: did this SDK exception come from a command/exec timeout?"""
+    msg = str(exc).lower()
+    return "timed out" in msg or "timeout" in msg
+
+
+def _build_exec_command(command: str, persistent_env: dict[str, str] | None, user: str | int | None) -> str:
+    """Wrap *command* with persistent-env exports and an optional ``su`` user-switch.
+
+    Pure string transform (mirrors ``modal_backend._build_exec_command``):
+
+    * ``persistent_env`` is exported ahead of the command so every exec sees the
+      task's declared environment — each Daytona exec is an independent shell, so
+      a one-shot ``export`` wouldn't persist. Mirrors harbor's per-exec env.
+    * ``user`` switches via ``su <user> -s /bin/bash -c <cmd>`` — Daytona sets the
+      default user only at create time (``os_user``), not per exec. An ``int`` is
+      resolved as a uid via ``getent``; a ``str`` is used verbatim. Matches how
+      harbor's Daytona environment runs the agent vs. verifier under their users.
+    """
+    run = command
+    if persistent_env:
+        prefix = "".join(f"export {k}={shlex.quote(str(v))}; " for k, v in persistent_env.items())
+        run = prefix + run
+    if user is not None:
+        user_arg = f"$(getent passwd {user} | cut -d: -f1)" if isinstance(user, int) else shlex.quote(str(user))
+        run = f"su {user_arg} -s /bin/bash -c {shlex.quote(run)}"
+    return run
 
 
 def _terminate_all_live() -> None:
@@ -115,6 +225,10 @@ class DaytonaSandbox:
         self.name = name
         self._image_spec = image
         self._closed = False
+        # Env exported into every exec (the task's [environment].env). Daytona
+        # execs are independent shells, so this is re-applied per command rather
+        # than relying on a one-shot export. Populated via set_env().
+        self._persistent_env: dict[str, str] = {}
         self._auto_stop_interval = int(kwargs.pop("auto_stop_interval", _DEFAULT_AUTO_STOP_INTERVAL))
         self._auto_archive_interval = kwargs.pop("auto_archive_interval", None)
         self._create_timeout = float(kwargs.pop("create_timeout", 120.0))
@@ -143,11 +257,11 @@ class DaytonaSandbox:
         # Decide create path: snapshot name vs Docker image vs Image object
         if isinstance(image, Image):
             params = CreateSandboxFromImageParams(image=image, resources=resources, **base_kwargs)
-            self._sandbox = self._client.create(params, timeout=self._create_timeout)
+            self._sandbox = self._create(params)
             image_label = "<daytona.Image>"
         elif isinstance(image, str) and _looks_like_docker_image(image):
             params = CreateSandboxFromImageParams(image=image, resources=resources, **base_kwargs)
-            self._sandbox = self._client.create(params, timeout=self._create_timeout)
+            self._sandbox = self._create(params)
             image_label = image
         else:
             # Treat as Daytona snapshot name. Resources are baked into the
@@ -157,7 +271,7 @@ class DaytonaSandbox:
                 logger.debug("Resources ignored when creating from snapshot %s; snapshot resources win.", image)
             params = CreateSandboxFromSnapshotParams(snapshot=image, **base_kwargs)
             try:
-                self._sandbox = self._client.create(params, timeout=self._create_timeout)
+                self._sandbox = self._create(params)
             except (DaytonaNotFoundError, DaytonaValidationError) as e:
                 # A gone/removing snapshot surfaces as 404 (NotFound) or 400
                 # (Validation, e.g. "Snapshot <name> is removing") — both mean
@@ -181,25 +295,102 @@ class DaytonaSandbox:
             image_label,
         )
 
-    def exec(self, command: str, timeout: float | None = None, user: str | None = None) -> str:  # noqa: ARG002
+    def _create(self, params):
+        """Create the sandbox with rate-limit pacing + retry on transient errors.
+
+        ``Daytona.create()`` can fail under a concurrent-create burst (GRPO step)
+        with a server-side rate-limit/capacity error. The limiter paces the burst
+        and this loop retries transient failures with linear backoff (mirroring
+        harbor's tenacity policy). A vanished snapshot / real validation error is
+        not transient, so it raises on the first attempt for the caller to handle.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(1, _CREATE_MAX_ATTEMPTS + 1):
+            _CREATE_LIMITER.acquire()
+            try:
+                return self._client.create(params, timeout=self._create_timeout)
+            except Exception as e:  # noqa: BLE001 — classify, then retry-or-reraise
+                last_exc = e
+                if attempt < _CREATE_MAX_ATTEMPTS and _is_transient_daytona_error(e):
+                    backoff = min(_CREATE_BACKOFF_CAP_S, _CREATE_BACKOFF_BASE_S * attempt)
+                    logger.warning(
+                        "daytona create %s attempt %d/%d failed (transient: %s); retrying in %.0fs",
+                        self.name,
+                        attempt,
+                        _CREATE_MAX_ATTEMPTS,
+                        e,
+                        backoff,
+                    )
+                    time.sleep(backoff)
+                    continue
+                raise
+        assert last_exc is not None  # loop always raises or returns
+        raise last_exc
+
+    def set_env(self, env: dict[str, str]) -> None:
+        """Register env vars exported into every subsequent :meth:`exec`.
+
+        Daytona execs are independent shells, so persistent task env (Harbor's
+        ``[environment].env``) must be re-applied per command — otherwise the
+        verifier (and any agent step) wouldn't observe it. Mirrors how harbor
+        injects the same vars per exec, and ModalSandbox.set_env.
+        """
+        for k, v in (env or {}).items():
+            self._persistent_env[str(k)] = str(v)
+
+    def exec(self, command: str, timeout: float | None = None, user: str | int | None = None) -> str:
         """Execute a command inside the Daytona sandbox.
 
-        ``user`` is accepted for protocol compatibility but ignored —
-        Daytona sets the default user at sandbox creation time
-        (``os_user`` kwarg), not per exec.
-
         Wraps the command in ``bash -c`` for shell-feature parity with
-        DockerSandbox / ModalSandbox. Returns stdout. Raises
-        ``RuntimeError`` on non-zero exit.
+        DockerSandbox / ModalSandbox. Returns stdout. Raises ``RuntimeError``
+        on non-zero exit, or :class:`SandboxCommandTimeout` when the command is
+        killed for exceeding *timeout*.
+
+        ``user`` switches the command to another OS user via ``su`` (Daytona
+        sets the default user only at create time, not per exec), and env
+        registered via :meth:`set_env` is exported into every command. See
+        :func:`_build_exec_command`.
+
+        When *timeout* is set the command is wrapped in coreutils ``timeout`` so
+        a runaway process is hard-killed (SIGTERM, then SIGKILL after a grace
+        window) and reports a clean exit code with captured stdout — rather than
+        hanging until the sandbox idle-stops or surfacing an opaque SDK error.
         """
+        run = _build_exec_command(command, self._persistent_env, user)
+        wrapped = f"bash -c {_shell_quote(run)}"
+
         exec_kwargs: dict = {}
         if timeout is not None:
-            exec_kwargs["timeout"] = int(timeout)
+            t = int(timeout)
+            # SIGTERM at t, SIGKILL 10s later if it ignores TERM. Exit 124
+            # (TERM) / 137 (KILL) flag the timeout below.
+            wrapped = f"timeout -k 10 {t} {wrapped}"
+            # SDK timeout as a backstop, set beyond the shell timeout so the
+            # deterministic shell `timeout` is what fires first.
+            exec_kwargs["timeout"] = t + 60
 
-        response = self._sandbox.process.exec(f"bash -c {_shell_quote(command)}", **exec_kwargs)
+        try:
+            response = self._sandbox.process.exec(wrapped, **exec_kwargs)
+        except Exception as e:  # noqa: BLE001 — map an SDK-level timeout to the protocol type
+            if timeout is not None and _looks_like_timeout(e):
+                raise SandboxCommandTimeout(f"Command hit its {int(timeout)}s timeout in sandbox {self.name}: {command[:200]}") from e
+            raise
 
         stdout = response.result or ""
         exit_code = response.exit_code
+
+        if timeout is not None and exit_code in (124, 137):
+            # `timeout` killed it: 124 = exited on SIGTERM, 137 = SIGKILL'd after
+            # the grace window. Distinct from a real failure so an agent that
+            # simply spent its time budget isn't reported as one.
+            logger.warning(
+                "Command hit its %ds timeout in sandbox %s (exit %d): %s",
+                int(timeout),
+                self.name,
+                exit_code,
+                command[:200],
+            )
+            raise SandboxCommandTimeout(f"Command hit its {int(timeout)}s timeout in sandbox {self.name} (exit {exit_code})")
 
         if exit_code != 0:
             tail = stdout[-500:]
@@ -355,7 +546,10 @@ def build_daytona_snapshot(task, key: str, *, force: bool = False, install_scrip
     if run_commands:
         img = img.run_commands(*run_commands)
 
-    res_kw = _sandbox_resource_kwargs(task, "daytona")
+    # _sandbox_resource_kwargs also carries sandbox-lifecycle knobs
+    # (create_timeout, auto_stop_interval) that Resources() doesn't accept; a
+    # snapshot bakes only the compute shape, so keep just the resource fields.
+    res_kw = {k: v for k, v in _sandbox_resource_kwargs(task, "daytona").items() if k in ("cpu", "memory", "disk", "gpu")}
     resources = Resources(**res_kw) if res_kw else None
     client.snapshot.create(
         CreateSnapshotParams(name=key, image=img, resources=resources),
