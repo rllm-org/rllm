@@ -248,10 +248,13 @@ backend via `TERMINAL_SANDBOX_BACKEND`:
 | `daytona` | `pip install daytona` + `DAYTONA_API_KEY` | Cloud sandboxes; the backend Tmax's reported 27.2% used for eval. |
 | `docker` | local | Fastest iteration; needs the Docker daemon + free disk. |
 
-The scripts keep two timeouts ordered — **`RLLM_MODAL_SANDBOX_TIMEOUT_S`
+The scripts keep two timeouts ordered — **`RLLM_SANDBOX_TIMEOUT_S`
 (sandbox lifetime, 2400s) > `RLLM_HARNESS_RUN_TIMEOUT_S` (agent run cap,
 1800s)** — so a long rollout still gets verified before its sandbox is reaped.
-See terminal-rl's README for why making them equal causes
+`RLLM_SANDBOX_TIMEOUT_S` is provider-agnostic (seconds): every backend honors it
+— Modal as a hard lifetime, Daytona as an idle auto-stop (converted to minutes).
+(The old `RLLM_MODAL_SANDBOX_TIMEOUT_S` still works as a deprecated alias.) See
+terminal-rl's README for why making the two equal causes
 `NotFoundError: Sandbox has already shut down` storms.
 
 ## Files

@@ -62,10 +62,11 @@ export TMAX_HARNESS="${TMAX_HARNESS:-terminus2}"
 # Per-rollout tool-call cap (Tmax max_steps=64). Read by train.py.
 export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-64}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
-# Modal sandbox LIFETIME (not idle time). Must exceed the agent run timeout
-# above plus setup/verify, or sandboxes get reaped mid-rollout — surfacing as
-# "Sandbox has already shut down" (NotFoundError) and exit-137 kills.
-export RLLM_MODAL_SANDBOX_TIMEOUT_S="${RLLM_MODAL_SANDBOX_TIMEOUT_S:-2400}"
+# Provider-agnostic sandbox LIFETIME floor (seconds). Must exceed the agent run
+# timeout above plus setup/verify, or sandboxes get reaped mid-rollout —
+# surfacing as "Sandbox has already shut down" (Modal) / ENOSPC mid-run. Honored
+# by every backend (Modal hard timeout; Daytona idle auto-stop, in minutes).
+export RLLM_SANDBOX_TIMEOUT_S="${RLLM_SANDBOX_TIMEOUT_S:-2400}"
 
 NNODES="${NNODES:-1}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
