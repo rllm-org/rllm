@@ -18,10 +18,14 @@ parsing (and the ``RLLM_`` naming convention) lives in one place.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 
+logger = logging.getLogger(__name__)
+
 _RUN_ID: str | None = None
+_WARNED_LEGACY_SANDBOX_TIMEOUT = False
 
 
 def rllm_run_id() -> str:
@@ -65,3 +69,29 @@ def env_float(name: str, default: float) -> float:
     """
     value = os.environ.get(name)
     return float(value) if value else default
+
+
+def sandbox_timeout_override_s() -> int:
+    """Operator override for a sandbox's lifetime budget, in **seconds** (0 = none).
+
+    Provider-agnostic: ``RLLM_SANDBOX_TIMEOUT_S`` is the single knob across all
+    backends. Each backend interprets it for its own lifetime mechanism — Modal's
+    hard ``timeout`` (seconds, used directly), Daytona's idle ``auto_stop_interval``
+    (converted to minutes). It is a *floor*: backends still size the lifetime to
+    cover the per-task agent + verifier + install budget and only raise it to this
+    value, never below.
+
+    ``RLLM_MODAL_SANDBOX_TIMEOUT_S`` is honored as a **deprecated alias** so
+    existing scripts keep working; prefer the provider-agnostic name.
+    """
+    value = env_int("RLLM_SANDBOX_TIMEOUT_S", 0)
+    if value > 0:
+        return value
+    legacy = env_int("RLLM_MODAL_SANDBOX_TIMEOUT_S", 0)
+    if legacy > 0:
+        global _WARNED_LEGACY_SANDBOX_TIMEOUT
+        if not _WARNED_LEGACY_SANDBOX_TIMEOUT:
+            _WARNED_LEGACY_SANDBOX_TIMEOUT = True
+            logger.warning("RLLM_MODAL_SANDBOX_TIMEOUT_S is deprecated; use the provider-agnostic RLLM_SANDBOX_TIMEOUT_S (seconds).")
+        return legacy
+    return 0

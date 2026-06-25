@@ -23,7 +23,7 @@ import threading
 import time
 import weakref
 
-from rllm.env import env_float, env_int, rllm_run_id
+from rllm.env import env_float, env_int, rllm_run_id, sandbox_timeout_override_s
 from rllm.sandbox.protocol import SandboxCommandTimeout, SnapshotNotFound
 
 logger = logging.getLogger(__name__)
@@ -40,10 +40,10 @@ def _default_sandbox_timeout() -> int:
     install, the agent run, and the verifier. If it doesn't exceed their sum the
     container is reaped mid-rollout (exit 137 + "Sandbox already shut down").
     So derive it from the agent run-timeout knob with headroom for install +
-    verify + teardown. ``RLLM_MODAL_SANDBOX_TIMEOUT_S`` overrides outright.
-    (Modal's own default is only 5 min.)
+    verify + teardown. ``RLLM_SANDBOX_TIMEOUT_S`` (provider-agnostic) overrides
+    outright. (Modal's own default is only 5 min.)
     """
-    explicit = env_int("RLLM_MODAL_SANDBOX_TIMEOUT_S", 0)
+    explicit = sandbox_timeout_override_s()
     if explicit > 0:
         return explicit
     run_timeout = env_int("RLLM_HARNESS_RUN_TIMEOUT_S", 3600)
