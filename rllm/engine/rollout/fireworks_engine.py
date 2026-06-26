@@ -21,7 +21,7 @@ import asyncio
 import contextvars
 import dataclasses
 import logging
-from typing import Any, cast
+from typing import Any
 
 from fireworks.training.sdk import DeploymentSampler
 from typing_extensions import override
@@ -197,8 +197,8 @@ class FireworksEngine(TinkerEngine):
             renderer_name=renderer_name,
         )
         explicit = renderer_name is not None or renderer_family != "auto"
-        self.renderer = res.renderer if (res.source == "tinker" or (explicit and res.source != "chat_template")) else None
-        if self.renderer is not None:
+        self.unified_renderer = res.renderer if (res.source == "tinker" or (explicit and res.source != "chat_template")) else None
+        if self.unified_renderer is not None:
             logger.info("FireworksEngine rendering via %s renderer (%s)", res.name, res.source)
         elif explicit and res.source == "chat_template":
             logger.warning(
@@ -208,55 +208,18 @@ class FireworksEngine(TinkerEngine):
                 getattr(tokenizer, "name_or_path", None),
             )
 
-        # bypass_render_with_parser reflects who owns rendering+parsing: True means
-        # ChatTemplateParser (built below); False means the unified renderer does.
-        # The flag was previously hardcoded True even with a renderer active, which
-        # was a lie — and is why assemble_model_output asserted on a None chat_parser.
-        self.bypass_render_with_parser = self.renderer is None
-        self.chat_parser = None if self.renderer is not None else ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=disable_thinking)
+        # No tinker_cookbook renderer on this path; the unified renderer (above) or
+        # chat_parser owns rendering+parsing — both handled by the shared TinkerEngine.
+        # ``renderer`` stays None so the shared legacy/VLM branch is never reached here.
+        self.renderer = None
+        # bypass_render_with_parser reflects who owns rendering+parsing: True =
+        # ChatTemplateParser (built below); False = the unified renderer.
+        self.bypass_render_with_parser = self.unified_renderer is None
+        self.chat_parser = None if self.unified_renderer is not None else ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=disable_thinking)
 
         self.sample_timeout = sample_timeout
         self.router_replay = router_replay
         self.sampling_client = sampler
-
-    @override
-    def assemble_model_output(self, token_input, token_output) -> ModelOutput:
-        """Assemble the ModelOutput, parsing the completion via the unified renderer.
-
-        When a unified renderer is active, chat_parser is None, so the parent's
-        chat_parser path can't run. Parse the completion through the renderer's
-        ``parse_response`` (a ``ParsedResponse``) instead. Falls back to the
-        inherited (chat_parser) path otherwise. This covers both turn 0
-        (``get_model_response``) and turns 1+ (the gateway's token-prompt path),
-        which both call ``assemble_model_output``.
-        """
-        if self.renderer is None:
-            return super().assemble_model_output(token_input, token_output)
-
-        sampled = cast(TinkerTokenOutput, token_output)
-        response_tokens, logprobs = sampled.tokens, sampled.logprobs
-        parsed = self.renderer.parse_response(response_tokens)
-
-        prompt_ids: list[int] = []
-        for elem in token_input:
-            chunk_tokens = getattr(elem, "tokens", None)  # tinker.EncodedTextChunk -> ints
-            if chunk_tokens is not None:
-                prompt_ids.extend(chunk_tokens)
-            else:
-                prompt_ids.append(elem)
-
-        return ModelOutput(
-            text=self.tokenizer.decode(response_tokens, skip_special_tokens=True),
-            content=parsed.content or "",
-            reasoning=parsed.reasoning_content or "",
-            tool_calls=parsed.tool_calls or [],
-            prompt_ids=prompt_ids,
-            completion_ids=response_tokens,
-            logprobs=logprobs,
-            prompt_length=_flat_token_input_length(token_input),
-            completion_length=len(response_tokens),
-            finish_reason=sampled.stop_reason,
-        )
 
     # ------------------------------------------------------------------
     # Token-in / token-out override
@@ -270,18 +233,12 @@ class FireworksEngine(TinkerEngine):
         accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
         reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
 
-        if self.renderer is not None:
-            token_input = self.renderer.render_ids(messages, tools=tools or None, add_generation_prompt=True)
-        else:
-            prompt = self.chat_parser.parse(
-                messages,
-                add_generation_prompt=True,
-                is_first_msg=True,
-                tools=tools,
-                reasoning_effort=reasoning_effort,
-                accumulate_reasoning=accumulate_reasoning,
-            )
-            token_input = self.tokenizer.encode(prompt, add_special_tokens=False)
+        token_input = self._render_prompt_token_input(
+            messages,
+            tools=tools,
+            reasoning_effort=reasoning_effort,
+            accumulate_reasoning=accumulate_reasoning,
+        )
 
         if application_id is not None:
             kwargs["user"] = application_id

@@ -227,12 +227,12 @@ def test_fireworks_engine_skips_chatparser_when_renderer_pinned(qwen_tokenizer):
     class _StubSampler: ...
 
     pinned = FireworksEngine(tokenizer=qwen_tokenizer, sampler=_StubSampler(), renderer_family="qwen3")
-    assert pinned.renderer is not None
+    assert pinned.unified_renderer is not None
     assert pinned.chat_parser is None
     assert pinned.bypass_render_with_parser is False  # renderer owns rendering+parsing
 
     default = FireworksEngine(tokenizer=qwen_tokenizer, sampler=_StubSampler())
-    assert default.renderer is None
+    assert default.unified_renderer is None
     assert default.chat_parser is not None
     assert default.bypass_render_with_parser is True
 
@@ -278,9 +278,9 @@ def test_assemble_model_output_uses_renderer_when_chat_parser_absent(qwen_tokeni
             self.stop_reason = "stop"
 
     engine = FireworksEngine(tokenizer=qwen_tokenizer, sampler=_StubSampler(), renderer_family="qwen3")
-    assert engine.renderer is not None and engine.chat_parser is None
+    assert engine.unified_renderer is not None and engine.chat_parser is None
 
-    completion = qwen_tokenizer.encode("hello", add_special_tokens=False) + engine.renderer.get_stop_token_ids()[:1]
+    completion = qwen_tokenizer.encode("hello", add_special_tokens=False) + engine.unified_renderer.get_stop_token_ids()[:1]
     out = engine.assemble_model_output([1, 2, 3], _StubOutput(completion))  # must not raise
     assert out.completion_ids == completion
     assert out.prompt_ids == [1, 2, 3]
