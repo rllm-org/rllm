@@ -276,30 +276,6 @@ def _summarize_llm_latencies(traces: list[Any], agentflow_s: float) -> tuple[flo
     return llm_sum_s, min(merged_total, agentflow_s) if agentflow_s > 0 else merged_total
 
 
-def derive_termination_reason(episode: Episode) -> TerminationReason:
-    """Termination reason for a flow that finished without classifying itself.
-
-    On the CLI-harness path the harness already sets ``TIMEOUT`` (wall-clock
-    budget) and ``ERROR`` (sandbox/exec failure) itself, so anything reaching
-    here is a clean exit → ``ENV_DONE``. We deliberately do NOT try to derive
-    ``MAX_RESPONSE_LENGTH_EXCEEDED`` or ``MAX_TURNS_EXCEEDED`` from the gateway
-    traces, because neither is recoverable from them on this path:
-
-    * A per-call ``finish_reason == "length"`` is not episode-terminal — the
-      in-sandbox agent (e.g. Terminus-2) recovers from a truncated response and
-      keeps going (``terminus_2.py`` re-queries on ``OutputLengthExceededError``),
-      so a "length" on the final trace is coincidental, not the cause.
-    * The trace count is LLM *calls*, not turns — retries, length-recovery
-      re-queries and summarization inflate it — so it can't reliably detect the
-      turn cap. The true turn count lives only inside the sandbox driver.
-
-    Deriving either would mislabel and, since ``base.yaml`` masks both, silently
-    drop otherwise-fine (including successful) episodes. The argument is kept so
-    this stays the single seam where a harness-agnostic rule would live.
-    """
-    return TerminationReason.ENV_DONE
-
-
 _TIMING_PHASES_DISPLAY: tuple[tuple[str, str], ...] = (
     ("setup", "time/setup_s"),
     ("agentflow", "time/agentflow_s"),
@@ -762,11 +738,10 @@ class AgentFlowEngine:
         for signal in eval_output.signals:
             enriched.metrics[signal.name] = signal.value
 
-        # The harness classifies TIMEOUT/ERROR itself; anything else that reaches
-        # here is a clean exit → ENV_DONE. (See derive_termination_reason for why
-        # length / max-turns aren't inferred from gateway traces on this path.)
+        # Harness sets TIMEOUT/ERROR itself; a clean exit is ENV_DONE. (Length /
+        # turn-cap aren't reliably recoverable from gateway traces on this path.)
         if enriched.termination_reason is None:
-            enriched.termination_reason = derive_termination_reason(enriched)
+            enriched.termination_reason = TerminationReason.ENV_DONE
         return enriched
 
     def shutdown(self) -> None:

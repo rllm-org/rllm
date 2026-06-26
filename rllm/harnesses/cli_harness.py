@@ -302,15 +302,9 @@ class BaseCliHarness(SandboxedAgentFlow):
         termination_reason: TerminationReason | None = None,
         error: dict | None = None,
     ) -> Episode:
-        """Build the lightweight Episode that carries this run's outcome.
-
-        One empty-step Trajectory named like the flow; the engine's enrichment
-        pass fills its Steps from gateway-captured traces (same shape
-        :func:`rllm.types._coerce_to_episode` builds for a ``None`` return).
-        ``termination_reason`` is ``TIMEOUT``/``ERROR`` when the harness itself
-        observed the outcome, or ``None`` on a clean exit (the engine maps that
-        to ``ENV_DONE`` — length/turn-cap aren't reliably recoverable from the
-        traces on this path, so they're not inferred).
+        """Outcome Episode for this run: one empty-step Trajectory (the engine
+        fills its Steps from gateway traces) tagged with the reason the harness
+        observed — TIMEOUT/ERROR, or None on a clean exit (engine → ENV_DONE).
         """
         metadata: dict = {}
         if error is not None:
@@ -323,16 +317,13 @@ class BaseCliHarness(SandboxedAgentFlow):
         )
 
     def run(self, task: Task, config: AgentConfig, *, env: Sandbox) -> Episode:
-        """Exec the CLI in the sandbox; let the gateway build the trajectory.
+        """Exec the CLI in the sandbox; the gateway captures its LLM calls.
 
-        The install has already happened by the time this runs — either
-        baked into the snapshot image or executed by the hook on a cold
-        sandbox. Returns an outcome :class:`~rllm.types.Episode` with one
-        empty-step Trajectory whose Steps the engine enriches from
-        gateway-captured traces, plus the ``termination_reason`` this run
-        observed (``TIMEOUT`` on the agent's wall-clock budget, ``ERROR`` on a
-        sandbox/exec failure, or ``None`` on a clean exit, which the engine
-        marks ``ENV_DONE``).
+        Install has already run (baked into the image, or by the hook on a cold
+        sandbox). Returns an outcome :class:`~rllm.types.Episode` (one empty-step
+        Trajectory the engine enriches from gateway traces) tagged with the
+        ``termination_reason`` this run observed: ``TIMEOUT`` (wall-clock budget),
+        ``ERROR`` (sandbox/exec failure), or ``None`` on a clean exit (→ ENV_DONE).
         """
         sandbox = env
         env_vars = self.build_env(task, config)
@@ -355,15 +346,12 @@ class BaseCliHarness(SandboxedAgentFlow):
         try:
             self._exec_agent(sandbox, cmd, timeout=timeout, env=env_vars)
         except SandboxCommandTimeout as e:
-            # Expected, not a failure: the agent spent its whole time budget; the
-            # captured steps are still scored by the verifier. INFO, not WARNING.
-            # Surfaced as TIMEOUT so compact filtering can avoid punishing it.
+            # Expected, not a failure: the agent spent its budget and the captured
+            # steps are still scored. TIMEOUT lets compact filtering skip it.
             logger.info("%s reached its time budget: %s", type(self).__name__, e)
             return self._outcome_episode(task, termination_reason=TerminationReason.TIMEOUT)
         except Exception as e:
-            # Surface as a warning for operator visibility; the gateway traces
-            # (if any LLM calls made it through before the failure) still drive
-            # enrichment, and the run is marked ERROR for compact filtering.
+            # Traces up to the failure still drive enrichment; mark ERROR.
             logger.warning("%s execution failed: %s", type(self).__name__, e)
             return self._outcome_episode(
                 task,
