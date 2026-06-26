@@ -1,10 +1,12 @@
 """Unit tests for ``derive_termination_reason``.
 
-The CLI-harness path returns an outcome Episode with ``termination_reason=None``
-on a clean exit; the engine then classifies *why* it ended from the enriched
-gateway Steps (last call's ``finish_reason``) and the harness's declared turn
-cap. This is what makes compact filtering work on the SandboxedAgentFlow path
-(everything used to come back ENV_DONE).
+On the CLI-harness path the harness itself sets TIMEOUT (wall-clock budget) and
+ERROR (sandbox/exec failure); anything that reaches the engine's fallback is a
+clean exit → ENV_DONE. We deliberately do NOT infer MAX_RESPONSE_LENGTH_EXCEEDED
+or MAX_TURNS_EXCEEDED from gateway traces here — the in-sandbox agent recovers
+from a truncated response (so a trailing ``finish_reason == "length"`` is
+coincidental, not terminal) and the trace count is LLM calls, not turns. These
+tests pin that behavior so the misleading branches don't get re-added.
 """
 
 from __future__ import annotations
@@ -19,31 +21,16 @@ def _episode(finish_reasons: list[str | None]) -> Episode:
     return Episode(trajectories=[Trajectory(name="t", steps=steps)])
 
 
-def test_length_finish_reason_maps_to_max_response_length():
-    # ...and wins even when the turn cap is also reached.
-    ep = _episode(["stop", "length"])
-    assert derive_termination_reason(ep, max_turns=2) == TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED
+def test_clean_exit_maps_to_env_done():
+    assert derive_termination_reason(_episode(["stop"])) == TerminationReason.ENV_DONE
 
 
-def test_step_count_at_cap_maps_to_max_turns():
-    ep = _episode(["stop", "stop", "stop"])
-    assert derive_termination_reason(ep, max_turns=3) == TerminationReason.MAX_TURNS_EXCEEDED
-
-
-def test_under_cap_maps_to_env_done():
-    ep = _episode(["stop", "stop", "stop"])
-    assert derive_termination_reason(ep, max_turns=10) == TerminationReason.ENV_DONE
-
-
-def test_no_cap_clean_exit_maps_to_env_done():
-    ep = _episode(["tool_calls", "stop"])
-    assert derive_termination_reason(ep, max_turns=None) == TerminationReason.ENV_DONE
+def test_trailing_length_finish_reason_is_not_treated_as_terminal():
+    # Terminus-2 recovers from truncation and keeps going, so a "length" on the
+    # final trace is not the reason the episode ended. Classifying it would, with
+    # base.yaml's mask, silently drop otherwise-fine (incl. successful) episodes.
+    assert derive_termination_reason(_episode(["stop", "length"])) == TerminationReason.ENV_DONE
 
 
 def test_empty_episode_maps_to_env_done():
-    assert derive_termination_reason(Episode(trajectories=[]), max_turns=5) == TerminationReason.ENV_DONE
-
-
-def test_missing_model_output_does_not_crash():
-    ep = Episode(trajectories=[Trajectory(name="t", steps=[Step(model_output=None)])])
-    assert derive_termination_reason(ep, max_turns=None) == TerminationReason.ENV_DONE
+    assert derive_termination_reason(Episode(trajectories=[])) == TerminationReason.ENV_DONE

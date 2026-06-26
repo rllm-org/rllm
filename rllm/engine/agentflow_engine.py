@@ -276,27 +276,27 @@ def _summarize_llm_latencies(traces: list[Any], agentflow_s: float) -> tuple[flo
     return llm_sum_s, min(merged_total, agentflow_s) if agentflow_s > 0 else merged_total
 
 
-def derive_termination_reason(episode: Episode, max_turns: int | None = None) -> TerminationReason:
-    """Classify why a clean-exit Episode ended, from its enriched gateway steps.
+def derive_termination_reason(episode: Episode) -> TerminationReason:
+    """Termination reason for a flow that finished without classifying itself.
 
-    Used when a flow (e.g. a CLI harness) finished without raising and left
-    ``termination_reason`` unset. Priority:
+    On the CLI-harness path the harness already sets ``TIMEOUT`` (wall-clock
+    budget) and ``ERROR`` (sandbox/exec failure) itself, so anything reaching
+    here is a clean exit → ``ENV_DONE``. We deliberately do NOT try to derive
+    ``MAX_RESPONSE_LENGTH_EXCEEDED`` or ``MAX_TURNS_EXCEEDED`` from the gateway
+    traces, because neither is recoverable from them on this path:
 
-    1. last step ``finish_reason == "length"`` → ``MAX_RESPONSE_LENGTH_EXCEEDED``
-    2. ``max_turns`` set and step count ``>= max_turns`` → ``MAX_TURNS_EXCEEDED``
-    3. otherwise → ``ENV_DONE``
+    * A per-call ``finish_reason == "length"`` is not episode-terminal — the
+      in-sandbox agent (e.g. Terminus-2) recovers from a truncated response and
+      keeps going (``terminus_2.py`` re-queries on ``OutputLengthExceededError``),
+      so a "length" on the final trace is coincidental, not the cause.
+    * The trace count is LLM *calls*, not turns — retries, length-recovery
+      re-queries and summarization inflate it — so it can't reliably detect the
+      turn cap. The true turn count lives only inside the sandbox driver.
 
-    (TODO: ``MAX_PROMPT_LENGTH_EXCEEDED`` — the prompt-overflow signal lives in
-    :func:`enrich_episode_with_traces`, which drops the malformed trailing trace
-    without recording why; surfacing it would need that function to flag the drop.)
+    Deriving either would mislabel and, since ``base.yaml`` masks both, silently
+    drop otherwise-fine (including successful) episodes. The argument is kept so
+    this stays the single seam where a harness-agnostic rule would live.
     """
-    steps = [s for traj in (episode.trajectories or []) for s in (traj.steps or [])]
-    if steps:
-        last = steps[-1].model_output
-        if last is not None and getattr(last, "finish_reason", None) == "length":
-            return TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED
-    if max_turns is not None and len(steps) >= max_turns:
-        return TerminationReason.MAX_TURNS_EXCEEDED
     return TerminationReason.ENV_DONE
 
 
@@ -762,12 +762,11 @@ class AgentFlowEngine:
         for signal in eval_output.signals:
             enriched.metrics[signal.name] = signal.value
 
-        # When the flow didn't classify the ending itself (e.g. a CLI harness
-        # that exited cleanly), derive it from the enriched gateway steps.
-        # Harness-set TIMEOUT/ERROR are preserved (the guard skips them).
+        # The harness classifies TIMEOUT/ERROR itself; anything else that reaches
+        # here is a clean exit → ENV_DONE. (See derive_termination_reason for why
+        # length / max-turns aren't inferred from gateway traces on this path.)
         if enriched.termination_reason is None:
-            max_turns = (enriched.metadata or {}).get("max_turns")
-            enriched.termination_reason = derive_termination_reason(enriched, max_turns=max_turns)
+            enriched.termination_reason = derive_termination_reason(enriched)
         return enriched
 
     def shutdown(self) -> None:

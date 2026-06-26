@@ -25,7 +25,6 @@ from rllm.harnesses.kimi_cli import KimiCliHarness
 from rllm.harnesses.mini_swe_agent import MiniSweAgentHarness
 from rllm.harnesses.opencode import OpenCodeHarness
 from rllm.harnesses.qwen_code import QwenCodeHarness
-from rllm.harnesses.terminus2 import Terminus2Harness
 from rllm.sandbox.protocol import SandboxCommandTimeout
 from rllm.types import AgentConfig, Episode, Task, TerminationReason
 
@@ -151,18 +150,6 @@ def test_run_marks_timeout_on_budget_exhaustion():
     assert isinstance(result, Episode)
     assert result.termination_reason == TerminationReason.TIMEOUT
     assert "error" not in result.metadata
-
-
-def test_run_stamps_max_turns_metadata_when_harness_caps_turns():
-    """A harness that declares a turn cap stamps it into metadata so the engine
-    can derive MAX_TURNS_EXCEEDED; harnesses without a cap stamp nothing."""
-    capped = Terminus2Harness(max_turns=30)
-    result = capped.run(_make_task(), _make_config(), env=FakeSandbox())
-    assert result.metadata["max_turns"] == 30
-
-    uncapped = OpenCodeHarness()
-    result = uncapped.run(_make_task(), _make_config(), env=FakeSandbox())
-    assert "max_turns" not in result.metadata
 
 
 @pytest.mark.parametrize(

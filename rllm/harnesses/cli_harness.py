@@ -307,17 +307,12 @@ class BaseCliHarness(SandboxedAgentFlow):
         One empty-step Trajectory named like the flow; the engine's enrichment
         pass fills its Steps from gateway-captured traces (same shape
         :func:`rllm.types._coerce_to_episode` builds for a ``None`` return).
-        ``termination_reason`` is left ``None`` for a clean exit — the engine
-        then derives it from the last call's ``finish_reason`` / ``max_turns``
-        (see :func:`rllm.engine.agentflow_engine.derive_termination_reason`).
-        It is set to ``TIMEOUT``/``ERROR`` when the harness itself observed the
-        outcome. ``metadata['max_turns']`` is stamped when the harness declares
-        a cap so the engine can derive ``MAX_TURNS_EXCEEDED``.
+        ``termination_reason`` is ``TIMEOUT``/``ERROR`` when the harness itself
+        observed the outcome, or ``None`` on a clean exit (the engine maps that
+        to ``ENV_DONE`` — length/turn-cap aren't reliably recoverable from the
+        traces on this path, so they're not inferred).
         """
         metadata: dict = {}
-        max_turns = getattr(self, "max_turns", None)
-        if max_turns is not None:
-            metadata["max_turns"] = int(max_turns)
         if error is not None:
             metadata["error"] = error
         return Episode(
@@ -336,8 +331,8 @@ class BaseCliHarness(SandboxedAgentFlow):
         empty-step Trajectory whose Steps the engine enriches from
         gateway-captured traces, plus the ``termination_reason`` this run
         observed (``TIMEOUT`` on the agent's wall-clock budget, ``ERROR`` on a
-        sandbox/exec failure, or ``None`` on a clean exit for the engine to
-        classify as done/length/max-turns).
+        sandbox/exec failure, or ``None`` on a clean exit, which the engine
+        marks ``ENV_DONE``).
         """
         sandbox = env
         env_vars = self.build_env(task, config)
@@ -376,5 +371,5 @@ class BaseCliHarness(SandboxedAgentFlow):
                 error={"message": str(e), "error_type": type(e).__name__},
             )
 
-        # Clean exit: let the engine derive done / length / max-turns from traces.
+        # Clean exit: the engine marks this ENV_DONE.
         return self._outcome_episode(task, termination_reason=None)
