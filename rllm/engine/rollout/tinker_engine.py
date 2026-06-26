@@ -11,7 +11,7 @@ from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine
 from rllm.engine.rollout.types import ImageProcessor, Processor, TinkerTokenInput, TinkerTokenOutput, TokenInput, Tokenizer, TokenOutput
 from rllm.parser import ChatTemplateParser
 from rllm.tools.tool_base import ToolCall
-from rllm.workflows import TerminationEvent, TerminationReason
+from rllm.types import TerminationEvent, TerminationReason
 
 """
 Utility functions for Tinker engine. Partly borrowed from
