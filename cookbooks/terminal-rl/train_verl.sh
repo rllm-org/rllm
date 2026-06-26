@@ -73,7 +73,7 @@ python -u train.py \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     rllm.workflow.n_parallel_tasks=64 \
     rllm.workflow.raise_on_error=false \
-    rllm.gateway.port=9090 \
+    rllm.gateway.port=9091 \
     trainer.logger="['console','wandb']" \
     trainer.project_name=terminal-rl \
     trainer.experiment_name=terminal-rl-terminus2-qwen3.5-4b-verl \

@@ -56,11 +56,11 @@
 
 set -euo pipefail
 
-export TERMINAL_SANDBOX_BACKEND="${TERMINAL_SANDBOX_BACKEND:-modal}"
+export TERMINAL_SANDBOX_BACKEND="${TERMINAL_SANDBOX_BACKEND:-daytona}"
 export TMAX_HARNESS="${TMAX_HARNESS:-terminus2}"
 export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-64}"
 export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
-export RLLM_MODAL_SANDBOX_TIMEOUT_S="${RLLM_MODAL_SANDBOX_TIMEOUT_S:-2400}"
+export RLLM_SANDBOX_TIMEOUT_S="${RLLM_SANDBOX_TIMEOUT_S:-2400}"
 
 # --- Fireworks scale knobs (the two distinct "replicas") -------------------
 #  TRAINER_REPLICAS  -> fireworks_config.policy_trainer_replica_count
@@ -98,6 +98,7 @@ python -u train.py \
     data.val_batch_size=-1 \
     rllm.data.max_prompt_length=51200 \
     rllm.data.max_response_length=16384 \
+    rllm.data.train_batch_size=1 \
     rllm.data.val_batch_size=-1 \
     rllm.data.seed=42 \
     rllm.compact_filtering.enable=true \
@@ -106,15 +107,14 @@ python -u train.py \
     rllm.algorithm.lr_schedule=constant \
     rllm.algorithm.kl_beta=0.0 \
     rllm.async_training.enable=true \
-    rllm.async_training.mini_batch_size=8 \
+    rllm.async_training.mini_batch_size=16 \
     rllm.async_training.fwd_bwd_group_size=1 \
     rllm.async_training.staleness_threshold=3.0 \
     rllm.async_training.trigger_parameter_sync_step=1 \
     rllm.async_training.partial_rollout=true \
-    rllm.workflow.n_parallel_tasks=256 \
+    rllm.workflow.n_parallel_tasks=512 \
     rllm.workflow.raise_on_error=false \
-    rllm.gateway.port=9091 \
-    rllm.gateway.tunnel=https://rllm.ngrok.dev \
+    rllm.gateway.port=9090 \
     rllm.gateway.cumulative_token_mode=true \
     rllm.gateway.renderer_family=qwen3.5 \
     rllm.trainer.total_epochs=1 \
