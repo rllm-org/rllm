@@ -227,12 +227,14 @@ def test_fireworks_engine_skips_chatparser_when_renderer_pinned(qwen_tokenizer):
     class _StubSampler: ...
 
     pinned = FireworksEngine(tokenizer=qwen_tokenizer, sampler=_StubSampler(), renderer_family="qwen3")
-    assert pinned.renderer is not None
+    assert pinned.unified_renderer is not None
     assert pinned.chat_parser is None
+    assert pinned.bypass_render_with_parser is False  # renderer owns rendering+parsing
 
     default = FireworksEngine(tokenizer=qwen_tokenizer, sampler=_StubSampler())
-    assert default.renderer is None
+    assert default.unified_renderer is None
     assert default.chat_parser is not None
+    assert default.bypass_render_with_parser is True
 
 
 def test_cookbook_renderer_name_prefix_match():
@@ -256,3 +258,53 @@ def test_resolve_cookbook_does_not_crash_when_absent(qwen_tokenizer, monkeypatch
     monkeypatch.setattr(qwen_tokenizer, "name_or_path", "zai-org/GLM-5.2", raising=False)
     res = resolve("zai-org/GLM-5.2", qwen_tokenizer)
     assert res.source in ("tinker", "chat_template")
+
+
+def test_assemble_model_output_uses_renderer_when_chat_parser_absent(qwen_tokenizer):
+    """With a unified renderer active (chat_parser=None), assemble_model_output must
+    parse the completion via the renderer instead of asserting chat_parser is set."""
+    pytest.importorskip("tinker")
+    try:
+        from rllm.engine.rollout.fireworks_engine import FireworksEngine
+    except Exception as e:
+        pytest.skip(f"FireworksEngine import failed: {e}")
+
+    class _StubSampler: ...
+
+    class _StubOutput:
+        def __init__(self, tokens):
+            self.tokens = tokens
+            self.logprobs = [0.0] * len(tokens)
+            self.stop_reason = "stop"
+
+    engine = FireworksEngine(tokenizer=qwen_tokenizer, sampler=_StubSampler(), renderer_family="qwen3")
+    assert engine.unified_renderer is not None and engine.chat_parser is None
+
+    completion = qwen_tokenizer.encode("hello", add_special_tokens=False) + engine.unified_renderer.get_stop_token_ids()[:1]
+    out = engine.assemble_model_output([1, 2, 3], _StubOutput(completion))  # must not raise
+    assert out.completion_ids == completion
+    assert out.prompt_ids == [1, 2, 3]
+    assert isinstance(out.content, str)
+    assert isinstance(out.tool_calls, list)
+
+
+def test_fireworks_engine_explicit_bypass_overrides_renderer(qwen_tokenizer):
+    """bypass_render_with_parser=True is an explicit escape hatch: force
+    ChatTemplateParser and skip the unified renderer, even when one is pinned."""
+    pytest.importorskip("tinker")
+    try:
+        from rllm.engine.rollout.fireworks_engine import FireworksEngine
+    except Exception as e:
+        pytest.skip(f"FireworksEngine import failed: {e}")
+
+    class _StubSampler: ...
+
+    engine = FireworksEngine(
+        tokenizer=qwen_tokenizer,
+        sampler=_StubSampler(),
+        renderer_family="qwen3",  # would normally pin the unified renderer
+        bypass_render_with_parser=True,
+    )
+    assert engine.unified_renderer is None
+    assert engine.chat_parser is not None
+    assert engine.bypass_render_with_parser is True
