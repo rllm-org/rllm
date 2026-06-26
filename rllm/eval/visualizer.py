@@ -28,6 +28,7 @@ import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 # --------------------------------------------------------------------------- #
 # Filesystem layer                                                            #
@@ -859,8 +860,12 @@ def _make_handler(root_path: Path, html_factory):
       * ``GET /api/runs/<id>/episodes/<file>``    → one episode JSON
       * other GETs                                → 404 (no static fall-through)
     """
-    safe_id = re.compile(r"^[A-Za-z0-9._-]+$")
-    safe_file = re.compile(r"^episode_[A-Za-z0-9._-]+\.json$")
+    # Run dirs / episode files routinely contain '@' (e.g. "terminal-bench@2.0")
+    # and '#' (model#deployment), so permit them. Path-traversal is still
+    # blocked by the ".."/"/"/"\\" checks below plus the _under_root guard,
+    # which both run *after* URL-decoding in do_GET.
+    safe_id = re.compile(r"^[A-Za-z0-9._@#-]+$")
+    safe_file = re.compile(r"^episode_[A-Za-z0-9._@#-]+\.json$")
     resolved_root = root_path.resolve()
 
     def _is_safe_run_id(rid: str) -> bool:
@@ -920,7 +925,7 @@ def _make_handler(root_path: Path, html_factory):
 
             m = re.match(r"^/api/runs/([^/]+)/index$", path)
             if m:
-                run_id = m.group(1)
+                run_id = unquote(m.group(1))
                 if not _is_safe_run_id(run_id):
                     return self.send_error(400, "Bad run id")
                 run_dir = (root_path / run_id).resolve()
@@ -933,7 +938,7 @@ def _make_handler(root_path: Path, html_factory):
 
             m = re.match(r"^/api/runs/([^/]+)/episodes/([^/]+)$", path)
             if m:
-                run_id, fname = m.group(1), m.group(2)
+                run_id, fname = unquote(m.group(1)), unquote(m.group(2))
                 if not _is_safe_run_id(run_id) or not safe_file.match(fname):
                     return self.send_error(400, "Bad path")
                 target = (root_path / run_id / "episodes" / fname).resolve()
