@@ -18,6 +18,7 @@ is inherited from ``TinkerEngine``.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import dataclasses
 import logging
 from typing import Any
@@ -28,7 +29,9 @@ from typing_extensions import override
 from rllm.engine.rollout.rollout_engine import ModelOutput
 from rllm.engine.rollout.tinker_engine import (
     TinkerEngine,
+    _convert_openai_messages,
     _flat_token_input_length,
+    _prepare_messages_with_tools,
 )
 from rllm.engine.rollout.types import (
     TinkerTokenInput,
@@ -49,6 +52,39 @@ _TRANSIENT_ERROR_MARKERS = (
     "_SSETruncationError",
     "closed the SSE stream mid-generation",
 )
+
+
+# Per-request inference headers (e.g. Fireworks session-affinity) injected into
+# DeploymentSampler requests. ``DeploymentSampler.async_completions_stream`` only
+# forwards body params and a fixed set of client-level headers, so there is no
+# per-call header hook; we patch ``_inference_headers`` to merge whatever the
+# current async context stashed here. A ContextVar is async-safe — each rollout
+# task carries its own copy, so concurrent trajectories don't clobber each
+# other's session-affinity key.
+_per_request_headers: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar("rllm_fw_request_headers", default=None)
+
+
+def _install_inference_header_patch() -> None:
+    """Patch ``DeploymentSampler._inference_headers`` to merge per-request headers.
+
+    Idempotent: re-imports / repeated calls are no-ops.
+    """
+    orig = DeploymentSampler._inference_headers
+    if getattr(orig, "_rllm_session_affinity_patch", False):
+        return
+
+    def _inference_headers(self):  # noqa: ANN001 - matches SDK signature
+        headers = orig(self)
+        extra = _per_request_headers.get()
+        if extra:
+            headers = {**headers, **extra}
+        return headers
+
+    _inference_headers._rllm_session_affinity_patch = True  # type: ignore[attr-defined]
+    DeploymentSampler._inference_headers = _inference_headers
+
+
+_install_inference_header_patch()
 
 
 class _EmptyCompletionIdsError(RuntimeError):
@@ -86,6 +122,11 @@ class FireworksEngine(TinkerEngine):
     ``TinkerTokenOutput`` are fully supported.
     """
 
+    # Signals the gateway handler to forward a per-trajectory ``rllm_session_id``
+    # so this engine can set Fireworks session-affinity headers (prefix-cache
+    # reuse across a rollout's turns). Other engines ignore the session id.
+    supports_session_affinity = True
+
     def __init__(
         self,
         tokenizer: Tokenizer,
@@ -100,6 +141,7 @@ class FireworksEngine(TinkerEngine):
         sample_timeout: int = 600,
         processor=None,
         router_replay: bool = False,
+        cumulative_token_mode: bool = False,
         **kwargs,
     ):
         """
@@ -137,13 +179,63 @@ class FireworksEngine(TinkerEngine):
         self.train_sampling_params = dict((sampling_params or {}).get("train", {}))
         self.val_sampling_params = dict((sampling_params or {}).get("val", {}))
 
-        # Chat template parser (same setup as TinkerEngine bypass mode)
-        self.bypass_render_with_parser = True
-        self.chat_parser = ChatTemplateParser.get_parser(
-            tokenizer,
-            processor=processor,
-            disable_thinking=disable_thinking,
-        )
+        # Rendering setup.
+        #
+        # Cumulative token mode: the gateway renders EVERY turn (turn-0 via the
+        # renderer's render_ids, turns 2+ via bridge_to_next_turn) and parses the
+        # completion via the renderer too, so the engine is a pure token-in /
+        # token-out sampler — it never renders messages or parses completions.
+        # We therefore build no ChatTemplateParser (which would crash here for
+        # models whose Jinja template the parser's equivalence self-check can't
+        # render, e.g. GLM) and no tinker renderer. assemble_model_output uses the
+        # raw-decode branch; get_model_response (the chat path) is never called.
+        self.cumulative_token_mode = cumulative_token_mode
+        self.raw_token_mode = cumulative_token_mode
+        self.renderer = None
+        if cumulative_token_mode:
+            self.chat_parser = None
+            self.bypass_render_with_parser = False
+            self.sample_timeout = sample_timeout
+            self.router_replay = router_replay
+            self.sampling_client = sampler
+            return
+        # Non-cumulative. Default: ChatTemplateParser bypass mode (Jinja
+        # chat-template models). Some models (e.g. DeepSeek-V4) ship no Jinja
+        # chat_template — they use a hand-rolled encoder exposed via the
+        # tinker/Fireworks renderer. Fall back to that renderer, using the
+        # non-bypass path the inherited assemble_model_output already supports.
+        try:
+            self.chat_parser = ChatTemplateParser.get_parser(
+                tokenizer,
+                processor=processor,
+                disable_thinking=disable_thinking,
+            )
+            self.bypass_render_with_parser = True
+        except Exception as err:
+            from tinker_cookbook import renderers as tc_renderers
+
+            from rllm.renderers._fw_register import ensure_registered
+            from rllm.renderers._tinker import tinker_renderer_name
+
+            model_name = getattr(tokenizer, "name_or_path", None)
+            ensure_registered()
+            renderer_name = tinker_renderer_name(model_name)
+            if renderer_name is None:
+                raise ValueError(
+                    f"FireworksEngine: tokenizer for {model_name!r} has no Jinja chat_template "
+                    "and no tinker/Fireworks renderer is registered for it. Add the model to "
+                    "rllm.renderers._tinker._FW_MODEL_RENDERER, or serve a model with a chat "
+                    "template."
+                ) from err
+            logger.info(
+                "No usable chat_template for %r (%s); rendering via tinker/Fireworks renderer %r.",
+                model_name,
+                err,
+                renderer_name,
+            )
+            self.chat_parser = None
+            self.bypass_render_with_parser = False
+            self.renderer = tc_renderers.get_renderer(renderer_name, tokenizer)
 
         self.sample_timeout = sample_timeout
         self.router_replay = router_replay
@@ -155,21 +247,39 @@ class FireworksEngine(TinkerEngine):
 
     @override
     async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
+        if self.raw_token_mode:
+            raise RuntimeError(
+                "FireworksEngine is in cumulative_token_mode (token-in/token-out only): the "
+                "gateway renders every turn, so get_model_response (message rendering) must not "
+                "be called. This means turn-0 fell back to the chat path because the gateway "
+                "renderer could not render the initial messages — fix the renderer/renderer_family "
+                "(it must not resolve to DefaultRenderer) rather than the engine."
+            )
         application_id = kwargs.pop("application_id", None)
 
         tools = kwargs.pop("tools", [])
         accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
         reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
 
-        prompt = self.chat_parser.parse(
-            messages,
-            add_generation_prompt=True,
-            is_first_msg=True,
-            tools=tools,
-            reasoning_effort=reasoning_effort,
-            accumulate_reasoning=accumulate_reasoning,
-        )
-        token_input = self.tokenizer.encode(prompt, add_special_tokens=False)
+        if self.bypass_render_with_parser:
+            prompt = self.chat_parser.parse(
+                messages,
+                add_generation_prompt=True,
+                is_first_msg=True,
+                tools=tools,
+                reasoning_effort=reasoning_effort,
+                accumulate_reasoning=accumulate_reasoning,
+            )
+            token_input = self.tokenizer.encode(prompt, add_special_tokens=False)
+        else:
+            # No chat_template: render via the tinker/Fireworks renderer (same
+            # path as TinkerEngine's non-bypass mode; parsed back by the
+            # inherited assemble_model_output).
+            converted = self._convert_images_to_content_list(messages)
+            tinker_messages = _convert_openai_messages(converted)
+            if tools:
+                tinker_messages = _prepare_messages_with_tools(self.renderer, tinker_messages, tools)
+            token_input = self.renderer.build_generation_prompt(tinker_messages).to_ints()
 
         if application_id is not None:
             kwargs["user"] = application_id
@@ -237,6 +347,10 @@ class FireworksEngine(TinkerEngine):
         requested_max_tokens = sampling_params.pop("max_tokens", requested_max_tokens)
         max_tokens = self._prepare_max_tokens(requested_max_tokens, input_length)
 
+        # Per-trajectory session id (gateway forwards it for affinity); it must
+        # NOT leak into the request body, so pop it before building sampling params.
+        session_id = kwargs.pop("rllm_session_id", None)
+
         for key in ("temperature", "top_p", "top_k", "user", "reasoning_effort"):
             if key in kwargs:
                 sampling_params[key] = kwargs.pop(key)
@@ -247,10 +361,21 @@ class FireworksEngine(TinkerEngine):
         if self.router_replay:
             sampling_params["include_routing_matrix"] = True
 
+        # Fireworks routes requests carrying the same session id to the same
+        # replica, so its per-replica prompt-prefix KV is reused across a
+        # trajectory's turns. Set once per turn from the trajectory id.
+        session_headers = None
+        if session_id:
+            session_headers = {
+                "x-multi-turn-session-id": str(session_id),
+                "x-session-affinity": str(session_id),
+            }
+
         raw, server_metrics = await self._completions_with_retry(
             prompt_ids,
             max_tokens,
             sampling_params,
+            session_headers=session_headers,
         )
 
         choice = raw["choices"][0]
@@ -296,21 +421,30 @@ class FireworksEngine(TinkerEngine):
         prompt_ids: list[int],
         max_tokens: int,
         sampling_kwargs: dict[str, Any],
+        session_headers: dict[str, str] | None = None,
     ) -> tuple[dict[str, Any], dict | None]:
         """Call ``DeploymentSampler.async_completions_stream`` with transient-error retries.
 
-        Returns (response_dict, server_metrics_dict)."""
+        ``session_headers``, when given, are merged into the request's HTTP
+        headers (via the ``_inference_headers`` patch) so Fireworks routes this
+        request to the trajectory's pinned replica. Returns
+        (response_dict, server_metrics_dict)."""
 
         for attempt in range(_MAX_SAMPLE_ATTEMPTS):
             try:
-                result, server_metrics = await self.sampling_client.async_completions_stream(
-                    prompt=prompt_ids,
-                    max_tokens=max_tokens,
-                    raw_output=True,
-                    logprobs=True,
-                    http_timeout=self.sample_timeout,
-                    **sampling_kwargs,
-                )
+                token = _per_request_headers.set(session_headers) if session_headers else None
+                try:
+                    result, server_metrics = await self.sampling_client.async_completions_stream(
+                        prompt=prompt_ids,
+                        max_tokens=max_tokens,
+                        raw_output=True,
+                        logprobs=True,
+                        http_timeout=self.sample_timeout,
+                        **sampling_kwargs,
+                    )
+                finally:
+                    if token is not None:
+                        _per_request_headers.reset(token)
                 metrics_dict = {k: v for k, v in dataclasses.asdict(server_metrics).items() if v is not None} if server_metrics else None
                 choice = (result.get("choices") or [{}])[0]
                 completion_ids = (choice.get("raw_output") or {}).get("completion_token_ids") or []

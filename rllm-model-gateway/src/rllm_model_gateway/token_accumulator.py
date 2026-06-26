@@ -68,6 +68,17 @@ class TokenAccumulator:
         self.turn_count: int = 0
         self.message_count: int = 0
         self._prefix_fingerprint: str = ""
+        # Per-message fingerprints of the last verified prefix, for diagnosing
+        # exactly where a non-cumulative request diverged (see divergence).
+        self._prefix_msg_fingerprints: list[str] = []
+        # trace_id of the most recently folded turn, so a duplicate/retried
+        # request can overwrite that turn's trace instead of appending a new one.
+        self.last_trace_id: str | None = None
+        # Outcome of the most recently folded/resampled turn, for diagnosing *why*
+        # a duplicate re-send happened (empty completion / length / normal-but-
+        # rejected). Set on every fold + resample.
+        self.last_finish_reason: str | None = None
+        self.last_completion_len: int = 0
 
     @property
     def cumulative_ids(self) -> list[int]:
@@ -98,18 +109,62 @@ class TokenAccumulator:
         prefix = messages[: self.message_count]
         return _messages_fingerprint(prefix) == self._prefix_fingerprint
 
-    def reset(self) -> None:
-        """Clear all accumulated state, restarting this session's history."""
+    def reset(self, reason: str = "") -> None:
+        """Clear all accumulated state, restarting this session's history.
+
+        ``reason`` (optional) is logged so the cause of a cumulative-mode break
+        is visible — see the call sites in ``ReverseProxy.handle``.
+        """
         logger.info(
-            "Resetting TokenAccumulator (was at turn %d, %d messages)",
+            "Resetting TokenAccumulator (was at turn %d, %d messages)%s",
             self.turn_count,
             self.message_count,
+            f" — {reason}" if reason else "",
         )
         self.prev_prompt_ids = []
         self.prev_completion_ids = []
         self.turn_count = 0
         self.message_count = 0
         self._prefix_fingerprint = ""
+        self._prefix_msg_fingerprints = []
+        self.last_trace_id = None
+        self.last_finish_reason = None
+        self.last_completion_len = 0
+
+    def record_outcome(self, finish_reason: str | None, completion_len: int) -> None:
+        """Remember the last folded/resampled turn's sampling outcome so a
+        subsequent duplicate re-send can report *why* the agent likely retried."""
+        self.last_finish_reason = finish_reason
+        self.last_completion_len = completion_len
+
+    def divergence(self, messages: list[dict[str, Any]]) -> tuple[str, int]:
+        """Diagnose why ``messages`` is not a cumulative extension of the stored
+        prefix. Returns ``(kind, index)``:
+
+          - ``("changed", i)``: ``messages[i]`` differs from the stored prefix's
+            message ``i`` — the prefix was *mutated*, not just appended to
+            (e.g. an edited/reformatted earlier message).
+          - ``("shrunk", n)``: the overlap matches but ``messages`` has only ``n``
+            messages (fewer than the verified prefix) — the conversation got
+            *shorter*, i.e. summarization / history unwind.
+          - ``("duplicate", n)``: ``messages`` is byte-identical to the verified
+            prefix (same length, every message matches) — the agent re-sent an
+            already-processed request, i.e. a retried / replayed sampling call.
+          - ``("clean", -1)``: no divergence found.
+
+        Only called on a reset (after ``is_cumulative`` already returned False),
+        so the per-message rehash here is off the hot path.
+        """
+        prior = self._prefix_msg_fingerprints
+        overlap = min(len(messages), len(prior))
+        for i in range(overlap):
+            if _messages_fingerprint([messages[i]]) != prior[i]:
+                return ("changed", i)
+        if len(messages) < len(prior):
+            return ("shrunk", len(messages))
+        if len(messages) == len(prior):
+            return ("duplicate", len(messages))
+        return ("clean", -1)
 
     def ingest_turn(self, prompt_token_ids: list[int], completion_token_ids: list[int]) -> None:
         """Record the token IDs from a completed turn.
@@ -123,10 +178,46 @@ class TokenAccumulator:
         self.prev_completion_ids = list(completion_token_ids)
         self.turn_count += 1
 
+    def resample_completion(self, completion_token_ids: list[int]) -> None:
+        """Replace the most recent turn's completion *in place* — used when the
+        agent re-sends an already-folded turn (a retry). The prompt
+        (``prev_prompt_ids``), ``turn_count``, ``message_count`` and prefix
+        fingerprints are unchanged, so the cumulative chain is preserved and the
+        next real turn still extends it. Only the sampled completion is swapped
+        for the retry's fresh sample.
+        """
+        self.prev_completion_ids = list(completion_token_ids)
+
     def update_prefix(self, messages: list[dict[str, Any]]) -> None:
         """Snapshot the current message list as the verified prefix."""
         self.message_count = len(messages)
         self._prefix_fingerprint = _messages_fingerprint(messages)
+        self._prefix_msg_fingerprints = [_messages_fingerprint([m]) for m in messages]
+
+    def build_first_prompt(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> list[int] | None:
+        """Construct the prompt token IDs for the FIRST turn (turn 0).
+
+        Renders the initial message list from scratch via the renderer's
+        ``render_ids`` (with a trailing generation prompt). Routing turn 0 through
+        the *same* renderer that bridges every later turn is what makes cumulative
+        mode drift-free: otherwise turn 0 would be tokenized by the engine's chat
+        template and turns 2+ by the renderer's bridge — two tokenizers stitched
+        mid-trajectory, which only coincidentally agree per model.
+
+        Returns ``None`` if the renderer cannot render the messages, so the caller
+        can fall back to the chat path (which then seeds the accumulator as before).
+        """
+        try:
+            token_ids = self.renderer.render_ids(messages, tools=tools, add_generation_prompt=True)
+        except Exception as err:  # noqa: BLE001 - fall back to the chat path on any render failure
+            logger.warning("render_ids failed for first turn (%s); falling back to chat path", err)
+            return None
+        return list(token_ids) if token_ids else None
 
     def build_next_prompt(
         self,

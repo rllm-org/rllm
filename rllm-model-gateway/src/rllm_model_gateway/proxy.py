@@ -65,6 +65,44 @@ def _strip_logprobs(response: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _tool_call_to_openai(tc: Any, index: int) -> dict[str, Any]:
+    """Convert a renderer ToolCall to OpenAI ``tool_calls`` entry format.
+
+    Handles the shapes ``parse_response`` may return: an object with
+    ``name``/``arguments``, an object with ``function.name``/
+    ``function.arguments``, or a dict. ``arguments`` is JSON-encoded (OpenAI
+    sends it as a string).
+    """
+    fn = getattr(tc, "function", None)
+    if fn is not None:
+        name, arguments = getattr(fn, "name", ""), getattr(fn, "arguments", {})
+    elif isinstance(tc, dict):
+        name, arguments = tc.get("name", ""), tc.get("arguments", {})
+    else:
+        name, arguments = getattr(tc, "name", ""), getattr(tc, "arguments", {})
+    if not isinstance(arguments, str):
+        arguments = json.dumps(arguments)
+    return {"id": f"call_{index}", "type": "function", "function": {"name": name, "arguments": arguments}}
+
+
+def _parsed_response_to_message(parsed: Any) -> dict[str, Any]:
+    """Build an OpenAI assistant message from a renderer ``ParsedResponse``.
+
+    Matches the shape the chat-completions endpoint returns — clean ``content``,
+    plus ``reasoning_content`` and structured ``tool_calls`` when present — so
+    cumulative-mode (token-in) turns are consumed identically to the first
+    (chat-path) turn instead of dumping the raw completion text into ``content``.
+    """
+    message: dict[str, Any] = {"role": "assistant", "content": getattr(parsed, "content", "") or ""}
+    reasoning = getattr(parsed, "reasoning_content", "") or ""
+    if reasoning:
+        message["reasoning_content"] = reasoning
+    tool_calls = getattr(parsed, "tool_calls", None) or []
+    if tool_calls:
+        message["tool_calls"] = [_tool_call_to_openai(tc, i) for i, tc in enumerate(tool_calls)]
+    return message
+
+
 class ReverseProxy:
     """Forward requests to inference workers, capture traces.
 
@@ -154,9 +192,49 @@ class ReverseProxy:
             if acc.should_rewrite():
                 messages = request_body.get("messages", [])
                 if not acc.is_cumulative(messages):
-                    # Message history diverged — reset and fall through to
-                    # normal chat path (treated as fresh turn-0).
-                    acc.reset()
+                    kind, idx = acc.divergence(messages)
+                    # Duplicate / retried request (byte-identical to the already-
+                    # folded turn): the agent re-sent the same turn (its prior
+                    # attempt was rejected/failed). Re-sample that turn *in place*
+                    # from its existing prompt and overwrite its trace, instead of
+                    # resetting — so the cumulative chain isn't torn down and the
+                    # trajectory isn't split into two steps. Non-streaming only;
+                    # streaming retries fall through to reset below.
+                    if kind == "duplicate" and not is_stream and acc.prev_prompt_ids:
+                        # Report the prior attempt's outcome so the *cause* of the
+                        # re-send is visible: finish_reason=length → still length;
+                        # completion=0 → empty/failed response (deployment/infra);
+                        # finish_reason=stop with completion>0 → a valid response
+                        # the agent rejected (look agent-side, e.g. parse).
+                        logger.info(
+                            "Re-sampling duplicate request in place (session=%s, turn=%d, %d msgs); prior attempt: finish_reason=%s, completion=%d tok — chain preserved",
+                            session_id,
+                            acc.turn_count,
+                            acc.message_count,
+                            acc.last_finish_reason,
+                            acc.last_completion_len,
+                        )
+                        return await self._handle_cumulative_turn(
+                            request,
+                            request_body,
+                            session_id,
+                            acc,
+                            list(acc.prev_prompt_ids),
+                            originally_requested_logprobs,
+                            is_retry=True,
+                        )
+                    # Otherwise reset and fall through to the normal chat path
+                    # (fresh turn-0). Log *why* so resets can be root-caused.
+                    if kind == "changed":
+                        role = messages[idx].get("role", "?") if idx < len(messages) else "?"
+                        reason = f"prefix not append-only: msg {idx} (role={role}) changed vs verified prefix"
+                    elif kind == "shrunk":
+                        reason = f"history shrank to {idx} msgs (verified prefix was {acc.message_count}); summarization/unwind"
+                    elif kind == "duplicate":
+                        reason = f"duplicate request ({idx} msgs); resetting (streaming retry or no prior prompt to re-sample)"
+                    else:
+                        reason = f"non-cumulative message list (len={len(messages)} <= prefix {acc.message_count})"
+                    acc.reset(reason)
                 else:
                     new_messages = extract_new_messages(messages, acc.message_count)
                     token_ids = None
@@ -171,13 +249,37 @@ class ReverseProxy:
                             token_ids,
                             originally_requested_logprobs,
                         )
-                    # No new messages, or the renderer couldn't prove the
-                    # prefix-extension contract (e.g. DefaultRenderer, or an
-                    # assistant message in the new slice). Reset so this turn is
-                    # re-ingested as a fresh turn-0 on the chat path; otherwise
-                    # the stale prefix would drop this turn's completion tokens
-                    # from the next cumulative prompt and break prefix-extension.
-                    acc.reset()
+                    # No bridgeable new messages, or the renderer couldn't prove
+                    # the prefix-extension contract (DefaultRenderer, assistant in
+                    # the new slice, multimodal, a renderer error). Reset so this
+                    # turn is re-ingested as a fresh turn-0 on the chat path;
+                    # otherwise the stale prefix would drop this turn's completion
+                    # tokens from the next cumulative prompt and break extension.
+                    # Log which case it was + the new-slice shape to root-cause.
+                    if not new_messages:
+                        raw_roles = [m.get("role") for m in messages[acc.message_count :]]
+                        reason = f"no bridgeable new messages (raw new-slice roles={raw_roles})"
+                    else:
+                        reason = f"bridge returned None (new-slice roles={[m.get('role') for m in new_messages]}, content_types={[type(m.get('content')).__name__ for m in new_messages]})"
+                    acc.reset(reason)
+            else:
+                # First turn (turn 0): render the initial messages from scratch via
+                # the renderer and route through the *same* token-in path as later
+                # turns, so the ENTIRE trajectory is tokenized by one renderer — no
+                # chat-template-vs-renderer seam at the turn-0/turn-1 boundary. Falls
+                # back to the chat path if the renderer can't render turn 0 (the chat
+                # path then seeds the accumulator via its own turn-0 ingest below).
+                messages = request_body.get("messages", [])
+                token_ids = acc.build_first_prompt(messages, tools=request_body.get("tools")) if messages else None
+                if token_ids is not None:
+                    return await self._handle_cumulative_turn(
+                        request,
+                        request_body,
+                        session_id,
+                        acc,
+                        token_ids,
+                        originally_requested_logprobs,
+                    )
 
         if is_stream:
             return await self._handle_streaming(request, body, request_body, session_id, originally_requested_logprobs)
@@ -198,14 +300,18 @@ class ReverseProxy:
         t0 = time.perf_counter()
 
         if self.local_handler is not None:
-            # In-process path: call handler directly, no HTTP
+            # In-process path: call handler directly, no HTTP.
+            # Forward the rollout session id so affinity-aware engines (Fireworks)
+            # can pin a trajectory's turns to one replica for prefix-cache reuse.
+            if session_id:
+                request_body["rllm_session_id"] = session_id
             response_body = await self.local_handler(request_body)
             status_code = 200
         else:
             # HTTP proxy path
             worker = self.router.route(session_id)
             url = self._build_url(worker.api_url, request.url.path, str(request.url.query))
-            headers = self._forward_headers(request)
+            headers = self._forward_headers(request, session_id)
             try:
                 resp = await self._send_with_retry(
                     method=request.method,
@@ -240,6 +346,10 @@ class ReverseProxy:
                     if prompt_ids or completion_ids:
                         acc.ingest_turn(prompt_ids, completion_ids)
                         acc.update_prefix(request_body.get("messages", []))
+                        # Remember this turn's trace so a duplicate/retried turn-0
+                        # request can overwrite it instead of appending a new row.
+                        acc.last_trace_id = trace.trace_id
+                        acc.record_outcome((response_body.get("choices") or [{}])[0].get("finish_reason"), len(completion_ids))
 
         # Sanitise response
         needs_strip_vllm = self.strip_vllm
@@ -270,17 +380,23 @@ class ReverseProxy:
         acc: TokenAccumulator,
         token_ids: list[int],
         originally_requested_logprobs: bool = False,
+        is_retry: bool = False,
     ) -> Response:
         """Rewrite chat/completions to /v1/completions with pre-tokenized prompt.
 
         ``token_ids`` is the full bridge-extended prompt for this turn, built
         by ``acc.build_next_prompt`` in ``handle()``.
 
+        ``is_retry``: this is a re-sample of an already-folded turn (a duplicate
+        request). The completion is swapped in place (``resample_completion``)
+        and its trace is overwritten, rather than folding a new turn — keeping
+        the cumulative chain intact. Retries are routed non-streaming.
+
         Respects the original stream setting: if the client requested streaming,
         we stream from vLLM and translate completions chunks to chat format in
         real-time.
         """
-        is_stream = request_body.get("stream", False)
+        is_stream = request_body.get("stream", False) and not is_retry
 
         # Construct completions request: forward everything except chat-specific fields
         completions_body = {k: v for k, v in request_body.items() if k not in ("messages", "stream", "stream_options", "tools", "tool_choice")}
@@ -297,6 +413,7 @@ class ReverseProxy:
             acc,
             token_ids,
             originally_requested_logprobs,
+            is_retry=is_retry,
         )
 
     async def _handle_cumulative_non_streaming(
@@ -308,48 +425,89 @@ class ReverseProxy:
         acc: TokenAccumulator,
         token_ids: list[int],
         originally_requested_logprobs: bool = False,
+        is_retry: bool = False,
     ) -> Response:
-        """Non-streaming cumulative turn: send non-streaming to vLLM, return JSON."""
+        """Non-streaming cumulative turn: send pre-tokenized prompt, return JSON.
+
+        Routes to the in-process ``local_handler`` (e.g. Tinker) when present,
+        otherwise POSTs ``/v1/completions`` to a vLLM worker. Both return a
+        completions-style body carrying ``prompt_token_ids`` + ``token_ids``.
+        """
         t0 = time.perf_counter()
 
-        worker = self.router.route(session_id)
-        url = self._build_url(worker.api_url, "/v1/completions", "")
-        headers = self._forward_headers(request)
-        raw_body = json.dumps(completions_body).encode()
-        try:
-            resp = await self._send_with_retry(
-                method="POST",
-                url=url,
-                content=raw_body,
-                headers=headers,
-            )
-            content = resp.content
-            status_code = resp.status_code
-        finally:
-            self.router.release(worker.url)
+        if self.local_handler is not None:
+            # In-process path (Tinker): sample directly from the pre-tokenized
+            # prompt; no HTTP worker, no re-tokenization.
+            if session_id:
+                completions_body["rllm_session_id"] = session_id
+            response_body = await self.local_handler(completions_body)
+            status_code = 200
+        else:
+            worker = self.router.route(session_id)
+            url = self._build_url(worker.api_url, "/v1/completions", "")
+            headers = self._forward_headers(request, session_id)
+            raw_body = json.dumps(completions_body).encode()
+            try:
+                resp = await self._send_with_retry(
+                    method="POST",
+                    url=url,
+                    content=raw_body,
+                    headers=headers,
+                )
+                content = resp.content
+                status_code = resp.status_code
+            finally:
+                self.router.release(worker.url)
 
-        try:
-            response_body = json.loads(content)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            response_body = {}
+            try:
+                response_body = json.loads(content)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                response_body = {}
 
         latency_ms = (time.perf_counter() - t0) * 1000
 
         prompt_token_ids = extract_prompt_token_ids(response_body) or token_ids
         completion_token_ids = extract_completion_token_ids(response_body)
 
-        acc.ingest_turn(prompt_token_ids, completion_token_ids)
-        acc.update_prefix(request_body.get("messages", []))
+        if is_retry:
+            # Duplicate/retried turn: swap the completion in place (don't advance
+            # turn_count/message_count) so the cumulative chain stays intact.
+            acc.resample_completion(completion_token_ids)
+        else:
+            acc.ingest_turn(prompt_token_ids, completion_token_ids)
+            acc.update_prefix(request_body.get("messages", []))
+        # Record this turn's outcome so a later duplicate re-send can report why.
+        acc.record_outcome((response_body.get("choices") or [{}])[0].get("finish_reason"), len(completion_token_ids))
 
-        # Translate to chat format
+        # Translate completions response → chat format. Parse the completion into
+        # the structured shape the chat endpoint returns (clean content +
+        # reasoning_content + tool_calls) via the renderer, so cumulative turns
+        # are consumed identically to the chat-path first turn. /v1/completions
+        # returns the model's raw text (e.g. "reasoning</think>answer" or raw
+        # tool-call markup for thinking/tool models); dumping that verbatim into
+        # `content` breaks the agent's action/tool parsing on every cumulative
+        # turn. Fall back to the raw text if the renderer can't parse it.
         choices = response_body.get("choices") or []
         if choices:
             first_choice = choices[0]
-            first_choice["message"] = {"role": "assistant", "content": first_choice.pop("text", "")}
+            raw_text = first_choice.pop("text", "")
+            message: dict[str, Any] | None = None
+            if self.renderer is not None and completion_token_ids:
+                try:
+                    parsed = self.renderer.parse_response(list(completion_token_ids))
+                    message = _parsed_response_to_message(parsed)
+                except Exception as err:  # noqa: BLE001 - never break the response on a parse error
+                    logger.warning("cumulative parse_response failed (%s); falling back to raw text", err)
+            first_choice["message"] = message if message is not None else {"role": "assistant", "content": raw_text}
         response_body["object"] = "chat.completion"
 
         if session_id and response_body:
             trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=request.state.weight_version)
+            if is_retry and acc.last_trace_id:
+                # Overwrite the rejected attempt's trace (stores upsert by
+                # trace_id), so the trajectory keeps one row for this turn.
+                trace.trace_id = acc.last_trace_id
+            acc.last_trace_id = trace.trace_id
             await self._persist(trace)
 
         sanitized = response_body
@@ -375,11 +533,16 @@ class ReverseProxy:
         token_ids: list[int],
     ) -> StreamingResponse:
         """Streaming cumulative turn: stream from vLLM, translate chunks to chat format."""
+        if self.local_handler is not None:
+            # In-process backends (Tinker) don't stream; synthesize an SSE
+            # stream from a single pre-tokenized completion call.
+            return await self._handle_cumulative_streaming_local(request, request_body, completions_body, session_id, acc, token_ids)
+
         completions_body["stream"] = True
 
         worker = self.router.route(session_id)
         url = self._build_url(worker.api_url, "/v1/completions", "")
-        headers = self._forward_headers(request)
+        headers = self._forward_headers(request, session_id)
         raw_body = json.dumps(completions_body).encode()
 
         assert self._http is not None
@@ -502,6 +665,99 @@ class ReverseProxy:
             status_code=resp.status_code,
         )
 
+    async def _handle_cumulative_streaming_local(
+        self,
+        request: Request,
+        request_body: dict[str, Any],
+        completions_body: dict[str, Any],
+        session_id: str,
+        acc: TokenAccumulator,
+        token_ids: list[int],
+    ) -> StreamingResponse:
+        """Cumulative streaming via the in-process handler (fake-streaming).
+
+        The local handler returns a full completion in one shot; we ingest its
+        token IDs into the accumulator, translate to chat format, and emit it as
+        a synthesized SSE stream (role → content+tokens → finish → [DONE]).
+        """
+        assert self.local_handler is not None
+        t0 = time.perf_counter()
+        if session_id:
+            completions_body["rllm_session_id"] = session_id
+        response_body = await self.local_handler(completions_body)
+        latency_ms = (time.perf_counter() - t0) * 1000
+
+        prompt_token_ids = extract_prompt_token_ids(response_body) or token_ids
+        completion_token_ids = extract_completion_token_ids(response_body)
+        acc.ingest_turn(prompt_token_ids, completion_token_ids)
+        acc.update_prefix(request_body.get("messages", []))
+
+        choices = response_body.get("choices") or []
+        content = choices[0].pop("text", "") if choices else ""
+        finish_reason = (choices[0].get("finish_reason") if choices else None) or "stop"
+        completion_logprobs = choices[0].get("logprobs") if choices else None
+
+        if session_id and response_body:
+            chat_body = dict(response_body)
+            chat_body["object"] = "chat.completion"
+            if chat_body.get("choices"):
+                chat_body["choices"][0]["message"] = {"role": "assistant", "content": content}
+            trace = build_trace_record(session_id, request_body, chat_body, latency_ms, weight_version=request.state.weight_version)
+            await self._persist(trace)
+
+        chat_id = response_body.get("id", "chatcmpl-local")
+        created = response_body.get("created", int(time.time()))
+        model = response_body.get("model", "")
+        usage = response_body.get("usage", {})
+
+        def _sanitize_chunk(chunk: dict[str, Any]) -> dict[str, Any]:
+            return strip_vllm_fields(chunk) if self.strip_vllm else chunk
+
+        async def event_generator():
+            def _sse(data: str) -> str:
+                return f"data: {data}\n\n"
+
+            yield _sse(
+                json.dumps(
+                    {
+                        "id": chat_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
+                    }
+                )
+            )
+            yield _sse(
+                json.dumps(
+                    _sanitize_chunk(
+                        {
+                            "id": chat_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None, "token_ids": completion_token_ids, "logprobs": completion_logprobs}],
+                            "prompt_token_ids": prompt_token_ids,
+                        }
+                    )
+                )
+            )
+            yield _sse(
+                json.dumps(
+                    {
+                        "id": chat_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+                        "usage": usage,
+                    }
+                )
+            )
+            yield _sse("[DONE]")
+
+        return StreamingResponse(event_generator(), media_type="text/event-stream", status_code=200)
+
     # ------------------------------------------------------------------
     # Streaming (SSE)
     # ------------------------------------------------------------------
@@ -519,7 +775,7 @@ class ReverseProxy:
 
         worker = self.router.route(session_id)
         url = self._build_url(worker.api_url, request.url.path, str(request.url.query))
-        headers = self._forward_headers(request)
+        headers = self._forward_headers(request, session_id)
 
         assert self._http is not None
         upstream = self._http.stream(
@@ -800,5 +1056,13 @@ class ReverseProxy:
         return url
 
     @staticmethod
-    def _forward_headers(request: Request) -> dict[str, str]:
-        return {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
+    def _forward_headers(request: Request, session_id: str | None = None) -> dict[str, str]:
+        headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
+        # Pin a trajectory's turns to one replica so Fireworks reuses its
+        # prompt-prefix KV (caching is per-replica). The training path sets these
+        # via the rollout engine; the HTTP path (eval) does it here. No-op for
+        # non-Fireworks upstreams; setdefault lets a client pin its own value.
+        if session_id:
+            headers.setdefault("x-session-affinity", str(session_id))
+            headers.setdefault("x-multi-turn-session-id", str(session_id))
+        return headers

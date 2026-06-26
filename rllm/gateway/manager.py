@@ -4,7 +4,7 @@ Two classes share most of the lifecycle (uvicorn-on-thread or subprocess,
 trace store, session API). They differ in how upstream workers are
 registered and what request-body injection the middleware applies.
 
-* :class:`GatewayManager` — training. Workers come from a verl/tinker
+* :class:`GatewayManager` — training. Workers come from a verl/tinker/fireworks
   rollout engine via :meth:`start(rollout_engine)`. Injects ``logprobs``
   and ``return_token_ids`` into request bodies (vLLM needs both for the
   loss math downstream).
@@ -159,8 +159,8 @@ class GatewayManager:
         from rllm.gateway.tunnel import parse_tunnel
 
         self.public_url, self.tunnel_backend = parse_tunnel(gw_cfg.get("tunnel", None))
-        # The gateway always pins ``body.model`` to whatever the trainer is serving
-        self.model: str | None = config.get("model", {}).get("name", None)
+        _model_cfg = config.get("model", {})
+        self.model: str | None = _model_cfg.get("tokenizer_model") or _model_cfg.get("name", None)
 
         # Cumulative token mode: drift-free multi-turn token forwarding. The
         # gateway loads the tokenizer from the served model path. renderers
@@ -207,11 +207,11 @@ class GatewayManager:
         """Start the gateway and register inference workers.
 
         For VerlEngine: registers the existing vLLM server addresses.
-        For TinkerEngine: creates an in-process handler (no sidecar needed).
+        For TinkerEngine / FireworksEngine: creates an in-process handler (no sidecar needed).
         """
         engine_cls = type(rollout_engine).__name__
 
-        if engine_cls == "TinkerEngine":
+        if engine_cls in ("TinkerEngine", "FireworksEngine"):
             # In-process handler — no HTTP backend, no worker registration
             from rllm.gateway.tinker_adapter import create_tinker_handler
 
@@ -227,6 +227,7 @@ class GatewayManager:
             for url in worker_urls:
                 worker_id = self.client.add_worker(url=url)
                 logger.info("Registered worker %s -> %s", worker_id, url)
+
         else:
             logger.warning("Unknown engine type %s — no workers registered", engine_cls)
 
@@ -384,6 +385,40 @@ class GatewayManager:
         self._process.terminate()
         raise TimeoutError(f"Gateway did not become healthy within {_HEALTH_POLL_TIMEOUT}s")
 
+    def _build_cumulative_renderer(self) -> Any:
+        """Build the cumulative-mode renderer on the rllm side for injection.
+
+        Returns ``None`` when cumulative mode is off or no model is set (the
+        gateway then builds a prime-rl renderer from config itself). Routes via
+        ``rllm.renderers.resolve``: prime-rl for supported models (token bridge),
+        the tinker/Fireworks adapter (with a generic bridge) for the rest
+        (DeepSeek-V4, Gemma-4, …).
+        """
+        if not self.cumulative_token_mode or not self.model:
+            return None
+        try:
+            from transformers import AutoTokenizer
+
+            from rllm.renderers import resolve
+
+            tokenizer = AutoTokenizer.from_pretrained(self.model)
+            family = self.renderer_family if self.renderer_family and self.renderer_family != "auto" else None
+            renderer = resolve(self.model, tokenizer, renderer_family=family)
+            logger.info(
+                "Injecting %s for cumulative token mode (model=%s, has_bridge=%s)",
+                type(renderer).__name__,
+                self.model,
+                getattr(renderer, "has_bridge", "?"),
+            )
+            return renderer
+        except Exception as err:  # noqa: BLE001
+            logger.warning(
+                "Could not build a cumulative-mode renderer for %s (%s); the gateway will build a prime-rl renderer from config instead.",
+                self.model,
+                err,
+            )
+            return None
+
     def _start_thread(self, local_handler: Any = None) -> None:
         """Start gateway in a background thread using create_app + uvicorn."""
         import uvicorn
@@ -401,7 +436,15 @@ class GatewayManager:
             cumulative_token_mode=self.cumulative_token_mode,
             renderer_family=self.renderer_family,
         )
-        app = create_app(config=gw_config, local_handler=local_handler)
+
+        # In-process (thread) mode: build the cumulative-mode renderer here, on the
+        # rllm side, and inject it. This keeps the gateway package free of
+        # tinker/Fireworks deps while still supporting models prime-rl lacks (e.g.
+        # DeepSeek-V4) — rllm.renderers.resolve routes those to the tinker/Fireworks
+        # renderer with a generic cross-turn bridge. prime-rl-supported models
+        # resolve to prime-rl (token bridge), same as before.
+        injected_renderer = self._build_cumulative_renderer()
+        app = create_app(config=gw_config, local_handler=local_handler, renderer=injected_renderer)
 
         uvi_config = uvicorn.Config(
             app,

@@ -108,6 +108,24 @@ def _load_policy(dotted_path: str):
 
 
 # ------------------------------------------------------------------
+# Cumulative-mode renderer
+# ------------------------------------------------------------------
+
+
+def _renderer_has_bridge(renderer: object) -> bool:
+    """Whether ``renderer`` provides a real cross-turn bridge.
+
+    Renderers may carry an explicit ``has_bridge`` flag (e.g. an injected
+    rllm renderer); prime-rl renderers don't, so we treat anything but
+    ``DefaultRenderer`` (whose bridge always returns ``None``) as bridge-capable.
+    """
+    flag = getattr(renderer, "has_bridge", None)
+    if flag is not None:
+        return bool(flag)
+    return type(renderer).__name__ != "DefaultRenderer"
+
+
+# ------------------------------------------------------------------
 # App factory
 # ------------------------------------------------------------------
 
@@ -116,8 +134,17 @@ def create_app(
     config: GatewayConfig | None = None,
     store: TraceStore | None = None,
     local_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+    renderer: object | None = None,
 ) -> FastAPI:
-    """Create and return a fully configured FastAPI application."""
+    """Create and return a fully configured FastAPI application.
+
+    ``renderer``: an optional pre-built cumulative-mode renderer. The in-process
+    (thread-mode) ``GatewayManager`` injects one here — built on the rllm side via
+    ``rllm.renderers.resolve`` so it can support models prime-rl lacks (e.g.
+    DeepSeek-V4) without the gateway depending on tinker/Fireworks. When ``None``
+    and cumulative mode is on, the gateway builds a prime-rl renderer from
+    ``config`` (its only renderer dependency).
+    """
     if config is None:
         config = GatewayConfig()
 
@@ -148,50 +175,48 @@ def create_app(
             )
         )
 
-    # Build the renderer for cumulative token mode. The renderer owns
-    # message↔token conversion and the cross-turn bridge (see
-    # token_accumulator.TokenAccumulator). The tokenizer is loaded from the
-    # served model path (``config.model``), which we assume is a complete,
-    # unmodified HuggingFace checkpoint.
-    renderer = None
+    # Renderer for cumulative token mode. The renderer owns message↔token
+    # conversion and the cross-turn bridge (see token_accumulator.TokenAccumulator).
+    # If one was injected (in-process mode), use it as-is. Otherwise build a
+    # prime-rl renderer from config — the gateway's only renderer dependency.
+    # The tokenizer is loaded from the served model path (``config.model``),
+    # which we assume is a complete, unmodified HuggingFace checkpoint.
     if config.cumulative_token_mode:
-        if not config.model:
-            raise ValueError("cumulative_token_mode=True requires 'model' to be set in GatewayConfig (path to the served HuggingFace checkpoint).")
-        try:
-            from renderers import create_renderer
-            from transformers import AutoTokenizer
-        except ImportError as err:
-            raise ImportError("cumulative_token_mode requires the 'renderers' and 'transformers' packages. Install them with: pip install renderers transformers") from err
+        if renderer is None:
+            if not config.model:
+                raise ValueError("cumulative_token_mode=True requires 'model' to be set in GatewayConfig (path to the served HuggingFace checkpoint).")
+            try:
+                from renderers import create_renderer
+                from transformers import AutoTokenizer
+            except ImportError as err:
+                raise ImportError("cumulative_token_mode requires the 'renderers' and 'transformers' packages. Install them with: pip install renderers transformers") from err
 
-        tokenizer = AutoTokenizer.from_pretrained(config.model)
+            tokenizer = AutoTokenizer.from_pretrained(config.model)
+            # renderer_family="auto" resolves by matching the tokenizer's
+            # name_or_path against renderers' MODEL_RENDERER_MAP; a local/custom
+            # checkpoint path misses and falls back to DefaultRenderer (no bridge).
+            renderer = create_renderer(tokenizer, renderer=config.renderer_family)
+            logger.info(
+                "Built %s (family=%r) from %s for cumulative token mode",
+                type(renderer).__name__,
+                config.renderer_family,
+                config.model,
+            )
+        else:
+            logger.info("Using injected %s for cumulative token mode", type(renderer).__name__)
 
-        # renderer_family="auto" lets renderers resolve the family by matching the
-        # tokenizer's name_or_path against its MODEL_RENDERER_MAP. This succeeds
-        # when ``model`` is a canonical HF id (e.g. "Qwen/Qwen3-8B") but misses for
-        # a local/custom checkpoint path, which falls back to DefaultRenderer (whose
-        # bridge_to_next_turn always returns None, disabling drift protection). When
-        # serving from a path, set renderer_family explicitly. Supported families /
-        # MODEL_RENDERER_MAP:
-        #   https://github.com/PrimeIntellect-ai/renderers/blob/main/renderers/base.py
-        renderer = create_renderer(tokenizer, renderer=config.renderer_family)
-        logger.info(
-            "Built %s (family=%r) from %s for cumulative token mode",
-            type(renderer).__name__,
-            config.renderer_family,
-            config.model,
-        )
-        if type(renderer).__name__ == "DefaultRenderer":
+        if not _renderer_has_bridge(renderer):
             raise ValueError(
-                f"Cumulative token mode resolved to DefaultRenderer for renderer_family="
-                f"{config.renderer_family!r} (model={config.model!r}). DefaultRenderer "
+                f"Cumulative token mode resolved to {type(renderer).__name__} for "
+                f"renderer_family={config.renderer_family!r} (model={config.model!r}), which "
                 "provides no cross-turn bridge, so drift-free token forwarding is disabled. "
                 "renderer_family='auto' only resolves when 'model' is a canonical HuggingFace "
                 "id present in renderers' MODEL_RENDERER_MAP; a local/custom checkpoint path "
                 "will not match. Either pass a recognized HF id as 'model', or set "
                 "renderer_family explicitly to match your model (e.g. 'qwen3', 'qwen3.5', "
-                "'qwen3.6', 'glm-5', 'deepseek-v3', 'gpt-oss'). Check supported families in "
-                "MODEL_RENDERER_MAP of: https://github.com/PrimeIntellect-ai/renderers/blob/"
-                "main/renderers/base.py"
+                "'glm-5', 'deepseek-v3', 'gpt-oss'). For models without a prime-rl renderer "
+                "(e.g. DeepSeek-V4), run the gateway in-process so rllm can inject a "
+                "tinker/Fireworks-backed renderer."
             )
 
     proxy = ReverseProxy(

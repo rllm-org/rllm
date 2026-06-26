@@ -152,6 +152,38 @@ class TestCumulativeTokenMode:
         # So turn 2 prompt should start with [1,2,3,4,5,10,11,12] + bridge
         assert prompt[:8] == [1, 2, 3, 4, 5, 10, 11, 12]
 
+    def test_duplicate_request_resampled_in_place_not_reset(self, cumulative_gateway):
+        """A duplicate/retried request (identical to an already-folded turn) is
+        re-sampled in place: the cumulative chain is preserved (no reset) and the
+        turn's trace is overwritten rather than appended (no trajectory split)."""
+        server, mock_vllm = cumulative_gateway
+        gw_url = server.url
+        client = GatewayClient(gw_url)
+        oai = openai.OpenAI(base_url=f"{gw_url}/sessions/dup-test/v1", api_key="dummy")
+
+        # Turn 1 (chat path)
+        oai.chat.completions.create(model="m", messages=[{"role": "user", "content": "Hello"}])
+        turn2 = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hello from mock!"},
+            {"role": "user", "content": "How are you?"},
+        ]
+        # Turn 2 (cumulative)
+        oai.chat.completions.create(model="m", messages=turn2)
+        acc = server.app.state.proxy._accumulators["dup-test"]
+        assert acc.turn_count == 2
+
+        # Re-send the EXACT same turn-2 request (a retry).
+        resp = oai.chat.completions.create(model="m", messages=turn2)
+        assert resp.choices[0].message.content  # graceful 200, not an error
+
+        # Chain preserved: not reset, turn not advanced (re-sampled in place).
+        assert acc.turn_count == 2
+        # Trace overwritten, not appended: still 2 traces (turn1 + turn2), not 3.
+        traces = client.get_session_traces("dup-test")
+        assert len(traces) == 2
+        client.close()
+
     def test_traces_have_correct_token_ids(self, cumulative_gateway):
         """Both turns produce traces with prompt_token_ids and completion_token_ids."""
         server, mock_vllm = cumulative_gateway
@@ -449,3 +481,191 @@ class TestCumulativeStreaming:
         usage = usage_chunks[-1]["usage"]
         assert "prompt_tokens" in usage
         assert "completion_tokens" in usage
+
+
+# ---------------------------------------------------------------------------
+# Structured cumulative response (option 3): parse the completion via the
+# renderer so cumulative turns match the chat-path shape (clean content +
+# reasoning_content + structured tool_calls) instead of dumping raw text.
+# ---------------------------------------------------------------------------
+
+
+class _ParsedResp:
+    def __init__(self, content="", reasoning_content="", tool_calls=None):
+        self.content = content
+        self.reasoning_content = reasoning_content
+        self.tool_calls = tool_calls or []
+
+
+class _ToolCall:
+    def __init__(self, name, arguments):
+        self.name = name
+        self.arguments = arguments
+
+
+class _MockRendererWithParse(_MockRenderer):
+    """Adds parse_response — returns a fixed structured response distinct from
+    the mock worker's raw text, so a test can prove parse_response is used."""
+
+    def parse_response(self, token_ids):
+        return _ParsedResp(
+            content="parsed answer",
+            reasoning_content="my thinking",
+            tool_calls=[_ToolCall("run_cmd", {"cmd": "ls"})],
+        )
+
+
+class TestStructuredCumulativeResponse:
+    def test_pure_message_builder(self):
+        from rllm_model_gateway.proxy import _parsed_response_to_message
+
+        msg = _parsed_response_to_message(_ParsedResp("hello", "thinking", [_ToolCall("f", {"a": 1})]))
+        assert msg["role"] == "assistant"
+        assert msg["content"] == "hello"
+        assert msg["reasoning_content"] == "thinking"
+        assert msg["tool_calls"][0]["type"] == "function"
+        assert msg["tool_calls"][0]["function"]["name"] == "f"
+        import json as _json
+
+        assert _json.loads(msg["tool_calls"][0]["function"]["arguments"]) == {"a": 1}
+
+    def test_pure_message_builder_omits_empty_fields(self):
+        from rllm_model_gateway.proxy import _parsed_response_to_message
+
+        msg = _parsed_response_to_message(_ParsedResp("just text"))
+        assert msg == {"role": "assistant", "content": "just text"}  # no reasoning/tool_calls keys
+
+    def test_tool_call_function_shape(self):
+        from rllm_model_gateway.proxy import _tool_call_to_openai
+
+        class _FnTc:
+            class function:  # noqa: N801
+                name = "g"
+                arguments = '{"x": 2}'  # already a string
+
+        out = _tool_call_to_openai(_FnTc(), 3)
+        assert out["id"] == "call_3"
+        assert out["function"] == {"name": "g", "arguments": '{"x": 2}'}
+
+    def test_cumulative_turn_returns_parsed_message(self, mock_vllm):
+        """End-to-end: a cumulative (token-in) turn returns the renderer-parsed
+        message shape, not the worker's raw completion text."""
+        config = GatewayConfig(
+            store_worker="memory",
+            workers=[{"url": f"{mock_vllm.url}/v1", "worker_id": "w0"}],
+            health_check_interval=999,
+            sync_traces=True,
+            cumulative_token_mode=False,
+        )
+        app = create_app(config)
+        app.state.proxy.renderer = _MockRendererWithParse()
+        app.state.proxy.cumulative_token_mode = True
+        server = GatewayServer(app, port=0)
+        server.start()
+        try:
+            oai = openai.OpenAI(base_url=f"{server.url}/sessions/parse-test/v1", api_key="dummy")
+            oai.chat.completions.create(model="m", messages=[{"role": "user", "content": "Hi"}])  # turn 1
+            resp = oai.chat.completions.create(  # turn 2 — cumulative
+                model="m",
+                messages=[
+                    {"role": "user", "content": "Hi"},
+                    {"role": "assistant", "content": "Hello from mock!"},
+                    {"role": "user", "content": "go"},
+                ],
+            )
+        finally:
+            server.stop()
+        msg = resp.choices[0].message
+        assert msg.content == "parsed answer"  # parsed, not the raw "Hello from mock!"
+        assert msg.tool_calls[0].function.name == "run_cmd"
+        import json as _json
+
+        assert _json.loads(msg.tool_calls[0].function.arguments) == {"cmd": "ls"}
+
+
+class _MockRendererFull(_MockRendererWithParse):
+    """A complete renderer: bridge + parse_response + render_ids.
+
+    ``render_ids`` is what turn 0 uses, so the WHOLE trajectory is tokenized by
+    one renderer (no chat-template-vs-renderer seam). Deterministic encoding:
+    ``[200, 10, 201] + ord(last user content[:3]) + [202]``.
+    """
+
+    def render_ids(self, messages, *, tools=None, add_generation_prompt=False):
+        content = ""
+        for m in messages:
+            if m.get("role") == "user":
+                content = m.get("content", "")
+        return [200, 10, 201] + [ord(c) for c in content[:3]] + [202]
+
+
+@pytest.fixture
+def cumulative_gateway_full(mock_vllm: MockVLLMServer):
+    """Cumulative gateway whose renderer implements render_ids (turn 0 included)."""
+    config = GatewayConfig(
+        store_worker="memory",
+        workers=[{"url": f"{mock_vllm.url}/v1", "worker_id": "w0"}],
+        health_check_interval=999,
+        sync_traces=True,
+        cumulative_token_mode=False,
+    )
+    app = create_app(config)
+    app.state.proxy.renderer = _MockRendererFull()
+    app.state.proxy.cumulative_token_mode = True
+    server = GatewayServer(app, port=0)
+    server.start()
+    yield server, mock_vllm
+    server.stop()
+
+
+class TestCumulativeTurn0ViaRenderer:
+    """Turn 0 is rendered by the renderer (render_ids) and sent token-in, exactly
+    like turns 2+, so one renderer owns the entire trajectory."""
+
+    def test_turn0_uses_completions_with_token_ids(self, cumulative_gateway_full):
+        server, mock_vllm = cumulative_gateway_full
+        oai = openai.OpenAI(base_url=f"{server.url}/sessions/t0-completions/v1", api_key="dummy")
+        oai.chat.completions.create(model="m", messages=[{"role": "user", "content": "Hello"}])
+
+        assert len(mock_vllm.request_log) == 1
+        req = mock_vllm.request_log[0]
+        # Turn 0 went to /v1/completions (token-in), NOT /chat/completions.
+        assert "messages" not in req
+        assert isinstance(req["prompt"], list) and all(isinstance(t, int) for t in req["prompt"])
+
+    def test_turn0_prompt_equals_render_ids(self, cumulative_gateway_full):
+        server, mock_vllm = cumulative_gateway_full
+        oai = openai.OpenAI(base_url=f"{server.url}/sessions/t0-render/v1", api_key="dummy")
+        oai.chat.completions.create(model="m", messages=[{"role": "user", "content": "Hello"}])
+
+        expected = _MockRendererFull().render_ids([{"role": "user", "content": "Hello"}])
+        assert mock_vllm.request_log[0]["prompt"] == expected
+
+    def test_turn0_returns_parsed_message(self, cumulative_gateway_full):
+        """Turn 0's completion is parsed via the renderer too (not raw worker text)."""
+        server, _ = cumulative_gateway_full
+        oai = openai.OpenAI(base_url=f"{server.url}/sessions/t0-parse/v1", api_key="dummy")
+        resp = oai.chat.completions.create(model="m", messages=[{"role": "user", "content": "Hello"}])
+        assert resp.choices[0].message.content == "parsed answer"  # parsed, not "Hello from mock!"
+
+    def test_single_renderer_trajectory_no_seam(self, cumulative_gateway_full):
+        """The seam fix: turn 1's prompt extends turn 0's render_ids output +
+        completion byte-for-byte — both produced by the same renderer, so there is
+        no chat-template/renderer boundary mismatch."""
+        server, mock_vllm = cumulative_gateway_full
+        oai = openai.OpenAI(base_url=f"{server.url}/sessions/t0-seam/v1", api_key="dummy")
+
+        oai.chat.completions.create(model="m", messages=[{"role": "user", "content": "Hello"}])  # turn 0
+        oai.chat.completions.create(  # turn 1
+            model="m",
+            messages=[
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hello from mock!"},
+                {"role": "user", "content": "More"},
+            ],
+        )
+
+        turn0_prompt = _MockRendererFull().render_ids([{"role": "user", "content": "Hello"}])
+        # mock_vllm echoes the prompt as prompt_token_ids and returns completion [10,11,12].
+        turn1_prompt = mock_vllm.request_log[1]["prompt"]
+        assert turn1_prompt[: len(turn0_prompt) + 3] == turn0_prompt + [10, 11, 12]

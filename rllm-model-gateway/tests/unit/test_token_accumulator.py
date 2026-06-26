@@ -243,3 +243,67 @@ class TestExtractNewMessages:
             {"role": "tool", "content": "result"},
             {"role": "user", "content": "thanks"},
         ]
+
+
+class TestDivergenceDiagnostics:
+    """The reset-cause diagnostics that distinguish prefix mutation vs shrink."""
+
+    def _acc(self):
+        from rllm_model_gateway.token_accumulator import TokenAccumulator
+
+        acc = TokenAccumulator(renderer=_MockRenderer())
+        base = [{"role": "system", "content": "s"}, {"role": "user", "content": "u0"}]
+        acc.ingest_turn([1, 2, 3], [4, 5])
+        acc.update_prefix(base)
+        return acc, base
+
+    def test_divergence_clean_on_append_only_extension(self):
+        acc, base = self._acc()
+        ext = base + [{"role": "assistant", "content": "a0"}, {"role": "user", "content": "u1"}]
+        assert acc.is_cumulative(ext) is True
+        assert acc.divergence(ext) == ("clean", -1)
+
+    def test_divergence_changed_when_prefix_message_mutated(self):
+        acc, _ = self._acc()
+        mutated = [
+            {"role": "system", "content": "s"},
+            {"role": "user", "content": "u0-EDITED"},  # msg 1 changed
+            {"role": "assistant", "content": "a0"},
+        ]
+        assert acc.is_cumulative(mutated) is False
+        assert acc.divergence(mutated) == ("changed", 1)
+
+    def test_divergence_shrunk_on_summarization(self):
+        acc, _ = self._acc()
+        shorter = [{"role": "system", "content": "s"}]  # history collapsed
+        assert acc.is_cumulative(shorter) is False
+        assert acc.divergence(shorter) == ("shrunk", 1)
+
+    def test_divergence_duplicate_on_identical_resend(self):
+        acc, base = self._acc()
+        # Re-send the exact same messages the gateway already folded (a retry).
+        assert acc.is_cumulative(list(base)) is False  # len == message_count
+        assert acc.divergence(list(base)) == ("duplicate", 2)
+
+    def test_resample_completion_preserves_chain(self):
+        acc, _ = self._acc()  # turn 1 folded: prev_prompt=[1,2,3], prev_completion=[4,5]
+        acc.resample_completion([9, 9, 9])
+        assert acc.prev_completion_ids == [9, 9, 9]  # completion swapped
+        assert acc.prev_prompt_ids == [1, 2, 3]  # prompt unchanged
+        assert acc.turn_count == 1  # NOT advanced — same turn re-sampled
+        assert acc.message_count == 2  # unchanged
+
+    def test_record_outcome_and_reset(self):
+        acc, _ = self._acc()
+        acc.record_outcome("length", 16384)
+        assert acc.last_finish_reason == "length"
+        assert acc.last_completion_len == 16384
+        acc.reset()
+        assert acc.last_finish_reason is None
+        assert acc.last_completion_len == 0
+
+    def test_reset_accepts_reason(self):
+        acc, _ = self._acc()
+        acc.reset("prefix not append-only: msg 1 (role=user) changed")
+        assert acc.turn_count == 0 and acc.message_count == 0
+        assert acc._prefix_msg_fingerprints == []

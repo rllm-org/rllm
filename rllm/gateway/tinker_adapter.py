@@ -17,6 +17,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from rllm.engine.rollout.tinker_engine import TinkerEngine
+from rllm.workflows import TerminationEvent, TerminationReason
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,82 @@ def _to_openai_tool_calls(tool_calls: list) -> list[dict[str, Any]]:
     return result
 
 
+def _termination_http_error(reason: TerminationReason) -> Exception:
+    """Map a ``TerminationEvent`` to a non-retryable OpenAI-style 400.
+
+    For CLI harnesses the agent loop runs inside the sandbox, so the only way
+    to stop it is the HTTP response — a 500 makes the LLM client retry the
+    (still-too-long) call until the harness run-timeout SIGKILLs it, stalling
+    the whole group. ``context_length_exceeded`` maps to a NON-retryable
+    ContextWindowExceededError in litellm/openai SDKs, so the agent raises and
+    the rollout returns immediately with the turns so far.
+    """
+    from fastapi import HTTPException
+
+    is_prompt_limit = reason == TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED
+    return HTTPException(
+        status_code=400,
+        detail={
+            "error": {
+                "message": f"Rollout terminated: {reason}. The conversation exceeded the model's prompt window.",
+                "type": "invalid_request_error",
+                "code": "context_length_exceeded" if is_prompt_limit else "rollout_terminated",
+                "param": "messages",
+            }
+        },
+    )
+
+
+async def _token_prompt_completion(
+    engine: TinkerEngine,
+    request_body: dict[str, Any],
+    prompt_ids: list[int],
+    sampling_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Sample from a pre-tokenized prompt (cumulative-token mode).
+
+    Bypasses message rendering entirely: ``prompt_ids`` is fed straight to the
+    engine's token-input sampler. Returns a **completions-style** response dict
+    (``choices[0].text`` + ``token_ids``, root ``prompt_token_ids``,
+    ``logprobs.token_logprobs``) — the exact shape the gateway's cumulative-turn
+    handler extracts token IDs from and translates back to chat format.
+    """
+    token_output = await engine.get_token_output_from_token_input(prompt_ids, **sampling_kwargs)
+    model_output = engine.assemble_model_output(prompt_ids, token_output)
+
+    # Text the agent sees as the assistant turn (same precedence as the chat path).
+    text = model_output.content or model_output.text or ""
+    out_prompt_ids = list(model_output.prompt_ids) if model_output.prompt_ids else list(prompt_ids)
+    completion_ids = list(model_output.completion_ids) if model_output.completion_ids else []
+    logprobs = model_output.logprobs or []
+    finish_reason = model_output.finish_reason or "stop"
+    prompt_len = model_output.prompt_length or len(out_prompt_ids)
+    completion_len = model_output.completion_length or len(completion_ids)
+
+    return {
+        "id": f"cmpl-{uuid.uuid4().hex[:12]}",
+        "object": "text_completion",
+        "created": int(time.time()),
+        "model": request_body.get("model", getattr(engine, "model_name", "default")),
+        "choices": [
+            {
+                "index": 0,
+                "text": text,
+                "token_ids": completion_ids,
+                "finish_reason": finish_reason,
+                "logprobs": {"token_logprobs": logprobs},
+            }
+        ],
+        "usage": {
+            "prompt_tokens": prompt_len,
+            "completion_tokens": completion_len,
+            "total_tokens": prompt_len + completion_len,
+        },
+        "prompt_token_ids": out_prompt_ids,
+        "weight_version": getattr(model_output, "weight_version", None),
+    }
+
+
 def create_tinker_handler(engine: TinkerEngine) -> Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]:
     """Return an async handler that calls TinkerEngine in-process.
 
@@ -50,24 +127,50 @@ def create_tinker_handler(engine: TinkerEngine) -> Callable[[dict[str, Any]], Aw
     """
 
     async def handler(request_body: dict[str, Any]) -> dict[str, Any]:
+        # Sampling params shared by the chat and pre-tokenized paths.
+        sampling_kwargs: dict[str, Any] = {}
+        if request_body.get("temperature") is not None:
+            sampling_kwargs["temperature"] = request_body["temperature"]
+        if request_body.get("top_p") is not None:
+            sampling_kwargs["top_p"] = request_body["top_p"]
+        if request_body.get("top_k") is not None:
+            sampling_kwargs["top_k"] = request_body["top_k"]
+        if request_body.get("max_tokens") is not None:
+            sampling_kwargs["max_tokens"] = request_body["max_tokens"]
+        if request_body.get("max_completion_tokens") is not None:
+            sampling_kwargs["max_completion_tokens"] = request_body["max_completion_tokens"]
+
+        # Per-trajectory session id (injected by the gateway) — forwarded only to
+        # engines that use it for inference session affinity (Fireworks prefix-cache
+        # reuse across a rollout's turns). Popped so it never reaches a chat body.
+        session_id = request_body.pop("rllm_session_id", None)
+        if session_id and getattr(engine, "supports_session_affinity", False):
+            sampling_kwargs["rllm_session_id"] = session_id
+
+        # Cumulative-token-mode path: the gateway rewrites turn 2+ to a
+        # completions-style request whose ``prompt`` is raw token IDs built by
+        # ``renderers.bridge_to_next_turn`` (= prior turns' prompt+completion
+        # tokens + the new messages). Sample straight from those tokens — no
+        # re-render, no re-tokenization — so the sequence the optimizer trains on
+        # is byte-for-byte what was generated. Mirrors the vLLM /v1/completions
+        # path the HTTP backend uses for the same feature.
+        prompt = request_body.get("prompt")
+        if isinstance(prompt, list) and prompt and isinstance(prompt[0], int):
+            try:
+                return await _token_prompt_completion(engine, request_body, prompt, sampling_kwargs)
+            except TerminationEvent as e:
+                raise _termination_http_error(e.reason) from e
+
         messages = request_body.get("messages", [])
         tools = request_body.get("tools", [])
-
-        kwargs: dict[str, Any] = {}
+        kwargs = dict(sampling_kwargs)
         if tools:
             kwargs["tools"] = tools
-        if request_body.get("temperature") is not None:
-            kwargs["temperature"] = request_body["temperature"]
-        if request_body.get("top_p") is not None:
-            kwargs["top_p"] = request_body["top_p"]
-        if request_body.get("top_k") is not None:
-            kwargs["top_k"] = request_body["top_k"]
-        if request_body.get("max_tokens") is not None:
-            kwargs["max_tokens"] = request_body["max_tokens"]
-        if request_body.get("max_completion_tokens") is not None:
-            kwargs["max_completion_tokens"] = request_body["max_completion_tokens"]
 
-        model_output = await engine.get_model_response(messages, **kwargs)
+        try:
+            model_output = await engine.get_model_response(messages, **kwargs)
+        except TerminationEvent as e:
+            raise _termination_http_error(e.reason) from e
 
         response_text = model_output.content or model_output.text or ""
         prompt_ids = list(model_output.prompt_ids) if model_output.prompt_ids else []
