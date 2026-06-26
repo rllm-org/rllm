@@ -286,3 +286,25 @@ def test_assemble_model_output_uses_renderer_when_chat_parser_absent(qwen_tokeni
     assert out.prompt_ids == [1, 2, 3]
     assert isinstance(out.content, str)
     assert isinstance(out.tool_calls, list)
+
+
+def test_fireworks_engine_explicit_bypass_overrides_renderer(qwen_tokenizer):
+    """bypass_render_with_parser=True is an explicit escape hatch: force
+    ChatTemplateParser and skip the unified renderer, even when one is pinned."""
+    pytest.importorskip("tinker")
+    try:
+        from rllm.engine.rollout.fireworks_engine import FireworksEngine
+    except Exception as e:
+        pytest.skip(f"FireworksEngine import failed: {e}")
+
+    class _StubSampler: ...
+
+    engine = FireworksEngine(
+        tokenizer=qwen_tokenizer,
+        sampler=_StubSampler(),
+        renderer_family="qwen3",  # would normally pin the unified renderer
+        bypass_render_with_parser=True,
+    )
+    assert engine.unified_renderer is None
+    assert engine.chat_parser is not None
+    assert engine.bypass_render_with_parser is True

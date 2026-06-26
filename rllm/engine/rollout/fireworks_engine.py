@@ -139,6 +139,7 @@ class FireworksEngine(TinkerEngine):
         sample_timeout: int = 600,
         processor=None,
         router_replay: bool = False,
+        bypass_render_with_parser: bool = False,
         renderer_name: str | None = None,
         renderer_family: str = "auto",
         **kwargs,
@@ -187,26 +188,32 @@ class FireworksEngine(TinkerEngine):
         # when it is explicitly pinned, or when auto-detection lands on a
         # Fireworks-cookbook renderer (a model chat_parser can't serve). prime-rl
         # models under plain auto keep the existing chat_parser path (no regression).
-        from rllm.renderers import resolve
+        #
+        # bypass_render_with_parser=True is an explicit escape hatch: force
+        # ChatTemplateParser and skip the unified renderer entirely.
+        if bypass_render_with_parser:
+            self.unified_renderer = None
+        else:
+            from rllm.renderers import resolve
 
-        res = resolve(
-            getattr(tokenizer, "name_or_path", None),
-            tokenizer,
-            backend="fireworks",
-            family=renderer_family,
-            renderer_name=renderer_name,
-        )
-        explicit = renderer_name is not None or renderer_family != "auto"
-        self.unified_renderer = res.renderer if (res.source == "tinker" or (explicit and res.source != "chat_template")) else None
-        if self.unified_renderer is not None:
-            logger.info("FireworksEngine rendering via %s renderer (%s)", res.name, res.source)
-        elif explicit and res.source == "chat_template":
-            logger.warning(
-                "renderer_family=%r / renderer_name=%r did not resolve a native renderer for %s; using ChatTemplateParser.",
-                renderer_family,
-                renderer_name,
+            res = resolve(
                 getattr(tokenizer, "name_or_path", None),
+                tokenizer,
+                backend="fireworks",
+                family=renderer_family,
+                renderer_name=renderer_name,
             )
+            explicit = renderer_name is not None or renderer_family != "auto"
+            self.unified_renderer = res.renderer if (res.source == "tinker" or (explicit and res.source != "chat_template")) else None
+            if self.unified_renderer is not None:
+                logger.info("FireworksEngine rendering via %s renderer (%s)", res.name, res.source)
+            elif explicit and res.source == "chat_template":
+                logger.warning(
+                    "renderer_family=%r / renderer_name=%r did not resolve a native renderer for %s; using ChatTemplateParser.",
+                    renderer_family,
+                    renderer_name,
+                    getattr(tokenizer, "name_or_path", None),
+                )
 
         # No tinker_cookbook renderer on this path; the unified renderer (above) or
         # chat_parser owns rendering+parsing — both handled by the shared TinkerEngine.
