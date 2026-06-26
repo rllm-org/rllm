@@ -139,6 +139,7 @@ class FireworksEngine(TinkerEngine):
         sample_timeout: int = 600,
         processor=None,
         router_replay: bool = False,
+        bypass_render_with_parser: bool = False,
         renderer_name: str | None = None,
         renderer_family: str = "auto",
         **kwargs,
@@ -178,8 +179,6 @@ class FireworksEngine(TinkerEngine):
         self.train_sampling_params = dict((sampling_params or {}).get("train", {}))
         self.val_sampling_params = dict((sampling_params or {}).get("val", {}))
 
-        self.bypass_render_with_parser = True
-
         # Resolve the renderer the same way the gateway does, so the engine renders
         # turn 0 with the same renderer the gateway uses for the turn-1+ cumulative
         # bridge. resolve() auto-detects Fireworks-cookbook models (e.g. GLM-5.2 ->
@@ -189,29 +188,41 @@ class FireworksEngine(TinkerEngine):
         # when it is explicitly pinned, or when auto-detection lands on a
         # Fireworks-cookbook renderer (a model chat_parser can't serve). prime-rl
         # models under plain auto keep the existing chat_parser path (no regression).
-        from rllm.renderers import resolve
+        #
+        # bypass_render_with_parser=True is an explicit escape hatch: force
+        # ChatTemplateParser and skip the unified renderer entirely.
+        if bypass_render_with_parser:
+            self.unified_renderer = None
+        else:
+            from rllm.renderers import resolve
 
-        res = resolve(
-            getattr(tokenizer, "name_or_path", None),
-            tokenizer,
-            backend="fireworks",
-            family=renderer_family,
-            renderer_name=renderer_name,
-        )
-        explicit = renderer_name is not None or renderer_family != "auto"
-        self.renderer = res.renderer if (res.source == "tinker" or (explicit and res.source != "chat_template")) else None
-        if self.renderer is not None:
-            logger.info("FireworksEngine rendering via %s renderer (%s)", res.name, res.source)
-        elif explicit and res.source == "chat_template":
-            logger.warning(
-                "renderer_family=%r / renderer_name=%r did not resolve a native renderer for %s; using ChatTemplateParser.",
-                renderer_family,
-                renderer_name,
+            res = resolve(
                 getattr(tokenizer, "name_or_path", None),
+                tokenizer,
+                backend="fireworks",
+                family=renderer_family,
+                renderer_name=renderer_name,
             )
+            explicit = renderer_name is not None or renderer_family != "auto"
+            self.unified_renderer = res.renderer if (res.source == "tinker" or (explicit and res.source != "chat_template")) else None
+            if self.unified_renderer is not None:
+                logger.info("FireworksEngine rendering via %s renderer (%s)", res.name, res.source)
+            elif explicit and res.source == "chat_template":
+                logger.warning(
+                    "renderer_family=%r / renderer_name=%r did not resolve a native renderer for %s; using ChatTemplateParser.",
+                    renderer_family,
+                    renderer_name,
+                    getattr(tokenizer, "name_or_path", None),
+                )
 
-        # Chat template parser — only when no unified renderer is active.
-        self.chat_parser = None if self.renderer is not None else ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=disable_thinking)
+        # No tinker_cookbook renderer on this path; the unified renderer (above) or
+        # chat_parser owns rendering+parsing — both handled by the shared TinkerEngine.
+        # ``renderer`` stays None so the shared legacy/VLM branch is never reached here.
+        self.renderer = None
+        # bypass_render_with_parser reflects who owns rendering+parsing: True =
+        # ChatTemplateParser (built below); False = the unified renderer.
+        self.bypass_render_with_parser = self.unified_renderer is None
+        self.chat_parser = None if self.unified_renderer is not None else ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=disable_thinking)
 
         self.sample_timeout = sample_timeout
         self.router_replay = router_replay
@@ -229,18 +240,12 @@ class FireworksEngine(TinkerEngine):
         accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
         reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
 
-        if self.renderer is not None:
-            token_input = self.renderer.render_ids(messages, tools=tools or None, add_generation_prompt=True)
-        else:
-            prompt = self.chat_parser.parse(
-                messages,
-                add_generation_prompt=True,
-                is_first_msg=True,
-                tools=tools,
-                reasoning_effort=reasoning_effort,
-                accumulate_reasoning=accumulate_reasoning,
-            )
-            token_input = self.tokenizer.encode(prompt, add_special_tokens=False)
+        token_input = self._render_prompt_token_input(
+            messages,
+            tools=tools,
+            reasoning_effort=reasoning_effort,
+            accumulate_reasoning=accumulate_reasoning,
+        )
 
         if application_id is not None:
             kwargs["user"] = application_id
