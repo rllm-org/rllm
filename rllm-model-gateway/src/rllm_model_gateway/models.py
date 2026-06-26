@@ -123,6 +123,9 @@ class GatewayConfig(BaseModel):
     sync_traces: bool = False
     model: str | None = None  # When set, overrides ``body.model``
     cumulative_token_mode: bool = False
-    # renderers family for the cumulative-mode bridge. Check supported model families
-    # in MODEL_RENDERER_MAP of https://github.com/PrimeIntellect-ai/renderers/blob/main/renderers/base.py
+    # prime-rl family for the cumulative-mode bridge (e.g. "qwen3", "deepseek-v3"); "auto"
+    # resolves from the model id. See rllm.renderers.get_renderer.
     renderer_family: str = "auto"
+    # Tinker-style renderer name override for models prime-rl doesn't cover
+    # (e.g. "deepseek_v4"), served via the Fireworks/Tinker cookbook renderer.
+    renderer_name: str | None = None

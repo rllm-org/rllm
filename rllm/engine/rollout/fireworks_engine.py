@@ -139,6 +139,8 @@ class FireworksEngine(TinkerEngine):
         sample_timeout: int = 600,
         processor=None,
         router_replay: bool = False,
+        renderer_name: str | None = None,
+        renderer_family: str = "auto",
         **kwargs,
     ):
         """
@@ -184,6 +186,23 @@ class FireworksEngine(TinkerEngine):
             disable_thinking=disable_thinking,
         )
 
+        # Opt-in unified renderer: when a renderer is pinned (e.g.
+        # renderer_name="deepseek_v4" for models prime-rl doesn't cover), render
+        # rollout prompts through the same renderer the gateway uses for
+        # cumulative mode. Default (None/auto) keeps the chat-template path so
+        # existing Fireworks models are unaffected.
+        self.renderer = None
+        if renderer_name is not None or renderer_family != "auto":
+            from rllm.renderers import get_renderer
+
+            self.renderer = get_renderer(
+                getattr(tokenizer, "name_or_path", None),
+                tokenizer,
+                backend="fireworks",
+                family=renderer_family,
+                renderer_name=renderer_name,
+            )
+
         self.sample_timeout = sample_timeout
         self.router_replay = router_replay
         self.sampling_client = sampler
@@ -200,15 +219,18 @@ class FireworksEngine(TinkerEngine):
         accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
         reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
 
-        prompt = self.chat_parser.parse(
-            messages,
-            add_generation_prompt=True,
-            is_first_msg=True,
-            tools=tools,
-            reasoning_effort=reasoning_effort,
-            accumulate_reasoning=accumulate_reasoning,
-        )
-        token_input = self.tokenizer.encode(prompt, add_special_tokens=False)
+        if self.renderer is not None:
+            token_input = self.renderer.render_ids(messages, tools=tools or None, add_generation_prompt=True)
+        else:
+            prompt = self.chat_parser.parse(
+                messages,
+                add_generation_prompt=True,
+                is_first_msg=True,
+                tools=tools,
+                reasoning_effort=reasoning_effort,
+                accumulate_reasoning=accumulate_reasoning,
+            )
+            token_input = self.tokenizer.encode(prompt, add_special_tokens=False)
 
         if application_id is not None:
             kwargs["user"] = application_id
