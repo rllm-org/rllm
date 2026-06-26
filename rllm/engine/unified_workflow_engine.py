@@ -11,9 +11,9 @@ from typing import TYPE_CHECKING, Any
 from tqdm import tqdm
 
 from rllm.engine.rollout import RolloutEngine
-from rllm.types import Episode
+from rllm.types import Episode, TerminationReason
 from rllm.workflows.store import Store
-from rllm.workflows.workflow import TerminationReason, Workflow
+from rllm.workflows.workflow import Workflow
 
 # Avoid hard dependency on verl at import time; only for typing
 if TYPE_CHECKING:

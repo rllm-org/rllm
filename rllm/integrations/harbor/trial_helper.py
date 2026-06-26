@@ -249,7 +249,7 @@ def _get_exception_type_map() -> dict[str, Any]:
     """Lazily build the exception-type → TerminationReason map."""
     global _EXCEPTION_TYPE_MAP
     if _EXCEPTION_TYPE_MAP is None:
-        from rllm.workflows.workflow import TerminationReason
+        from rllm.types import TerminationReason
 
         _EXCEPTION_TYPE_MAP = {
             "AgentTimeoutError": TerminationReason.TIMEOUT,
@@ -268,7 +268,7 @@ def map_termination_reason(
 
     Shared by both eval and training paths.
     """
-    from rllm.workflows.workflow import TerminationReason
+    from rllm.types import TerminationReason
 
     if finished:
         return TerminationReason.ENV_DONE
@@ -338,7 +338,7 @@ async def run_harbor_task(
     Returns:
         A ``HarborTaskOutcome`` with reward, termination reason, and raw result.
     """
-    from rllm.workflows.workflow import TerminationReason
+    from rllm.types import TerminationReason
 
     start = time.monotonic()
     try:

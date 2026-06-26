@@ -36,7 +36,7 @@ from rllm.engine.rollout.types import (
     TinkerTokenOutput,
     Tokenizer,
 )
-from rllm.workflows import TerminationEvent, TerminationReason
+from rllm.types import TerminationEvent, TerminationReason
 
 logger = logging.getLogger(__name__)
 
