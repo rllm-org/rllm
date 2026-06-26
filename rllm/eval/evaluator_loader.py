@@ -94,6 +94,7 @@ _EVALUATOR_REGISTRY: dict[str, str] = {
     "countdown_reward_fn": "rllm.eval.reward_fns.countdown:evaluate",
     "code_reward_fn": "rllm.eval.reward_fns.code:evaluate",
     "f1_reward_fn": "rllm.eval.reward_fns.f1:evaluate",
+    "gaia_reward_fn": "rllm.eval.reward_fns.gaia:evaluate",
     "mcq_reward_fn": "rllm.eval.reward_fns.mcq:evaluate",
     "ifeval_reward_fn": "rllm.eval.reward_fns.ifeval:evaluate",
     "bfcl_reward_fn": "rllm.eval.reward_fns.bfcl:evaluate",
