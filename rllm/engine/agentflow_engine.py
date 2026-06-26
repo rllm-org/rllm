@@ -35,9 +35,8 @@ from rllm.data.utils import task_from_row
 from rllm.engine.trace_converter import compute_step_metrics, trace_record_to_step
 from rllm.eval.types import EvalOutput
 from rllm.gateway.manager import container_reachable_url
-from rllm.types import AgentConfig, Episode, Step, Task, Trajectory, flow_accepts_env, run_agent_flow
+from rllm.types import AgentConfig, Episode, Step, Task, TerminationReason, Trajectory, flow_accepts_env, run_agent_flow
 from rllm.utils import colorful_print
-from rllm.workflows.workflow import TerminationReason
 
 if TYPE_CHECKING:
     from rllm_model_gateway.models import TraceRecord
@@ -275,6 +274,30 @@ def _summarize_llm_latencies(traces: list[Any], agentflow_s: float) -> tuple[flo
             cur_start, cur_end = start, end
     merged_total += cur_end - cur_start
     return llm_sum_s, min(merged_total, agentflow_s) if agentflow_s > 0 else merged_total
+
+
+def derive_termination_reason(episode: Episode, max_turns: int | None = None) -> TerminationReason:
+    """Classify why a clean-exit Episode ended, from its enriched gateway steps.
+
+    Used when a flow (e.g. a CLI harness) finished without raising and left
+    ``termination_reason`` unset. Priority:
+
+    1. last step ``finish_reason == "length"`` → ``MAX_RESPONSE_LENGTH_EXCEEDED``
+    2. ``max_turns`` set and step count ``>= max_turns`` → ``MAX_TURNS_EXCEEDED``
+    3. otherwise → ``ENV_DONE``
+
+    (TODO: ``MAX_PROMPT_LENGTH_EXCEEDED`` — the prompt-overflow signal lives in
+    :func:`enrich_episode_with_traces`, which drops the malformed trailing trace
+    without recording why; surfacing it would need that function to flag the drop.)
+    """
+    steps = [s for traj in (episode.trajectories or []) for s in (traj.steps or [])]
+    if steps:
+        last = steps[-1].model_output
+        if last is not None and getattr(last, "finish_reason", None) == "length":
+            return TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED
+    if max_turns is not None and len(steps) >= max_turns:
+        return TerminationReason.MAX_TURNS_EXCEEDED
+    return TerminationReason.ENV_DONE
 
 
 _TIMING_PHASES_DISPLAY: tuple[tuple[str, str], ...] = (
@@ -739,8 +762,12 @@ class AgentFlowEngine:
         for signal in eval_output.signals:
             enriched.metrics[signal.name] = signal.value
 
+        # When the flow didn't classify the ending itself (e.g. a CLI harness
+        # that exited cleanly), derive it from the enriched gateway steps.
+        # Harness-set TIMEOUT/ERROR are preserved (the guard skips them).
         if enriched.termination_reason is None:
-            enriched.termination_reason = TerminationReason.ENV_DONE
+            max_turns = (enriched.metadata or {}).get("max_turns")
+            enriched.termination_reason = derive_termination_reason(enriched, max_turns=max_turns)
         return enriched
 
     def shutdown(self) -> None:

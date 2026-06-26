@@ -37,7 +37,7 @@ from abc import abstractmethod
 from rllm.env import env_int
 from rllm.sandbox.protocol import Sandbox, SandboxCommandTimeout
 from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
-from rllm.types import AgentConfig, Task
+from rllm.types import AgentConfig, Episode, Task, TerminationReason, Trajectory
 
 logger = logging.getLogger(__name__)
 
@@ -296,14 +296,48 @@ class BaseCliHarness(SandboxedAgentFlow):
     # Lifecycle
     # ---------------------------------------------------------------------
 
-    def run(self, task: Task, config: AgentConfig, *, env: Sandbox) -> None:
+    def _outcome_episode(
+        self,
+        task: Task,
+        termination_reason: TerminationReason | None = None,
+        error: dict | None = None,
+    ) -> Episode:
+        """Build the lightweight Episode that carries this run's outcome.
+
+        One empty-step Trajectory named like the flow; the engine's enrichment
+        pass fills its Steps from gateway-captured traces (same shape
+        :func:`rllm.types._coerce_to_episode` builds for a ``None`` return).
+        ``termination_reason`` is left ``None`` for a clean exit — the engine
+        then derives it from the last call's ``finish_reason`` / ``max_turns``
+        (see :func:`rllm.engine.agentflow_engine.derive_termination_reason`).
+        It is set to ``TIMEOUT``/``ERROR`` when the harness itself observed the
+        outcome. ``metadata['max_turns']`` is stamped when the harness declares
+        a cap so the engine can derive ``MAX_TURNS_EXCEEDED``.
+        """
+        metadata: dict = {}
+        max_turns = getattr(self, "max_turns", None)
+        if max_turns is not None:
+            metadata["max_turns"] = int(max_turns)
+        if error is not None:
+            metadata["error"] = error
+        return Episode(
+            task=task.metadata,
+            termination_reason=termination_reason,
+            trajectories=[Trajectory(name=self.name, steps=[])],
+            metadata=metadata,
+        )
+
+    def run(self, task: Task, config: AgentConfig, *, env: Sandbox) -> Episode:
         """Exec the CLI in the sandbox; let the gateway build the trajectory.
 
         The install has already happened by the time this runs — either
         baked into the snapshot image or executed by the hook on a cold
-        sandbox. Returns ``None`` so :func:`rllm.types._coerce_to_episode`
-        builds an empty single-trajectory Episode whose Steps the engine
-        enriches from gateway-captured traces.
+        sandbox. Returns an outcome :class:`~rllm.types.Episode` with one
+        empty-step Trajectory whose Steps the engine enriches from
+        gateway-captured traces, plus the ``termination_reason`` this run
+        observed (``TIMEOUT`` on the agent's wall-clock budget, ``ERROR`` on a
+        sandbox/exec failure, or ``None`` on a clean exit for the engine to
+        classify as done/length/max-turns).
         """
         sandbox = env
         env_vars = self.build_env(task, config)
@@ -328,11 +362,19 @@ class BaseCliHarness(SandboxedAgentFlow):
         except SandboxCommandTimeout as e:
             # Expected, not a failure: the agent spent its whole time budget; the
             # captured steps are still scored by the verifier. INFO, not WARNING.
+            # Surfaced as TIMEOUT so compact filtering can avoid punishing it.
             logger.info("%s reached its time budget: %s", type(self).__name__, e)
+            return self._outcome_episode(task, termination_reason=TerminationReason.TIMEOUT)
         except Exception as e:
-            # Surface as a warning for operator visibility; the engine
-            # still gets None and the gateway traces (if any LLM calls
-            # made it through before the failure) drive enrichment.
+            # Surface as a warning for operator visibility; the gateway traces
+            # (if any LLM calls made it through before the failure) still drive
+            # enrichment, and the run is marked ERROR for compact filtering.
             logger.warning("%s execution failed: %s", type(self).__name__, e)
+            return self._outcome_episode(
+                task,
+                termination_reason=TerminationReason.ERROR,
+                error={"message": str(e), "error_type": type(e).__name__},
+            )
 
-        return None
+        # Clean exit: let the engine derive done / length / max-turns from traces.
+        return self._outcome_episode(task, termination_reason=None)
