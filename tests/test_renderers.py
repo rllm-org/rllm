@@ -212,3 +212,24 @@ def test_token_accumulator_extends_with_adapter():
     assert next_prompt is not None
     prev = prompt + completion
     assert next_prompt[: len(prev)] == prev
+
+
+def test_fireworks_engine_skips_chatparser_when_renderer_pinned(qwen_tokenizer):
+    """Pinning renderer_family must use the unified renderer and skip building
+    ChatTemplateParser, whose eager verify_equivalence runs apply_chat_template
+    and crashes on some served templates (e.g. GLM-5.2). Default keeps chat_parser."""
+    pytest.importorskip("tinker")
+    try:
+        from rllm.engine.rollout.fireworks_engine import FireworksEngine
+    except Exception as e:
+        pytest.skip(f"FireworksEngine import failed: {e}")
+
+    class _StubSampler: ...
+
+    pinned = FireworksEngine(tokenizer=qwen_tokenizer, sampler=_StubSampler(), renderer_family="qwen3")
+    assert pinned.renderer is not None
+    assert pinned.chat_parser is None
+
+    default = FireworksEngine(tokenizer=qwen_tokenizer, sampler=_StubSampler())
+    assert default.renderer is None
+    assert default.chat_parser is not None
