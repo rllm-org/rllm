@@ -168,11 +168,18 @@ gateway:
   cumulative_token_mode: false   # Drift-free multi-turn token forwarding: rewrites turn 2+ to
                                  # /v1/completions with cumulative raw token IDs built by the renderer.
                                  # The tokenizer is loaded from the served model path (model.name).
-  renderer_family: auto  # renderers family for the cumulative-mode bridge. Renderers can auto infer it
-                         # if your input model.name is a huggingface model it. If model.name is a local
-                         # path, you must set this explicitly (e.g. qwen3, qwen3.5, qwen3.6, glm-5, 
-                         # deepseek-v3, gpt-oss). Check supported model families in MODEL_RENDERER_MAP of 
-                         # https://github.com/PrimeIntellect-ai/renderers/blob/main/renderers/base.py
+  renderer_family: auto  # DEPRECATED alias of rllm.renderer.family (still read as a fallback).
+
+# Renderer for cumulative-mode tokenization — the single source of truth shared by the gateway
+# (turn-1+ bridge) AND the trainer rollout engine (turn-0 render + completion parse), so both
+# sides resolve the SAME renderer. ``family`` is a prime-rl family (qwen3, qwen3.5, glm-5,
+# deepseek-v3, gpt-oss, ...); ``name`` is a tinker / Fireworks-cookbook renderer (deepseek_v4,
+# glm5, ...) and takes precedence over ``family``. Leave family=auto / name=null to auto-detect
+# from model.tokenizer_model. Supported families: MODEL_RENDERER_MAP in
+# https://github.com/PrimeIntellect-ai/renderers/blob/main/renderers/base.py
+renderer:
+  family: auto
+  name: null
 
 # Async Training Configuration
 async_training:

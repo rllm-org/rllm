@@ -144,6 +144,11 @@ class GatewayManager:
     # off when the upstream isn't vLLM (e.g. OpenAI/Anthropic via LiteLLM).
     add_logprobs: bool = True
     add_return_token_ids: bool = True
+    # Renderer for cumulative token mode (single source of truth: rllm.renderer.*).
+    # Class defaults so subclasses (EvalGatewayManager) that skip the config-based
+    # __init__ still have them.
+    renderer_family: str = "auto"
+    renderer_name: str | None = None
 
     def __init__(self, config: DictConfig, mode: str = "thread") -> None:
         gw_cfg = config.rllm.get("gateway", {})
@@ -164,10 +169,14 @@ class GatewayManager:
 
         # Cumulative token mode: drift-free multi-turn token forwarding. The
         # gateway loads the tokenizer from the served model path. renderers
-        # cannot infer the family from a local checkpoint path, so
-        # renderer_family must be set explicitly (e.g. "qwen3", "glm-5").
+        # cannot infer the family from a local checkpoint path, so the renderer
+        # must be set explicitly via rllm.renderer.{family,name} (e.g. "glm-5").
         self.cumulative_token_mode: bool = gw_cfg.get("cumulative_token_mode", False)
-        self.renderer_family: str = gw_cfg.get("renderer_family", "auto")
+        # Single source of truth shared with the trainer rollout engine, so the
+        # gateway's turn-1+ bridge uses the same renderer as the engine's turn 0.
+        from rllm.renderers import renderer_settings
+
+        self.renderer_family, self.renderer_name = renderer_settings(config)
 
         self.mode = mode
 
@@ -359,6 +368,8 @@ class GatewayManager:
             cmd.append("--cumulative-token-mode")
             if self.renderer_family != "auto":
                 cmd.extend(["--renderer-family", self.renderer_family])
+            if self.renderer_name:
+                cmd.extend(["--renderer-name", self.renderer_name])
 
         logger.info("Starting gateway subprocess: %s", " ".join(cmd))
         # Inherit parent's stdout/stderr so gateway logs are visible for debugging.
@@ -398,6 +409,7 @@ class GatewayManager:
             add_return_token_ids=self.add_return_token_ids,
             cumulative_token_mode=self.cumulative_token_mode,
             renderer_family=self.renderer_family,
+            renderer_name=self.renderer_name,
         )
         app = create_app(config=gw_config, local_handler=local_handler)
 

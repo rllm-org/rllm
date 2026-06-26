@@ -215,11 +215,13 @@ class FireworksBackend(TinkerBackend):
             )
 
             cfg = self.full_config
+            from rllm.renderers import renderer_settings
+
             rollout_extra = dict(cfg.get("rollout_engine", {}))
-            # Render turn-0 prompts with the same renderer the gateway uses for
-            # the cumulative bridge (rllm.gateway.renderer_family), so engine and
-            # gateway agree across turns. renderer_name still flows via rollout_extra.
-            renderer_family = cfg.rllm.gateway.get("renderer_family", "auto") if cfg.rllm.get("gateway") else "auto"
+            rollout_extra.pop("renderer_name", None)  # sourced from rllm.renderer (single source of truth)
+            # Render turn-0 prompts with the same renderer the gateway uses for the
+            # turn-1+ cumulative bridge — both read rllm.renderer.{family,name}.
+            renderer_family, renderer_name = renderer_settings(cfg)
             self.rollout_engine = FireworksEngine(
                 tokenizer=self.tokenizer,
                 sampler=self.sampling_client,
@@ -231,6 +233,7 @@ class FireworksBackend(TinkerBackend):
                 accumulate_reasoning=rollout_extra.pop("accumulate_reasoning", False),
                 reasoning_effort=rollout_extra.pop("reasoning_effort", "medium"),
                 renderer_family=renderer_family,
+                renderer_name=renderer_name,
                 router_replay=cfg.rllm.algorithm.get("router_replay", "disabled") == "R3",
                 **rollout_extra,
             )

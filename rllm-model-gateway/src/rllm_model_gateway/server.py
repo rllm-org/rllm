@@ -494,6 +494,8 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
         data["cumulative_token_mode"] = True
     if getattr(args, "renderer_family", None) is not None:
         data["renderer_family"] = args.renderer_family
+    if getattr(args, "renderer_name", None) is not None:
+        data["renderer_name"] = args.renderer_name
 
     # Workers from CLI --worker flags (WorkerConfig validator auto-splits URLs)
     worker_urls = getattr(args, "worker", None) or []
@@ -538,11 +540,19 @@ def main() -> None:
         "--renderer-family",
         type=str,
         default=None,
-        help="renderers family for the cumulative-mode bridge (e.g. 'qwen3', 'qwen3.5', "
+        help="prime-rl renderer family for the cumulative-mode bridge (e.g. 'qwen3', 'qwen3.5', "
         "'qwen3.6', 'glm-5', 'deepseek-v3', 'gpt-oss'). Renderers can auto infer it if --model "
         "is a huggingface model id, but if --model is a local path, you must explicitly set it. "
         "Check the supported model families in MODEL_RENDERER_MAP of "
         "https://github.com/PrimeIntellect-ai/renderers/blob/main/renderers/base.py",
+    )
+    parser.add_argument(
+        "--renderer-name",
+        type=str,
+        default=None,
+        help="Tinker / Fireworks-cookbook renderer name (e.g. 'deepseek_v4', 'glm5') for models "
+        "prime-rl doesn't cover. Takes precedence over --renderer-family. Must match the renderer "
+        "the trainer's rollout engine uses (set via rllm.renderer.name).",
     )
 
     args = parser.parse_args()

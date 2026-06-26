@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Any, cast
 
 import tinker
@@ -12,6 +13,8 @@ from rllm.engine.rollout.types import ImageProcessor, Processor, TinkerTokenInpu
 from rllm.parser import ChatTemplateParser
 from rllm.tools.tool_base import ToolCall
 from rllm.types import TerminationEvent, TerminationReason
+
+logger = logging.getLogger(__name__)
 
 """
 Utility functions for Tinker engine. Partly borrowed from
@@ -164,6 +167,7 @@ class TinkerEngine(RolloutEngine):
         accumulate_reasoning: bool = False,
         reasoning_effort: str = "medium",
         renderer_name: str | None = None,
+        renderer_family: str = "auto",
         **kwargs,
     ):
         """
@@ -196,32 +200,36 @@ class TinkerEngine(RolloutEngine):
         self.bypass_render_with_parser = bypass_render_with_parser
         self.accumulate_reasoning = accumulate_reasoning
         self.reasoning_effort = reasoning_effort
-        # Optional unified renderer (rllm.renderers). When set, it owns prompt
-        # rendering and completion parsing for both backends; ``renderer`` (the
-        # tinker_cookbook renderer) and ``chat_parser`` remain the fallbacks.
-        # Base TinkerEngine leaves this None (no behavior change); FireworksEngine
-        # sets it via rllm.renderers.resolve.
-        self.unified_renderer = None
-
         self.train_sampling_params = dict(sampling_params.get("train", {})) if sampling_params else {}
         self.val_sampling_params = dict(sampling_params.get("val", {})) if sampling_params else {}
         # Initialize Tinker service client
         self.service_client = service_client
 
-        # Initialize the renderer
-        if renderer_name is None:
+        # Renderer setup. Both backends resolve the SAME renderer from
+        # rllm.renderer.{family,name} (passed as renderer_family / renderer_name),
+        # so the engine's turn-0 render matches the gateway's turn-1+ bridge.
+        #   - bypass_render_with_parser=True  -> ChatTemplateParser (explicit escape hatch)
+        #   - VLM (image_processor/processor)  -> legacy tinker_cookbook renderer (carries image chunks)
+        #   - otherwise                        -> unified rllm.renderers renderer (render_ids + parse_response),
+        #                                         with ChatTemplateParser as the last-resort fallback.
+        self.unified_renderer = None
+        self.renderer = None
+        self.chat_parser = None
+        is_vlm = image_processor is not None or processor is not None
+
+        def _legacy_renderer_name() -> str:
+            if renderer_name is not None:
+                return renderer_name
             try:
-                renderer_name = model_info.get_recommended_renderer_name(self.model_name)
+                return model_info.get_recommended_renderer_name(self.model_name)
             except KeyError as e:
                 raise ValueError(
-                    f"tinker_cookbook's model_info does not know '{self.model_name}' (the cookbook release can lag "
-                    f"models the Tinker service already supports). Set rollout_engine.renderer_name explicitly to a "
-                    f"renderer matching the model's chat template (e.g. 'qwen3_5' for Qwen3.6 models)."
+                    f"tinker_cookbook's model_info does not know '{self.model_name}'. Set rllm.renderer.name (or "
+                    f".family) to a renderer matching the model's chat template (e.g. 'qwen3_5' for Qwen3.6 models)."
                 ) from e
-        # Pass image_processor for VLM support with Tinker renderer
-        self.renderer = renderers.get_renderer(renderer_name, self.tokenizer, image_processor=image_processor)
 
-        if bypass_render_with_parser:
+        def _use_chat_parser() -> None:
+            self.bypass_render_with_parser = True
             self.chat_parser = ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=disable_thinking)
             if hasattr(self.chat_parser, "stop_sequences") and self.chat_parser.stop_sequences:
                 self.stop_sequences = self.chat_parser.stop_sequences
@@ -229,9 +237,22 @@ class TinkerEngine(RolloutEngine):
                 self.stop_sequences = [tokenizer.eos_token_id]
             else:
                 raise ValueError("No stop sequences found for tokenizer or chat parser")
-        else:
-            self.chat_parser = None
+
+        if bypass_render_with_parser:
+            _use_chat_parser()
+        elif is_vlm:
+            self.renderer = renderers.get_renderer(_legacy_renderer_name(), self.tokenizer, image_processor=image_processor)
             self.stop_sequences = self.renderer.get_stop_sequences()
+        else:
+            from rllm.renderers import resolve as _resolve_unified
+
+            res = _resolve_unified(self.model_name, self.tokenizer, backend="tinker", family=renderer_family, renderer_name=renderer_name)
+            if res.source != "chat_template":
+                self.unified_renderer = res.renderer
+                self.stop_sequences = self.unified_renderer.get_stop_token_ids()
+                logger.info("TinkerEngine rendering via %s renderer (%s)", res.name, res.source)
+            else:
+                _use_chat_parser()
 
         # Sampling client will be set via set_sampling_client()
         self.sampling_client = None
