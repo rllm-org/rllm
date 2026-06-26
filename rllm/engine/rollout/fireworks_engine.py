@@ -180,34 +180,35 @@ class FireworksEngine(TinkerEngine):
 
         self.bypass_render_with_parser = True
 
-        # Unified renderer: when a renderer is pinned (renderer_family != "auto",
-        # e.g. "glm-5", or renderer_name like "deepseek_v4"), render turn-0
-        # prompts through the same renderer the gateway uses for the cumulative
-        # bridge — so engine and gateway agree across turns. When active we skip
-        # ChatTemplateParser entirely: its construction eagerly runs
-        # apply_chat_template (verify_equivalence), which some served templates
-        # reject (e.g. GLM-5.2 -> "'str object' has no attribute 'items'").
-        self.renderer = None
-        if renderer_name is not None or renderer_family != "auto":
-            from rllm.renderers import resolve
+        # Resolve the renderer the same way the gateway does, so the engine renders
+        # turn 0 with the same renderer the gateway uses for the turn-1+ cumulative
+        # bridge. resolve() auto-detects Fireworks-cookbook models (e.g. GLM-5.2 ->
+        # "glm5") with no config. We adopt the unified renderer — and skip
+        # ChatTemplateParser, whose eager apply_chat_template check rejects some
+        # served templates (GLM-5.2 -> "'str object' has no attribute 'items'") —
+        # when it is explicitly pinned, or when auto-detection lands on a
+        # Fireworks-cookbook renderer (a model chat_parser can't serve). prime-rl
+        # models under plain auto keep the existing chat_parser path (no regression).
+        from rllm.renderers import resolve
 
-            res = resolve(
+        res = resolve(
+            getattr(tokenizer, "name_or_path", None),
+            tokenizer,
+            backend="fireworks",
+            family=renderer_family,
+            renderer_name=renderer_name,
+        )
+        explicit = renderer_name is not None or renderer_family != "auto"
+        self.renderer = res.renderer if (res.source == "tinker" or (explicit and res.source != "chat_template")) else None
+        if self.renderer is not None:
+            logger.info("FireworksEngine rendering via %s renderer (%s)", res.name, res.source)
+        elif explicit and res.source == "chat_template":
+            logger.warning(
+                "renderer_family=%r / renderer_name=%r did not resolve a native renderer for %s; using ChatTemplateParser.",
+                renderer_family,
+                renderer_name,
                 getattr(tokenizer, "name_or_path", None),
-                tokenizer,
-                backend="fireworks",
-                family=renderer_family,
-                renderer_name=renderer_name,
             )
-            if res.source == "chat_template":
-                logger.warning(
-                    "renderer_family=%r / renderer_name=%r did not resolve a native renderer for %s; falling back to ChatTemplateParser.",
-                    renderer_family,
-                    renderer_name,
-                    getattr(tokenizer, "name_or_path", None),
-                )
-            else:
-                self.renderer = res.renderer
-                logger.info("FireworksEngine rendering via %s renderer (%s)", res.name, res.source)
 
         # Chat template parser — only when no unified renderer is active.
         self.chat_parser = None if self.renderer is not None else ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=disable_thinking)

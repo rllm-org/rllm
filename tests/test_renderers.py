@@ -233,3 +233,26 @@ def test_fireworks_engine_skips_chatparser_when_renderer_pinned(qwen_tokenizer):
     default = FireworksEngine(tokenizer=qwen_tokenizer, sampler=_StubSampler())
     assert default.renderer is None
     assert default.chat_parser is not None
+
+
+def test_cookbook_renderer_name_prefix_match():
+    """Fireworks-cookbook models auto-detect by family prefix (no config), incl.
+    point releases prime-rl's exact-match map doesn't list (GLM-5.2)."""
+    from rllm.renderers.registry import _cookbook_renderer_name
+
+    assert _cookbook_renderer_name("zai-org/GLM-5.2") == "glm5"
+    assert _cookbook_renderer_name("zai-org/GLM-5") == "glm5"
+    assert _cookbook_renderer_name("zai-org/GLM-5.1") == "glm5"
+    assert _cookbook_renderer_name("deepseek-ai/DeepSeek-V4") == "deepseek_v4"
+    assert _cookbook_renderer_name("deepseek-ai/DeepSeek-V4-Flash") == "deepseek_v4"
+    # Not cookbook families (prime-rl / fallback handle these):
+    assert _cookbook_renderer_name("Qwen/Qwen3-8B") is None
+    assert _cookbook_renderer_name("zai-org/GLM-4.5-Air") is None
+
+
+def test_resolve_cookbook_does_not_crash_when_absent(qwen_tokenizer, monkeypatch):
+    """A cookbook-family model still resolves cleanly (to the cookbook renderer if
+    installed, else the chat-template fallback) — resolution never hard-fails."""
+    monkeypatch.setattr(qwen_tokenizer, "name_or_path", "zai-org/GLM-5.2", raising=False)
+    res = resolve("zai-org/GLM-5.2", qwen_tokenizer)
+    assert res.source in ("tinker", "chat_template")
