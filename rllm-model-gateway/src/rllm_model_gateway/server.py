@@ -158,40 +158,31 @@ def create_app(
         if not config.model:
             raise ValueError("cumulative_token_mode=True requires 'model' to be set in GatewayConfig (path to the served HuggingFace checkpoint).")
         try:
-            from renderers import create_renderer
             from transformers import AutoTokenizer
+
+            from rllm.renderers import resolve
         except ImportError as err:
-            raise ImportError("cumulative_token_mode requires the 'renderers' and 'transformers' packages. Install them with: pip install renderers transformers") from err
+            raise ImportError("cumulative_token_mode requires 'transformers' and the rllm package (rllm.renderers).") from err
 
         tokenizer = AutoTokenizer.from_pretrained(config.model)
-
-        # renderer_family="auto" lets renderers resolve the family by matching the
-        # tokenizer's name_or_path against its MODEL_RENDERER_MAP. This succeeds
-        # when ``model`` is a canonical HF id (e.g. "Qwen/Qwen3-8B") but misses for
-        # a local/custom checkpoint path, which falls back to DefaultRenderer (whose
-        # bridge_to_next_turn always returns None, disabling drift protection). When
-        # serving from a path, set renderer_family explicitly. Supported families /
-        # MODEL_RENDERER_MAP:
-        #   https://github.com/PrimeIntellect-ai/renderers/blob/main/renderers/base.py
-        renderer = create_renderer(tokenizer, renderer=config.renderer_family)
-        logger.info(
-            "Built %s (family=%r) from %s for cumulative token mode",
-            type(renderer).__name__,
-            config.renderer_family,
+        # Unified resolution: prime-rl native -> tinker/Fireworks-cookbook adapter
+        # (e.g. deepseek_v4) -> chat-template fallback. renderer_name pins a tinker
+        # renderer for models prime-rl doesn't cover; renderer_family pins a prime family.
+        res = resolve(
             config.model,
+            tokenizer,
+            family=config.renderer_family,
+            renderer_name=config.renderer_name,
         )
-        if type(renderer).__name__ == "DefaultRenderer":
-            raise ValueError(
-                f"Cumulative token mode resolved to DefaultRenderer for renderer_family="
-                f"{config.renderer_family!r} (model={config.model!r}). DefaultRenderer "
-                "provides no cross-turn bridge, so drift-free token forwarding is disabled. "
-                "renderer_family='auto' only resolves when 'model' is a canonical HuggingFace "
-                "id present in renderers' MODEL_RENDERER_MAP; a local/custom checkpoint path "
-                "will not match. Either pass a recognized HF id as 'model', or set "
-                "renderer_family explicitly to match your model (e.g. 'qwen3', 'qwen3.5', "
-                "'qwen3.6', 'glm-5', 'deepseek-v3', 'gpt-oss'). Check supported families in "
-                "MODEL_RENDERER_MAP of: https://github.com/PrimeIntellect-ai/renderers/blob/"
-                "main/renderers/base.py"
+        renderer = res.renderer
+        logger.info("Built renderer %s (source=%s) from %s for cumulative token mode", res.name, res.source, config.model)
+        if res.source == "chat_template":
+            logger.warning(
+                "Cumulative token mode resolved to the chat-template fallback for model=%r. "
+                "Its bridge is best-effort (drift is detected and resets, never corrupts), but "
+                "for guaranteed parity pass renderer_family (prime-rl) or renderer_name (tinker, "
+                "e.g. 'deepseek_v4') matching your model.",
+                config.model,
             )
 
     proxy = ReverseProxy(
