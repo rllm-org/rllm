@@ -232,6 +232,24 @@ class ReverseProxy:
                     else:
                         reason = f"bridge returned None (new-slice roles={[m.get('role') for m in new_messages]}, content_types={[type(m.get('content')).__name__ for m in new_messages]})"
                     acc.reset(reason)
+            else:
+                # First turn (turn 0): render the initial messages from scratch via
+                # the renderer and route through the *same* token-in path as later
+                # turns, so the ENTIRE trajectory is tokenized by one renderer — no
+                # chat-template-vs-renderer seam at the turn-0/turn-1 boundary. Falls
+                # back to the chat path if the renderer can't render turn 0 (the chat
+                # path then seeds the accumulator via its own turn-0 ingest below).
+                messages = request_body.get("messages", [])
+                token_ids = acc.build_first_prompt(messages, tools=request_body.get("tools")) if messages else None
+                if token_ids is not None:
+                    return await self._handle_cumulative_turn(
+                        request,
+                        request_body,
+                        session_id,
+                        acc,
+                        token_ids,
+                        originally_requested_logprobs,
+                    )
 
         if is_stream:
             return await self._handle_streaming(request, body, request_body, session_id, originally_requested_logprobs)

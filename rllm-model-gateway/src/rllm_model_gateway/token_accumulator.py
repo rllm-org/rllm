@@ -162,6 +162,31 @@ class TokenAccumulator:
         self._prefix_fingerprint = _messages_fingerprint(messages)
         self._prefix_msg_fingerprints = [_messages_fingerprint([m]) for m in messages]
 
+    def build_first_prompt(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> list[int] | None:
+        """Construct the prompt token IDs for the FIRST turn (turn 0).
+
+        Renders the initial message list from scratch via the renderer's
+        ``render_ids`` (with a trailing generation prompt). Routing turn 0 through
+        the *same* renderer that bridges every later turn is what makes cumulative
+        mode drift-free: otherwise turn 0 would be tokenized by the engine's chat
+        template and turns 2+ by the renderer's bridge — two tokenizers stitched
+        mid-trajectory, which only coincidentally agree per model.
+
+        Returns ``None`` if the renderer cannot render the messages, so the caller
+        can fall back to the chat path (which then seeds the accumulator as before).
+        """
+        try:
+            token_ids = self.renderer.render_ids(messages, tools=tools, add_generation_prompt=True)
+        except Exception as err:  # noqa: BLE001 - fall back to the chat path on any render failure
+            logger.warning("render_ids failed for first turn (%s); falling back to chat path", err)
+            return None
+        return list(token_ids) if token_ids else None
+
     def build_next_prompt(
         self,
         new_messages: list[dict[str, Any]],
