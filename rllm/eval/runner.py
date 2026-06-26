@@ -17,8 +17,7 @@ from typing import TYPE_CHECKING
 
 from rllm.eval.results import EvalItem, EvalResult
 from rllm.hooks import FixedEvaluation, SandboxTaskHooks
-from rllm.types import AgentFlow, Evaluator
-from rllm.workflows.workflow import TerminationReason
+from rllm.types import AgentFlow, Evaluator, TerminationReason
 
 if TYPE_CHECKING:
     from rllm.gateway.manager import GatewayManager

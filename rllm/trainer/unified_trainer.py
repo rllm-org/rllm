@@ -42,10 +42,10 @@ from rllm.trainer.backend_protocol import BackendProtocol
 from rllm.trainer.buffer import TrajectoryGroupBuffer
 from rllm.trainer.metrics_aggregator import MetricsAggregator
 from rllm.trainer.sync_coordinator import SyncCoordinator, SyncCoordinatorConfig
-from rllm.types import Episode, TrajectoryGroup
+from rllm.types import Episode, TerminationReason, TrajectoryGroup
 from rllm.utils import EpisodeLogger, Tracking, extract_source_metadata
 from rllm.workflows.store import Store
-from rllm.workflows.workflow import TerminationReason, Workflow
+from rllm.workflows.workflow import Workflow
 
 logger = logging.getLogger(__name__)
 

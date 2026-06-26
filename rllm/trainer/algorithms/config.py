@@ -5,8 +5,7 @@ from typing import Any, Literal
 
 from omegaconf import DictConfig, OmegaConf
 
-from rllm.types import _DEFAULT_TRAJ_NAME
-from rllm.workflows.workflow import TerminationReason
+from rllm.types import _DEFAULT_TRAJ_NAME, TerminationReason
 
 
 def _explicit_override_keys(hydra_overrides: list[str] | None = None) -> set[str]:

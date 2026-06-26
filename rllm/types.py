@@ -23,6 +23,7 @@ import inspect
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -31,6 +32,22 @@ from pydantic import BaseModel, ConfigDict, Field
 if TYPE_CHECKING:
     from rllm.engine.rollout import ModelOutput
     from rllm.eval.types import EvalOutput
+
+
+class TerminationReason(Enum):
+    MAX_PROMPT_LENGTH_EXCEEDED = "max_prompt_length_exceeded"
+    MAX_RESPONSE_LENGTH_EXCEEDED = "max_response_length_exceeded"
+    ENV_DONE = "env_done"
+    MAX_TURNS_EXCEEDED = "max_turns_exceeded"
+    TIMEOUT = "timeout"
+    UNKNOWN = "unknown"
+    ERROR = "error"
+
+
+class TerminationEvent(Exception):
+    def __init__(self, reason: TerminationReason = TerminationReason.UNKNOWN):
+        super().__init__(f"Terminated: {reason}")
+        self.reason = reason
 
 
 @dataclass
@@ -321,7 +338,7 @@ class Episode(BaseModel):
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     task: Any = None
-    termination_reason: Any | None = None
+    termination_reason: TerminationReason | None = None
     is_correct: bool = False
     session_id: str | None = None
     trajectories: list[Trajectory] = Field(default_factory=list)
@@ -368,8 +385,6 @@ class Episode(BaseModel):
     @classmethod
     def from_dict(cls, data: dict) -> Episode:
         """Create Episode from dictionary, properly deserializing Trajectory objects."""
-        from rllm.workflows.workflow import TerminationReason
-
         return cls(
             id=data["id"],
             task=data["task"],

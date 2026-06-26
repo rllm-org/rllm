@@ -17,9 +17,8 @@ from rllm.engine.remote_runtime.protocol import (
 )
 from rllm.engine.trace_converter import compute_step_metrics, trace_record_to_step
 from rllm.gateway.manager import GatewayManager
-from rllm.types import Episode, Step, Trajectory
+from rllm.types import Episode, Step, TerminationReason, Trajectory
 from rllm.utils.episode_logger import EpisodeLogger
-from rllm.workflows.workflow import TerminationReason
 
 logger = logging.getLogger(__name__)
 
