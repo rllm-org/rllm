@@ -517,6 +517,54 @@ def save_ui_config(ui_api_key: str | None) -> None:
     os.chmod(path, 0o600)
 
 
+def load_tunnel_config() -> dict:
+    """Return the gateway-tunnel config (``backend``/``domain``/``port``) from ``~/.rllm/config.json``.
+
+    Written by ``rllm tunnel setup``; consumed by ``rllm tunnel up`` and the
+    quick-tunnel fallback warning. Empty dict if unset or unreadable.
+    """
+    path = _config_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        tunnel = data.get("tunnel")
+        return dict(tunnel) if isinstance(tunnel, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_tunnel_config(backend: str | None, *, domain: str | None = None, port: int | None = None) -> None:
+    """Merge or remove the ``tunnel`` block in ``~/.rllm/config.json``.
+
+    ``backend=None`` removes the block. Merges into the existing file so the
+    provider/model and ``ui_api_key`` entries survive.
+    """
+    path = _config_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    data: dict = {}
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    if backend is None:
+        data.pop("tunnel", None)
+    else:
+        entry: dict = {"backend": backend}
+        if domain:
+            entry["domain"] = domain
+        if port:
+            entry["port"] = port
+        data["tunnel"] = entry
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.chmod(path, 0o600)
+
+
 def load_config() -> RllmConfig:
     """Load configuration from ``~/.rllm/config.json``.
 
