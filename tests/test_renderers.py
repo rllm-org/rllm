@@ -256,3 +256,31 @@ def test_resolve_cookbook_does_not_crash_when_absent(qwen_tokenizer, monkeypatch
     monkeypatch.setattr(qwen_tokenizer, "name_or_path", "zai-org/GLM-5.2", raising=False)
     res = resolve("zai-org/GLM-5.2", qwen_tokenizer)
     assert res.source in ("tinker", "chat_template")
+
+
+def test_assemble_model_output_uses_renderer_when_chat_parser_absent(qwen_tokenizer):
+    """With a unified renderer active (chat_parser=None), assemble_model_output must
+    parse the completion via the renderer instead of asserting chat_parser is set."""
+    pytest.importorskip("tinker")
+    try:
+        from rllm.engine.rollout.fireworks_engine import FireworksEngine
+    except Exception as e:
+        pytest.skip(f"FireworksEngine import failed: {e}")
+
+    class _StubSampler: ...
+
+    class _StubOutput:
+        def __init__(self, tokens):
+            self.tokens = tokens
+            self.logprobs = [0.0] * len(tokens)
+            self.stop_reason = "stop"
+
+    engine = FireworksEngine(tokenizer=qwen_tokenizer, sampler=_StubSampler(), renderer_family="qwen3")
+    assert engine.renderer is not None and engine.chat_parser is None
+
+    completion = qwen_tokenizer.encode("hello", add_special_tokens=False) + engine.renderer.get_stop_token_ids()[:1]
+    out = engine.assemble_model_output([1, 2, 3], _StubOutput(completion))  # must not raise
+    assert out.completion_ids == completion
+    assert out.prompt_ids == [1, 2, 3]
+    assert isinstance(out.content, str)
+    assert isinstance(out.tool_calls, list)

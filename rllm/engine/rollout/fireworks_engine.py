@@ -21,7 +21,7 @@ import asyncio
 import contextvars
 import dataclasses
 import logging
-from typing import Any
+from typing import Any, cast
 
 from fireworks.training.sdk import DeploymentSampler
 from typing_extensions import override
@@ -216,6 +216,45 @@ class FireworksEngine(TinkerEngine):
         self.sample_timeout = sample_timeout
         self.router_replay = router_replay
         self.sampling_client = sampler
+
+    @override
+    def assemble_model_output(self, token_input, token_output) -> ModelOutput:
+        """Assemble the ModelOutput, parsing the completion via the unified renderer.
+
+        When a unified renderer is active, chat_parser is None, so the parent's
+        chat_parser path can't run. Parse the completion through the renderer's
+        ``parse_response`` (a ``ParsedResponse``) instead. Falls back to the
+        inherited (chat_parser) path otherwise. This covers both turn 0
+        (``get_model_response``) and turns 1+ (the gateway's token-prompt path),
+        which both call ``assemble_model_output``.
+        """
+        if self.renderer is None:
+            return super().assemble_model_output(token_input, token_output)
+
+        sampled = cast(TinkerTokenOutput, token_output)
+        response_tokens, logprobs = sampled.tokens, sampled.logprobs
+        parsed = self.renderer.parse_response(response_tokens)
+
+        prompt_ids: list[int] = []
+        for elem in token_input:
+            chunk_tokens = getattr(elem, "tokens", None)  # tinker.EncodedTextChunk -> ints
+            if chunk_tokens is not None:
+                prompt_ids.extend(chunk_tokens)
+            else:
+                prompt_ids.append(elem)
+
+        return ModelOutput(
+            text=self.tokenizer.decode(response_tokens, skip_special_tokens=True),
+            content=parsed.content or "",
+            reasoning=parsed.reasoning_content or "",
+            tool_calls=parsed.tool_calls or [],
+            prompt_ids=prompt_ids,
+            completion_ids=response_tokens,
+            logprobs=logprobs,
+            prompt_length=_flat_token_input_length(token_input),
+            completion_length=len(response_tokens),
+            finish_reason=sampled.stop_reason,
+        )
 
     # ------------------------------------------------------------------
     # Token-in / token-out override
