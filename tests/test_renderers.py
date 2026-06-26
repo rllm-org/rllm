@@ -229,10 +229,12 @@ def test_fireworks_engine_skips_chatparser_when_renderer_pinned(qwen_tokenizer):
     pinned = FireworksEngine(tokenizer=qwen_tokenizer, sampler=_StubSampler(), renderer_family="qwen3")
     assert pinned.renderer is not None
     assert pinned.chat_parser is None
+    assert pinned.bypass_render_with_parser is False  # renderer owns rendering+parsing
 
     default = FireworksEngine(tokenizer=qwen_tokenizer, sampler=_StubSampler())
     assert default.renderer is None
     assert default.chat_parser is not None
+    assert default.bypass_render_with_parser is True
 
 
 def test_cookbook_renderer_name_prefix_match():

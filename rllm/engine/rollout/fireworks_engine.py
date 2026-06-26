@@ -178,8 +178,6 @@ class FireworksEngine(TinkerEngine):
         self.train_sampling_params = dict((sampling_params or {}).get("train", {}))
         self.val_sampling_params = dict((sampling_params or {}).get("val", {}))
 
-        self.bypass_render_with_parser = True
-
         # Resolve the renderer the same way the gateway does, so the engine renders
         # turn 0 with the same renderer the gateway uses for the turn-1+ cumulative
         # bridge. resolve() auto-detects Fireworks-cookbook models (e.g. GLM-5.2 ->
@@ -210,7 +208,11 @@ class FireworksEngine(TinkerEngine):
                 getattr(tokenizer, "name_or_path", None),
             )
 
-        # Chat template parser — only when no unified renderer is active.
+        # bypass_render_with_parser reflects who owns rendering+parsing: True means
+        # ChatTemplateParser (built below); False means the unified renderer does.
+        # The flag was previously hardcoded True even with a renderer active, which
+        # was a lie — and is why assemble_model_output asserted on a None chat_parser.
+        self.bypass_render_with_parser = self.renderer is None
         self.chat_parser = None if self.renderer is not None else ChatTemplateParser.get_parser(tokenizer, processor=processor, disable_thinking=disable_thinking)
 
         self.sample_timeout = sample_timeout
