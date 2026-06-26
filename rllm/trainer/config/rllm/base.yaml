@@ -155,9 +155,12 @@ remote_runtime:
 gateway:
   port: 9090
   host: null          # Auto-detects routable IP; set explicitly to override
-  tunnel: null        # Reach gateway from remote sandboxes. Either a backend name ("cloudflared")
-                      # to auto-spawn a tunnel, or an http(s):// URL reachable from the sandbox
-                      # (your own tailscale IP, bore/ngrok/frp URL, internal DNS, etc.).
+  tunnel: null        # Reach the gateway from remote sandboxes. When null and a run uses remote
+                      # sandboxes, it auto-resolves: $RLLM_GATEWAY_TUNNEL -> a running `rllm tunnel up`
+                      # daemon -> a free Cloudflare quick tunnel (shared/rate-limited; warns). Or set
+                      # explicitly to a backend to auto-spawn ("cloudflared", "ngrok", "ngrok:<domain>")
+                      # or an http(s):// URL reachable from the sandbox (tailscale IP, bore/frp, etc.).
+                      # For a stable tunnel with no per-run config: `rllm tunnel setup` then `rllm tunnel up`.
   store: memory       # "memory" (non-persistent) | "sqlite" (writes traces to disk)
   db_path: null       # Only used when store=sqlite; null → auto-resolved path (logged at startup)
   # Sampling params attached to a session overwrite those keys on every LLM call;

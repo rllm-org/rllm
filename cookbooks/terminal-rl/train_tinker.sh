@@ -62,7 +62,7 @@ python -u train.py \
     rllm.async_training.partial_rollout=true \
     rllm.workflow.n_parallel_tasks=128 \
     rllm.workflow.raise_on_error=false \
-    rllm.gateway.port=9090 \
+    rllm.gateway.port=9091 \
     rllm.gateway.cumulative_token_mode=true \
     rllm.gateway.renderer_family=qwen3.5 \
     rllm.trainer.total_epochs=1 \
