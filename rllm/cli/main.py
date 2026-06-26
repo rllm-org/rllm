@@ -33,6 +33,7 @@ class _LazyGroup(click.Group):
         "model": ("rllm.cli.model_cmd", "model", "Manage provider and model configuration.", "⚙️"),
         "snapshot": ("rllm.cli.snapshot_cmd", "snapshot", "Manage sandbox environment snapshots.", "📸"),
         "train": ("rllm.cli.train", "train_cmd", "Train a model on a benchmark dataset using RL.", "🏋️"),
+        "tunnel": ("rllm.cli.tunnel", "tunnel", "Set up & run the gateway tunnel.", "🛰️"),
         "view": ("rllm.cli.view", "view_cmd", "Browse saved eval episodes in a local web viewer.", "🔍"),
         "login": ("rllm.cli.login", "login_cmd", "Log in to rLLM UI.", "🔑"),
         "setup": None,  # handled inline

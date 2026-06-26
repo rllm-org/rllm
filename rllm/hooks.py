@@ -327,17 +327,27 @@ def pin_gateway_host_loopback(config: DictConfig) -> DictConfig:
 
 
 def enable_gateway_tunnel(config: DictConfig) -> DictConfig:
-    """Auto-wire ``rllm.gateway.tunnel="cloudflared"`` when no tunnel is already set.
+    """Auto-wire ``rllm.gateway.tunnel`` when no tunnel is explicitly set.
 
     Callers decide *when* (sandboxes run off-host — see
-    :func:`scan_env_requirements`); this helper only applies the setting.
+    :func:`scan_env_requirements`); this helper resolves *what*. An explicit
+    ``rllm.gateway.tunnel`` always wins; otherwise resolution falls to
+    ``$RLLM_GATEWAY_TUNNEL`` → a running ``rllm tunnel up`` daemon → a free
+    Cloudflare quick tunnel (with a warning) — see
+    :func:`rllm.gateway.tunnel.resolve_auto_tunnel`.
     """
     gw = config.rllm.get("gateway", {}) or {}
     if gw.get("tunnel"):
         return config
+
+    from rllm.gateway.tunnel import resolve_auto_tunnel
+
+    value, warning = resolve_auto_tunnel()
+    if warning:
+        logger.warning(warning)
     return OmegaConf.merge(
         config,
-        OmegaConf.create({"rllm": {"gateway": {"tunnel": "cloudflared"}}}),
+        OmegaConf.create({"rllm": {"gateway": {"tunnel": value}}}),
     )
 
 
