@@ -196,6 +196,12 @@ class TinkerEngine(RolloutEngine):
         self.bypass_render_with_parser = bypass_render_with_parser
         self.accumulate_reasoning = accumulate_reasoning
         self.reasoning_effort = reasoning_effort
+        # Optional unified renderer (rllm.renderers). When set, it owns prompt
+        # rendering and completion parsing for both backends; ``renderer`` (the
+        # tinker_cookbook renderer) and ``chat_parser`` remain the fallbacks.
+        # Base TinkerEngine leaves this None (no behavior change); FireworksEngine
+        # sets it via rllm.renderers.resolve.
+        self.unified_renderer = None
 
         self.train_sampling_params = dict(sampling_params.get("train", {})) if sampling_params else {}
         self.val_sampling_params = dict(sampling_params.get("val", {})) if sampling_params else {}
@@ -339,7 +345,14 @@ class TinkerEngine(RolloutEngine):
         sampled_sequence = cast(TinkerTokenOutput, token_output)
         response_tokens, logprobs = sampled_sequence.tokens, sampled_sequence.logprobs
 
-        if self.bypass_render_with_parser:
+        if self.unified_renderer is not None:
+            # Unified rllm.renderers layer (prime-rl / Fireworks-cookbook): parse
+            # the completion into a ParsedResponse. Shared by both backends.
+            parsed = self.unified_renderer.parse_response(response_tokens)
+            content = parsed.content or ""
+            reasoning = parsed.reasoning_content or ""
+            tool_calls = parsed.tool_calls or []
+        elif self.bypass_render_with_parser:
             assert self.chat_parser is not None, "chat_parser must be set when bypass_render_with_parser=True"
             parsed_output = self.chat_parser.parse_completion(response_tokens)
             content = parsed_output.get("content", "")
@@ -374,6 +387,32 @@ class TinkerEngine(RolloutEngine):
             finish_reason=finish_reason,
         )
 
+    def _render_prompt_token_input(self, messages: list[dict], *, tools=None, reasoning_effort=None, accumulate_reasoning=None):
+        """Render messages to this engine's token input. Shared by both backends.
+
+        Order mirrors ``assemble_model_output``'s parse branches: unified
+        rllm.renderers renderer (``render_ids``) -> ChatTemplateParser
+        (text -> encode) -> tinker_cookbook renderer (``build_generation_prompt``
+        chunks, incl. VLM image chunks).
+        """
+        if self.unified_renderer is not None:
+            return self.unified_renderer.render_ids(messages, tools=tools or None, add_generation_prompt=True)
+        if self.bypass_render_with_parser:
+            prompt = self.chat_parser.parse(  # type: ignore
+                messages,
+                add_generation_prompt=True,
+                is_first_msg=True,
+                tools=tools,
+                reasoning_effort=reasoning_effort,
+                accumulate_reasoning=accumulate_reasoning,
+            )
+            return self.tokenizer.encode(prompt, add_special_tokens=False)  # type: ignore
+        converted_messages = self._convert_images_to_content_list(messages)
+        tinker_messages = _convert_openai_messages(converted_messages)
+        if tools:
+            tinker_messages = _prepare_messages_with_tools(self.renderer, tinker_messages, tools)
+        return self.renderer.build_generation_prompt(tinker_messages).chunks  # type: ignore
+
     @override
     async def _get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
         """
@@ -398,27 +437,12 @@ class TinkerEngine(RolloutEngine):
         accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
         reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
 
-        if self.bypass_render_with_parser:
-            # Use ChatTemplateParser
-            prompt = self.chat_parser.parse(  # type: ignore
-                messages,
-                add_generation_prompt=True,
-                is_first_msg=True,
-                tools=tools,
-                reasoning_effort=reasoning_effort,
-                accumulate_reasoning=accumulate_reasoning,
-            )
-            token_input = self.tokenizer.encode(prompt, add_special_tokens=False)  # type: ignore
-        else:
-            # Use Tinker renderer
-            # Convert images, then convert OpenAI messages to renderer format
-            converted_messages = self._convert_images_to_content_list(messages)
-            tinker_messages = _convert_openai_messages(converted_messages)
-            # Inject tool definitions via renderer if tools are provided
-            if tools:
-                tinker_messages = _prepare_messages_with_tools(self.renderer, tinker_messages, tools)
-            # Build prompt using renderer
-            token_input: TinkerTokenInput = self.renderer.build_generation_prompt(tinker_messages).chunks  # type: ignore
+        token_input = self._render_prompt_token_input(
+            messages,
+            tools=tools,
+            reasoning_effort=reasoning_effort,
+            accumulate_reasoning=accumulate_reasoning,
+        )
 
         sampled_sequence = await self.get_token_output_from_token_input(token_input=token_input, **kwargs)
         return self.assemble_model_output(token_input=token_input, token_output=sampled_sequence)
