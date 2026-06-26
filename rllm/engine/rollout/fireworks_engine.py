@@ -141,6 +141,7 @@ class FireworksEngine(TinkerEngine):
         sample_timeout: int = 600,
         processor=None,
         router_replay: bool = False,
+        cumulative_token_mode: bool = False,
         **kwargs,
     ):
         """
@@ -178,12 +179,31 @@ class FireworksEngine(TinkerEngine):
         self.train_sampling_params = dict((sampling_params or {}).get("train", {}))
         self.val_sampling_params = dict((sampling_params or {}).get("val", {}))
 
-        # Rendering setup. Default: ChatTemplateParser bypass mode (Jinja
+        # Rendering setup.
+        #
+        # Cumulative token mode: the gateway renders EVERY turn (turn-0 via the
+        # renderer's render_ids, turns 2+ via bridge_to_next_turn) and parses the
+        # completion via the renderer too, so the engine is a pure token-in /
+        # token-out sampler — it never renders messages or parses completions.
+        # We therefore build no ChatTemplateParser (which would crash here for
+        # models whose Jinja template the parser's equivalence self-check can't
+        # render, e.g. GLM) and no tinker renderer. assemble_model_output uses the
+        # raw-decode branch; get_model_response (the chat path) is never called.
+        self.cumulative_token_mode = cumulative_token_mode
+        self.raw_token_mode = cumulative_token_mode
+        self.renderer = None
+        if cumulative_token_mode:
+            self.chat_parser = None
+            self.bypass_render_with_parser = False
+            self.sample_timeout = sample_timeout
+            self.router_replay = router_replay
+            self.sampling_client = sampler
+            return
+        # Non-cumulative. Default: ChatTemplateParser bypass mode (Jinja
         # chat-template models). Some models (e.g. DeepSeek-V4) ship no Jinja
         # chat_template — they use a hand-rolled encoder exposed via the
         # tinker/Fireworks renderer. Fall back to that renderer, using the
         # non-bypass path the inherited assemble_model_output already supports.
-        self.renderer = None
         try:
             self.chat_parser = ChatTemplateParser.get_parser(
                 tokenizer,
@@ -225,6 +245,14 @@ class FireworksEngine(TinkerEngine):
 
     @override
     async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
+        if self.raw_token_mode:
+            raise RuntimeError(
+                "FireworksEngine is in cumulative_token_mode (token-in/token-out only): the "
+                "gateway renders every turn, so get_model_response (message rendering) must not "
+                "be called. This means turn-0 fell back to the chat path because the gateway "
+                "renderer could not render the initial messages — fix the renderer/renderer_family "
+                "(it must not resolve to DefaultRenderer) rather than the engine."
+            )
         application_id = kwargs.pop("application_id", None)
 
         tools = kwargs.pop("tools", [])

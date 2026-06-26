@@ -339,7 +339,16 @@ class TinkerEngine(RolloutEngine):
         sampled_sequence = cast(TinkerTokenOutput, token_output)
         response_tokens, logprobs = sampled_sequence.tokens, sampled_sequence.logprobs
 
-        if self.bypass_render_with_parser:
+        if getattr(self, "raw_token_mode", False):
+            # Cumulative token mode: the gateway re-parses the completion token IDs
+            # with the renderer (renderer.parse_response) to build the structured
+            # assistant message, so the engine does no parsing — just expose the
+            # raw decoded text (used only as the gateway's fallback) plus the raw
+            # token IDs. No chat_parser / renderer is built in this mode.
+            content = self.tokenizer.decode(response_tokens, skip_special_tokens=True)  # type: ignore
+            reasoning = ""
+            tool_calls = []
+        elif self.bypass_render_with_parser:
             assert self.chat_parser is not None, "chat_parser must be set when bypass_render_with_parser=True"
             parsed_output = self.chat_parser.parse_completion(response_tokens)
             content = parsed_output.get("content", "")

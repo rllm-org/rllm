@@ -227,6 +227,9 @@ class FireworksBackend(TinkerBackend):
                 accumulate_reasoning=rollout_extra.pop("accumulate_reasoning", False),
                 reasoning_effort=rollout_extra.pop("reasoning_effort", "medium"),
                 router_replay=cfg.rllm.algorithm.get("router_replay", "disabled") == "R3",
+                # Cumulative token mode → the gateway renders/parses every turn;
+                # the engine is a pure token-in/token-out sampler (no chat_parser).
+                cumulative_token_mode=cfg.rllm.get("gateway", {}).get("cumulative_token_mode", False),
                 **rollout_extra,
             )
             return self.rollout_engine
