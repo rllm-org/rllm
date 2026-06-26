@@ -66,16 +66,12 @@ def select_backend(
     if renderer_family:
         return RendererResolution(Backend.PRIME, renderer_family=renderer_family, has_bridge=True)
     if renderer_name:
-        return RendererResolution(
-            Backend.TINKER, renderer_name=renderer_name, has_bridge=_tinker.BRIDGE_AVAILABLE
-        )
+        return RendererResolution(Backend.TINKER, renderer_name=renderer_name, has_bridge=_tinker.BRIDGE_AVAILABLE)
     if _prime.prime_supports(model_name):
         return RendererResolution(Backend.PRIME, renderer_family="auto", has_bridge=True)
     tname = _tinker.tinker_renderer_name(model_name)
     if tname is not None:
-        return RendererResolution(
-            Backend.TINKER, renderer_name=tname, has_bridge=_tinker.BRIDGE_AVAILABLE
-        )
+        return RendererResolution(Backend.TINKER, renderer_name=tname, has_bridge=_tinker.BRIDGE_AVAILABLE)
     return RendererResolution(Backend.DEFAULT, renderer_family="auto", has_bridge=False)
 
 
@@ -86,9 +82,7 @@ def describe(
     renderer_family: str | None = None,
 ) -> RendererResolution:
     """Alias of :func:`select_backend`, for logging / CLI introspection."""
-    return select_backend(
-        model_name, renderer_name=renderer_name, renderer_family=renderer_family
-    )
+    return select_backend(model_name, renderer_name=renderer_name, renderer_family=renderer_family)
 
 
 def resolve(
@@ -106,27 +100,24 @@ def resolve(
     to the prime-rl backend and ignored by the tinker backend.
     """
     model_name = _infer_model_name(model_name, tokenizer)
-    decision = select_backend(
-        model_name, renderer_name=renderer_name, renderer_family=renderer_family
-    )
+    decision = select_backend(model_name, renderer_name=renderer_name, renderer_family=renderer_family)
 
     if decision.backend is Backend.PRIME:
-        renderer = _prime.make_prime_renderer(
-            tokenizer, renderer_family=decision.renderer_family or "auto", **prime_kwargs
-        )
+        renderer = _prime.make_prime_renderer(tokenizer, renderer_family=decision.renderer_family or "auto", **prime_kwargs)
         logger.info(
             "Renderer for %r -> prime-rl %s (bridge=%s)",
-            model_name, renderer.name, renderer.has_bridge,
+            model_name,
+            renderer.name,
+            renderer.has_bridge,
         )
         return renderer
 
     if decision.backend is Backend.TINKER:
-        renderer = _tinker.make_tinker_renderer(
-            decision.renderer_name, tokenizer, image_processor=image_processor
-        )
+        renderer = _tinker.make_tinker_renderer(decision.renderer_name, tokenizer, image_processor=image_processor)
         logger.info(
             "Renderer for %r -> tinker/fireworks %r (no token bridge)",
-            model_name, decision.renderer_name,
+            model_name,
+            decision.renderer_name,
         )
         return renderer
 
@@ -134,10 +125,9 @@ def resolve(
     if _prime.PRIME_AVAILABLE:
         renderer = _prime.make_prime_renderer(tokenizer, renderer_family="auto", **prime_kwargs)
         logger.warning(
-            "No hand-coded renderer for %r; falling back to %s (no token bridge, "
-            "multi-turn RL will full-re-render each turn). Pass renderer_family/"
-            "renderer_name to override.",
-            model_name, renderer.name,
+            "No hand-coded renderer for %r; falling back to %s (no token bridge, multi-turn RL will full-re-render each turn). Pass renderer_family/renderer_name to override.",
+            model_name,
+            renderer.name,
         )
         return renderer
 

@@ -149,9 +149,7 @@ def test_prime_bridge_extends_prefix_byte_for_byte():
     msgs = [{"role": "user", "content": "What is 2+2?"}]
     prompt_ids = r.render_ids(msgs, add_generation_prompt=True)
     completion_ids = tok.encode("4", add_special_tokens=False)
-    bridged = r.bridge_to_next_turn(
-        prompt_ids, completion_ids, [{"role": "user", "content": "And 3+3?"}]
-    )
+    bridged = r.bridge_to_next_turn(prompt_ids, completion_ids, [{"role": "user", "content": "And 3+3?"}])
     assert isinstance(bridged, RenderedTokens)
     prefix = prompt_ids + completion_ids
     assert bridged.token_ids[: len(prefix)] == prefix
@@ -182,9 +180,7 @@ def test_tinker_adapter_bridge_extends_prefix_for_fw_model():
     assert r.has_bridge is True
     prompt_ids = r.render_ids([{"role": "user", "content": "hi"}], add_generation_prompt=True)
     completion_ids = tok.encode("</think>hello", add_special_tokens=False) + [1]  # clean EOS
-    bridged = r.bridge_to_next_turn(
-        prompt_ids, completion_ids, [{"role": "user", "content": "bye"}]
-    )
+    bridged = r.bridge_to_next_turn(prompt_ids, completion_ids, [{"role": "user", "content": "bye"}])
     assert isinstance(bridged, RenderedTokens)
     prefix = prompt_ids + completion_ids
     assert bridged.token_ids[: len(prefix)] == prefix
@@ -295,7 +291,7 @@ def test_deepseek_v4_bridge_merges_tool_results():
     assert out is not None
     prefix = prev_prompt + prev_completion
     assert out.token_ids[: len(prefix)] == prefix  # prior tokens kept verbatim
-    delta = _decode(tok, out.token_ids[len(prefix):])
+    delta = _decode(tok, out.token_ids[len(prefix) :])
     # Two tool results merge into ONE user turn (not two), then the assistant opener.
     assert delta.count("<｜User｜>") == 1
     assert delta.count("<tool_result>") == 2

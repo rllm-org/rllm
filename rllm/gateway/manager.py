@@ -405,14 +405,16 @@ class GatewayManager:
             renderer = resolve(self.model, tokenizer, renderer_family=family)
             logger.info(
                 "Injecting %s for cumulative token mode (model=%s, has_bridge=%s)",
-                type(renderer).__name__, self.model, getattr(renderer, "has_bridge", "?"),
+                type(renderer).__name__,
+                self.model,
+                getattr(renderer, "has_bridge", "?"),
             )
             return renderer
         except Exception as err:  # noqa: BLE001
             logger.warning(
-                "Could not build a cumulative-mode renderer for %s (%s); the gateway "
-                "will build a prime-rl renderer from config instead.",
-                self.model, err,
+                "Could not build a cumulative-mode renderer for %s (%s); the gateway will build a prime-rl renderer from config instead.",
+                self.model,
+                err,
             )
             return None
 

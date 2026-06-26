@@ -74,10 +74,7 @@ def _to_prime_tools(tools: list[ToolSpec] | list[dict[str, Any]] | None):
         return None
     from renderers.base import ToolSpec as PrimeToolSpec  # type: ignore
 
-    return [
-        PrimeToolSpec(name=s.name, description=s.description, parameters=s.parameters)
-        for s in specs
-    ]
+    return [PrimeToolSpec(name=s.name, description=s.description, parameters=s.parameters) for s in specs]
 
 
 def _wrap_rendered(rt: Any) -> RenderedTokens:
@@ -176,10 +173,7 @@ def make_prime_renderer(
 ) -> PrimeRenderer:
     """Build a :class:`PrimeRenderer` via prime-rl ``create_renderer``."""
     if not PRIME_AVAILABLE:
-        raise RuntimeError(
-            "prime-rl 'renderers' package is not installed. "
-            "Install it with: pip install renderers"
-        )
+        raise RuntimeError("prime-rl 'renderers' package is not installed. Install it with: pip install renderers")
     renderer = _prime().create_renderer(
         tokenizer,
         renderer=renderer_family,

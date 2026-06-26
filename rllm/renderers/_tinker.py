@@ -86,9 +86,7 @@ def _convert_messages(messages: list[Message]) -> list[Message]:
         if "tool_call_id" in msg:
             tinker_msg["tool_call_id"] = msg["tool_call_id"]
         if "tool_calls" in msg:
-            tinker_msg["tool_calls"] = [
-                TinkerToolCall.model_validate(tc) for tc in msg["tool_calls"]
-            ]
+            tinker_msg["tool_calls"] = [TinkerToolCall.model_validate(tc) for tc in msg["tool_calls"]]
         out.append(tinker_msg)
     return out
 
@@ -99,10 +97,7 @@ def _to_tinker_tool_specs(tools: list[ToolSpec] | list[dict[str, Any]] | None):
         return []
     from tinker_cookbook.renderers.base import ToolSpec as TinkerToolSpec
 
-    return [
-        TinkerToolSpec(name=s.name, description=s.description, parameters=s.parameters)
-        for s in specs
-    ]
+    return [TinkerToolSpec(name=s.name, description=s.description, parameters=s.parameters) for s in specs]
 
 
 class TinkerAdapter:
@@ -140,9 +135,7 @@ class TinkerAdapter:
             remaining = tinker_messages[1:]
         else:
             remaining = tinker_messages
-        prefix = self._renderer.create_conversation_prefix_with_tools(
-            tool_specs, system_prompt
-        )
+        prefix = self._renderer.create_conversation_prefix_with_tools(tool_specs, system_prompt)
         return list(prefix) + list(remaining)
 
     def render_ids(
@@ -170,11 +163,7 @@ class TinkerAdapter:
         tools: list[ToolSpec] | list[dict[str, Any]] | None = None,
         add_generation_prompt: bool = False,
     ) -> RenderedTokens:
-        return RenderedTokens(
-            token_ids=self.render_ids(
-                messages, tools=tools, add_generation_prompt=add_generation_prompt
-            )
-        )
+        return RenderedTokens(token_ids=self.render_ids(messages, tools=tools, add_generation_prompt=add_generation_prompt))
 
     def parse_response(self, token_ids: list[int]) -> ParsedResponse:
         message, _termination = self._renderer.parse_response(token_ids)
@@ -252,9 +241,7 @@ class TinkerAdapter:
         {
             "role": "assistant",
             "content": "",
-            "tool_calls": [
-                {"id": "_b", "type": "function", "function": {"name": "_", "arguments": "{}"}}
-            ],
+            "tool_calls": [{"id": "_b", "type": "function", "function": {"name": "_", "arguments": "{}"}}],
         },
     ]
 
@@ -317,9 +304,7 @@ class TinkerAdapter:
             return None
         close_set = set(close_ids)
 
-        anchor = self._trim_to_turn_close(
-            previous_prompt_ids, previous_completion_ids, close_set, close_ids[0]
-        )
+        anchor = self._trim_to_turn_close(previous_prompt_ids, previous_completion_ids, close_set, close_ids[0])
         if anchor is None:
             return None
 
@@ -340,9 +325,7 @@ def make_tinker_renderer(
     ``deepseek_v4`` / ``gemma4`` resolve.
     """
     if not TINKER_AVAILABLE:
-        raise RuntimeError(
-            "tinker_cookbook is not installed. Install it with: pip install tinker-cookbook"
-        )
+        raise RuntimeError("tinker_cookbook is not installed. Install it with: pip install tinker-cookbook")
     from tinker_cookbook import renderers as tc_renderers
 
     from rllm.renderers._fw_register import ensure_registered

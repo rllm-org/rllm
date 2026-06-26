@@ -170,7 +170,9 @@ class FireworksEngine(TinkerEngine):
                 ) from err
             logger.info(
                 "No usable chat_template for %r (%s); rendering via tinker/Fireworks renderer %r.",
-                model_name, err, renderer_name,
+                model_name,
+                err,
+                renderer_name,
             )
             self.chat_parser = None
             self.bypass_render_with_parser = False

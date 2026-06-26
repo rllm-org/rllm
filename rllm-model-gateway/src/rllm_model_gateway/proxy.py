@@ -227,14 +227,10 @@ class ReverseProxy:
                     # tokens from the next cumulative prompt and break extension.
                     # Log which case it was + the new-slice shape to root-cause.
                     if not new_messages:
-                        raw_roles = [m.get("role") for m in messages[acc.message_count:]]
+                        raw_roles = [m.get("role") for m in messages[acc.message_count :]]
                         reason = f"no bridgeable new messages (raw new-slice roles={raw_roles})"
                     else:
-                        reason = (
-                            "bridge returned None (new-slice roles="
-                            f"{[m.get('role') for m in new_messages]}, content_types="
-                            f"{[type(m.get('content')).__name__ for m in new_messages]})"
-                        )
+                        reason = f"bridge returned None (new-slice roles={[m.get('role') for m in new_messages]}, content_types={[type(m.get('content')).__name__ for m in new_messages]})"
                     acc.reset(reason)
 
         if is_stream:

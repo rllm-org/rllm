@@ -487,9 +487,7 @@ class TestStructuredCumulativeResponse:
     def test_pure_message_builder(self):
         from rllm_model_gateway.proxy import _parsed_response_to_message
 
-        msg = _parsed_response_to_message(
-            _ParsedResp("hello", "thinking", [_ToolCall("f", {"a": 1})])
-        )
+        msg = _parsed_response_to_message(_ParsedResp("hello", "thinking", [_ToolCall("f", {"a": 1})]))
         assert msg["role"] == "assistant"
         assert msg["content"] == "hello"
         assert msg["reasoning_content"] == "thinking"

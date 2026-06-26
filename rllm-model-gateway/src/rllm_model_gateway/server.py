@@ -198,7 +198,9 @@ def create_app(
             renderer = create_renderer(tokenizer, renderer=config.renderer_family)
             logger.info(
                 "Built %s (family=%r) from %s for cumulative token mode",
-                type(renderer).__name__, config.renderer_family, config.model,
+                type(renderer).__name__,
+                config.renderer_family,
+                config.model,
             )
         else:
             logger.info("Using injected %s for cumulative token mode", type(renderer).__name__)
