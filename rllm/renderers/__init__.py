@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from .adapters import ChatTemplateAdapter, TinkerRendererAdapter
 from .bridging import BridgingRendererMixin
+from .config import renderer_settings
 from .registry import Backend, RendererResolution, describe, get_renderer, resolve
 from .types import ParsedResponse, RenderedTokens, Renderer
 
@@ -24,5 +25,6 @@ __all__ = [
     "TinkerRendererAdapter",
     "describe",
     "get_renderer",
+    "renderer_settings",
     "resolve",
 ]

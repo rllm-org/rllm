@@ -288,6 +288,43 @@ def test_assemble_model_output_uses_renderer_when_chat_parser_absent(qwen_tokeni
     assert isinstance(out.tool_calls, list)
 
 
+def _make_tinker_engine(tokenizer, **kw):
+    pytest.importorskip("tinker")
+    from rllm.engine.rollout.tinker_engine import TinkerEngine
+
+    class _StubClient: ...
+
+    return TinkerEngine(
+        base_url="http://x",
+        model_name=getattr(tokenizer, "name_or_path", "Qwen/Qwen3-0.6B"),
+        service_client=_StubClient(),
+        tokenizer=tokenizer,
+        sampling_params={},
+        **kw,
+    )
+
+
+def test_tinker_engine_uses_unified_renderer_for_text(qwen_tokenizer):
+    """Both backends converge: TinkerEngine adopts the unified renderer for text."""
+    eng = _make_tinker_engine(qwen_tokenizer, bypass_render_with_parser=False)
+    assert eng.unified_renderer is not None
+    assert eng.chat_parser is None
+    assert eng.stop_sequences
+
+
+def test_tinker_engine_bypass_forces_chat_parser(qwen_tokenizer):
+    eng = _make_tinker_engine(qwen_tokenizer, bypass_render_with_parser=True)
+    assert eng.unified_renderer is None
+    assert eng.chat_parser is not None
+
+
+def test_tinker_engine_vlm_keeps_legacy_renderer(qwen_tokenizer):
+    """VLM stays on the legacy tinker_cookbook renderer (unified render_ids can't carry image chunks)."""
+    eng = _make_tinker_engine(qwen_tokenizer, bypass_render_with_parser=False, processor=object())
+    assert eng.unified_renderer is None
+    assert eng.renderer is not None
+
+
 def test_fireworks_engine_explicit_bypass_overrides_renderer(qwen_tokenizer):
     """bypass_render_with_parser=True is an explicit escape hatch: force
     ChatTemplateParser and skip the unified renderer, even when one is pinned."""

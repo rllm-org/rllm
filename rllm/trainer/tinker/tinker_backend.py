@@ -144,6 +144,11 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             else:
                 raise RuntimeError(f"AutoProcessor for {self.full_config.model.name!r} has no .image_processor attribute; this model isn't a VLM or transformers can't expose its image processor.")
 
+        from rllm.renderers import renderer_settings
+
+        rollout_extra = dict(self.full_config.rollout_engine)
+        rollout_extra.pop("renderer_name", None)  # sourced from rllm.renderer (single source of truth)
+        renderer_family, renderer_name = renderer_settings(self.full_config)
         self.rollout_engine = TinkerEngine(
             base_url=self.full_config.tinker_base_url,
             model_name=self.full_config.model.name,
@@ -153,8 +158,10 @@ class TinkerBackend(BackendProtocol[Iterable, list[tinker.Datum]]):
             max_response_length=self.full_config.data.max_response_length,
             max_model_length=self.full_config.training.max_length,
             sampling_params=self.full_config.rllm.rollout,
-            **self.full_config.rollout_engine,
+            renderer_family=renderer_family,
+            renderer_name=renderer_name,
             image_processor=image_processor,
+            **rollout_extra,
         )
         return self.rollout_engine
 
