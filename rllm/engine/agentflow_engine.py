@@ -35,9 +35,8 @@ from rllm.data.utils import task_from_row
 from rllm.engine.trace_converter import compute_step_metrics, trace_record_to_step
 from rllm.eval.types import EvalOutput
 from rllm.gateway.manager import container_reachable_url
-from rllm.types import AgentConfig, Episode, Step, Task, Trajectory, flow_accepts_env, run_agent_flow
+from rllm.types import AgentConfig, Episode, Step, Task, TerminationReason, Trajectory, flow_accepts_env, run_agent_flow
 from rllm.utils import colorful_print
-from rllm.workflows.workflow import TerminationReason
 
 if TYPE_CHECKING:
     from rllm_model_gateway.models import TraceRecord
@@ -739,6 +738,8 @@ class AgentFlowEngine:
         for signal in eval_output.signals:
             enriched.metrics[signal.name] = signal.value
 
+        # Harness sets TIMEOUT/ERROR itself; a clean exit is ENV_DONE. (Length /
+        # turn-cap aren't reliably recoverable from gateway traces on this path.)
         if enriched.termination_reason is None:
             enriched.termination_reason = TerminationReason.ENV_DONE
         return enriched

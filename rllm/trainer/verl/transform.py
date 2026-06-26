@@ -10,8 +10,7 @@ from verl.utils.torch_functional import pad_sequence_to_length
 
 from rllm.engine.rollout import VerlEngine
 from rllm.trainer.verl.dataclass import AccumulatedData, ProcessedStepData
-from rllm.types import Episode, Trajectory, TrajectoryGroup
-from rllm.workflows.workflow import TerminationReason
+from rllm.types import Episode, TerminationReason, Trajectory, TrajectoryGroup
 
 logger = logging.getLogger(__name__)
 

@@ -17,7 +17,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from rllm.engine.rollout.tinker_engine import TinkerEngine
-from rllm.workflows import TerminationEvent, TerminationReason
+from rllm.types import TerminationEvent, TerminationReason
 
 logger = logging.getLogger(__name__)
 

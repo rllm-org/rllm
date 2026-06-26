@@ -4,10 +4,12 @@ A FakeSandbox captures every ``exec`` call so we can assert on the
 shape of install scripts, env var construction, and config-file
 contents without needing Docker.
 
-These harnesses return ``None`` from ``run()`` — the gateway captures
-LLM calls and the engine builds the trajectory during enrichment. The
-tests therefore assert on side-effects (sandbox calls, config files,
-invocation strings), not on returned Steps/Trajectories.
+These harnesses return a lightweight outcome ``Episode`` from ``run()`` (one
+empty-step Trajectory the engine enriches from gateway traces) carrying the
+``termination_reason`` the run observed — ``TIMEOUT`` on the agent's wall-clock
+budget, ``ERROR`` on a sandbox/exec failure, or ``None`` on a clean exit for the
+engine to classify. The tests assert on that reason plus the usual side-effects
+(sandbox calls, config files, invocation strings).
 """
 
 from __future__ import annotations
@@ -23,7 +25,8 @@ from rllm.harnesses.kimi_cli import KimiCliHarness
 from rllm.harnesses.mini_swe_agent import MiniSweAgentHarness
 from rllm.harnesses.opencode import OpenCodeHarness
 from rllm.harnesses.qwen_code import QwenCodeHarness
-from rllm.types import AgentConfig, Task
+from rllm.sandbox.protocol import SandboxCommandTimeout
+from rllm.types import AgentConfig, Episode, Task, TerminationReason
 
 ALL_HARNESSES = [
     AiderHarness,
@@ -50,8 +53,11 @@ class FakeSandbox:
     stdout: str = "OK"
     calls: list[_ExecCall] = field(default_factory=list)
     fail_on_substring: str | None = None
+    timeout_on_substring: str | None = None
 
     def exec(self, command: str, timeout: float | None = None, user: str | None = None) -> str:
+        if self.timeout_on_substring and self.timeout_on_substring in command:
+            raise SandboxCommandTimeout(f"command timed out: {self.timeout_on_substring!r}")
         if self.fail_on_substring and self.fail_on_substring in command:
             raise RuntimeError(f"sandbox exec failed: {self.fail_on_substring!r}")
         self.calls.append(_ExecCall(command=command, user=user, timeout=timeout))
@@ -77,20 +83,26 @@ def _make_config(base_url: str = "http://gw:8000/sessions/eval-0/v1", model: str
 
 
 # ---------------------------------------------------------------------------
-# Lifecycle: install on sandbox-ready, run() returns None and execs the CLI
+# Lifecycle: install on sandbox-ready, run() execs the CLI and returns an
+# outcome Episode whose termination_reason reflects what the run observed.
 # (BaseCliHarness.run is shared by every subclass — tested once here)
 # ---------------------------------------------------------------------------
 
 
-def test_run_returns_none_so_gateway_drives_trajectory():
-    """Harnesses don't build Episodes — the gateway captures LLM calls and
-    the engine's enrichment pass populates Steps from those traces."""
+def test_run_returns_empty_outcome_episode_on_clean_exit():
+    """A clean exit yields an Episode with one empty-step Trajectory (the
+    gateway/engine enrichment fills its Steps) and no termination_reason —
+    the engine derives done/length/max-turns from the traces."""
     h = OpenCodeHarness()
     sandbox = FakeSandbox(stdout="opencode said hi")
 
     result = h.run(_make_task(), _make_config(), env=sandbox)
 
-    assert result is None
+    assert isinstance(result, Episode)
+    assert len(result.trajectories) == 1
+    assert result.trajectories[0].name == h.name
+    assert result.trajectories[0].steps == []
+    assert result.termination_reason is None
 
 
 def test_run_execs_cli_against_agent_user_with_env_exported():
@@ -111,15 +123,33 @@ def test_run_execs_cli_against_agent_user_with_env_exported():
     assert "opencode --model=" in invocation.command
 
 
-def test_run_swallows_cli_failure_and_returns_none():
-    """A CLI failure should not raise — the gateway-captured traces (up to
-    the point of failure) plus the verifier still drive the reward."""
+def test_run_marks_error_on_cli_failure():
+    """A CLI failure should not raise — the gateway-captured traces (up to the
+    point of failure) plus the verifier still drive the reward — but the
+    Episode is marked ERROR (with details) so compact filtering can drop it."""
     h = OpenCodeHarness()
     sandbox = FakeSandbox(fail_on_substring="opencode --model")
 
     result = h.run(_make_task(), _make_config(), env=sandbox)
 
-    assert result is None
+    assert isinstance(result, Episode)
+    assert result.termination_reason == TerminationReason.ERROR
+    assert result.metadata["error"]["error_type"] == "RuntimeError"
+    assert "message" in result.metadata["error"]
+
+
+def test_run_marks_timeout_on_budget_exhaustion():
+    """Hitting the wall-clock budget (SandboxCommandTimeout) is expected, not a
+    failure: the captured steps are still scored, and the run is marked TIMEOUT
+    so compact filtering avoids punishing it."""
+    h = OpenCodeHarness()
+    sandbox = FakeSandbox(timeout_on_substring="opencode --model")
+
+    result = h.run(_make_task(), _make_config(), env=sandbox)
+
+    assert isinstance(result, Episode)
+    assert result.termination_reason == TerminationReason.TIMEOUT
+    assert "error" not in result.metadata
 
 
 @pytest.mark.parametrize(

@@ -28,8 +28,7 @@ from rllm.trainer.algorithms import (
 from rllm.trainer.algorithms.transform import transform_episodes_to_trajectory_groups
 from rllm.trainer.metrics_aggregator import MetricsAggregator
 from rllm.trainer.sync_coordinator import SyncCoordinator
-from rllm.types import Episode, TrajectoryGroup
-from rllm.workflows.workflow import TerminationReason
+from rllm.types import Episode, TerminationReason, TrajectoryGroup
 
 logger = logging.getLogger(__name__)
 
