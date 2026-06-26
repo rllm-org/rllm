@@ -384,8 +384,7 @@ def create_tunnel(spec: str, upstream_url: str) -> _Tunnel:
     if cls is None:
         supported = "', '".join(sorted(_BACKENDS))
         raise ValueError(
-            f"Unsupported gateway tunnel backend: {spec!r}. Supported: '{supported}', "
-            "'ngrok:<domain>', or an http(s):// URL.",
+            f"Unsupported gateway tunnel backend: {spec!r}. Supported: '{supported}', 'ngrok:<domain>', or an http(s):// URL.",
         )
     if cls is NgrokTunnel:
         return NgrokTunnel(upstream_url, domain=opt or None)

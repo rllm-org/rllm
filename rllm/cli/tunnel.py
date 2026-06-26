@@ -50,8 +50,7 @@ def tunnel_setup():
         if not NgrokTunnel.is_available():
             fail(f"ngrok not found on PATH. {NgrokTunnel.install_hint}")
         token = click.prompt(
-            "  ngrok authtoken (https://dashboard.ngrok.com/get-started/your-authtoken; "
-            "blank if already configured)",
+            "  ngrok authtoken (https://dashboard.ngrok.com/get-started/your-authtoken; blank if already configured)",
             default="",
             hide_input=True,
             show_default=False,
@@ -106,8 +105,7 @@ def tunnel_up(backend, port):
     state = read_tunnel_state()
     if state and pid_alive(state.get("pid")):
         console.print(
-            f"  [success]✓ Tunnel already running:[/] [val]{state.get('url')}[/] "
-            f"[muted](backend={state.get('backend')}, pid={state.get('pid')})[/]",
+            f"  [success]✓ Tunnel already running:[/] [val]{state.get('url')}[/] [muted](backend={state.get('backend')}, pid={state.get('pid')})[/]",
         )
         console.print("  Restart it with [key]rllm tunnel down && rllm tunnel up[/].")
         return
@@ -153,8 +151,7 @@ def tunnel_status():
         return
     console.print(f"  [success]● running[/]  [val]{state.get('url')}[/]")
     console.print(
-        f"  [label]backend[/] {state.get('backend')}   [label]pid[/] {state.get('pid')}   "
-        f"[label]upstream[/] {state.get('upstream')}",
+        f"  [label]backend[/] {state.get('backend')}   [label]pid[/] {state.get('pid')}   [label]upstream[/] {state.get('upstream')}",
     )
 
 
