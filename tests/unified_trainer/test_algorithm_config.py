@@ -8,6 +8,7 @@ See: https://github.com/rllm-org/rllm/issues/447
 import importlib.util
 import os
 
+import pytest
 from omegaconf import OmegaConf
 
 # Import config module directly to avoid heavy transitive deps (codetiming, verl, etc.)
@@ -108,3 +109,39 @@ def test_env_loss_coef_can_enable_on_grpo():
     """env_loss_coef is the real switch: it can enable the env loss with adv_estimator=grpo."""
     algo_config = AlgorithmConfig.from_config(_echo_config(adv_estimator="grpo", env_loss_coef=0.05).rllm.algorithm)
     assert algo_config.env_loss_coef == 0.05
+
+
+# --- DPPO ---------------------------------------------------------------------
+
+
+def _dppo_config(**overrides):
+    section = {
+        "adv_estimator": "grpo",
+        "norm_adv_by_std_in_grpo": True,
+        "loss_fn": "dppo",
+    }
+    section.update(overrides)
+    return OmegaConf.create({"rllm": {"algorithm": section, "stepwise_advantage": {"mode": "broadcast"}}})
+
+
+def test_dppo_config_defaults():
+    algo_config = AlgorithmConfig.from_config(_dppo_config().rllm.algorithm)
+    assert algo_config.loss_fn == "dppo"
+    assert algo_config.dppo_divergence_type == "tv"
+    assert algo_config.dppo_divergence_threshold == 0.1
+
+
+def test_dppo_config_overrides():
+    algo_config = AlgorithmConfig.from_config(_dppo_config(dppo_divergence_type="kl", dppo_divergence_threshold=0.05).rllm.algorithm)
+    assert algo_config.dppo_divergence_type == "kl"
+    assert algo_config.dppo_divergence_threshold == 0.05
+
+
+def test_dppo_rejects_invalid_divergence_type():
+    with pytest.raises(ValueError, match="dppo_divergence_type"):
+        AlgorithmConfig.from_config(_dppo_config(dppo_divergence_type="bad").rllm.algorithm)
+
+
+def test_dppo_rejects_nonpositive_threshold():
+    with pytest.raises(ValueError, match="dppo_divergence_threshold"):
+        AlgorithmConfig.from_config(_dppo_config(dppo_divergence_threshold=0.0).rllm.algorithm)

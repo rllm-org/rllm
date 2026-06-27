@@ -72,11 +72,13 @@ TMAX_HARNESS = os.environ.get("TMAX_HARNESS", "terminus2")
 # TB_VAL_MAX=N to validate on the first N tasks instead (0/unset = all).
 TB_VAL_MAX = int(os.environ.get("TB_VAL_MAX", "0"))
 
-# Per-rollout tool-call cap. Tmax uses max_steps=64 (max tool calls per
-# episode). The train_*.sh scripts default TERMINUS_MAX_TURNS=64; set it to
-# empty/0 to uncap. Only terminus2 honours this knob.
+# Per-rollout cap. Terminus calls this max_turns; Mini-SWE calls it step_limit.
 _max_turns = os.environ.get("TERMINUS_MAX_TURNS")
 TERMINUS_MAX_TURNS = int(_max_turns) if _max_turns and int(_max_turns) > 0 else None
+_mini_swe_step_limit = os.environ.get("MINI_SWE_STEP_LIMIT", "64")
+MINI_SWE_STEP_LIMIT = int(_mini_swe_step_limit) if _mini_swe_step_limit and int(_mini_swe_step_limit) > 0 else None
+_mini_swe_tool_timeout = os.environ.get("MINI_SWE_TOOL_TIMEOUT", "120")
+MINI_SWE_TOOL_TIMEOUT = int(_mini_swe_tool_timeout) if _mini_swe_tool_timeout and int(_mini_swe_tool_timeout) > 0 else None
 
 
 def _build_agent_flow():
@@ -84,7 +86,11 @@ def _build_agent_flow():
     if TMAX_HARNESS == "mini-swe-agent":
         from rllm.harnesses.mini_swe_agent import MiniSweAgentHarness
 
-        return MiniSweAgentHarness(sandbox_backend=SANDBOX_BACKEND)
+        return MiniSweAgentHarness(
+            sandbox_backend=SANDBOX_BACKEND,
+            step_limit=MINI_SWE_STEP_LIMIT,
+            tool_timeout=MINI_SWE_TOOL_TIMEOUT,
+        )
     if TMAX_HARNESS == "terminus2":
         from rllm.harnesses.terminus2 import Terminus2Harness
 
@@ -95,15 +101,19 @@ def _build_agent_flow():
 @hydra.main(config_path="pkg://rllm.trainer.config", config_name="unified", version_base=None)
 def main(config: DictConfig) -> None:
     train_dataset = DatasetRegistry.load_dataset(TRAIN_DATASET, TRAIN_SPLIT)
-    val_dataset = DatasetRegistry.load_dataset(VAL_DATASET, "default")
+    # val_dataset = DatasetRegistry.load_dataset(VAL_DATASET, "default")
 
     if train_dataset is None:
         raise RuntimeError(f"Dataset '{TRAIN_DATASET}' not found. Run: python cookbooks/tmax/prepare_data.py")
-    if val_dataset is None:
-        raise RuntimeError(f"Dataset '{VAL_DATASET}' not found. Run: rllm dataset pull harbor:{VAL_DATASET} (or: python cookbooks/tmax/prepare_data.py)")
 
-    if TB_VAL_MAX > 0 and TB_VAL_MAX < len(val_dataset):
-        val_dataset = val_dataset.select(range(TB_VAL_MAX))
+    keep = set(open("cookbooks/tmax/tmax_train_task_ids.txt", encoding="utf-8").read().splitlines())
+    train_dataset.data = [row for row in train_dataset.data if row["task_id"] in keep]
+    print(f"TMax task-id filter: kept {len(train_dataset)}/{len(keep)} rows", flush=True)
+    # if val_dataset is None:
+    #     raise RuntimeError(f"Dataset '{VAL_DATASET}' not found. Run: rllm dataset pull harbor:{VAL_DATASET} (or: python cookbooks/tmax/prepare_data.py)")
+
+    # if TB_VAL_MAX > 0 and TB_VAL_MAX < len(val_dataset):
+    #     val_dataset = val_dataset.select(range(TB_VAL_MAX))
 
     agent_flow = _build_agent_flow()
 
@@ -111,7 +121,7 @@ def main(config: DictConfig) -> None:
         backend=config.rllm.get("backend", "verl"),
         config=config,
         train_dataset=train_dataset,
-        val_dataset=val_dataset,
+        # val_dataset=val_dataset,
         agent_flow=agent_flow,
         sandbox_backend=SANDBOX_BACKEND,
     )

@@ -322,6 +322,8 @@ class AlgorithmConfig:
     kl_beta: float = 0.0
     eps_clip: float = 0.2
     eps_clip_high: float | None = None
+    dppo_divergence_type: Literal["tv", "kl"] = "tv"
+    dppo_divergence_threshold: float = 0.1
     loss_agg_mode: Literal["token-mean", "seq-mean-token-sum", "seq-mean-token-mean", None] = None
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
     router_replay: Literal["disabled", "R2", "R3"] = "disabled"
@@ -365,6 +367,8 @@ class AlgorithmConfig:
             kl_beta=algorithm_config.get("kl_beta", 0.0),
             eps_clip=algorithm_config.get("eps_clip", 0.2),
             eps_clip_high=algorithm_config.get("eps_clip_high", None),
+            dppo_divergence_type=algorithm_config.get("dppo_divergence_type", "tv"),
+            dppo_divergence_threshold=algorithm_config.get("dppo_divergence_threshold", 0.1),
             loss_agg_mode=algorithm_config.get("loss_agg_mode", None),
             rollout_correction=rollout_correction,
             router_replay=algorithm_config.get("router_replay", "disabled"),
@@ -412,3 +416,9 @@ class AlgorithmConfig:
                 stacklevel=2,
             )
             self.stepwise_advantage_mode = "broadcast"
+
+        if self.loss_fn == "dppo":
+            if self.dppo_divergence_type not in ("tv", "kl"):
+                raise ValueError("dppo_divergence_type must be 'tv' or 'kl'")
+            if self.dppo_divergence_threshold <= 0.0:
+                raise ValueError("dppo_divergence_threshold must be > 0")

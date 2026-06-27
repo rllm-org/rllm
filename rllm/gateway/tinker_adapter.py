@@ -82,8 +82,11 @@ async def _token_prompt_completion(
     ``logprobs.token_logprobs``) — the exact shape the gateway's cumulative-turn
     handler extracts token IDs from and translates back to chat format.
     """
-    token_output = await engine.get_token_output_from_token_input(prompt_ids, **sampling_kwargs)
-    model_output = engine.assemble_model_output(prompt_ids, token_output)
+    if hasattr(engine, "get_model_response_from_tokens"):
+        model_output = await engine.get_model_response_from_tokens(prompt_ids, **sampling_kwargs)
+    else:
+        token_output = await engine.get_token_output_from_token_input(prompt_ids, **sampling_kwargs)
+        model_output = engine.assemble_model_output(prompt_ids, token_output)
 
     # Text the agent sees as the assistant turn (same precedence as the chat path).
     text = model_output.content or model_output.text or ""
@@ -104,6 +107,7 @@ async def _token_prompt_completion(
                 "index": 0,
                 "text": text,
                 "token_ids": completion_ids,
+                "routing_matrices": getattr(model_output, "routing_matrices", None),
                 "finish_reason": finish_reason,
                 "logprobs": {"token_logprobs": logprobs},
             }

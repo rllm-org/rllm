@@ -351,6 +351,14 @@ def test_mini_swe_agent_invocation_uses_qualified_model():
     assert "--exit-immediately" in cmd
 
 
+def test_mini_swe_agent_invocation_can_set_limits():
+    h = MiniSweAgentHarness(step_limit=64, tool_timeout=120)
+    cmd = h.build_invocation("hi", _make_task(), _make_config(model="gpt-4o"))
+    assert "-c mini.yaml" in cmd
+    assert "-c agent.step_limit=64" in cmd
+    assert "-c environment.timeout=120" in cmd
+
+
 # ---------------------------------------------------------------------------
 # ClaudeCodeHarness — bypassPermissions sandbox mode
 # ---------------------------------------------------------------------------

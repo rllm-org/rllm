@@ -645,7 +645,6 @@ class UnifiedTrainer:
         fwd_bwd_group_size = self.async_config.fwd_bwd_group_size
         num_fwd_bwd_passes = mini_batch_size // fwd_bwd_group_size
         use_total_batches = self.rllm_config.trainer.get("total_batches", -1) > 0
-        rollout_engine = getattr(self.agent_workflow_engine, "rollout_engine", None)
 
         while True:
             trainer_state.reset_batch()
@@ -725,7 +724,7 @@ class UnifiedTrainer:
             if coordinator.should_sync():
                 logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: triggering weight sync")
                 t0 = time.perf_counter()
-                await self._perform_weight_sync(trainer_state, coordinator, rollout_engine)
+                await self._perform_weight_sync(trainer_state, coordinator)
                 sync_time = time.perf_counter() - t0
                 logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: weight sync complete ({sync_time:.2f}s)")
             if sync_time > 0:
@@ -776,7 +775,7 @@ class UnifiedTrainer:
             if use_total_batches and trainer_state.global_step >= self.rllm_config.trainer.total_batches:
                 break
 
-    async def _perform_weight_sync(self, trainer_state: TrainerState, coordinator: SyncCoordinator, rollout_engine: RolloutEngine | None) -> None:
+    async def _perform_weight_sync(self, trainer_state: TrainerState, coordinator: SyncCoordinator) -> None:
         """Synchronize weights between training and rollout engines."""
         if not self.async_config.partial_rollout:
             coordinator.pause_generation()
@@ -784,8 +783,7 @@ class UnifiedTrainer:
 
         trainer_state.weight_version = coordinator.weight_version + 1
         await self.backend.on_policy_updated(trainer_state)
-        if rollout_engine is not None:
-            rollout_engine.weight_version = trainer_state.weight_version
+        self.backend.rollout_engine.weight_version = trainer_state.weight_version
         if self._gateway is not None:
             await self._gateway.aset_weight_version(trainer_state.weight_version)
         coordinator.on_sync_complete()

@@ -30,6 +30,7 @@ from rllm.trainer.algorithms import (
     TransformConfig,
     build_aux_losses,
 )
+from rllm.trainer.fireworks.dppo_loss import make_dppo_loss_fn
 from rllm.trainer.tinker.tinker_policy_trainer import (
     compute_schedule_lr_multiplier,
     require_training_client,
@@ -115,7 +116,9 @@ class FireworksPolicyTrainer:
         self.cf_config = cf_config or CompactFilteringConfig.from_config(self.config.rllm.compact_filtering)
         self.transform_config = transform_config or TransformConfig()
         self.algorithm_config = algorithm_config or AlgorithmConfig.from_config(self.config.rllm.algorithm)
-        self.resolve_builtin_loss(self.algorithm_config)
+        self._builtin_loss = None
+        if not self._is_dppo_loss(self.algorithm_config):
+            self.resolve_builtin_loss(self.algorithm_config)
 
     # ------------------------------------------------------------------
     # Initialization
@@ -298,6 +301,43 @@ class FireworksPolicyTrainer:
             if built is not None:
                 out.append(built)
         return out
+
+    @staticmethod
+    def _is_dppo_loss(algorithm_config: AlgorithmConfig) -> bool:
+        return algorithm_config.loss_fn == "dppo"
+
+    @staticmethod
+    def _build_custom_loss_datums(raw_datums: list[tinker.Datum]) -> list[tinker.Datum]:
+        """Build datums accepted by Fireworks ``forward_backward_custom``."""
+        return [
+            tinker.Datum(
+                model_input=datum.model_input,
+                loss_fn_inputs={
+                    "target_tokens": datum.loss_fn_inputs["target_tokens"],
+                    "weights": datum.loss_fn_inputs["mask"],
+                },
+            )
+            for datum in raw_datums
+        ]
+
+    @staticmethod
+    def _extract_logprobs(result) -> list[list[float]]:
+        logprobs: list[list[float]] = []
+        for output in getattr(result, "loss_fn_outputs", []) or []:
+            value = output["logprobs"]
+            if hasattr(value, "data"):
+                logprobs.append(list(value.data))
+            elif hasattr(value, "to_torch"):
+                logprobs.append(value.to_torch().detach().cpu().tolist())
+            else:
+                logprobs.append(list(value))
+        return logprobs
+
+    def _merge_remote_metrics(self, result, adv_metrics: dict, *, prefix: str = "train", separator: str = "/") -> None:
+        if hasattr(result, "metrics") and result.metrics:
+            for k, v in result.metrics.items():
+                if k not in self._METRIC_SKIP_KEYS:
+                    adv_metrics[f"{prefix}{separator}{k}"] = v
 
     async def _compute_proximal_logprobs(
         self,
@@ -508,6 +548,51 @@ class FireworksPolicyTrainer:
                 if datums:
                     aux_passes.append((aux, datums))
 
+        if self._is_dppo_loss(algorithm_config):
+            if algorithm_config.kl_beta > 0.0:
+                raise ValueError("Fireworks DPPO custom loss does not support kl_beta > 0 without a reference forward pass")
+            if rc.tis_mode is not None:
+                logger.warning("Fireworks DPPO uses rollout logprobs as the behavior policy; rollout_correction.tis_mode is ignored")
+
+            dppo_datums = self._build_custom_loss_datums(raw_datums)
+            dppo_loss_fn = make_dppo_loss_fn(
+                advantages,
+                inf_logprobs,
+                divergence_type=algorithm_config.dppo_divergence_type,
+                divergence_threshold=algorithm_config.dppo_divergence_threshold,
+            )
+            t0 = time.perf_counter()
+            fwd_bwd_result = await asyncio.to_thread(
+                self.training_client.forward_backward_custom,
+                dppo_datums,
+                dppo_loss_fn,
+            )
+            adv_metrics["time/dppo_forward_backward"] = time.perf_counter() - t0
+            adv_metrics["time/proximal_forward"] = 0.0
+
+            policy_logprobs = self._extract_logprobs(fwd_bwd_result)
+            if policy_logprobs:
+                adv_metrics.update(
+                    self._compute_offpolicy_metrics(
+                        old_logprobs=policy_logprobs,
+                        rollout_logprobs=inf_logprobs,
+                        masks=[list(datum.loss_fn_inputs["mask"].data) for datum in raw_datums],
+                    )
+                )
+            self._merge_remote_metrics(fwd_bwd_result, adv_metrics)
+
+            for aux, datums in aux_passes:
+                aux_fwd_bwd = await asyncio.to_thread(
+                    self.training_client.forward_backward,
+                    datums,
+                    "cross_entropy",
+                )
+                self._merge_remote_metrics(aux_fwd_bwd, adv_metrics, prefix=f"train/aux_{aux.name}", separator="_")
+                adv_metrics[f"train/aux_{aux.name}_coef"] = aux.coef
+                adv_metrics[f"train/aux_{aux.name}_sequences"] = len(datums)
+
+            return raw_datums, [], adv_metrics
+
         # Proximal logprobs
         t0 = time.perf_counter()
         if rc.bypass_mode:
@@ -544,10 +629,7 @@ class FireworksPolicyTrainer:
         )
 
         # Merge remote fwd/bwd metrics (e.g. loss) into adv_metrics
-        if hasattr(fwd_bwd_result, "metrics") and fwd_bwd_result.metrics:
-            for k, v in fwd_bwd_result.metrics.items():
-                if k not in self._METRIC_SKIP_KEYS:
-                    adv_metrics[f"train/{k}"] = v
+        self._merge_remote_metrics(fwd_bwd_result, adv_metrics)
 
         # Auxiliary-loss passes: each accumulates gradients on top of the policy
         # gradient before the (externally invoked) optim_step.
@@ -557,10 +639,7 @@ class FireworksPolicyTrainer:
                 datums,
                 "cross_entropy",
             )
-            if hasattr(aux_fwd_bwd, "metrics") and aux_fwd_bwd.metrics:
-                for k, v in aux_fwd_bwd.metrics.items():
-                    if k not in self._METRIC_SKIP_KEYS:
-                        adv_metrics[f"train/aux_{aux.name}_{k}"] = v
+            self._merge_remote_metrics(aux_fwd_bwd, adv_metrics, prefix=f"train/aux_{aux.name}", separator="_")
             adv_metrics[f"train/aux_{aux.name}_coef"] = aux.coef
             adv_metrics[f"train/aux_{aux.name}_sequences"] = len(datums)
 

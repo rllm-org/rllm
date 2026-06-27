@@ -98,6 +98,8 @@ class MiniSweAgentHarness(BaseCliHarness):
     name = "mini-swe-agent"
     sandbox_backend = "docker"
     stdout_log_path = "/tmp/mini-swe-agent.log"
+    step_limit: int | None = None
+    tool_timeout: int | None = None
 
     def install_script(self) -> str:
         return _INSTALL_SCRIPT
@@ -182,10 +184,20 @@ class MiniSweAgentHarness(BaseCliHarness):
         # which breaks the build with missing ``system_template`` etc.
         # The dotenv we write in :meth:`write_configs` carries the base
         # URL into the agent's environment so litellm picks it up.
+        config_args: list[str] = []
+        if self.step_limit is not None or self.tool_timeout is not None:
+            config_args.extend(["-c", "mini.yaml"])
+            if self.step_limit is not None:
+                config_args.extend(["-c", f"agent.step_limit={int(self.step_limit)}"])
+            if self.tool_timeout is not None:
+                config_args.extend(["-c", f"environment.timeout={int(self.tool_timeout)}"])
+        config_overrides = " ".join(shlex.quote(arg) for arg in config_args)
+
         return (
             f"{self._cd_prefix(task)}"
             f'export PATH="$HOME/.local/bin:$PATH"; '
             f"mini-swe-agent --yolo "
+            f"{config_overrides} "
             f"--model={shlex.quote(qualified)} "
             f"--task={shlex.quote(instruction)} "
             f"--exit-immediately "
