@@ -134,3 +134,31 @@ def test_cumulative_local_streaming_emits_sse_and_ingests():
     assert chunks[-1].strip().endswith("[DONE]")
     # Same ingest as non-streaming.
     assert acc.turn_count == 2 and acc.prev_completion_ids == [91, 92]
+
+
+def test_cumulative_local_replay_regenerates_in_place_without_advancing():
+    """A duplicate resend regenerates (fresh sample) and overwrites the turn in
+    place — handler is called again, turn_count does not advance, no reset."""
+    record = []
+    proxy = _make_proxy(_completion_handler(record))
+
+    acc = TokenAccumulator(renderer=None)
+    acc.ingest_turn([1, 2, 3], [4, 5])  # turn 1
+    acc.update_prefix([{"role": "user", "content": "x"}])
+
+    resp = asyncio.run(
+        proxy._handle_cumulative_non_streaming(
+            _Request(),
+            {"messages": [{"role": "user", "content": "x"}]},
+            {"prompt": [1, 2, 3], "add_special_tokens": False, "model": "q"},
+            "sess1",
+            acc,
+            [1, 2, 3],  # same prompt the turn was sampled from
+            replay=True,
+        )
+    )
+
+    assert resp.status_code == 200
+    assert record and record[0]["prompt"] == [1, 2, 3]  # regenerated, not cached
+    assert acc.turn_count == 1  # overwritten in place, NOT advanced
+    assert acc.prev_completion_ids == [91, 92]  # fresh sample replaced the old one

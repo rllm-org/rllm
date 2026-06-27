@@ -189,6 +189,28 @@ class ReverseProxy:
                             "new_roles": [m.get("role") for m in plan.new_messages],
                         },
                     )
+                elif plan.action == "replay" and acc.prev_prompt_ids:
+                    # Duplicate resend (upstream retry): the conversation did not
+                    # advance. Regenerate from the same prompt and overwrite this
+                    # turn in place instead of resetting — keeps drift-free state
+                    # and avoids a spurious segment break for a single step. A
+                    # fresh sample (not a cached one) is returned, so a retry that
+                    # depends on resampling still makes progress.
+                    logger.info(
+                        "TokenAccumulator duplicate session=%s turn=%d age_s=%s: regenerating in place, no reset",
+                        session_id,
+                        acc.turn_count,
+                        plan.diagnostics.get("age_s", "?"),
+                    )
+                    return await self._handle_cumulative_turn(
+                        request,
+                        request_body,
+                        session_id,
+                        acc,
+                        list(acc.prev_prompt_ids),
+                        originally_requested_logprobs,
+                        replay=True,
+                    )
                 else:
                     acc.reset(plan.reason, diagnostics=plan.diagnostics)
 
@@ -287,11 +309,16 @@ class ReverseProxy:
         acc: TokenAccumulator,
         token_ids: list[int],
         originally_requested_logprobs: bool = False,
+        *,
+        replay: bool = False,
     ) -> Response:
         """Rewrite chat/completions to /v1/completions with pre-tokenized prompt.
 
-        ``token_ids`` is the full bridge-extended prompt for this turn, built
-        by ``acc.build_next_prompt`` in ``handle()``.
+        ``token_ids`` is the full bridge-extended prompt for this turn, built by
+        ``acc.build_next_prompt`` in ``handle()`` — or, when ``replay`` is set,
+        the prior turn's prompt being regenerated after a duplicate resend.
+        ``replay`` overwrites the current turn in place (``advance=False``)
+        instead of recording a new one.
 
         Respects the original stream setting: if the client requested streaming,
         we stream from vLLM and translate completions chunks to chat format in
@@ -305,7 +332,7 @@ class ReverseProxy:
         completions_body["add_special_tokens"] = False
 
         if is_stream:
-            return await self._handle_cumulative_streaming(request, request_body, completions_body, session_id, acc, token_ids)
+            return await self._handle_cumulative_streaming(request, request_body, completions_body, session_id, acc, token_ids, replay=replay)
         return await self._handle_cumulative_non_streaming(
             request,
             request_body,
@@ -314,6 +341,7 @@ class ReverseProxy:
             acc,
             token_ids,
             originally_requested_logprobs,
+            replay=replay,
         )
 
     async def _handle_cumulative_non_streaming(
@@ -325,6 +353,8 @@ class ReverseProxy:
         acc: TokenAccumulator,
         token_ids: list[int],
         originally_requested_logprobs: bool = False,
+        *,
+        replay: bool = False,
     ) -> Response:
         """Non-streaming cumulative turn: send pre-tokenized prompt, return JSON.
 
@@ -368,7 +398,7 @@ class ReverseProxy:
         prompt_token_ids = extract_prompt_token_ids(response_body) or token_ids
         completion_token_ids = extract_completion_token_ids(response_body)
 
-        acc.ingest_turn(prompt_token_ids, completion_token_ids)
+        acc.ingest_turn(prompt_token_ids, completion_token_ids, advance=not replay)
         acc.update_prefix(request_body.get("messages", []))
 
         # Translate to chat format
@@ -403,12 +433,18 @@ class ReverseProxy:
         session_id: str,
         acc: TokenAccumulator,
         token_ids: list[int],
+        *,
+        replay: bool = False,
     ) -> StreamingResponse:
-        """Streaming cumulative turn: stream from vLLM, translate chunks to chat format."""
+        """Streaming cumulative turn: stream from vLLM, translate chunks to chat format.
+
+        ``replay`` overwrites the current turn in place (duplicate resend) rather
+        than recording a new one.
+        """
         if self.local_handler is not None:
             # In-process backends (Tinker) don't stream; synthesize an SSE
             # stream from a single pre-tokenized completion call.
-            return await self._handle_cumulative_streaming_local(request, request_body, completions_body, session_id, acc, token_ids)
+            return await self._handle_cumulative_streaming_local(request, request_body, completions_body, session_id, acc, token_ids, replay=replay)
 
         completions_body["stream"] = True
 
@@ -524,7 +560,7 @@ class ReverseProxy:
                     prompt_ids = trace.prompt_token_ids or token_ids
                     completion_ids = trace.completion_token_ids
 
-                    acc.ingest_turn(prompt_ids, completion_ids)
+                    acc.ingest_turn(prompt_ids, completion_ids, advance=not replay)
                     acc.update_prefix(request_body.get("messages", []))
 
                     task = asyncio.create_task(self._safe_store(trace.trace_id, trace.session_id, trace.model_dump()))
@@ -545,12 +581,17 @@ class ReverseProxy:
         session_id: str,
         acc: TokenAccumulator,
         token_ids: list[int],
+        *,
+        replay: bool = False,
     ) -> StreamingResponse:
         """Cumulative streaming via the in-process handler (fake-streaming).
 
         The local handler returns a full completion in one shot; we ingest its
         token IDs into the accumulator, translate to chat format, and emit it as
         a synthesized SSE stream (role → content+tokens → finish → [DONE]).
+
+        ``replay`` overwrites the current turn in place (duplicate resend) rather
+        than recording a new one.
         """
         assert self.local_handler is not None
         t0 = time.perf_counter()
@@ -561,7 +602,7 @@ class ReverseProxy:
 
         prompt_token_ids = extract_prompt_token_ids(response_body) or token_ids
         completion_token_ids = extract_completion_token_ids(response_body)
-        acc.ingest_turn(prompt_token_ids, completion_token_ids)
+        acc.ingest_turn(prompt_token_ids, completion_token_ids, advance=not replay)
         acc.update_prefix(request_body.get("messages", []))
 
         choices = response_body.get("choices") or []
