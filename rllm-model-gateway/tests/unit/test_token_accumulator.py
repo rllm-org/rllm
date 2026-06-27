@@ -50,6 +50,17 @@ class TestTokenAccumulator:
         assert acc.prev_prompt_ids == [1, 2, 3]
         assert acc.prev_completion_ids == [10, 11]
 
+    def test_ingest_replay_overwrites_turn_in_place(self):
+        from rllm_model_gateway.token_accumulator import TokenAccumulator
+
+        acc = TokenAccumulator(renderer=_MockRenderer())
+        acc.ingest_turn([1, 2, 3], [10, 11])
+        # Replay a duplicate: same prompt, fresh completion, no turn advance.
+        acc.ingest_turn([1, 2, 3], [99], advance=False)
+        assert acc.turn_count == 1  # unchanged — same logical step
+        assert acc.prev_completion_ids == [99]
+        assert acc.cumulative_ids == [1, 2, 3, 99]
+
     def test_should_rewrite_false_on_first_turn(self):
         from rllm_model_gateway.token_accumulator import TokenAccumulator
 
@@ -279,7 +290,8 @@ class TestPlanTurnClassification:
         msgs = [{"role": "user", "content": "Hello"}]
         acc = self._seed(msgs)
         plan = acc.plan_turn([{"role": "user", "content": "Hello"}])  # byte-identical
-        assert plan.action == "reset"
+        # A duplicate is replayed in place (regenerate + overwrite), NOT reset.
+        assert plan.action == "replay"
         assert plan.reason is ResetReason.DUPLICATE
         # age_s is populated from the snapshot time (>= 0).
         assert plan.diagnostics.get("age_s") is not None
