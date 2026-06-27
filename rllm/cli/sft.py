@@ -28,7 +28,8 @@ from rllm.cli._ui import console, fail
 # Model / backend
 @click.option("--model", default="Qwen/Qwen3.5-4B", help="Model name/path (default: Qwen/Qwen3.5-4B).")
 @click.option("--backend", default="tinker", type=click.Choice(["tinker", "verl", "fireworks"]), help="SFT backend (default: tinker).")
-@click.option("--lora-rank", default=32, type=int, help="LoRA rank (default: 32).")
+@click.option("--gpus", default=1, type=int, help="GPUs per node for the distributed (verl) backend's torchrun launcher (default: 1).")
+@click.option("--lora-rank", default=32, type=int, help="LoRA rank; 0 = full fine-tuning (default: 32).")
 # Hyperparameters
 @click.option("--lr", default=1e-5, type=float, help="Learning rate (default: 1e-5).")
 @click.option("--batch-size", default=32, type=int, help="Training batch size (default: 32).")
@@ -51,6 +52,7 @@ def sft_cmd(
     max_examples: int | None,
     model: str,
     backend: str,
+    gpus: int,
     lora_rank: int,
     lr: float,
     batch_size: int,
@@ -114,6 +116,10 @@ def sft_cmd(
     if experiment is None:
         experiment = dataset or (Path(train_file).stem if train_file else "sft")
 
+    # The verl backend runs under torchrun; route --gpus to its native
+    # trainer.n_gpus_per_node (hosted backends ignore it).
+    overrides = {"trainer": {"n_gpus_per_node": gpus}} if backend == "verl" else None
+
     spec = SFTSpec(
         model=model,
         train_dataset=train_dataset,
@@ -130,6 +136,7 @@ def sft_cmd(
         project=project,
         experiment=experiment,
         output_dir=output_dir,
+        overrides=overrides,
     )
 
     # Build + configure the backend up front (local, no provisioning) so the
@@ -141,7 +148,9 @@ def sft_cmd(
     except SFTConfigError as e:
         fail(str(e))
     cfg = be.config
-    resolved_model = cfg.model.get("name", model)
+    # tinker/fireworks expose model.name; verl uses model.path. Fall back to the
+    # CLI --model for either.
+    resolved_model = cfg.model.get("name") or cfg.model.get("path") or model
     tokenizer_model = cfg.model.get("tokenizer_model")
 
     rows = [
@@ -150,7 +159,7 @@ def sft_cmd(
     if tokenizer_model and tokenizer_model != resolved_model:
         rows.append(("Tokenizer", f"[dim]{tokenizer_model}[/]"))
     rows += [
-        ("Backend", f"[val]{backend}[/]"),
+        ("Backend", f"[val]{backend}[/]" + (f"  [dim]({gpus} GPU{'s' if gpus != 1 else ''}, torchrun)[/]" if backend == "verl" else "")),
         ("Train data", f"[val]{source_label}[/]  [dim]({len(train_dataset)} examples)[/]"),
         ("Val data", f"[dim]{len(val_dataset)} examples[/]" if val_dataset else "[dim]none[/]"),
         ("LoRA rank", f"[dim]{lora_rank}[/]"),

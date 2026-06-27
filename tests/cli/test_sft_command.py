@@ -56,8 +56,27 @@ def test_sft_missing_dataset(runner, tmp_rllm_home):
     assert "Could not load" in result.output
 
 
-def test_sft_verl_backend_reports_milestone(runner, tmp_rllm_home):
+def test_sft_verl_backend_dispatches_to_launcher(runner, tmp_rllm_home, monkeypatch):
+    """`--backend verl` is wired: it reaches the torchrun launcher (mocked)."""
+    from omegaconf import OmegaConf
+
+    from rllm.trainer.agent_sft_trainer import AgentSFTTrainer
+    from rllm.trainer.sft.verl_backend import VerlSFTBackend
+
+    monkeypatch.delenv("RLLM_SFT_IN_TORCHRUN", raising=False)
+    monkeypatch.delenv("RANK", raising=False)
+    # Skip the real verl/hydra config build + parquet materialization.
+    monkeypatch.setattr(
+        VerlSFTBackend,
+        "build_config",
+        lambda self: OmegaConf.create({"model": {"path": self.spec.model}, "trainer": {"default_local_dir": "/tmp/x", "n_gpus_per_node": 2}}),
+    )
+    monkeypatch.setattr(VerlSFTBackend, "prepare_data", lambda self: None)
+    launched = {}
+    monkeypatch.setattr(AgentSFTTrainer, "_launch_distributed", lambda self, be: launched.setdefault("name", be.name))
+
     name = _register_toy()
-    result = runner.invoke(cli, ["sft", name, "--backend", "verl"])
-    assert result.exit_code == 1
-    assert "not wired yet" in result.output
+    result = runner.invoke(cli, ["sft", name, "--backend", "verl", "--gpus", "2"])
+    assert "not wired yet" not in result.output
+    assert launched.get("name") == "verl"
+    assert result.exit_code == 0

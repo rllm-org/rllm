@@ -80,14 +80,69 @@ def test_dispatch_fireworks_runs_lifecycle(monkeypatch):
     assert calls == ["fit"]
 
 
-def test_dispatch_planned_backends_raise():
-    with pytest.raises(SFTConfigError, match="not wired yet"):
-        AgentSFTTrainer(_spec(), backend="verl").train()
+def test_dispatch_verl_uses_distributed_launcher(monkeypatch):
+    """verl is distributed: train() routes to the torchrun launcher, not fit()."""
+    from rllm.trainer.sft.verl_backend import VerlSFTBackend
+
+    monkeypatch.delenv("RLLM_SFT_IN_TORCHRUN", raising=False)
+    monkeypatch.delenv("RANK", raising=False)
+    monkeypatch.setattr(VerlSFTBackend, "validate_spec", lambda self: None)
+    monkeypatch.setattr(VerlSFTBackend, "build_config", lambda self: None)
+    monkeypatch.setattr(VerlSFTBackend, "prepare_data", lambda self: None)
+    launched = []
+    monkeypatch.setattr(AgentSFTTrainer, "_launch_distributed", lambda self, be: launched.append(be.name))
+    AgentSFTTrainer(_spec(), backend="verl").train()
+    assert launched == ["verl"]
+
+
+def test_dispatch_verl_runs_fit_inside_torchrun(monkeypatch):
+    """Inside an existing process group, verl runs fit() directly (no relaunch)."""
+    from rllm.trainer.sft.verl_backend import VerlSFTBackend
+
+    monkeypatch.setenv("RLLM_SFT_IN_TORCHRUN", "1")
+    monkeypatch.setattr(VerlSFTBackend, "validate_spec", lambda self: None)
+    monkeypatch.setattr(VerlSFTBackend, "build_config", lambda self: None)
+    monkeypatch.setattr(VerlSFTBackend, "prepare_data", lambda self: None)
+    calls = []
+    monkeypatch.setattr(VerlSFTBackend, "fit", lambda self: calls.append("fit"))
+    monkeypatch.setattr(AgentSFTTrainer, "_launch_distributed", lambda self, be: calls.append("launch"))
+    AgentSFTTrainer(_spec(), backend="verl").train()
+    assert calls == ["fit"]
 
 
 def test_dispatch_unknown_backend_raises():
     with pytest.raises(SFTConfigError, match="Unknown SFT backend"):
         AgentSFTTrainer(_spec(), backend="nope").train()
+
+
+def test_verl_build_config_maps_spec():
+    """VerlSFTBackend translates the SFTSpec into verl's sft_trainer_engine schema."""
+    pytest.importorskip("verl")
+    from rllm.trainer.sft.verl_backend import VerlSFTBackend
+
+    spec = _spec(lr=2e-5, epochs=2, batch_size=16, max_length=4096, tokenize_method="cumulative", lr_schedule="cosine", lora_rank=0, overrides={"trainer": {"n_gpus_per_node": 4}})
+    cfg = VerlSFTBackend(spec).build_config()
+    assert cfg.model.path == spec.model
+    assert cfg.model.lora_rank == 0  # full FT
+    assert cfg.data.train_batch_size == 16
+    assert cfg.data.max_length == 4096
+    assert cfg.data.pad_mode == "no_padding"
+    assert cfg.data.messages_key == "messages"
+    assert cfg.data.custom_cls.path == "pkg://rllm.trainer.verl.sft_dataset"
+    assert cfg.data.custom_cls.name == "RLLMSFTDataset"
+    assert cfg.data.rllm.tokenize_and_mask_method == "cumulative"
+    assert cfg.optim.lr == 2e-5
+    assert cfg.optim.lr_scheduler_type == "cosine"
+    assert cfg.trainer.total_epochs == 2
+    assert cfg.trainer.n_gpus_per_node == 4  # routed from --gpus via overrides
+
+
+def test_verl_linear_schedule_falls_back_to_cosine():
+    pytest.importorskip("verl")
+    from rllm.trainer.sft.verl_backend import VerlSFTBackend
+
+    cfg = VerlSFTBackend(_spec(lr_schedule="linear")).build_config()
+    assert cfg.optim.lr_scheduler_type == "cosine"
 
 
 def test_fireworks_build_config_uses_fireworks_template():
