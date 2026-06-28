@@ -55,8 +55,10 @@ def _install_script(harbor_version: str, py_version: str) -> str:
     return rf"""
 set -e
 export DEBIAN_FRONTEND=noninteractive
-# Marker keeps this a no-op on a snapshot that already baked the install.
-if [ -f {_VENV_DIR}/.terminus2-ready ]; then
+# Skip only when harbor is ALREADY at the pinned version — this self-heals a
+# snapshot that baked an older harbor. A bare "ready" marker would let a stale
+# (e.g. 0.3.0) harbor stand, which crashes the modern driver.
+if [ -x {_VENV_DIR}/bin/python ] && {_VENV_DIR}/bin/python -c "import importlib.metadata as _m, sys; sys.exit(0 if _m.version('harbor') == '{harbor_version}' else 1)" 2>/dev/null; then
     exit 0
 fi
 # tmux + `script` (util-linux) + ps (procps) are what Terminus-2's TmuxSession
@@ -73,8 +75,12 @@ if ! command -v uv >/dev/null 2>&1; then
     curl -LsSf https://astral.sh/uv/install.sh | sh
 fi
 export PATH="$HOME/.local/bin:$PATH"
-# Private interpreter + venv; harbor and its deps live only here.
-uv venv --python {shlex.quote(py_version)} {_VENV_DIR}
+# Private interpreter + venv; harbor and its deps live only here. Create the venv
+# only if missing (don't clobber an existing one), then install/upgrade harbor to
+# the pinned version in place — so a 0.3.0 snapshot self-heals to {harbor_version}.
+if [ ! -x {_VENV_DIR}/bin/python ]; then
+    uv venv --python {shlex.quote(py_version)} {_VENV_DIR}
+fi
 uv pip install --python {_VENV_DIR}/bin/python {shlex.quote("harbor==" + harbor_version)}
 touch {_VENV_DIR}/.terminus2-ready
 """
