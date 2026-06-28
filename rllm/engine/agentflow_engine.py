@@ -533,7 +533,7 @@ class AgentFlowEngine:
 
                     timing_str = _format_timing_breakdown(episode.metrics)
                     colorful_print(
-                        f"[{uid}] Rollout completed. Rewards: [{', '.join(reward_strs)}]{timing_str}, Termination: {episode.termination_reason}",
+                        f"[{uid}] Rewards: [{', '.join(reward_strs)}]{timing_str}, Termination: {episode.termination_reason}",
                         fg="green" if episode.is_correct else "yellow",
                     )
 
