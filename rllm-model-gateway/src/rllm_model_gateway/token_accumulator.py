@@ -45,7 +45,9 @@ class ResetReason(str, Enum):
     #: Incoming list is byte-identical to the snapshot we already processed —
     #: the conversation did **not advance**. Almost always an upstream retry /
     #: duplicate request; the log's ``age_s`` (seconds since the snapshot) tells
-    #: you whether it was a fast resend.
+    #: you whether it was a fast resend. Handled as a **replay** (regenerate +
+    #: overwrite the turn in place), not a reset — so it's the one classification
+    #: carried in :class:`TurnPlan` that does not drop state.
     DUPLICATE = "duplicate"
 
     #: The messages *covering the snapshot prefix* changed: the list is shorter
@@ -86,9 +88,11 @@ _REL_PREFIX_CHANGED = "prefix_changed"
 class TurnPlan:
     """How an incoming request should be handled against the current snapshot.
 
-    ``action`` is ``"extend"`` (build a cumulative bridge from ``new_messages``)
-    or ``"reset"`` (drop state and re-ingest as turn-0, logging ``reason``).
-    ``diagnostics`` carries the structural facts for the reset log.
+    ``action`` is ``"extend"`` (build a cumulative bridge from ``new_messages``),
+    ``"replay"`` (a duplicate resend — regenerate from the accumulated prompt and
+    overwrite the current turn in place, no reset), or ``"reset"`` (drop state and
+    re-ingest as turn-0, logging ``reason``). ``diagnostics`` carries the
+    structural facts for the reset/replay log.
     """
 
     action: str
@@ -208,11 +212,13 @@ class TokenAccumulator:
     def plan_turn(self, messages: list[dict[str, Any]]) -> TurnPlan:
         """Decide how to handle an incoming chat request for an active session.
 
-        Returns a :class:`TurnPlan`: either ``extend`` (with the new messages to
-        bridge) or ``reset`` (with the classified :class:`ResetReason` and
-        diagnostics for the log). Does not call the renderer — a structurally
-        valid extension that the renderer later declines is surfaced separately
-        by the caller as :attr:`ResetReason.RENDERER_NO_BRIDGE`.
+        Returns a :class:`TurnPlan`: ``extend`` (bridge the new messages),
+        ``replay`` (a duplicate resend — regenerate from the same prompt and
+        overwrite the current turn in place, no reset), or ``reset`` (with the
+        classified :class:`ResetReason` and diagnostics for the log). Does not
+        call the renderer — a structurally valid extension that the renderer
+        later declines is surfaced separately by the caller as
+        :attr:`ResetReason.RENDERER_NO_BRIDGE`.
         """
         relation = self._classify_prefix(messages)
         diag: dict[str, Any] = {"incoming_len": len(messages), "relation": relation}
@@ -229,7 +235,11 @@ class TokenAccumulator:
         if relation == _REL_DUPLICATE:
             if self._snapshot_mono is not None:
                 diag["age_s"] = round(time.monotonic() - self._snapshot_mono, 2)
-            return TurnPlan(action="reset", reason=ResetReason.DUPLICATE, diagnostics=diag)
+            # Identical resend (upstream retry): the conversation did not advance.
+            # Regenerate from the same prompt and overwrite this turn in place —
+            # do NOT reset (that would drop drift-free state and break the segment
+            # for a single step).
+            return TurnPlan(action="replay", reason=ResetReason.DUPLICATE, diagnostics=diag)
 
         # _REL_PREFIX_CHANGED
         diag.update(self._divergence_diag(messages))
@@ -316,17 +326,23 @@ class TokenAccumulator:
         self._prefix_fps = []
         self._snapshot_mono = None
 
-    def ingest_turn(self, prompt_token_ids: list[int], completion_token_ids: list[int]) -> None:
+    def ingest_turn(self, prompt_token_ids: list[int], completion_token_ids: list[int], *, advance: bool = True) -> None:
         """Record the token IDs from a completed turn.
 
         ``prompt_token_ids`` is the full prompt the turn was sampled from (turn
         1: the chat-rendered prompt; later turns: the bridge output we built).
         ``completion_token_ids`` is what the model produced. Together they form
         ``previous_prompt`` / ``previous_completion`` for the next bridge call.
+
+        ``advance=False`` overwrites the most recent turn in place without bumping
+        ``turn_count`` — used when replaying a duplicate resend, where the
+        conversation did not move forward but the regenerated tokens replace the
+        prior sample.
         """
         self.prev_prompt_ids = list(prompt_token_ids)
         self.prev_completion_ids = list(completion_token_ids)
-        self.turn_count += 1
+        if advance:
+            self.turn_count += 1
 
     def update_prefix(self, messages: list[dict[str, Any]]) -> None:
         """Snapshot the current message list as the verified prefix."""
