@@ -50,6 +50,7 @@ class TerminationReason(Enum):
     VERIFIER_TIMEOUT = "verifier_timeout"
     GRADING_ERROR = "grading_error"
     SANDBOX_ERROR = "sandbox_error"
+    MODEL_ERROR = "model_error"  # upstream/API/proxy failure — every model completion came back empty
 
 
 # Reasons whose reward is NOT a trustworthy training signal: an infra or grading
@@ -64,6 +65,7 @@ INFRA_ERROR_REASONS = frozenset(
         TerminationReason.VERIFIER_TIMEOUT,
         TerminationReason.GRADING_ERROR,
         TerminationReason.SANDBOX_ERROR,
+        TerminationReason.MODEL_ERROR,
     }
 )
 
@@ -91,11 +93,13 @@ _ERROR_TYPE_TO_REASON: dict[str, TerminationReason] = {
     "RewardFileNotFoundError": TerminationReason.GRADING_ERROR,
     "RewardFileEmptyError": TerminationReason.GRADING_ERROR,
     "VerifierOutputParseError": TerminationReason.GRADING_ERROR,
-    # Environment/sandbox (harbor.environments.base + rllm.sandbox.protocol)
+    # Environment/sandbox (harbor.environments.base + rllm.sandbox.protocol + backends)
     "HealthcheckError": TerminationReason.SANDBOX_ERROR,
     "SandboxBuildFailedError": TerminationReason.SANDBOX_ERROR,
     "MemoryLimitExceededError": TerminationReason.SANDBOX_ERROR,
     "SnapshotNotFound": TerminationReason.SANDBOX_ERROR,
+    "DaytonaValidationError": TerminationReason.SANDBOX_ERROR,
+    "DaytonaError": TerminationReason.SANDBOX_ERROR,
 }
 
 

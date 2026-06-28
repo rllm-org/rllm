@@ -148,6 +148,7 @@ class CompactFilteringConfig:
     mask_sandbox_error: bool = False
     mask_agent_setup_timeout: bool = False
     mask_env_start_timeout: bool = False
+    mask_model_error: bool = False
 
     @classmethod
     def from_config(cls, config: DictConfig) -> "CompactFilteringConfig":
@@ -183,6 +184,7 @@ class CompactFilteringConfig:
             or (self.mask_sandbox_error and termination_reason == TerminationReason.SANDBOX_ERROR)
             or (self.mask_agent_setup_timeout and termination_reason == TerminationReason.AGENT_SETUP_TIMEOUT)
             or (self.mask_env_start_timeout and termination_reason == TerminationReason.ENV_START_TIMEOUT)
+            or (self.mask_model_error and termination_reason == TerminationReason.MODEL_ERROR)
         )
 
 

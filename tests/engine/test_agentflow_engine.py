@@ -189,3 +189,31 @@ def test_env_flow_receives_sandbox_and_container_url():
 
     assert seen["env"] is sandbox
     assert seen["base_url"].startswith("http://host.docker.internal:9131/")
+
+
+def test_no_usable_model_output_detects_dead_upstream():
+    """No LLM calls at all, or every call empty (no content, no tool_calls) =
+    downed upstream — the signal _finish_episode promotes to MODEL_ERROR instead
+    of a clean ENV_DONE."""
+    from types import SimpleNamespace as NS
+
+    from rllm.engine.agentflow_engine import _no_usable_model_output, _step_returned_nothing
+
+    def step(content, tool_calls=None):
+        return NS(model_output=NS(content=content), chat_completions=[{"role": "assistant", "content": content, "tool_calls": tool_calls}])
+
+    assert _step_returned_nothing(step("")) is True
+    assert _step_returned_nothing(step("ls -la")) is False
+    assert _step_returned_nothing(step("", tool_calls=[{"id": "1"}])) is False  # tool-only turn is real work
+
+    assert _no_usable_model_output(NS(trajectories=[NS(steps=[step(""), step("")])])) is True  # dead proxy
+    assert _no_usable_model_output(NS(trajectories=[NS(steps=[])])) is True  # no LLM calls (the broken-eval case)
+    assert _no_usable_model_output(NS(trajectories=[NS(steps=[step(""), step("echo hi")])])) is False  # partial — real work
+
+
+def test_infra_taxonomy_membership_and_mapping():
+    from rllm.types import INFRA_ERROR_REASONS, TerminationReason, termination_reason_from_error
+
+    assert TerminationReason.MODEL_ERROR in INFRA_ERROR_REASONS
+    assert termination_reason_from_error("DaytonaValidationError") == TerminationReason.SANDBOX_ERROR
+    assert termination_reason_from_error("EmptyCompletion", default=TerminationReason.MODEL_ERROR) == TerminationReason.MODEL_ERROR

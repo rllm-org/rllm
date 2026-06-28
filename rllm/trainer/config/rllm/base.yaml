@@ -131,6 +131,7 @@ compact_filtering:
   mask_sandbox_error: True
   mask_agent_setup_timeout: True
   mask_env_start_timeout: True
+  mask_model_error: True
 
 # Rejection sampling
 rejection_sample:
