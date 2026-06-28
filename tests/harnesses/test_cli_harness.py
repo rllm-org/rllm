@@ -138,6 +138,30 @@ def test_run_marks_error_on_cli_failure():
     assert "message" in result.metadata["error"]
 
 
+def test_run_marks_sandbox_error_when_box_died_mid_run():
+    """A dead sandbox surfaces as a generic exec failure; the is_alive() probe
+    distinguishes it from a benign CLI crash and marks SANDBOX_ERROR (infra)."""
+    h = OpenCodeHarness()
+    sandbox = FakeSandbox(fail_on_substring="opencode --model")
+    sandbox.is_alive = lambda: False  # box is gone
+
+    result = h.run(_make_task(), _make_config(), env=sandbox)
+
+    assert result.termination_reason == TerminationReason.SANDBOX_ERROR
+    assert result.metadata["error"]["error_type"] == "RuntimeError"
+
+
+def test_run_marks_error_when_cli_failed_but_box_alive():
+    """A non-zero CLI exit on a *live* box stays ERROR, not SANDBOX_ERROR."""
+    h = OpenCodeHarness()
+    sandbox = FakeSandbox(fail_on_substring="opencode --model")
+    sandbox.is_alive = lambda: True  # box is healthy; the agent just failed
+
+    result = h.run(_make_task(), _make_config(), env=sandbox)
+
+    assert result.termination_reason == TerminationReason.ERROR
+
+
 def test_run_marks_timeout_on_budget_exhaustion():
     """Hitting the wall-clock budget (SandboxCommandTimeout) is expected, not a
     failure: the captured steps are still scored, and the run is marked TIMEOUT

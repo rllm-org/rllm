@@ -381,11 +381,23 @@ class BaseCliHarness(SandboxedAgentFlow):
             logger.info("%s reached its time budget: %s", type(self).__name__, e)
             return self._outcome_episode(task, termination_reason=TerminationReason.TIMEOUT)
         except Exception as e:
-            # Traces up to the failure still drive enrichment; mark ERROR.
-            logger.warning("%s execution failed: %s", type(self).__name__, e)
+            # The backend collapses "sandbox died mid-run" and "the CLI exited
+            # non-zero on a live box" into the same generic exception, so probe
+            # liveness to tell them apart: a dead box is infra (SANDBOX_ERROR,
+            # reward untrustworthy), a non-zero exit on a live box is ERROR.
+            # Traces up to the failure still drive enrichment either way.
+            reason = TerminationReason.ERROR
+            alive = getattr(sandbox, "is_alive", None)
+            if callable(alive):
+                try:
+                    if not alive():
+                        reason = TerminationReason.SANDBOX_ERROR
+                except Exception:  # is_alive must not raise, but never let the probe mask the real failure
+                    logger.debug("is_alive probe raised after exec failure", exc_info=True)
+            logger.warning("%s execution failed (%s): %s", type(self).__name__, reason.value, e)
             return self._outcome_episode(
                 task,
-                termination_reason=TerminationReason.ERROR,
+                termination_reason=reason,
                 error={"message": str(e), "error_type": type(e).__name__},
             )
         elapsed = time.monotonic() - start
