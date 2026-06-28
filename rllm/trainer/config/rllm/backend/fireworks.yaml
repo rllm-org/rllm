@@ -99,6 +99,11 @@ fireworks_infra:
     learning_rate: 1e-5      # placeholder for fireworks managed flow. Should be overridden in the training codes.
     max_seq_len: null        # null = use the training shape's default context length
     step_timeout: 3600       # SDK default (3600s)
+    # Transient-fault tolerance for training-client RPCs (fwd/bwd, optim, weight
+    # hot-load). A blip on the shared training client around the per-step
+    # hot-load otherwise crashes the whole run, since the SDK does not retry.
+    step_max_retries: 2      # retries on transient errors (timeout/connection); 0 disables
+    step_retry_backoff_s: 10 # base linear backoff between retries (seconds)
     weight_sync_timeout: 600
 
   deployments:
