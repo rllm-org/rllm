@@ -78,8 +78,12 @@ class PythonModuleEvaluator:
         try:
             result = self.fn(**kwargs)
         except Exception as e:
+            # The verifier code itself crashed — a grading-infra failure, not a
+            # legitimate reward 0. Carry the real exception class so it's visible
+            # in metrics; the engine maps any non-timeout grading error to
+            # GRADING_ERROR and filters the reward from training.
             logger.exception("Verifier %s raised: %s", self.module_name, e)
-            return EvalOutput(reward=0.0, is_correct=False, metadata={"error": f"verifier exception: {e}"})
+            return EvalOutput(reward=0.0, is_correct=False, error=type(e).__name__, metadata={"error": f"verifier exception: {e}"})
 
         return _coerce_eval_result(result)
 
@@ -171,5 +175,6 @@ def _coerce_eval_result(result: object) -> EvalOutput:
         return EvalOutput(
             reward=0.0,
             is_correct=False,
+            error="VerifierOutputParseError",
             metadata={"error": f"Cannot coerce {type(result).__name__} to reward"},
         )

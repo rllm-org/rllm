@@ -37,6 +37,10 @@ _VENV_DIR = "/opt/terminus2-venv"
 _DRIVER_PATH = "/opt/terminus2/driver.py"
 _INSTRUCTION_PATH = "/tmp/terminus2/instruction.txt"
 _LOGS_DIR = "/tmp/terminus2/logs"
+# The driver records a structured outcome here (Harbor ExceptionInfo-shaped) so
+# the harness can label TIMEOUT / AGENT_SETUP_TIMEOUT / ... by the agent's actual
+# verdict instead of an exit code the ``| tee`` pipeline would mask.
+_OUTCOME_PATH = "/tmp/terminus2/outcome.json"
 
 
 def _install_script(harbor_version: str, py_version: str) -> str:
@@ -129,11 +133,44 @@ class Terminus2Harness(BaseCliHarness):
             "RLLM_TERMINUS_RECORD": "1" if self.record_terminal_session else "0",
             "RLLM_TERMINUS_INSTRUCTION_FILE": _INSTRUCTION_PATH,
             "RLLM_TERMINUS_LOGS_DIR": _LOGS_DIR,
+            "RLLM_TERMINUS_OUTCOME_FILE": _OUTCOME_PATH,
+            # The driver self-limits the agent loop at this budget and records an
+            # AgentTimeoutError, so the timeout is labelled correctly even though
+            # the outer ``| tee`` exec masks the kill's exit code. The harness's
+            # exec gets a grace window beyond this (see BaseCliHarness.run).
+            "RLLM_TERMINUS_AGENT_TIMEOUT_S": str(self._effective_timeout(task)),
         }
         # Only pass a turn cap when one is set; absent var = no artificial limit.
         if self.max_turns is not None:
             env["RLLM_TERMINUS_MAX_TURNS"] = str(self.max_turns)
         return env
+
+    def _read_outcome(self, sandbox: Sandbox) -> dict | None:
+        """Read the driver's outcome sentinel (Harbor ExceptionInfo-shaped).
+
+        Returns ``{"exception_type", "message"}`` when the driver recorded a
+        failure, ``{}`` (present, no exception) on a clean finish, or ``None``
+        when the file is absent/unreadable — e.g. the driver was SIGKILLed
+        before it could write, in which case run() applies its elapsed backstop.
+        """
+        import json
+
+        try:
+            raw = sandbox.exec(f"cat {shlex.quote(_OUTCOME_PATH)} 2>/dev/null || true", timeout=15, user=self.agent_user).strip()
+        except Exception as e:
+            logger.debug("terminus2 outcome read failed: %s", e)
+            return None
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except Exception as e:
+            logger.debug("terminus2 outcome parse failed: %s", e)
+            return None
+        info = data.get("exception_info")
+        if info:
+            return {"exception_type": info.get("exception_type"), "message": info.get("exception_message", "")}
+        return {}
 
     def write_configs(
         self,
@@ -168,15 +205,19 @@ class Terminus2Harness(BaseCliHarness):
 # ---------------------------------------------------------------------------
 _DRIVER_SCRIPT = r'''
 import asyncio
+import json
 import logging
 import os
 import shutil
+import traceback
+from datetime import datetime
 from pathlib import Path
 
 from harbor.agents.terminus_2.terminus_2 import Terminus2
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.agent.context import AgentContext
 from harbor.models.environment_type import EnvironmentType
+from harbor.trial.errors import AgentSetupTimeoutError, AgentTimeoutError
 
 log = logging.getLogger("terminus2-driver")
 
@@ -295,12 +336,54 @@ async def _main():
         suppress_max_turns_warning=True,
     )
     ctx = AgentContext()
-    log.info("terminus2-driver: model=%s workdir=%s parser=%s max_turns=%s", model, workdir, parser, max_turns)
-    await agent.setup(env)
-    await agent.run(instruction, env, ctx)
+    # Budgets: self-limit the agent loop so a wall-clock kill is recorded as a
+    # typed AgentTimeoutError (mirrors harbor Trial), instead of relying on the
+    # outer exec's exit code which the `| tee` pipeline masks. 0/unset = no cap.
+    agent_timeout = float(os.environ.get("RLLM_TERMINUS_AGENT_TIMEOUT_S", "0")) or None
+    setup_timeout = float(os.environ.get("RLLM_TERMINUS_SETUP_TIMEOUT_S", "0")) or None
+    outcome_file = os.environ.get("RLLM_TERMINUS_OUTCOME_FILE")
+    log.info("terminus2-driver: model=%s workdir=%s parser=%s max_turns=%s agent_timeout=%s", model, workdir, parser, max_turns, agent_timeout)
+
+    exc_info = None
+    try:
+        if setup_timeout:
+            try:
+                await asyncio.wait_for(agent.setup(env), timeout=setup_timeout)
+            except asyncio.TimeoutError:
+                raise AgentSetupTimeoutError(f"Agent setup timed out after {setup_timeout}s")
+        else:
+            await agent.setup(env)
+        if agent_timeout:
+            try:
+                await asyncio.wait_for(agent.run(instruction, env, ctx), timeout=agent_timeout)
+            except asyncio.TimeoutError:
+                raise AgentTimeoutError(f"Agent execution timed out after {agent_timeout}s")
+        else:
+            await agent.run(instruction, env, ctx)
+    except BaseException as e:  # noqa: BLE001 — record the verdict, never crash the exec
+        # Captures harbor's typed timeouts plus ContextLengthExceededError /
+        # OutputLengthExceededError raised inside agent.run.
+        exc_info = {
+            "exception_type": type(e).__name__,
+            "exception_message": str(e),
+            "exception_traceback": traceback.format_exc(),
+            "occurred_at": datetime.now().isoformat(),
+        }
+        log.warning("terminus2-driver agent phase failed: %s: %s", type(e).__name__, e)
+
+    # Mirror harbor's ExceptionInfo; exit 0 regardless so the agent's partial
+    # container state survives for the verifier (a timeout is still graded).
+    if outcome_file:
+        try:
+            Path(outcome_file).parent.mkdir(parents=True, exist_ok=True)
+            Path(outcome_file).write_text(json.dumps({"exception_info": exc_info, "finished": exc_info is None}))
+        except Exception as e:
+            log.warning("terminus2-driver failed to write outcome file: %s", e)
+
     log.info(
-        "terminus2-driver done: episodes=%s in_tokens=%s out_tokens=%s",
+        "terminus2-driver done: episodes=%s in_tokens=%s out_tokens=%s exc=%s",
         (ctx.metadata or {}).get("n_episodes"), ctx.n_input_tokens, ctx.n_output_tokens,
+        (exc_info or {}).get("exception_type"),
     )
 
 

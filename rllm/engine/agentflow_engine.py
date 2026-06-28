@@ -35,7 +35,7 @@ from rllm.data.utils import task_from_row
 from rllm.engine.trace_converter import compute_step_metrics, trace_record_to_step
 from rllm.eval.types import EvalOutput
 from rllm.gateway.manager import container_reachable_url
-from rllm.types import AgentConfig, Episode, Step, Task, TerminationReason, Trajectory, flow_accepts_env, run_agent_flow
+from rllm.types import INFRA_ERROR_REASONS, AgentConfig, Episode, Step, Task, TerminationReason, Trajectory, flow_accepts_env, run_agent_flow, termination_reason_from_error
 from rllm.utils import colorful_print
 
 if TYPE_CHECKING:
@@ -738,9 +738,19 @@ class AgentFlowEngine:
         for signal in eval_output.signals:
             enriched.metrics[signal.name] = signal.value
 
-        # Harness sets TIMEOUT/ERROR itself; a clean exit is ENV_DONE. (Length /
-        # turn-cap aren't reliably recoverable from gateway traces on this path.)
-        if enriched.termination_reason is None:
+        if eval_output.error:
+            # Grading ITSELF failed (verifier timeout/crash, missing/empty/unparseable
+            # reward file, tests-dir upload). The reward is not a real task score, so
+            # route it to an infra TerminationReason (VERIFIER_TIMEOUT for a known
+            # phase, else GRADING_ERROR) — training filters it and eval counts it as
+            # an error. Don't clobber a harness-set infra reason (e.g. the agent
+            # already SANDBOX_ERROR'd): that's the root cause, first-write-wins.
+            if enriched.termination_reason not in INFRA_ERROR_REASONS:
+                enriched.termination_reason = termination_reason_from_error(eval_output.error, default=TerminationReason.GRADING_ERROR)
+            enriched.metadata.setdefault("error", {"error_type": eval_output.error, "message": eval_output.metadata.get("error", "")})
+        elif enriched.termination_reason is None:
+            # Harness sets TIMEOUT/ERROR itself; a clean exit is ENV_DONE. (Length /
+            # turn-cap aren't reliably recoverable from gateway traces on this path.)
             enriched.termination_reason = TerminationReason.ENV_DONE
         return enriched
 

@@ -152,6 +152,63 @@ def test_run_marks_timeout_on_budget_exhaustion():
     assert "error" not in result.metadata
 
 
+# ---------------------------------------------------------------------------
+# Outcome sentinel (in-sandbox driver verdict) + wall-clock backstop. A driver
+# like terminus2 records why it stopped; run() trusts that over the exit code
+# (which ``| tee`` masks). Without a sentinel, an exec that ran ~to the budget
+# is classified TIMEOUT regardless of a masked clean-looking exit.
+# ---------------------------------------------------------------------------
+
+
+class _DriverHarness(OpenCodeHarness):
+    """OpenCode harness with a stubbed driver outcome, to drive run()'s sentinel path."""
+
+    outcome: dict | None = None
+
+    def _read_outcome(self, sandbox):  # type: ignore[override]
+        return self.outcome
+
+
+def test_run_sentinel_agent_timeout_maps_to_timeout():
+    h = _DriverHarness()
+    h.outcome = {"exception_type": "AgentTimeoutError", "message": "Agent execution timed out after 60.0s"}
+    result = h.run(_make_task(), _make_config(), env=FakeSandbox())
+    assert result.termination_reason == TerminationReason.TIMEOUT
+
+
+def test_run_sentinel_verifier_timeout_distinct_from_agent_timeout():
+    h = _DriverHarness()
+    h.outcome = {"exception_type": "VerifierTimeoutError", "message": "verifier timed out"}
+    result = h.run(_make_task(), _make_config(), env=FakeSandbox())
+    assert result.termination_reason == TerminationReason.VERIFIER_TIMEOUT
+    assert result.metadata["error"]["error_type"] == "VerifierTimeoutError"
+
+
+def test_run_sentinel_clean_finish_beats_elapsed_backstop(monkeypatch):
+    """A driver that finished cleanly is ENV_DONE even past the wall clock —
+    the sentinel is authoritative, so the elapsed heuristic must not fire."""
+    import rllm.harnesses.cli_harness as mod
+
+    ticks = iter([0.0, 10_000.0])
+    monkeypatch.setattr(mod.time, "monotonic", lambda: next(ticks))
+    h = _DriverHarness()
+    h.outcome = {}  # sentinel present, no exception → clean finish
+    result = h.run(_make_task(), _make_config(), env=FakeSandbox())
+    assert result.termination_reason is None  # ENV_DONE, not TIMEOUT
+
+
+def test_run_elapsed_backstop_marks_timeout_when_exit_masked(monkeypatch):
+    """No sentinel + ran ~to the budget with a clean-looking exit (the ``| tee``
+    masking case) → TIMEOUT, reconstructed from the clock."""
+    import rllm.harnesses.cli_harness as mod
+
+    ticks = iter([0.0, 10_000.0])  # elapsed >> 0.95 * run_timeout
+    monkeypatch.setattr(mod.time, "monotonic", lambda: next(ticks))
+    h = OpenCodeHarness()  # base harness writes no sentinel
+    result = h.run(_make_task(), _make_config(), env=FakeSandbox())
+    assert result.termination_reason == TerminationReason.TIMEOUT
+
+
 @pytest.mark.parametrize(
     ("workdir", "expected_prefix"),
     [

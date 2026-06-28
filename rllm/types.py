@@ -39,9 +39,80 @@ class TerminationReason(Enum):
     MAX_RESPONSE_LENGTH_EXCEEDED = "max_response_length_exceeded"
     ENV_DONE = "env_done"
     MAX_TURNS_EXCEEDED = "max_turns_exceeded"
-    TIMEOUT = "timeout"
+    TIMEOUT = "timeout"  # agent execution wall-clock budget — reward is still graded on partial state
     UNKNOWN = "unknown"
     ERROR = "error"
+    # Infra/grading failures: the reward (if any) reflects an infrastructure or
+    # grading breakdown, not the policy's behavior. Distinguished so training can
+    # filter them and eval can count them as errors rather than task failures.
+    AGENT_SETUP_TIMEOUT = "agent_setup_timeout"
+    ENV_START_TIMEOUT = "env_start_timeout"
+    VERIFIER_TIMEOUT = "verifier_timeout"
+    GRADING_ERROR = "grading_error"
+    SANDBOX_ERROR = "sandbox_error"
+
+
+# Reasons whose reward is NOT a trustworthy training signal: an infra or grading
+# failure produced it (or no reward at all). Training filters these; eval counts
+# them as errors. TIMEOUT (agent wall-clock) is deliberately excluded — that
+# rollout is real and graded on partial state, so its reward is valid.
+INFRA_ERROR_REASONS = frozenset(
+    {
+        TerminationReason.ERROR,
+        TerminationReason.AGENT_SETUP_TIMEOUT,
+        TerminationReason.ENV_START_TIMEOUT,
+        TerminationReason.VERIFIER_TIMEOUT,
+        TerminationReason.GRADING_ERROR,
+        TerminationReason.SANDBOX_ERROR,
+    }
+)
+
+
+# Canonical map from an exception class name to a coarse TerminationReason.
+# Mirrors Harbor's granular failure taxonomy (harbor.trial.errors,
+# harbor.verifier.verifier, harbor.llms.base, harbor.environments.base) so the
+# in-sandbox CLI path and the harbor-runtime path classify identically. The exact
+# class name is preserved on the episode (metadata.error_type); this is only the
+# coarse rollup used for filtering and per-category metrics.
+_ERROR_TYPE_TO_REASON: dict[str, TerminationReason] = {
+    # Phase timeouts (harbor.trial.errors)
+    "AgentTimeoutError": TerminationReason.TIMEOUT,
+    "AgentSetupTimeoutError": TerminationReason.AGENT_SETUP_TIMEOUT,
+    "EnvironmentStartTimeoutError": TerminationReason.ENV_START_TIMEOUT,
+    "VerifierTimeoutError": TerminationReason.VERIFIER_TIMEOUT,
+    # Model/context (harbor.llms.base)
+    "ContextLengthExceededError": TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED,
+    "OutputLengthExceededError": TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED,
+    # Agent process (harbor.agents.installed.base)
+    "NonZeroAgentExitCodeError": TerminationReason.ERROR,
+    # Verifier/grading (harbor.verifier.verifier)
+    "AddTestsDirError": TerminationReason.GRADING_ERROR,
+    "DownloadVerifierDirError": TerminationReason.GRADING_ERROR,
+    "RewardFileNotFoundError": TerminationReason.GRADING_ERROR,
+    "RewardFileEmptyError": TerminationReason.GRADING_ERROR,
+    "VerifierOutputParseError": TerminationReason.GRADING_ERROR,
+    # Environment/sandbox (harbor.environments.base + rllm.sandbox.protocol)
+    "HealthcheckError": TerminationReason.SANDBOX_ERROR,
+    "SandboxBuildFailedError": TerminationReason.SANDBOX_ERROR,
+    "MemoryLimitExceededError": TerminationReason.SANDBOX_ERROR,
+    "SnapshotNotFound": TerminationReason.SANDBOX_ERROR,
+}
+
+
+def termination_reason_from_error(
+    error_type: str | None,
+    default: TerminationReason = TerminationReason.ERROR,
+) -> TerminationReason:
+    """Map an exception class name to a coarse :class:`TerminationReason`.
+
+    Unknown names fall back to ``default``: callers pass
+    :attr:`TerminationReason.GRADING_ERROR` when the failure came from the
+    verifier/grader, and the more general :attr:`TerminationReason.ERROR`
+    otherwise.
+    """
+    if not error_type:
+        return default
+    return _ERROR_TYPE_TO_REASON.get(error_type, default)
 
 
 class TerminationEvent(Exception):

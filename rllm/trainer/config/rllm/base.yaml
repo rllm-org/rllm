@@ -113,7 +113,10 @@ accumulate_reasoning: False
 mask_truncated_samples: False
 filter_token_mismatch: True
 
-# Compact filtering
+# Compact filtering. ``enable`` is the master switch (off by default for
+# back-compat); when on, a rollout whose termination_reason is masked here is
+# excluded from the loss. The infra/grading reasons default True because their
+# reward is not a real task score (verifier timed out/crashed, sandbox died).
 compact_filtering:
   enable: False
   mask_max_prompt_length_exceeded: True
@@ -123,6 +126,11 @@ compact_filtering:
   mask_timeout: True
   mask_unknown: False
   mask_error: True
+  mask_verifier_timeout: True
+  mask_grading_error: True
+  mask_sandbox_error: True
+  mask_agent_setup_timeout: True
+  mask_env_start_timeout: True
 
 # Rejection sampling
 rejection_sample:

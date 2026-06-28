@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 from rllm.eval.results import EvalItem, EvalResult
 from rllm.hooks import FixedEvaluation, SandboxTaskHooks
-from rllm.types import AgentFlow, Evaluator, TerminationReason
+from rllm.types import INFRA_ERROR_REASONS, AgentFlow, Evaluator
 
 if TYPE_CHECKING:
     from rllm.gateway.manager import GatewayManager
@@ -155,10 +155,18 @@ async def run_dataset(
             items.append(EvalItem(idx=task_idx, attempt=attempt, reward=0.0, is_correct=False, error="missing episode"))
             continue
 
+        # An infra/grading failure (sandbox/setup/verifier/grading) means the
+        # reward isn't a real task score — surface it as an error so it's counted
+        # separately from genuine task failures. An agent TIMEOUT is NOT an error
+        # here: it's graded on partial state, so its reward stands.
+        reason = episode.termination_reason
         error_msg = None
-        if episode.termination_reason == TerminationReason.ERROR:
+        if reason in INFRA_ERROR_REASONS:
             err = (episode.metadata or {}).get("error") or {}
-            error_msg = err.get("message") if isinstance(err, dict) else str(err)
+            if isinstance(err, dict):
+                error_msg = err.get("error_type") or err.get("message") or reason.value
+            else:
+                error_msg = str(err) or reason.value
 
         signals: dict[str, float] = {}
         if episode.trajectories:
@@ -180,6 +188,7 @@ async def run_dataset(
                 is_correct=bool(episode.is_correct),
                 signals=signals,
                 error=error_msg,
+                termination_reason=reason.value if reason is not None else None,
             )
         )
         if error_msg is None:
