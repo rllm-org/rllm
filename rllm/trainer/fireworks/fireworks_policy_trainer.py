@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 import tinker
 from fireworks.training.sdk import WeightSyncer
+from omegaconf import OmegaConf
 from tinker.types import AdamParams
 from training.utils.client import ReconnectableClient
 
@@ -109,6 +110,9 @@ class FireworksPolicyTrainer:
         self.weight_syncer = weight_syncer
         self._rlor_mgr = rlor_mgr
         self._policy_job_id = policy_job_id
+        # Transient-fault tolerance for training-client RPCs (see _run_training_op).
+        self._step_max_retries = max(0, int(OmegaConf.select(config, "fireworks_infra.common.step_max_retries", default=2)))
+        self._step_retry_backoff_s = float(OmegaConf.select(config, "fireworks_infra.common.step_retry_backoff_s", default=10.0))
         self._resume_checkpoint_name = self.config.training.get("resume_from_dcp_checkpoint")
         self._resume_source_job_id = self.config.training.get("resume_from_fireworks_job_id") or policy_job_id
 
@@ -116,6 +120,102 @@ class FireworksPolicyTrainer:
         self.transform_config = transform_config or TransformConfig()
         self.algorithm_config = algorithm_config or AlgorithmConfig.from_config(self.config.rllm.algorithm)
         self.resolve_builtin_loss(self.algorithm_config)
+
+    # ------------------------------------------------------------------
+    # Transient-fault tolerance for training-client RPCs
+    # ------------------------------------------------------------------
+
+    # Substrings marking a retryable transient failure on the shared training
+    # client — channel/deadline blips (typically around the per-step weight
+    # hot-load), not data errors. Mirrors the rollout engine's transient markers.
+    _TRANSIENT_MARKERS = (
+        "timeout",
+        "timed out",
+        "deadline",
+        "unavailable",
+        "connection",
+        "connection reset",
+        "broken pipe",
+        "eof",
+        "502",
+        "503",
+        "504",
+        "goaway",
+        "rst_stream",
+    )
+
+    def _is_transient(self, exc: BaseException) -> bool:
+        """Whether *exc* looks like a transient channel/timeout fault (vs a data error)."""
+        if isinstance(exc, TimeoutError | ConnectionError):
+            return True
+        text = f"{type(exc).__name__}: {exc}".lower()
+        return any(marker in text for marker in self._TRANSIENT_MARKERS)
+
+    def _reconnect_training_client(self) -> bool:
+        """Best-effort refresh of the training client's channel to the **same** job.
+
+        Re-resolves the trainer endpoint via the job manager and rebinds the
+        ``ReconnectableClient`` to it (the SDK's own ``_connect`` path, which we
+        replicate here because ``from_training_client`` instances carry no job
+        manager). Server-side optimizer/gradient state lives with the job, which
+        is unchanged — this only replaces a stale channel. Returns True on success.
+
+        Note: this refreshes ``self.training_client`` (used by forward / fwd-bwd /
+        optim_step) only; the ``WeightSyncer`` holds the raw client, so its calls
+        are retried without reconnect.
+        """
+        mgr, job_id = self._rlor_mgr, self._policy_job_id
+        if mgr is None or not job_id:
+            logger.warning("Cannot reconnect training client: rlor_mgr/policy_job_id unset")
+            return False
+        try:
+            endpoint = mgr.wait_for_existing(job_id)
+            self.training_client._use_endpoint(endpoint)
+            logger.info("Reconnected training client to job %s", job_id)
+            return True
+        except Exception as exc:
+            logger.warning("Training client reconnect failed for job %s: %s", job_id, exc)
+            return False
+
+    async def _run_training_op(self, fn, *args, op_name: str, reconnect: bool = False, **kwargs):
+        """Run a blocking training-client RPC in a thread, retrying transient faults.
+
+        On a transient error (timeout / connection / channel reset — typically a
+        blip on the shared training client around the per-step weight hot-load)
+        we optionally reconnect to the same job and retry, up to
+        ``step_max_retries`` times with linear backoff. Non-transient errors
+        (e.g. malformed data) and cancellation propagate immediately.
+
+        CAVEAT: forward_backward / optim_step mutate server-side state (gradient
+        accumulation / optimizer). A retry assumes the failed RPC did NOT commit
+        that mutation — true for channel/dispatch failures, where the server
+        never ran it. A *false* timeout (server finished but the ack was lost)
+        could double-apply for that one step; retries are kept low and this
+        bounded, rare perturbation is preferred over crashing a multi-hour run.
+        For genuine slowness, raise ``step_timeout`` instead of relying on retry.
+        """
+        attempt = 0
+        while True:
+            try:
+                return await asyncio.to_thread(fn, *args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 — re-raised below unless transient
+                if attempt >= self._step_max_retries or not self._is_transient(exc):
+                    raise
+                attempt += 1
+                backoff = self._step_retry_backoff_s * attempt
+                logger.warning(
+                    "Training op %r failed (%s: %s); %sretry %d/%d after %.0fs",
+                    op_name,
+                    type(exc).__name__,
+                    exc,
+                    "reconnect+" if reconnect else "",
+                    attempt,
+                    self._step_max_retries,
+                    backoff,
+                )
+                if reconnect:
+                    self._reconnect_training_client()
+                await asyncio.sleep(backoff)
 
     # ------------------------------------------------------------------
     # Initialization
@@ -225,10 +325,13 @@ class FireworksPolicyTrainer:
         Returns the snapshot_name on success, None on failure."""
         if self.weight_syncer is None:
             return None
-        snapshot_name = await asyncio.to_thread(
+        # reconnect=False: the syncer holds the raw client, not self.training_client;
+        # re-dispatching save_and_hotload (idempotent) is the available recovery.
+        snapshot_name = await self._run_training_op(
             self.weight_syncer.save_and_hotload,
             name,
             checkpoint_type=checkpoint_type,
+            op_name="save_and_hotload",
         )
         logger.debug("Weights synced to deployment: %s", name)
         return snapshot_name
@@ -307,10 +410,12 @@ class FireworksPolicyTrainer:
 
         Only called when ``bypass_mode=False`` (3-policy / decoupled PPO).
         """
-        prox_fwd = await asyncio.to_thread(
+        prox_fwd = await self._run_training_op(
             self.training_client.forward,
             datums,
             "cross_entropy",
+            op_name="forward",
+            reconnect=True,
         )
         return [out["logprobs"].data for out in prox_fwd.loss_fn_outputs]
 
@@ -536,11 +641,13 @@ class FireworksPolicyTrainer:
         )
 
         kernel_loss, kernel_config = self._builtin_loss
-        fwd_bwd_result = await asyncio.to_thread(
+        fwd_bwd_result = await self._run_training_op(
             self.training_client.forward_backward,
             builtin_datums,
             kernel_loss,
             loss_fn_config=kernel_config,
+            op_name="forward_backward",
+            reconnect=True,
         )
 
         # Merge remote fwd/bwd metrics (e.g. loss) into adv_metrics
@@ -552,10 +659,12 @@ class FireworksPolicyTrainer:
         # Auxiliary-loss passes: each accumulates gradients on top of the policy
         # gradient before the (externally invoked) optim_step.
         for aux, datums in aux_passes:
-            aux_fwd_bwd = await asyncio.to_thread(
+            aux_fwd_bwd = await self._run_training_op(
                 self.training_client.forward_backward,
                 datums,
                 "cross_entropy",
+                op_name="forward_backward(aux)",
+                reconnect=True,
             )
             if hasattr(aux_fwd_bwd, "metrics") and aux_fwd_bwd.metrics:
                 for k, v in aux_fwd_bwd.metrics.items():
@@ -613,10 +722,12 @@ class FireworksPolicyTrainer:
         # gradient, so we disable server-side grad-accumulation normalization.
         if build_aux_losses(self.algorithm_config):
             grad_norm = GradAccNormalization.NONE
-        optim_result = await asyncio.to_thread(
+        optim_result = await self._run_training_op(
             self.training_client.optim_step,
             adam_params,
             grad_accumulation_normalization=grad_norm,
+            op_name="optim_step",
+            reconnect=True,
         )
 
         metrics = {}
