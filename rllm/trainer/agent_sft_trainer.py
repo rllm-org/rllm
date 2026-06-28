@@ -25,9 +25,9 @@ if TYPE_CHECKING:
     from rllm.trainer.sft.backend import SFTBackend
     from rllm.trainer.sft.spec import SFTSpec
 
-# Backends available today. verl lands in milestone 4.
-_IMPLEMENTED = {"tinker", "fireworks"}
-_PLANNED = {"verl"}
+# Backends available today.
+_IMPLEMENTED = {"tinker", "fireworks", "verl"}
+_PLANNED: set[str] = set()
 
 
 def _inside_torchrun() -> bool:
@@ -75,12 +75,50 @@ class AgentSFTTrainer:
             from rllm.trainer.sft.fireworks_backend import FireworksSFTBackend
 
             return FireworksSFTBackend(self.spec)
+        if name == "verl":
+            from rllm.trainer.sft.verl_backend import VerlSFTBackend
+
+            return VerlSFTBackend(self.spec)
         if name in _PLANNED:
             raise SFTConfigError(f"SFT backend {name!r} is not wired yet. Use backend='tinker' or 'fireworks' for now.")
         raise SFTConfigError(f"Unknown SFT backend {name!r}. Available: {', '.join(sorted(_IMPLEMENTED))}.")
 
     def _launch_distributed(self, backend: SFTBackend) -> None:
-        # The torchrun launcher for distributed backends (verl) is not wired
-        # yet. Until then, distributed backends must be run inside an existing
-        # torchrun process group.
-        raise SFTConfigError(f"Backend {backend.name!r} requires a distributed launcher (not wired yet). Run inside torchrun, or use a managed backend (tinker/fireworks).")
+        """Spawn ``torchrun`` for a distributed backend (verl) and run its loop.
+
+        ``prepare()`` has already materialized the data (parquet) and built the
+        config; we serialize the config and re-enter under a torchrun process
+        group via :mod:`rllm.trainer.sft.verl_entry`, which calls the backend's
+        ``run_sft``. ``RLLM_SFT_IN_TORCHRUN`` marks the child so a nested
+        dispatch would call ``fit()`` directly instead of relaunching.
+        """
+        import subprocess
+        import sys
+
+        cfg = backend.config
+        nproc = int(cfg.trainer.get("n_gpus_per_node", 1) or 1)
+        nnodes = int(cfg.trainer.get("nnodes", 1) or 1)
+        config_path = backend.serialize_config()
+
+        cmd = [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--standalone",
+            f"--nnodes={nnodes}",
+            f"--nproc_per_node={nproc}",
+            "-m",
+            "rllm.trainer.sft.verl_entry",
+            "--config",
+            config_path,
+        ]
+        env = {**os.environ, "RLLM_SFT_IN_TORCHRUN": "1"}
+        # verl's worker refuses to start when ROCR_VISIBLE_DEVICES (an AMD/ROCm
+        # var) and CUDA_VISIBLE_DEVICES are both set. On NVIDIA hosts ROCR is a
+        # stray cluster default; drop it so CUDA_VISIBLE_DEVICES wins.
+        if env.get("ROCR_VISIBLE_DEVICES") and env.get("CUDA_VISIBLE_DEVICES"):
+            env.pop("ROCR_VISIBLE_DEVICES", None)
+        print(f"[rllm sft] launching torchrun: nnodes={nnodes} nproc_per_node={nproc}\n  config: {config_path}")
+        result = subprocess.run(cmd, env=env)
+        if result.returncode != 0:
+            raise SFTConfigError(f"verl SFT torchrun exited with code {result.returncode}. See the torchrun output above.")

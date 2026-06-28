@@ -33,7 +33,6 @@ class VerlTaskRunner(TaskRunner):
         print(f"VerlTaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
         sync_config(config, hydra_overrides=hydra_overrides)
         OmegaConf.resolve(config)
-        config.trainer.use_legacy_worker_impl = "disable"
         pprint(OmegaConf.to_container(config))
 
         is_separated = config.rllm.get("async_training", {}).get("enable", False)

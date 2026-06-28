@@ -1,6 +1,7 @@
 import logging
 
 import torch
+from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
 
 from rllm.parser import ChatTemplateParser
@@ -108,9 +109,34 @@ class RLLMSFTDataset(MultiTurnSFTDataset):
 
         input_ids = torch.tensor(tokens, dtype=torch.long)
         loss_mask = torch.tensor(loss_mask, dtype=torch.long)
+
+        # verl 0.8.0 keys the loss path off ``pad_mode`` (injected into the batch
+        # by SFTTrainer). ``no_padding`` (the SFT default) expects each sample as
+        # an *unpadded* 1-D ``{input_ids, position_ids, loss_mask}`` that the
+        # SFTTensorCollator nests + flattens; ``sft_loss`` reads ``loss_mask``
+        # directly. ``right`` pads to ``max_length`` and the loss reads
+        # ``response_mask``. We mirror ``MultiTurnSFTDataset.__getitem__`` for
+        # both so the loss mask always lands on the assistant tokens this class
+        # computed.
+        if self.pad_mode == DatasetPadMode.NO_PADDING:
+            sequence_length = input_ids.shape[0]
+            if sequence_length > self.max_length:
+                if self.truncation == "error":
+                    raise ValueError(f"{sequence_length=} is larger than {self.max_length=}")
+                # left/right truncation both keep the head here, matching verl's
+                # no_padding branch (it only right-truncates).
+                input_ids = input_ids[: self.max_length]
+                loss_mask = loss_mask[: self.max_length]
+            position_ids = torch.arange(input_ids.shape[0], dtype=torch.long)
+            return {
+                "input_ids": input_ids,
+                "position_ids": position_ids,
+                "loss_mask": loss_mask,
+            }
+
         attention_mask = torch.tensor([1] * len(tokens), dtype=torch.long)
 
-        # Handle sequence length
+        # Handle sequence length (pad_mode == "right")
         sequence_length = input_ids.shape[0]
         if sequence_length < self.max_length:
             # Pad sequences
@@ -147,4 +173,7 @@ class RLLMSFTDataset(MultiTurnSFTDataset):
             "attention_mask": attention_mask,
             "position_ids": position_ids,
             "loss_mask": loss_mask,
+            # verl 0.8.0's right/left_right sft_loss reads ``response_mask``;
+            # ours is the assistant-token loss mask.
+            "response_mask": loss_mask,
         }

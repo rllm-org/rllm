@@ -75,14 +75,14 @@ dev = [
 ]
 
 verl = [
-    "transformers>=4.55.0,<5.0.0",
+    "transformers>=5.5.3",
     "numpy",
-    "verl==0.7.1",
+    "verl==0.8.0",
     "ray",
     "torch>=2.10.0",
     "torchvision>=0.23.0",
-    "vllm==0.17.0",
-    "flash-attn==2.8.1",
+    "vllm==0.22.1",
+    "flash-attn==2.8.3",
     "qwen-vl-utils",
 ]
 
@@ -93,7 +93,7 @@ tinker = [
 
 fireworks = [
     "fireworks-ai[training]==1.2.0a79 ; python_version >= '3.11'",
-    "fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git#subdirectory=training ; python_version >= '3.11'",
+    "fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git@bba676c6d00bd595f9453e0b2165b7457a01e0d5#subdirectory=training ; python_version >= '3.11'",
 ]
 
 opentelemetry = [
