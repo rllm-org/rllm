@@ -89,7 +89,7 @@ class Terminus2Harness(BaseCliHarness):
     stdout_log_path = "/tmp/terminus2.log"
 
     # ---- Terminus-2 knobs (overridable via agent kwargs / configure) ----
-    harbor_version: str = "0.3.0"
+    harbor_version: str = "0.13.2"  # match the host venv; 0.3.0 is far too old (no harbor.trial.errors, ancient Terminus-2)
     terminus_python: str = "3.12"
     parser_name: str = "json"  # "json" or "xml"
     # Temperature the agent requests; in `rllm eval`/training the gateway
@@ -217,7 +217,19 @@ from harbor.agents.terminus_2.terminus_2 import Terminus2
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.agent.context import AgentContext
 from harbor.models.environment_type import EnvironmentType
-from harbor.trial.errors import AgentSetupTimeoutError, AgentTimeoutError
+
+
+# Defined locally on purpose: harbor 0.3.0 (the version installed in the sandbox)
+# has no ``harbor.trial.errors`` module. Only the class *names* matter — the
+# harness maps them to a TerminationReason via the exception_type string in the
+# outcome sentinel, so matching Harbor's names is all that's needed.
+class AgentSetupTimeoutError(asyncio.TimeoutError):
+    pass
+
+
+class AgentTimeoutError(asyncio.TimeoutError):
+    pass
+
 
 log = logging.getLogger("terminus2-driver")
 
