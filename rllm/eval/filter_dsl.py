@@ -122,7 +122,7 @@ def _validate(tree: ast.AST, source: str) -> None:
             allowed = ", ".join(sorted(n for n in ALLOWED_NAMES if n != "_at"))
             raise FilterError(f"Filter {source!r}: unknown name {node.id!r}. Available: {allowed}, plus name@k forms (e.g. pass@8).")
         if isinstance(node, ast.Constant):
-            if isinstance(node.value, bool) or isinstance(node.value, (int, float)):
+            if isinstance(node.value, bool) or isinstance(node.value, int | float):
                 continue
             if isinstance(node.value, str) and id(node) in approved_strings:
                 continue

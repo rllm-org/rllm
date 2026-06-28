@@ -254,7 +254,7 @@ def _clean_message(m: dict) -> dict | None:
     if not role:
         return None
     content = m.get("content")
-    if isinstance(content, (str, list)):
+    if isinstance(content, str | list):
         norm = content
     elif content is None:
         norm = ""
