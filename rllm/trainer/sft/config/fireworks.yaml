@@ -1,0 +1,80 @@
+# Native config for the Fireworks SFT backend.
+#
+# Provisions a dedicated trainer through the *training-shape path* (exactly how
+# the RL Fireworks backend provisions): the `fireworks_infra` document below
+# names `trainers.policy.training_shape_id`, so init_fireworks_infra("sft", ...)
+# resolves the shape and never falls back to the manual-infra path. Requires
+# FIREWORKS_API_KEY.
+#
+# Fireworks needs a FW model path + HF tokenizer + matching training shape (not a
+# bare HF name). Swap model.name / model.tokenizer_model /
+# fireworks_config.policy_trainer_shape_id *together* to change the model.
+# Defaults to Qwen3.5-9B: Fireworks ships a 3.5-9B shape but not a 3.5-4B one
+# (pattern from cookbooks/swe-rl/train_fireworks_sync.sh).
+
+fireworks_base_url: "https://api.fireworks.ai"
+
+model:
+  name: accounts/fireworks/models/qwen3p5-9b      # Fireworks base-model path
+  tokenizer_model: Qwen/Qwen3.5-9B                # HF tokenizer (for rendering/tokenization)
+  lora_rank: 32
+  train_unembed: true
+  train_attn: true
+  train_mlp: true
+
+fireworks_config:
+  # LoRA-validated shape (we train LoRA → LORA_TRAINER mode). The non-`-lora`
+  # shape resolves but is not validated for LoRA. Matches swe-rl's RL recipe.
+  policy_trainer_shape_id: accounts/fireworks/trainingShapes/qwen3p5-9b-256k-lora
+  policy_trainer_replica_count: 1
+
+data:
+  train_files: null
+  val_files: null
+  train_batch_size: 32
+  micro_batch_size_per_gpu: 32
+  train_max_samples: -1
+  val_max_samples: -1
+  max_length: 2048
+  renderer_name: "role_colon"
+  rllm:
+    tokenize_and_mask_method: cumulative
+
+optim:
+  lr: 1e-5
+  betas: [0.9, 0.95]
+  eps: 1e-8
+  lr_scheduler: constant
+  warmup_steps_ratio: 0.1
+
+trainer:
+  total_epochs: 1
+  logger: ['console']
+  project_name: 'rllm-fireworks-sft'
+  experiment_name: 'default'
+  save_freq: 20
+  test_freq: 10
+  default_local_dir: '/tmp/rllm-fireworks-sft-checkpoints'
+
+# Provision document parsed by training.provision.load_yaml_provision(mode="sft").
+# Mirrors the RL backend's fireworks_infra, minus the deployment/reference
+# (SFT needs no inference deployment). Do not edit unless you know the
+# Fireworks provisioning format.
+fireworks_infra:
+  common:
+    base_model: ${model.name}
+    tokenizer_model: ${model.tokenizer_model}
+    lora_rank: ${model.lora_rank}
+    learning_rate: 1e-5      # overridden at runtime from optim.lr
+    max_seq_len: null        # null = use the training shape's default context length
+    step_timeout: 3600
+  trainers:
+    policy:
+      training_shape_id: ${fireworks_config.policy_trainer_shape_id}
+      job_id: null           # null = create a new job; set to reattach
+      replica_count: ${fireworks_config.policy_trainer_replica_count}
+      timeout_s: 3600
+      skip_validations: false
+  recipe:
+    sft:
+      trainer: policy

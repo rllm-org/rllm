@@ -31,6 +31,7 @@ class _LazyGroup(click.Group):
         "eval": ("rllm.cli.eval", "eval_cmd", "Evaluate a model on a benchmark dataset.", "📊"),
         "init": ("rllm.cli.init", "init_cmd", "Scaffold a new agent project.", "🚀"),
         "model": ("rllm.cli.model_cmd", "model", "Manage provider and model configuration.", "⚙️"),
+        "sft": ("rllm.cli.sft", "sft_cmd", "Fine-tune a model on a dataset (SFT).", "🎓"),
         "snapshot": ("rllm.cli.snapshot_cmd", "snapshot", "Manage sandbox environment snapshots.", "📸"),
         "train": ("rllm.cli.train", "train_cmd", "Train a model on a benchmark dataset using RL.", "🏋️"),
         "view": ("rllm.cli.view", "view_cmd", "Browse saved eval episodes in a local web viewer.", "🔍"),

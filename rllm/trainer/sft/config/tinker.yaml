@@ -1,0 +1,40 @@
+# Native config for the Tinker SFT backend.
+# AgentSFTTrainer/TinkerSFTBackend.build_config() loads this and merges the
+# SFTSpec on top. Edit defaults here; per-run knobs come from the spec / CLI.
+
+tinker_base_url: null  # Tinker service URL (null for default)
+
+model:
+  name: "Qwen/Qwen3.5-4B"
+  lora_rank: 32
+  train_unembed: true   # LoRA on output embedding
+  train_attn: true      # LoRA on attention
+  train_mlp: true       # LoRA on MLP
+
+data:
+  train_files: null
+  val_files: null
+  train_batch_size: 32
+  micro_batch_size_per_gpu: 32  # validation batch size
+  train_max_samples: -1
+  val_max_samples: -1
+  max_length: 2048
+  renderer_name: "role_colon"   # role_colon | llama3 | qwen3
+  rllm:
+    tokenize_and_mask_method: cumulative  # cumulative -> ALL_ASSISTANT_MESSAGES; stepwise -> LAST_ASSISTANT_MESSAGE
+
+optim:
+  lr: 1e-5
+  betas: [0.9, 0.95]
+  eps: 1e-8
+  lr_scheduler: constant  # constant | linear | cosine
+  warmup_steps_ratio: 0.1
+
+trainer:
+  total_epochs: 1
+  logger: ['console']
+  project_name: 'rllm-tinker-sft'
+  experiment_name: 'default'
+  save_freq: 20   # checkpoint every N steps (-1 to disable)
+  test_freq: 10   # validate every N steps (-1 to disable)
+  default_local_dir: '/tmp/rllm-tinker-sft-checkpoints'

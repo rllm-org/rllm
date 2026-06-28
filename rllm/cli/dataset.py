@@ -279,6 +279,149 @@ def register(name: str, file_path: str, split: str, category: str | None, descri
     click.echo(f"Registered '{name}' split '{split}' ({len(ds)} examples).")
 
 
+def _split_train_val(rows: list[dict], val_fraction: float, seed: int) -> tuple[list[dict], list[dict]]:
+    """Hold out a fraction of *tasks* (not rows) for validation, to avoid leaking
+    sibling trajectories of the same task across the split."""
+    if val_fraction <= 0 or not rows:
+        return rows, []
+    import random
+
+    by_task: dict = {}
+    for r in rows:
+        by_task.setdefault(r.get("task_id"), []).append(r)
+    task_ids = list(by_task.keys())
+    random.Random(seed).shuffle(task_ids)
+    n_val = int(len(task_ids) * val_fraction)
+    if 0 < val_fraction < 1 and n_val == 0:
+        n_val = 1  # always hold out at least one task when a fraction was asked for
+    val_tasks = set(task_ids[:n_val])
+    train_rows, val_rows = [], []
+    for tid, task_rows in by_task.items():
+        (val_rows if tid in val_tasks else train_rows).extend(task_rows)
+    return train_rows, val_rows
+
+
+@dataset.command(name="from-eval")
+@click.argument("runs", nargs=-1, required=True)
+@click.option("--name", required=True, help="Name to register the curated SFT dataset under.")
+@click.option("--metric", default="is_correct", help="What avg/best/worst aggregate: is_correct (default), reward, or a signal name.")
+@click.option("--filter", "filter_expr", default="solved", help='Task-level filter over aggregates, e.g. "0 < avg < 1" or "pass@4 >= 0.5" (default: solved).')
+@click.option("--select", default="correct", type=click.Choice(["correct", "best", "best-n", "shortest", "all"]), help="Which trajectories to keep per task (default: correct).")
+@click.option("--max-per-task", default=None, type=int, help="Cap trajectories kept per task.")
+@click.option("--min-reward", default=None, type=float, help="Per-trajectory passing threshold on the metric (default: use is_correct).")
+@click.option("--dedup/--no-dedup", default=False, help="Drop duplicate assistant solutions (default: off).")
+@click.option("--trajectory", default=None, help="Named trajectory to extract for multi-agent flows (default: first).")
+@click.option("--split", default="train", help="Split name to register the curated rows under (default: train).")
+@click.option("--val-fraction", default=0.0, type=float, help="Hold out this fraction of tasks as a validation split.")
+@click.option("--val-split", default="test", help="Split name for the held-out validation rows (default: test).")
+@click.option("--seed", default=0, type=int, help="Seed for the train/val split.")
+@click.option("--category", default=None, help="Dataset category metadata (e.g. math, code).")
+@click.option("--description", default=None, help="Dataset description metadata.")
+@click.option("--dry-run", is_flag=True, help="Report what would be curated without registering anything.")
+def from_eval(
+    runs: tuple[str, ...],
+    name: str,
+    metric: str,
+    filter_expr: str,
+    select: str,
+    max_per_task: int | None,
+    min_reward: float | None,
+    dedup: bool,
+    trajectory: str | None,
+    split: str,
+    val_fraction: float,
+    val_split: str,
+    seed: int,
+    category: str | None,
+    description: str | None,
+    dry_run: bool,
+):
+    """Curate eval trajectories into an SFT dataset.
+
+    RUNS are eval run ids (under ~/.rllm/eval_results) or paths to run dirs.
+    Filters tasks by aggregate metrics, selects trajectories, and registers the
+    survivors as a `messages` dataset ready for `rllm sft`.
+
+    \b
+    Examples:
+      rllm dataset from-eval math500_run --name math500-rft --filter "0 < avg < 1"
+      rllm dataset from-eval run_a run_b --name pooled --select best --max-per-task 1
+      rllm dataset from-eval run --name d --filter "pass@4 >= 0.5" --dry-run
+    """
+    from rllm.data import DatasetRegistry
+    from rllm.eval.curation import CurationConfig, CurationError, curate
+    from rllm.eval.filter_dsl import FilterError
+
+    if not 0.0 <= val_fraction < 1.0:
+        fail("--val-fraction must be in [0, 1).")
+
+    config = CurationConfig(
+        metric=metric,
+        filter_expr=filter_expr,
+        select=select,
+        max_per_task=max_per_task,
+        min_reward=min_reward,
+        dedup=dedup,
+        trajectory=trajectory,
+    )
+
+    try:
+        rows, stats = curate(list(runs), config)
+    except (CurationError, FilterError) as e:
+        fail(str(e))
+
+    summary = [
+        ("Runs", f"[val]{stats.runs}[/]"),
+        ("Tasks kept", f"[val]{stats.tasks_kept}[/] [dim]/ {stats.tasks_total}[/]"),
+        ("Attempts pooled", f"[dim]{stats.attempts_total}[/]"),
+        ("Filter", f"[dim]{config.filter_expr}  (metric={config.metric})[/]"),
+        ("Select", f"[dim]{config.select}{f', max {max_per_task}/task' if max_per_task else ''}[/]"),
+        ("Trajectories", f"[val]{stats.rows_emitted}[/]"),
+    ]
+    if stats.rows_skipped_no_messages:
+        summary.append(("Skipped", f"[yellow]{stats.rows_skipped_no_messages}[/] [dim](no usable messages)[/]"))
+    if stats.rows_deduped:
+        summary.append(("Deduped", f"[dim]{stats.rows_deduped}[/]"))
+
+    console.print()
+    console.print(info_panel(summary, title="[bold]Curation[/]", border="brand"))
+
+    if stats.rows_emitted == 0:
+        console.print()
+        console.print("  [yellow]No trajectories matched.[/] Loosen [bold]--filter[/], lower [bold]--min-reward[/], or check [bold]--metric[/].")
+        console.print()
+        if not dry_run:
+            raise SystemExit(1)
+        return
+
+    if dry_run:
+        console.print()
+        console.print(f"  [dim]Dry run — nothing registered. Re-run without --dry-run to save as [bold]{name}[/].[/]")
+        console.print()
+        return
+
+    train_rows, val_rows = _split_train_val(rows, val_fraction, seed)
+
+    DatasetRegistry.register_dataset(
+        name,
+        train_rows,
+        split=split,
+        source="curated-from-eval",
+        category=category,
+        description=description,
+    )
+    registered = [f"{split} ({len(train_rows)})"]
+    if val_rows:
+        DatasetRegistry.register_dataset(name, val_rows, split=val_split, source="curated-from-eval")
+        registered.append(f"{val_split} ({len(val_rows)})")
+
+    console.print()
+    console.print(f"  [success]Registered[/] [val]{name}[/]  [dim]splits: {', '.join(registered)}[/]")
+    console.print(f"  [dim]Inspect: [bold]rllm dataset inspect {name}[/][/]")
+    console.print(f"  [dim]Train:   [bold]rllm sft {name} --model <model> --backend tinker[/][/]")
+    console.print()
+
+
 @dataset.command()
 @click.argument("name")
 @click.option("--split", default=None, help="Remove only this split (default: remove all).")
