@@ -184,10 +184,10 @@ class TinkerPolicyTrainer:
         backward over the rollouts already collected. See
         ``rllm.trainer.algorithms.aux_loss`` / ``design/auxiliary-losses.md``.
         """
-        from rllm.trainer.algorithms import build_aux_losses
+        from rllm.trainer.algorithms.loss import resolve_additive_terms
         from rllm.trainer.tinker.aux_loss import aux_positions, build_aux_ce_datum
 
-        aux_losses = build_aux_losses(algorithm_config)
+        aux_losses = resolve_additive_terms(algorithm_config)
         if not aux_losses:
             return []
         flat = [d for datums in training_datums.values() for d in datums] if isinstance(training_datums, dict) else training_datums

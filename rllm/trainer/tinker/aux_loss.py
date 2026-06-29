@@ -20,22 +20,22 @@ from __future__ import annotations
 import tinker
 from tinker.types.tensor_data import TensorData
 
-from rllm.trainer.algorithms import MASK_ACTION, MASK_OBSERVATION
-from rllm.trainer.algorithms.aux_loss import AuxiliaryLoss
+from rllm.trainer.algorithms.loss import MASK_ACTION, MASK_OBSERVATION
 
 
-def aux_positions(aux: AuxiliaryLoss, mask_values) -> list[bool]:
-    """Boolean per-token selector for ``aux`` from a datum's action mask.
+def aux_positions(term, mask_values) -> list[bool]:
+    """Boolean per-token selector for an additive term from a datum's action mask.
 
-    The datum ``mask`` is ``1.0`` on action tokens and ``0.0`` on environment
-    observation tokens (built by ``rllm.trainer.tinker.transform``).
+    ``term`` is a ``ResolvedTerm`` whose ``.mask`` names its static token region. The
+    datum ``mask`` is ``1.0`` on action tokens and ``0.0`` on environment observation
+    tokens (built by ``rllm.trainer.tinker.transform``).
     """
     is_obs = [float(m) == 0.0 for m in mask_values]
-    if aux.mask == MASK_OBSERVATION:
+    if term.mask == MASK_OBSERVATION:
         return is_obs
-    if aux.mask == MASK_ACTION:
+    if term.mask == MASK_ACTION:
         return [not o for o in is_obs]
-    raise ValueError(f"Auxiliary mask '{aux.mask}' is not supported on managed (tinker/fireworks) backends")
+    raise ValueError(f"Additive term mask {term.mask!r} is not supported on managed (tinker/fireworks) backends; use algorithm.losses (forward_backward_custom) for non-CE terms")
 
 
 def build_aux_ce_datum(model_input, target_tokens, positions: list[bool], scale) -> tinker.Datum | None:

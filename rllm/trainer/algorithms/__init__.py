@@ -5,12 +5,11 @@ This module provides shared functionality across different trainer backends (ver
 """
 
 from rllm.trainer.algorithms.advantage import collect_reward_and_advantage_from_trajectory_groups
-from rllm.trainer.algorithms.aux_loss import (
+from rllm.trainer.algorithms.aux_loss import (  # deprecated shim — see rllm.trainer.algorithms.loss
     AUX_LOSS_REGISTRY,
     MASK_ACTION,
     MASK_OBSERVATION,
     AuxiliaryLoss,
-    EnvPredictionLoss,
     build_aux_losses,
     get_aux_loss,
     register_aux_loss,
@@ -29,9 +28,11 @@ from rllm.trainer.algorithms.loss import (
     LossContext,
     ResolvedTerm,
     get_loss,
+    get_term_aux_mask,
     is_custom_loss,
     load_loss_plugins,
     register_loss,
+    resolve_additive_terms,
     resolve_loss_terms,
 )
 from rllm.trainer.algorithms.metrics import reduce_metrics_by_trajectory_name, reduce_metrics_lists
@@ -75,9 +76,11 @@ __all__ = [
     # Unified custom losses
     "register_loss",
     "get_loss",
+    "get_term_aux_mask",
     "is_custom_loss",
     "load_loss_plugins",
     "resolve_loss_terms",
+    "resolve_additive_terms",
     "LossContext",
     "ResolvedTerm",
     "RLLM_LOSS_REGISTRY",

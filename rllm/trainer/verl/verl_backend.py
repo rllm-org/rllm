@@ -107,12 +107,12 @@ class CustomPPOLoss:
         return policy_loss, metrics
 
     def _apply_aux_losses(self, policy_loss, metrics, model_output, data):
-        """In-process aux-loss executor: add each configured auxiliary loss.
+        """In-process executor for additive (ECHO-style) loss terms.
 
-        Each loss contributes ``coef * Agg_mask(weight_t * [-log p_theta(token_t)])``,
-        aggregated with the same ``loss_agg_mode``/global-batch normalization as the
-        policy gradient so the coefficients are on a comparable scale. The masks are
-        resolved from the merged multi-turn row produced by
+        Each term is the unified ``rllm.trainer.algorithms.loss`` term evaluated over a
+        :class:`LossContext` and folded as ``coef * Agg_mask(term(ctx))``, aggregated with
+        the same ``loss_agg_mode``/global-batch normalization as the policy gradient. The
+        masks come from the merged multi-turn row produced by
         ``transform._process_trajectory``: action tokens are ``response_mask == 1``;
         observation tokens are the remaining non-pad response tokens.
         """
@@ -121,7 +121,7 @@ class CustomPPOLoss:
         from verl.utils.metric import AggregationType, Metric
         from verl.workers.utils.padding import no_padding_2_padding
 
-        from rllm.trainer.algorithms import MASK_ACTION, MASK_OBSERVATION
+        from rllm.trainer.algorithms.loss import LossContext
 
         # Per-token current-policy log-probs over the whole response, repadded to
         # (bs, response_length) — already computed; ppo_loss used the same call.
@@ -135,20 +135,22 @@ class CustomPPOLoss:
         else:
             resp_len = response_mask.shape[-1]
             non_pad = data["attention_mask"][:, -resp_len:].to(torch.bool)
-        masks = {MASK_ACTION: response_mask, MASK_OBSERVATION: non_pad & (~response_mask)}
+        action_mask = response_mask.to(log_prob.dtype)
+        obs_mask = (non_pad & (~response_mask)).to(log_prob.dtype)
 
         gbi = self.config.global_batch_info
         distributed = gbi.get("dp_size", 1) > 1 or gbi.get("batch_num_tokens") is not None or gbi.get("global_batch_size") is not None or self.config.loss_scale_factor is not None
         agg = AggregationType.SUM if distributed else AggregationType.MEAN
 
-        for aux in self.aux_losses:
-            mask = masks[aux.mask]
-            weight = aux.weight(self)  # None => uniform (ECHO); dynamic weights land in design step 4
-            loss_mat = -log_prob if weight is None else -weight * log_prob
-            term = agg_loss(loss_mat=loss_mat, loss_mask=mask.to(log_prob.dtype), loss_agg_mode=self.config.loss_agg_mode, **gbi)
-            policy_loss = policy_loss + aux.coef * term
-            metrics[f"actor/aux_{aux.name}_loss"] = Metric(value=term, aggregation=agg)
-            metrics[f"actor/aux_{aux.name}_token_frac"] = Metric(value=mask.float().mean(), aggregation=AggregationType.MEAN)
+        # additive terms (CE-style, e.g. ECHO) only need pi + masks; mu/advantages are
+        # supplied as harmless placeholders so a policy-style term would still run.
+        for term in self.aux_losses:
+            ctx = LossContext(pi=log_prob, mu=log_prob, advantages=torch.zeros_like(log_prob), action_mask=action_mask, obs_mask=obs_mask, params=term.params, backend="verl")
+            per_token, term_mask, _ = term.fn(ctx)
+            t = agg_loss(loss_mat=per_token, loss_mask=term_mask.to(log_prob.dtype), loss_agg_mode=self.config.loss_agg_mode, **gbi)
+            policy_loss = policy_loss + term.coef * t
+            metrics[f"actor/aux_{term.name}_loss"] = Metric(value=t, aggregation=agg)
+            metrics[f"actor/aux_{term.name}_token_frac"] = Metric(value=term_mask.float().mean(), aggregation=AggregationType.MEAN)
         return policy_loss, metrics
 
 
@@ -413,18 +415,18 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         # identify environment-observation tokens. Installed after algorithm_config
         # is resolved so the `echo` / env_loss_coef defaults are reflected.
         if hasattr(self.actor_rollout_wg, "set_loss_fn"):
-            from rllm.trainer.algorithms import build_aux_losses
+            from rllm.trainer.algorithms.loss import resolve_additive_terms
 
-            aux_losses = build_aux_losses(self.algorithm_config) if self.algorithm_config is not None else []
+            aux_terms = resolve_additive_terms(self.algorithm_config) if self.algorithm_config is not None else []
             self.actor_rollout_wg.set_loss_fn(
                 CustomPPOLoss(
                     self.config.actor_rollout_ref.actor,
-                    aux_losses=aux_losses,
+                    aux_losses=aux_terms,
                     pad_token_id=getattr(self.tokenizer, "pad_token_id", None),
                 )
             )
-            if aux_losses:
-                logger.info("Auxiliary losses enabled on verl actor: %s", [(loss.name, loss.coef) for loss in aux_losses])
+            if aux_terms:
+                logger.info("Additive loss terms enabled on verl actor: %s", [(t.name, t.coef) for t in aux_terms])
         else:
             logger.warning("RayWorkerGroup.set_loss_fn not available — skipping custom loss injection")
 
