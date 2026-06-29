@@ -531,11 +531,11 @@ class AgentFlowEngine:
                             reward = f"{traj.steps[-1].reward:.1f}"
                         reward_strs.append(f"{traj.name}: {reward}")
 
-                    # timing_str = _format_timing_breakdown(episode.metrics)
-                    # colorful_print(
-                    #     f"[{uid}] Rollout completed. Rewards: [{', '.join(reward_strs)}]{timing_str}, Termination: {episode.termination_reason}",
-                    #     fg="green" if episode.is_correct else "yellow",
-                    # )
+                    timing_str = _format_timing_breakdown(episode.metrics)
+                    colorful_print(
+                        f"[{uid}] Rollout completed. Rewards: [{', '.join(reward_strs)}]{timing_str}, Termination: {episode.termination_reason}",
+                        fg="green" if episode.is_correct else "yellow",
+                    )
 
                     return task_id, rollout_idx, result_idx, episode
 
