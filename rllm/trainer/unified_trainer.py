@@ -44,7 +44,6 @@ from rllm.trainer.metrics_aggregator import MetricsAggregator
 from rllm.trainer.sync_coordinator import SyncCoordinator, SyncCoordinatorConfig
 from rllm.types import Episode, TerminationReason, TrajectoryGroup
 from rllm.utils import EpisodeLogger, Tracking, extract_source_metadata
-from rllm.utils.loop_probe import start_loop_probe, stop_loop_probe
 from rllm.workflows.store import Store
 from rllm.workflows.workflow import Workflow
 
@@ -582,7 +581,6 @@ class UnifiedTrainer:
         pbar = tqdm(total=total_tasks, desc="Tasks", unit="task")
         buffer._pbar = pbar
 
-        loop_probe = start_loop_probe("trainer", logger)
         try:
             gen_task = asyncio.create_task(self._generation_loop(trainer_state, buffer, coordinator))
             await self._training_loop(trainer_state, buffer, coordinator, aggregator)
@@ -593,7 +591,6 @@ class UnifiedTrainer:
                 except asyncio.CancelledError:
                     pass
         finally:
-            await stop_loop_probe(loop_probe)
             pbar.close()
 
     async def _generation_loop(

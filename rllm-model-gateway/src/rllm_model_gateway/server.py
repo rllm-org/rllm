@@ -25,17 +25,6 @@ from rllm_model_gateway.store.base import TraceStore
 
 logger = logging.getLogger(__name__)
 
-try:
-    from rllm.utils.loop_probe import start_loop_probe, stop_loop_probe
-except ImportError:
-
-    def start_loop_probe(*args, **kwargs):
-        return None
-
-    async def stop_loop_probe(task):
-        return None
-
-
 # ------------------------------------------------------------------
 # Access-log noise filter
 # ------------------------------------------------------------------
@@ -208,17 +197,13 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        loop_probe = start_loop_probe("gateway", logger)
-        try:
-            await proxy.start()
-            if router.workers:
-                await router.start_health_checks()
-            yield
-        finally:
-            await router.stop_health_checks()
-            await proxy.stop()
-            await store.close()
-            await stop_loop_probe(loop_probe)
+        await proxy.start()
+        if router.workers:
+            await router.start_health_checks()
+        yield
+        await router.stop_health_checks()
+        await proxy.stop()
+        await store.close()
 
     app = FastAPI(title="rllm-model-gateway", version="0.1.0", lifespan=lifespan)
 

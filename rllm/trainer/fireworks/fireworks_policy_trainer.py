@@ -10,13 +10,10 @@ It does NOT contain any environment or agent logic.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import math
-import os
 import re
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -119,12 +116,6 @@ class FireworksPolicyTrainer:
         self._step_retry_backoff_s = float(OmegaConf.select(config, "fireworks_infra.common.step_retry_backoff_s", default=10.0))
         self._resume_checkpoint_name = self.config.training.get("resume_from_dcp_checkpoint")
         self._resume_source_job_id = self.config.training.get("resume_from_fireworks_job_id") or policy_job_id
-        batch_dump_dir = os.getenv("RLLM_FIREWORKS_BATCH_DUMP_DIR") or os.getenv("RLLM_BACKEND_BATCH_DUMP_DIR")
-        self._batch_dump_dir = Path(batch_dump_dir).expanduser() if batch_dump_dir else None
-        self._batch_dump_seq = 0
-        if self._batch_dump_dir is not None:
-            logger.info("Fireworks backend batch dumps enabled: %s", self._batch_dump_dir)
-
         self.cf_config = cf_config or CompactFilteringConfig.from_config(self.config.rllm.compact_filtering)
         self.transform_config = transform_config or TransformConfig()
         self.algorithm_config = algorithm_config or AlgorithmConfig.from_config(self.config.rllm.algorithm)
@@ -431,108 +422,6 @@ class FireworksPolicyTrainer:
             for datum in raw_datums
         ]
 
-    @classmethod
-    def _jsonable(cls, value):
-        if value is None or isinstance(value, str | int | float | bool):
-            return value
-        if isinstance(value, bytes | bytearray):
-            return list(value)
-        if hasattr(value, "detach") and hasattr(value, "cpu"):
-            return value.detach().cpu().tolist()
-        if hasattr(value, "to_torch"):
-            return value.to_torch().detach().cpu().tolist()
-        if hasattr(value, "tolist"):
-            try:
-                return value.tolist()
-            except Exception:
-                pass
-        if hasattr(value, "data"):
-            return cls._jsonable(value.data)
-        if isinstance(value, dict):
-            return {str(k): cls._jsonable(v) for k, v in value.items()}
-        if isinstance(value, list | tuple):
-            return [cls._jsonable(v) for v in value]
-        if hasattr(value, "model_dump"):
-            try:
-                return cls._jsonable(value.model_dump())
-            except Exception:
-                pass
-        return repr(value)
-
-    @classmethod
-    def _datum_to_jsonable(cls, datum):
-        return {
-            "type": type(datum).__name__,
-            "model_input": cls._jsonable(getattr(datum, "model_input", None)),
-            "loss_fn_inputs": cls._jsonable(getattr(datum, "loss_fn_inputs", None)),
-        }
-
-    @classmethod
-    def _datums_to_jsonable(cls, datums):
-        if isinstance(datums, dict):
-            return {str(k): cls._datums_to_jsonable(v) for k, v in datums.items()}
-        return [cls._datum_to_jsonable(datum) for datum in datums]
-
-    def _write_backend_batch_dump(
-        self,
-        *,
-        seq: int,
-        kind: str,
-        raw_datums,
-        training_datums,
-        aux_passes,
-        metadata: dict,
-    ) -> None:
-        assert self._batch_dump_dir is not None
-        self._batch_dump_dir.mkdir(parents=True, exist_ok=True)
-        num_training_datums = len(training_datums) if not isinstance(training_datums, dict) else {str(k): len(v) for k, v in training_datums.items()}
-        payload = {
-            "kind": kind,
-            "sequence": seq,
-            "num_raw_datums": len(raw_datums),
-            "num_training_datums": num_training_datums,
-            "metadata": self._jsonable(metadata),
-            "raw_datums": self._datums_to_jsonable(raw_datums),
-            "training_datums": self._datums_to_jsonable(training_datums),
-            "aux_passes": [
-                {
-                    "name": self._jsonable(getattr(aux, "name", type(aux).__name__)),
-                    "coef": self._jsonable(getattr(aux, "coef", None)),
-                    "num_datums": len(datums),
-                    "datums": self._datums_to_jsonable(datums),
-                }
-                for aux, datums in aux_passes
-            ],
-        }
-        path = self._batch_dump_dir / f"fireworks_backend_batch_{seq:06d}_{kind}.json"
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            json.dump(payload, f)
-        tmp_path.replace(path)
-        # print(f"Dumped Fireworks backend batch to {path}", flush=True)
-
-    async def _maybe_dump_backend_batch(
-        self,
-        *,
-        kind: str,
-        raw_datums,
-        training_datums,
-        aux_passes=None,
-        **metadata,
-    ) -> None:
-        if self._batch_dump_dir is None:
-            return
-        self._batch_dump_seq += 1
-        await asyncio.to_thread(
-            self._write_backend_batch_dump,
-            seq=self._batch_dump_seq,
-            kind=kind,
-            raw_datums=raw_datums,
-            training_datums=training_datums,
-            aux_passes=aux_passes or [],
-            metadata=metadata,
-        )
-
     @staticmethod
     def _extract_logprobs(result) -> list[list[float]]:
         outputs = getattr(result, "loss_fn_outputs", []) or []
@@ -787,21 +676,6 @@ class FireworksPolicyTrainer:
                 divergence_type=algorithm_config.dppo_divergence_type,
                 divergence_threshold=algorithm_config.dppo_divergence_threshold,
             )
-            await self._maybe_dump_backend_batch(
-                kind="dppo",
-                raw_datums=raw_datums,
-                training_datums=dppo_datums,
-                aux_passes=aux_passes,
-                loss_fn=algorithm_config.loss_fn,
-                loss_agg_mode=algorithm_config.loss_agg_mode,
-                divergence_type=algorithm_config.dppo_divergence_type,
-                divergence_threshold=algorithm_config.dppo_divergence_threshold,
-                advantages=advantages,
-                rollout_logprobs=inf_logprobs,
-                prompt_lens=prompt_lens,
-                num_loss_tokens=num_loss_tokens,
-                adv_metrics=adv_metrics,
-            )
             t0 = time.perf_counter()
             fwd_bwd_result = await asyncio.to_thread(
                 self.training_client.forward_backward_custom,
@@ -862,24 +736,6 @@ class FireworksPolicyTrainer:
         )
 
         kernel_loss, kernel_config = self._builtin_loss
-        await self._maybe_dump_backend_batch(
-            kind="builtin",
-            raw_datums=raw_datums,
-            training_datums=builtin_datums,
-            aux_passes=aux_passes,
-            loss_fn=algorithm_config.loss_fn,
-            loss_agg_mode=algorithm_config.loss_agg_mode,
-            loss_kernel=kernel_loss,
-            loss_kernel_config=kernel_config,
-            rollout_correction_tis_mode=rc.tis_mode,
-            rollout_correction_tis_cap=rc.tis_cap,
-            advantages=advantages,
-            proximal_logprobs=prox_logprobs,
-            rollout_logprobs=inf_logprobs,
-            prompt_lens=prompt_lens,
-            num_loss_tokens=num_loss_tokens,
-            adv_metrics=adv_metrics,
-        )
         fwd_bwd_result = await self._run_training_op(
             self.training_client.forward_backward,
             builtin_datums,
