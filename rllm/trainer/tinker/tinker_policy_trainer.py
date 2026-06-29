@@ -235,6 +235,22 @@ class TinkerPolicyTrainer:
         are returned separately so callers extract training logprobs only from
         the policy-gradient futures (keeping per-datum alignment).
         """
+        # Unified custom-loss path: a single forward_backward_custom pass evaluates all
+        # configured rLLM loss terms (surrogate + ECHO) over per-datum log-probs, so no
+        # separate aux passes are needed. Engaged when algorithm.losses is set or the main
+        # loss_fn is an rLLM-registered term (e.g. dppo_tv); otherwise the builtin path runs.
+        from rllm.trainer.algorithms import resolve_loss_terms
+
+        terms = resolve_loss_terms(algorithm_config)
+        if terms:
+            from rllm.trainer.tinker.custom_loss import build_custom_loss
+
+            flat = [d for datums in training_datums.values() for d in datums] if isinstance(training_datums, dict) else list(training_datums)
+            stripped, loss_fn = build_custom_loss(terms, flat)
+            fwd_bwd_future = await self.training_client.forward_backward_custom_async(stripped, loss_fn)  # type: ignore[attr-defined]
+            logger.info("Tinker custom-loss pass: terms=%s", [(t.name, t.coef) for t in terms])
+            return [fwd_bwd_future], []
+
         fwd_bwd_futures = []
         if isinstance(training_datums, dict):
             for group_role, datums in training_datums.items():
@@ -304,6 +320,11 @@ class TinkerPolicyTrainer:
         training_logprobs = []
         for fwd_bwd_result in fwd_bwd_results:
             for output in fwd_bwd_result.loss_fn_outputs:
+                # The custom-loss path (forward_backward_custom) reproduces gradients via a
+                # weighted-CE pass whose outputs need not expose per-token logprobs; skip
+                # gracefully (downstream tolerates empty logprobs, as the Fireworks path does).
+                if "logprobs" not in output:
+                    continue
                 logprobs = output["logprobs"].to_torch()
                 training_logprobs.append(logprobs)
             # Capture server-side metrics (e.g. loss) under train/ prefix
@@ -390,6 +411,11 @@ class TinkerPolicyTrainer:
         training_logprobs = []
         for fwd_bwd_result in fwd_bwd_results:
             for output in fwd_bwd_result.loss_fn_outputs:
+                # The custom-loss path (forward_backward_custom) reproduces gradients via a
+                # weighted-CE pass whose outputs need not expose per-token logprobs; skip
+                # gracefully (downstream tolerates empty logprobs, as the Fireworks path does).
+                if "logprobs" not in output:
+                    continue
                 logprobs = output["logprobs"].to_torch()
                 training_logprobs.append(logprobs)
             if fwd_bwd_result.metrics:

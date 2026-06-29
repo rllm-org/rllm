@@ -153,13 +153,17 @@ class CustomPPOLoss:
 
 
 def _get_verl_known_losses() -> set[str]:
-    """Lazily load the set of registered Verl policy loss function names."""
-    global _VERL_KNOWN_LOSSES
-    if _VERL_KNOWN_LOSSES is None:
-        from verl.trainer.ppo.core_algos import POLICY_LOSS_REGISTRY
+    """Lazily load the set of registered Verl policy loss function names.
 
-        _VERL_KNOWN_LOSSES = set(POLICY_LOSS_REGISTRY.keys())
-    return _VERL_KNOWN_LOSSES
+    Includes rLLM unified loss terms (``rllm.trainer.algorithms.loss``): they are
+    registered into verl's ``POLICY_LOSS_REGISTRY`` on workers via the setup hook, so
+    driver-side name validation must accept them too. Recomputed each call so terms
+    registered after first use (e.g. via ``loss_plugins``) are still recognized."""
+    from verl.trainer.ppo.core_algos import POLICY_LOSS_REGISTRY
+
+    from rllm.trainer.algorithms.loss import RLLM_LOSS_REGISTRY
+
+    return set(POLICY_LOSS_REGISTRY.keys()) | set(RLLM_LOSS_REGISTRY.keys())
 
 
 class VerlBackend(BackendProtocol[Iterable, DataProto]):

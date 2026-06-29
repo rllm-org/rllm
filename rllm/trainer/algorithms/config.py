@@ -314,6 +314,19 @@ class AlgorithmConfig:
     # entry is a {"type": <registered name>, "coef": <float>, ...} spec. Backends
     # build these via build_aux_losses(); empty = none (plain GRPO).
     aux_losses: list = field(default_factory=list)
+    # Unified custom-loss front door (see rllm.trainer.algorithms.loss). Each entry is a
+    # {"type": <registered term>, "coef": <float>, ...params} spec, summed into the
+    # objective and run identically across verl / tinker / fireworks. When set, this takes
+    # precedence over loss_fn/aux_losses. Empty = use the backend-native loss path.
+    losses: list = field(default_factory=list)
+    # Modules imported at startup so their @register_loss decorators run (lets a blackbox
+    # `pip install rllm` user define custom losses without editing rllm). Must also be
+    # importable on verl Ray workers (the loss is cloudpickled to them).
+    loss_plugins: list = field(default_factory=list)
+    # Which log-probs play the importance-ratio denominator (mu) for custom losses on the
+    # managed backends: "inference" (sampling/vLLM log-probs — the tmax DPPO default, masks
+    # the train/inference gap) or "proximal" (old-policy forward-pass log-probs).
+    mu_source: Literal["inference", "proximal"] = "inference"
     lr_schedule: Literal["linear", "cosine", "constant"] = "constant"
     warmup_steps: int = -1
     warmup_steps_ratio: float = 0.0
@@ -359,6 +372,9 @@ class AlgorithmConfig:
             loss_fn=algorithm_config.get("loss_fn", None),
             env_loss_coef=algorithm_config.get("env_loss_coef", None),
             aux_losses=_to_plain_list(algorithm_config.get("aux_losses", None)),
+            losses=_to_plain_list(algorithm_config.get("losses", None)),
+            loss_plugins=_to_plain_list(algorithm_config.get("loss_plugins", None)),
+            mu_source=algorithm_config.get("mu_source", "inference"),
             lr_schedule=algorithm_config.get("lr_schedule", "constant"),
             warmup_steps=algorithm_config.get("warmup_steps", -1),
             warmup_steps_ratio=algorithm_config.get("warmup_steps_ratio", 0.0),

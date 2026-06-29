@@ -576,6 +576,35 @@ class FireworksPolicyTrainer:
         adv_metrics["train/active_tokens"] = sum(int(sum(datum.loss_fn_inputs["mask"].data)) for datum in raw_datums)
         adv_metrics.update(self._compute_rollout_entropy_metrics(raw_datums))
 
+        # Unified custom-loss path (shared with Tinker via forward_backward_custom): when
+        # rLLM loss terms are configured (algorithm.losses or an rLLM-registered loss_fn,
+        # e.g. dppo_tv), evaluate all terms (surrogate + ECHO) client-side in one pass over
+        # the rollout log-probs, instead of the server-side builtin kernel + aux passes.
+        # mu defaults to the sampling (inference) log-probs — the tmax DPPO choice.
+        from rllm.trainer.algorithms import resolve_loss_terms
+
+        custom_terms = resolve_loss_terms(algorithm_config)
+        if custom_terms:
+            from rllm.trainer.tinker.custom_loss import build_custom_loss
+
+            if algorithm_config.mu_source == "proximal":
+                logger.warning("mu_source='proximal' not yet supported on the Fireworks custom path; using inference log-probs (mu=sampling).")
+            stripped, loss_fn = build_custom_loss(custom_terms, raw_datums)
+            fwd_bwd_result = await self._run_training_op(
+                self.training_client.forward_backward_custom,
+                stripped,
+                loss_fn,
+                op_name="forward_backward_custom",
+                reconnect=True,
+            )
+            if hasattr(fwd_bwd_result, "metrics") and fwd_bwd_result.metrics:
+                for k, v in fwd_bwd_result.metrics.items():
+                    if k not in self._METRIC_SKIP_KEYS:
+                        adv_metrics[f"train/{k}"] = v
+            adv_metrics["train/custom_loss_terms"] = float(len(custom_terms))
+            logger.info("Fireworks custom-loss pass: terms=%s", [(t.name, t.coef) for t in custom_terms])
+            return raw_datums, [], adv_metrics
+
         rc = algorithm_config.rollout_correction
         clean_datums, advantages, inf_logprobs, prompt_lens, num_loss_tokens = self._process_datums(raw_datums)
 
@@ -720,7 +749,13 @@ class FireworksPolicyTrainer:
         # (see forward_backward_from_trajectory_groups). Re-normalizing here by
         # token/sequence counts that span all passes would rescale the policy
         # gradient, so we disable server-side grad-accumulation normalization.
-        if build_aux_losses(self.algorithm_config):
+        # Aux losses and the unified custom-loss path both accumulate a gradient whose
+        # normalization is already folded in client-side (aux: per-datum weights; custom:
+        # the loss closure's seq-mean-token-mean). Server-side re-normalization would
+        # rescale it, so disable it for both.
+        from rllm.trainer.algorithms import resolve_loss_terms
+
+        if build_aux_losses(self.algorithm_config) or resolve_loss_terms(self.algorithm_config):
             grad_norm = GradAccNormalization.NONE
         optim_result = await self._run_training_op(
             self.training_client.optim_step,

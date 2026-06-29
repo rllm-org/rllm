@@ -24,6 +24,16 @@ from rllm.trainer.algorithms.config import (
     TransformConfig,
     rLLMAdvantageEstimator,
 )
+from rllm.trainer.algorithms.loss import (
+    RLLM_LOSS_REGISTRY,
+    LossContext,
+    ResolvedTerm,
+    get_loss,
+    is_custom_loss,
+    load_loss_plugins,
+    register_loss,
+    resolve_loss_terms,
+)
 from rllm.trainer.algorithms.metrics import reduce_metrics_by_trajectory_name, reduce_metrics_lists
 from rllm.trainer.algorithms.performance import marked_timer, simple_timer
 from rllm.trainer.algorithms.rejection_sampling import (
@@ -62,6 +72,15 @@ __all__ = [
     "AUX_LOSS_REGISTRY",
     "MASK_ACTION",
     "MASK_OBSERVATION",
+    # Unified custom losses
+    "register_loss",
+    "get_loss",
+    "is_custom_loss",
+    "load_loss_plugins",
+    "resolve_loss_terms",
+    "LossContext",
+    "ResolvedTerm",
+    "RLLM_LOSS_REGISTRY",
     # Metrics
     "reduce_metrics_by_trajectory_name",
     "reduce_metrics_lists",
