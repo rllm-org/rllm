@@ -1,49 +1,30 @@
-"""Unified custom policy-loss abstraction across the verl / tinker / fireworks backends.
+"""Custom policy losses across the verl / tinker / fireworks backends.
 
-A *loss term* is a per-token function over a normalized :class:`LossContext`. The
-**same** term runs in-process under verl and inside ``forward_backward_custom`` on
-tinker / fireworks (those two share one mechanism). The total objective is a sum of
-coefficient-weighted terms::
+Mirrors verl's model: a **single** loss selected by name (``algorithm.loss_fn`` →
+verl's ``policy_loss.loss_mode``), not a list. A loss is one function that returns the
+**complete** scalar objective and does its own masking + aggregation — exactly like a
+verl ``POLICY_LOSS_REGISTRY`` function. There is no separate auxiliary-loss framework:
+a loss that wants an extra term (e.g. ECHO's cross-entropy on observation tokens) simply
+adds it inside its own body (see ``ppo_clip_env``).
 
-    L = sum_i  coef_i * Agg_mask_i( term_i(ctx) )
+The same function runs in-process under verl and inside ``forward_backward_custom`` on
+tinker/fireworks. Each backend injects ``ctx.aggregate(per_token, mask) -> scalar`` (verl:
+``agg_loss`` with global-batch normalization; managed: seq-mean-token-mean), so the loss
+body is backend-agnostic.
 
-This subsumes — and deprecates — the older auxiliary-loss framework (``aux_loss.py``):
-an "aux" loss (e.g. ECHO) is just a term over the observation mask, declared with
-``aux_mask=MASK_OBSERVATION``. ``@register_aux_loss`` / ``AuxiliaryLoss`` are deprecated
-shims that delegate here.
-
-Extensibility (works for blackbox ``pip install rllm`` users) — same decorator style as
-``@rllm.rollout`` / ``@rllm.evaluator``:
+Public API — same decorator style as ``@rllm.rollout`` / ``@rllm.evaluator``:
 
     import rllm
 
     @rllm.register_loss("my_dppo")
     def my_dppo(ctx: rllm.LossContext):
         ratio = (ctx.pi - ctx.mu).exp()
-        ...
-        return per_token_loss, ctx.action_mask, {"metric": ...}
+        keep = (...).detach()
+        pg = -ctx.advantages * ratio.clamp(max=20).detach() * ctx.pi * keep
+        return ctx.aggregate(pg, ctx.action_mask), {"mask_frac": ...}
 
-(``rllm.trainer.algorithms.register_loss`` / ``LossContext`` are the same objects.)
-
-then select it in config without editing rllm::
-
-    algorithm:
-      loss_plugins: ["my_pkg.my_losses"]    # imported at startup -> fires @register_loss
-      losses:
-        - {type: my_dppo, coef: 1.0}
-        - {type: env_prediction, coef: 0.05}   # ECHO, just another term
-
-A term returns ``(per_token_loss, agg_mask, metrics)``:
-
-* ``per_token_loss`` — tensor shaped like ``ctx.pi`` (it may already fold in an
-  internal selector such as DPPO's divergence mask).
-* ``agg_mask`` — which tokens this term is aggregated over (``ctx.action_mask`` for
-  policy-gradient terms, ``ctx.obs_mask`` for ECHO).
-* ``metrics`` — scalar dict for logging.
-
-Each backend adapter applies its own (proven) aggregation/normalization to
-``per_token_loss`` under ``agg_mask``; this module owns only the math and the
-registry, and stays import-light (torch is imported lazily inside terms).
+    # config:  algorithm: { loss_fn: my_dppo, loss_params: {delta: 0.2} }
+    # for a blackbox install, list the module:  algorithm.loss_plugins: ["my_pkg.losses"]
 """
 
 from __future__ import annotations
@@ -53,7 +34,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
-if TYPE_CHECKING:  # avoid a hard torch import at module load (registry/config stay torch-free)
+if TYPE_CHECKING:  # avoid a hard torch import at module load
     import torch
 
 logger = logging.getLogger(__name__)
@@ -61,25 +42,24 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class LossContext:
-    """Normalized per-token inputs a loss term sees, identical across backends.
+    """Normalized inputs a loss function sees, identical across backends.
 
     On verl the tensors are 2-D ``(batch, response_len)``; on the
-    ``forward_backward_custom`` path they are 1-D ``(num_tokens,)`` per datum and the
-    adapter loops. Terms are written shape-agnostically (elementwise math + masks),
-    so the same function works in both.
+    ``forward_backward_custom`` path they are 1-D ``(num_tokens,)`` per datum (the adapter
+    loops). Loss bodies are written shape-agnostically (elementwise math + ``aggregate``).
 
     Attributes:
-        pi: current-policy per-token log-probs (``requires_grad=True``). The only
-            differentiable input — gradients flow through this.
-        mu: behavior/old-policy per-token log-probs (the importance-ratio denominator).
-            On verl this is ``old_log_prob``; on tinker/fireworks it is the sampling
-            (inference) log-probs by default, or proximal log-probs — see ``mu_source``.
+        pi: current-policy per-token log-probs (``requires_grad=True``) — the only
+            differentiable input.
+        mu: behavior/old-policy per-token log-probs (importance-ratio denominator). verl:
+            ``old_log_probs``; managed: sampling (inference) log-probs by default.
         advantages: per-token advantage estimates.
-        action_mask: 1.0 on assistant/action tokens (what the policy gradient trains).
-        obs_mask: 1.0 on environment-observation tokens (what ECHO trains).
-        ref: reference-policy per-token log-probs for a KL term, or None.
-        params: loss hyperparameters (e.g. ``delta``/``eps_clip``, ``kl_beta``).
-        backend: "verl" | "tinker" | "fireworks" (for backend-aware metrics only).
+        action_mask: 1.0 on assistant/action tokens (the policy gradient).
+        obs_mask: 1.0 on environment-observation tokens (e.g. for ECHO).
+        aggregate: ``(per_token_loss, mask) -> scalar`` reducer injected by the backend.
+        ref: reference-policy log-probs for a KL term, or None.
+        params: loss hyperparameters (``delta``/``eps_clip``, ``env_loss_coef``, ...).
+        backend: "verl" | "tinker" | "fireworks".
     """
 
     pi: "torch.Tensor"
@@ -87,64 +67,43 @@ class LossContext:
     advantages: "torch.Tensor"
     action_mask: "torch.Tensor"
     obs_mask: "torch.Tensor"
+    aggregate: Callable[["torch.Tensor", "torch.Tensor"], "torch.Tensor"]
     ref: Optional["torch.Tensor"] = None
     params: dict[str, Any] = field(default_factory=dict)
     backend: str = ""
 
 
-# Named token subsets a term aggregates over (the mask vocabulary). Resolved to
-# concrete masks by each backend (verl: tensors from response_mask/responses;
-# tinker/fireworks: the datum ``mask`` field).
-MASK_ACTION = "action"  # assistant/action tokens (what the policy gradient trains)
-MASK_OBSERVATION = "observation"  # environment-observation tokens (tool/terminal output)
+# A loss: (ctx) -> (scalar_loss, metrics)
+LossFn = Callable[[LossContext], "tuple[torch.Tensor, dict[str, float]]"]
 
-# A loss term: (ctx) -> (per_token_loss, agg_mask, metrics)
-LossTerm = Callable[[LossContext], "tuple[torch.Tensor, torch.Tensor, dict[str, float]]"]
-
-RLLM_LOSS_REGISTRY: dict[str, LossTerm] = {}
-# Optional static token region for a term, used only by the managed (tinker/fireworks)
-# efficient cross-entropy realization of additive terms; None = a policy term over the
-# action mask. The term's runtime-returned mask is authoritative everywhere else.
-_TERM_AUX_MASK: dict[str, str] = {}
+RLLM_LOSS_REGISTRY: dict[str, LossFn] = {}
 
 
-def register_loss(name: str, *, aux_mask: str | None = None) -> Callable[[LossTerm], LossTerm]:
-    """Register a loss term under ``name`` (its config ``type``).
+def register_loss(name: str) -> Callable[[LossFn], LossFn]:
+    """Register a loss under ``name`` (its ``algorithm.loss_fn`` value).
 
-    Public API for users who install rllm as a package: define a term function and
-    decorate it, then reference ``name`` from ``algorithm.losses`` in config. Use
-    ``algorithm.loss_plugins`` to have rllm import the defining module at startup.
-
-    ``aux_mask`` (``MASK_OBSERVATION``/``MASK_ACTION``) declares the static token region
-    for a cross-entropy *additive* term (e.g. ECHO). It lets the managed backends realize
-    the term as an efficient extra CE pass without running it; policy terms omit it.
+    Public API for blackbox ``pip install rllm`` users: decorate a function and select it
+    by name. Use ``algorithm.loss_plugins`` to have rllm import the defining module at
+    startup so the decorator runs.
     """
 
-    def deco(fn: LossTerm) -> LossTerm:
+    def deco(fn: LossFn) -> LossFn:
         if name in RLLM_LOSS_REGISTRY and RLLM_LOSS_REGISTRY[name] is not fn:
-            logger.warning("Overriding already-registered loss term %r", name)
+            logger.warning("Overriding already-registered loss %r", name)
         RLLM_LOSS_REGISTRY[name] = fn
-        if aux_mask is not None:
-            _TERM_AUX_MASK[name] = aux_mask
         return fn
 
     return deco
 
 
-def get_term_aux_mask(name: str) -> str | None:
-    """Static token region declared for an additive (CE) term, or None for policy terms."""
-    return _TERM_AUX_MASK.get(name)
-
-
-def get_loss(name: str) -> LossTerm:
+def get_loss(name: str) -> LossFn:
     if name not in RLLM_LOSS_REGISTRY:
-        raise ValueError(f"Unknown loss term '{name}'. Registered: {sorted(RLLM_LOSS_REGISTRY)}. Register one with @register_loss, and list its module under algorithm.loss_plugins.")
+        raise ValueError(f"Unknown loss {name!r}. Registered: {sorted(RLLM_LOSS_REGISTRY)}. Register one with @rllm.register_loss and list its module under algorithm.loss_plugins.")
     return RLLM_LOSS_REGISTRY[name]
 
 
 def is_custom_loss(name: str | None) -> bool:
-    """True if ``name`` is handled by the unified (rLLM) loss path rather than a
-    backend-native kernel (verl ``vanilla``/``gspo``, tinker ``ppo``, fireworks ``grpo``…)."""
+    """True if ``name`` is an rLLM loss (vs a backend-native one like verl ``vanilla``)."""
     return name is not None and name in RLLM_LOSS_REGISTRY
 
 
@@ -154,106 +113,44 @@ def load_loss_plugins(modules: list[str]) -> None:
         try:
             importlib.import_module(mod)
             logger.info("Loaded loss plugin module %r", mod)
-        except Exception as e:  # surface a clear, actionable error
-            raise ImportError(f"Failed to import loss plugin module {mod!r} (algorithm.loss_plugins). Is it installed/importable on this process (and on verl Ray workers)?") from e
+        except Exception as e:
+            raise ImportError(f"Failed to import loss plugin module {mod!r} (algorithm.loss_plugins). Importable on this process (and on verl Ray workers)?") from e
 
 
 @dataclass
-class ResolvedTerm:
-    """A loss term resolved from config, ready for a backend adapter to evaluate.
-
-    ``mask`` is set only for additive (CE) terms (ECHO) and names their static token
-    region (``MASK_OBSERVATION``/``MASK_ACTION``); None for policy terms, which carry
-    their aggregation mask at runtime via the value they return.
-    """
+class ResolvedLoss:
+    """The single loss selected from config, ready for a backend to run."""
 
     name: str
-    fn: LossTerm
-    coef: float
+    fn: LossFn
     params: dict[str, Any]
-    mask: str | None = None
 
 
-def resolve_loss_terms(algorithm_config) -> list[ResolvedTerm]:
-    """Resolve the configured unified loss terms from an ``AlgorithmConfig``.
+def resolve_loss(algorithm_config) -> ResolvedLoss | None:
+    """Resolve ``algorithm.loss_fn`` to an rLLM loss, or None for a backend-native loss.
 
-    Precedence:
-      1. ``algorithm.losses`` — explicit ``[{type, coef, ...params}]`` list (front door).
-      2. otherwise, back-compat: the main ``loss_fn`` (if rLLM-registered) at coef 1.0,
-         plus ``aux_losses`` / ``env_loss_coef`` (ECHO) as additional terms.
-
-    Returns an empty list when no rLLM-registered loss is selected (caller then uses
-    the backend-native path). First imports ``algorithm.loss_plugins`` so user terms
-    are registered before resolution.
-    """
+    First imports ``algorithm.loss_plugins`` so user losses are registered. Params passed
+    to the loss are the standard clip/kl fields plus ``env_loss_coef`` and anything under
+    ``algorithm.loss_params`` (verl-style loss-specific config)."""
     load_loss_plugins(list(getattr(algorithm_config, "loss_plugins", None) or []))
-
-    base_params = {
+    name = getattr(algorithm_config, "loss_fn", None)
+    if not is_custom_loss(name):
+        return None
+    params = {
         "eps_clip": getattr(algorithm_config, "eps_clip", 0.2),
         "eps_clip_high": getattr(algorithm_config, "eps_clip_high", None),
         "kl_beta": getattr(algorithm_config, "kl_beta", 0.0),
+        "env_loss_coef": float(getattr(algorithm_config, "env_loss_coef", 0.0) or 0.0),
+        **dict(getattr(algorithm_config, "loss_params", None) or {}),
     }
-
-    explicit = list(getattr(algorithm_config, "losses", None) or [])
-    terms: list[ResolvedTerm] = []
-
-    if explicit:
-        for spec in explicit:
-            spec = dict(spec)
-            name = spec.pop("type", None)
-            if name is None:
-                raise ValueError(f"algorithm.losses entry is missing 'type': {spec}")
-            coef = float(spec.pop("coef", 1.0))
-            params = {**base_params, **spec}
-            terms.append(ResolvedTerm(name=name, fn=get_loss(name), coef=coef, params=params))
-        return terms
-
-    # Back-compat path: only engaged when the main loss_fn is an rLLM term.
-    main = getattr(algorithm_config, "loss_fn", None)
-    if not is_custom_loss(main):
-        return []
-    terms.append(ResolvedTerm(name=main, fn=get_loss(main), coef=1.0, params=dict(base_params)))
-    # Fold in additive terms (ECHO via aux_losses/env_loss_coef) over the same registry.
-    terms.extend(resolve_additive_terms(algorithm_config))
-    return terms
-
-
-def resolve_additive_terms(algorithm_config) -> list[ResolvedTerm]:
-    """Resolve additive (cross-entropy) terms from ``aux_losses`` / ``env_loss_coef``.
-
-    These compose *on top of* a main loss (native backend kernel or rLLM term) — this
-    is what ECHO does. Each is an rLLM term carrying its static ``mask`` (so the managed
-    backends can realize it as an efficient extra CE pass). Replaces the deprecated
-    ``AuxiliaryLoss`` family; ``env_loss_coef`` / ``adv_estimator=echo`` remain shorthand.
-    """
-    base_params = {
-        "eps_clip": getattr(algorithm_config, "eps_clip", 0.2),
-        "eps_clip_high": getattr(algorithm_config, "eps_clip_high", None),
-        "kl_beta": getattr(algorithm_config, "kl_beta", 0.0),
-    }
-    out: list[ResolvedTerm] = []
-    seen: set[str] = set()
-    for spec in list(getattr(algorithm_config, "aux_losses", None) or []):
-        spec = dict(spec)
-        name = spec.pop("type", None)
-        if name is None:
-            raise ValueError(f"aux_losses entry is missing 'type': {spec}")
-        coef = spec.pop("coef", None)
-        if coef is None:
-            raise ValueError(f"aux_losses entry {name!r} is missing 'coef'")
-        out.append(ResolvedTerm(name=name, fn=get_loss(name), coef=float(coef), params={**base_params, **spec}, mask=get_term_aux_mask(name) or MASK_OBSERVATION))
-        seen.add(name)
-
-    env_coef = float(getattr(algorithm_config, "env_loss_coef", 0.0) or 0.0)
-    if env_coef > 0.0 and "env_prediction" not in seen:
-        out.append(ResolvedTerm(name="env_prediction", fn=get_loss("env_prediction"), coef=env_coef, params=dict(base_params), mask=MASK_OBSERVATION))
-    return out
+    return ResolvedLoss(name=name, fn=get_loss(name), params=params)
 
 
 # ---------------------------------------------------------------------------
-# Built-in loss terms. Math kept identical to verl 0.8's POLICY_LOSS_REGISTRY so a
-# loss runs the same whether on verl-native kernels or the forward_backward_custom
-# path. See https://arxiv.org/pdf/2602.04879 (DPPO) and arXiv:2605.24517 (ECHO).
+# Built-in losses. Math kept identical to verl 0.8's POLICY_LOSS_REGISTRY so a loss runs
+# the same on verl-native kernels or the forward_backward_custom path. Each returns a
+# scalar (own aggregation via ctx.aggregate) — the verl convention.
+# See https://arxiv.org/pdf/2602.04879 (DPPO) and arXiv:2605.24517 (ECHO).
 # ---------------------------------------------------------------------------
 _RATIO_CLAMP = 20.0
 
@@ -265,22 +162,34 @@ def _ratio(ctx: LossContext):
 
 
 def _truncated_is(ratio, params):
-    """Truncated importance-sampling surrogate weight (detached). Loss uses
-    ``ratio.detach() * logprob`` so the gradient equals the policy gradient."""
     import torch
 
-    cap = params.get("clip_ratio_c", _RATIO_CLAMP)
-    return torch.clamp(ratio, max=cap).detach()
+    return torch.clamp(ratio, max=params.get("clip_ratio_c", _RATIO_CLAMP)).detach()
+
+
+@register_loss("ppo_clip")
+def ppo_clip(ctx: LossContext):
+    """Standard PPO/GRPO clipped surrogate."""
+    import torch
+
+    eps = float(ctx.params.get("eps_clip", 0.2))
+    eps_hi = ctx.params.get("eps_clip_high")
+    eps_hi = float(eps_hi) if eps_hi is not None else eps
+    ratio = _ratio(ctx)
+    clipped = torch.clamp(ratio, 1.0 - eps, 1.0 + eps_hi)
+    pg = -torch.minimum(ratio * ctx.advantages, clipped * ctx.advantages)
+    am = ctx.action_mask
+    clip_frac = ((clipped != ratio).to(ctx.pi.dtype) * am).sum() / am.sum().clamp(min=1.0)
+    return ctx.aggregate(pg, am), {"ppo/clip_frac": clip_frac.item()}
 
 
 @register_loss("dppo_tv")
 def dppo_tv(ctx: LossContext):
     """DPPO with a binary total-variation divergence mask (Eq. 12, TV variant).
 
-    Replaces PPO ratio-clipping with a per-token mask: zero the gradient only when the
-    update pushes the token *away* from the behavior policy AND the TV divergence
-    ``|exp(pi) - exp(mu)|`` already exceeds ``delta``. ``delta`` defaults to ``eps_clip``.
-    """
+    Replaces PPO ratio-clipping: zero the gradient only when the update pushes the token
+    *away* from the behavior policy AND ``|exp(pi)-exp(mu)|`` exceeds ``delta`` (defaults
+    to ``eps_clip``)."""
     import torch
 
     delta = float(ctx.params.get("delta", ctx.params.get("eps_clip", 0.2)))
@@ -288,23 +197,16 @@ def dppo_tv(ctx: LossContext):
     delta_hi = float(ctx.params.get("delta_high", delta))
     tr = _truncated_is(_ratio(ctx), ctx.params)
     pi_p, mu_p = ctx.pi.exp(), ctx.mu.exp()
-    keep = torch.where(ctx.advantages > 0, (pi_p - mu_p) <= delta_hi, (pi_p - mu_p) >= -delta_lo)
-    keep = keep.detach().to(ctx.pi.dtype)
-    per_token = -ctx.advantages * tr * ctx.pi * keep
+    keep = torch.where(ctx.advantages > 0, (pi_p - mu_p) <= delta_hi, (pi_p - mu_p) >= -delta_lo).detach().to(ctx.pi.dtype)
+    pg = -ctx.advantages * tr * ctx.pi * keep
     am = ctx.action_mask
-    denom = am.sum().clamp(min=1.0)
-    metrics = {"dppo_tv/mask_frac": ((1.0 - keep) * am).sum().div(denom).item()}
-    return per_token, am, metrics
+    mask_frac = ((1.0 - keep) * am).sum() / am.sum().clamp(min=1.0)
+    return ctx.aggregate(pg, am), {"dppo_tv/mask_frac": mask_frac.item()}
 
 
 @register_loss("dppo_kl")
 def dppo_kl(ctx: LossContext):
-    """DPPO with a binary-KL divergence mask (Eq. 12, KL variant).
-
-    Bernoulli-KL between behavior ``mu`` and current ``pi`` at the sampled token:
-    ``D = q·log(q/p) + (1-q)·log((1-q)/(1-p))`` with ``q=exp(mu)``, ``p=exp(pi)``.
-    Mask when moving away from behavior and ``D > delta``.
-    """
+    """DPPO with a binary-KL divergence mask (Eq. 12, KL variant)."""
     import torch
 
     delta = float(ctx.params.get("delta", ctx.params.get("eps_clip", 0.2)))
@@ -314,42 +216,24 @@ def dppo_kl(ctx: LossContext):
     q = ctx.mu.exp().clamp(eps, 1.0 - eps)
     d_kl = q * (q / p).log() + (1.0 - q) * ((1.0 - q) / (1.0 - p)).log()
     moving_away = torch.where(ctx.advantages > 0, p > q, p < q)
-    keep = ~(moving_away & (d_kl > delta))
-    keep = keep.detach().to(ctx.pi.dtype)
-    per_token = -ctx.advantages * tr * ctx.pi * keep
+    keep = (~(moving_away & (d_kl > delta))).detach().to(ctx.pi.dtype)
+    pg = -ctx.advantages * tr * ctx.pi * keep
     am = ctx.action_mask
-    denom = am.sum().clamp(min=1.0)
-    metrics = {"dppo_kl/mask_frac": ((1.0 - keep) * am).sum().div(denom).item()}
-    return per_token, am, metrics
+    mask_frac = ((1.0 - keep) * am).sum() / am.sum().clamp(min=1.0)
+    return ctx.aggregate(pg, am), {"dppo_kl/mask_frac": mask_frac.item()}
 
 
-@register_loss("ppo_clip")
-def ppo_clip(ctx: LossContext):
-    """Standard PPO/GRPO clipped surrogate — the baseline DPPO replaces.
-
-    Registered so a full GRPO+ECHO objective is expressible purely as unified terms.
+@register_loss("ppo_clip_env")
+def ppo_clip_env(ctx: LossContext):
+    """ECHO (arXiv:2605.24517) in the verl-style single-loss model: PPO/GRPO plus a
+    length-normalized cross-entropy term on observation tokens, composed *inside the loss*
+    (no auxiliary-loss framework). ``env_loss_coef`` (default 0.05) scales the term;
+    set it to 0 to recover plain ``ppo_clip``. This is how an additive term is done now —
+    add it in your loss body, exactly as verl would.
     """
-    import torch
-
-    eps = float(ctx.params.get("eps_clip", 0.2))
-    eps_hi = ctx.params.get("eps_clip_high")
-    eps_hi = float(eps_hi) if eps_hi is not None else eps
-    ratio = _ratio(ctx)
-    clipped = torch.clamp(ratio, 1.0 - eps, 1.0 + eps_hi)
-    per_token = -torch.minimum(ratio * ctx.advantages, clipped * ctx.advantages)
-    am = ctx.action_mask
-    denom = am.sum().clamp(min=1.0)
-    metrics = {"ppo/clip_frac": ((clipped != ratio).to(ctx.pi.dtype) * am).sum().div(denom).item()}
-    return per_token, am, metrics
-
-
-@register_loss("env_prediction", aux_mask=MASK_OBSERVATION)
-def env_prediction(ctx: LossContext):
-    """ECHO (arXiv:2605.24517): cross-entropy on environment-observation tokens.
-
-    The single definition of ECHO (the old ``AuxiliaryLoss``/``EnvPredictionLoss`` is
-    deprecated): uniform-weight ``-log p_theta`` over the observation mask. No advantage,
-    no ratio. ``aux_mask`` lets the managed backends realize it as an efficient extra CE
-    pass; verl and the unified closure evaluate this function directly.
-    """
-    return -ctx.pi, ctx.obs_mask, {}
+    loss, metrics = ppo_clip(ctx)
+    coef = float(ctx.params.get("env_loss_coef", 0.05))
+    if coef:
+        loss = loss + coef * ctx.aggregate(-ctx.pi, ctx.obs_mask)
+        metrics["echo/coef"] = coef
+    return loss, metrics
