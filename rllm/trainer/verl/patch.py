@@ -260,6 +260,25 @@ def patch_verl_tensordict_jagged_layout() -> None:
     logger.info("Patched verl.utils.tensordict_utils: rebuild jagged NestedTensors with explicit _ragged_idx (backport of volcengine/verl#6127)")
 
 
+def register_rllm_custom_losses() -> None:
+    """Register rLLM unified loss terms into verl's POLICY_LOSS_REGISTRY (worker-side).
+
+    verl resolves ``loss_mode`` inside the worker process, so registration must run
+    there (driver-side registration does not propagate). Built-in terms (e.g. the
+    rLLM DPPO terms) live in the always-importable ``rllm`` package; user plugins are
+    loaded from the comma-separated ``RLLM_LOSS_PLUGINS`` env var if set (the module
+    must be importable on the worker). Idempotent; never shadows a verl-native loss.
+    """
+    import os
+
+    from rllm.trainer.algorithms.loss import load_loss_plugins
+    from rllm.trainer.verl.custom_loss import register_rllm_terms_into_verl
+
+    plugins = [m.strip() for m in os.environ.get("RLLM_LOSS_PLUGINS", "").split(",") if m.strip()]
+    load_loss_plugins(plugins)
+    register_rllm_terms_into_verl()
+
+
 # ---------------------------------------------------------------------------
 # Worker-side entry point (used as Ray runtime_env worker_process_setup_hook)
 # ---------------------------------------------------------------------------
@@ -268,6 +287,7 @@ _ALL_VERL_PATCHES = {
     "patch_verl_dynamic_batch_sync": patch_verl_dynamic_batch_sync,
     "patch_verl_qwen3_vl_dummy_inplace": patch_verl_qwen3_vl_dummy_inplace,
     "patch_verl_tensordict_jagged_layout": patch_verl_tensordict_jagged_layout,
+    "register_rllm_custom_losses": register_rllm_custom_losses,
 }
 
 
