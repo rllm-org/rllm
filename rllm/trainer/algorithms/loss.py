@@ -7,9 +7,10 @@ coefficient-weighted terms::
 
     L = sum_i  coef_i * Agg_mask_i( term_i(ctx) )
 
-This subsumes the older auxiliary-loss concept (see ``aux_loss.py``): an "aux" loss
-(e.g. ECHO) is just a term over the observation mask. ``AuxiliaryLoss`` survives as a
-thin declarative shorthand that compiles down to a term.
+This subsumes — and deprecates — the older auxiliary-loss framework (``aux_loss.py``):
+an "aux" loss (e.g. ECHO) is just a term over the observation mask, declared with
+``aux_mask=MASK_OBSERVATION``. ``@register_aux_loss`` / ``AuxiliaryLoss`` are deprecated
+shims that delegate here.
 
 Extensibility (works for blackbox ``pip install rllm`` users) — same decorator style as
 ``@rllm.rollout`` / ``@rllm.evaluator``:
@@ -91,27 +92,48 @@ class LossContext:
     backend: str = ""
 
 
+# Named token subsets a term aggregates over (the mask vocabulary). Resolved to
+# concrete masks by each backend (verl: tensors from response_mask/responses;
+# tinker/fireworks: the datum ``mask`` field).
+MASK_ACTION = "action"  # assistant/action tokens (what the policy gradient trains)
+MASK_OBSERVATION = "observation"  # environment-observation tokens (tool/terminal output)
+
 # A loss term: (ctx) -> (per_token_loss, agg_mask, metrics)
 LossTerm = Callable[[LossContext], "tuple[torch.Tensor, torch.Tensor, dict[str, float]]"]
 
 RLLM_LOSS_REGISTRY: dict[str, LossTerm] = {}
+# Optional static token region for a term, used only by the managed (tinker/fireworks)
+# efficient cross-entropy realization of additive terms; None = a policy term over the
+# action mask. The term's runtime-returned mask is authoritative everywhere else.
+_TERM_AUX_MASK: dict[str, str] = {}
 
 
-def register_loss(name: str) -> Callable[[LossTerm], LossTerm]:
+def register_loss(name: str, *, aux_mask: str | None = None) -> Callable[[LossTerm], LossTerm]:
     """Register a loss term under ``name`` (its config ``type``).
 
     Public API for users who install rllm as a package: define a term function and
     decorate it, then reference ``name`` from ``algorithm.losses`` in config. Use
     ``algorithm.loss_plugins`` to have rllm import the defining module at startup.
+
+    ``aux_mask`` (``MASK_OBSERVATION``/``MASK_ACTION``) declares the static token region
+    for a cross-entropy *additive* term (e.g. ECHO). It lets the managed backends realize
+    the term as an efficient extra CE pass without running it; policy terms omit it.
     """
 
     def deco(fn: LossTerm) -> LossTerm:
         if name in RLLM_LOSS_REGISTRY and RLLM_LOSS_REGISTRY[name] is not fn:
             logger.warning("Overriding already-registered loss term %r", name)
         RLLM_LOSS_REGISTRY[name] = fn
+        if aux_mask is not None:
+            _TERM_AUX_MASK[name] = aux_mask
         return fn
 
     return deco
+
+
+def get_term_aux_mask(name: str) -> str | None:
+    """Static token region declared for an additive (CE) term, or None for policy terms."""
+    return _TERM_AUX_MASK.get(name)
 
 
 def get_loss(name: str) -> LossTerm:
@@ -138,12 +160,18 @@ def load_loss_plugins(modules: list[str]) -> None:
 
 @dataclass
 class ResolvedTerm:
-    """A loss term resolved from config, ready for a backend adapter to evaluate."""
+    """A loss term resolved from config, ready for a backend adapter to evaluate.
+
+    ``mask`` is set only for additive (CE) terms (ECHO) and names their static token
+    region (``MASK_OBSERVATION``/``MASK_ACTION``); None for policy terms, which carry
+    their aggregation mask at runtime via the value they return.
+    """
 
     name: str
     fn: LossTerm
     coef: float
     params: dict[str, Any]
+    mask: str | None = None
 
 
 def resolve_loss_terms(algorithm_config) -> list[ResolvedTerm]:
@@ -185,16 +213,41 @@ def resolve_loss_terms(algorithm_config) -> list[ResolvedTerm]:
     if not is_custom_loss(main):
         return []
     terms.append(ResolvedTerm(name=main, fn=get_loss(main), coef=1.0, params=dict(base_params)))
-
-    # Compose configured auxiliary losses (ECHO, ...) as terms over the same registry.
-    from rllm.trainer.algorithms.aux_loss import build_aux_losses
-
-    for aux in build_aux_losses(algorithm_config):
-        if aux.name not in RLLM_LOSS_REGISTRY:
-            logger.warning("Aux loss %r has no registered term; skipping on the unified loss path", aux.name)
-            continue
-        terms.append(ResolvedTerm(name=aux.name, fn=get_loss(aux.name), coef=aux.coef, params={**base_params, **getattr(aux, "cfg", {})}))
+    # Fold in additive terms (ECHO via aux_losses/env_loss_coef) over the same registry.
+    terms.extend(resolve_additive_terms(algorithm_config))
     return terms
+
+
+def resolve_additive_terms(algorithm_config) -> list[ResolvedTerm]:
+    """Resolve additive (cross-entropy) terms from ``aux_losses`` / ``env_loss_coef``.
+
+    These compose *on top of* a main loss (native backend kernel or rLLM term) — this
+    is what ECHO does. Each is an rLLM term carrying its static ``mask`` (so the managed
+    backends can realize it as an efficient extra CE pass). Replaces the deprecated
+    ``AuxiliaryLoss`` family; ``env_loss_coef`` / ``adv_estimator=echo`` remain shorthand.
+    """
+    base_params = {
+        "eps_clip": getattr(algorithm_config, "eps_clip", 0.2),
+        "eps_clip_high": getattr(algorithm_config, "eps_clip_high", None),
+        "kl_beta": getattr(algorithm_config, "kl_beta", 0.0),
+    }
+    out: list[ResolvedTerm] = []
+    seen: set[str] = set()
+    for spec in list(getattr(algorithm_config, "aux_losses", None) or []):
+        spec = dict(spec)
+        name = spec.pop("type", None)
+        if name is None:
+            raise ValueError(f"aux_losses entry is missing 'type': {spec}")
+        coef = spec.pop("coef", None)
+        if coef is None:
+            raise ValueError(f"aux_losses entry {name!r} is missing 'coef'")
+        out.append(ResolvedTerm(name=name, fn=get_loss(name), coef=float(coef), params={**base_params, **spec}, mask=get_term_aux_mask(name) or MASK_OBSERVATION))
+        seen.add(name)
+
+    env_coef = float(getattr(algorithm_config, "env_loss_coef", 0.0) or 0.0)
+    if env_coef > 0.0 and "env_prediction" not in seen:
+        out.append(ResolvedTerm(name="env_prediction", fn=get_loss("env_prediction"), coef=env_coef, params=dict(base_params), mask=MASK_OBSERVATION))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -290,11 +343,13 @@ def ppo_clip(ctx: LossContext):
     return per_token, am, metrics
 
 
-@register_loss("env_prediction")
+@register_loss("env_prediction", aux_mask=MASK_OBSERVATION)
 def env_prediction(ctx: LossContext):
     """ECHO (arXiv:2605.24517): cross-entropy on environment-observation tokens.
 
-    The aux-loss family unified into a term: uniform-weight ``-log p_theta`` over the
-    observation mask. No advantage, no ratio.
+    The single definition of ECHO (the old ``AuxiliaryLoss``/``EnvPredictionLoss`` is
+    deprecated): uniform-weight ``-log p_theta`` over the observation mask. No advantage,
+    no ratio. ``aux_mask`` lets the managed backends realize it as an efficient extra CE
+    pass; verl and the unified closure evaluate this function directly.
     """
     return -ctx.pi, ctx.obs_mask, {}

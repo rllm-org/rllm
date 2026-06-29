@@ -29,8 +29,8 @@ from rllm.trainer.algorithms import (
     AlgorithmConfig,
     CompactFilteringConfig,
     TransformConfig,
-    build_aux_losses,
 )
+from rllm.trainer.algorithms.loss import resolve_additive_terms
 from rllm.trainer.tinker.tinker_policy_trainer import (
     compute_schedule_lr_multiplier,
     require_training_client,
@@ -624,7 +624,7 @@ class FireworksPolicyTrainer:
         # optim_step (see optim_step()). The aux datums carry their own
         # per-sequence length normalization so each term equals exactly
         # ``coef * grad(aux_loss)``.
-        aux_losses = build_aux_losses(algorithm_config)
+        aux_losses = resolve_additive_terms(algorithm_config)
         aux_passes: list[tuple] = []  # (aux, datums)
         if aux_losses:
             n_seq = max(1, len(raw_datums))
@@ -755,7 +755,7 @@ class FireworksPolicyTrainer:
         # rescale it, so disable it for both.
         from rllm.trainer.algorithms import resolve_loss_terms
 
-        if build_aux_losses(self.algorithm_config) or resolve_loss_terms(self.algorithm_config):
+        if resolve_additive_terms(self.algorithm_config) or resolve_loss_terms(self.algorithm_config):
             grad_norm = GradAccNormalization.NONE
         optim_result = await self._run_training_op(
             self.training_client.optim_step,

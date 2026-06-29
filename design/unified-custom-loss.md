@@ -45,6 +45,28 @@ resolved into terms. A backend-native `loss_fn` (verl `vanilla`, tinker `ppo`,
 fireworks `grpo`) leaves `resolve_loss_terms()` empty -> the existing native path runs
 unchanged.
 
+### ECHO and the deprecated auxiliary-loss framework
+
+There is now **one** registry. The old `rllm.trainer.algorithms.aux_loss` framework
+(`@register_aux_loss`, `AuxiliaryLoss`, `EnvPredictionLoss`) is **deprecated** (imports
+still work, emit `DeprecationWarning`). **ECHO is defined once** as the `env_prediction`
+term:
+
+```python
+@register_loss("env_prediction", aux_mask=MASK_OBSERVATION)
+def env_prediction(ctx):                 # cross-entropy on observation tokens
+    return -ctx.pi, ctx.obs_mask, {}
+```
+
+`aux_mask` declares the static token region so the managed backends can realize a
+CE-style additive term as an efficient extra `cross_entropy` pass (no `forward_backward_custom`
+needed); verl evaluates the term directly via `CustomPPOLoss._apply_aux_losses`. Configure
+ECHO via `losses: [{type: env_prediction, coef: 0.05}]`, or the back-compat
+`aux_losses` / `env_loss_coef` / `adv_estimator: echo` (all resolve to the same term).
+
+Migration: `@register_aux_loss` → `@rllm.register_loss(name, aux_mask=MASK_OBSERVATION)`;
+`aux_losses:` → `losses:`.
+
 ## How each backend runs it
 
 | Backend | Mechanism | Notes |

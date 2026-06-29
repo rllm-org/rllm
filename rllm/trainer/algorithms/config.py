@@ -309,10 +309,10 @@ class AlgorithmConfig:
     # (disabled). Backends read the resolved float; 0.0 reproduces plain GRPO.
     # Shorthand for `aux_losses: [{type: env_prediction, coef: <env_loss_coef>}]`.
     env_loss_coef: float | None = None
-    # General auxiliary token-level losses added on top of the policy loss
-    # (see rllm.trainer.algorithms.aux_loss and design/auxiliary-losses.md). Each
-    # entry is a {"type": <registered name>, "coef": <float>, ...} spec. Backends
-    # build these via build_aux_losses(); empty = none (plain GRPO).
+    # DEPRECATED (prefer `losses`): additive token-level losses on top of the main loss.
+    # Each entry is a {"type": <registered term>, "coef": <float>, ...} spec, resolved to
+    # unified terms via resolve_additive_terms(). ECHO is the `env_prediction` term. Empty
+    # = none. See design/unified-custom-loss.md.
     aux_losses: list = field(default_factory=list)
     # Unified custom-loss front door (see rllm.trainer.algorithms.loss). Each entry is a
     # {"type": <registered term>, "coef": <float>, ...params} spec, summed into the
