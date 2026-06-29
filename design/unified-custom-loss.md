@@ -1,97 +1,91 @@
-# Unified custom-loss layer
+# Custom losses (verl-style, single selector)
 
-One place to define a policy loss, runs on all three backends (verl / tinker / fireworks).
-Supersedes the policy-vs-aux split: an "aux" loss (ECHO) is just a term over the
-observation mask. Motivating example: DPPO (arXiv:2602.04879), a GRPO variant that
-replaces ratio-clipping with a per-token divergence mask.
+One way to define a policy loss that runs on all three backends (verl / tinker / fireworks),
+modeled on verl: a **single** loss selected by name (`algorithm.loss_fn`), not a list. There
+is **no** auxiliary-loss framework — a loss that wants an extra term (e.g. ECHO) adds it
+inside its own body, exactly as a verl `POLICY_LOSS_REGISTRY` function would.
+
+Motivating example: DPPO ([arXiv:2602.04879](https://arxiv.org/abs/2602.04879)) — a GRPO
+variant that replaces ratio-clipping with a per-token divergence mask.
 
 ## The contract
 
-A loss term is a function over a normalized `LossContext`, registered with a top-level
-decorator (same style as `@rllm.rollout` / `@rllm.evaluator`):
+A loss is one function that returns the **complete scalar objective** and does its own
+masking + aggregation via the backend-injected `ctx.aggregate`:
 
 ```python
 import rllm
 
-@rllm.register_loss("dppo_tv")
-def dppo_tv(ctx: rllm.LossContext):
-    ...
-    return per_token_loss, agg_mask, metrics
+@rllm.register_loss("my_dppo")                       # same style as @rllm.rollout
+def my_dppo(ctx: rllm.LossContext):
+    ratio = (ctx.pi - ctx.mu).exp()                  # pi: current logprobs (grad); mu: behavior
+    keep  = (...).detach()
+    pg    = -ctx.advantages * ratio.clamp(max=20).detach() * ctx.pi * keep
+    return ctx.aggregate(pg, ctx.action_mask), {"mask_frac": ...}   # (scalar, metrics)
 ```
 
-(`rllm.register_loss` and `rllm.trainer.algorithms.register_loss` are the same object.)
-
-`LossContext` (identical fields across backends): `pi` (current log-probs, grad),
-`mu` (behavior/old log-probs — the IS denominator), `advantages`, `action_mask`,
-`obs_mask`, `ref` (optional), `params`. A term returns `(per_token_loss, agg_mask,
-metrics)`; the total objective is `Σ_i coef_i · Agg_mask_i(term_i(ctx))`.
-
-Source: `rllm/trainer/algorithms/loss.py`. Built-ins: `dppo_tv`, `dppo_kl`,
-`ppo_clip`, `env_prediction` (ECHO).
+`LossContext`: `pi, mu, advantages, action_mask, obs_mask, ref, params, aggregate, backend`.
+`ctx.aggregate(per_token, mask) -> scalar` is supplied by each backend (verl: `agg_loss`
+with global-batch normalization; managed: seq-mean-token-mean), so the body is
+backend-agnostic. Built-ins (`rllm/trainer/algorithms/loss.py`): `ppo_clip`, `dppo_tv`,
+`dppo_kl`, `ppo_clip_env`.
 
 ## Config
 
 ```yaml
 algorithm:
-  losses:                              # the front door; summed terms
-    - {type: dppo_tv, coef: 1.0, delta: 0.2}
-    - {type: env_prediction, coef: 0.05}   # ECHO — just another term
-  loss_plugins: ["my_pkg.my_losses"]   # imported at startup -> fires @register_loss
-  mu_source: inference                 # inference (tmax default) | proximal
+  loss_fn: dppo_tv              # single selector → verl's policy_loss.loss_mode
+  loss_params: {delta: 0.2}     # loss-specific params (verl-style) → ctx.params
+  loss_plugins: ["my_pkg.losses"]   # imported at startup → fires @register_loss
+  eps_clip: 0.2                 # standard params also reach ctx.params
 ```
 
-Back-compat: `loss_fn: dppo_tv` (+ `env_loss_coef` / `aux_losses`) still works and is
-resolved into terms. A backend-native `loss_fn` (verl `vanilla`, tinker `ppo`,
-fireworks `grpo`) leaves `resolve_loss_terms()` empty -> the existing native path runs
-unchanged.
+A backend-native `loss_fn` (verl `vanilla`/`gspo`, tinker `ppo`, fireworks `grpo`) runs the
+native kernel unchanged; an rLLM-registered name runs the rLLM loss. `resolve_loss()`
+returns the single loss or None.
 
-### ECHO and the deprecated auxiliary-loss framework
+## ECHO (how an additive term is done now)
 
-There is now **one** registry. The old `rllm.trainer.algorithms.aux_loss` framework
-(`@register_aux_loss`, `AuxiliaryLoss`, `EnvPredictionLoss`) is **deprecated** (imports
-still work, emit `DeprecationWarning`). **ECHO is defined once** as the `env_prediction`
-term:
+There is no separate aux loss. ECHO is the `ppo_clip_env` loss — PPO/GRPO plus a
+length-normalized cross-entropy on observation tokens, composed **inside the loss body**:
 
 ```python
-@register_loss("env_prediction", aux_mask=MASK_OBSERVATION)
-def env_prediction(ctx):                 # cross-entropy on observation tokens
-    return -ctx.pi, ctx.obs_mask, {}
+@register_loss("ppo_clip_env")
+def ppo_clip_env(ctx):
+    loss, m = ppo_clip(ctx)
+    coef = ctx.params.get("env_loss_coef", 0.05)
+    if coef:
+        loss = loss + coef * ctx.aggregate(-ctx.pi, ctx.obs_mask)   # CE on observation tokens
+    return loss, m
 ```
 
-`aux_mask` declares the static token region so the managed backends can realize a
-CE-style additive term as an efficient extra `cross_entropy` pass (no `forward_backward_custom`
-needed); verl evaluates the term directly via `CustomPPOLoss._apply_aux_losses`. Configure
-ECHO via `losses: [{type: env_prediction, coef: 0.05}]`, or the back-compat
-`aux_losses` / `env_loss_coef` / `adv_estimator: echo` (all resolve to the same term).
-
-Migration: `@register_aux_loss` → `@rllm.register_loss(name, aux_mask=MASK_OBSERVATION)`;
-`aux_losses:` → `losses:`.
+`adv_estimator: echo` keeps working: it uses GRPO advantages and defaults `loss_fn` to
+`ppo_clip_env` with `env_loss_coef=0.05`. To add ECHO to a different surrogate, write one
+loss that adds the same term (the verl way) — no config list.
 
 ## How each backend runs it
 
-| Backend | Mechanism | Notes |
-|---|---|---|
-| **verl** | terms registered into verl's `POLICY_LOSS_REGISTRY` (`verl/custom_loss.py`, wired on Ray workers via `patch.register_rllm_custom_losses`) | verl-native `dppo_tv`/`dppo_kl` are **not** shadowed; the shim back-fills losses verl lacks (e.g. user terms). ECHO stays on `CustomPPOLoss._apply_aux_losses`. `mu = old_log_prob`. |
-| **tinker** | `forward_backward_custom` closure (`tinker/custom_loss.py`) | one pass folds in all terms (surrogate + ECHO); no separate aux CE pass. `mu = sampling log-probs`. |
-| **fireworks** | same `forward_backward_custom` (its client path is built on it) | `optim_step` forces `GradAccNormalization.NONE` (closure normalizes seq-mean-token-mean). `mu = sampling log-probs`. |
+| Backend | Mechanism |
+|---|---|
+| **verl** | the loss runs in-process in `CustomPPOLoss._rllm_loss` over a `LossContext` (native kernel still used for non-rLLM `loss_fn`). `aggregate = agg_loss` with global-batch norm; `mu = old_log_probs`. |
+| **tinker** | `forward_backward_custom` closure (`tinker/custom_loss.py`) — one pass; `mu = sampling log-probs`; `aggregate` = seq-mean-token-mean. |
+| **fireworks** | same `forward_backward_custom`; `optim_step` forced to `GradAccNormalization.NONE` (the closure normalizes). |
 
-**Cost:** the managed (`forward_backward_custom`) path adds a forward pass (~1.5× FLOPs,
-up to ~3× wall-time). verl runs in-process (cheap). The builtin server-side fast path
-on tinker/fireworks cannot host custom surrogates — that's why custom losses use the
-client path.
+Cost: the managed (`forward_backward_custom`) path adds a forward pass (~1.5× FLOPs, up to
+~3× wall-time); verl runs in-process (cheap). The loss math itself is pointwise over
+log-probs — runs on the host, fine on CPU.
 
-**Blackbox users:** `register_loss` + `LossContext` are public; list the defining
-module under `loss_plugins`. On verl the term is cloudpickled to Ray workers, so the
-module must also be importable there (set `RLLM_LOSS_PLUGINS` in the worker env).
+## Removed
+
+The standalone auxiliary-loss framework (`aux_loss.py`, `AuxiliaryLoss`,
+`@register_aux_loss`, `EnvPredictionLoss`, `build_aux_losses`) and the `algorithm.losses` /
+`algorithm.aux_losses` config are gone. ECHO migrated to `ppo_clip_env`.
 
 ## Limits / follow-ups
 
-- `mu_source: proximal` not yet wired on the fireworks custom path (falls back to
-  inference with a warning).
-- Per-role custom losses (multi-agent) flatten to the global term set on the managed
-  path; verl per-role routing is unchanged.
-- Losses needing a separate teacher/privileged forward pass (SDAR-style) still need the
-  `AuxiliaryLoss.requires` / AuxForward escape hatch — out of scope for the single-pass
-  term model.
-- End-to-end GPU/training validation of the managed trainer wiring (normalization vs
-  optim_step, logprob extraction) is pending; the term math and adapters are unit-tested.
+- `mu_source: proximal` not yet wired on the fireworks custom path (falls back to inference).
+- Per-role custom losses (multi-agent) flatten to the global loss on the managed path; verl
+  per-role routing is unchanged.
+- End-to-end GPU/training validation of the managed and verl trainer wiring (normalization
+  vs optim_step, the verl `select(...).to_padded_tensor()` extraction) is pending; the loss
+  math and adapters are unit-tested.

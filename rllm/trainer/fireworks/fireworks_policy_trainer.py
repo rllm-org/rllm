@@ -30,7 +30,7 @@ from rllm.trainer.algorithms import (
     CompactFilteringConfig,
     TransformConfig,
 )
-from rllm.trainer.algorithms.loss import resolve_additive_terms
+from rllm.trainer.algorithms.loss import resolve_loss
 from rllm.trainer.tinker.tinker_policy_trainer import (
     compute_schedule_lr_multiplier,
     require_training_client,
@@ -377,31 +377,6 @@ class FireworksPolicyTrainer:
 
         return clean_datums, advantages, inf_logprobs, prompt_lens, num_loss_tokens
 
-    @staticmethod
-    def _build_aux_datums(raw_datums: list[tinker.Datum], aux, n_seq: int) -> list[tinker.Datum]:
-        """Build ``cross_entropy`` datums for one auxiliary loss (ECHO, ...).
-
-        For each rollout we emit a datum over the same tokens, weighting every
-        selected token (``aux.mask``) by ``coef / (n_seq * |selected_i|)`` and the
-        rest by 0. Under ``GradAccNormalization.NONE`` the summed gradient equals
-        ``coef * d/dtheta [ mean_i (1/|selected_i|) sum_t -log p(target_t) ]``,
-        i.e. ``coef`` times the length-normalized, sequence-mean auxiliary loss
-        (for ECHO, the paper's L_env). Datums with no selected token are skipped.
-        """
-        from rllm.trainer.tinker.aux_loss import aux_positions, build_aux_ce_datum
-
-        out: list[tinker.Datum] = []
-        for datum in raw_datums:
-            positions = aux_positions(aux, datum.loss_fn_inputs["mask"].data)
-            count = sum(1 for p in positions if p)
-            if count == 0:
-                continue
-            scale = aux.coef / (n_seq * count)
-            built = build_aux_ce_datum(datum.model_input, datum.loss_fn_inputs["target_tokens"], positions, scale)
-            if built is not None:
-                out.append(built)
-        return out
-
     async def _compute_proximal_logprobs(
         self,
         datums: list[tinker.Datum],
@@ -576,20 +551,20 @@ class FireworksPolicyTrainer:
         adv_metrics["train/active_tokens"] = sum(int(sum(datum.loss_fn_inputs["mask"].data)) for datum in raw_datums)
         adv_metrics.update(self._compute_rollout_entropy_metrics(raw_datums))
 
-        # Unified custom-loss path (shared with Tinker via forward_backward_custom): when
-        # rLLM loss terms are configured (algorithm.losses or an rLLM-registered loss_fn,
-        # e.g. dppo_tv), evaluate all terms (surrogate + ECHO) client-side in one pass over
-        # the rollout log-probs, instead of the server-side builtin kernel + aux passes.
-        # mu defaults to the sampling (inference) log-probs — the tmax DPPO choice.
-        from rllm.trainer.algorithms import resolve_loss_terms
+        # Custom-loss path (shared with Tinker via forward_backward_custom): when
+        # algorithm.loss_fn names an rLLM loss (e.g. dppo_tv, or ppo_clip_env which folds
+        # in ECHO), evaluate it client-side in one pass over the rollout log-probs instead
+        # of the server-side builtin kernel. mu defaults to the sampling (inference)
+        # log-probs — the tmax DPPO choice.
+        from rllm.trainer.algorithms.loss import resolve_loss
 
-        custom_terms = resolve_loss_terms(algorithm_config)
-        if custom_terms:
+        resolved = resolve_loss(algorithm_config)
+        if resolved is not None:
             from rllm.trainer.tinker.custom_loss import build_custom_loss
 
             if algorithm_config.mu_source == "proximal":
                 logger.warning("mu_source='proximal' not yet supported on the Fireworks custom path; using inference log-probs (mu=sampling).")
-            stripped, loss_fn = build_custom_loss(custom_terms, raw_datums)
+            stripped, loss_fn = build_custom_loss(resolved, raw_datums)
             fwd_bwd_result = await self._run_training_op(
                 self.training_client.forward_backward_custom,
                 stripped,
@@ -601,8 +576,7 @@ class FireworksPolicyTrainer:
                 for k, v in fwd_bwd_result.metrics.items():
                     if k not in self._METRIC_SKIP_KEYS:
                         adv_metrics[f"train/{k}"] = v
-            adv_metrics["train/custom_loss_terms"] = float(len(custom_terms))
-            logger.info("Fireworks custom-loss pass: terms=%s", [(t.name, t.coef) for t in custom_terms])
+            logger.info("Fireworks custom-loss pass: loss_fn=%s params=%s", resolved.name, resolved.params)
             return raw_datums, [], adv_metrics
 
         rc = algorithm_config.rollout_correction
@@ -614,33 +588,6 @@ class FireworksPolicyTrainer:
         if algorithm_config.loss_agg_mode == "seq-mean-token-mean":
             for i in range(len(advantages)):
                 advantages[i] /= max(1, num_loss_tokens[i])
-
-        # Auxiliary losses (ECHO, ...): build a second, gradient-accumulated
-        # cross_entropy pass per loss. Fireworks' optim_step normalizes the
-        # *summed* gradient by token/sequence counts across ALL passes, which
-        # would rescale the policy gradient. To keep the policy-gradient term
-        # identical to a non-aux run, we fold the normalization optim would have
-        # applied into the advantages here and force GradAccNormalization.NONE at
-        # optim_step (see optim_step()). The aux datums carry their own
-        # per-sequence length normalization so each term equals exactly
-        # ``coef * grad(aux_loss)``.
-        aux_losses = resolve_additive_terms(algorithm_config)
-        aux_passes: list[tuple] = []  # (aux, datums)
-        if aux_losses:
-            n_seq = max(1, len(raw_datums))
-            agg = algorithm_config.loss_agg_mode
-            if agg in ("seq-mean-token-sum", "seq-mean-token-mean"):
-                for i in range(len(advantages)):
-                    advantages[i] /= n_seq  # optim would divide by NUM_SEQUENCES
-            elif agg == "token-mean":
-                total_action_tokens = max(1, sum(num_loss_tokens))
-                for i in range(len(advantages)):
-                    advantages[i] /= total_action_tokens  # optim would divide by NUM_LOSS_TOKENS
-            # agg None/other => optim NONE => no fold needed.
-            for aux in aux_losses:
-                datums = self._build_aux_datums(raw_datums, aux, n_seq)
-                if datums:
-                    aux_passes.append((aux, datums))
 
         # Proximal logprobs
         t0 = time.perf_counter()
@@ -684,23 +631,6 @@ class FireworksPolicyTrainer:
             for k, v in fwd_bwd_result.metrics.items():
                 if k not in self._METRIC_SKIP_KEYS:
                     adv_metrics[f"train/{k}"] = v
-
-        # Auxiliary-loss passes: each accumulates gradients on top of the policy
-        # gradient before the (externally invoked) optim_step.
-        for aux, datums in aux_passes:
-            aux_fwd_bwd = await self._run_training_op(
-                self.training_client.forward_backward,
-                datums,
-                "cross_entropy",
-                op_name="forward_backward(aux)",
-                reconnect=True,
-            )
-            if hasattr(aux_fwd_bwd, "metrics") and aux_fwd_bwd.metrics:
-                for k, v in aux_fwd_bwd.metrics.items():
-                    if k not in self._METRIC_SKIP_KEYS:
-                        adv_metrics[f"train/aux_{aux.name}_{k}"] = v
-            adv_metrics[f"train/aux_{aux.name}_coef"] = aux.coef
-            adv_metrics[f"train/aux_{aux.name}_sequences"] = len(datums)
 
         return raw_datums, [], adv_metrics
 
@@ -749,13 +679,10 @@ class FireworksPolicyTrainer:
         # (see forward_backward_from_trajectory_groups). Re-normalizing here by
         # token/sequence counts that span all passes would rescale the policy
         # gradient, so we disable server-side grad-accumulation normalization.
-        # Aux losses and the unified custom-loss path both accumulate a gradient whose
-        # normalization is already folded in client-side (aux: per-datum weights; custom:
-        # the loss closure's seq-mean-token-mean). Server-side re-normalization would
-        # rescale it, so disable it for both.
-        from rllm.trainer.algorithms import resolve_loss_terms
-
-        if resolve_additive_terms(self.algorithm_config) or resolve_loss_terms(self.algorithm_config):
+        # The custom-loss path computes its gradient client-side with normalization already
+        # folded in (the loss closure's seq-mean-token-mean). Server-side re-normalization
+        # would rescale it, so disable it.
+        if resolve_loss(self.algorithm_config) is not None:
             grad_norm = GradAccNormalization.NONE
         optim_result = await self._run_training_op(
             self.training_client.optim_step,

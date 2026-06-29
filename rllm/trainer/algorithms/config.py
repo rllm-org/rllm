@@ -35,10 +35,9 @@ def _plain(value: Any) -> Any:
 
 
 def _to_plain_list(value: Any) -> list:
-    """Convert an OmegaConf list (e.g. ``algorithm.aux_losses``) to a plain list.
+    """Convert an OmegaConf list (e.g. ``algorithm.loss_plugins``) to a plain list.
 
-    Returns ``[]`` for ``None``. Used so downstream code (``build_aux_losses``)
-    sees ordinary dicts rather than OmegaConf nodes.
+    Returns ``[]`` for ``None`` so downstream code sees ordinary Python values.
     """
     if value is None:
         return []
@@ -299,29 +298,22 @@ class AlgorithmConfig:
     # advantage computation (GRPO/REINFORCE). Steps missing advantages default to 0.0.
     # When False (default), always compute advantages normally.
     use_precomputed_advantage: bool = False
-    # Global loss function (backend-specific values; null = backend default)
+    # The single loss selector (verl-style; maps to verl's policy_loss.loss_mode). A
+    # backend-native name (verl `vanilla`/`gspo`, tinker `ppo`, fireworks `grpo`) runs the
+    # native kernel; an rLLM-registered name (`dppo_tv`, `ppo_clip`, `ppo_clip_env`, or a
+    # user `@rllm.register_loss`) runs the rLLM loss. null = backend default.
     loss_fn: str | None = None
-    # ECHO (arXiv:2605.24517) auxiliary environment-prediction loss weight (lambda).
-    # The total loss is L_GRPO + env_loss_coef * L_env, where L_env is the
-    # length-normalized cross-entropy on environment-observation tokens (tool
-    # output) that the policy conditions on but GRPO never trains. None = auto:
-    # resolved in __post_init__ to 0.05 when adv_estimator=echo, else 0.0
-    # (disabled). Backends read the resolved float; 0.0 reproduces plain GRPO.
-    # Shorthand for `aux_losses: [{type: env_prediction, coef: <env_loss_coef>}]`.
+    # Loss-specific hyperparameters passed to an rLLM loss via ctx.params (verl-style:
+    # like verl's policy_loss sub-fields). Merged with eps_clip/eps_clip_high/kl_beta/
+    # env_loss_coef. Example: {delta: 0.2} for dppo_tv.
+    loss_params: dict = field(default_factory=dict)
+    # ECHO (arXiv:2605.24517) environment-prediction coefficient (lambda), read by the
+    # `ppo_clip_env` loss as ctx.params["env_loss_coef"]: total = L_GRPO + lambda * L_env,
+    # L_env = length-normalized cross-entropy on observation tokens. None = auto: 0.05 when
+    # adv_estimator=echo (which also defaults loss_fn to `ppo_clip_env`), else 0.0.
     env_loss_coef: float | None = None
-    # DEPRECATED (prefer `losses`): additive token-level losses on top of the main loss.
-    # Each entry is a {"type": <registered term>, "coef": <float>, ...} spec, resolved to
-    # unified terms via resolve_additive_terms(). ECHO is the `env_prediction` term. Empty
-    # = none. See design/unified-custom-loss.md.
-    aux_losses: list = field(default_factory=list)
-    # Unified custom-loss front door (see rllm.trainer.algorithms.loss). Each entry is a
-    # {"type": <registered term>, "coef": <float>, ...params} spec, summed into the
-    # objective and run identically across verl / tinker / fireworks. When set, this takes
-    # precedence over loss_fn/aux_losses. Empty = use the backend-native loss path.
-    losses: list = field(default_factory=list)
     # Modules imported at startup so their @register_loss decorators run (lets a blackbox
-    # `pip install rllm` user define custom losses without editing rllm). Must also be
-    # importable on verl Ray workers (the loss is cloudpickled to them).
+    # `pip install rllm` user define custom losses without editing rllm).
     loss_plugins: list = field(default_factory=list)
     # Which log-probs play the importance-ratio denominator (mu) for custom losses on the
     # managed backends: "inference" (sampling/vLLM log-probs — the tmax DPPO default, masks
@@ -371,8 +363,7 @@ class AlgorithmConfig:
             use_precomputed_advantage=algorithm_config.get("use_precomputed_advantage", False),
             loss_fn=algorithm_config.get("loss_fn", None),
             env_loss_coef=algorithm_config.get("env_loss_coef", None),
-            aux_losses=_to_plain_list(algorithm_config.get("aux_losses", None)),
-            losses=_to_plain_list(algorithm_config.get("losses", None)),
+            loss_params=dict(algorithm_config.get("loss_params", None) or {}),
             loss_plugins=_to_plain_list(algorithm_config.get("loss_plugins", None)),
             mu_source=algorithm_config.get("mu_source", "inference"),
             lr_schedule=algorithm_config.get("lr_schedule", "constant"),
@@ -396,11 +387,13 @@ class AlgorithmConfig:
                 stacklevel=2,
             )
 
-        # ECHO: resolve the auxiliary env-loss coefficient. `adv_estimator=echo`
-        # implies the paper's default lambda (0.05) unless the user set
-        # `env_loss_coef` explicitly; any other estimator defaults to 0.0 (off).
+        # ECHO: `adv_estimator=echo` uses GRPO advantages plus the env-prediction loss.
+        # Default lambda to 0.05 (unless set) and select the `ppo_clip_env` loss (unless
+        # the user picked a loss_fn). Any other estimator defaults env_loss_coef to 0.0.
         if self.env_loss_coef is None:
             self.env_loss_coef = 0.05 if self.estimator == rLLMAdvantageEstimator.ECHO else 0.0
+        if self.estimator == rLLMAdvantageEstimator.ECHO and self.loss_fn is None:
+            self.loss_fn = "ppo_clip_env"
 
         # Normalize estimator_map: split (estimator, loss_fn) tuples.
         normalized_map: dict[str, rLLMAdvantageEstimator | str] = {}
