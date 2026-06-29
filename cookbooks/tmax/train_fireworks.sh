@@ -59,8 +59,8 @@ set -euo pipefail
 
 export TERMINAL_SANDBOX_BACKEND="${TERMINAL_SANDBOX_BACKEND:-daytona}"
 export TMAX_HARNESS="${TMAX_HARNESS:-mini-swe-agent}"
-export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
-export RLLM_SANDBOX_TIMEOUT_S="${RLLM_SANDBOX_TIMEOUT_S:-2400}"
+export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-2400}"
+export RLLM_SANDBOX_TIMEOUT_S="${RLLM_SANDBOX_TIMEOUT_S:-3600}"
 
 # --- Fireworks scale knobs (the two distinct "replicas") -------------------
 #  TRAINER_REPLICAS  -> fireworks_config.policy_trainer_replica_count
@@ -74,13 +74,14 @@ export RLLM_SANDBOX_TIMEOUT_S="${RLLM_SANDBOX_TIMEOUT_S:-2400}"
 #      num_samples_per_prompt_rollout. Drop to 16/8 to cut cost (lower fidelity).
 #  Reference-trainer replicas stay 0: Tmax has beta=0 (no KL), so no ref model.
 TRAINER_REPLICAS="${TRAINER_REPLICAS:-1}"
-ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-4}"
+ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-6}"
 GROUP_SIZE="${GROUP_SIZE:-32}"
 
-python -u train.py \
+python -u cookbooks/tmax/train.py \
     rllm/backend=fireworks \
     model.name=accounts/fireworks/models/qwen3p5-9b \
     model.tokenizer_model=Qwen/Qwen3.5-9B \
+    model.lora_rank=0 \
     fireworks_config.policy_trainer_shape_id=accounts/fireworks/trainingShapes/qwen3p5-9b-256k \
     fireworks_config.policy_trainer_replica_count=$TRAINER_REPLICAS \
     fireworks_config.rollout_deployment_replica_count=$ROLLOUT_REPLICAS \

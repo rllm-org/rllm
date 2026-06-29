@@ -70,6 +70,84 @@ def _tensor_data_to_tensor(value: Any, *, dtype, device, name: str, sample_idx: 
     return torch.tensor(list(value), dtype=dtype, device=device)
 
 
+def compute_offpolicy_metrics_from_tensors(policy_logprobs, rollout_logprobs, masks, *, safety_bound: float = SAFETY_CLAMP) -> dict[str, float]:
+    """Compute rollout-vs-training logprob metrics inside the custom loss."""
+    import torch
+
+    training_means = []
+    rollout_means = []
+    log_ratio_sums = []
+    token_policy = []
+    token_rollout = []
+
+    with torch.no_grad():
+        for policy_lp, rollout_lp, mask in zip(policy_logprobs, rollout_logprobs, masks, strict=False):
+            active_policy = policy_lp[mask].detach().to(dtype=torch.float32)
+            active_rollout = rollout_lp[mask].detach().to(dtype=torch.float32)
+            if active_policy.numel() == 0:
+                continue
+
+            training_means.append(active_policy.mean())
+            rollout_means.append(active_rollout.mean())
+            log_ratio_sums.append((active_policy - active_rollout).sum())
+            token_policy.append(active_policy)
+            token_rollout.append(active_rollout)
+
+        if not token_policy:
+            return {}
+
+        mean_log_prob_training = torch.stack(training_means)
+        mean_log_prob_rollout = torch.stack(rollout_means)
+        policy_flat = torch.cat(token_policy)
+        rollout_flat = torch.cat(token_rollout)
+        log_ratio = policy_flat - rollout_flat
+        logprob_abs_diff = log_ratio.abs()
+        policy_prob = torch.exp(policy_flat)
+        rollout_prob = torch.exp(rollout_flat)
+        prob_abs_diff = (policy_prob - rollout_prob).abs()
+        log_ratio_safe = torch.clamp(log_ratio, min=-safety_bound, max=safety_bound)
+        ratio = torch.exp(log_ratio_safe)
+        log_ppl_diff = mean_log_prob_rollout - mean_log_prob_training
+
+        metrics = {
+            "offpolicy/kl": (rollout_flat - policy_flat).mean().item(),
+            "offpolicy/k3_kl": (torch.exp(log_ratio) - log_ratio - 1).mean().item(),
+            "offpolicy/logprob_abs_diff/mean": logprob_abs_diff.mean().item(),
+            "offpolicy/logprob_abs_diff/min": logprob_abs_diff.min().item(),
+            "offpolicy/logprob_abs_diff/max": logprob_abs_diff.max().item(),
+            "offpolicy/prob_abs_diff/mean": prob_abs_diff.mean().item(),
+            "offpolicy/prob_abs_diff/min": prob_abs_diff.min().item(),
+            "offpolicy/prob_abs_diff/max": prob_abs_diff.max().item(),
+            "offpolicy/training_ppl": torch.exp(-mean_log_prob_training).mean().item(),
+            "offpolicy/training_log_ppl": (-mean_log_prob_training).mean().item(),
+            "offpolicy/rollout_ppl": torch.exp(-mean_log_prob_rollout).mean().item(),
+            "offpolicy/rollout_log_ppl": (-mean_log_prob_rollout).mean().item(),
+            "offpolicy/log_ppl_diff": log_ppl_diff.mean().item(),
+            "offpolicy/log_ppl_abs_diff": log_ppl_diff.abs().mean().item(),
+            "offpolicy/log_ppl_diff_min": log_ppl_diff.min().item(),
+            "offpolicy/log_ppl_diff_max": log_ppl_diff.max().item(),
+            "offpolicy/ppl_ratio": torch.exp(log_ppl_diff).mean().item(),
+            "offpolicy/ratio/mean": ratio.mean().item(),
+            "offpolicy/ratio/min": ratio.min().item(),
+            "offpolicy/ratio/max": ratio.max().item(),
+        }
+
+        if policy_prob.numel() > 1:
+            policy_centered = policy_prob - policy_prob.mean()
+            rollout_centered = rollout_prob - rollout_prob.mean()
+            denom = torch.sqrt(policy_centered.square().sum() * rollout_centered.square().sum())
+            if denom.item() > 0.0:
+                metrics["offpolicy/prob_pearson_corr"] = ((policy_centered * rollout_centered).sum() / denom).item()
+
+        metrics["offpolicy/chi2_token"] = (ratio.square().mean() - 1.0).item()
+
+        log_ratio_sum = torch.stack(log_ratio_sums)
+        log_ratio_sum_safe = torch.clamp(log_ratio_sum, min=-safety_bound, max=safety_bound)
+        metrics["offpolicy/chi2_seq"] = (torch.exp(2.0 * log_ratio_sum_safe).mean() - 1.0).item()
+
+        return metrics
+
+
 def make_dppo_loss_fn(
     advantages: list[float],
     rollout_logprobs: list[list[float]],
@@ -104,6 +182,9 @@ def make_dppo_loss_fn(
         divergence_sum = 0.0
         divergence_max = 0.0
         ratio_sum = 0.0
+        metric_policy_logprobs = []
+        metric_rollout_logprobs = []
+        metric_masks = []
 
         for i, policy_lp_full in enumerate(logprobs_list):
             if i >= len(data):
@@ -136,6 +217,9 @@ def make_dppo_loss_fn(
             active_count = int(response_mask.sum().item())
             if active_count == 0:
                 continue
+            metric_policy_logprobs.append(policy_lp.detach())
+            metric_rollout_logprobs.append(behavior_lp.detach())
+            metric_masks.append(response_mask.detach())
 
             adv = policy_lp.new_full(policy_lp.shape, float(advantages[i]))
             log_ratio = torch.clamp(policy_lp - behavior_lp, min=-ratio_log_cap, max=ratio_log_cap)
@@ -172,6 +256,14 @@ def make_dppo_loss_fn(
             "mean_loss": float(total_loss.detach().item()) / denom,
         }
         metrics[f"dppo_divergence_type/{divergence_type}"] = 1.0
+        metrics.update(
+            compute_offpolicy_metrics_from_tensors(
+                metric_policy_logprobs,
+                metric_rollout_logprobs,
+                metric_masks,
+                safety_bound=ratio_log_cap,
+            )
+        )
         return total_loss, metrics
 
     return loss_fn

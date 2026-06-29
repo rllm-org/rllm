@@ -44,6 +44,7 @@ from rllm.trainer.metrics_aggregator import MetricsAggregator
 from rllm.trainer.sync_coordinator import SyncCoordinator, SyncCoordinatorConfig
 from rllm.types import Episode, TerminationReason, TrajectoryGroup
 from rllm.utils import EpisodeLogger, Tracking, extract_source_metadata
+from rllm.utils.loop_probe import start_loop_probe, stop_loop_probe
 from rllm.workflows.store import Store
 from rllm.workflows.workflow import Workflow
 
@@ -581,6 +582,7 @@ class UnifiedTrainer:
         pbar = tqdm(total=total_tasks, desc="Tasks", unit="task")
         buffer._pbar = pbar
 
+        loop_probe = start_loop_probe("trainer", logger)
         try:
             gen_task = asyncio.create_task(self._generation_loop(trainer_state, buffer, coordinator))
             await self._training_loop(trainer_state, buffer, coordinator, aggregator)
@@ -591,6 +593,7 @@ class UnifiedTrainer:
                 except asyncio.CancelledError:
                     pass
         finally:
+            await stop_loop_probe(loop_probe)
             pbar.close()
 
     async def _generation_loop(
@@ -652,13 +655,15 @@ class UnifiedTrainer:
             weight_versions = []
             all_trajectory_groups: list[TrajectoryGroup] = []
             all_episodes: list[Episode] = []
+            fwd_bwd_chunk_metrics: list[dict[str, Any]] = []
             groups_consumed = 0
             buffer_wait_time = 0.0
             done = False
 
             buffered = buffer._queue.qsize()
-            logger.info(
-                f"[TrainingLoop] Step {trainer_state.global_step}: waiting for {mini_batch_size} task batches ({num_fwd_bwd_passes} fwd-bwd passes x {fwd_bwd_group_size} groups), {buffered} buffered"
+            print(
+                f"[TrainingLoop] Step {trainer_state.global_step}: waiting for {mini_batch_size} task batches ({num_fwd_bwd_passes} fwd-bwd passes x {fwd_bwd_group_size} groups), {buffered} buffered",
+                flush=True,
             )
 
             # 1. Pull mini_batch_size task batches total, split into
@@ -690,22 +695,24 @@ class UnifiedTrainer:
                 trainer_state.trajectory_groups = chunk_groups
 
                 if trainer_state.has_trajectory_groups:
-                    logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: fwd-bwd pass {pass_idx + 1}/{num_fwd_bwd_passes} ({len(chunk_groups)} groups)")
+                    print(f"[TrainingLoop] Step {trainer_state.global_step}: fwd-bwd pass {pass_idx + 1}/{num_fwd_bwd_passes} ({len(chunk_groups)} groups)", flush=True)
                     await self.backend.on_batch_start(trainer_state)
                     trainer_state.backend_batch = self.backend.transform_to_backend_batch(trainer_state)
                     await self.backend.process_backend_batch(trainer_state)
 
                     # Drain per-chunk backend metrics into aggregator
-                    aggregator.record_dict(trainer_state.metrics)
+                    chunk_metrics = dict(trainer_state.metrics)
+                    fwd_bwd_chunk_metrics.append(chunk_metrics)
+                    aggregator.record_dict(chunk_metrics)
                     trainer_state.metrics = {}
 
             # Only run optimizer step on a full batch
             if groups_consumed < mini_batch_size:
-                logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: incomplete batch ({groups_consumed}/{mini_batch_size}), stopping")
+                print(f"[TrainingLoop] Step {trainer_state.global_step}: incomplete batch ({groups_consumed}/{mini_batch_size}), stopping", flush=True)
                 break
 
             # 2. Optimizer step
-            logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: optimizer step")
+            print(f"[TrainingLoop] Step {trainer_state.global_step}: optimizer step", flush=True)
             await self.backend.update_policy(trainer_state)
 
             # 3. Capture pre-sync metrics (before weight sync resets coordinator state)
@@ -722,11 +729,11 @@ class UnifiedTrainer:
             coordinator.on_training_step_complete()
             sync_time = 0.0
             if coordinator.should_sync():
-                logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: triggering weight sync")
+                print(f"[TrainingLoop] Step {trainer_state.global_step}: triggering weight sync", flush=True)
                 t0 = time.perf_counter()
                 await self._perform_weight_sync(trainer_state, coordinator)
                 sync_time = time.perf_counter() - t0
-                logger.info(f"[TrainingLoop] Step {trainer_state.global_step}: weight sync complete ({sync_time:.2f}s)")
+                print(f"[TrainingLoop] Step {trainer_state.global_step}: weight sync complete ({sync_time:.2f}s)", flush=True)
             if sync_time > 0:
                 aggregator.record("time/weight_sync", sync_time)
             step_time = time.perf_counter() - step_start
@@ -756,6 +763,11 @@ class UnifiedTrainer:
 
             # 7. on_batch_end writes backend metrics (progress, optim, timing)
             await self.backend.on_batch_end(trainer_state)
+
+            # The async buffer emits reward/advantage metrics before zero-variance
+            # filtering. Override them with the exact optimizer-step training set.
+            trainer_state.metrics.update(self._collect_training_reward_advantage_metrics(all_trajectory_groups))
+            trainer_state.metrics.update(self._aggregate_fwd_bwd_train_metrics(fwd_bwd_chunk_metrics))
 
             # 7. Print and log
             print_metrics_table(trainer_state.metrics, trainer_state.global_step)
@@ -907,6 +919,101 @@ class UnifiedTrainer:
             except Exception:
                 continue
         return reduced_workflow_metrics, termination_counts
+
+    @staticmethod
+    def _collect_training_reward_advantage_metrics(trajectory_groups: list[TrajectoryGroup]) -> dict[str, float]:
+        rewards_by_role = defaultdict(list)
+        advantages_by_role = defaultdict(list)
+
+        for group in trajectory_groups:
+            role = group.group_role
+            for traj in group.trajectories:
+                if traj.reward is not None:
+                    rewards_by_role[role].append(float(traj.reward))
+
+                advantage = None
+                for step in traj.steps:
+                    if step.advantage is None:
+                        continue
+                    if isinstance(step.advantage, list):
+                        if step.advantage:
+                            advantage = float(np.mean(step.advantage))
+                            break
+                    else:
+                        advantage = float(step.advantage)
+                        break
+                if advantage is not None:
+                    advantages_by_role[role].append(advantage)
+
+        metrics: dict[str, float] = {}
+        for role, rewards in rewards_by_role.items():
+            values = np.asarray(rewards, dtype=float)
+            metrics[f"reward/{role}/mean"] = float(np.mean(values))
+            metrics[f"reward/{role}/std"] = float(np.std(values))
+            metrics[f"reward/{role}/max"] = float(np.max(values))
+            metrics[f"reward/{role}/min"] = float(np.min(values))
+
+        for role, advantages in advantages_by_role.items():
+            values = np.asarray(advantages, dtype=float)
+            metrics[f"advantage/{role}/mean"] = float(np.mean(values))
+            metrics[f"advantage/{role}/std"] = float(np.std(values))
+            metrics[f"advantage/{role}/max"] = float(np.max(values))
+            metrics[f"advantage/{role}/min"] = float(np.min(values))
+            metrics[f"advantage/{role}/fraction_zero"] = float(np.sum(np.abs(values) < 1e-8) / len(values))
+
+        return metrics
+
+    @staticmethod
+    def _aggregate_fwd_bwd_train_metrics(chunk_metrics: list[dict[str, Any]]) -> dict[str, float]:
+        chunks = [{k: float(v) for k, v in metrics.items() if isinstance(k, str) and k.startswith("train/") and isinstance(v, int | float | np.number)} for metrics in chunk_metrics]
+        chunks = [metrics for metrics in chunks if metrics]
+        if not chunks:
+            return {}
+
+        def value_sum(key: str) -> float:
+            return float(sum(metrics.get(key, 0.0) for metrics in chunks))
+
+        def weighted_mean(key: str, weight_key: str) -> float | None:
+            weighted_chunks = [metrics for metrics in chunks if key in metrics]
+            denom = sum(metrics.get(weight_key, 0.0) for metrics in weighted_chunks)
+            if denom <= 0:
+                return None
+            numer = sum(metrics[key] * metrics.get(weight_key, 0.0) for metrics in weighted_chunks)
+            return float(numer / denom)
+
+        result: dict[str, float] = {}
+        keys = set().union(*(metrics.keys() for metrics in chunks))
+
+        for key in keys:
+            values = [metrics[key] for metrics in chunks if key in metrics]
+            if not values:
+                continue
+
+            if key in {"train/num_sequences", "train/active_tokens", "train/dppo_active_tokens", "train/response_tokens"} or key.endswith(":sum") or key.endswith("_sequences"):
+                result[key] = float(sum(values))
+            elif key == "train/perplexity":
+                continue
+            elif key == "train/entropy":
+                aggregated = weighted_mean(key, "train/active_tokens")
+                if aggregated is not None:
+                    result[key] = aggregated
+                    result["train/perplexity"] = float(np.exp(aggregated))
+            elif key in {"train/mean_loss", "train/dppo_mask_frac_kept", "train/dppo_divergence_mean", "train/dppo_ratio_mean"}:
+                aggregated = weighted_mean(key, "train/dppo_active_tokens")
+                if aggregated is None:
+                    aggregated = weighted_mean(key, "train/active_tokens")
+                if aggregated is not None:
+                    result[key] = aggregated
+            elif "/max" in key or key.endswith("_max"):
+                result[key] = float(max(values))
+            elif "/min" in key or key.endswith("_min"):
+                result[key] = float(min(values))
+            elif key.endswith(":last"):
+                result[key] = float(values[-1])
+            else:
+                result[key] = float(sum(values) / len(values))
+
+        return result
 
 
 class TrainerLauncher(ABC):

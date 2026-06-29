@@ -17,6 +17,14 @@ def _datum(weights):
     return SimpleNamespace(loss_fn_inputs={"weights": SimpleNamespace(data=weights)})
 
 
+def test_extract_logprobs_tolerates_custom_forward_backward_without_logprobs():
+    from rllm.trainer.fireworks.fireworks_policy_trainer import FireworksPolicyTrainer
+
+    result = SimpleNamespace(loss_fn_outputs=[{"loss": SimpleNamespace(data=[1.0])}])
+
+    assert FireworksPolicyTrainer._extract_logprobs(result) == []
+
+
 def test_dppo_mask_blocks_only_unsafe_directions():
     behavior_logprobs = torch.log(torch.tensor([[0.1, 0.1, 0.1]]))
     policy_logprobs = torch.log(torch.tensor([[0.5, 0.5, 0.5]])).requires_grad_(True)
@@ -63,3 +71,20 @@ def test_dppo_custom_loss_uses_rollout_anchor_and_masks_gradients():
     assert metrics["dppo_mask_frac_kept"] == pytest.approx(0.5)
     assert metrics["dppo_divergence_mean"] == pytest.approx(0.4)
     assert metrics["dppo_ratio_mean"] == pytest.approx(5.0)
+    assert metrics["offpolicy/ratio/mean"] == pytest.approx(5.0)
+    assert metrics["offpolicy/logprob_abs_diff/mean"] == pytest.approx(math.log(5.0))
+    assert metrics["offpolicy/training_ppl"] == pytest.approx(2.0)
+    assert metrics["offpolicy/rollout_ppl"] == pytest.approx(10.0)
+
+
+def test_merge_remote_metrics_preserves_offpolicy_namespace():
+    from rllm.trainer.fireworks.fireworks_policy_trainer import FireworksPolicyTrainer
+
+    dummy = SimpleNamespace(_METRIC_SKIP_KEYS=set())
+    result = SimpleNamespace(metrics={"offpolicy/kl": 1.25, "dppo_ratio_mean": 2.0})
+    metrics = {}
+
+    FireworksPolicyTrainer._merge_remote_metrics(dummy, result, metrics)
+
+    assert metrics["offpolicy/kl"] == 1.25
+    assert metrics["train/dppo_ratio_mean"] == 2.0

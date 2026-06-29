@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx
 from starlette.requests import Request
-from starlette.responses import Response, StreamingResponse
+from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from rllm_model_gateway.data_process import (
     build_trace_record,
@@ -304,7 +304,33 @@ class ReverseProxy:
             # can pin a trajectory's turns to one replica for prefix-cache reuse.
             if session_id:
                 request_body["rllm_session_id"] = session_id
-            response_body = await self.local_handler(request_body)
+            try:
+                response_body = await self.local_handler(request_body)
+            except ValueError as e:
+                if str(e) != "No messages provided.":
+                    raise
+                prompt = request_body.get("prompt")
+                logger.warning(
+                    "Gateway local_handler failed with empty messages: path=%s session=%s body_keys=%s body_bytes=%d messages=%r prompt_type=%s prompt_len=%s",
+                    request.url.path,
+                    session_id,
+                    sorted(request_body.keys()),
+                    len(raw_body),
+                    request_body.get("messages"),
+                    type(prompt).__name__,
+                    len(prompt) if isinstance(prompt, list) else None,
+                )
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": {
+                            "message": "No messages provided.",
+                            "type": "invalid_request_error",
+                            "param": "messages",
+                            "code": "empty_messages",
+                        }
+                    },
+                )
             status_code = 200
         else:
             # HTTP proxy path

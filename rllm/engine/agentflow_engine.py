@@ -531,11 +531,11 @@ class AgentFlowEngine:
                             reward = f"{traj.steps[-1].reward:.1f}"
                         reward_strs.append(f"{traj.name}: {reward}")
 
-                    timing_str = _format_timing_breakdown(episode.metrics)
-                    colorful_print(
-                        f"[{uid}] Rollout completed. Rewards: [{', '.join(reward_strs)}]{timing_str}, Termination: {episode.termination_reason}",
-                        fg="green" if episode.is_correct else "yellow",
-                    )
+                    # timing_str = _format_timing_breakdown(episode.metrics)
+                    # colorful_print(
+                    #     f"[{uid}] Rollout completed. Rewards: [{', '.join(reward_strs)}]{timing_str}, Termination: {episode.termination_reason}",
+                    #     fg="green" if episode.is_correct else "yellow",
+                    # )
 
                     return task_id, rollout_idx, result_idx, episode
 
@@ -724,6 +724,7 @@ class AgentFlowEngine:
             _llm_sum_s, _llm_wall_s = _summarize_llm_latencies(traces, _agentflow_s)
             _timings["time/agentflow_llm_sum_s"] = _llm_sum_s
             _timings["time/agentflow_llm_wall_s"] = _llm_wall_s
+            _timings["time/agentflow_non_llm_s"] = max(0.0, _agentflow_s - _llm_wall_s)
             _timings["n_turns"] = float(len(traces))
 
         # Preserve per-trajectory rewards set by multi-trajectory evaluators.
