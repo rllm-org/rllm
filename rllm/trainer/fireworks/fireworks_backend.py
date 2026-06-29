@@ -153,7 +153,8 @@ class FireworksBackend(TinkerBackend):
         from training.utils.rl.losses import validate_loss_path
 
         algorithm_config = kwargs.get("algorithm_config") or AlgorithmConfig.from_config(cfg.rllm.algorithm)
-        validate_loss_path(builtin_loss_args(algorithm_config))
+        if algorithm_config.loss_fn != "dppo":
+            validate_loss_path(builtin_loss_args(algorithm_config))
 
         provision_cfg = self._build_provision_config(algorithm_config)
 
@@ -258,6 +259,9 @@ class FireworksBackend(TinkerBackend):
         loss_fn = alg.get("loss_fn", None)
         loss_agg_mode = alg.get("loss_agg_mode", None)
         eps_clip_high = alg.get("eps_clip_high", None)
+        kl_beta = alg.get("kl_beta", 0.0)
+        dppo_divergence_type = alg.get("dppo_divergence_type", "tv")
+        dppo_divergence_threshold = alg.get("dppo_divergence_threshold", 0.1)
         router_replay = alg.get("router_replay", "disabled")
         rc = alg.get("rollout_correction", {})
         tis_mode = rc.get("tis_mode", None)
@@ -274,6 +278,14 @@ class FireworksBackend(TinkerBackend):
         if loss_agg_mode not in valid_loss_agg_modes:
             raise ValueError(f"rllm.algorithm.loss_agg_mode must be null, 'token-mean', 'seq-mean-token-sum', or 'seq-mean-token-mean' for the Fireworks backend, got {loss_agg_mode!r}")
         logger.info("Fireworks loss aggregation mode: %s", loss_agg_mode or "backend default")
+
+        if loss_fn == "dppo":
+            if dppo_divergence_type not in ("tv", "kl"):
+                raise ValueError("rllm.algorithm.dppo_divergence_type must be 'tv' or 'kl' for the Fireworks backend")
+            if dppo_divergence_threshold <= 0.0:
+                raise ValueError("rllm.algorithm.dppo_divergence_threshold must be > 0 for the Fireworks backend")
+            if kl_beta > 0.0:
+                raise ValueError("Fireworks DPPO custom loss does not support rllm.algorithm.kl_beta > 0")
 
         if router_replay == "R2":
             raise ValueError("rllm.algorithm.router_replay='R2' is not supported by the Fireworks backend; use 'R3' or 'disabled'.")

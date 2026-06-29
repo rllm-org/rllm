@@ -724,6 +724,7 @@ class AgentFlowEngine:
             _llm_sum_s, _llm_wall_s = _summarize_llm_latencies(traces, _agentflow_s)
             _timings["time/agentflow_llm_sum_s"] = _llm_sum_s
             _timings["time/agentflow_llm_wall_s"] = _llm_wall_s
+            _timings["time/agentflow_non_llm_s"] = max(0.0, _agentflow_s - _llm_wall_s)
             _timings["n_turns"] = float(len(traces))
 
         # Preserve per-trajectory rewards set by multi-trajectory evaluators.

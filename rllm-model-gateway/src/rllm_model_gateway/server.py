@@ -25,7 +25,6 @@ from rllm_model_gateway.store.base import TraceStore
 
 logger = logging.getLogger(__name__)
 
-
 # ------------------------------------------------------------------
 # Access-log noise filter
 # ------------------------------------------------------------------

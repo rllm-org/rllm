@@ -35,8 +35,9 @@
 # Intended differences (LoRA + backend, NOT recipe choices):
 #   - LoRA-32 adapter, not full-parameter DPPO. LoRA needs a higher LR than the
 #     paper's full-FT 1e-6, so this uses 2e-5 (1e-6 barely moves an adapter).
-#   - loss_fn: GRPO + PPO clip, since rLLM has no DPPO (tv trust region). The
-#     centered-advantage / no-KL / outcome-only parts ARE matched.
+#   - loss_fn: Fireworks DPPO custom forward/backward, using rollout logprobs
+#     as the behavior anchor with a TV trust region. Centered advantages, no-KL,
+#     and outcome-only rewards are matched.
 #   - lm_head_fp32 / Liger GRPO are backend-internal (not exposed on Fireworks).
 #
 # Model: Qwen3.5-9B + LoRA-32 on the qwen3p5-9b-256k-lora training shape.
@@ -57,10 +58,9 @@
 set -euo pipefail
 
 export TERMINAL_SANDBOX_BACKEND="${TERMINAL_SANDBOX_BACKEND:-daytona}"
-export TMAX_HARNESS="${TMAX_HARNESS:-terminus2}"
-export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-64}"
-export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
-export RLLM_SANDBOX_TIMEOUT_S="${RLLM_SANDBOX_TIMEOUT_S:-2400}"
+export TMAX_HARNESS="${TMAX_HARNESS:-mini-swe-agent}"
+export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-2400}"
+export RLLM_SANDBOX_TIMEOUT_S="${RLLM_SANDBOX_TIMEOUT_S:-3600}"
 
 # --- Fireworks scale knobs (the two distinct "replicas") -------------------
 #  TRAINER_REPLICAS  -> fireworks_config.policy_trainer_replica_count
@@ -77,41 +77,41 @@ TRAINER_REPLICAS="${TRAINER_REPLICAS:-1}"
 ROLLOUT_REPLICAS="${ROLLOUT_REPLICAS:-6}"
 GROUP_SIZE="${GROUP_SIZE:-32}"
 
-python -u train.py \
+python -u cookbooks/tmax/train.py \
     rllm/backend=fireworks \
     model.name=accounts/fireworks/models/qwen3p5-9b \
     model.tokenizer_model=Qwen/Qwen3.5-9B \
-    model.lora_rank=32 \
-    fireworks_config.policy_trainer_shape_id=accounts/fireworks/trainingShapes/qwen3p5-9b-256k-lora \
+    model.lora_rank=0 \
+    fireworks_config.policy_trainer_shape_id=accounts/fireworks/trainingShapes/qwen3p5-9b-256k \
     fireworks_config.policy_trainer_replica_count=$TRAINER_REPLICAS \
     fireworks_config.rollout_deployment_replica_count=$ROLLOUT_REPLICAS \
     fireworks_config.reference_trainer_replica_count=0 \
+    fireworks_infra.deployments.rollout.disable_speculative_decoding=true \
+    concurrency=null \
     training.group_size=$GROUP_SIZE \
-    training.learning_rate=2e-5 \
+    training.learning_rate=1e-6 \
     training.max_length=67584 \
-    rllm.rollout.train.temperature=1.0 \
-    rllm.rollout.train.top_p=1.0 \
-    rllm.rollout.val.temperature=1.0 \
-    rllm.rollout.val.top_p=1.0 \
-    data.max_prompt_length=51200 \
-    data.max_response_length=16384 \
-    data.val_batch_size=-1 \
-    rllm.data.max_prompt_length=51200 \
+    rllm.data.max_prompt_length=67584 \
     rllm.data.max_response_length=16384 \
     rllm.data.train_batch_size=1 \
-    rllm.data.val_batch_size=-1 \
-    rllm.data.seed=42 \
-    rllm.compact_filtering.enable=true \
+    rllm.rollout.train.temperature=1.0 \
+    rllm.rollout.train.top_p=1.0 \
     rllm.algorithm.adv_estimator=grpo \
     rllm.algorithm.norm_adv_by_std_in_grpo=false \
+    rllm.algorithm.loss_fn=dppo \
+    rllm.algorithm.dppo_divergence_type=tv \
+    rllm.algorithm.dppo_divergence_threshold=0.1 \
     rllm.algorithm.lr_schedule=constant \
     rllm.algorithm.kl_beta=0.0 \
+    rllm.algorithm.rollout_correction.bypass_mode=true \
     rllm.async_training.enable=true \
-    rllm.async_training.mini_batch_size=16 \
+    rllm.async_training.mini_batch_size=8 \
     rllm.async_training.fwd_bwd_group_size=1 \
-    rllm.async_training.staleness_threshold=3.0 \
+    rllm.async_training.staleness_threshold=4.0 \
     rllm.async_training.trigger_parameter_sync_step=1 \
     rllm.async_training.partial_rollout=true \
+    rllm.compact_filtering.enable=false \
+    rllm.rejection_sample.filter_uniform_groups=true \
     rllm.workflow.n_parallel_tasks=512 \
     rllm.workflow.raise_on_error=false \
     rllm.gateway.port=9090 \
@@ -121,8 +121,8 @@ python -u train.py \
     rllm.trainer.total_batches=500 \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='tmax' \
-    rllm.trainer.experiment_name='tmax-qwen3p5-9b-fireworks-lora' \
+    rllm.trainer.experiment_name='tmax-qwen3p5-9b-fireworks-dppo' \
     rllm.trainer.val_before_train=false \
-    rllm.trainer.test_freq=20 \
-    rllm.trainer.save_freq=20 \
+    rllm.trainer.test_freq=-1 \
+    rllm.trainer.save_freq=10 \
     "$@"

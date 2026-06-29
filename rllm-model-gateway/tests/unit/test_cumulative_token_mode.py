@@ -22,6 +22,12 @@ class _MockRendered:
         self.token_ids = token_ids
 
 
+class _ParsedResponse:
+    content = "parsed action"
+    reasoning_content = "parsed reasoning"
+    tool_calls = [{"name": "bash", "arguments": {"command": "ls -la"}}]
+
+
 class _MockRenderer:
     """Mimics renderers.Renderer.bridge_to_next_turn without loading a real model.
 
@@ -44,6 +50,15 @@ class _MockRenderer:
         content_ids = [ord(c) for c in content[:3]]
         bridge = [100, 10, 101, 1, 10] + content_ids + [100, 10, 101, 2, 10]
         return _MockRendered(list(prev_prompt_ids) + list(prev_completion_ids) + bridge)
+
+
+class _StructuredRenderer(_MockRenderer):
+    def __init__(self):
+        self.seen_token_ids = None
+
+    def parse_response(self, token_ids):
+        self.seen_token_ids = list(token_ids)
+        return _ParsedResponse()
 
 
 @pytest.fixture
@@ -121,6 +136,40 @@ class TestCumulativeTokenMode:
         assert isinstance(second_req["prompt"], list)
         assert all(isinstance(t, int) for t in second_req["prompt"])
         assert "messages" not in second_req
+
+    def test_turn2_reconstructs_structured_chat_message_from_completion_tokens(self, cumulative_gateway):
+        server, mock_vllm = cumulative_gateway
+        structured_renderer = _StructuredRenderer()
+        server.app.state.proxy.renderer = structured_renderer
+        gw_url = server.url
+
+        oai = openai.OpenAI(base_url=f"{gw_url}/sessions/cum-structured/v1", api_key="dummy")
+
+        oai.chat.completions.create(
+            model="mock-model",
+            messages=[{"role": "user", "content": "Hello"}],
+        )
+
+        resp = oai.chat.completions.create(
+            model="mock-model",
+            messages=[
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hello from mock!"},
+                {"role": "user", "content": "How are you?"},
+            ],
+        )
+
+        msg = resp.choices[0].message
+        assert structured_renderer.seen_token_ids == [10, 11, 12]
+        assert msg.content == "parsed action"
+        assert resp.choices[0].finish_reason == "tool_calls"
+        assert msg.tool_calls is not None
+        assert msg.tool_calls[0].function.name == "bash"
+        assert msg.tool_calls[0].function.arguments == '{"command": "ls -la"}'
+
+        assert len(mock_vllm.request_log) == 2
+        assert "prompt" in mock_vllm.request_log[1]
+        assert "messages" not in mock_vllm.request_log[1]
 
     def test_turn2_prompt_extends_turn1(self, cumulative_gateway):
         """Turn 2 prompt token IDs are cumulative (extend turn 1's prompt + completion)."""

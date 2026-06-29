@@ -28,7 +28,22 @@ class _Request:
     state = _State()
 
 
-def _make_proxy(local_handler):
+class _ParsedResponse:
+    content = "parsed action"
+    reasoning_content = "parsed reasoning"
+    tool_calls = [{"name": "bash", "arguments": {"command": "ls -la"}}]
+
+
+class _ParsingRenderer:
+    def __init__(self):
+        self.seen_token_ids = None
+
+    def parse_response(self, token_ids):
+        self.seen_token_ids = list(token_ids)
+        return _ParsedResponse()
+
+
+def _make_proxy(local_handler, renderer=None):
     """ReverseProxy wired for the local cumulative path (no router/worker)."""
     return ReverseProxy(
         router=None,
@@ -36,7 +51,7 @@ def _make_proxy(local_handler):
         sync_traces=True,
         local_handler=local_handler,
         cumulative_token_mode=True,
-        renderer=None,  # accumulator state is set directly in these tests
+        renderer=renderer,  # accumulator state is set directly in these tests
     )
 
 
@@ -100,6 +115,35 @@ def test_cumulative_local_non_streaming_ingests_and_translates():
     assert acc.prev_prompt_ids == bridged
     assert acc.prev_completion_ids == [91, 92]
     assert acc.cumulative_ids[: len([1, 2, 3, 4, 5])] == [1, 2, 3, 4, 5]
+
+
+def test_cumulative_local_non_streaming_reconstructs_structured_chat_message():
+    record = []
+    renderer = _ParsingRenderer()
+    proxy = _make_proxy(_completion_handler(record), renderer=renderer)
+
+    acc = TokenAccumulator(renderer=None)
+    acc.ingest_turn([1, 2, 3], [4, 5])
+    bridged = [1, 2, 3, 4, 5, 6, 7]
+
+    resp = asyncio.run(
+        proxy._handle_cumulative_non_streaming(
+            _Request(),
+            {"messages": [{"role": "user", "content": "x"}]},
+            {"prompt": bridged, "add_special_tokens": False, "model": "q"},
+            "sess1",
+            acc,
+            bridged,
+        )
+    )
+
+    body = json.loads(resp.body)
+    message = body["choices"][0]["message"]
+    assert renderer.seen_token_ids == [91, 92]
+    assert message["content"] == "parsed action"
+    assert message["reasoning"] == "parsed reasoning"
+    assert message["tool_calls"] == [{"id": "call_0", "type": "function", "function": {"name": "bash", "arguments": '{"command": "ls -la"}'}}]
+    assert body["choices"][0]["finish_reason"] == "tool_calls"
 
 
 def test_cumulative_local_streaming_emits_sse_and_ingests():

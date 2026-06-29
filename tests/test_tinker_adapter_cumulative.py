@@ -25,6 +25,8 @@ class _ModelOutput:
     prompt_length = 4
     completion_length = 2
     finish_reason = "stop"
+    weight_version = 7
+    routing_matrices = ["r0", "r1"]
 
 
 class _FakeEngine:
@@ -33,8 +35,40 @@ class _FakeEngine:
     def __init__(self):
         self.token_input = None
         self.messages = None
+        self.token_wrapper_called = False
+        self.token_sampler_called = False
 
     async def get_token_output_from_token_input(self, token_input, **kwargs):
+        self.token_sampler_called = True
+        self.token_input = token_input
+        self.sampling_kwargs = kwargs
+        return "sampled"
+
+    def assemble_model_output(self, token_input, token_output):
+        return _ModelOutput()
+
+    async def get_model_response_from_tokens(self, token_input, **kwargs):
+        self.token_wrapper_called = True
+        self.token_input = token_input
+        self.sampling_kwargs = kwargs
+        return _ModelOutput()
+
+    async def get_model_response(self, messages, **kwargs):
+        self.messages = messages
+        return _ModelOutput()
+
+
+class _FallbackEngine:
+    model_name = "qwen"
+
+    def __init__(self):
+        self.token_input = None
+        self.messages = None
+        self.token_wrapper_called = False
+        self.token_sampler_called = False
+
+    async def get_token_output_from_token_input(self, token_input, **kwargs):
+        self.token_sampler_called = True
         self.token_input = token_input
         self.sampling_kwargs = kwargs
         return "sampled"
@@ -57,6 +91,8 @@ def test_token_prompt_path_samples_from_tokens():
     assert engine.token_input == [1, 2, 3, 4]
     assert engine.messages is None
     assert engine.sampling_kwargs.get("temperature") == 0.7
+    assert engine.token_wrapper_called is True
+    assert engine.token_sampler_called is False
 
     # Completions-style body the gateway's cumulative handler understands.
     assert resp["object"] == "text_completion"
@@ -64,6 +100,21 @@ def test_token_prompt_path_samples_from_tokens():
     assert resp["choices"][0]["text"] == "ls -la"
     assert resp["choices"][0]["token_ids"] == [10, 11]
     assert resp["choices"][0]["logprobs"]["token_logprobs"] == [-0.1, -0.2]
+    assert resp["choices"][0]["routing_matrices"] == ["r0", "r1"]
+    assert resp["weight_version"] == 7
+
+
+def test_token_prompt_path_falls_back_without_token_wrapper():
+    engine = _FallbackEngine()
+    handler = create_tinker_handler(engine)
+
+    resp = asyncio.run(handler({"prompt": [1, 2, 3, 4], "temperature": 0.7, "model": "qwen"}))
+
+    assert engine.token_input == [1, 2, 3, 4]
+    assert engine.messages is None
+    assert engine.sampling_kwargs.get("temperature") == 0.7
+    assert engine.token_sampler_called is True
+    assert resp["choices"][0]["token_ids"] == [10, 11]
 
 
 def test_chat_path_unchanged_by_token_branch():

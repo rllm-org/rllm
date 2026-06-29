@@ -90,6 +90,8 @@ algorithm:
   kl_beta: 0.0            # KL penalty coefficient
   eps_clip: 0.2           # PPO clip epsilon
   eps_clip_high: null     # Asymmetric upper clip bound (null = symmetric)
+  dppo_divergence_type: tv # DPPO trust-region divergence: tv | kl
+  dppo_divergence_threshold: 0.1 # DPPO trust-region threshold
   router_replay: disabled # Router Replay: "disabled" | "R2" (training-side record) | "R3" (rollout-side record)
   rollout_correction:
     bypass_mode: null     # true = pi_old = pi_rollout, false = pi_old is computed (null = backend default)

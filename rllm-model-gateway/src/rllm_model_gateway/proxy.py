@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx
 from starlette.requests import Request
-from starlette.responses import Response, StreamingResponse
+from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from rllm_model_gateway.data_process import (
     build_trace_record,
@@ -31,6 +31,72 @@ from rllm_model_gateway.token_accumulator import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _field(value: Any, name: str, default: Any = None) -> Any:
+    if isinstance(value, dict):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def _json_arguments(arguments: Any) -> str:
+    if isinstance(arguments, str):
+        return arguments
+    if arguments is None:
+        return "{}"
+    try:
+        return json.dumps(arguments)
+    except TypeError:
+        return str(arguments)
+
+
+def _to_openai_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
+    result = []
+    for i, tool_call in enumerate(tool_calls or []):
+        function = _field(tool_call, "function")
+        if function is not None:
+            name = _field(function, "name", "")
+            arguments = _field(function, "arguments", {})
+        else:
+            name = _field(tool_call, "name", "")
+            arguments = _field(tool_call, "arguments", _field(tool_call, "args", {}))
+
+        result.append(
+            {
+                "id": str(_field(tool_call, "id", None) or f"call_{i}"),
+                "type": _field(tool_call, "type", None) or "function",
+                "function": {"name": name or "", "arguments": _json_arguments(arguments)},
+            }
+        )
+    return result
+
+
+def _message_from_completion_tokens(renderer: Any, completion_token_ids: list[int], fallback_text: str) -> dict[str, Any]:
+    message: dict[str, Any] = {"role": "assistant", "content": fallback_text or ""}
+    parse_response = getattr(renderer, "parse_response", None)
+    if parse_response is None or not completion_token_ids:
+        return message
+
+    try:
+        parsed = parse_response(list(completion_token_ids))
+    except Exception:
+        logger.exception("Failed to parse cumulative completion tokens with renderer")
+        return message
+
+    content = _field(parsed, "content", None)
+    if content is not None:
+        message["content"] = content or ""
+
+    reasoning = _field(parsed, "reasoning_content", None) or _field(parsed, "reasoning", None)
+    if reasoning:
+        message["reasoning"] = reasoning
+
+    tool_calls = _field(parsed, "tool_calls", None)
+    if tool_calls:
+        message["tool_calls"] = _to_openai_tool_calls(tool_calls)
+
+    return message
+
 
 # Headers that should not be forwarded verbatim
 _HOP_BY_HOP = frozenset(
@@ -238,7 +304,33 @@ class ReverseProxy:
             # can pin a trajectory's turns to one replica for prefix-cache reuse.
             if session_id:
                 request_body["rllm_session_id"] = session_id
-            response_body = await self.local_handler(request_body)
+            try:
+                response_body = await self.local_handler(request_body)
+            except ValueError as e:
+                if str(e) != "No messages provided.":
+                    raise
+                prompt = request_body.get("prompt")
+                logger.warning(
+                    "Gateway local_handler failed with empty messages: path=%s session=%s body_keys=%s body_bytes=%d messages=%r prompt_type=%s prompt_len=%s",
+                    request.url.path,
+                    session_id,
+                    sorted(request_body.keys()),
+                    len(raw_body),
+                    request_body.get("messages"),
+                    type(prompt).__name__,
+                    len(prompt) if isinstance(prompt, list) else None,
+                )
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": {
+                            "message": "No messages provided.",
+                            "type": "invalid_request_error",
+                            "param": "messages",
+                            "code": "empty_messages",
+                        }
+                    },
+                )
             status_code = 200
         else:
             # HTTP proxy path
@@ -401,11 +493,15 @@ class ReverseProxy:
         acc.ingest_turn(prompt_token_ids, completion_token_ids, advance=not replay)
         acc.update_prefix(request_body.get("messages", []))
 
-        # Translate to chat format
+        # Translate back to chat format from the completion tokens the model emitted.
         choices = response_body.get("choices") or []
         if choices:
             first_choice = choices[0]
-            first_choice["message"] = {"role": "assistant", "content": first_choice.pop("text", "")}
+            text = first_choice.pop("text", "")
+            message = _message_from_completion_tokens(self.renderer, completion_token_ids, text)
+            first_choice["message"] = message
+            if message.get("tool_calls") and first_choice.get("finish_reason") in (None, "stop"):
+                first_choice["finish_reason"] = "tool_calls"
         response_body["object"] = "chat.completion"
 
         if session_id and response_body:
@@ -606,15 +702,20 @@ class ReverseProxy:
         acc.update_prefix(request_body.get("messages", []))
 
         choices = response_body.get("choices") or []
-        content = choices[0].pop("text", "") if choices else ""
-        finish_reason = (choices[0].get("finish_reason") if choices else None) or "stop"
-        completion_logprobs = choices[0].get("logprobs") if choices else None
+        first_choice = choices[0] if choices else {}
+        content = first_choice.pop("text", "") if first_choice else ""
+        message = _message_from_completion_tokens(self.renderer, completion_token_ids, content)
+        finish_reason = first_choice.get("finish_reason") or "stop"
+        if message.get("tool_calls") and finish_reason == "stop":
+            finish_reason = "tool_calls"
+            first_choice["finish_reason"] = finish_reason
+        completion_logprobs = first_choice.get("logprobs") if first_choice else None
 
         if session_id and response_body:
             chat_body = dict(response_body)
             chat_body["object"] = "chat.completion"
             if chat_body.get("choices"):
-                chat_body["choices"][0]["message"] = {"role": "assistant", "content": content}
+                chat_body["choices"][0]["message"] = message
             trace = build_trace_record(session_id, request_body, chat_body, latency_ms, weight_version=request.state.weight_version)
             await self._persist(trace)
 
@@ -641,6 +742,7 @@ class ReverseProxy:
                     }
                 )
             )
+            delta = {k: v for k, v in message.items() if k != "role" and v}
             yield _sse(
                 json.dumps(
                     _sanitize_chunk(
@@ -649,7 +751,15 @@ class ReverseProxy:
                             "object": "chat.completion.chunk",
                             "created": created,
                             "model": model,
-                            "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None, "token_ids": completion_token_ids, "logprobs": completion_logprobs}],
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": delta,
+                                    "finish_reason": None,
+                                    "token_ids": completion_token_ids,
+                                    "logprobs": completion_logprobs,
+                                }
+                            ],
                             "prompt_token_ids": prompt_token_ids,
                         }
                     )
