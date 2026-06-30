@@ -539,6 +539,7 @@ def build_daytona_snapshot(task, key: str, *, force: bool = False, install_scrip
 
     from rllm.eval._resolution import (
         _as_single_run_line,
+        _builds_from_dockerfile,
         _dockerfile_run_commands,
         _resolve_image,
         _sandbox_resource_kwargs,
@@ -556,12 +557,19 @@ def build_daytona_snapshot(task, key: str, *, force: bool = False, install_scrip
     except DaytonaNotFoundError:
         pass
 
-    img = Image.base(_resolve_image(task, "daytona"))
-    # Honor [environment].replay_dockerfile: fully-built task images opt out so
-    # their RUN steps aren't double-applied on top of the prebuilt image.
-    run_commands = [_as_single_run_line(c) for c in _dockerfile_run_commands(task)] if _should_replay_dockerfile(task) else []
-    if install_script:
-        run_commands.append(_as_single_run_line(install_script))
+    dockerfile = _builds_from_dockerfile(task, "daytona")
+    if dockerfile is not None:
+        # Build the real Dockerfile (COPY/ENV/WORKDIR/RUN) so a snapshotted task is
+        # identical to a cold-built one; only the install script layers on top.
+        img = Image.from_dockerfile(str(dockerfile))
+        run_commands = [_as_single_run_line(install_script)] if install_script else []
+    else:
+        img = Image.base(_resolve_image(task, "daytona"))
+        # Honor [environment].replay_dockerfile: fully-built task images opt out so
+        # their RUN steps aren't double-applied on top of the prebuilt image.
+        run_commands = [_as_single_run_line(c) for c in _dockerfile_run_commands(task)] if _should_replay_dockerfile(task) else []
+        if install_script:
+            run_commands.append(_as_single_run_line(install_script))
     if run_commands:
         img = img.run_commands(*run_commands)
 

@@ -232,9 +232,83 @@ def _replay_dockerfile(task: Task, sandbox: Sandbox, backend: str) -> None:
         _safe_exec(sandbox, cmd, timeout=900)
 
 
+def _task_dockerfile(task: Task) -> Path | None:
+    """Locate a task's ``environment/Dockerfile`` (task dir first, then dataset dir)."""
+    for base in (task.task_dir, task.dataset_dir):
+        df = base / "environment" / "Dockerfile"
+        if df.exists():
+            return df
+    return None
+
+
+# Remote backends that build images themselves and so can build the *real* Dockerfile
+# (COPY/ENV/WORKDIR/RUN) instead of pulling FROM + replaying RUN. ``docker`` is excluded
+# because it already builds via ``docker build``; ``local`` cannot build. ``modal`` is a
+# tracked follow-up (it accepts a ``modal.Image`` and already keepalive-overrides the
+# entrypoint, but the from_dockerfile path there is untested — see _dockerfile_image).
+_FROM_DOCKERFILE_BACKENDS = ("daytona",)
+
+
+def _builds_from_dockerfile(task: Task, backend: str) -> Path | None:
+    """Return the Dockerfile to build directly on a remote backend, else ``None``.
+
+    For remote backends that build images themselves, building the real Dockerfile keeps
+    ``COPY``/``ENV``/``WORKDIR`` (which ``_replay_dockerfile`` silently drops) — required by
+    COPY-then-RUN tasks like honeycomb's AWS/LocalStack tasks (``COPY start_localstack.sh``
+    + ``ready.d``). Only when the task is Dockerfile-based (``replay_dockerfile`` true);
+    prebuilt-image tasks (``replay_dockerfile = false``) boot their image as-is.
+    """
+    if backend not in _FROM_DOCKERFILE_BACKENDS or not _should_replay_dockerfile(task):
+        return None
+    return _task_dockerfile(task)
+
+
+def _dockerfile_image(backend: str, dockerfile: Path):
+    """Backend-native build spec for the real Dockerfile (COPY context = its directory)."""
+    if backend == "daytona":
+        from daytona import Image  # daytona.Image.from_dockerfile bundles the Dockerfile dir as context
+
+        return Image.from_dockerfile(str(dockerfile))
+    raise ValueError(f"from_dockerfile build unsupported for backend {backend!r}")
+
+
+def _dockerfile_context_fingerprint(dockerfile: Path) -> str:
+    """Stable hash of a Dockerfile's build context (its directory) for snapshot identity.
+
+    Tasks built via ``Image.from_dockerfile`` must key on the *whole* context, not just
+    ``FROM``+``RUN``: two tasks that share a base image and RUN block but differ in COPYed
+    data (e.g. AWS tasks with different ``ready.d`` seeds) would otherwise collide on one
+    snapshot / warm-queue sandbox. Hashes the Dockerfile text plus every file under its
+    directory (relative path + bytes).
+    """
+    import hashlib
+
+    ctx = dockerfile.parent
+    h = hashlib.sha256()
+    for p in sorted(ctx.rglob("*")):
+        if p.is_file():
+            h.update(str(p.relative_to(ctx)).encode("utf-8") + b"\0")
+            try:
+                h.update(p.read_bytes())
+            except OSError:
+                pass
+    return h.hexdigest()[:16]
+
+
 def _create_sandbox_for_task(task: Task, sandbox_backend: str | None) -> Sandbox:
-    """Cold-path sandbox creation: base image + RUN replay (today's behavior)."""
+    """Cold-path sandbox creation.
+
+    When a Dockerfile-based task runs on a remote backend that builds images itself
+    (``_builds_from_dockerfile``), build the *real* Dockerfile (full COPY/ENV/WORKDIR/RUN
+    fidelity — the same primitive harbor's own environment uses) so nothing needs replaying.
+    Otherwise create from the base/prebuilt image and replay the Dockerfile's RUN steps
+    (``_replay_dockerfile``; a no-op for docker, which already built the image, and for
+    prebuilt-image tasks that set ``replay_dockerfile = false``).
+    """
     backend = _resolve_backend(task, sandbox_backend)
+    dockerfile = _builds_from_dockerfile(task, backend)
+    if dockerfile is not None:
+        return _create_base_sandbox(task, backend, image=_dockerfile_image(backend, dockerfile))
     sandbox = _create_base_sandbox(task, backend)
     _replay_dockerfile(task, sandbox, backend)
     return sandbox
@@ -374,6 +448,52 @@ def _build_docker_image(context_dir: Path, task_id: str) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"Docker build failed for {task_id}:\n{result.stderr[:1000]}")
     return tag
+
+
+def _run_healthcheck(task: Task, sandbox: Sandbox) -> None:
+    """Boot a task's declared service and wait for readiness before the agent.
+
+    Harbor-format tasks may declare ``[environment.healthcheck]`` (command +
+    interval/timeout/retries/start-period) that boots an in-image service and
+    blocks until it is ready — e.g. honeycomb's AWS/LocalStack tasks run
+    ``bash /usr/local/bin/start_localstack.sh`` to start LocalStack and seed
+    ``ready.d``. rLLM boots the container with ``sleep infinity`` and never runs
+    the image CMD/entrypoint, so without this the service never starts and the
+    agent (and verifier) hit a dead endpoint. Mirrors harbor's ``run_healthcheck``
+    (run after environment setup, before the agent).
+
+    No-op when the task declares no healthcheck — so non-service eval *and*
+    training tasks are unaffected. Raises on exhaustion so an unbootable service
+    surfaces as an explicit infra error rather than a silent reward 0.0.
+    """
+    import time
+
+    hc = (task.metadata.get("environment", {}) or {}).get("healthcheck")
+    if not isinstance(hc, dict):
+        return
+    command = hc.get("command")
+    if not command:
+        return
+
+    timeout_s = float(hc.get("timeout_sec") or 300.0)
+    interval_s = float(hc.get("interval_sec") or 5.0)
+    retries = int(hc.get("retries") if hc.get("retries") is not None else 3)
+    start_period_s = float(hc.get("start_period_sec") or 0.0)
+
+    if start_period_s > 0:
+        time.sleep(start_period_s)
+
+    last_err: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            sandbox.exec(command, timeout=timeout_s)
+            logger.info("Healthcheck passed (attempt %d/%d): %s", attempt + 1, retries + 1, command)
+            return
+        except Exception as e:  # non-zero exit / timeout → service not ready yet
+            last_err = e
+            if attempt < retries:
+                time.sleep(interval_s)
+    raise RuntimeError(f"Healthcheck failed after {retries + 1} attempt(s) for command {command!r}: {last_err}")
 
 
 def _setup_task_environment(task: Task, sandbox: Sandbox) -> None:
