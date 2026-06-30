@@ -97,6 +97,52 @@ def test_dppo_tv_gradient_masked_tokens_get_no_grad():
     assert pi.grad[1].item() != 0.0
 
 
+# --------------------------------------------------------------------------- CISPO / GPG
+def test_builtins_include_cispo_gpg():
+    for name in ("cispo", "gpg"):
+        assert name in RLLM_LOSS_REGISTRY
+
+
+def test_cispo_matches_verl_formula():
+    torch.manual_seed(1)
+    n = 64
+    pi = (torch.rand(n) * -2).requires_grad_(True)
+    mu = torch.rand(n) * -2
+    adv = torch.randn(n)
+    eps = 0.2
+    from rllm.trainer.algorithms.loss import cispo
+
+    ctx = LossContext(pi=pi, mu=mu, advantages=adv, action_mask=torch.ones(n), obs_mask=torch.zeros(n), aggregate=_agg_sum, params={"eps_clip": eps})
+    ours, _ = cispo(ctx)
+    # verl reference (core_algos.compute_policy_loss_cispo), summed.
+    ratio = torch.exp(torch.clamp(pi.detach() - mu, -20.0, 20.0))
+    clipped_sg = torch.clamp(ratio, 1 - eps, 1 + eps).detach()
+    verl = (-clipped_sg * adv * pi.detach()).sum()
+    assert torch.allclose(ours.detach(), verl, atol=1e-5)
+
+
+def test_cispo_keeps_gradient_where_ppo_clip_drops_it():
+    # token with ratio > 1+eps and adv > 0: PPO clip zeros its gradient; CISPO does not.
+    from rllm.trainer.algorithms.loss import cispo
+
+    pi = lambda: torch.tensor([float(torch.tensor(0.9).log())], requires_grad=True)  # noqa: E731
+    mu = [float(torch.tensor(0.5).log())]  # ratio = 1.8 > 1.2
+    a, b = pi(), pi()
+    ppo_clip(LossContext(pi=a, mu=torch.tensor(mu), advantages=torch.tensor([1.0]), action_mask=torch.ones(1), obs_mask=torch.zeros(1), aggregate=_agg_sum, params={"eps_clip": 0.2}))[0].backward()
+    cispo(LossContext(pi=b, mu=torch.tensor(mu), advantages=torch.tensor([1.0]), action_mask=torch.ones(1), obs_mask=torch.zeros(1), aggregate=_agg_sum, params={"eps_clip": 0.2}))[0].backward()
+    assert a.grad[0].item() == 0.0  # PPO clip: clipped, no gradient
+    assert b.grad[0].item() != 0.0  # CISPO: gradient still flows through log_prob
+
+
+def test_gpg_is_plain_policy_gradient():
+    from rllm.trainer.algorithms.loss import gpg
+
+    pi = torch.tensor([-0.5, -0.6], requires_grad=True)
+    ctx = LossContext(pi=pi, mu=torch.tensor([-0.5, -0.6]), advantages=torch.tensor([2.0, -1.0]), action_mask=torch.ones(2), obs_mask=torch.zeros(2), aggregate=_agg_sum, params={})
+    loss, _ = gpg(ctx)
+    assert torch.allclose(loss.detach(), (-torch.tensor([2.0, -1.0]) * pi.detach()).sum())
+
+
 # --------------------------------------------------------------------------- ECHO as one loss function
 def test_ppo_clip_env_zero_coef_equals_ppo_clip():
     args = dict(pi=[-0.5, -0.6, -0.7], mu=[-0.5, -0.6, -0.7], adv=[1.0, 1.0, 0.0], action_mask=[1.0, 1.0, 0.0], obs_mask=[0.0, 0.0, 1.0])

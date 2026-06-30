@@ -223,6 +223,31 @@ def dppo_kl(ctx: LossContext):
     return ctx.aggregate(pg, am), {"dppo_kl/mask_frac": mask_frac.item()}
 
 
+@register_loss("cispo")
+def cispo(ctx: LossContext):
+    """CISPO (arXiv:2506.13585, MiniMax-M1): clip the importance-sampling weight with a
+    stop-gradient, but keep **every** token's gradient through ``log_prob`` — no token is
+    dropped (unlike PPO clip, which zeros the gradient of clipped tokens)."""
+    import torch
+
+    eps_lo = float(ctx.params.get("eps_clip", 0.2))
+    eps_hi = ctx.params.get("eps_clip_high")
+    eps_hi = float(eps_hi) if eps_hi is not None else eps_lo
+    ratio = _ratio(ctx)
+    clipped = torch.clamp(ratio, 1.0 - eps_lo, 1.0 + eps_hi)
+    pg = -clipped.detach() * ctx.advantages * ctx.pi
+    am = ctx.action_mask
+    clip_frac = ((ratio != clipped).to(ctx.pi.dtype) * am).sum() / am.sum().clamp(min=1.0)
+    return ctx.aggregate(pg, am), {"cispo/clip_frac": clip_frac.item()}
+
+
+@register_loss("gpg")
+def gpg(ctx: LossContext):
+    """GPG (Group Policy Gradient): clip-free REINFORCE-style policy gradient with
+    group-normalized advantages — ``-advantages * log_prob``."""
+    return ctx.aggregate(-ctx.advantages * ctx.pi, ctx.action_mask), {}
+
+
 @register_loss("ppo_clip_env")
 def ppo_clip_env(ctx: LossContext):
     """ECHO (arXiv:2605.24517) in the verl-style single-loss model: PPO/GRPO plus a
