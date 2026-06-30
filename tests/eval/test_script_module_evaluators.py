@@ -133,16 +133,16 @@ class TestShellScriptEvaluator:
         out = ev.evaluate(task, _episode())
         assert out.reward == 1.0
 
-    def test_no_reward_file_returns_zero(self, tmp_path):
+    def test_no_reward_file_raises(self, tmp_path):
         bench = _bench(tmp_path)
         sb = _FakeSandbox(files={})  # nothing written
         ev = ShellScriptEvaluator(sandbox=sb)
         task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
 
-        out = ev.evaluate(task, _episode())
-        assert out.reward == 0.0
-        assert out.is_correct is False
-        assert "no reward file" in out.metadata.get("error", "")
+        # A missing reward file means the verifier produced no verdict — a verifier/infra
+        # failure, distinct from a legitimate score of 0 — so it surfaces as an error.
+        with pytest.raises(RuntimeError, match="no reward file"):
+            ev.evaluate(task, _episode())
 
     def test_missing_tests_dir_short_circuits(self, tmp_path):
         bench = tmp_path / "bench-no-tests"
