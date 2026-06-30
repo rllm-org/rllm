@@ -69,9 +69,24 @@ def env_key(backend: str, base_image: str, run_commands: list[str], install_scri
 
 
 def env_key_for(task: Task, backend: str, install_script: str = "") -> str:
-    """Fingerprint a task's environment via the shared image/RUN resolution."""
-    from rllm.eval._resolution import _dockerfile_run_commands, _resolve_image, _should_replay_dockerfile
+    """Fingerprint a task's environment via the shared image/RUN resolution.
 
+    Tasks built from the real Dockerfile (``_builds_from_dockerfile``) key on the whole
+    build context — COPYed data included — so tasks sharing a base image + RUN block but
+    differing in COPY (e.g. AWS tasks with different ``ready.d`` seeds) don't collide on one
+    snapshot / warm-queue sandbox. Others key on ``(base image, RUN block)`` as before.
+    """
+    from rllm.eval._resolution import (
+        _builds_from_dockerfile,
+        _dockerfile_context_fingerprint,
+        _dockerfile_run_commands,
+        _resolve_image,
+        _should_replay_dockerfile,
+    )
+
+    dockerfile = _builds_from_dockerfile(task, backend)
+    if dockerfile is not None:
+        return env_key(backend, f"dockerfile:{_dockerfile_context_fingerprint(dockerfile)}", [], install_script)
     run_commands = _dockerfile_run_commands(task) if _should_replay_dockerfile(task) else []
     return env_key(backend, _resolve_image(task, backend), run_commands, install_script)
 
