@@ -244,7 +244,7 @@ class SandboxTaskHooks:
 
     def setup(self, task: Task, agent_flow: AgentFlow, uid: str) -> TaskContext:
         from rllm.engine.agentflow_engine import TaskContext
-        from rllm.eval._resolution import _resolve_backend, _setup_task_environment
+        from rllm.eval._resolution import _resolve_backend, _run_healthcheck, _setup_task_environment
 
         plan = resolve_rollout_plan(task, agent_flow, self.evaluation)
 
@@ -266,6 +266,12 @@ class SandboxTaskHooks:
                         sandbox.exec(install, timeout=getattr(agent_flow, "install_timeout", env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 600)), user="root")
                     except Exception as e:
                         raise RuntimeError(f"Failed to install {getattr(agent_flow, 'name', type(agent_flow).__name__)} in sandbox: {e}") from e
+
+                # Boot any declared service ([environment.healthcheck], e.g. LocalStack)
+                # and wait for readiness before the agent runs — rLLM boots the container
+                # with `sleep infinity`, so the image CMD never starts it. No-op when no
+                # healthcheck is declared (every non-service eval/training task).
+                _run_healthcheck(task, sandbox)
 
             evaluator = self.evaluation.resolve(task, sandbox, plan.verifier_kind, plan.verifier_config)
         except BaseException:

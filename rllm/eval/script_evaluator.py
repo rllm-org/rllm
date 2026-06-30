@@ -130,8 +130,12 @@ def _read_reward_from_sandbox(sandbox: Sandbox, paths: list[str], user: str | No
             logger.debug("Could not read reward from %s: %s", path, e)
             continue
 
-    logger.warning("No reward file found at any of: %s", paths)
-    return EvalOutput(reward=0.0, is_correct=False, metadata={"error": "no reward file found"})
+    # A missing reward file means the verifier produced no verdict — a verifier/infra
+    # failure, NOT a legitimate score of 0 (a correctly-failing verifier writes reward 0).
+    # Raise so it surfaces as an explicit error (the engine maps it to a task error),
+    # distinguishable from an agent that genuinely scored 0. Mirrors harbor's
+    # RewardFileNotFoundError.
+    raise RuntimeError(f"no reward file found at any of: {paths}")
 
 
 def _parse_reward_json(raw: str) -> EvalOutput:
