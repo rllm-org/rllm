@@ -33,9 +33,9 @@ python -m examples.agentcore_math.train_agentcore_math_verl \
     data.max_response_length=2048 \
     +model.name=$MODEL_PATH \
     actor_rollout_ref.model.path=$MODEL_PATH \
-    +actor_rollout_ref.model.lora.rank=16 \
-    +actor_rollout_ref.model.lora.alpha=16 \
-    +actor_rollout_ref.model.lora.merge=true \
+    actor_rollout_ref.model.lora.rank=16 \
+    actor_rollout_ref.model.lora.alpha=16 \
+    actor_rollout_ref.model.lora.merge=true \
     actor_rollout_ref.hybrid_engine=True \
     actor_rollout_ref.actor.optim.lr=2e-5 \
     actor_rollout_ref.actor.ppo_mini_batch_size=64 \
