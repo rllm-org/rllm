@@ -180,6 +180,9 @@ class TestUseSglang:
 
     def test_tool_calls_parsed_to_structured(self, sglang_gateway_noncumulative):
         """The renderer-parsed completion is surfaced as structured tool_calls."""
+        # Needs SGLang's real FunctionCallParser to turn <tool_call> text into a
+        # structured call; sglang is an optional dep, so skip where it's absent.
+        pytest.importorskip("sglang")
         server, _ = sglang_gateway_noncumulative
         oai = openai.OpenAI(base_url=f"{server.url}/sessions/sg-tool/v1", api_key="dummy")
         resp = oai.chat.completions.create(model="mock-model", messages=[{"role": "user", "content": "calc"}], tools=_TOOLS)
@@ -238,6 +241,9 @@ class TestUseSglang:
     def test_streaming_routes_to_generate(self, sglang_gateway_noncumulative):
         """Streaming chat also goes via client tokenize + /generate and emits the
         parsed tool call as chat-format SSE."""
+        # Asserts a structured tool_call in the SSE, which needs SGLang's real
+        # FunctionCallParser; sglang is optional, so skip where it's absent.
+        pytest.importorskip("sglang")
         server, mock_sglang = sglang_gateway_noncumulative
         oai = openai.OpenAI(base_url=f"{server.url}/sessions/sg-stream/v1", api_key="dummy")
         stream = oai.chat.completions.create(model="mock-model", messages=[{"role": "user", "content": "Hello"}], tools=_TOOLS, stream=True)
