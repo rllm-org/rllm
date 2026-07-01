@@ -59,7 +59,10 @@ def build_custom_loss(
     def loss_fn(data, logprobs_list):
         import torch
 
-        def aggregate(per_token, mask):
+        # token-mean within a datum; the cross-datum average below makes the overall
+        # reduction seq-mean-token-mean. ``mode`` is accepted for API parity (GSPO passes
+        # "seq-mean-token-mean", which is already what this composes to).
+        def aggregate(per_token, mask, mode=None):
             return (per_token * mask).sum() / mask.sum().clamp(min=1.0)
 
         total = torch.zeros((), dtype=logprobs_list[0].dtype)
