@@ -24,7 +24,7 @@ from rllm.trainer.algorithms.loss import (
 )
 
 
-def _agg_sum(per_token, mask):
+def _agg_sum(per_token, mask, mode=None):
     """Test aggregator: sum over masked tokens (lets us inspect the raw per-token loss)."""
     return (per_token * mask).sum()
 
@@ -141,6 +141,50 @@ def test_gpg_is_plain_policy_gradient():
     ctx = LossContext(pi=pi, mu=torch.tensor([-0.5, -0.6]), advantages=torch.tensor([2.0, -1.0]), action_mask=torch.ones(2), obs_mask=torch.zeros(2), aggregate=_agg_sum, params={})
     loss, _ = gpg(ctx)
     assert torch.allclose(loss.detach(), (-torch.tensor([2.0, -1.0]) * pi.detach()).sum())
+
+
+# --------------------------------------------------------------------------- GSPO (sequence-level)
+def test_seq_reduce_per_row_broadcast():
+    ctx = LossContext(pi=torch.zeros(2, 3), mu=torch.zeros(2, 3), advantages=torch.zeros(2, 3), action_mask=torch.ones(2, 3), obs_mask=torch.zeros(2, 3), aggregate=_agg_sum)
+    vals = torch.tensor([[1.0, 2.0, 9.0], [3.0, 3.0, 3.0]])
+    mask = torch.tensor([[1.0, 1.0, 0.0], [1.0, 1.0, 1.0]])
+    out = ctx.seq_reduce(vals, mask, "mean")
+    assert out[0].tolist() == [1.5, 1.5, 1.5]  # (1+2)/2, masked token excluded, broadcast
+    assert out[1].tolist() == [3.0, 3.0, 3.0]
+
+
+def test_gspo_matches_verl_formula():
+    from rllm.trainer.algorithms.loss import gspo
+
+    torch.manual_seed(2)
+    pi = (torch.rand(2, 4) * -1).requires_grad_(True)
+    mu = torch.rand(2, 4) * -1
+    adv = torch.randn(2, 1).expand(2, 4).contiguous()  # GRPO: one advantage per sequence
+    mask = torch.tensor([[1.0, 1.0, 1.0, 0.0], [1.0, 1.0, 1.0, 1.0]])
+    eps = 0.2
+    ctx = LossContext(pi=pi, mu=mu, advantages=adv, action_mask=mask, obs_mask=torch.zeros(2, 4), aggregate=_agg_sum, params={"eps_clip": eps})
+    ours, _ = gspo(ctx)
+
+    # verl reference (core_algos.compute_policy_loss_gspo), summed over masked tokens.
+    seq_len = mask.sum(-1).clamp(min=1)
+    neg_kl_seq = ((pi.detach() - mu) * mask).sum(-1) / seq_len
+    log_s = torch.clamp(pi.detach() - pi.detach() + neg_kl_seq.detach().unsqueeze(-1), max=10.0)
+    s = torch.exp(log_s)
+    pg = torch.maximum(-adv * s, -adv * torch.clamp(s, 1 - eps, 1 + eps))
+    ref = (pg * mask).sum()
+    assert torch.allclose(ours.detach(), ref, atol=1e-5)
+
+
+def test_gspo_gradient_flows_per_token():
+    from rllm.trainer.algorithms.loss import gspo
+
+    pi = torch.tensor([[-0.5, -0.6, -0.7]], requires_grad=True)
+    mu = torch.tensor([[-0.4, -0.5, -0.6]])
+    adv = torch.tensor([[1.0, 1.0, 1.0]])
+    mask = torch.tensor([[1.0, 1.0, 1.0]])
+    ctx = LossContext(pi=pi, mu=mu, advantages=adv, action_mask=mask, obs_mask=torch.zeros(1, 3), aggregate=_agg_sum, params={"eps_clip": 0.2})
+    gspo(ctx)[0].backward()
+    assert pi.grad is not None and (pi.grad != 0).all()  # every token in the sequence gets a gradient
 
 
 # --------------------------------------------------------------------------- ECHO as one loss function

@@ -25,10 +25,15 @@ def my_dppo(ctx: rllm.LossContext):
 ```
 
 `LossContext`: `pi, mu, advantages, action_mask, obs_mask, ref, params, aggregate, backend`.
-`ctx.aggregate(per_token, mask) -> scalar` is supplied by each backend (verl: `agg_loss`
-with global-batch normalization; managed: seq-mean-token-mean), so the body is
-backend-agnostic. Built-ins (`rllm/trainer/algorithms/loss.py`): `ppo_clip`, `dppo_tv`,
-`dppo_kl`, `ppo_clip_env`.
+`ctx.aggregate(per_token, mask, mode=None) -> scalar` is supplied by each backend (verl:
+`agg_loss` with global-batch normalization; managed: seq-mean-token-mean); `mode` overrides
+the aggregation (e.g. GSPO forces `seq-mean-token-mean`). For sequence-level losses,
+`ctx.seq_reduce(values, mask, reduction)` reduces per sequence (per row on verl `(B,T)`;
+the whole datum on the managed path) and broadcasts back to tokens.
+
+Built-ins (`rllm/trainer/algorithms/loss.py`): `ppo_clip` (=verl `vanilla`), `cispo`,
+`gpg`, `gspo`, `dppo_tv`, `dppo_kl`, `ppo_clip_env` (ECHO). Each is verified against verl
+0.8's kernel where one exists.
 
 ## Config
 
@@ -86,6 +91,9 @@ The standalone auxiliary-loss framework (`aux_loss.py`, `AuxiliaryLoss`,
 - `mu_source: proximal` not yet wired on the fireworks custom path (falls back to inference).
 - Per-role custom losses (multi-agent) flatten to the global loss on the managed path; verl
   per-role routing is unchanged.
+- `geo_mean` (GMPO) is now expressible via `ctx.seq_reduce` (like `gspo`); `clip_cov`/`kl_cov`
+  need batch-level covariance statistics — verl-clean but the managed per-datum closure would
+  need a batch-level variant first.
 - End-to-end GPU/training validation of the managed and verl trainer wiring (normalization
   vs optim_step, the verl `select(...).to_padded_tensor()` extraction) is pending; the loss
   math and adapters are unit-tested.

@@ -56,7 +56,9 @@ class LossContext:
         advantages: per-token advantage estimates.
         action_mask: 1.0 on assistant/action tokens (the policy gradient).
         obs_mask: 1.0 on environment-observation tokens (e.g. for ECHO).
-        aggregate: ``(per_token_loss, mask) -> scalar`` reducer injected by the backend.
+        aggregate: ``(per_token_loss, mask, mode=None) -> scalar`` reducer injected by the
+            backend. ``mode`` overrides the aggregation (e.g. GSPO forces
+            "seq-mean-token-mean"); None uses the backend/config default.
         ref: reference-policy log-probs for a KL term, or None.
         params: loss hyperparameters (``delta``/``eps_clip``, ``env_loss_coef``, ...).
         backend: "verl" | "tinker" | "fireworks".
@@ -67,10 +69,25 @@ class LossContext:
     advantages: "torch.Tensor"
     action_mask: "torch.Tensor"
     obs_mask: "torch.Tensor"
-    aggregate: Callable[["torch.Tensor", "torch.Tensor"], "torch.Tensor"]
+    aggregate: Callable[..., "torch.Tensor"]
     ref: Optional["torch.Tensor"] = None
     params: dict[str, Any] = field(default_factory=dict)
     backend: str = ""
+
+    def seq_reduce(self, values: "torch.Tensor", mask: "torch.Tensor", reduction: str = "mean") -> "torch.Tensor":
+        """Reduce ``values`` over each sequence (masked) and broadcast back to per-token.
+
+        A "sequence" is one row: verl tensors are ``(batch, seq_len)`` so this reduces over
+        the last dim per row; on the managed per-datum path a datum is one 1-D sequence, so
+        it reduces over the whole vector. Enables sequence-level losses (GSPO/GMPO). The
+        returned tensor has the same shape as ``values`` (each token holds its sequence's
+        reduced value)."""
+        import torch
+
+        summed = (values * mask).sum(dim=-1, keepdim=True)
+        if reduction == "mean":
+            summed = summed / mask.sum(dim=-1, keepdim=True).clamp(min=1.0)
+        return summed.expand_as(values)
 
 
 # A loss: (ctx) -> (scalar_loss, metrics)
@@ -239,6 +256,28 @@ def cispo(ctx: LossContext):
     am = ctx.action_mask
     clip_frac = ((ratio != clipped).to(ctx.pi.dtype) * am).sum() / am.sum().clamp(min=1.0)
     return ctx.aggregate(pg, am), {"cispo/clip_frac": clip_frac.item()}
+
+
+@register_loss("gspo")
+def gspo(ctx: LossContext):
+    """GSPO (arXiv:2507.18071, Qwen): a **sequence-level** importance ratio
+    ``s_i = (π_θ(y_i)/π_old(y_i))^(1/|y_i|)`` (length-normalized), clipped PPO-style and
+    applied to every token. Uses verl's stop-gradient identity so the value is the
+    detached sequence ratio while the gradient flows per-token through ``log_prob``.
+    Aggregated seq-mean-token-mean (forced)."""
+    import torch
+
+    eps_lo = float(ctx.params.get("eps_clip", 0.2))
+    eps_hi = ctx.params.get("eps_clip_high")
+    eps_hi = float(eps_hi) if eps_hi is not None else eps_lo
+    seq_log_ratio = ctx.seq_reduce(ctx.pi - ctx.mu, ctx.action_mask, "mean")  # per-token = seq mean log-ratio
+    # s_{i,t} = sg[s_i] · π_θ,t / sg[π_θ,t]  ⇒  value = seq ratio, gradient flows through pi.
+    log_s = torch.clamp(ctx.pi - ctx.pi.detach() + seq_log_ratio.detach(), max=10.0)
+    s = torch.exp(log_s)
+    pg = torch.maximum(-ctx.advantages * s, -ctx.advantages * torch.clamp(s, 1.0 - eps_lo, 1.0 + eps_hi))
+    am = ctx.action_mask
+    clip_frac = ((-ctx.advantages * torch.clamp(s, 1.0 - eps_lo, 1.0 + eps_hi) > -ctx.advantages * s).to(ctx.pi.dtype) * am).sum() / am.sum().clamp(min=1.0)
+    return ctx.aggregate(pg, am, mode="seq-mean-token-mean"), {"gspo/clip_frac": clip_frac.item()}
 
 
 @register_loss("gpg")
