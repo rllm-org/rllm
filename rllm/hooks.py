@@ -304,6 +304,7 @@ class FixedEvaluatorHooks:
         from rllm.eval._resolution import _adapt_legacy_evaluator
 
         self.evaluator = _adapt_legacy_evaluator(evaluator)
+        self.warm_queue = None
 
     def setup(self, task: Task, agent_flow: AgentFlow, uid: str) -> TaskContext:  # noqa: ARG002
         from rllm.engine.agentflow_engine import TaskContext
