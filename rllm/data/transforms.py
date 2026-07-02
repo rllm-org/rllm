@@ -582,6 +582,34 @@ def hle_transform(row: dict) -> dict | None:
     }
 
 
+def gaia_transform(row: dict) -> dict | None:
+    """Transform a GAIA row to standard QA format.
+
+    GAIA columns: ``task_id``, ``Question``, ``Level``, ``Final answer``,
+    ``file_name``, ``file_path``, ``Annotator Metadata``.
+
+    We integrate the text-only subset: rows that ship an attached file
+    (``file_name`` set) require file-reading tools, so they are skipped
+    (returns ``None``) — mirroring how ``hle_transform`` skips image questions.
+    File-tool support is a follow-up. Scored by ``gaia_reward_fn`` (the official
+    GAIA quasi-exact-match scorer).
+    """
+    question = row.get("Question", "") or ""
+    if not question.strip():
+        return None
+
+    # Skip file-dependent tasks for now (need attachment-reading tools).
+    if (row.get("file_name") or "").strip():
+        return None
+
+    return {
+        "question": question,
+        "ground_truth": row.get("Final answer", "") or "",
+        "level": row.get("Level", ""),
+        "data_source": "gaia",
+    }
+
+
 # ---------------------------------------------------------------------------
 # VLM (Vision Language Model) transforms
 # ---------------------------------------------------------------------------
