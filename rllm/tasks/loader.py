@@ -25,7 +25,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 import tomllib
@@ -34,6 +36,8 @@ from rllm.tasks.dataset_config import DatasetConfig, load_dataset_config
 from rllm.types import Task
 
 logger = logging.getLogger(__name__)
+
+_VLM_IMAGE_DATA_URI_CACHE_SIZE = int(os.environ.get("RLLM_VLM_IMAGE_CACHE_SIZE", "256"))
 
 
 @dataclass
@@ -114,12 +118,11 @@ def _load_data_dataset(
 ) -> BenchmarkResult:
     """Materialised-style dataset: jsonl rows + shared verifier."""
     data_file = _resolve_data_file(path, config)
-    rows = _load_jsonl(data_file)
 
     instruction_field, metadata_fields = _read_dataset_meta(path)
     category = _read_dataset_category(path)
     tasks: list[Task] = []
-    for idx, row in enumerate(rows):
+    for idx, row in enumerate(_iter_jsonl(data_file)):
         text = _render_instruction(path, row, instruction_field)
         if category == "vlm":
             instruction: str | list[dict] = _build_multimodal_instruction(text, row, path)
@@ -248,14 +251,16 @@ def _resolve_data_file(path: Path, config: DatasetConfig) -> Path:
     raise FileNotFoundError(f"No data file found in {path}")
 
 
-def _load_jsonl(path: Path) -> list[dict]:
-    rows = []
+def _iter_jsonl(path: Path) -> Iterator[dict]:
     with path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
-                rows.append(json.loads(line))
-    return rows
+                yield json.loads(line)
+
+
+def _load_jsonl(path: Path) -> list[dict]:
+    return list(_iter_jsonl(path))
 
 
 def _read_dataset_meta(path: Path) -> tuple[str | None, list[str] | None]:
@@ -277,18 +282,73 @@ def _read_dataset_category(path: Path) -> str | None:
     return raw.get("dataset", {}).get("category")
 
 
+@dataclass(frozen=True)
+class _ImageRef:
+    path: Path
+    mime: str
+
+
+class _LazyMultimodalInstruction(list):
+    """List-compatible OpenAI content blocks with lazy image data URI encoding."""
+
+    def __init__(self, text: str, image_refs: list[_ImageRef]):
+        super().__init__()
+        self._text = text
+        self._image_refs = image_refs
+
+    def _materialize(self) -> list[dict]:
+        blocks: list[dict] = [{"type": "text", "text": self._text}]
+        for ref in self._image_refs:
+            try:
+                url = _image_file_to_data_uri(str(ref.path.resolve()), ref.mime)
+            except OSError:
+                logger.warning("Skipping missing/unreadable VLM image: %s", ref.path)
+                continue
+            blocks.append({"type": "image_url", "image_url": {"url": url}})
+        return blocks
+
+    def __iter__(self) -> Iterator[dict]:
+        return iter(self._materialize())
+
+    def __len__(self) -> int:
+        return 1 + len(self._image_refs)
+
+    def __getitem__(self, index):
+        return self._materialize()[index]
+
+    def __bool__(self) -> bool:
+        return True
+
+    def __repr__(self) -> str:
+        refs = [str(ref.path) for ref in self._image_refs]
+        return f"_LazyMultimodalInstruction(text={self._text!r}, images={refs!r})"
+
+    def __eq__(self, other) -> bool:
+        return self._materialize() == other
+
+    def copy(self) -> list[dict]:
+        return self._materialize()
+
+
+@lru_cache(maxsize=_VLM_IMAGE_DATA_URI_CACHE_SIZE)
+def _image_file_to_data_uri(path: str, mime: str) -> str:
+    import base64
+
+    data = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{data}"
+
+
 def _build_multimodal_instruction(text: str, row: dict, bench_dir: Path) -> list[dict]:
     """Construct OpenAI-format multimodal content blocks for VLM tasks.
 
     Picks up image paths from any row column (single string or list of
-    strings) that points at a file under ``bench_dir/images/``. Each
-    image becomes one ``{"type": "image_url", "image_url": {...}}`` block,
-    encoded inline as a base64 data URI.
+    strings) that points at a file under ``bench_dir/images/``. Image files
+    are encoded lazily when the content list is consumed, avoiding eager
+    base64 copies for every loaded task.
     """
-    import base64
     import mimetypes
 
-    blocks: list[dict] = [{"type": "text", "text": text}]
+    image_refs: list[_ImageRef] = []
     seen: set[str] = set()
     for value in row.values():
         candidates: list[str] = []
@@ -308,9 +368,8 @@ def _build_multimodal_instruction(text: str, row: dict, bench_dir: Path) -> list
             mime, _ = mimetypes.guess_type(file_path.name)
             if mime is None:
                 mime = "image/png"
-            data = base64.b64encode(file_path.read_bytes()).decode("ascii")
-            blocks.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}})
-    return blocks
+            image_refs.append(_ImageRef(path=file_path, mime=mime))
+    return _LazyMultimodalInstruction(text, image_refs)
 
 
 def _render_instruction(path: Path, row: dict, instruction_field: str | None) -> str:
