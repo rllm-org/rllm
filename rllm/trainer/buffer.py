@@ -28,7 +28,7 @@ from rllm.trainer.algorithms import (
 from rllm.trainer.algorithms.transform import transform_episodes_to_trajectory_groups
 from rllm.trainer.metrics_aggregator import MetricsAggregator
 from rllm.trainer.sync_coordinator import SyncCoordinator
-from rllm.types import Episode, TerminationReason, TrajectoryGroup
+from rllm.types import INFRA_ERROR_REASONS, Episode, TerminationReason, TrajectoryGroup
 
 logger = logging.getLogger(__name__)
 
@@ -370,6 +370,9 @@ class TrajectoryGroupBuffer:
                     f"episode/termination_reason/{r.value}",
                     1.0 if reason == r else 0.0,
                 )
+            # Aggregate infra/grading-failure rate (sandbox/setup/verifier/grading),
+            # so it's trackable without summing the per-reason series by hand.
+            self._aggregator.record("episode/infra_error", 1.0 if reason in INFRA_ERROR_REASONS else 0.0)
             for k, v in ep.metrics.items():
                 try:
                     self._aggregator.record(f"episode/{k}", float(v))

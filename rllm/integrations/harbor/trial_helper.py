@@ -241,23 +241,6 @@ def trial_result_to_reward(result) -> tuple[float | None, bool, str | None]:
 # Unified single-task execution
 # ---------------------------------------------------------------------------
 
-# Map harbor exception_type strings to rllm TerminationReason.
-_EXCEPTION_TYPE_MAP: dict[str, Any] | None = None
-
-
-def _get_exception_type_map() -> dict[str, Any]:
-    """Lazily build the exception-type → TerminationReason map."""
-    global _EXCEPTION_TYPE_MAP
-    if _EXCEPTION_TYPE_MAP is None:
-        from rllm.types import TerminationReason
-
-        _EXCEPTION_TYPE_MAP = {
-            "AgentTimeoutError": TerminationReason.TIMEOUT,
-            "ContextLengthExceededError": TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED,
-            "OutputLengthExceededError": TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED,
-        }
-    return _EXCEPTION_TYPE_MAP
-
 
 def map_termination_reason(
     finished: bool,
@@ -266,17 +249,17 @@ def map_termination_reason(
 ):
     """Derive TerminationReason from harbor trial outcome.
 
-    Shared by both eval and training paths.
+    Shared by both eval and training paths. Delegates the exception-type
+    rollup to :func:`rllm.types.termination_reason_from_error` so the harbor
+    runtime and the in-sandbox CLI harness classify failures identically.
     """
-    from rllm.types import TerminationReason
+    from rllm.types import TerminationReason, termination_reason_from_error
 
     if finished:
         return TerminationReason.ENV_DONE
     if timed_out:
         return TerminationReason.TIMEOUT
-    if exception_type:
-        return _get_exception_type_map().get(exception_type, TerminationReason.ERROR)
-    return TerminationReason.ERROR
+    return termination_reason_from_error(exception_type, default=TerminationReason.ERROR)
 
 
 @dataclasses.dataclass

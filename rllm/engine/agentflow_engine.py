@@ -35,7 +35,7 @@ from rllm.data.utils import task_from_row
 from rllm.engine.trace_converter import compute_step_metrics, trace_record_to_step
 from rllm.eval.types import EvalOutput
 from rllm.gateway.manager import container_reachable_url
-from rllm.types import AgentConfig, Episode, Step, Task, TerminationReason, Trajectory, flow_accepts_env, run_agent_flow
+from rllm.types import INFRA_ERROR_REASONS, AgentConfig, Episode, Step, Task, TerminationReason, Trajectory, flow_accepts_env, run_agent_flow, termination_reason_from_error
 from rllm.utils import colorful_print
 
 if TYPE_CHECKING:
@@ -48,6 +48,29 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MIN_FD_LIMIT = 8192
+
+
+def _step_returned_nothing(step) -> bool:
+    """True when a model call produced no usable output — empty content AND no tool
+    calls. A dead/erroring upstream (proxy down, API failure) looks like this; a
+    legitimate tool-only turn does not (it carries ``tool_calls``)."""
+    content = (getattr(step.model_output, "content", None) or "").strip() if getattr(step, "model_output", None) else ""
+    if content:
+        return False
+    msgs = getattr(step, "chat_completions", None)
+    last = msgs[-1] if msgs else None
+    tool_calls = last.get("tool_calls") if isinstance(last, dict) else None
+    return not tool_calls
+
+
+def _no_usable_model_output(episode: Episode) -> bool:
+    """The agent produced nothing usable: it made no model calls at all (no
+    traces captured), or every call came back empty. Both are the signature of a
+    downed upstream / unreachable gateway (e.g. the LiteLLM proxy dying, an auth
+    or tunnel failure) — which otherwise looks identical to a clean ENV_DONE with
+    reward 0. A legit failed rollout has real completions, so it isn't flagged."""
+    steps = [s for traj in episode.trajectories for s in traj.steps]
+    return not steps or all(_step_returned_nothing(s) for s in steps)
 
 
 class EnrichMismatchError(RuntimeError):
@@ -533,7 +556,7 @@ class AgentFlowEngine:
 
                     timing_str = _format_timing_breakdown(episode.metrics)
                     colorful_print(
-                        f"[{uid}] Rollout completed. Rewards: [{', '.join(reward_strs)}]{timing_str}, Termination: {episode.termination_reason}",
+                        f"[{uid}] Rewards: [{', '.join(reward_strs)}]{timing_str}, Termination: {episode.termination_reason}",
                         fg="green" if episode.is_correct else "yellow",
                     )
 
@@ -545,6 +568,10 @@ class AgentFlowEngine:
                         continue
                     if self.raise_on_error:
                         raise
+                    # Classify the failure: a phase-tagged reason (e.g. setup →
+                    # SANDBOX_ERROR) wins; otherwise map the exception class name
+                    # (sandbox/harbor errors → their reason) and fall back to ERROR.
+                    reason = getattr(e, "_rllm_termination_reason", None) or termination_reason_from_error(type(e).__name__, default=TerminationReason.ERROR)
                     return (
                         task_id,
                         rollout_idx,
@@ -553,8 +580,8 @@ class AgentFlowEngine:
                             id=uid,
                             task=task_for_episode,
                             is_correct=False,
-                            termination_reason=TerminationReason.ERROR,
-                            metadata={"error": {"message": str(e)}},
+                            termination_reason=reason,
+                            metadata={"error": {"message": str(e), "error_type": type(e).__name__}},
                         ),
                     )
 
@@ -628,13 +655,25 @@ class AgentFlowEngine:
 
         # Offload hook setup (blocking Modal/docker I/O) to the executor.
         t = time.perf_counter()
-        ctx: TaskContext = await loop.run_in_executor(
-            self.executor,
-            self.hooks.setup,
-            task_obj,
-            self.agent_flow,
-            uid,
-        )
+        try:
+            ctx: TaskContext = await loop.run_in_executor(
+                self.executor,
+                self.hooks.setup,
+                task_obj,
+                self.agent_flow,
+                uid,
+            )
+        except BaseException as e:
+            # Setup is sandbox provisioning + per-task verifier resolution — a
+            # failure here is infra, not the policy. Tag it so the retry path
+            # classifies SANDBOX_ERROR instead of a generic ERROR (unless the
+            # exception name already maps to a more specific reason).
+            try:
+                if getattr(e, "_rllm_termination_reason", None) is None:
+                    e._rllm_termination_reason = TerminationReason.SANDBOX_ERROR
+            except Exception:
+                pass
+            raise
         _timings["time/setup_s"] = time.perf_counter() - t
 
         try:
@@ -738,9 +777,28 @@ class AgentFlowEngine:
         for signal in eval_output.signals:
             enriched.metrics[signal.name] = signal.value
 
-        # Harness sets TIMEOUT/ERROR itself; a clean exit is ENV_DONE. (Length /
-        # turn-cap aren't reliably recoverable from gateway traces on this path.)
-        if enriched.termination_reason is None:
+        if _no_usable_model_output(enriched) and not enriched.is_correct and enriched.termination_reason not in INFRA_ERROR_REASONS:
+            # The agent produced nothing usable — no LLM calls at all, or every
+            # call came back empty: a downed/erroring upstream (proxy died, auth or
+            # tunnel failure), NOT a clean rollout. The reward (0) is meaningless;
+            # this is the root cause, so it beats a downstream grading_error and the
+            # ENV_DONE default. (A harness-set infra reason already wins, above; a
+            # *correct* rollout is never reclassified.)
+            enriched.termination_reason = TerminationReason.MODEL_ERROR
+            enriched.metadata.setdefault("error", {"error_type": "EmptyCompletion", "message": "no usable model output — no LLM calls or all completions empty (upstream/proxy/gateway failure)"})
+        elif eval_output.error:
+            # Grading ITSELF failed (verifier timeout/crash, missing/empty/unparseable
+            # reward file, tests-dir upload). The reward is not a real task score, so
+            # route it to an infra TerminationReason (VERIFIER_TIMEOUT for a known
+            # phase, else GRADING_ERROR) — training filters it and eval counts it as
+            # an error. Don't clobber a harness-set infra reason (e.g. the agent
+            # already SANDBOX_ERROR'd): that's the root cause, first-write-wins.
+            if enriched.termination_reason not in INFRA_ERROR_REASONS:
+                enriched.termination_reason = termination_reason_from_error(eval_output.error, default=TerminationReason.GRADING_ERROR)
+            enriched.metadata.setdefault("error", {"error_type": eval_output.error, "message": eval_output.metadata.get("error", "")})
+        elif enriched.termination_reason is None:
+            # Harness sets TIMEOUT/ERROR itself; a clean exit is ENV_DONE. (Length /
+            # turn-cap aren't reliably recoverable from gateway traces on this path.)
             enriched.termination_reason = TerminationReason.ENV_DONE
         return enriched
 

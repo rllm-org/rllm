@@ -15,7 +15,7 @@ def test_configure_applies_known_overrides_and_returns_leftovers():
     # no overrides → defaults untouched, nothing left over.
     assert flow.configure({}) == {}
     assert flow.sandbox_backend == "docker"
-    assert flow.max_concurrent == 4
+    assert flow.max_concurrent == 64  # class default (raised from 4 upstream)
 
     leftovers = flow.configure({"sandbox_backend": "daytona", "sandbox_concurrency": 2, "made_up_flag": 1})
     assert flow.sandbox_backend == "daytona"
