@@ -79,10 +79,7 @@ def test_session_path_delivers_past_nat_drop_line(live_sandbox):
     out = live_sandbox.exec(f"sleep {DROP_LINE_SLEEP_S}; echo DELIVERED", timeout=600)
     wall = time.monotonic() - t0
     assert "DELIVERED" in out
-    assert wall < DROP_LINE_SLEEP_S + 60, (
-        f"exec returned only after {wall:.0f}s for a {DROP_LINE_SLEEP_S}s command — "
-        "completion was lost and recovered by a timeout, not delivered"
-    )
+    assert wall < DROP_LINE_SLEEP_S + 60, f"exec returned only after {wall:.0f}s for a {DROP_LINE_SLEEP_S}s command — completion was lost and recovered by a timeout, not delivered"
 
 
 @requires_daytona
@@ -98,7 +95,4 @@ def test_keepalive_keeps_one_shot_alive_past_drop_line(live_sandbox, monkeypatch
     out = live_sandbox.exec(f"sleep {DROP_LINE_SLEEP_S}; echo KA_DELIVERED", timeout=600)
     wall = time.monotonic() - t0
     assert "KA_DELIVERED" in out
-    assert wall < DROP_LINE_SLEEP_S + 60, (
-        f"one-shot exec with keepalive returned only after {wall:.0f}s — "
-        "keepalive did not keep the flow alive"
-    )
+    assert wall < DROP_LINE_SLEEP_S + 60, f"one-shot exec with keepalive returned only after {wall:.0f}s — keepalive did not keep the flow alive"

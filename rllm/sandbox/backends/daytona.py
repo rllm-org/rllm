@@ -86,6 +86,7 @@ def _enable_tcp_keepalive(client) -> None:
     except Exception:
         logger.warning("Could not enable TCP keepalive on Daytona SDK pools (SDK internals changed?)", exc_info=True)
 
+
 # atexit-tracked sandboxes; terminated on process exit to avoid leaks.
 _LIVE_SANDBOXES: weakref.WeakSet = weakref.WeakSet()
 _LIVE_LOCK = threading.Lock()
@@ -457,10 +458,7 @@ class DaytonaSandbox:
                     # exit-124 path below, where the shell `timeout` killed the
                     # command and reported back). The command may have finished
                     # and its completion been lost in transport — say so.
-                    raise SandboxCommandTimeout(
-                        f"No exec response within {int(timeout) + 60}s in sandbox {self.name} "
-                        f"(command may have completed; response lost in transport): {command[:200]}"
-                    ) from e
+                    raise SandboxCommandTimeout(f"No exec response within {int(timeout) + 60}s in sandbox {self.name} (command may have completed; response lost in transport): {command[:200]}") from e
                 raise
             stdout = response.result or ""
             exit_code = response.exit_code
