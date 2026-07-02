@@ -138,6 +138,30 @@ def test_run_marks_error_on_cli_failure():
     assert "message" in result.metadata["error"]
 
 
+def test_run_marks_sandbox_error_when_box_died_mid_run():
+    """A dead sandbox surfaces as a generic exec failure; the is_alive() probe
+    distinguishes it from a benign CLI crash and marks SANDBOX_ERROR (infra)."""
+    h = OpenCodeHarness()
+    sandbox = FakeSandbox(fail_on_substring="opencode --model")
+    sandbox.is_alive = lambda: False  # box is gone
+
+    result = h.run(_make_task(), _make_config(), env=sandbox)
+
+    assert result.termination_reason == TerminationReason.SANDBOX_ERROR
+    assert result.metadata["error"]["error_type"] == "RuntimeError"
+
+
+def test_run_marks_error_when_cli_failed_but_box_alive():
+    """A non-zero CLI exit on a *live* box stays ERROR, not SANDBOX_ERROR."""
+    h = OpenCodeHarness()
+    sandbox = FakeSandbox(fail_on_substring="opencode --model")
+    sandbox.is_alive = lambda: True  # box is healthy; the agent just failed
+
+    result = h.run(_make_task(), _make_config(), env=sandbox)
+
+    assert result.termination_reason == TerminationReason.ERROR
+
+
 def test_run_marks_timeout_on_budget_exhaustion():
     """Hitting the wall-clock budget (SandboxCommandTimeout) is expected, not a
     failure: the captured steps are still scored, and the run is marked TIMEOUT
@@ -150,6 +174,63 @@ def test_run_marks_timeout_on_budget_exhaustion():
     assert isinstance(result, Episode)
     assert result.termination_reason == TerminationReason.TIMEOUT
     assert "error" not in result.metadata
+
+
+# ---------------------------------------------------------------------------
+# Outcome sentinel (in-sandbox driver verdict) + wall-clock backstop. A driver
+# like terminus2 records why it stopped; run() trusts that over the exit code
+# (which ``| tee`` masks). Without a sentinel, an exec that ran ~to the budget
+# is classified TIMEOUT regardless of a masked clean-looking exit.
+# ---------------------------------------------------------------------------
+
+
+class _DriverHarness(OpenCodeHarness):
+    """OpenCode harness with a stubbed driver outcome, to drive run()'s sentinel path."""
+
+    outcome: dict | None = None
+
+    def _read_outcome(self, sandbox):  # type: ignore[override]
+        return self.outcome
+
+
+def test_run_sentinel_agent_timeout_maps_to_timeout():
+    h = _DriverHarness()
+    h.outcome = {"exception_type": "AgentTimeoutError", "message": "Agent execution timed out after 60.0s"}
+    result = h.run(_make_task(), _make_config(), env=FakeSandbox())
+    assert result.termination_reason == TerminationReason.TIMEOUT
+
+
+def test_run_sentinel_verifier_timeout_distinct_from_agent_timeout():
+    h = _DriverHarness()
+    h.outcome = {"exception_type": "VerifierTimeoutError", "message": "verifier timed out"}
+    result = h.run(_make_task(), _make_config(), env=FakeSandbox())
+    assert result.termination_reason == TerminationReason.VERIFIER_TIMEOUT
+    assert result.metadata["error"]["error_type"] == "VerifierTimeoutError"
+
+
+def test_run_sentinel_clean_finish_beats_elapsed_backstop(monkeypatch):
+    """A driver that finished cleanly is ENV_DONE even past the wall clock —
+    the sentinel is authoritative, so the elapsed heuristic must not fire."""
+    import rllm.harnesses.cli_harness as mod
+
+    ticks = iter([0.0, 10_000.0])
+    monkeypatch.setattr(mod.time, "monotonic", lambda: next(ticks))
+    h = _DriverHarness()
+    h.outcome = {}  # sentinel present, no exception → clean finish
+    result = h.run(_make_task(), _make_config(), env=FakeSandbox())
+    assert result.termination_reason is None  # ENV_DONE, not TIMEOUT
+
+
+def test_run_elapsed_backstop_marks_timeout_when_exit_masked(monkeypatch):
+    """No sentinel + ran ~to the budget with a clean-looking exit (the ``| tee``
+    masking case) → TIMEOUT, reconstructed from the clock."""
+    import rllm.harnesses.cli_harness as mod
+
+    ticks = iter([0.0, 10_000.0])  # elapsed >> 0.95 * run_timeout
+    monkeypatch.setattr(mod.time, "monotonic", lambda: next(ticks))
+    h = OpenCodeHarness()  # base harness writes no sentinel
+    result = h.run(_make_task(), _make_config(), env=FakeSandbox())
+    assert result.termination_reason == TerminationReason.TIMEOUT
 
 
 @pytest.mark.parametrize(
@@ -609,3 +690,47 @@ def test_gateway_api_key_resolution(monkeypatch, metadata: dict, env_value: str 
     config = AgentConfig(base_url="http://gw/v1", model="gpt-4o", session_uid="eval-0", metadata=metadata)
 
     assert BaseCliHarness.gateway_api_key(config, "OPENAI_API_KEY") == expected
+
+
+# ---------------------------------------------------------------------------
+# Exec timeout + sentinel: a SandboxCommandTimeout does not necessarily mean
+# the agent spent its budget — the backend may have lost the exec completion
+# in transport (e.g. a NAT dropping the idle long-poll; 2026-07-01). The
+# sentinel is authoritative there too.
+# ---------------------------------------------------------------------------
+
+
+def test_run_exec_timeout_with_clean_sentinel_recovers_env_done():
+    """Transport-lost completion: exec 'timed out' but the driver finished
+    cleanly → ENV_DONE with an ExecCompletionLost audit marker, not TIMEOUT."""
+    h = _DriverHarness()
+    h.outcome = {}  # sentinel present, no exception → driver finished fine
+    sandbox = FakeSandbox(timeout_on_substring="opencode --model")
+
+    result = h.run(_make_task(), _make_config(), env=sandbox)
+
+    assert result.termination_reason is None  # ENV_DONE
+    assert result.metadata["error"]["error_type"] == "ExecCompletionLost"
+
+
+def test_run_exec_timeout_with_typed_sentinel_maps_reason():
+    """Exec timeout + a typed driver verdict → the verdict's reason wins."""
+    h = _DriverHarness()
+    h.outcome = {"exception_type": "AgentTimeoutError", "message": "budget spent"}
+    sandbox = FakeSandbox(timeout_on_substring="opencode --model")
+
+    result = h.run(_make_task(), _make_config(), env=sandbox)
+
+    assert result.termination_reason == TerminationReason.TIMEOUT
+    assert result.metadata["error"]["error_type"] == "AgentTimeoutError"
+
+
+def test_run_exec_timeout_without_sentinel_stays_timeout():
+    """No sentinel to consult → the exec timeout is taken at face value."""
+    h = _DriverHarness()
+    h.outcome = None
+    sandbox = FakeSandbox(timeout_on_substring="opencode --model")
+
+    result = h.run(_make_task(), _make_config(), env=sandbox)
+
+    assert result.termination_reason == TerminationReason.TIMEOUT

@@ -31,13 +31,14 @@ from __future__ import annotations
 import logging
 import os
 import shlex
+import time
 import uuid
 from abc import abstractmethod
 
 from rllm.env import env_int
 from rllm.sandbox.protocol import Sandbox, SandboxCommandTimeout
 from rllm.sandbox.sandboxed_flow import SandboxedAgentFlow
-from rllm.types import AgentConfig, Episode, Task, TerminationReason, Trajectory
+from rllm.types import AgentConfig, Episode, Task, TerminationReason, Trajectory, termination_reason_from_error
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,12 @@ class BaseCliHarness(SandboxedAgentFlow):
     # unset, the task's own agent_timeout governs (so eval honors each
     # benchmark's per-task budget). Captured at import; configure() flips it on.
     run_timeout_is_cap: bool = "RLLM_HARNESS_RUN_TIMEOUT_S" in os.environ
+    # Grace added to the *exec* timeout over the agent's budget so an in-sandbox
+    # driver that self-limits at the budget (terminus2) has time to record its
+    # outcome and exit cleanly before the backend SIGKILLs the exec. The agent
+    # still only "feels" ``_effective_timeout``; this just keeps the kill from
+    # racing the sentinel write.
+    timeout_grace_s: int = env_int("RLLM_HARNESS_TIMEOUT_GRACE_S", 60)
 
     def configure(self, overrides: dict) -> dict:
         """Consume CLI overrides this harness understands, then defer to the base.
@@ -113,6 +120,33 @@ class BaseCliHarness(SandboxedAgentFlow):
             exports = "; ".join(f"export {k}={shlex.quote(v)}" for k, v in env.items() if v is not None)
             command = f"{exports}; {command}"
         return sandbox.exec(command, timeout=timeout, user=self.agent_user)
+
+    def _effective_timeout(self, task: Task) -> float:
+        """The agent's wall-clock budget for this task, in seconds.
+
+        The task's own ``agent_timeout`` applies, but an operator-set
+        ``RLLM_HARNESS_RUN_TIMEOUT_S`` / ``--agent-timeout`` is a hard ceiling
+        over it (``run_timeout_is_cap``). Shared by :meth:`run` (to size the
+        exec timeout + classify a wall-clock kill) and by harnesses that hand
+        the same budget to an in-sandbox driver.
+        """
+        per_task = task.metadata.get("agent_timeout")
+        if per_task is None:
+            return float(self.run_timeout)
+        if self.run_timeout_is_cap:
+            return min(float(per_task), float(self.run_timeout))
+        return float(per_task)
+
+    def _read_outcome(self, sandbox: Sandbox) -> dict | None:
+        """Structured outcome an in-sandbox driver may have written.
+
+        Returns ``{"exception_type": str|None, "message": str}`` when a driver
+        recorded one (an empty ``exception_type`` means it finished cleanly), or
+        ``None`` when there's no sentinel — in which case :meth:`run` falls back
+        to the elapsed-vs-budget heuristic. Base CLI harnesses run an opaque
+        binary and write nothing, so this is ``None``; terminus2 overrides it.
+        """
+        return None
 
     @staticmethod
     def infer_provider(model_name: str) -> str:
@@ -330,34 +364,98 @@ class BaseCliHarness(SandboxedAgentFlow):
         self.write_configs(sandbox, task, config, env_vars)
 
         instruction = str(task.instruction).strip()
-        # The task's own agent_timeout (from task.toml) applies, but an
-        # operator-set RLLM_HARNESS_RUN_TIMEOUT_S / --agent-timeout is a hard
-        # ceiling over it — otherwise a task declaring e.g. 3600s would ignore a
-        # 1800s cap meant to bound training-rollout wall-clock.
-        per_task = task.metadata.get("agent_timeout")
-        if per_task is None:
-            timeout = float(self.run_timeout)
-        elif self.run_timeout_is_cap:
-            timeout = min(float(per_task), float(self.run_timeout))
-        else:
-            timeout = float(per_task)
+        budget = self._effective_timeout(task)
+        # Give the exec a grace window over the agent's budget: a driver that
+        # self-limits at ``budget`` (terminus2) gets to record its outcome before
+        # this kills it. Harnesses without a driver just get a slightly later
+        # hard kill, which the elapsed backstop below still classifies as TIMEOUT.
+        exec_timeout = budget + self.timeout_grace_s
         cmd = self.build_invocation(instruction, task, config)
 
+        start = time.monotonic()
         try:
-            self._exec_agent(sandbox, cmd, timeout=timeout, env=env_vars)
+            self._exec_agent(sandbox, cmd, timeout=exec_timeout, env=env_vars)
         except SandboxCommandTimeout as e:
-            # Expected, not a failure: the agent spent its budget and the captured
-            # steps are still scored. TIMEOUT lets compact filtering skip it.
-            logger.info("%s reached its time budget: %s", type(self).__name__, e)
+            # The exec ended at the wall — either the agent really spent its
+            # budget, or the backend lost the command's completion (e.g. a
+            # dropped long-poll connection) and only its client-side timer
+            # fired. The driver's sentinel survives either way and is
+            # authoritative: a clean sentinel means the agent finished fine.
+            logger.info("%s exec ended at the wall: %s", type(self).__name__, e)
+            outcome = self._read_outcome(sandbox)
+            if outcome is not None:
+                exc_type = outcome.get("exception_type")
+                if not exc_type:
+                    # Transport loss: the driver finished cleanly but the exec's
+                    # completion never reached us. Label ENV_DONE (reward is
+                    # valid) and leave an audit marker in episode metadata —
+                    # not an infra error, but it must be visible in tracking.
+                    logger.warning(
+                        "%s exec hit the wall but the sentinel shows a clean finish — the backend lost the exec completion in transport (recovered; labeling ENV_DONE)",
+                        type(self).__name__,
+                    )
+                    return self._outcome_episode(
+                        task,
+                        termination_reason=None,
+                        error={"error_type": "ExecCompletionLost", "message": f"exec completion lost in transport; recovered via sentinel: {e}"},
+                    )
+                reason = termination_reason_from_error(exc_type, default=TerminationReason.TIMEOUT)
+                logger.info("%s outcome after exec timeout: %s -> %s", type(self).__name__, exc_type, reason)
+                return self._outcome_episode(
+                    task,
+                    termination_reason=reason,
+                    error={"message": outcome.get("message", ""), "error_type": exc_type},
+                )
+            # No sentinel: the driver really was killed at the wall.
+            # Captured steps are still scored; TIMEOUT lets compact filtering skip it.
             return self._outcome_episode(task, termination_reason=TerminationReason.TIMEOUT)
         except Exception as e:
-            # Traces up to the failure still drive enrichment; mark ERROR.
-            logger.warning("%s execution failed: %s", type(self).__name__, e)
+            # The backend collapses "sandbox died mid-run" and "the CLI exited
+            # non-zero on a live box" into the same generic exception, so probe
+            # liveness to tell them apart: a dead box is infra (SANDBOX_ERROR,
+            # reward untrustworthy), a non-zero exit on a live box is ERROR.
+            # Traces up to the failure still drive enrichment either way.
+            reason = TerminationReason.ERROR
+            alive = getattr(sandbox, "is_alive", None)
+            if callable(alive):
+                try:
+                    if not alive():
+                        reason = TerminationReason.SANDBOX_ERROR
+                except Exception:  # is_alive must not raise, but never let the probe mask the real failure
+                    logger.debug("is_alive probe raised after exec failure", exc_info=True)
+            logger.warning("%s execution failed (%s): %s", type(self).__name__, reason.value, e)
             return self._outcome_episode(
                 task,
-                termination_reason=TerminationReason.ERROR,
+                termination_reason=reason,
                 error={"message": str(e), "error_type": type(e).__name__},
             )
+        elapsed = time.monotonic() - start
 
-        # Clean exit: the engine marks this ENV_DONE.
+        # Prefer the driver's own verdict when it left one: it knows whether the
+        # agent declared completion or hit a phase timeout (AgentTimeoutError,
+        # ContextLengthExceededError, ...). A masked exit code (e.g. ``| tee``
+        # swallowing the kill) can't be trusted, so the sentinel — not the exit
+        # status — is authoritative when present.
+        outcome = self._read_outcome(sandbox)
+        if outcome is not None:
+            exc_type = outcome.get("exception_type")
+            if exc_type:
+                reason = termination_reason_from_error(exc_type, default=TerminationReason.ERROR)
+                logger.info("%s outcome: %s -> %s", type(self).__name__, exc_type, reason)
+                return self._outcome_episode(
+                    task,
+                    termination_reason=reason,
+                    error={"message": outcome.get("message", ""), "error_type": exc_type},
+                )
+            # Driver finished cleanly (declared done) → ENV_DONE, even past the wall.
+            return self._outcome_episode(task, termination_reason=None)
+
+        # No sentinel (opaque CLI, or the driver was killed before writing one):
+        # an exec that ran essentially to the wall is a wall-clock timeout whose
+        # exit code got masked — the failure mode this backstop exists to catch.
+        if budget > 0 and elapsed >= budget * 0.95:
+            logger.info("%s ran to its wall-clock budget (%.0fs/%.0fs) with no clean exit; marking TIMEOUT", type(self).__name__, elapsed, budget)
+            return self._outcome_episode(task, termination_reason=TerminationReason.TIMEOUT)
+
+        # Clean exit well within budget: the engine marks this ENV_DONE.
         return self._outcome_episode(task, termination_reason=None)

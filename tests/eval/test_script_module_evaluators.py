@@ -133,16 +133,18 @@ class TestShellScriptEvaluator:
         out = ev.evaluate(task, _episode())
         assert out.reward == 1.0
 
-    def test_no_reward_file_raises(self, tmp_path):
+    def test_no_reward_file_is_infra_error_not_score_zero(self, tmp_path):
         bench = _bench(tmp_path)
         sb = _FakeSandbox(files={})  # nothing written
         ev = ShellScriptEvaluator(sandbox=sb)
         task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
 
         # A missing reward file means the verifier produced no verdict — a verifier/infra
-        # failure, distinct from a legitimate score of 0 — so it surfaces as an error.
-        with pytest.raises(RuntimeError, match="no reward file"):
-            ev.evaluate(task, _episode())
+        # failure, distinct from a legitimate score of 0 — so it surfaces as a typed
+        # grading error (was a bare RuntimeError before the error taxonomy).
+        out = ev.evaluate(task, _episode())
+        assert out.error == "RewardFileNotFoundError"
+        assert out.is_correct is False
 
     def test_missing_tests_dir_short_circuits(self, tmp_path):
         bench = tmp_path / "bench-no-tests"
@@ -154,6 +156,72 @@ class TestShellScriptEvaluator:
         out = ev.evaluate(task, _episode())
         assert out.reward == 0.0
         assert "no" in out.metadata.get("error", "")
+        assert out.error == "AddTestsDirError"
+
+
+class TestShellScriptEvaluatorErrorTagging:
+    """Grading-infra failures set EvalOutput.error (Harbor-aligned) so the engine
+    routes them to an infra TerminationReason instead of a spurious reward 0."""
+
+    def test_verifier_timeout_tagged(self, tmp_path):
+        from rllm.sandbox.protocol import SandboxCommandTimeout
+
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={})
+        base_exec = sb.exec
+
+        def exec_with_verifier_timeout(cmd, timeout=None, user=None):
+            if "/tests/test.sh" in cmd:
+                raise SandboxCommandTimeout("verifier timed out")
+            return base_exec(cmd, timeout=timeout, user=user)
+
+        sb.exec = exec_with_verifier_timeout
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert out.error == "VerifierTimeoutError"
+        assert out.reward == 0.0
+
+    def test_no_reward_file_tagged(self, tmp_path):
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={})
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert out.error == "RewardFileNotFoundError"
+
+    def test_empty_reward_file_tagged(self, tmp_path):
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": ""})  # present but empty
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert out.error == "RewardFileEmptyError"
+
+    def test_unparseable_reward_tagged(self, tmp_path):
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={"/logs/verifier/reward.json": "not-json{{"})
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert out.error == "VerifierOutputParseError"
+
+    def test_upload_failure_tagged(self, tmp_path):
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={})
+
+        def boom(src, dst):
+            raise RuntimeError("upload failed")
+
+        sb.upload_dir = boom
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert out.error == "AddTestsDirError"
+
+    def test_legit_zero_is_not_tagged(self, tmp_path):
+        """A real reward of 0 (verifier ran, wrote 0) is NOT an error."""
+        bench = _bench(tmp_path)
+        sb = _FakeSandbox(files={"/logs/verifier/reward.txt": "0.0"})
+        task = Task(id="0", instruction="", metadata={}, dataset_dir=bench)
+        out = ShellScriptEvaluator(sandbox=sb).evaluate(task, _episode())
+        assert out.reward == 0.0
+        assert out.error is None
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +314,8 @@ def evaluate(metadata, trajectory):
         assert out.reward == 0.0
         assert out.is_correct is False
         assert "boom" in out.metadata["error"]
+        # The exception class is carried so the engine can route it to GRADING_ERROR.
+        assert out.error == "RuntimeError"
 
 
 # ---------------------------------------------------------------------------

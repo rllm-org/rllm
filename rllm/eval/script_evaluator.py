@@ -16,7 +16,7 @@ import logging
 from pathlib import Path
 
 from rllm.eval.types import EvalOutput, Signal
-from rllm.sandbox.protocol import Sandbox
+from rllm.sandbox.protocol import Sandbox, SandboxCommandTimeout
 from rllm.types import Episode, Task
 
 logger = logging.getLogger(__name__)
@@ -59,6 +59,7 @@ class ShellScriptEvaluator:
             return EvalOutput(
                 reward=0.0,
                 is_correct=False,
+                error="AddTestsDirError",
                 metadata={"error": f"no {tests_dir} directory"},
             )
 
@@ -70,13 +71,25 @@ class ShellScriptEvaluator:
         except Exception:
             pass
 
-        # Upload to /tests/ (Harbor convention — scripts may reference /tests/*.py)
-        self.sandbox.upload_dir(str(tests_dir), "/tests")
+        # Upload to /tests/ (Harbor convention — scripts may reference /tests/*.py).
+        # A failed upload means the verifier can't run — a grading-infra failure,
+        # not a task score; tag it so the engine doesn't read it as reward 0.
+        try:
+            self.sandbox.upload_dir(str(tests_dir), "/tests")
+        except Exception as e:
+            logger.warning("Failed to upload tests dir for %s: %s", task.id, e)
+            return EvalOutput(
+                reward=0.0,
+                is_correct=False,
+                error="AddTestsDirError",
+                metadata={"error": f"failed to upload tests dir: {e}"},
+            )
 
         if not (tests_dir / script_name).exists():
             return EvalOutput(
                 reward=0.0,
                 is_correct=False,
+                error="AddTestsDirError",
                 metadata={"error": f"verifier script {script_name} not found in {tests_dir}"},
             )
 
@@ -92,6 +105,18 @@ class ShellScriptEvaluator:
                 f"chmod +x /tests/{script_name} && {cd_prefix}/tests/{script_name}",
                 timeout=self.verifier_timeout,
                 user=v_user,
+            )
+        except SandboxCommandTimeout as e:
+            # The verifier itself blew its time budget — a grading-infra
+            # failure, NOT "agent scored 0". Tag it (Harbor's VerifierTimeoutError)
+            # so the engine routes it to VERIFIER_TIMEOUT and training drops the
+            # untrustworthy reward instead of training on a spurious zero.
+            logger.warning("Verifier timed out after %ss for %s: %s", self.verifier_timeout, task.id, e)
+            return EvalOutput(
+                reward=0.0,
+                is_correct=False,
+                error="VerifierTimeoutError",
+                metadata={"error": f"verifier timed out after {self.verifier_timeout}s"},
             )
         except Exception as e:
             # Verifier exit != 0 is the *expected* outcome when an agent
@@ -113,29 +138,51 @@ class ShellScriptEvaluator:
 
 
 def _read_reward_from_sandbox(sandbox: Sandbox, paths: list[str], user: str | None = None) -> EvalOutput:
-    """Try reading reward from the sandbox at each path in order."""
+    """Try reading reward from the sandbox at each path in order.
+
+    Distinguishes grading-infra failures from a legitimate ``reward=0`` by
+    setting :attr:`EvalOutput.error` (Harbor-aligned names): an unparseable
+    file → ``VerifierOutputParseError``, an empty file → ``RewardFileEmptyError``,
+    no file at all → ``RewardFileNotFoundError``. The engine promotes these to
+    ``GRADING_ERROR`` so the untrustworthy reward is filtered from training.
+    """
+    saw_empty = False
     for path in paths:
         try:
             check = sandbox.exec(f"test -f {path} && echo yes || echo no", timeout=10, user=user).strip()
             if check != "yes":
                 continue
             raw = sandbox.exec(f"cat {path}", timeout=10, user=user).strip()
-            if not raw:
-                continue
+        except Exception as e:
+            logger.debug("Could not read reward from %s: %s", path, e)
+            continue
+        if not raw:
+            saw_empty = True
+            continue
+        try:
             if path.endswith(".txt"):
                 reward = float(raw)
                 return EvalOutput(reward=reward, is_correct=reward >= 1.0)
             return _parse_reward_json(raw)
         except Exception as e:
-            logger.debug("Could not read reward from %s: %s", path, e)
-            continue
+            logger.warning("Could not parse reward file %s: %s", path, e)
+            return EvalOutput(
+                reward=0.0,
+                is_correct=False,
+                error="VerifierOutputParseError",
+                metadata={"error": f"could not parse reward file {path}: {e}"},
+            )
 
-    # A missing reward file means the verifier produced no verdict — a verifier/infra
-    # failure, NOT a legitimate score of 0 (a correctly-failing verifier writes reward 0).
-    # Raise so it surfaces as an explicit error (the engine maps it to a task error),
-    # distinguishable from an agent that genuinely scored 0. Mirrors harbor's
-    # RewardFileNotFoundError.
-    raise RuntimeError(f"no reward file found at any of: {paths}")
+    # A missing reward file means the verifier produced no verdict — a verifier/
+    # infra failure, NOT a legitimate score of 0 (a correctly-failing verifier
+    # writes reward 0). Surface it as a typed grading error (Harbor-aligned
+    # names) so the engine promotes it to GRADING_ERROR and the untrustworthy
+    # reward is filtered, distinguishable from an agent that genuinely scored 0.
+    if saw_empty:
+        logger.warning("Reward file present but empty at one of: %s", paths)
+        return EvalOutput(reward=0.0, is_correct=False, error="RewardFileEmptyError", metadata={"error": "reward file present but empty"})
+    logger.warning("No reward file found at any of: %s", paths)
+    return EvalOutput(reward=0.0, is_correct=False, error="RewardFileNotFoundError", metadata={"error": "no reward file found"})
 
 
 def _parse_reward_json(raw: str) -> EvalOutput:
