@@ -92,7 +92,15 @@ def test_keepalive_keeps_one_shot_alive_past_drop_line(live_sandbox, monkeypatch
 
     monkeypatch.setattr(daytona_mod, "_SESSION_EXEC_THRESHOLD_S", 10_000.0)
     t0 = time.monotonic()
-    out = live_sandbox.exec(f"sleep {DROP_LINE_SLEEP_S}; echo KA_DELIVERED", timeout=600)
+    try:
+        out = live_sandbox.exec(f"sleep {DROP_LINE_SLEEP_S}; echo KA_DELIVERED", timeout=600)
+    except Exception as e:
+        wall = time.monotonic() - t0
+        if wall < DROP_LINE_SLEEP_S and "timed out" not in str(e).lower():
+            # A fast server-side 5xx is a Daytona blip, not the delivery-loss
+            # regression this test guards (loss = hanging to the read timeout).
+            pytest.skip(f"transient Daytona error after {wall:.0f}s: {e!r:.120}")
+        raise
     wall = time.monotonic() - t0
     assert "KA_DELIVERED" in out
     assert wall < DROP_LINE_SLEEP_S + 60, f"one-shot exec with keepalive returned only after {wall:.0f}s — keepalive did not keep the flow alive"
