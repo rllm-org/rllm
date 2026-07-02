@@ -690,3 +690,47 @@ def test_gateway_api_key_resolution(monkeypatch, metadata: dict, env_value: str 
     config = AgentConfig(base_url="http://gw/v1", model="gpt-4o", session_uid="eval-0", metadata=metadata)
 
     assert BaseCliHarness.gateway_api_key(config, "OPENAI_API_KEY") == expected
+
+
+# ---------------------------------------------------------------------------
+# Exec timeout + sentinel: a SandboxCommandTimeout does not necessarily mean
+# the agent spent its budget — the backend may have lost the exec completion
+# in transport (e.g. a NAT dropping the idle long-poll; 2026-07-01). The
+# sentinel is authoritative there too.
+# ---------------------------------------------------------------------------
+
+
+def test_run_exec_timeout_with_clean_sentinel_recovers_env_done():
+    """Transport-lost completion: exec 'timed out' but the driver finished
+    cleanly → ENV_DONE with an ExecCompletionLost audit marker, not TIMEOUT."""
+    h = _DriverHarness()
+    h.outcome = {}  # sentinel present, no exception → driver finished fine
+    sandbox = FakeSandbox(timeout_on_substring="opencode --model")
+
+    result = h.run(_make_task(), _make_config(), env=sandbox)
+
+    assert result.termination_reason is None  # ENV_DONE
+    assert result.metadata["error"]["error_type"] == "ExecCompletionLost"
+
+
+def test_run_exec_timeout_with_typed_sentinel_maps_reason():
+    """Exec timeout + a typed driver verdict → the verdict's reason wins."""
+    h = _DriverHarness()
+    h.outcome = {"exception_type": "AgentTimeoutError", "message": "budget spent"}
+    sandbox = FakeSandbox(timeout_on_substring="opencode --model")
+
+    result = h.run(_make_task(), _make_config(), env=sandbox)
+
+    assert result.termination_reason == TerminationReason.TIMEOUT
+    assert result.metadata["error"]["error_type"] == "AgentTimeoutError"
+
+
+def test_run_exec_timeout_without_sentinel_stays_timeout():
+    """No sentinel to consult → the exec timeout is taken at face value."""
+    h = _DriverHarness()
+    h.outcome = None
+    sandbox = FakeSandbox(timeout_on_substring="opencode --model")
+
+    result = h.run(_make_task(), _make_config(), env=sandbox)
+
+    assert result.termination_reason == TerminationReason.TIMEOUT

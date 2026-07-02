@@ -376,9 +376,38 @@ class BaseCliHarness(SandboxedAgentFlow):
         try:
             self._exec_agent(sandbox, cmd, timeout=exec_timeout, env=env_vars)
         except SandboxCommandTimeout as e:
-            # The backend killed the exec at the wall — the agent spent its budget.
+            # The exec ended at the wall — either the agent really spent its
+            # budget, or the backend lost the command's completion (e.g. a
+            # dropped long-poll connection) and only its client-side timer
+            # fired. The driver's sentinel survives either way and is
+            # authoritative: a clean sentinel means the agent finished fine.
+            logger.info("%s exec ended at the wall: %s", type(self).__name__, e)
+            outcome = self._read_outcome(sandbox)
+            if outcome is not None:
+                exc_type = outcome.get("exception_type")
+                if not exc_type:
+                    # Transport loss: the driver finished cleanly but the exec's
+                    # completion never reached us. Label ENV_DONE (reward is
+                    # valid) and leave an audit marker in episode metadata —
+                    # not an infra error, but it must be visible in tracking.
+                    logger.warning(
+                        "%s exec hit the wall but the sentinel shows a clean finish — the backend lost the exec completion in transport (recovered; labeling ENV_DONE)",
+                        type(self).__name__,
+                    )
+                    return self._outcome_episode(
+                        task,
+                        termination_reason=None,
+                        error={"error_type": "ExecCompletionLost", "message": f"exec completion lost in transport; recovered via sentinel: {e}"},
+                    )
+                reason = termination_reason_from_error(exc_type, default=TerminationReason.TIMEOUT)
+                logger.info("%s outcome after exec timeout: %s -> %s", type(self).__name__, exc_type, reason)
+                return self._outcome_episode(
+                    task,
+                    termination_reason=reason,
+                    error={"message": outcome.get("message", ""), "error_type": exc_type},
+                )
+            # No sentinel: the driver really was killed at the wall.
             # Captured steps are still scored; TIMEOUT lets compact filtering skip it.
-            logger.info("%s reached its time budget: %s", type(self).__name__, e)
             return self._outcome_episode(task, termination_reason=TerminationReason.TIMEOUT)
         except Exception as e:
             # The backend collapses "sandbox died mid-run" and "the CLI exited
