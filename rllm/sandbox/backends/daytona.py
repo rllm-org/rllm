@@ -22,6 +22,7 @@ import shlex
 import tarfile
 import threading
 import time
+import uuid
 import weakref
 from pathlib import Path
 
@@ -35,6 +36,56 @@ logger = logging.getLogger(__name__)
 # finite value to belt-and-suspenders against leaked sandboxes if the
 # process is SIGKILL'd (atexit won't fire then).
 _DEFAULT_AUTO_STOP_INTERVAL = 30  # minutes; mirrors ModalSandbox's 30-min timeout
+
+# Commands allowed to run longer than this ride a session (async submit +
+# short polls) instead of the one-shot exec endpoint. The one-shot exec
+# carries the whole command on a single HTTP request that stays byte-silent
+# until completion, and Daytona's toolbox proxy silently drops idle flows
+# after ~4 minutes (measured 2026-07-01: sleep 240 delivered, sleep 270/330
+# lost) — the completion is then unreachable and the call blocks until the
+# SDK read timeout, mislabeling long-finished commands as timeouts.
+_SESSION_EXEC_THRESHOLD_S = env_float("RLLM_DAYTONA_SESSION_EXEC_THRESHOLD_S", 180.0)
+_SESSION_EXEC_POLL_S = env_float("RLLM_DAYTONA_SESSION_EXEC_POLL_S", 15.0)
+_SESSION_EXEC_MAX_POLL_FAILURES = 5
+
+
+def _enable_tcp_keepalive(client) -> None:
+    """Inject TCP keepalive into the SDK's HTTP pools (defense-in-depth).
+
+    An L4 middlebox on the toolbox path silently drops flows idle for
+    ~245-250s (measured 2026-07-01), black-holing responses of long
+    requests. Kernel keepalive probes every 60s reset that idle timer
+    (validated: a 400s one-shot exec delivers with these options, and is
+    always lost without them). Sessions + polling remain the primary
+    defense for long execs; this also protects every other SDK call.
+
+    Reaches into SDK internals (no public hook: ``DaytonaConfig`` doesn't
+    expose ``socket_options`` and the toolbox client is cloned at
+    construction), so it is strictly best-effort — never fails the caller.
+    """
+    import socket as _socket
+
+    opts = [(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)]
+    for name, val in (("TCP_KEEPIDLE", 60), ("TCP_KEEPINTVL", 60), ("TCP_KEEPCNT", 5)):
+        if hasattr(_socket, name):  # Linux; macOS/Windows lack some of these
+            opts.append((_socket.IPPROTO_TCP, getattr(_socket, name), val))
+    try:
+        import urllib3.connection
+
+        base = list(urllib3.connection.HTTPConnection.default_socket_options)
+        from daytona_api_client.rest import RESTClientObject as _ApiREST
+        from daytona_toolbox_api_client.rest import RESTClientObject as _ToolboxREST
+
+        for attr, rest_cls in (("_api_client", _ApiREST), ("_toolbox_api_client", _ToolboxREST)):
+            api = getattr(client, attr, None)
+            if api is None or not hasattr(api, "configuration"):
+                continue
+            api.configuration.socket_options = base + opts
+            api.rest_client = rest_cls(api.configuration)
+        logger.debug("TCP keepalive enabled on Daytona SDK HTTP pools")
+    except Exception:
+        logger.warning("Could not enable TCP keepalive on Daytona SDK pools (SDK internals changed?)", exc_info=True)
+
 
 # atexit-tracked sandboxes; terminated on process exit to avoid leaks.
 _LIVE_SANDBOXES: weakref.WeakSet = weakref.WeakSet()
@@ -253,6 +304,7 @@ class DaytonaSandbox:
         # Client init
         daytona_config = kwargs.pop("daytona_config", None)
         self._client = Daytona(daytona_config) if daytona_config is not None else Daytona()
+        _enable_tcp_keepalive(self._client)
 
         # Build common parameters
         base_kwargs: dict = {
@@ -378,25 +430,38 @@ class DaytonaSandbox:
         run = _build_exec_command(command, self._persistent_env, user)
         wrapped = f"bash -c {_shell_quote(run)}"
 
-        exec_kwargs: dict = {}
         if timeout is not None:
             t = int(timeout)
             # SIGTERM at t, SIGKILL 10s later if it ignores TERM. Exit 124
             # (TERM) / 137 (KILL) flag the timeout below.
             wrapped = f"timeout -k 10 {t} {wrapped}"
-            # SDK timeout as a backstop, set beyond the shell timeout so the
-            # deterministic shell `timeout` is what fires first.
-            exec_kwargs["timeout"] = t + 60
 
-        try:
-            response = self._sandbox.process.exec(wrapped, **exec_kwargs)
-        except Exception as e:  # noqa: BLE001 — map an SDK-level timeout to the protocol type
-            if timeout is not None and _looks_like_timeout(e):
-                raise SandboxCommandTimeout(f"Command hit its {int(timeout)}s timeout in sandbox {self.name}: {command[:200]}") from e
-            raise
-
-        stdout = response.result or ""
-        exit_code = response.exit_code
+        if timeout is not None and timeout > _SESSION_EXEC_THRESHOLD_S:
+            # Long command: a one-shot exec would ride a single idle HTTP
+            # request that NAT middleboxes drop after ~4 minutes of silence,
+            # so its completion could never be delivered (see
+            # _SESSION_EXEC_THRESHOLD_S). Untimed execs stay one-shot: they
+            # are quick housekeeping calls in practice, and the TCP-keepalive
+            # layer (_enable_tcp_keepalive) protects any that straggle.
+            stdout, exit_code = self._exec_session(wrapped, timeout, command)
+        else:
+            exec_kwargs: dict = {}
+            if timeout is not None:
+                # SDK timeout as a backstop, set beyond the shell timeout so the
+                # deterministic shell `timeout` is what fires first.
+                exec_kwargs["timeout"] = int(timeout) + 60
+            try:
+                response = self._sandbox.process.exec(wrapped, **exec_kwargs)
+            except Exception as e:  # noqa: BLE001 — map an SDK-level timeout to the protocol type
+                if timeout is not None and _looks_like_timeout(e):
+                    # SDK-level timeout = NO response was received (unlike the
+                    # exit-124 path below, where the shell `timeout` killed the
+                    # command and reported back). The command may have finished
+                    # and its completion been lost in transport — say so.
+                    raise SandboxCommandTimeout(f"No exec response within {int(timeout) + 60}s in sandbox {self.name} (command may have completed; response lost in transport): {command[:200]}") from e
+                raise
+            stdout = response.result or ""
+            exit_code = response.exit_code
 
         if timeout is not None and exit_code in (124, 137):
             # `timeout` killed it: 124 = exited on SIGTERM, 137 = SIGKILL'd after
@@ -421,6 +486,61 @@ class DaytonaSandbox:
             )
             raise RuntimeError(f"Command failed (exit {exit_code}) in sandbox {self.name}: {command}\n{tail}")
         return stdout
+
+    def _exec_session(self, wrapped: str, timeout: float | None, command: str) -> tuple[str, int]:
+        """Run ``wrapped`` via a session command: async submit, then short polls.
+
+        Each poll is its own short-lived HTTP request, so no connection ever
+        sits idle long enough for the toolbox proxy to drop it — unlike
+        ``process.exec``, which waits for the completion on one idle long-poll.
+        The in-sandbox coreutils ``timeout`` (already baked into ``wrapped``)
+        remains the deterministic killer; the poll deadline below (same +60s
+        grace the one-shot path gives the SDK) only catches a daemon that
+        lost the command entirely.
+        """
+        from daytona.common.process import SessionExecuteRequest
+
+        proc = self._sandbox.process
+        session_id = f"rllm-exec-{uuid.uuid4().hex[:12]}"
+        proc.create_session(session_id)
+        try:
+            submitted = proc.execute_session_command(session_id, SessionExecuteRequest(command=wrapped, run_async=True))
+            cmd_id = submitted.cmd_id
+            deadline = None if timeout is None else time.monotonic() + float(timeout) + 60.0
+            poll_failures = 0
+            # Adaptive poll: fast at first so short-lived commands that merely
+            # *allow* a long budget (cached install, quick verifier) don't pay
+            # a full poll interval, decaying to the steady-state interval.
+            poll_s = 1.0
+            while True:
+                time.sleep(poll_s)
+                poll_s = min(poll_s * 2, _SESSION_EXEC_POLL_S)
+                try:
+                    cmd = proc.get_session_command(session_id, cmd_id)
+                    poll_failures = 0
+                except Exception as e:  # noqa: BLE001 — a transient API blip must not kill a long rollout
+                    poll_failures += 1
+                    if poll_failures >= _SESSION_EXEC_MAX_POLL_FAILURES:
+                        raise
+                    logger.warning("Session exec poll %d/%d failed in sandbox %s: %s", poll_failures, _SESSION_EXEC_MAX_POLL_FAILURES, self.name, e)
+                    continue
+                if cmd.exit_code is not None:
+                    exit_code = int(cmd.exit_code)
+                    break
+                if deadline is not None and time.monotonic() > deadline:
+                    raise SandboxCommandTimeout(f"Command hit its {int(timeout)}s timeout in sandbox {self.name} (poll deadline): {command[:200]}")
+            try:
+                logs = proc.get_session_command_logs(session_id, cmd_id)
+                stdout = (logs.stdout or "") + (logs.stderr or "")
+            except Exception as e:  # noqa: BLE001 — output is best-effort; the exit code is what gates
+                logger.warning("Session exec log fetch failed in sandbox %s: %s", self.name, e)
+                stdout = ""
+            return stdout, exit_code
+        finally:
+            try:
+                proc.delete_session(session_id)
+            except Exception:
+                logger.debug("Session cleanup failed for %s", session_id, exc_info=True)
 
     def upload_file(self, local_path: str, remote_path: str) -> None:
         """Upload a single file via Daytona's native ``fs.upload_file``."""

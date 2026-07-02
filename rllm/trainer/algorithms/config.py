@@ -140,6 +140,15 @@ class CompactFilteringConfig:
     mask_timeout: bool = False
     mask_unknown: bool = False
     mask_error: bool = False
+    # Infra/grading failures: the reward isn't a real task score (verifier timed
+    # out/crashed, sandbox or setup died), so it shouldn't enter the loss. These
+    # default False in the dataclass for back-compat; base.yaml turns them on.
+    mask_verifier_timeout: bool = False
+    mask_grading_error: bool = False
+    mask_sandbox_error: bool = False
+    mask_agent_setup_timeout: bool = False
+    mask_env_start_timeout: bool = False
+    mask_model_error: bool = False
 
     @classmethod
     def from_config(cls, config: DictConfig) -> "CompactFilteringConfig":
@@ -170,6 +179,12 @@ class CompactFilteringConfig:
             or (self.mask_timeout and termination_reason == TerminationReason.TIMEOUT)
             or (self.mask_unknown and termination_reason == TerminationReason.UNKNOWN)
             or (self.mask_error and termination_reason == TerminationReason.ERROR)
+            or (self.mask_verifier_timeout and termination_reason == TerminationReason.VERIFIER_TIMEOUT)
+            or (self.mask_grading_error and termination_reason == TerminationReason.GRADING_ERROR)
+            or (self.mask_sandbox_error and termination_reason == TerminationReason.SANDBOX_ERROR)
+            or (self.mask_agent_setup_timeout and termination_reason == TerminationReason.AGENT_SETUP_TIMEOUT)
+            or (self.mask_env_start_timeout and termination_reason == TerminationReason.ENV_START_TIMEOUT)
+            or (self.mask_model_error and termination_reason == TerminationReason.MODEL_ERROR)
         )
 
 

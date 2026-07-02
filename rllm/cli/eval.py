@@ -537,6 +537,16 @@ def _run_eval(
     for k, v in sorted(result.pass_at.items()):
         res_rows.append((f"pass@{k}", f"[bold]{v * 100:.1f}%[/]"))
 
+    # Per-category completion breakdown (env_done / timeout / verifier_timeout / ...),
+    # infra-error reasons highlighted so a flaky endpoint or broken verifier is
+    # visible at a glance instead of hiding inside a single "Errors" count.
+    if result.termination_breakdown:
+        from rllm.types import INFRA_ERROR_REASONS
+
+        infra_vals = {r.value for r in INFRA_ERROR_REASONS}
+        parts = [f"[{'red' if reason in infra_vals else 'dim'}]{reason} {count}[/]" for reason, count in sorted(result.termination_breakdown.items(), key=lambda kv: (-kv[1], kv[0]))]
+        res_rows.append(("Terminations", "  ".join(parts)))
+
     # Display signal breakdown if any
     if result.signal_averages:
         for sig_name, sig_avg in result.signal_averages.items():

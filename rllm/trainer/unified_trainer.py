@@ -42,7 +42,7 @@ from rllm.trainer.backend_protocol import BackendProtocol
 from rllm.trainer.buffer import TrajectoryGroupBuffer
 from rllm.trainer.metrics_aggregator import MetricsAggregator
 from rllm.trainer.sync_coordinator import SyncCoordinator, SyncCoordinatorConfig
-from rllm.types import Episode, TerminationReason, TrajectoryGroup
+from rllm.types import INFRA_ERROR_REASONS, Episode, TerminationReason, TrajectoryGroup
 from rllm.utils import EpisodeLogger, Tracking, extract_source_metadata
 from rllm.workflows.store import Store
 from rllm.workflows.workflow import Workflow
@@ -502,6 +502,9 @@ class UnifiedTrainer:
         total_counts = max(sum(termination_counts.values()), 1)
         for r in TerminationReason:
             trainer_state.metrics[f"batch/termination_reason/{r.value}"] = termination_counts[r.value] / total_counts
+        # Aggregate infra/grading-failure rate (sandbox/setup/verifier/grading),
+        # mirroring the buffer/async path's episode/infra_error.
+        trainer_state.metrics["batch/infra_error"] = sum(termination_counts[r.value] for r in INFRA_ERROR_REASONS) / total_counts
 
         # stage 2: transform episodes to trajectory groups (sync)
         trajectory_groups, transform_metrics = transform_episodes_to_trajectory_groups(trainer_state.episodes, self.transform_config, self.cf_config, traj_grouping_hook=self.traj_grouping_hook)
