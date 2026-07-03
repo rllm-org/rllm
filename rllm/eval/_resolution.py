@@ -322,6 +322,24 @@ def _sandbox_resource_kwargs(task: Task, backend: str) -> dict:
     OOM-kills compile-heavy graders (e.g. ``go test ./...``). Modal takes memory
     in MB; Daytona takes memory/disk in GB. Docker/local ignore the values.
 
+    Those per-task values are baked into ``task.toml`` at dataset-build time, so
+    an over-provisioned default can only be shrunk by rebuilding the dataset.
+    Three provider-agnostic *caps* let an operator clamp every sandbox down at
+    runtime instead — each lowers the task's declared value (``min``) when set
+    (>0); a task already at or below the cap is untouched, and a task that
+    declares nothing is left at the backend default (a cap only lowers — it never
+    raises a task above what it declared, nor introduces a value where there is
+    none):
+
+    * ``RLLM_SANDBOX_MAX_CPUS`` (float) — max physical cores.
+    * ``RLLM_SANDBOX_MAX_MEMORY_MB`` (int) — max memory in MB.
+    * ``RLLM_SANDBOX_MAX_STORAGE_MB`` (int) — max disk in MB (Daytona only; Modal
+      never receives ``storage`` and bills scratch disk as part of compute).
+
+    Modal Sandboxes bill on reserved CPU+memory per second, so capping cuts the
+    per-rollout bill proportionally (e.g. ``RLLM_SANDBOX_MAX_CPUS=2`` halves the
+    CPU term of a 4-core task).
+
     The sandbox lifetime is sized to this task's own budget so the box always
     outlives the agent + verifier it hosts (both run inside it). A flat default
     could be shorter than agent+verifier and reap the box mid-rollout ("Sandbox
@@ -331,10 +349,24 @@ def _sandbox_resource_kwargs(task: Task, backend: str) -> dict:
     (Modal's hard ``timeout`` in seconds; Daytona's idle ``auto_stop_interval``
     in minutes).
     """
-    from rllm.env import env_int, sandbox_timeout_override_s
+    from rllm.env import env_float, env_int, sandbox_timeout_override_s
 
     env = task.metadata.get("environment", {}) or {}
     cpus, mem_mb, disk_mb = env.get("cpus"), env.get("memory_mb"), env.get("storage_mb")
+
+    # Operator caps clamp the baked-in task.toml values down (see docstring):
+    # shrink an over-provisioned sandbox at runtime without rebuilding. A cap
+    # only lowers — never raises a task above its declared value, nor sets one
+    # where the task declares none (a min against a missing value would be wrong).
+    cpu_cap = env_float("RLLM_SANDBOX_MAX_CPUS", 0.0)
+    mem_cap = env_int("RLLM_SANDBOX_MAX_MEMORY_MB", 0)
+    disk_cap = env_int("RLLM_SANDBOX_MAX_STORAGE_MB", 0)
+    if cpu_cap > 0 and cpus:
+        cpus = min(float(cpus), cpu_cap)
+    if mem_cap > 0 and mem_mb:
+        mem_mb = min(int(mem_mb), mem_cap)
+    if disk_cap > 0 and disk_mb:
+        disk_mb = min(int(disk_mb), disk_cap)
 
     # Per-task lifetime floor (seconds), shared across backends: agent + verifier
     # + install + teardown/scheduling slack, raised to the operator override.
@@ -352,7 +384,7 @@ def _sandbox_resource_kwargs(task: Task, backend: str) -> dict:
         kw["timeout"] = lifetime_s  # Modal's hard lifetime, in seconds
     elif backend == "daytona":
         if cpus:
-            kw["cpu"] = int(cpus)
+            kw["cpu"] = max(1, int(cpus))  # Daytona cores are ints; a fractional Modal-style cap floors to 1
         if mem_mb:
             kw["memory"] = max(1, round(mem_mb / 1024))
         if disk_mb:
