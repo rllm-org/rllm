@@ -524,15 +524,27 @@ def clear_tunnel_state() -> None:
         pass
 
 
-def live_tunnel_url() -> str | None:
-    """URL of a currently-running daemon tunnel, or ``None`` (clearing stale state)."""
+def live_tunnel() -> dict | None:
+    """State of a currently-running daemon tunnel, or ``None`` (clearing stale state).
+
+    The dict is the state file as written by ``rllm tunnel up``: ``backend``,
+    ``url`` (public), ``pid``, ``upstream`` (the local ``http://127.0.0.1:<port>``
+    the daemon forwards to — the authoritative answer to "which port must the
+    gateway bind"), ``log_path``.
+    """
     state = read_tunnel_state()
     if not state:
         return None
     if pid_alive(state.get("pid")) and state.get("url"):
-        return state["url"]
+        return state
     clear_tunnel_state()
     return None
+
+
+def live_tunnel_url() -> str | None:
+    """URL of a currently-running daemon tunnel, or ``None`` (clearing stale state)."""
+    state = live_tunnel()
+    return state["url"] if state else None
 
 
 def resolve_auto_tunnel() -> tuple[str, str | None]:
