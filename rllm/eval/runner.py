@@ -95,8 +95,42 @@ async def run_dataset(
     owned_gateway = gateway is None
     if owned_gateway:
         # Auto-tunnel for off-host sandboxes (same predicate AgentTrainer uses).
-        gateway_tunnel = None if is_local_sandbox_backend(sandbox_backend) else "cloudflared"
-        gateway = EvalGatewayManager(upstream_url=base_url, model=model, tunnel=gateway_tunnel)
+        # Resolve like training does: $RLLM_GATEWAY_TUNNEL → a running
+        # `rllm tunnel up` daemon → cloudflared quick-tunnel fallback. Quick
+        # tunnels enforce a 120s origin read timeout, which kills slow
+        # non-streaming LLM calls (CF 524) — a configured ngrok tunnel avoids
+        # that, so eval must honor it, not just training.
+        gateway_tunnel: str | None = None
+        gateway_port: int | None = None
+        if not is_local_sandbox_backend(sandbox_backend):
+            from rllm.gateway.tunnel import resolve_auto_tunnel
+
+            gateway_tunnel, tunnel_warning = resolve_auto_tunnel()
+            if tunnel_warning:
+                logger.warning(tunnel_warning)
+            if gateway_tunnel.startswith(("http://", "https://")):
+                # A tunnel URL means an already-running forwarder; the gateway
+                # must bind wherever it forwards (a free-port pick would leave
+                # the tunnel pointing at nothing). The daemon's recorded
+                # ``upstream`` is authoritative; a URL supplied some other way
+                # (env var) falls back to the setup config's port.
+                from urllib.parse import urlparse
+
+                from rllm.gateway.tunnel import live_tunnel
+
+                state = live_tunnel() or {}
+                upstream = state.get("upstream") if state.get("url") == gateway_tunnel else None
+                gateway_port = urlparse(upstream).port if upstream else None
+                if gateway_port is None:
+                    from rllm.eval.config import load_tunnel_config
+
+                    gateway_port = int(load_tunnel_config().get("port") or 9090)
+                    logger.warning(
+                        "Tunnel URL %s has no matching daemon state; binding the gateway to port %d from the tunnel config — it must match the port that URL forwards to.",
+                        gateway_tunnel,
+                        gateway_port,
+                    )
+        gateway = EvalGatewayManager(upstream_url=base_url, model=model, tunnel=gateway_tunnel, port=gateway_port)
         gateway.start()
 
     hooks = SandboxTaskHooks(evaluation=FixedEvaluation(evaluator) if evaluator is not None else None, sandbox_backend=sandbox_backend, use_snapshot=use_snapshot)
