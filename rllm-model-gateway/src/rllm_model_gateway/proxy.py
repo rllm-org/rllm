@@ -87,6 +87,9 @@ class ReverseProxy:
         local_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
         cumulative_token_mode: bool = False,
         renderer: Any = None,
+        heartbeat_initial_delay_s: float = 50.0,
+        heartbeat_interval_s: float = 25.0,
+        heartbeat_budget_s: float = 3600.0,
     ) -> None:
         self.router = router
         self.store = store
@@ -96,6 +99,16 @@ class ReverseProxy:
         self.local_handler = local_handler
         self.cumulative_token_mode = cumulative_token_mode
         self.renderer = renderer
+        # Whitespace heartbeat for slow non-streaming completions: middleboxes
+        # on the response path (Cloudflare quick tunnel: 120s; ngrok: ~300s;
+        # NAT flow tables) silently kill responses that stay byte-silent while
+        # the model generates. After ``initial_delay`` with no upstream result,
+        # the response is committed as chunked and a single space (legal JSON
+        # leading whitespace, invisible to every JSON parser) is emitted every
+        # ``interval`` until the real body is ready. ``interval <= 0`` disables.
+        self.heartbeat_initial_delay_s = heartbeat_initial_delay_s
+        self.heartbeat_interval_s = heartbeat_interval_s
+        self.heartbeat_budget_s = heartbeat_budget_s
         self.weight_version: int | None = None
         self._http: httpx.AsyncClient | None = None
         self._pending_traces: set[asyncio.Task[None]] = set()
@@ -230,6 +243,68 @@ class ReverseProxy:
         session_id: str | None,
         originally_requested_logprobs: bool = False,
     ) -> Response:
+        """Proxy a non-streaming request, keeping the response connection warm.
+
+        The upstream call runs as a task; if it finishes within
+        ``heartbeat_initial_delay_s`` the plain JSON response goes out with its
+        true status code (fast successes AND fast upstream errors are
+        untouched). Past that, the response is committed as chunked 200 and a
+        space is emitted every ``heartbeat_interval_s`` so no middlebox on the
+        path (tunnel edge read timers, NAT flow tables) sees a byte-silent
+        connection while the model generates. Leading spaces are insignificant
+        JSON whitespace — parsed output is byte-identical for every client.
+        """
+        result_task = asyncio.ensure_future(self._non_streaming_result(request, raw_body, request_body, session_id, originally_requested_logprobs))
+        if self.heartbeat_interval_s <= 0:
+            content, status_code = await result_task
+            return Response(content=content, status_code=status_code, media_type="application/json")
+
+        try:
+            content, status_code = await asyncio.wait_for(asyncio.shield(result_task), timeout=self.heartbeat_initial_delay_s)
+            return Response(content=content, status_code=status_code, media_type="application/json")
+        except TimeoutError:
+            pass  # slow generation — switch to the heartbeat stream
+        except asyncio.TimeoutError:  # noqa: UP041 — pre-3.11 alias, kept for safety
+            pass
+
+        async def _heartbeat_stream():
+            deadline = time.monotonic() + self.heartbeat_budget_s
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    result_task.cancel()
+                    logger.error("Heartbeat budget (%.0fs) exhausted waiting for upstream; failing the request", self.heartbeat_budget_s)
+                    yield json.dumps(
+                        {"error": {"message": f"gateway heartbeat budget of {self.heartbeat_budget_s:.0f}s exhausted waiting for upstream", "type": "gateway_upstream_timeout", "code": 504}}
+                    ).encode()
+                    return
+                try:
+                    content, status_code = await asyncio.wait_for(asyncio.shield(result_task), timeout=min(self.heartbeat_interval_s, remaining))
+                except (TimeoutError, asyncio.TimeoutError):
+                    yield b" "  # legal JSON leading whitespace; resets every idle timer on the path
+                    continue
+                except Exception as e:  # noqa: BLE001 — surface upstream failure as a parseable error body
+                    logger.warning("Upstream failed after heartbeat commit (status already 200): %s", e)
+                    yield json.dumps({"error": {"message": f"gateway upstream failure: {e}", "type": "gateway_upstream_error", "code": 502}}).encode()
+                    return
+                if status_code != 200:
+                    # Status line is already committed as 200; the upstream error
+                    # body still goes through — clients see a JSON error object
+                    # instead of a typed status, and the log keeps the truth.
+                    logger.warning("Upstream returned %d after heartbeat commit; forwarding error body under 200", status_code)
+                yield content
+                return
+
+        return StreamingResponse(_heartbeat_stream(), status_code=200, media_type="application/json")
+
+    async def _non_streaming_result(
+        self,
+        request: Request,
+        raw_body: bytes,
+        request_body: dict[str, Any],
+        session_id: str | None,
+        originally_requested_logprobs: bool = False,
+    ) -> tuple[bytes, int]:
         t0 = time.perf_counter()
 
         if self.local_handler is not None:
@@ -291,11 +366,7 @@ class ReverseProxy:
             if needs_strip_logprobs:
                 sanitized = _strip_logprobs(sanitized)
 
-        return Response(
-            content=json.dumps(sanitized),
-            status_code=status_code,
-            media_type="application/json",
-        )
+        return json.dumps(sanitized).encode(), status_code
 
     # ------------------------------------------------------------------
     # Cumulative token mode
