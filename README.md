@@ -1,6 +1,9 @@
 <div align="center">
 
-# rLLM
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/logo/rllm-github-logo-dark.png">
+  <img src="docs/logo/rllm-github-logo-light.png" alt="rLLM" width="360">
+</picture>
 
 **Agentic RL on any harness, with any backend, on any benchmark.**
 
