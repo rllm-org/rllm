@@ -58,9 +58,7 @@ class Terminus2NativeHarness(Terminus2Harness):
         # Host env wins over the class attribute so eval runs can pin the
         # model's real limit (e.g. 240000 for v4 on Fireworks) without a code
         # edit — the eval CLI has no agent-kwargs mechanism.
-        limit = os.environ.get("RLLM_TERMINUS_CONTEXT_LIMIT") or (
-            str(self.context_limit_tokens) if self.context_limit_tokens is not None else None
-        )
+        limit = os.environ.get("RLLM_TERMINUS_CONTEXT_LIMIT") or (str(self.context_limit_tokens) if self.context_limit_tokens is not None else None)
         if limit:
             env["RLLM_TERMINUS_CONTEXT_LIMIT"] = limit
         return env

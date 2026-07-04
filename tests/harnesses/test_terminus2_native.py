@@ -182,7 +182,7 @@ def test_context_length_error_is_not_retried():
 
     class _Resp:
         status_code = 400
-        text = '{"error": {"message": "This model'"'"'s maximum context length is 128000 tokens"}}'
+        text = '{"error": {"message": "This model\'s maximum context length is 128000 tokens"}}'
 
         def json(self):
             return json.loads(self.text)
