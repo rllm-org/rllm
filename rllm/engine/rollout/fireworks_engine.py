@@ -21,6 +21,7 @@ import asyncio
 import contextvars
 import dataclasses
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -42,6 +43,18 @@ from rllm.types import TerminationEvent, TerminationReason
 logger = logging.getLogger(__name__)
 
 _MAX_SAMPLE_ATTEMPTS = 5
+# The gateway wires FireworksEngine as an in-process handler, so these retries
+# run *inside* the agent's HTTP call and hold that (byte-silent, no-heartbeat on
+# the cumulative path) connection open the whole time. Retrying long enough to
+# ride out a transient reset / weight-sync reload is good; holding past the
+# client/tunnel tolerance is not — the client re-sends, surfacing as
+# TokenAccumulator "duplicate" churn + wasted regeneration. So cap the total
+# retry wall-clock: ride out the common case, then fail fast so a persistent
+# outage surfaces instead of stalling the connection.
+_RETRY_BUDGET_S = 90.0
+# Per-retry backoff cap: the old 10/20/30/40s schedule alone could sleep ~100s,
+# well past the budget. Cap it so backoff can't dominate the budget.
+_RETRY_BACKOFF_CAP_S = 15.0
 _TRANSIENT_ERROR_MARKERS = (
     "502",
     "503",
@@ -397,6 +410,7 @@ class FireworksEngine(TinkerEngine):
         request to the trajectory's pinned replica. Returns
         (response_dict, server_metrics_dict)."""
 
+        start = time.monotonic()
         for attempt in range(_MAX_SAMPLE_ATTEMPTS):
             try:
                 token = _per_request_headers.set(session_headers) if session_headers else None
@@ -425,22 +439,31 @@ class FireworksEngine(TinkerEngine):
                 # markers below miss them; classify by type instead.
                 is_network_error = isinstance(exc, httpx.TimeoutException | httpx.TransportError)
                 transient = isinstance(exc, _EmptyCompletionIdsError) or is_network_error or any(marker in err or marker in exc_name for marker in _TRANSIENT_ERROR_MARKERS)
-                if transient and attempt < _MAX_SAMPLE_ATTEMPTS - 1:
-                    wait = 10 * (attempt + 1)
+                elapsed = time.monotonic() - start
+                wait = min(10 * (attempt + 1), _RETRY_BACKOFF_CAP_S)
+                # Retry only while there's budget left to both back off and make
+                # another attempt worthwhile — else fail fast so the held client
+                # connection is released instead of stalled past its tolerance.
+                budget_left = elapsed + wait < _RETRY_BUDGET_S
+                if transient and attempt < _MAX_SAMPLE_ATTEMPTS - 1 and budget_left:
                     logger.debug(
-                        "Attempt %d/%d failed (%s: %s), retrying in %ds...",
+                        "Attempt %d/%d failed (%s: %s) after %.1fs, retrying in %ds...",
                         attempt + 1,
                         _MAX_SAMPLE_ATTEMPTS,
                         exc_name,
                         exc,
+                        elapsed,
                         wait,
                     )
                     await asyncio.sleep(wait)
                     continue
                 resp_text = getattr(getattr(exc, "response", None), "text", None)
+                give_up = "retry budget exhausted" if (transient and not budget_left) else "permanent"
                 logger.error(
-                    "Sampling failed permanently after %d attempts (%s): %s\n%s",
+                    "Sampling failed (%s) after %d attempts / %.1fs (%s): %s\n%s",
+                    give_up,
                     attempt + 1,
+                    elapsed,
                     exc_name,
                     exc,
                     resp_text or "",
