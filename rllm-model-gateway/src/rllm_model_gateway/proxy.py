@@ -5,6 +5,7 @@ Reference: miles ``MilesRouter._do_proxy()``
 """
 
 import asyncio
+import functools
 import json
 import logging
 import time
@@ -90,6 +91,7 @@ class ReverseProxy:
         heartbeat_initial_delay_s: float = 50.0,
         heartbeat_interval_s: float = 25.0,
         heartbeat_budget_s: float = 3600.0,
+        capture_raw_payloads: bool = False,
     ) -> None:
         self.router = router
         self.store = store
@@ -99,6 +101,11 @@ class ReverseProxy:
         self.local_handler = local_handler
         self.cumulative_token_mode = cumulative_token_mode
         self.renderer = renderer
+        # Retain full raw request/response on each trace. Off by default: training
+        # reads only token-id/logprob/message fields, and serializing the raw
+        # dicts (≤120K-token prompt + full response) is the dominant per-request
+        # CPU cost on the event loop at high concurrency. Enable for debugging.
+        self.capture_raw_payloads = capture_raw_payloads
         # Whitespace heartbeat for slow non-streaming completions: middleboxes
         # on the response path (Cloudflare quick tunnel: 120s; ngrok: ~300s;
         # NAT flow tables) silently kill responses that stay byte-silent while
@@ -173,7 +180,15 @@ class ReverseProxy:
                 # the *why* is recoverable from the gateway log.
                 plan = acc.plan_turn(messages)
                 if plan.action == "extend":
-                    token_ids = acc.build_next_prompt(plan.new_messages, tools=request_body.get("tools"))
+                    # bridge_to_next_turn renders the new messages and concatenates
+                    # ≤120K prior token ids — CPU-bound, so keep it off the single
+                    # event loop (the tokenizer half releases the GIL) so the loop
+                    # stays free to service other concurrent requests.
+                    loop = asyncio.get_running_loop()
+                    token_ids = await loop.run_in_executor(
+                        None,
+                        functools.partial(acc.build_next_prompt, plan.new_messages, tools=request_body.get("tools")),
+                    )
                     if token_ids is not None:
                         logger.debug(
                             "TokenAccumulator extend session=%s turn=%d +%d new msgs",
@@ -342,7 +357,7 @@ class ReverseProxy:
 
         # Persist trace
         if session_id and response_body:
-            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=request.state.weight_version)
+            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=request.state.weight_version, capture_raw=self.capture_raw_payloads)
             await self._persist(trace)
 
             # Ingest first turn into accumulator for cumulative token mode
@@ -480,7 +495,7 @@ class ReverseProxy:
         response_body["object"] = "chat.completion"
 
         if session_id and response_body:
-            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=request.state.weight_version)
+            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=request.state.weight_version, capture_raw=self.capture_raw_payloads)
             await self._persist(trace)
 
         sanitized = response_body
@@ -627,7 +642,7 @@ class ReverseProxy:
                 # Ingest accumulated token data
                 if chunks:
                     latency_ms = (time.perf_counter() - t0) * 1000
-                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version)
+                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, capture_raw=self.capture_raw_payloads)
                     prompt_ids = trace.prompt_token_ids or token_ids
                     completion_ids = trace.completion_token_ids
 
@@ -686,7 +701,7 @@ class ReverseProxy:
             chat_body["object"] = "chat.completion"
             if chat_body.get("choices"):
                 chat_body["choices"][0]["message"] = {"role": "assistant", "content": content}
-            trace = build_trace_record(session_id, request_body, chat_body, latency_ms, weight_version=request.state.weight_version)
+            trace = build_trace_record(session_id, request_body, chat_body, latency_ms, weight_version=request.state.weight_version, capture_raw=self.capture_raw_payloads)
             await self._persist(trace)
 
         chat_id = response_body.get("id", "chatcmpl-local")
@@ -851,7 +866,7 @@ class ReverseProxy:
                 # finally block may run during GeneratorExit, where await
                 # on real async I/O (e.g. aiosqlite) is not reliable.
                 if session_id and chunks:
-                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version)
+                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, capture_raw=self.capture_raw_payloads)
                     task = asyncio.create_task(
                         self._safe_store(
                             trace.trace_id,
@@ -893,7 +908,7 @@ class ReverseProxy:
 
         # Persist trace from the full response
         if session_id and response_body:
-            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=weight_version)
+            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=weight_version, capture_raw=self.capture_raw_payloads)
             await self._persist(trace)
 
         needs_strip_vllm = self.strip_vllm

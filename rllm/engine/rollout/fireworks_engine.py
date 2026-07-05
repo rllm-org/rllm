@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import dataclasses
+import functools
 import logging
 import time
 from typing import Any
@@ -254,11 +255,22 @@ class FireworksEngine(TinkerEngine):
         accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
         reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
 
-        token_input = self._render_prompt_token_input(
-            messages,
-            tools=tools,
-            reasoning_effort=reasoning_effort,
-            accumulate_reasoning=accumulate_reasoning,
+        # Rendering a ≤120K-token prompt is CPU-bound and (via the HF fast
+        # tokenizer) releases the GIL, so run it in a worker thread instead of on
+        # the gateway's single event loop — otherwise every turn-0 request blocks
+        # the loop from flushing responses / firing heartbeats for all other
+        # in-flight requests, which at high concurrency shows up as client
+        # timeouts + TokenAccumulator "duplicate" churn.
+        loop = asyncio.get_running_loop()
+        token_input = await loop.run_in_executor(
+            None,
+            functools.partial(
+                self._render_prompt_token_input,
+                messages,
+                tools=tools,
+                reasoning_effort=reasoning_effort,
+                accumulate_reasoning=accumulate_reasoning,
+            ),
         )
 
         if application_id is not None:
