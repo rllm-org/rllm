@@ -100,6 +100,58 @@ def _install_inference_header_patch() -> None:
 _install_inference_header_patch()
 
 
+def _install_httpx_orjson_patch() -> None:
+    """Serialize httpx ``json=`` request bodies with orjson instead of stdlib json.
+
+    ``DeploymentSampler`` POSTs the full (≤120K-token) prompt via
+    ``client.post(json=payload)``; httpx serializes it with stdlib ``json`` on the
+    calling thread — the gateway's single event loop — which at high concurrency is
+    the dominant per-request on-loop CPU cost. orjson is ~3x faster and matches
+    httpx's wire semantics (compact, UTF-8, rejects NaN).
+
+    Best-effort and guarded: httpx internals (``encode_json`` returning
+    ``(headers, ByteStream)``) are version-specific, so we probe the shape against
+    the real function before installing and skip (keeping stdlib) on any mismatch —
+    a future httpx upgrade can degrade the speedup but never break sampling.
+    """
+    try:
+        import httpx._content as _hc
+        from httpx._content import ByteStream
+        import orjson
+    except Exception:  # noqa: BLE001 - httpx/orjson layout unknown → skip patch
+        return
+
+    orig = getattr(_hc, "encode_json", None)
+    if orig is None or getattr(orig, "_rllm_orjson_patch", False):
+        return
+
+    def _encode_json(json):  # noqa: ANN001 - matches httpx signature
+        try:
+            body = orjson.dumps(json)
+        except TypeError:
+            return orig(json)  # exotic types orjson can't handle → stdlib
+        headers = {"Content-Length": str(len(body)), "Content-Type": "application/json"}
+        return headers, ByteStream(body)
+
+    # Verify our output matches the real httpx contract (types + headers) on a
+    # tiny probe before swapping; otherwise leave stdlib in place.
+    try:
+        ref_headers, ref_stream = orig({"_rllm_probe": 1})
+        new_headers, new_stream = _encode_json({"_rllm_probe": 1})
+        if type(new_stream) is not type(ref_stream) or set(new_headers) != set(ref_headers):
+            raise ValueError("httpx encode_json shape mismatch")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("httpx orjson patch skipped (%s); using stdlib json for httpx bodies", e)
+        return
+
+    _encode_json._rllm_orjson_patch = True  # type: ignore[attr-defined]
+    _hc.encode_json = _encode_json
+    logger.info("Installed httpx orjson encode_json patch (faster large-prompt serialization off the gateway loop's critical path)")
+
+
+_install_httpx_orjson_patch()
+
+
 class _EmptyCompletionIdsError(RuntimeError):
     pass
 

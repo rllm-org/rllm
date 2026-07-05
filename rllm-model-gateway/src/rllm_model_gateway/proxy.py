@@ -67,6 +67,32 @@ def _strip_logprobs(response: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _build_trace_data(
+    session_id: str,
+    request_body: dict[str, Any],
+    response_body: dict[str, Any],
+    latency_ms: float,
+    weight_version: int | None,
+    capture_raw: bool,
+) -> tuple[str, str, dict[str, Any]]:
+    """Build a TraceRecord and serialize it to a dict.
+
+    Runs in a worker thread (see ``ReverseProxy._persist_trace``) so the token-id
+    list copies + ``model_dump`` stay off the event-loop thread. Reads
+    ``request_body``/``response_body`` without mutating them, so it's safe to run
+    concurrently with the response path.
+    """
+    trace = build_trace_record(
+        session_id,
+        request_body,
+        response_body,
+        latency_ms,
+        weight_version=weight_version,
+        capture_raw=capture_raw,
+    )
+    return trace.trace_id, trace.session_id, trace.model_dump()
+
+
 class ReverseProxy:
     """Forward requests to inference workers, capture traces.
 
@@ -453,8 +479,7 @@ class ReverseProxy:
 
         # Persist trace
         if session_id and response_body:
-            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=request.state.weight_version, capture_raw=self.capture_raw_payloads)
-            await self._persist(trace)
+            await self._persist_trace(session_id, request_body, response_body, latency_ms, request.state.weight_version)
 
             # Ingest first turn into accumulator for cumulative token mode
             if self.cumulative_token_mode and request.url.path.endswith("/chat/completions"):
@@ -618,8 +643,7 @@ class ReverseProxy:
         response_body["object"] = "chat.completion"
 
         if session_id and response_body:
-            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=request.state.weight_version, capture_raw=self.capture_raw_payloads)
-            await self._persist(trace)
+            await self._persist_trace(session_id, request_body, response_body, latency_ms, request.state.weight_version)
 
         sanitized = response_body
         if isinstance(response_body, dict) and response_body:
@@ -1159,6 +1183,49 @@ class ReverseProxy:
             await self.store.store_trace(trace_id, session_id, data)
         except Exception:
             logger.exception("Failed to persist trace %s", trace_id)
+
+    async def _persist_trace(
+        self,
+        session_id: str,
+        request_body: dict[str, Any],
+        response_body: dict[str, Any],
+        latency_ms: float,
+        weight_version: int | None,
+    ) -> None:
+        """Build + store a trace off the event-loop thread and off the response
+        critical path.
+
+        ``build_trace_record`` + ``model_dump`` copy the ≤120K/16K token-id lists
+        and were previously done inline on the loop before returning the response.
+        Here they run in the executor (``_build_trace_data``); only the async store
+        write touches the loop, and the response no longer waits for any of it.
+        ``sync_traces`` still forces synchronous completion for callers that need it.
+        """
+        loop = asyncio.get_running_loop()
+        capture_raw = self.capture_raw_payloads
+
+        async def _run() -> None:
+            try:
+                trace_id, sess, data = await loop.run_in_executor(
+                    None,
+                    _build_trace_data,
+                    session_id,
+                    request_body,
+                    response_body,
+                    latency_ms,
+                    weight_version,
+                    capture_raw,
+                )
+                await self._safe_store(trace_id, sess, data)
+            except Exception:
+                logger.exception("Failed to persist trace (session=%s)", session_id)
+
+        if self.sync_traces:
+            await _run()
+        else:
+            task = asyncio.create_task(_run())
+            self._pending_traces.add(task)
+            task.add_done_callback(self._pending_traces.discard)
 
     @staticmethod
     def _build_url(worker_url: str, path: str, query: str, *, gateway_prefix: str = "/v1") -> str:
