@@ -152,6 +152,53 @@ def _install_httpx_orjson_patch() -> None:
 _install_httpx_orjson_patch()
 
 
+def _install_sdk_response_parse_patch() -> None:
+    """Parse the SDK's streaming completion chunks with orjson.
+
+    ``DeploymentSampler.async_completions_stream`` parses every SSE chunk with
+    stdlib ``json.loads(sse.data)`` on the event-loop thread; across many
+    concurrent streams that per-chunk parse is a continuous on-loop cost. Swap
+    the SDK ``sampling`` module's ``json`` reference for a shim whose ``loads`` is
+    orjson and which delegates every other attribute (``dumps``,
+    ``JSONDecodeError``, …) to stdlib json — so nothing else in the module
+    changes behaviour. ``orjson.JSONDecodeError`` subclasses ``ValueError``, so
+    the SDK's ``except (ValueError, TypeError)`` still catches malformed chunks.
+
+    Best-effort and idempotent: skips silently if the SDK/orjson layout differs.
+    """
+    try:
+        import json as _stdlib_json
+
+        import orjson
+        from fireworks.training.sdk import sampling as _sdk
+    except Exception:  # noqa: BLE001 - layout unknown → skip
+        return
+
+    if getattr(_sdk, "_rllm_orjson_json_shim", False):
+        return
+
+    class _OrjsonJson:
+        loads = staticmethod(orjson.loads)  # the hot path
+
+        def __getattr__(self, name):  # noqa: ANN001 - delegate everything else
+            return getattr(_stdlib_json, name)
+
+    shim = _OrjsonJson()
+    try:
+        assert shim.loads('{"a":1}') == {"a": 1}
+        assert shim.dumps({"a": 1}) == '{"a": 1}'  # delegates to stdlib → str
+    except Exception as e:  # noqa: BLE001
+        logger.warning("SDK response-parse orjson patch skipped (%s); using stdlib json", e)
+        return
+
+    _sdk.json = shim
+    _sdk._rllm_orjson_json_shim = True  # type: ignore[attr-defined]
+    logger.info("Installed orjson patch for Fireworks SDK streaming response parse")
+
+
+_install_sdk_response_parse_patch()
+
+
 class _EmptyCompletionIdsError(RuntimeError):
     pass
 
