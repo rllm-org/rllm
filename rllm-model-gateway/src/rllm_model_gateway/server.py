@@ -571,7 +571,12 @@ def main() -> None:
 
     import uvicorn
 
-    uvicorn.run(app, host=config.host, port=config.port, log_level=config.log_level.lower())
+    # Per-request access logs flood at hundreds of concurrent requests; disable
+    # them unless log_level=debug (thread-mode gateway runs uvicorn at 'warning',
+    # which suppresses these too). Our own INFO logs (loop-health, duplicates)
+    # are unaffected — they're on the rllm_model_gateway logger, not uvicorn's.
+    access_log = config.log_level.lower() == "debug"
+    uvicorn.run(app, host=config.host, port=config.port, log_level=config.log_level.lower(), access_log=access_log)
 
 
 def _load_handler_factory(spec: str, config_path: str | None):
