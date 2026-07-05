@@ -18,6 +18,7 @@ dependencies = [
     "PyYAML>=6.0",
     "renderers>=0.1.7",
     "transformers>=4.50.0",
+    "orjson>=3.9.0",
 ]
 
 [project.optional-dependencies]

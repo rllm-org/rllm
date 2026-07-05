@@ -16,6 +16,7 @@ import httpx
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 
+from rllm_model_gateway import fastjson
 from rllm_model_gateway.data_process import (
     build_trace_record,
     build_trace_record_from_chunks,
@@ -236,8 +237,8 @@ class ReverseProxy:
         body = await request.body()
 
         try:
-            request_body = json.loads(body) if body else {}
-        except (json.JSONDecodeError, UnicodeDecodeError):
+            request_body = fastjson.loads(body) if body else {}
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
             request_body = {}
 
         is_stream = request_body.get("stream", False)
@@ -476,7 +477,7 @@ class ReverseProxy:
             if needs_strip_logprobs:
                 sanitized = _strip_logprobs(sanitized)
 
-        return json.dumps(sanitized).encode(), status_code
+        return fastjson.dumps(sanitized), status_code
 
     # ------------------------------------------------------------------
     # Cumulative token mode
@@ -627,7 +628,7 @@ class ReverseProxy:
             if not originally_requested_logprobs:
                 sanitized = _strip_logprobs(sanitized)
 
-        return json.dumps(sanitized).encode(), status_code
+        return fastjson.dumps(sanitized), status_code
 
     async def _handle_cumulative_streaming(
         self,
