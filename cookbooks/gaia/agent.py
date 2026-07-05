@@ -21,12 +21,26 @@ from __future__ import annotations
 
 import json
 
-from rllm.eval.reward_fns.gaia import SYSTEM_PROMPT
 from rllm.tools.web_tools.tavily_tool import TavilyExtractTool, TavilySearchTool
 from rllm.types import Episode, Step, Trajectory
 
 MAX_TURNS = 12
 _MAX_OBS_CHARS = 6000  # cap tool observations so browse output can't blow up context
+
+# The agent prompt MUST tell the model it has tools and to use them — GAIA questions
+# need fresh facts, and most models won't call tools unless explicitly instructed.
+AGENT_SYSTEM_PROMPT = (
+    "You are a general AI assistant answering questions that require accurate, "
+    "up-to-date facts from the web. You have two tools:\n"
+    "- tavily-search(query): search the web for relevant sources.\n"
+    "- tavily-extract(urls): read the full text of specific web pages.\n"
+    "Always use these tools to look things up before answering — do NOT answer from "
+    "memory. Search first, then extract the most relevant pages, then reason.\n\n"
+    "When you are confident, give your answer on its own line as:\n"
+    "FINAL ANSWER: <answer>\n"
+    "The answer should be a number, as few words as possible, or a comma-separated "
+    "list of numbers and/or strings. Do not add units unless asked."
+)
 
 
 def _tool_observation(tool, args: dict) -> str:
@@ -37,7 +51,7 @@ def _tool_observation(tool, args: dict) -> str:
     return text[:_MAX_OBS_CHARS]
 
 
-def run_tool_loop(client, model: str, tools: list, question: str, *, system_prompt: str = SYSTEM_PROMPT, max_turns: int = MAX_TURNS) -> tuple[list[Step], str]:
+def run_tool_loop(client, model: str, tools: list, question: str, *, system_prompt: str = AGENT_SYSTEM_PROMPT, max_turns: int = MAX_TURNS) -> tuple[list[Step], str]:
     """Multi-turn OpenAI tool-calling loop. Returns (steps, final_answer).
 
     Factored out from `GaiaAgent.run` so the control flow is unit-testable with a
