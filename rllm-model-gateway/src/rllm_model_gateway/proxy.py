@@ -269,7 +269,24 @@ class ReverseProxy:
         connection while the model generates. Leading spaces are insignificant
         JSON whitespace — parsed output is byte-identical for every client.
         """
-        result_task = asyncio.ensure_future(self._non_streaming_result(request, raw_body, request_body, session_id, originally_requested_logprobs))
+        return await self._respond_with_heartbeat(
+            self._non_streaming_result(request, raw_body, request_body, session_id, originally_requested_logprobs)
+        )
+
+    async def _respond_with_heartbeat(self, result_coro: Awaitable[tuple[bytes, int]]) -> Response:
+        """Await *result_coro* (returns ``(content_bytes, status_code)``); keep
+        the client connection warm if it's slow.
+
+        If the coroutine finishes within ``heartbeat_initial_delay_s`` the plain
+        JSON response goes out with its true status code. Past that, the response
+        is committed as chunked 200 and a space is emitted every
+        ``heartbeat_interval_s`` so no middlebox on the path (tunnel edge read
+        timers, NAT flow tables) sees a byte-silent connection while the model
+        generates. Leading spaces are insignificant JSON whitespace — parsed
+        output is byte-identical for every client. Shared by the turn-0 chat path
+        and the cumulative (turn 1+) path so long generations survive on both.
+        """
+        result_task = asyncio.ensure_future(result_coro)
         if self.heartbeat_interval_s <= 0:
             content, status_code = await result_task
             return Response(content=content, status_code=status_code, media_type="application/json")
@@ -444,9 +461,36 @@ class ReverseProxy:
     ) -> Response:
         """Non-streaming cumulative turn: send pre-tokenized prompt, return JSON.
 
-        Routes to the in-process ``local_handler`` (e.g. Tinker) when present,
-        otherwise POSTs ``/v1/completions`` to a vLLM worker. Both return a
-        completions-style body carrying ``prompt_token_ids`` + ``token_ids``.
+        Wrapped in the shared whitespace heartbeat so a slow turn-1+ generation
+        keeps its (otherwise byte-silent) client connection alive instead of
+        being idle-cut and re-sent as a duplicate.
+        """
+        return await self._respond_with_heartbeat(
+            self._cumulative_non_streaming_result(
+                request, request_body, completions_body, session_id, acc, token_ids, originally_requested_logprobs, replay=replay
+            )
+        )
+
+    async def _cumulative_non_streaming_result(
+        self,
+        request: Request,
+        request_body: dict[str, Any],
+        completions_body: dict[str, Any],
+        session_id: str,
+        acc: TokenAccumulator,
+        token_ids: list[int],
+        originally_requested_logprobs: bool = False,
+        *,
+        replay: bool = False,
+    ) -> tuple[bytes, int]:
+        """Produce the cumulative-turn response bytes + status code.
+
+        Routes to the in-process ``local_handler`` (Tinker/Fireworks) when
+        present, otherwise POSTs ``/v1/completions`` to a vLLM worker. Both
+        return a completions-style body carrying ``prompt_token_ids`` +
+        ``token_ids``. Runs as the heartbeat-wrapped result task, so its
+        accumulator side effects (``ingest_turn`` / ``update_prefix``) complete
+        exactly once even if the client connection drops mid-flight.
         """
         t0 = time.perf_counter()
 
@@ -505,11 +549,7 @@ class ReverseProxy:
             if not originally_requested_logprobs:
                 sanitized = _strip_logprobs(sanitized)
 
-        return Response(
-            content=json.dumps(sanitized),
-            status_code=status_code,
-            media_type="application/json",
-        )
+        return json.dumps(sanitized).encode(), status_code
 
     async def _handle_cumulative_streaming(
         self,
