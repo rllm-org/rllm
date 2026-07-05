@@ -120,6 +120,13 @@ class ReverseProxy:
         self._http: httpx.AsyncClient | None = None
         self._pending_traces: set[asyncio.Task[None]] = set()
         self._accumulators: dict[str, TokenAccumulator] = {}
+        # Loop-health instrumentation (diagnostic only; see _loop_health_monitor).
+        # _inflight counts concurrent in-flight generations; _recent_lag_ms is the
+        # latest event-loop lag sample, stamped onto duplicate logs for correlation.
+        self._inflight: int = 0
+        self._inflight_max: int = 0
+        self._recent_lag_ms: float = 0.0
+        self._monitor_task: asyncio.Task[None] | None = None
 
     def _get_accumulator(self, session_id: str) -> TokenAccumulator:
         """Return the TokenAccumulator for *session_id*, creating if needed."""
@@ -127,14 +134,82 @@ class ReverseProxy:
             self._accumulators[session_id] = TokenAccumulator(self.renderer, session_id=session_id)
         return self._accumulators[session_id]
 
+    def _track_inflight(self, task: asyncio.Future) -> None:
+        """Count *task* (an in-flight generation) toward the in-flight gauge until
+        it completes. Called by ``_respond_with_heartbeat`` around the result task
+        so the gauge reflects concurrent generation load regardless of whether the
+        response is buffered or heartbeat-streamed."""
+        self._inflight += 1
+        if self._inflight > self._inflight_max:
+            self._inflight_max = self._inflight
+
+        def _done(_: asyncio.Future) -> None:
+            self._inflight -= 1
+
+        task.add_done_callback(_done)
+
+    async def _loop_health_monitor(self, sample_s: float = 0.5, report_s: float = 20.0) -> None:
+        """Log event-loop health so the single-loop gateway's headroom is
+        observable under load. Diagnostic only — no behavioural effect.
+
+        ``lag`` is how much longer than ``sample_s`` a bare sleep actually took —
+        i.e. how long the loop couldn't run this callback, whether from on-loop
+        CPU or from GIL starvation by the trainer thread. ``thread_cpu`` is the
+        loop thread's own CPU utilisation over the window, which disambiguates
+        the two: high lag + high thread_cpu = self-CPU bound (offload / do less);
+        high lag + low thread_cpu = the loop thread is starved (a separate gateway
+        process would help). ``inflight`` is concurrent generations.
+        """
+        lags: list[float] = []
+        window_start = time.monotonic()
+        last_cpu = time.thread_time()
+        next_report = window_start + report_s
+        while True:
+            t0 = time.monotonic()
+            try:
+                await asyncio.sleep(sample_s)
+            except asyncio.CancelledError:
+                return
+            lag_ms = max(0.0, (time.monotonic() - t0 - sample_s) * 1000.0)
+            self._recent_lag_ms = lag_ms
+            lags.append(lag_ms)
+            now = time.monotonic()
+            if now >= next_report and lags:
+                window = now - window_start
+                cpu = time.thread_time()
+                util = 100.0 * (cpu - last_cpu) / window if window > 0 else 0.0
+                ordered = sorted(lags)
+                p50 = ordered[len(ordered) // 2]
+                p99 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.99))]
+                logger.info(
+                    "gateway loop health: lag_ms p50=%.0f p99=%.0f max=%.0f | thread_cpu=%.0f%% | inflight cur=%d max=%d | window=%.0fs",
+                    p50,
+                    p99,
+                    ordered[-1],
+                    util,
+                    self._inflight,
+                    self._inflight_max,
+                    window,
+                )
+                lags.clear()
+                self._inflight_max = self._inflight
+                last_cpu = cpu
+                window_start = now
+                next_report = now + report_s
+
     async def start(self) -> None:
         self._http = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout=None),  # no timeout — LLM calls can be long
             limits=httpx.Limits(max_connections=500, max_keepalive_connections=100),
             follow_redirects=True,
         )
+        if self._monitor_task is None:
+            self._monitor_task = asyncio.ensure_future(self._loop_health_monitor())
 
     async def stop(self) -> None:
+        if self._monitor_task is not None:
+            self._monitor_task.cancel()
+            self._monitor_task = None
         # Drain pending trace writes before closing
         if self._pending_traces:
             logger.info("Draining %d pending trace writes...", len(self._pending_traces))
@@ -225,10 +300,12 @@ class ReverseProxy:
                     # fresh sample (not a cached one) is returned, so a retry that
                     # depends on resampling still makes progress.
                     logger.info(
-                        "TokenAccumulator duplicate session=%s turn=%d age_s=%s: regenerating in place, no reset",
+                        "TokenAccumulator duplicate session=%s turn=%d age_s=%s inflight=%d loop_lag_ms=%.0f: regenerating in place, no reset",
                         session_id,
                         acc.turn_count,
                         plan.diagnostics.get("age_s", "?"),
+                        self._inflight,
+                        self._recent_lag_ms,
                     )
                     return await self._handle_cumulative_turn(
                         request,
@@ -287,6 +364,7 @@ class ReverseProxy:
         and the cumulative (turn 1+) path so long generations survive on both.
         """
         result_task = asyncio.ensure_future(result_coro)
+        self._track_inflight(result_task)
         if self.heartbeat_interval_s <= 0:
             content, status_code = await result_task
             return Response(content=content, status_code=status_code, media_type="application/json")
