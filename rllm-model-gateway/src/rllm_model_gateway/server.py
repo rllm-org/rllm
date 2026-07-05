@@ -545,16 +545,52 @@ def main() -> None:
         "https://github.com/PrimeIntellect-ai/renderers/blob/main/renderers/base.py",
     )
 
+    parser.add_argument(
+        "--handler-factory",
+        type=str,
+        default=None,
+        help="Import path 'module:function' that maps the --handler-config dict to an in-process "
+        "local_handler (used to run a backend's sampler engine inside this gateway process). "
+        "Backend-agnostic: the gateway imports and calls whatever it is given.",
+    )
+    parser.add_argument(
+        "--handler-config",
+        type=str,
+        default=None,
+        help="Path to a JSON file passed to --handler-factory.",
+    )
+
     args = parser.parse_args()
     config = _load_config(args)
 
     logging.basicConfig(level=getattr(logging, config.log_level.upper(), logging.INFO))
 
-    app = create_app(config)
+    local_handler = _load_handler_factory(args.handler_factory, args.handler_config) if args.handler_factory else None
+
+    app = create_app(config, local_handler=local_handler)
 
     import uvicorn
 
     uvicorn.run(app, host=config.host, port=config.port, log_level=config.log_level.lower())
+
+
+def _load_handler_factory(spec: str, config_path: str | None):
+    """Import a ``module:function`` factory and call it with the JSON config to
+    build an in-process ``local_handler``. Keeps the gateway package backend-
+    agnostic — it loads whatever factory it is told (e.g. rLLM's Fireworks one)."""
+    import importlib
+    import json as _json
+
+    mod_path, sep, fn_name = spec.partition(":")
+    if not sep or not fn_name:
+        raise ValueError(f"--handler-factory must be 'module:function', got {spec!r}")
+    factory = getattr(importlib.import_module(mod_path), fn_name)
+    cfg: dict = {}
+    if config_path:
+        with open(config_path) as f:
+            cfg = _json.load(f)
+    logging.getLogger(__name__).info("Building local_handler via factory %s", spec)
+    return factory(cfg)
 
 
 if __name__ == "__main__":

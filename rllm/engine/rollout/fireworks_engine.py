@@ -341,6 +341,41 @@ class FireworksEngine(TinkerEngine):
         self.sample_timeout = sample_timeout
         self.router_replay = router_replay
         self.sampling_client = sampler
+        # Retained so a separate-process gateway can rebuild an equivalent engine
+        # (see handler_factory_spec / rllm.gateway.worker_handlers).
+        self.renderer_family = renderer_family
+
+    def handler_factory_spec(self) -> tuple[str, dict[str, Any]]:
+        """Recipe for rebuilding this engine as a gateway ``local_handler`` in a
+        separate process (Path 1 / rllm.gateway.manager multi-process mode).
+
+        Returns ``(import_path, config)`` where ``import_path`` is a
+        ``"module:function"`` that maps ``config`` -> a ``local_handler``. The
+        config carries only serializable, non-secret values — the subprocess
+        attaches to the *same* Fireworks deployment via the sampler's
+        ``base_url``/``model`` (no re-provisioning); the API key comes from the
+        inherited ``FIREWORKS_API_KEY`` env, not this config.
+        """
+        sampler = self.sampling_client
+        return (
+            "rllm.gateway.worker_handlers:build_fireworks_handler",
+            {
+                "inference_url": getattr(sampler, "base_url", None),
+                "model": getattr(sampler, "model", None),
+                "tokenizer_model": getattr(self.tokenizer, "name_or_path", None),
+                "max_prompt_length": self.max_prompt_length,
+                "max_response_length": self.max_response_length,
+                # __init__ stored (input - 1); pass +1 so a rebuild lands identically.
+                "max_model_length": self.max_model_length + 1,
+                "sampling_params": {"train": self.train_sampling_params, "val": self.val_sampling_params},
+                "reasoning_effort": self.reasoning_effort,
+                "accumulate_reasoning": self.accumulate_reasoning,
+                "router_replay": self.router_replay,
+                "sample_timeout": self.sample_timeout,
+                "renderer_family": self.renderer_family,
+                "bypass_render_with_parser": self.bypass_render_with_parser,
+            },
+        )
 
     # ------------------------------------------------------------------
     # Token-in / token-out override
