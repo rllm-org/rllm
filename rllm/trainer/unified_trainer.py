@@ -561,6 +561,7 @@ class UnifiedTrainer:
             group_size=self.rllm_config.rollout.n,
             staleness_threshold=self.async_config.staleness_threshold,
             trigger_parameter_sync_step=self.async_config.trigger_parameter_sync_step,
+            max_concurrent_rollouts=self.agent_workflow_engine.n_parallel_tasks,
         )
         coordinator = SyncCoordinator(coord_config)
         aggregator = MetricsAggregator()
@@ -633,8 +634,7 @@ class UnifiedTrainer:
                     task = batch[0]
 
                     await coordinator.wait_for_generation_allowed()
-                    if not coordinator.has_quota():
-                        await coordinator.wait_for_throttle()
+                    await coordinator.wait_for_capacity()
                     coordinator.on_group_dispatched()
 
                     task_id = str(uuid.uuid4())
