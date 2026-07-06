@@ -478,7 +478,7 @@ class DaytonaSandbox:
 
         if exit_code != 0:
             tail = stdout[-500:]
-            logger.warning(
+            logger.debug(
                 "Command failed in sandbox %s: %s\noutput tail: %s",
                 self.name,
                 command,

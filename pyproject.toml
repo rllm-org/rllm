@@ -93,7 +93,9 @@ tinker = [
 
 fireworks = [
     "fireworks-ai[training]==1.2.0a83 ; python_version >= '3.11'",
-    "fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git#subdirectory=training ; python_version >= '3.11'",
+    # Pinned: cookbook HEAD moved to require fireworks-ai>=1.2.0a86, conflicting
+    # with the ==1.2.0a83 pin above and making the extra unresolvable.
+    "fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git@e927e50bfcc3b9cb97be53a4cdd95e8111d9531c#subdirectory=training ; python_version >= '3.11'",
 ]
 
 opentelemetry = [

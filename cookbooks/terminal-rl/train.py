@@ -43,7 +43,10 @@ from rllm.data.dataset import DatasetRegistry
 from rllm.harnesses.terminus2 import Terminus2Harness
 from rllm.trainer import AgentTrainer
 
-TRAIN_DATASET = "tb-opus-pass"
+# Train dataset name (DatasetRegistry). Override with TB_TRAIN_DATASET to train
+# on any locally registered dataset (e.g. one built by
+# rllm.data.local_tasks_builder via `rllm dataset pull <name>`).
+TRAIN_DATASET = os.environ.get("TB_TRAIN_DATASET", "tb-opus-pass")
 
 # Terminal-Bench eval version (Harbor registry). Must match prepare_data.py;
 # both read TB_EVAL_VERSION so the pulled and loaded dataset names agree.
