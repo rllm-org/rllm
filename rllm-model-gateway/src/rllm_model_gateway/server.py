@@ -193,6 +193,7 @@ def create_app(
         local_handler=local_handler,
         cumulative_token_mode=config.cumulative_token_mode,
         renderer=renderer,
+        worker_label=str(config.port) if config.port else "",
     )
     sessions = SessionManager(store)
 
