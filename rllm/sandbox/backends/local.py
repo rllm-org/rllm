@@ -42,7 +42,7 @@ class LocalSandbox:
             env=self._env,
         )
         if result.returncode != 0:
-            logger.debug("Command failed in sandbox %s: %s\nstderr: %s", self.name, translated_cmd, result.stderr[:500])
+            logger.warning("Command failed in sandbox %s: %s\nstderr: %s", self.name, translated_cmd, result.stderr[:500])
             raise subprocess.CalledProcessError(result.returncode, translated_cmd, result.stdout, result.stderr)
         return result.stdout
 

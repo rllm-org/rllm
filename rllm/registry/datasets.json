@@ -109,9 +109,7 @@
       "description": "DeepScaleR-Preview: ~40K competition math problems (AIME/AMC/Omni-MATH/STILL)",
       "source": "agentica-org/DeepScaleR-Preview-Dataset",
       "category": "math",
-      "splits": [
-        "train"
-      ],
+      "splits": ["train"],
       "default_agent": "react",
       "reward_fn": "math_reward_fn",
       "eval_split": "train",
@@ -883,134 +881,6 @@
       "reward_fn": "depth_reward_fn",
       "eval_split": "test",
       "transform": "rllm.data.transforms:sunrgbd_transform"
-    },
-    "tb-v2-debug": {
-      "description": "8 Tasks selected that have >= 50% pass rate for qwen3p5-35b-a3b",
-      "source": "mobius-lab/tb-v2-tasks",
-      "builder": "rllm.data.hf_tasks_builder:build_benchmark",
-      "builder_kwargs": {
-        "archive": "tb_v2_tasks.tar.zst",
-        "subset_file": "subsets/tb-v2-debug.json"
-      },
-      "category": "agentic",
-      "splits": [
-        "train"
-      ],
-      "eval_split": "train",
-      "train_split": "train",
-      "default_agent": "terminus-2"
-    },
-    "tb-v2-opus-pass-at-1": {
-      "description": "12k tasks that opus 4.6 pass in the first trial",
-      "source": "mobius-lab/tb-v2-tasks",
-      "builder": "rllm.data.hf_tasks_builder:build_benchmark",
-      "builder_kwargs": {
-        "archive": "tb_v2_tasks.tar.zst",
-        "subset_file": "subsets/tb-v2-opus-pass-at-1.json"
-      },
-      "category": "agentic",
-      "splits": [
-        "train"
-      ],
-      "eval_split": "train",
-      "train_split": "train",
-      "default_agent": "terminus-2"
-    },
-    "tb-v2-full": {
-      "description": "All 17k tb v2 not filtered",
-      "source": "mobius-lab/tb-v2-tasks",
-      "builder": "rllm.data.hf_tasks_builder:build_benchmark",
-      "builder_kwargs": {
-        "archive": "tb_v2_tasks.tar.zst",
-        "subset_file": "subsets/tb-v2-full.json"
-      },
-      "category": "agentic",
-      "splits": [
-        "train"
-      ],
-      "eval_split": "train",
-      "train_split": "train",
-      "default_agent": "terminus-2"
-    },
-    "tb-v2-opus-pass-at-16": {
-      "description": "15k tasks that opus 4.6 at least pass 1 out of 16 trials",
-      "source": "mobius-lab/tb-v2-tasks",
-      "builder": "rllm.data.hf_tasks_builder:build_benchmark",
-      "builder_kwargs": {
-        "archive": "tb_v2_tasks.tar.zst",
-        "subset_file": "subsets/tb-v2-opus-pass-at-16.json"
-      },
-      "category": "agentic",
-      "splits": [
-        "train"
-      ],
-      "eval_split": "train",
-      "train_split": "train",
-      "default_agent": "terminus-2"
-    },
-    "tb-v2-opus-always-pass-16": {
-      "description": "7k tasks that opus 4.6 pass 16 out of 16",
-      "source": "mobius-lab/tb-v2-tasks",
-      "builder": "rllm.data.hf_tasks_builder:build_benchmark",
-      "builder_kwargs": {
-        "archive": "tb_v2_tasks.tar.zst",
-        "subset_file": "subsets/tb-v2-opus-always-pass-16.json"
-      },
-      "category": "agentic",
-      "splits": [
-        "train"
-      ],
-      "eval_split": "train",
-      "train_split": "train",
-      "default_agent": "terminus-2"
-    },
-    "tb-v2-balanced": {
-      "description": "1<= pass <= 15 out of 16 trials (opus 4.6)",
-      "source": "mobius-lab/tb-v2-tasks",
-      "builder": "rllm.data.hf_tasks_builder:build_benchmark",
-      "builder_kwargs": {
-        "archive": "tb_v2_tasks.tar.zst",
-        "subset_file": "subsets/tb-v2-balanced.json"
-      },
-      "category": "agentic",
-      "splits": [
-        "train"
-      ],
-      "eval_split": "train",
-      "train_split": "train",
-      "default_agent": "terminus-2"
-    },
-    "tb-v2-hard": {
-      "description": "1<= pass <= 12 out of 16 trials (opus 4.6)",
-      "source": "mobius-lab/tb-v2-tasks",
-      "builder": "rllm.data.hf_tasks_builder:build_benchmark",
-      "builder_kwargs": {
-        "archive": "tb_v2_tasks.tar.zst",
-        "subset_file": "subsets/tb-v2-hard.json"
-      },
-      "category": "agentic",
-      "splits": [
-        "train"
-      ],
-      "eval_split": "train",
-      "train_split": "train",
-      "default_agent": "terminus-2"
-    },
-    "tb-v2-very-hard": {
-      "description": "1<= pass <= 8 out of 16 trials (opus 4.6)",
-      "source": "mobius-lab/tb-v2-tasks",
-      "builder": "rllm.data.hf_tasks_builder:build_benchmark",
-      "builder_kwargs": {
-        "archive": "tb_v2_tasks.tar.zst",
-        "subset_file": "subsets/tb-v2-very-hard.json"
-      },
-      "category": "agentic",
-      "splits": [
-        "train"
-      ],
-      "eval_split": "train",
-      "train_split": "train",
-      "default_agent": "terminus-2"
     }
   }
 }
