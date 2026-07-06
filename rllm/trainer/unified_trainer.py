@@ -569,6 +569,7 @@ class UnifiedTrainer:
             group_size=self.rllm_config.rollout.n,
             staleness_threshold=self.async_config.staleness_threshold,
             trigger_parameter_sync_step=self.async_config.trigger_parameter_sync_step,
+            max_concurrent_rollouts=self.agent_workflow_engine.n_parallel_tasks,
         )
         coordinator = SyncCoordinator(coord_config)
         aggregator = MetricsAggregator()
@@ -592,6 +593,22 @@ class UnifiedTrainer:
         pbar = tqdm(total=total_tasks, desc="Tasks", unit="task")
         buffer._pbar = pbar
 
+        # Trainer event-loop health monitor (diagnostic). Mirrors the gateway's:
+        # high lag + high thread_cpu => the trainer loop is self-CPU bound (e.g.
+        # on-loop enrich / batch prep); high lag + low thread_cpu => starved.
+        # inflight/pending come from the agent-flow engine's concurrency slots.
+        from rllm.utils.loop_health import run_loop_health_monitor
+
+        def _trainer_gauges() -> str:
+            eng = self.agent_workflow_engine
+            parts = []
+            for name in ("inflight", "pending"):
+                v = getattr(eng, name, None)
+                if isinstance(v, int) and v >= 0:
+                    parts.append(f"{name}={v}")
+            return " ".join(parts)
+
+        monitor_task = asyncio.create_task(run_loop_health_monitor("trainer", gauges=_trainer_gauges))
         try:
             gen_task = asyncio.create_task(self._generation_loop(trainer_state, buffer, coordinator))
             await self._training_loop(trainer_state, buffer, coordinator, aggregator)
@@ -602,6 +619,7 @@ class UnifiedTrainer:
                 except asyncio.CancelledError:
                     pass
         finally:
+            monitor_task.cancel()
             pbar.close()
 
     async def _generation_loop(
@@ -624,8 +642,7 @@ class UnifiedTrainer:
                     task = batch[0]
 
                     await coordinator.wait_for_generation_allowed()
-                    if not coordinator.has_quota():
-                        await coordinator.wait_for_throttle()
+                    await coordinator.wait_for_capacity()
                     coordinator.on_group_dispatched()
 
                     task_id = str(uuid.uuid4())

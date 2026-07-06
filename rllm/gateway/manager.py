@@ -31,6 +31,7 @@ from __future__ import annotations
 import errno
 import logging
 import re
+import os
 import socket
 import subprocess
 import sys
@@ -210,9 +211,16 @@ class GatewayManager:
         self.cumulative_token_mode: bool = gw_cfg.get("cumulative_token_mode", False)
         self.renderer_family: str = gw_cfg.get("renderer_family", "auto")
 
+        # 0 = gateway runs in a trainer thread (default). >=1 = run it in its own
+        # process(es), so its event loop no longer shares the trainer's GIL. 1 =
+        # a single separate gateway process (no session-sharding); >1 needs the
+        # session-sticky front router (not yet implemented).
+        self.num_workers: int = int(gw_cfg.get("num_workers", 0))
+
         self.mode = mode
 
         self._process: subprocess.Popen | None = None
+        self._handler_config_path: str | None = None  # temp file for --handler-config (cleaned up in stop)
         self._thread: threading.Thread | None = None
         self._server: Any = None  # uvicorn.Server when using thread mode
         self._local_handler: Any = None  # in-process handler for tinker
@@ -253,11 +261,16 @@ class GatewayManager:
         engine_cls = type(rollout_engine).__name__
 
         if engine_cls in ("TinkerEngine", "FireworksEngine"):
-            # In-process handler — no HTTP backend, no worker registration
-            from rllm.gateway.tinker_adapter import create_tinker_handler
+            if self.num_workers >= 1:
+                # Run the gateway (with its own rebuilt engine) in a separate
+                # process so its event loop no longer shares the trainer's GIL.
+                self._start_gateway_subprocess(rollout_engine)
+            else:
+                # In-process handler — no HTTP backend, no worker registration.
+                from rllm.gateway.tinker_adapter import create_tinker_handler
 
-            self._local_handler = create_tinker_handler(rollout_engine)
-            self._start_thread(local_handler=self._local_handler)
+                self._local_handler = create_tinker_handler(rollout_engine)
+                self._start_thread(local_handler=self._local_handler)
         elif engine_cls == "VerlEngine":
             if self.mode == "process":
                 self._start_process()
@@ -307,6 +320,13 @@ class GatewayManager:
             except subprocess.TimeoutExpired:
                 self._process.kill()
             self._process = None
+
+        if self._handler_config_path is not None:
+            try:
+                os.unlink(self._handler_config_path)
+            except OSError:
+                pass
+            self._handler_config_path = None
 
         if self._server is not None:
             self._server.should_exit = True
@@ -380,8 +400,43 @@ class GatewayManager:
 
     # -- Internal ------------------------------------------------------------
 
-    def _start_process(self) -> None:
-        """Launch gateway as a subprocess and poll until healthy."""
+    def _start_gateway_subprocess(self, rollout_engine: RolloutEngine) -> None:
+        """Run the gateway in its own process with a rebuilt in-process handler.
+
+        The live engine can't cross a process boundary, so the subprocess rebuilds
+        an equivalent one from ``engine.handler_factory_spec()`` (see
+        ``rllm.gateway.worker_handlers``). N=1 only for now (single process, no
+        session sharding); >1 needs the session-sticky front router.
+        """
+        import json
+        import tempfile
+
+        if self.num_workers > 1:
+            raise NotImplementedError(
+                "rllm.gateway.num_workers > 1 requires the session-sticky front router (not yet implemented). "
+                "Use num_workers=1 for a single separate gateway process, or 0 for the in-trainer thread."
+            )
+        spec = getattr(rollout_engine, "handler_factory_spec", None)
+        if spec is None:
+            raise RuntimeError(
+                f"{type(rollout_engine).__name__} does not support a separate-process gateway "
+                "(no handler_factory_spec); set rllm.gateway.num_workers=0."
+            )
+        factory_path, cfg = spec()
+        fd, cfg_path = tempfile.mkstemp(prefix="rllm_gw_handler_", suffix=".json")
+        with os.fdopen(fd, "w") as f:
+            json.dump(cfg, f)
+        self._handler_config_path = cfg_path
+        # Building the engine (tokenizer load ×2 + renderer resolve) takes longer
+        # than a proxy-only start, so allow more startup headroom.
+        self._start_process(handler_factory=factory_path, handler_config_path=cfg_path, poll_timeout=max(_HEALTH_POLL_TIMEOUT, 180.0))
+
+    def _start_process(self, handler_factory: str | None = None, handler_config_path: str | None = None, poll_timeout: float | None = None) -> None:
+        """Launch gateway as a subprocess and poll until healthy.
+
+        With ``handler_factory``/``handler_config_path`` the subprocess builds an
+        in-process ``local_handler`` (backend engine) from that recipe; without
+        them it runs as a pure HTTP proxy to registered workers (verl path)."""
         preflight_gateway_port(self.port)
         cmd = [
             sys.executable,
@@ -401,6 +456,10 @@ class GatewayManager:
             cmd.append("--cumulative-token-mode")
             if self.renderer_family != "auto":
                 cmd.extend(["--renderer-family", self.renderer_family])
+        if handler_factory:
+            cmd.extend(["--handler-factory", handler_factory])
+            if handler_config_path:
+                cmd.extend(["--handler-config", handler_config_path])
 
         logger.info("Starting gateway subprocess: %s", " ".join(cmd))
         # Inherit parent's stdout/stderr so gateway logs are visible for debugging.
@@ -410,7 +469,8 @@ class GatewayManager:
         self._process = subprocess.Popen(cmd)
 
         # Poll health endpoint
-        deadline = time.monotonic() + _HEALTH_POLL_TIMEOUT
+        timeout = poll_timeout if poll_timeout is not None else _HEALTH_POLL_TIMEOUT
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
                 self.client.health()
@@ -422,7 +482,7 @@ class GatewayManager:
                 time.sleep(_HEALTH_POLL_INTERVAL)
 
         self._process.terminate()
-        raise TimeoutError(f"Gateway did not become healthy within {_HEALTH_POLL_TIMEOUT}s")
+        raise TimeoutError(f"Gateway did not become healthy within {timeout}s")
 
     def _start_thread(self, local_handler: Any = None) -> None:
         """Start gateway in a background thread using create_app + uvicorn."""

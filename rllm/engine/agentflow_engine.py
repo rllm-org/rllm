@@ -395,6 +395,7 @@ class AgentFlowEngine:
         self.train_sampling_params = train_sampling_params
         self.val_sampling_params = val_sampling_params
 
+        self.n_parallel_tasks = n_parallel_tasks
         self.executor = ThreadPoolExecutor(max_workers=n_parallel_tasks)
         self._semaphore = asyncio.Semaphore(n_parallel_tasks)
 
@@ -411,6 +412,27 @@ class AgentFlowEngine:
         self.current_step = step
         self.current_mode = mode
         self.current_epoch = epoch
+
+    @property
+    def inflight(self) -> int:
+        """Best-effort count of rollout tasks currently holding a concurrency slot.
+
+        Diagnostic only (reads the semaphore's remaining permits). Returns -1 if
+        the internal state can't be read.
+        """
+        try:
+            return max(0, self.n_parallel_tasks - self._semaphore._value)  # type: ignore[attr-defined]
+        except Exception:
+            return -1
+
+    @property
+    def pending(self) -> int:
+        """Best-effort count of rollout tasks queued waiting for a slot."""
+        try:
+            waiters = self._semaphore._waiters  # type: ignore[attr-defined]
+            return len(waiters) if waiters else 0
+        except Exception:
+            return -1
 
     async def execute_tasks(
         self,
