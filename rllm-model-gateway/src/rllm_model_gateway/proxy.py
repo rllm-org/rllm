@@ -119,9 +119,13 @@ class ReverseProxy:
         heartbeat_interval_s: float = 25.0,
         heartbeat_budget_s: float = 3600.0,
         capture_raw_payloads: bool = False,
+        worker_label: str = "",
     ) -> None:
         self.router = router
         self.store = store
+        # Distinguishes this process's logs when several gateway workers run
+        # behind a front (num_workers>1); empty for the single-process case.
+        self.worker_label = f"[{worker_label}] " if worker_label else ""
         self.strip_vllm = strip_vllm
         self.sync_traces = sync_traces
         self.max_retries = max_retries
@@ -209,7 +213,8 @@ class ReverseProxy:
                 p50 = ordered[len(ordered) // 2]
                 p99 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.99))]
                 logger.info(
-                    "gateway loop health: lag_ms p50=%.0f p99=%.0f max=%.0f | thread_cpu=%.0f%% | inflight cur=%d max=%d | window=%.0fs",
+                    "%sgateway loop health: lag_ms p50=%.0f p99=%.0f max=%.0f | thread_cpu=%.0f%% | inflight cur=%d max=%d | window=%.0fs",
+                    self.worker_label,
                     p50,
                     p99,
                     ordered[-1],
@@ -327,7 +332,8 @@ class ReverseProxy:
                     # fresh sample (not a cached one) is returned, so a retry that
                     # depends on resampling still makes progress.
                     logger.info(
-                        "TokenAccumulator duplicate session=%s turn=%d age_s=%s inflight=%d loop_lag_ms=%.0f: regenerating in place, no reset",
+                        "%sTokenAccumulator duplicate session=%s turn=%d age_s=%s inflight=%d loop_lag_ms=%.0f: regenerating in place, no reset",
+                        self.worker_label,
                         session_id,
                         acc.turn_count,
                         plan.diagnostics.get("age_s", "?"),
@@ -373,9 +379,7 @@ class ReverseProxy:
         connection while the model generates. Leading spaces are insignificant
         JSON whitespace — parsed output is byte-identical for every client.
         """
-        return await self._respond_with_heartbeat(
-            self._non_streaming_result(request, raw_body, request_body, session_id, originally_requested_logprobs)
-        )
+        return await self._respond_with_heartbeat(self._non_streaming_result(request, raw_body, request_body, session_id, originally_requested_logprobs))
 
     async def _respond_with_heartbeat(self, result_coro: Awaitable[tuple[bytes, int]]) -> Response:
         """Await *result_coro* (returns ``(content_bytes, status_code)``); keep
@@ -570,9 +574,7 @@ class ReverseProxy:
         being idle-cut and re-sent as a duplicate.
         """
         return await self._respond_with_heartbeat(
-            self._cumulative_non_streaming_result(
-                request, request_body, completions_body, session_id, acc, token_ids, originally_requested_logprobs, replay=replay
-            )
+            self._cumulative_non_streaming_result(request, request_body, completions_body, session_id, acc, token_ids, originally_requested_logprobs, replay=replay)
         )
 
     async def _cumulative_non_streaming_result(
