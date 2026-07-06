@@ -20,7 +20,9 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import dataclasses
+import functools
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -42,6 +44,18 @@ from rllm.types import TerminationEvent, TerminationReason
 logger = logging.getLogger(__name__)
 
 _MAX_SAMPLE_ATTEMPTS = 5
+# The gateway wires FireworksEngine as an in-process handler, so these retries
+# run *inside* the agent's HTTP call and hold that (byte-silent, no-heartbeat on
+# the cumulative path) connection open the whole time. Retrying long enough to
+# ride out a transient reset / weight-sync reload is good; holding past the
+# client/tunnel tolerance is not — the client re-sends, surfacing as
+# TokenAccumulator "duplicate" churn + wasted regeneration. So cap the total
+# retry wall-clock: ride out the common case, then fail fast so a persistent
+# outage surfaces instead of stalling the connection.
+_RETRY_BUDGET_S = 90.0
+# Per-retry backoff cap: the old 10/20/30/40s schedule alone could sleep ~100s,
+# well past the budget. Cap it so backoff can't dominate the budget.
+_RETRY_BACKOFF_CAP_S = 15.0
 _TRANSIENT_ERROR_MARKERS = (
     "502",
     "503",
@@ -84,6 +98,105 @@ def _install_inference_header_patch() -> None:
 
 
 _install_inference_header_patch()
+
+
+def _install_httpx_orjson_patch() -> None:
+    """Serialize httpx ``json=`` request bodies with orjson instead of stdlib json.
+
+    ``DeploymentSampler`` POSTs the full (≤120K-token) prompt via
+    ``client.post(json=payload)``; httpx serializes it with stdlib ``json`` on the
+    calling thread — the gateway's single event loop — which at high concurrency is
+    the dominant per-request on-loop CPU cost. orjson is ~3x faster and matches
+    httpx's wire semantics (compact, UTF-8, rejects NaN).
+
+    Best-effort and guarded: httpx internals (``encode_json`` returning
+    ``(headers, ByteStream)``) are version-specific, so we probe the shape against
+    the real function before installing and skip (keeping stdlib) on any mismatch —
+    a future httpx upgrade can degrade the speedup but never break sampling.
+    """
+    try:
+        import httpx._content as _hc
+        from httpx._content import ByteStream
+        import orjson
+    except Exception:  # noqa: BLE001 - httpx/orjson layout unknown → skip patch
+        return
+
+    orig = getattr(_hc, "encode_json", None)
+    if orig is None or getattr(orig, "_rllm_orjson_patch", False):
+        return
+
+    def _encode_json(json):  # noqa: ANN001 - matches httpx signature
+        try:
+            body = orjson.dumps(json)
+        except TypeError:
+            return orig(json)  # exotic types orjson can't handle → stdlib
+        headers = {"Content-Length": str(len(body)), "Content-Type": "application/json"}
+        return headers, ByteStream(body)
+
+    # Verify our output matches the real httpx contract (types + headers) on a
+    # tiny probe before swapping; otherwise leave stdlib in place.
+    try:
+        ref_headers, ref_stream = orig({"_rllm_probe": 1})
+        new_headers, new_stream = _encode_json({"_rllm_probe": 1})
+        if type(new_stream) is not type(ref_stream) or set(new_headers) != set(ref_headers):
+            raise ValueError("httpx encode_json shape mismatch")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("httpx orjson patch skipped (%s); using stdlib json for httpx bodies", e)
+        return
+
+    _encode_json._rllm_orjson_patch = True  # type: ignore[attr-defined]
+    _hc.encode_json = _encode_json
+    logger.info("Installed httpx orjson encode_json patch (faster large-prompt serialization off the gateway loop's critical path)")
+
+
+_install_httpx_orjson_patch()
+
+
+def _install_sdk_response_parse_patch() -> None:
+    """Parse the SDK's streaming completion chunks with orjson.
+
+    ``DeploymentSampler.async_completions_stream`` parses every SSE chunk with
+    stdlib ``json.loads(sse.data)`` on the event-loop thread; across many
+    concurrent streams that per-chunk parse is a continuous on-loop cost. Swap
+    the SDK ``sampling`` module's ``json`` reference for a shim whose ``loads`` is
+    orjson and which delegates every other attribute (``dumps``,
+    ``JSONDecodeError``, …) to stdlib json — so nothing else in the module
+    changes behaviour. ``orjson.JSONDecodeError`` subclasses ``ValueError``, so
+    the SDK's ``except (ValueError, TypeError)`` still catches malformed chunks.
+
+    Best-effort and idempotent: skips silently if the SDK/orjson layout differs.
+    """
+    try:
+        import json as _stdlib_json
+
+        import orjson
+        from fireworks.training.sdk import sampling as _sdk
+    except Exception:  # noqa: BLE001 - layout unknown → skip
+        return
+
+    if getattr(_sdk, "_rllm_orjson_json_shim", False):
+        return
+
+    class _OrjsonJson:
+        loads = staticmethod(orjson.loads)  # the hot path
+
+        def __getattr__(self, name):  # noqa: ANN001 - delegate everything else
+            return getattr(_stdlib_json, name)
+
+    shim = _OrjsonJson()
+    try:
+        assert shim.loads('{"a":1}') == {"a": 1}
+        assert shim.dumps({"a": 1}) == '{"a": 1}'  # delegates to stdlib → str
+    except Exception as e:  # noqa: BLE001
+        logger.warning("SDK response-parse orjson patch skipped (%s); using stdlib json", e)
+        return
+
+    _sdk.json = shim
+    _sdk._rllm_orjson_json_shim = True  # type: ignore[attr-defined]
+    logger.info("Installed orjson patch for Fireworks SDK streaming response parse")
+
+
+_install_sdk_response_parse_patch()
 
 
 class _EmptyCompletionIdsError(RuntimeError):
@@ -228,6 +341,41 @@ class FireworksEngine(TinkerEngine):
         self.sample_timeout = sample_timeout
         self.router_replay = router_replay
         self.sampling_client = sampler
+        # Retained so a separate-process gateway can rebuild an equivalent engine
+        # (see handler_factory_spec / rllm.gateway.worker_handlers).
+        self.renderer_family = renderer_family
+
+    def handler_factory_spec(self) -> tuple[str, dict[str, Any]]:
+        """Recipe for rebuilding this engine as a gateway ``local_handler`` in a
+        separate process (Path 1 / rllm.gateway.manager multi-process mode).
+
+        Returns ``(import_path, config)`` where ``import_path`` is a
+        ``"module:function"`` that maps ``config`` -> a ``local_handler``. The
+        config carries only serializable, non-secret values — the subprocess
+        attaches to the *same* Fireworks deployment via the sampler's
+        ``base_url``/``model`` (no re-provisioning); the API key comes from the
+        inherited ``FIREWORKS_API_KEY`` env, not this config.
+        """
+        sampler = self.sampling_client
+        return (
+            "rllm.gateway.worker_handlers:build_fireworks_handler",
+            {
+                "inference_url": getattr(sampler, "base_url", None),
+                "model": getattr(sampler, "model", None),
+                "tokenizer_model": getattr(self.tokenizer, "name_or_path", None),
+                "max_prompt_length": self.max_prompt_length,
+                "max_response_length": self.max_response_length,
+                # __init__ stored (input - 1); pass +1 so a rebuild lands identically.
+                "max_model_length": self.max_model_length + 1,
+                "sampling_params": {"train": self.train_sampling_params, "val": self.val_sampling_params},
+                "reasoning_effort": self.reasoning_effort,
+                "accumulate_reasoning": self.accumulate_reasoning,
+                "router_replay": self.router_replay,
+                "sample_timeout": self.sample_timeout,
+                "renderer_family": self.renderer_family,
+                "bypass_render_with_parser": self.bypass_render_with_parser,
+            },
+        )
 
     # ------------------------------------------------------------------
     # Token-in / token-out override
@@ -241,11 +389,22 @@ class FireworksEngine(TinkerEngine):
         accumulate_reasoning = kwargs.pop("accumulate_reasoning", self.accumulate_reasoning)
         reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
 
-        token_input = self._render_prompt_token_input(
-            messages,
-            tools=tools,
-            reasoning_effort=reasoning_effort,
-            accumulate_reasoning=accumulate_reasoning,
+        # Rendering a ≤120K-token prompt is CPU-bound and (via the HF fast
+        # tokenizer) releases the GIL, so run it in a worker thread instead of on
+        # the gateway's single event loop — otherwise every turn-0 request blocks
+        # the loop from flushing responses / firing heartbeats for all other
+        # in-flight requests, which at high concurrency shows up as client
+        # timeouts + TokenAccumulator "duplicate" churn.
+        loop = asyncio.get_running_loop()
+        token_input = await loop.run_in_executor(
+            None,
+            functools.partial(
+                self._render_prompt_token_input,
+                messages,
+                tools=tools,
+                reasoning_effort=reasoning_effort,
+                accumulate_reasoning=accumulate_reasoning,
+            ),
         )
 
         if application_id is not None:
@@ -397,6 +556,7 @@ class FireworksEngine(TinkerEngine):
         request to the trajectory's pinned replica. Returns
         (response_dict, server_metrics_dict)."""
 
+        start = time.monotonic()
         for attempt in range(_MAX_SAMPLE_ATTEMPTS):
             try:
                 token = _per_request_headers.set(session_headers) if session_headers else None
@@ -425,22 +585,31 @@ class FireworksEngine(TinkerEngine):
                 # markers below miss them; classify by type instead.
                 is_network_error = isinstance(exc, httpx.TimeoutException | httpx.TransportError)
                 transient = isinstance(exc, _EmptyCompletionIdsError) or is_network_error or any(marker in err or marker in exc_name for marker in _TRANSIENT_ERROR_MARKERS)
-                if transient and attempt < _MAX_SAMPLE_ATTEMPTS - 1:
-                    wait = 10 * (attempt + 1)
+                elapsed = time.monotonic() - start
+                wait = min(10 * (attempt + 1), _RETRY_BACKOFF_CAP_S)
+                # Retry only while there's budget left to both back off and make
+                # another attempt worthwhile — else fail fast so the held client
+                # connection is released instead of stalled past its tolerance.
+                budget_left = elapsed + wait < _RETRY_BUDGET_S
+                if transient and attempt < _MAX_SAMPLE_ATTEMPTS - 1 and budget_left:
                     logger.debug(
-                        "Attempt %d/%d failed (%s: %s), retrying in %ds...",
+                        "Attempt %d/%d failed (%s: %s) after %.1fs, retrying in %ds...",
                         attempt + 1,
                         _MAX_SAMPLE_ATTEMPTS,
                         exc_name,
                         exc,
+                        elapsed,
                         wait,
                     )
                     await asyncio.sleep(wait)
                     continue
                 resp_text = getattr(getattr(exc, "response", None), "text", None)
+                give_up = "retry budget exhausted" if (transient and not budget_left) else "permanent"
                 logger.error(
-                    "Sampling failed permanently after %d attempts (%s): %s\n%s",
+                    "Sampling failed (%s) after %d attempts / %.1fs (%s): %s\n%s",
+                    give_up,
                     attempt + 1,
+                    elapsed,
                     exc_name,
                     exc,
                     resp_text or "",
