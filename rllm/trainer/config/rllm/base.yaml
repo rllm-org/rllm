@@ -166,8 +166,10 @@ gateway:
   host: null          # Auto-detects routable IP; set explicitly to override
   num_workers: 0      # 0 = gateway runs in a trainer thread (shares the trainer's GIL).
                       # 1 = run it in its own process (own event loop/GIL; recommended when the
-                      # gateway is CPU-bound and contends with the trainer). >1 (multiple gateway
-                      # processes with session-sticky routing) is not yet implemented.
+                      # gateway is CPU-bound and contends with the trainer).
+                      # >1 = N gateway worker processes (ports port+1..port+N) behind a thin
+                      # session-sharding front on `port`, to spread the gateway's per-request CPU
+                      # across cores. Use when one gateway process still saturates its core.
   tunnel: null        # Reach the gateway from remote sandboxes. When null and a run uses remote
                       # sandboxes, it auto-resolves: $RLLM_GATEWAY_TUNNEL -> a running `rllm tunnel up`
                       # daemon -> a free Cloudflare quick tunnel (shared/rate-limited; warns). Or set
