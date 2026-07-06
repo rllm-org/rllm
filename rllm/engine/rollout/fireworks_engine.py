@@ -21,6 +21,7 @@ import asyncio
 import contextvars
 import dataclasses
 import logging
+import ssl
 from typing import Any
 
 import httpx
@@ -422,8 +423,10 @@ class FireworksEngine(TinkerEngine):
                 err = str(exc)
                 exc_name = exc.__class__.__name__
                 # Timeouts/transport errors have an empty str(exc), so the string
-                # markers below miss them; classify by type instead.
-                is_network_error = isinstance(exc, httpx.TimeoutException | httpx.TransportError)
+                # markers below miss them; classify by type instead. Raw
+                # ssl.SSLError (e.g. bad_record_mac) escapes the SDK's SSE
+                # stream unwrapped by httpx.
+                is_network_error = isinstance(exc, httpx.TimeoutException | httpx.TransportError | ssl.SSLError)
                 transient = isinstance(exc, _EmptyCompletionIdsError) or is_network_error or any(marker in err or marker in exc_name for marker in _TRANSIENT_ERROR_MARKERS)
                 if transient and attempt < _MAX_SAMPLE_ATTEMPTS - 1:
                     wait = 10 * (attempt + 1)
