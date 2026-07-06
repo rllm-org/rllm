@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from rllm_model_gateway.fastjson import dumps_sorted
+
 logger = logging.getLogger(__name__)
 
 
@@ -102,9 +104,13 @@ class TurnPlan:
 
 
 def _message_fingerprint(message: dict[str, Any]) -> str:
-    """Stable SHA-256 of a single message (detects any role/content change)."""
-    raw = json.dumps(message, sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(raw.encode()).hexdigest()
+    """Stable SHA-256 of a single message (detects any role/content change).
+
+    Uses orjson (sorted keys) → hashes the bytes directly; the exact encoding
+    only needs to be stable within a run, and every fingerprint goes through
+    this one function, so snapshot and incoming fps stay comparable.
+    """
+    return hashlib.sha256(dumps_sorted(message)).hexdigest()
 
 
 def _per_message_fingerprints(messages: list[dict[str, Any]]) -> list[str]:
