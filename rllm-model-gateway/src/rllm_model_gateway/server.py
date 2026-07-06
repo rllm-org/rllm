@@ -573,6 +573,13 @@ def main() -> None:
 
     logging.basicConfig(level=getattr(logging, config.log_level.upper(), logging.INFO))
 
+    # httpx emits one INFO line per request; at high concurrency (especially the
+    # front's per-request forwards to workers, and workers' calls to Fireworks)
+    # that floods. Silence it unless debugging — our own INFO logs are separate.
+    if config.log_level.lower() != "debug":
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+
     if args.front:
         from rllm_model_gateway.front import create_front_app
 
