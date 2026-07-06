@@ -299,7 +299,7 @@ class ModalSandbox:
                     command[:200],
                 )
                 raise SandboxCommandTimeout(f"Command hit its {int(timeout)}s timeout in sandbox {self.name} (killed after {elapsed:.0f}s)")
-            logger.debug(
+            logger.warning(
                 "Command failed in sandbox %s: %s\nstderr: %s",
                 self.name,
                 command,
