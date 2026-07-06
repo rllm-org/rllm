@@ -5,6 +5,7 @@ Reference: miles ``MilesRouter._do_proxy()``
 """
 
 import asyncio
+import functools
 import json
 import logging
 import time
@@ -15,6 +16,7 @@ import httpx
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 
+from rllm_model_gateway import fastjson
 from rllm_model_gateway.data_process import (
     build_trace_record,
     build_trace_record_from_chunks,
@@ -65,6 +67,32 @@ def _strip_logprobs(response: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _build_trace_data(
+    session_id: str,
+    request_body: dict[str, Any],
+    response_body: dict[str, Any],
+    latency_ms: float,
+    weight_version: int | None,
+    capture_raw: bool,
+) -> tuple[str, str, dict[str, Any]]:
+    """Build a TraceRecord and serialize it to a dict.
+
+    Runs in a worker thread (see ``ReverseProxy._persist_trace``) so the token-id
+    list copies + ``model_dump`` stay off the event-loop thread. Reads
+    ``request_body``/``response_body`` without mutating them, so it's safe to run
+    concurrently with the response path.
+    """
+    trace = build_trace_record(
+        session_id,
+        request_body,
+        response_body,
+        latency_ms,
+        weight_version=weight_version,
+        capture_raw=capture_raw,
+    )
+    return trace.trace_id, trace.session_id, trace.model_dump()
+
+
 class ReverseProxy:
     """Forward requests to inference workers, capture traces.
 
@@ -90,6 +118,7 @@ class ReverseProxy:
         heartbeat_initial_delay_s: float = 50.0,
         heartbeat_interval_s: float = 25.0,
         heartbeat_budget_s: float = 3600.0,
+        capture_raw_payloads: bool = False,
     ) -> None:
         self.router = router
         self.store = store
@@ -99,6 +128,11 @@ class ReverseProxy:
         self.local_handler = local_handler
         self.cumulative_token_mode = cumulative_token_mode
         self.renderer = renderer
+        # Retain full raw request/response on each trace. Off by default: training
+        # reads only token-id/logprob/message fields, and serializing the raw
+        # dicts (≤120K-token prompt + full response) is the dominant per-request
+        # CPU cost on the event loop at high concurrency. Enable for debugging.
+        self.capture_raw_payloads = capture_raw_payloads
         # Whitespace heartbeat for slow non-streaming completions: middleboxes
         # on the response path (Cloudflare quick tunnel: 120s; ngrok: ~300s;
         # NAT flow tables) silently kill responses that stay byte-silent while
@@ -113,6 +147,13 @@ class ReverseProxy:
         self._http: httpx.AsyncClient | None = None
         self._pending_traces: set[asyncio.Task[None]] = set()
         self._accumulators: dict[str, TokenAccumulator] = {}
+        # Loop-health instrumentation (diagnostic only; see _loop_health_monitor).
+        # _inflight counts concurrent in-flight generations; _recent_lag_ms is the
+        # latest event-loop lag sample, stamped onto duplicate logs for correlation.
+        self._inflight: int = 0
+        self._inflight_max: int = 0
+        self._recent_lag_ms: float = 0.0
+        self._monitor_task: asyncio.Task[None] | None = None
 
     def _get_accumulator(self, session_id: str) -> TokenAccumulator:
         """Return the TokenAccumulator for *session_id*, creating if needed."""
@@ -120,14 +161,82 @@ class ReverseProxy:
             self._accumulators[session_id] = TokenAccumulator(self.renderer, session_id=session_id)
         return self._accumulators[session_id]
 
+    def _track_inflight(self, task: asyncio.Future) -> None:
+        """Count *task* (an in-flight generation) toward the in-flight gauge until
+        it completes. Called by ``_respond_with_heartbeat`` around the result task
+        so the gauge reflects concurrent generation load regardless of whether the
+        response is buffered or heartbeat-streamed."""
+        self._inflight += 1
+        if self._inflight > self._inflight_max:
+            self._inflight_max = self._inflight
+
+        def _done(_: asyncio.Future) -> None:
+            self._inflight -= 1
+
+        task.add_done_callback(_done)
+
+    async def _loop_health_monitor(self, sample_s: float = 0.5, report_s: float = 20.0) -> None:
+        """Log event-loop health so the single-loop gateway's headroom is
+        observable under load. Diagnostic only — no behavioural effect.
+
+        ``lag`` is how much longer than ``sample_s`` a bare sleep actually took —
+        i.e. how long the loop couldn't run this callback, whether from on-loop
+        CPU or from GIL starvation by the trainer thread. ``thread_cpu`` is the
+        loop thread's own CPU utilisation over the window, which disambiguates
+        the two: high lag + high thread_cpu = self-CPU bound (offload / do less);
+        high lag + low thread_cpu = the loop thread is starved (a separate gateway
+        process would help). ``inflight`` is concurrent generations.
+        """
+        lags: list[float] = []
+        window_start = time.monotonic()
+        last_cpu = time.thread_time()
+        next_report = window_start + report_s
+        while True:
+            t0 = time.monotonic()
+            try:
+                await asyncio.sleep(sample_s)
+            except asyncio.CancelledError:
+                return
+            lag_ms = max(0.0, (time.monotonic() - t0 - sample_s) * 1000.0)
+            self._recent_lag_ms = lag_ms
+            lags.append(lag_ms)
+            now = time.monotonic()
+            if now >= next_report and lags:
+                window = now - window_start
+                cpu = time.thread_time()
+                util = 100.0 * (cpu - last_cpu) / window if window > 0 else 0.0
+                ordered = sorted(lags)
+                p50 = ordered[len(ordered) // 2]
+                p99 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.99))]
+                logger.info(
+                    "gateway loop health: lag_ms p50=%.0f p99=%.0f max=%.0f | thread_cpu=%.0f%% | inflight cur=%d max=%d | window=%.0fs",
+                    p50,
+                    p99,
+                    ordered[-1],
+                    util,
+                    self._inflight,
+                    self._inflight_max,
+                    window,
+                )
+                lags.clear()
+                self._inflight_max = self._inflight
+                last_cpu = cpu
+                window_start = now
+                next_report = now + report_s
+
     async def start(self) -> None:
         self._http = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout=None),  # no timeout — LLM calls can be long
             limits=httpx.Limits(max_connections=500, max_keepalive_connections=100),
             follow_redirects=True,
         )
+        if self._monitor_task is None:
+            self._monitor_task = asyncio.ensure_future(self._loop_health_monitor())
 
     async def stop(self) -> None:
+        if self._monitor_task is not None:
+            self._monitor_task.cancel()
+            self._monitor_task = None
         # Drain pending trace writes before closing
         if self._pending_traces:
             logger.info("Draining %d pending trace writes...", len(self._pending_traces))
@@ -154,8 +263,8 @@ class ReverseProxy:
         body = await request.body()
 
         try:
-            request_body = json.loads(body) if body else {}
-        except (json.JSONDecodeError, UnicodeDecodeError):
+            request_body = fastjson.loads(body) if body else {}
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
             request_body = {}
 
         is_stream = request_body.get("stream", False)
@@ -173,7 +282,15 @@ class ReverseProxy:
                 # the *why* is recoverable from the gateway log.
                 plan = acc.plan_turn(messages)
                 if plan.action == "extend":
-                    token_ids = acc.build_next_prompt(plan.new_messages, tools=request_body.get("tools"))
+                    # bridge_to_next_turn renders the new messages and concatenates
+                    # ≤120K prior token ids — CPU-bound, so keep it off the single
+                    # event loop (the tokenizer half releases the GIL) so the loop
+                    # stays free to service other concurrent requests.
+                    loop = asyncio.get_running_loop()
+                    token_ids = await loop.run_in_executor(
+                        None,
+                        functools.partial(acc.build_next_prompt, plan.new_messages, tools=request_body.get("tools")),
+                    )
                     if token_ids is not None:
                         logger.debug(
                             "TokenAccumulator extend session=%s turn=%d +%d new msgs",
@@ -210,10 +327,12 @@ class ReverseProxy:
                     # fresh sample (not a cached one) is returned, so a retry that
                     # depends on resampling still makes progress.
                     logger.info(
-                        "TokenAccumulator duplicate session=%s turn=%d age_s=%s: regenerating in place, no reset",
+                        "TokenAccumulator duplicate session=%s turn=%d age_s=%s inflight=%d loop_lag_ms=%.0f: regenerating in place, no reset",
                         session_id,
                         acc.turn_count,
                         plan.diagnostics.get("age_s", "?"),
+                        self._inflight,
+                        self._recent_lag_ms,
                     )
                     return await self._handle_cumulative_turn(
                         request,
@@ -254,7 +373,25 @@ class ReverseProxy:
         connection while the model generates. Leading spaces are insignificant
         JSON whitespace — parsed output is byte-identical for every client.
         """
-        result_task = asyncio.ensure_future(self._non_streaming_result(request, raw_body, request_body, session_id, originally_requested_logprobs))
+        return await self._respond_with_heartbeat(
+            self._non_streaming_result(request, raw_body, request_body, session_id, originally_requested_logprobs)
+        )
+
+    async def _respond_with_heartbeat(self, result_coro: Awaitable[tuple[bytes, int]]) -> Response:
+        """Await *result_coro* (returns ``(content_bytes, status_code)``); keep
+        the client connection warm if it's slow.
+
+        If the coroutine finishes within ``heartbeat_initial_delay_s`` the plain
+        JSON response goes out with its true status code. Past that, the response
+        is committed as chunked 200 and a space is emitted every
+        ``heartbeat_interval_s`` so no middlebox on the path (tunnel edge read
+        timers, NAT flow tables) sees a byte-silent connection while the model
+        generates. Leading spaces are insignificant JSON whitespace — parsed
+        output is byte-identical for every client. Shared by the turn-0 chat path
+        and the cumulative (turn 1+) path so long generations survive on both.
+        """
+        result_task = asyncio.ensure_future(result_coro)
+        self._track_inflight(result_task)
         if self.heartbeat_interval_s <= 0:
             content, status_code = await result_task
             return Response(content=content, status_code=status_code, media_type="application/json")
@@ -342,8 +479,7 @@ class ReverseProxy:
 
         # Persist trace
         if session_id and response_body:
-            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=request.state.weight_version)
-            await self._persist(trace)
+            await self._persist_trace(session_id, request_body, response_body, latency_ms, request.state.weight_version)
 
             # Ingest first turn into accumulator for cumulative token mode
             if self.cumulative_token_mode and request.url.path.endswith("/chat/completions"):
@@ -366,7 +502,7 @@ class ReverseProxy:
             if needs_strip_logprobs:
                 sanitized = _strip_logprobs(sanitized)
 
-        return json.dumps(sanitized).encode(), status_code
+        return fastjson.dumps(sanitized), status_code
 
     # ------------------------------------------------------------------
     # Cumulative token mode
@@ -429,9 +565,36 @@ class ReverseProxy:
     ) -> Response:
         """Non-streaming cumulative turn: send pre-tokenized prompt, return JSON.
 
-        Routes to the in-process ``local_handler`` (e.g. Tinker) when present,
-        otherwise POSTs ``/v1/completions`` to a vLLM worker. Both return a
-        completions-style body carrying ``prompt_token_ids`` + ``token_ids``.
+        Wrapped in the shared whitespace heartbeat so a slow turn-1+ generation
+        keeps its (otherwise byte-silent) client connection alive instead of
+        being idle-cut and re-sent as a duplicate.
+        """
+        return await self._respond_with_heartbeat(
+            self._cumulative_non_streaming_result(
+                request, request_body, completions_body, session_id, acc, token_ids, originally_requested_logprobs, replay=replay
+            )
+        )
+
+    async def _cumulative_non_streaming_result(
+        self,
+        request: Request,
+        request_body: dict[str, Any],
+        completions_body: dict[str, Any],
+        session_id: str,
+        acc: TokenAccumulator,
+        token_ids: list[int],
+        originally_requested_logprobs: bool = False,
+        *,
+        replay: bool = False,
+    ) -> tuple[bytes, int]:
+        """Produce the cumulative-turn response bytes + status code.
+
+        Routes to the in-process ``local_handler`` (Tinker/Fireworks) when
+        present, otherwise POSTs ``/v1/completions`` to a vLLM worker. Both
+        return a completions-style body carrying ``prompt_token_ids`` +
+        ``token_ids``. Runs as the heartbeat-wrapped result task, so its
+        accumulator side effects (``ingest_turn`` / ``update_prefix``) complete
+        exactly once even if the client connection drops mid-flight.
         """
         t0 = time.perf_counter()
 
@@ -480,8 +643,7 @@ class ReverseProxy:
         response_body["object"] = "chat.completion"
 
         if session_id and response_body:
-            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=request.state.weight_version)
-            await self._persist(trace)
+            await self._persist_trace(session_id, request_body, response_body, latency_ms, request.state.weight_version)
 
         sanitized = response_body
         if isinstance(response_body, dict) and response_body:
@@ -490,11 +652,7 @@ class ReverseProxy:
             if not originally_requested_logprobs:
                 sanitized = _strip_logprobs(sanitized)
 
-        return Response(
-            content=json.dumps(sanitized),
-            status_code=status_code,
-            media_type="application/json",
-        )
+        return fastjson.dumps(sanitized), status_code
 
     async def _handle_cumulative_streaming(
         self,
@@ -627,7 +785,7 @@ class ReverseProxy:
                 # Ingest accumulated token data
                 if chunks:
                     latency_ms = (time.perf_counter() - t0) * 1000
-                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version)
+                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, capture_raw=self.capture_raw_payloads)
                     prompt_ids = trace.prompt_token_ids or token_ids
                     completion_ids = trace.completion_token_ids
 
@@ -686,7 +844,7 @@ class ReverseProxy:
             chat_body["object"] = "chat.completion"
             if chat_body.get("choices"):
                 chat_body["choices"][0]["message"] = {"role": "assistant", "content": content}
-            trace = build_trace_record(session_id, request_body, chat_body, latency_ms, weight_version=request.state.weight_version)
+            trace = build_trace_record(session_id, request_body, chat_body, latency_ms, weight_version=request.state.weight_version, capture_raw=self.capture_raw_payloads)
             await self._persist(trace)
 
         chat_id = response_body.get("id", "chatcmpl-local")
@@ -851,7 +1009,7 @@ class ReverseProxy:
                 # finally block may run during GeneratorExit, where await
                 # on real async I/O (e.g. aiosqlite) is not reliable.
                 if session_id and chunks:
-                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version)
+                    trace = build_trace_record_from_chunks(session_id, request_body, chunks, latency_ms, weight_version=request.state.weight_version, capture_raw=self.capture_raw_payloads)
                     task = asyncio.create_task(
                         self._safe_store(
                             trace.trace_id,
@@ -893,7 +1051,7 @@ class ReverseProxy:
 
         # Persist trace from the full response
         if session_id and response_body:
-            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=weight_version)
+            trace = build_trace_record(session_id, request_body, response_body, latency_ms, weight_version=weight_version, capture_raw=self.capture_raw_payloads)
             await self._persist(trace)
 
         needs_strip_vllm = self.strip_vllm
@@ -1025,6 +1183,49 @@ class ReverseProxy:
             await self.store.store_trace(trace_id, session_id, data)
         except Exception:
             logger.exception("Failed to persist trace %s", trace_id)
+
+    async def _persist_trace(
+        self,
+        session_id: str,
+        request_body: dict[str, Any],
+        response_body: dict[str, Any],
+        latency_ms: float,
+        weight_version: int | None,
+    ) -> None:
+        """Build + store a trace off the event-loop thread and off the response
+        critical path.
+
+        ``build_trace_record`` + ``model_dump`` copy the ≤120K/16K token-id lists
+        and were previously done inline on the loop before returning the response.
+        Here they run in the executor (``_build_trace_data``); only the async store
+        write touches the loop, and the response no longer waits for any of it.
+        ``sync_traces`` still forces synchronous completion for callers that need it.
+        """
+        loop = asyncio.get_running_loop()
+        capture_raw = self.capture_raw_payloads
+
+        async def _run() -> None:
+            try:
+                trace_id, sess, data = await loop.run_in_executor(
+                    None,
+                    _build_trace_data,
+                    session_id,
+                    request_body,
+                    response_body,
+                    latency_ms,
+                    weight_version,
+                    capture_raw,
+                )
+                await self._safe_store(trace_id, sess, data)
+            except Exception:
+                logger.exception("Failed to persist trace (session=%s)", session_id)
+
+        if self.sync_traces:
+            await _run()
+        else:
+            task = asyncio.create_task(_run())
+            self._pending_traces.add(task)
+            task.add_done_callback(self._pending_traces.discard)
 
     @staticmethod
     def _build_url(worker_url: str, path: str, query: str, *, gateway_prefix: str = "/v1") -> str:
