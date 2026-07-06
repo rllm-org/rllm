@@ -373,9 +373,7 @@ class ReverseProxy:
         connection while the model generates. Leading spaces are insignificant
         JSON whitespace — parsed output is byte-identical for every client.
         """
-        return await self._respond_with_heartbeat(
-            self._non_streaming_result(request, raw_body, request_body, session_id, originally_requested_logprobs)
-        )
+        return await self._respond_with_heartbeat(self._non_streaming_result(request, raw_body, request_body, session_id, originally_requested_logprobs))
 
     async def _respond_with_heartbeat(self, result_coro: Awaitable[tuple[bytes, int]]) -> Response:
         """Await *result_coro* (returns ``(content_bytes, status_code)``); keep
@@ -570,9 +568,7 @@ class ReverseProxy:
         being idle-cut and re-sent as a duplicate.
         """
         return await self._respond_with_heartbeat(
-            self._cumulative_non_streaming_result(
-                request, request_body, completions_body, session_id, acc, token_ids, originally_requested_logprobs, replay=replay
-            )
+            self._cumulative_non_streaming_result(request, request_body, completions_body, session_id, acc, token_ids, originally_requested_logprobs, replay=replay)
         )
 
     async def _cumulative_non_streaming_result(
