@@ -564,8 +564,7 @@ def main() -> None:
         "--front",
         action="store_true",
         default=False,
-        help="Run as a thin session-sharding reverse proxy over the --worker gateways "
-        "(the front for rllm.gateway.num_workers>1). Routes by session_id; no local engine.",
+        help="Run as a thin session-sharding reverse proxy over the --worker gateways (the front for rllm.gateway.num_workers>1). Routes by session_id; no local engine.",
     )
 
     args = parser.parse_args()

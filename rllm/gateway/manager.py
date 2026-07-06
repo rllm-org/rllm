@@ -29,8 +29,8 @@ For Tinker backends, an in-process handler is injected into the gateway
 from __future__ import annotations
 
 import logging
-import re
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -429,10 +429,7 @@ class GatewayManager:
 
         spec = getattr(rollout_engine, "handler_factory_spec", None)
         if spec is None:
-            raise RuntimeError(
-                f"{type(rollout_engine).__name__} does not support a separate-process gateway "
-                "(no handler_factory_spec); set rllm.gateway.num_workers=0."
-            )
+            raise RuntimeError(f"{type(rollout_engine).__name__} does not support a separate-process gateway (no handler_factory_spec); set rllm.gateway.num_workers=0.")
         factory_path, cfg = spec()
         fd, cfg_path = tempfile.mkstemp(prefix="rllm_gw_handler_", suffix=".json")
         with os.fdopen(fd, "w") as f:
