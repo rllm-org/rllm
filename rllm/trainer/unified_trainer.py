@@ -164,14 +164,6 @@ class UnifiedTrainer:
         if not has_agent_flow and not remote_runtime_enabled:
             assert workflow_class is not None, "Either workflow_class, (agent_flow AND (evaluator OR hooks)), or remote_runtime must be provided"
 
-        if has_agent_flow or remote_runtime_enabled:
-            # Gateway runs bind their port only in GatewayManager.start(), after
-            # the backend has provisioned rollout infra (minutes on Fireworks) —
-            # check the port here so a conflict fails before any of that.
-            from rllm.gateway.manager import DEFAULT_GATEWAY_PORT, preflight_gateway_port
-
-            preflight_gateway_port((config.rllm.get("gateway", {}) or {}).get("port", DEFAULT_GATEWAY_PORT))
-
         self.workflow_class = workflow_class
         self.workflow_args = workflow_args or {}
         self.store = store

@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable
+from typing import Callable
 
 logger = logging.getLogger(__name__)
 # This is a purpose-built diagnostic; keep it visible even when the surrounding
