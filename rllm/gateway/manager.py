@@ -30,8 +30,8 @@ from __future__ import annotations
 
 import errno
 import logging
-import re
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -413,15 +413,11 @@ class GatewayManager:
 
         if self.num_workers > 1:
             raise NotImplementedError(
-                "rllm.gateway.num_workers > 1 requires the session-sticky front router (not yet implemented). "
-                "Use num_workers=1 for a single separate gateway process, or 0 for the in-trainer thread."
+                "rllm.gateway.num_workers > 1 requires the session-sticky front router (not yet implemented). Use num_workers=1 for a single separate gateway process, or 0 for the in-trainer thread."
             )
         spec = getattr(rollout_engine, "handler_factory_spec", None)
         if spec is None:
-            raise RuntimeError(
-                f"{type(rollout_engine).__name__} does not support a separate-process gateway "
-                "(no handler_factory_spec); set rllm.gateway.num_workers=0."
-            )
+            raise RuntimeError(f"{type(rollout_engine).__name__} does not support a separate-process gateway (no handler_factory_spec); set rllm.gateway.num_workers=0.")
         factory_path, cfg = spec()
         fd, cfg_path = tempfile.mkstemp(prefix="rllm_gw_handler_", suffix=".json")
         with os.fdopen(fd, "w") as f:

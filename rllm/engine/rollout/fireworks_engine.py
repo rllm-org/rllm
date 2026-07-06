@@ -117,8 +117,8 @@ def _install_httpx_orjson_patch() -> None:
     """
     try:
         import httpx._content as _hc
-        from httpx._content import ByteStream
         import orjson
+        from httpx._content import ByteStream
     except Exception:  # noqa: BLE001 - httpx/orjson layout unknown → skip patch
         return
 

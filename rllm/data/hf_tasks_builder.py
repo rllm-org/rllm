@@ -84,9 +84,7 @@ def build_benchmark(
     if not repo_id:
         raise ValueError("repo_id is required (or set 'source' in the catalog entry)")
 
-    archive_path = Path(
-        hf_hub_download(repo_id=repo_id, filename=archive, repo_type="dataset", revision=revision)
-    )
+    archive_path = Path(hf_hub_download(repo_id=repo_id, filename=archive, repo_type="dataset", revision=revision))
 
     # One shared extraction per repo — every dataset version reuses it.
     cache_dir = Path(paths.datasets_dir()) / "_hf_tasks" / repo_id.replace("/", "__")
@@ -95,9 +93,7 @@ def build_benchmark(
     if subset_file is not None:
         if task_ids is not None:
             raise ValueError("Pass task_ids OR subset_file, not both")
-        subset_path = Path(
-            hf_hub_download(repo_id=repo_id, filename=subset_file, repo_type="dataset", revision=revision)
-        )
+        subset_path = Path(hf_hub_download(repo_id=repo_id, filename=subset_file, repo_type="dataset", revision=revision))
         task_ids = json.loads(subset_path.read_text(encoding="utf-8"))
 
     # Selection + symlinking + dataset.toml + registration are shared with the
