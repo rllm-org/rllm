@@ -27,11 +27,10 @@
 #     regularly exceed ~17 turns, else their tails get dropped by compact
 #     filtering.
 #
-# Model: Qwen3.5-9B + LoRA-32 on the qwen3p5-9b-256k-lora training shape.
-# Fireworks' public catalog ships a 3.5-9B LoRA shape but no 3.5-4B, so this
-# uses the 9B rather than the tinker recipe's 4B. To change it, swap model.name /
-# model.tokenizer_model / fireworks_config.policy_trainer_shape_id together
-# (see docs/backends/fireworks.mdx).
+# Model: Qwen3.5-35B-A3B + LoRA-32 on the qwen3p5-35b-a3b-256k-lora training
+# shape. To change it, swap model.name / model.tokenizer_model /
+# fireworks_config.policy_trainer_shape_id together (see
+# docs/backends/fireworks.mdx for the RFT-LoRA catalog).
 #
 # Sandbox backend is chosen by TERMINAL_SANDBOX_BACKEND (docker | local | modal |
 # daytona; default modal). modal needs `pip install modal` + `modal token new`;
@@ -47,22 +46,24 @@
 set -euo pipefail
 
 export TERMINAL_SANDBOX_BACKEND="${TERMINAL_SANDBOX_BACKEND:-modal}"
+# Train dataset (DatasetRegistry name). Pull it first: rllm dataset pull <name>
+export TB_TRAIN_DATASET="${TB_TRAIN_DATASET:-tb-v2-debug}"
 # Per-rollout turn cap for terminus2 (read by train.py). Empty = uncapped.
-export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-100}"
-export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-1800}"
+export TERMINUS_MAX_TURNS="${TERMINUS_MAX_TURNS:-200}"
+export RLLM_HARNESS_RUN_TIMEOUT_S="${RLLM_HARNESS_RUN_TIMEOUT_S:-3600}"
 # Modal sandbox LIFETIME (not idle time). Must exceed the agent run timeout
 # above plus setup/verify, or sandboxes get reaped mid-rollout — surfacing as
 # "Sandbox has already shut down" (NotFoundError) and exit-137 kills.
-export RLLM_MODAL_SANDBOX_TIMEOUT_S="${RLLM_MODAL_SANDBOX_TIMEOUT_S:-2400}"
+export RLLM_MODAL_SANDBOX_TIMEOUT_S="${RLLM_MODAL_SANDBOX_TIMEOUT_S:-4800}"
 
 python -u train.py \
     rllm/backend=fireworks \
-    model.name=accounts/fireworks/models/qwen3p5-9b \
-    model.tokenizer_model=Qwen/Qwen3.5-9B \
+    model.name=accounts/fireworks/models/qwen3p5-35b-a3b \
+    model.tokenizer_model=Qwen/Qwen3.5-35B-A3B \
     model.lora_rank=32 \
-    fireworks_config.policy_trainer_shape_id=accounts/fireworks/trainingShapes/qwen3p5-9b-256k-lora \
+    fireworks_config.policy_trainer_shape_id=accounts/fireworks/trainingShapes/qwen3p5-35b-a3b-256k-lora \
     fireworks_config.rollout_deployment_replica_count=6 \
-    training.group_size=8 \
+    training.group_size=32 \
     training.learning_rate=2e-5 \
     training.max_length=131072 \
     rllm.rollout.train.temperature=1.0 \
@@ -81,7 +82,7 @@ python -u train.py \
     rllm.algorithm.adv_estimator=echo \
     rllm.algorithm.norm_adv_by_std_in_grpo=true \
     rllm.async_training.enable=true \
-    rllm.async_training.mini_batch_size=16 \
+    rllm.async_training.mini_batch_size=8 \
     rllm.async_training.fwd_bwd_group_size=1 \
     rllm.async_training.staleness_threshold=1.0 \
     rllm.async_training.trigger_parameter_sync_step=1 \
@@ -94,7 +95,7 @@ python -u train.py \
     rllm.trainer.total_epochs=1 \
     rllm.trainer.logger='[wandb]' \
     rllm.trainer.project_name='terminal-rl' \
-    rllm.trainer.experiment_name='terminal-rl-terminus2-qwen3p5-9b-fireworks' \
+    rllm.trainer.experiment_name='terminal-rl-terminus2-qwen3p5-35b-a3b-fireworks' \
     rllm.trainer.val_before_train=false \
     rllm.trainer.test_freq=50 \
     rllm.trainer.save_freq=10 \

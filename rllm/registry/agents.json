@@ -60,6 +60,11 @@
       "module": "rllm.harnesses.zeroclaw",
       "function": "ZeroClawHarness",
       "description": "Run the ZeroClaw autonomous-assistant CLI inside the sandbox."
+    },
+    "terminus2-native": {
+      "module": "rllm.harnesses.terminus2_native",
+      "function": "Terminus2NativeHarness",
+      "description": "Terminus-2 loop over native tool-calling \u2014 reasoning_content persists across turns (for think-mode models like DeepSeek-V4-Pro)."
     }
   }
 }
