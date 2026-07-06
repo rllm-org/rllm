@@ -22,7 +22,6 @@ import contextvars
 import dataclasses
 import functools
 import logging
-import ssl
 import time
 from typing import Any
 
@@ -117,8 +116,8 @@ def _install_httpx_orjson_patch() -> None:
     """
     try:
         import httpx._content as _hc
-        import orjson
         from httpx._content import ByteStream
+        import orjson
     except Exception:  # noqa: BLE001 - httpx/orjson layout unknown → skip patch
         return
 
@@ -583,10 +582,8 @@ class FireworksEngine(TinkerEngine):
                 err = str(exc)
                 exc_name = exc.__class__.__name__
                 # Timeouts/transport errors have an empty str(exc), so the string
-                # markers below miss them; classify by type instead. Raw
-                # ssl.SSLError (e.g. bad_record_mac) escapes the SDK's SSE
-                # stream unwrapped by httpx.
-                is_network_error = isinstance(exc, httpx.TimeoutException | httpx.TransportError | ssl.SSLError)
+                # markers below miss them; classify by type instead.
+                is_network_error = isinstance(exc, httpx.TimeoutException | httpx.TransportError)
                 transient = isinstance(exc, _EmptyCompletionIdsError) or is_network_error or any(marker in err or marker in exc_name for marker in _TRANSIENT_ERROR_MARKERS)
                 elapsed = time.monotonic() - start
                 wait = min(10 * (attempt + 1), _RETRY_BACKOFF_CAP_S)
