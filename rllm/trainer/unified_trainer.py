@@ -641,8 +641,20 @@ class UnifiedTrainer:
                     for rollout_idx in range(group_size):
 
                         async def _run_rollout(t=task, tid=task_id, ridx=rollout_idx):
-                            _, _, _, episode = await self.agent_workflow_engine.process_task_with_retry(task=t, task_id=tid, rollout_idx=ridx, result_idx=0)
-                            await buffer.add_episode(tid, episode)
+                            uid = f"{tid}:{ridx}"
+                            try:
+                                _, _, _, episode = await self.agent_workflow_engine.process_task_with_retry(task=t, task_id=tid, rollout_idx=ridx, result_idx=0)
+                                await buffer.add_episode(tid, episode)
+                            finally:
+                                # Release the gateway session (traces are already in `episode`).
+                                # This async loop never calls engine.run(), whose end-of-step
+                                # batch_delete would otherwise do this -- without it the gateway's
+                                # in-memory trace store grows unbounded for the whole run.
+                                if self._gateway is not None:
+                                    try:
+                                        await self._gateway.adelete_session(uid)
+                                    except Exception:
+                                        logger.warning("gateway session cleanup failed for %s", uid)
 
                         t = asyncio.create_task(_run_rollout())
                         coordinator.track_task(t)
