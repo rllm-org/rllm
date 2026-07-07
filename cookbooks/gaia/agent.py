@@ -81,6 +81,11 @@ def run_tool_loop(client, model: str, tools: list, question: str, *, system_prom
             steps.append(Step(input=f"turn_{turn}", output=answer, done=True))
             break
 
+        # Execute every tool call in this turn, but record exactly ONE Step per turn:
+        # the eval trace-enricher consumes traces 1:1 with agent steps (one LLM call ==
+        # one Step), so a step-per-tool-call inflates the count on parallel tool calls
+        # and raises EnrichMismatchError. See rllm/engine/agentflow_engine.py.
+        observations = []
         for tc in msg.tool_calls:
             name = tc.function.name
             try:
@@ -89,8 +94,9 @@ def run_tool_loop(client, model: str, tools: list, question: str, *, system_prom
                 args = {}
             tool = tool_map.get(name)
             obs = f"Unknown tool: {name}" if tool is None else _tool_observation(tool, args)
-            steps.append(Step(input=tc.function.arguments, output=obs))
+            observations.append(f"{name}: {obs}")
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": obs})
+        steps.append(Step(input=f"turn_{turn}", output="\n".join(observations)))
 
     return steps, answer
 
