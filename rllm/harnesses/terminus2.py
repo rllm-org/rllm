@@ -24,6 +24,7 @@ builds the trajectory. Reward comes from rLLM's per-task verifier, not here.
 from __future__ import annotations
 
 import logging
+import os
 import shlex
 
 from rllm.harnesses.cli_harness import BaseCliHarness
@@ -140,6 +141,9 @@ class Terminus2Harness(BaseCliHarness):
             "RLLM_TERMINUS_INSTRUCTION_FILE": _INSTRUCTION_PATH,
             "RLLM_TERMINUS_LOGS_DIR": _LOGS_DIR,
             "RLLM_TERMINUS_OUTCOME_FILE": _OUTCOME_PATH,
+            # Host env wins so a run can turn off harbor's summarization (plain
+            # ReAct loop: overflow ends the episode) without a code edit.
+            "RLLM_TERMINUS_ENABLE_SUMMARIZE": os.environ.get("RLLM_TERMINUS_ENABLE_SUMMARIZE", "1"),
             # The driver self-limits the agent loop at this budget and records an
             # AgentTimeoutError, so the timeout is labelled correctly even though
             # the outer ``| tee`` exec masks the kill's exit code. The harness's
@@ -352,6 +356,7 @@ async def _main():
         record_terminal_session=record,
         model_info=model_info,
         suppress_max_turns_warning=True,
+        enable_summarize=os.environ.get("RLLM_TERMINUS_ENABLE_SUMMARIZE", "1") == "1",
     )
     ctx = AgentContext()
     # Budgets: self-limit the agent loop so a wall-clock kill is recorded as a
