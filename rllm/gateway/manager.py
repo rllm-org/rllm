@@ -28,6 +28,7 @@ For Tinker backends, an in-process handler is injected into the gateway
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import re
@@ -53,6 +54,46 @@ logger = logging.getLogger(__name__)
 _HEALTH_POLL_INTERVAL = 0.5
 _HEALTH_POLL_TIMEOUT = env_float("RLLM_GATEWAY_HEALTH_TIMEOUT_S", 30.0)  # set env var: export RLLM_GATEWAY_HEALTH_TIMEOUT_S=xxx
 _TRACE_API_TIMEOUT = 600.0
+
+DEFAULT_GATEWAY_PORT = 9090
+
+
+class GatewayPortInUseError(RuntimeError):
+    """The gateway's TCP port is already bound by another process."""
+
+
+def preflight_gateway_port(port: int) -> None:
+    """Fail fast if the gateway won't be able to bind ``port``.
+
+    The gateway binds ``0.0.0.0:<port>`` from a background thread or
+    subprocess, so a bind failure otherwise surfaces as an opaque
+    health-poll timeout — and only after any expensive setup that precedes
+    ``start()`` (e.g. minutes of remote-infra provisioning in training).
+    The probe sets ``SO_REUSEADDR`` to match uvicorn, so sockets in
+    TIME_WAIT don't false-positive. Best-effort: the port can still be
+    claimed between this check and the real bind.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("0.0.0.0", port))
+        except OSError as e:
+            if e.errno != errno.EADDRINUSE:
+                raise
+            daemon_hint = ""
+            try:
+                from rllm.gateway.tunnel import live_tunnel
+
+                state = live_tunnel() or {}
+                if str(state.get("upstream", "")).endswith(f":{port}"):
+                    daemon_hint = (
+                        f" Port {port} is the `rllm tunnel up` daemon's upstream, so another rLLM run "
+                        "(train/eval) is likely already serving behind the tunnel; give this run its own "
+                        "gateway with rllm.gateway.port=<free port> and rllm.gateway.tunnel=ngrok|cloudflared."
+                    )
+            except Exception:
+                pass
+            raise GatewayPortInUseError(f"Gateway port {port} is already in use (another process is listening on 0.0.0.0:{port}).{daemon_hint} Find the holder with: ss -tlnp 'sport = :{port}'") from e
 
 
 def _find_free_port() -> int:
@@ -150,7 +191,7 @@ class GatewayManager:
         gw_cfg = config.rllm.get("gateway", {})
         configured_host = gw_cfg.get("host", None)
         self.host: str = configured_host if configured_host else _get_routable_ip()
-        self.port: int = gw_cfg.get("port", 9090)
+        self.port: int = gw_cfg.get("port", DEFAULT_GATEWAY_PORT)
         self.store: str = gw_cfg.get("store", "memory")
         self.db_path: str | None = gw_cfg.get("db_path", None)
         if self.store not in ("memory", "sqlite"):
@@ -427,6 +468,7 @@ class GatewayManager:
         import json
         import tempfile
 
+        preflight_gateway_port(self.port)
         spec = getattr(rollout_engine, "handler_factory_spec", None)
         if spec is None:
             raise RuntimeError(f"{type(rollout_engine).__name__} does not support a separate-process gateway (no handler_factory_spec); set rllm.gateway.num_workers=0.")
@@ -471,6 +513,7 @@ class GatewayManager:
 
     def _start_thread(self, local_handler: Any = None) -> None:
         """Start gateway in a background thread using create_app + uvicorn."""
+        preflight_gateway_port(self.port)
         import uvicorn
         from rllm_model_gateway.models import GatewayConfig
         from rllm_model_gateway.server import create_app
