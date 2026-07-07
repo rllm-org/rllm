@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import gc
 import logging
 import os
 import uuid
@@ -586,6 +587,14 @@ def main() -> None:
     else:
         local_handler = _load_handler_factory(args.handler_factory, args.handler_config) if args.handler_factory else None
         app = create_app(config, local_handler=local_handler)
+
+    # Standalone gateway process only (main() never runs for the in-trainer
+    # thread-mode gateway, so this can't perturb the trainer's GC). Freeze the
+    # static tokenizer/renderer/sampler out of GC's scan set and make gen-2 sweeps
+    # rare, so cyclic GC on the event-loop thread stops stalling request handling.
+    gc.collect()
+    gc.freeze()
+    gc.set_threshold(50_000, 500, 500)
 
     import uvicorn
 
