@@ -509,7 +509,15 @@ class FireworksPolicyTrainer:
         Raises ValueError if the loss has no builtin kernel or the config is
         incompatible with the builtin path (e.g. kl_beta > 0).
         """
+        from rllm.trainer.algorithms.loss import native_loss_names, resolve_loss
         from training.utils.rl.losses import get_builtin_loss_config, validate_loss_path
+
+        # A custom rLLM loss (e.g. dppo_tv) uses forward_backward_custom, not a builtin
+        # kernel — nothing to resolve/validate here (self._builtin_loss stays unused).
+        if resolve_loss(algorithm_config, native_losses=native_loss_names("fireworks")) is not None:
+            self._builtin_loss = None
+            logger.info("Custom rLLM loss %r -> forward_backward_custom (no builtin kernel)", algorithm_config.loss_fn)
+            return
 
         args = builtin_loss_args(algorithm_config)
         validate_loss_path(args, profile)
