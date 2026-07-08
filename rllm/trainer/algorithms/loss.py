@@ -186,14 +186,26 @@ class ResolvedLoss:
     params: dict[str, Any]
 
 
-def resolve_loss(algorithm_config) -> ResolvedLoss | None:
-    """Resolve ``algorithm.loss_fn`` to an rLLM loss, or None for a backend-native loss.
+def resolve_loss(algorithm_config, native_losses: "set[str] | None" = None) -> ResolvedLoss | None:
+    """Resolve ``algorithm.loss_fn`` to an rLLM loss, or None to let the backend run it.
 
-    First imports ``algorithm.loss_plugins`` so user losses are registered. Params passed
-    to the loss are the standard clip/kl fields plus ``env_loss_coef`` and anything under
-    ``algorithm.loss_params`` (verl-style loss-specific config)."""
+    Routing is **native-first**: if ``native_losses`` (the backend's own fused-kernel menu)
+    contains ``loss_fn``, return None so the backend uses its fast native kernel — even when
+    an rLLM loss of the same name also exists (e.g. verl-native ``dppo_tv``/``gspo``/``cispo``,
+    Fireworks builtin ``gspo``/``cispo``). Only losses the backend can't run natively fall
+    back to the rLLM custom path (verl in-process; tinker/fireworks ``forward_backward_custom``).
+
+    First imports ``algorithm.loss_plugins`` so user losses are registered. Params passed to
+    the loss are the standard clip/kl fields plus ``env_loss_coef`` and anything under
+    ``algorithm.loss_params`` (verl-style loss-specific config). Note: a loss that routes to a
+    native kernel takes its hyperparameters from the backend-native config (e.g.
+    ``eps_clip``→``clip_ratio``), not ``loss_params``."""
     load_loss_plugins(list(getattr(algorithm_config, "loss_plugins", None) or []))
     name = getattr(algorithm_config, "loss_fn", None)
+    if name is None:
+        return None
+    if native_losses is not None and name in native_losses:
+        return None  # prefer the backend's native fused kernel
     if not is_custom_loss(name):
         return None
     params = {

@@ -243,6 +243,19 @@ def test_resolve_loss_custom_vs_native():
     assert resolve_loss(_alg(loss_fn=None)) is None
 
 
+def test_resolve_loss_prefers_native_kernel():
+    # A loss the backend has a native fused kernel for → route native (None), even though
+    # it's also rLLM-registered (e.g. verl-native dppo_tv, Fireworks builtin cispo/gspo).
+    assert resolve_loss(_alg(loss_fn="cispo"), native_losses={"cispo", "grpo"}) is None
+    assert resolve_loss(_alg(loss_fn="gspo"), native_losses={"gspo"}) is None
+    # An rLLM loss the backend can't run natively → custom path.
+    r = resolve_loss(_alg(loss_fn="dppo_tv"), native_losses={"cispo", "grpo"})
+    assert r is not None and r.name == "dppo_tv"
+    # No native set (or empty) → every rLLM loss takes the custom path.
+    assert resolve_loss(_alg(loss_fn="cispo")) is not None
+    assert resolve_loss(_alg(loss_fn="cispo"), native_losses=set()) is not None
+
+
 def test_loss_params_merged():
     r = resolve_loss(_alg(loss_fn="dppo_tv", loss_params={"delta": 0.15}))
     assert r.params["delta"] == 0.15

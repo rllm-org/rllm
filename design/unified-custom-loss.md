@@ -68,7 +68,24 @@ def ppo_clip_env(ctx):
 `ppo_clip_env` with `env_loss_coef=0.05`. To add ECHO to a different surrogate, write one
 loss that adds the same term (the verl way) — no config list.
 
-## How each backend runs it
+## Routing: native-first
+
+`resolve_loss(config, native_losses)` is **native-first**. For a given `loss_fn`, each backend
+passes its own fused-kernel menu; if the name is in it, the backend runs its **native** kernel
+(fast) — even when an rLLM loss of the same name exists. Only losses the backend can't run
+natively fall back to the rLLM custom path. So the same `loss_fn` can take different paths per
+backend:
+
+| `loss_fn` | verl (native: `POLICY_LOSS_REGISTRY`) | tinker (`importance_sampling/ppo/cispo/dro/cross_entropy`) | fireworks (builtin `grpo/importance_sampling/dapo/dro/gspo/cispo`) |
+|---|---|---|---|
+| `cispo`, `gspo` | native | tinker: `cispo` native / `gspo` custom | native |
+| `dppo_tv`, `dppo_kl` | native (verl 0.8) | custom | custom |
+| `ppo_clip_env` (ECHO) | custom | custom | custom |
+
+(A loss routed to a native kernel takes its hyperparameters from the backend-native config,
+e.g. `eps_clip`→`clip_ratio`, not `loss_params`.)
+
+## How each backend runs the custom path
 
 | Backend | Mechanism |
 |---|---|

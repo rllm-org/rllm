@@ -181,7 +181,9 @@ class TinkerPolicyTrainer:
         # Engaged when algorithm.loss_fn names an rLLM loss; else the native string path runs.
         from rllm.trainer.algorithms.loss import resolve_loss
 
-        resolved = resolve_loss(algorithm_config)
+        # native-first: a loss Tinker has a server-side kernel for (importance_sampling/ppo/
+        # cispo/dro/cross_entropy) runs there; only non-native rLLM losses take the custom path.
+        resolved = resolve_loss(algorithm_config, native_losses=TINKER_KNOWN_LOSSES)
         if resolved is not None:
             from rllm.trainer.tinker.custom_loss import build_custom_loss
 
