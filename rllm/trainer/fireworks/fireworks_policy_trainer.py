@@ -573,7 +573,28 @@ class FireworksPolicyTrainer:
 
             if algorithm_config.mu_source == "proximal":
                 logger.warning("mu_source='proximal' not yet supported on the Fireworks custom path; using inference log-probs (mu=sampling).")
-            stripped, loss_fn = build_custom_loss(resolved, raw_datums)
+
+            # Off-policy diagnostics (parity with the builtin path, which computes these after
+            # its own return): proximal (pi_old, via forward) vs inference (sampling) log-probs.
+            # Especially relevant for DPPO, whose keep-mask depends on this train/inference gap.
+            rc = algorithm_config.rollout_correction
+            clean_datums, _adv, inf_logprobs, _plens, _nlt = self._process_datums(raw_datums)
+            t0 = time.perf_counter()
+            prox_logprobs = inf_logprobs if rc.bypass_mode else await self._compute_proximal_logprobs(clean_datums)
+            adv_metrics.update(
+                self._compute_offpolicy_metrics(
+                    old_logprobs=prox_logprobs,
+                    rollout_logprobs=inf_logprobs,
+                    masks=[list(datum.loss_fn_inputs["mask"].data) for datum in raw_datums],
+                )
+            )
+            adv_metrics["time/proximal_forward"] = time.perf_counter() - t0
+
+            # server_normalized=True: the closure returns a RAW SUM over sequences; optim_step
+            # sets GradAccNormalization from resolved.agg_mode so the server normalizes across
+            # all grad-accumulation passes (invariant to fwd_bwd_group_size). A per-pass mean
+            # here + NONE at optim_step would scale the gradient by num_fwd_bwd_passes.
+            stripped, loss_fn = build_custom_loss(resolved, raw_datums, server_normalized=True)
             fwd_bwd_result = await self._run_training_op(
                 self.training_client.forward_backward_custom,
                 stripped,
@@ -585,7 +606,7 @@ class FireworksPolicyTrainer:
                 for k, v in fwd_bwd_result.metrics.items():
                     if k not in self._METRIC_SKIP_KEYS:
                         adv_metrics[f"train/{k}"] = v
-            logger.info("Fireworks custom-loss pass: loss_fn=%s params=%s", resolved.name, resolved.params)
+            logger.info("Fireworks custom-loss pass: loss_fn=%s agg_mode=%s params=%s", resolved.name, resolved.agg_mode, resolved.params)
             return raw_datums, [], adv_metrics
 
         rc = algorithm_config.rollout_correction
@@ -683,16 +704,14 @@ class FireworksPolicyTrainer:
             "seq-mean-token-mean": GradAccNormalization.NUM_SEQUENCES,
         }
         grad_norm = _LOSS_AGG_MAP.get(self.algorithm_config.loss_agg_mode)
-        # Auxiliary losses accumulate extra gradient passes before this step and
-        # fold the intended normalization into the per-datum weights/advantages
-        # (see forward_backward_from_trajectory_groups). Re-normalizing here by
-        # token/sequence counts that span all passes would rescale the policy
-        # gradient, so we disable server-side grad-accumulation normalization.
-        # The custom-loss path computes its gradient client-side with normalization already
-        # folded in (the loss closure's seq-mean-token-mean). Server-side re-normalization
-        # would rescale it, so disable it.
-        if resolve_loss(self.algorithm_config, native_losses=native_loss_names("fireworks")) is not None:
-            grad_norm = GradAccNormalization.NONE
+        # Custom-loss path (forward_backward_custom): the closure returns a RAW SUM over
+        # sequences (build_custom_loss server_normalized=True), so the server must divide by
+        # the count spanning ALL grad-accumulation passes — NUM_LOSS_TOKENS for token-mean,
+        # NUM_SEQUENCES for seq-mean-*. (NONE here would leave the gradient scaled by the
+        # per-step token/sequence count and inflate it by num_fwd_bwd_passes.)
+        resolved = resolve_loss(self.algorithm_config, native_losses=native_loss_names("fireworks"))
+        if resolved is not None:
+            grad_norm = GradAccNormalization.NUM_LOSS_TOKENS if resolved.agg_mode == "token-mean" else GradAccNormalization.NUM_SEQUENCES
         optim_result = await self._run_training_op(
             self.training_client.optim_step,
             adam_params,

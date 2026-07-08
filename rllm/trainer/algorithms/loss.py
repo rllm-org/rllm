@@ -8,9 +8,11 @@ a loss that wants an extra term (e.g. ECHO's cross-entropy on observation tokens
 adds it inside its own body (see ``echo``).
 
 The same function runs in-process under verl and inside ``forward_backward_custom`` on
-tinker/fireworks. Each backend injects ``ctx.aggregate(per_token, mask) -> scalar`` (verl:
-``agg_loss`` with global-batch normalization; managed: seq-mean-token-mean), so the loss
-body is backend-agnostic.
+tinker/fireworks. Each backend injects ``ctx.aggregate(per_token, mask) -> scalar`` realizing
+the configured ``algorithm.loss_agg_mode`` (see ``LOSS_AGG_MODES``) with **global**
+normalization spanning the whole optimizer step — verl via ``agg_loss`` + global counts,
+Fireworks via a raw-sum client loss + server-side ``GradAccNormalization``, Tinker via a
+client-side mean over its (single) pass — so the loss body is backend-agnostic.
 
 Public API — same decorator style as ``@rllm.rollout`` / ``@rllm.evaluator``:
 
@@ -93,21 +95,42 @@ class LossContext:
 # A loss: (ctx) -> (scalar_loss, metrics)
 LossFn = Callable[[LossContext], "tuple[torch.Tensor, dict[str, float]]"]
 
+# Canonical loss-aggregation modes, shared across backends (verl's names). A loss body stays
+# agnostic and just calls ``ctx.aggregate``; each backend's injected ``aggregate`` (+ its
+# optimizer-step normalization) realizes these semantics with GLOBAL normalization spanning
+# the whole optimizer step (all micro-batches / grad-accumulation passes / DP ranks):
+#   token-mean           Σ_tokens(loss·mask) / Σ_tokens(mask)          — every token equal
+#   seq-mean-token-mean  mean within a sequence, then mean over sequences — every seq equal
+#   seq-mean-token-sum   sum within a sequence, then mean over sequences
+LOSS_AGG_MODES = ("token-mean", "seq-mean-token-mean", "seq-mean-token-sum")
+DEFAULT_LOSS_AGG_MODE = "token-mean"  # matches verl's default and Fireworks' RL guidance
+
 RLLM_LOSS_REGISTRY: dict[str, LossFn] = {}
+# Optional per-loss aggregation-mode override. A sequence-level loss (e.g. GSPO) must
+# aggregate a fixed way regardless of ``algorithm.loss_agg_mode``; it declares that here.
+RLLM_LOSS_AGG_MODE: dict[str, str] = {}
 
 
-def register_loss(name: str) -> Callable[[LossFn], LossFn]:
+def register_loss(name: str, *, agg_mode: str | None = None) -> Callable[[LossFn], LossFn]:
     """Register a loss under ``name`` (its ``algorithm.loss_fn`` value).
 
     Public API for blackbox ``pip install rllm`` users: decorate a function and select it
     by name. Use ``algorithm.loss_plugins`` to have rllm import the defining module at
     startup so the decorator runs.
+
+    ``agg_mode``: pin this loss's aggregation mode (one of :data:`LOSS_AGG_MODES`), overriding
+    ``algorithm.loss_agg_mode``. Use only for losses whose math *requires* a specific reduction
+    (GSPO → ``seq-mean-token-mean``); leave None to inherit the configured/default mode.
     """
+    if agg_mode is not None and agg_mode not in LOSS_AGG_MODES:
+        raise ValueError(f"register_loss({name!r}): agg_mode={agg_mode!r} not in {LOSS_AGG_MODES}")
 
     def deco(fn: LossFn) -> LossFn:
         if name in RLLM_LOSS_REGISTRY and RLLM_LOSS_REGISTRY[name] is not fn:
             logger.warning("Overriding already-registered loss %r", name)
         RLLM_LOSS_REGISTRY[name] = fn
+        if agg_mode is not None:
+            RLLM_LOSS_AGG_MODE[name] = agg_mode
         return fn
 
     return deco
@@ -220,6 +243,7 @@ class ResolvedLoss:
     name: str
     fn: LossFn
     params: dict[str, Any]
+    agg_mode: str = DEFAULT_LOSS_AGG_MODE  # one of LOSS_AGG_MODES; drives each backend's aggregate + normalization
 
 
 def resolve_loss(algorithm_config, native_losses: "set[str] | None" = None) -> ResolvedLoss | None:
@@ -251,7 +275,10 @@ def resolve_loss(algorithm_config, native_losses: "set[str] | None" = None) -> R
         "env_loss_coef": float(getattr(algorithm_config, "env_loss_coef", 0.0) or 0.0),
         **dict(getattr(algorithm_config, "loss_params", None) or {}),
     }
-    return ResolvedLoss(name=name, fn=get_loss(name), params=params)
+    # Aggregation mode: the loss's own pin (GSPO) wins; else the config; else the canonical
+    # default. Same value feeds verl's agg_loss and the managed adapter, so all backends agree.
+    agg_mode = RLLM_LOSS_AGG_MODE.get(name) or getattr(algorithm_config, "loss_agg_mode", None) or DEFAULT_LOSS_AGG_MODE
+    return ResolvedLoss(name=name, fn=get_loss(name), params=params, agg_mode=agg_mode)
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +376,7 @@ def cispo(ctx: LossContext):
     return ctx.aggregate(pg, am), {"cispo/clip_frac": clip_frac.item()}
 
 
-@register_loss("gspo")
+@register_loss("gspo", agg_mode="seq-mean-token-mean")
 def gspo(ctx: LossContext):
     """GSPO (arXiv:2507.18071, Qwen): a **sequence-level** importance ratio
     ``s_i = (π_θ(y_i)/π_old(y_i))^(1/|y_i|)`` (length-normalized), clipped PPO-style and

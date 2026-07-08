@@ -278,6 +278,73 @@ def test_echo_estimator_defaults_to_echo():
     assert r.name == "echo" and r.params["env_loss_coef"] == 0.05
 
 
+# --------------------------------------------------------------------------- loss_agg_mode
+def test_agg_mode_resolution_default_config_and_pin():
+    from rllm.trainer.algorithms.loss import DEFAULT_LOSS_AGG_MODE
+
+    # default: no config → canonical default (token-mean)
+    assert resolve_loss(_alg(loss_fn="dppo_tv")).agg_mode == DEFAULT_LOSS_AGG_MODE == "token-mean"
+    # config value flows through
+    assert resolve_loss(_alg(loss_fn="dppo_tv", loss_agg_mode="seq-mean-token-sum")).agg_mode == "seq-mean-token-sum"
+    # a loss that PINS its mode (GSPO) overrides even an explicit config
+    assert resolve_loss(_alg(loss_fn="gspo", loss_agg_mode="token-mean")).agg_mode == "seq-mean-token-mean"
+
+
+def test_register_loss_rejects_bad_agg_mode():
+    with pytest.raises(ValueError):
+        register_loss("_bad_mode_loss", agg_mode="not-a-mode")
+
+
+# --------------------------------------------------------------------------- managed adapter normalization
+def test_managed_server_normalized_is_accumulation_invariant():
+    """Fireworks path (server_normalized=True): the raw-sum client loss must satisfy
+    sum-of-per-pass-losses == single-pass-loss, so the server's one division over the whole
+    window yields the same gradient no matter how the mini-batch is split into passes."""
+    pytest.importorskip("tinker")
+    from rllm.trainer.tinker.custom_loss import build_custom_loss
+
+    torch.manual_seed(3)
+    mu = [float(torch.tensor(0.5).log())] * 2
+    datums = [_make_datum(target=[2, 3], logprobs=mu, adv=[1.0, -1.0], mask=[1.0, 1.0]) for _ in range(4)]
+    pis = [torch.tensor([float(torch.tensor(0.55).log()), float(torch.tensor(0.48).log())]) for _ in range(4)]
+
+    for mode in ("token-mean", "seq-mean-token-mean", "seq-mean-token-sum"):
+        resolved = ResolvedLoss(name="dppo_tv", fn=get_loss("dppo_tv"), params={"delta": 0.2}, agg_mode=mode)
+
+        # single pass over all 4 datums
+        _, loss_fn_all = build_custom_loss(resolved, datums, server_normalized=True)
+        one, _ = loss_fn_all(datums, [p.clone() for p in pis])
+
+        # 4 separate passes, summed (what the server accumulates under NONE-free NUM_* norm)
+        acc = 0.0
+        for d, p in zip(datums, pis, strict=True):
+            _, lf = build_custom_loss(resolved, [d], server_normalized=True)
+            li, _ = lf([d], [p.clone()])
+            acc = acc + li
+        assert torch.allclose(one, acc, atol=1e-6), mode  # raw sums compose exactly
+
+
+def test_managed_client_normalized_matches_agg_mode():
+    """Tinker path (server_normalized=False, single pass): the client divisor follows the
+    aggregation mode — token count for token-mean, sequence count for seq-mean-*."""
+    pytest.importorskip("tinker")
+    from rllm.trainer.tinker.custom_loss import build_custom_loss
+
+    # 2 datums, 2 action tokens each → 4 tokens, 2 sequences. reinforce → loss_i = -adv·pi summed.
+    d = [_make_datum(target=[2, 3], logprobs=[0.0, 0.0], adv=[1.0, 1.0], mask=[1.0, 1.0]) for _ in range(2)]
+    pi = [torch.tensor([-0.5, -0.5]), torch.tensor([-0.5, -0.5])]
+    raw_sum = 4 * 0.5  # Σ -adv·pi over 4 tokens = 4 * (-(1.0)*(-0.5)) = 2.0
+
+    r_tok = ResolvedLoss(name="reinforce", fn=get_loss("reinforce"), params={}, agg_mode="token-mean")
+    loss_tok, _ = build_custom_loss(r_tok, d, server_normalized=False)[1](d, [p.clone() for p in pi])
+    assert torch.allclose(loss_tok, torch.tensor(raw_sum / 4.0))  # ÷ 4 tokens
+
+    r_seq = ResolvedLoss(name="reinforce", fn=get_loss("reinforce"), params={}, agg_mode="seq-mean-token-mean")
+    loss_seq, _ = build_custom_loss(r_seq, d, server_normalized=False)[1](d, [p.clone() for p in pi])
+    # seq-mean-token-mean: within-seq mean (÷2) per seq = 0.5 each, summed = 1.0, ÷ 2 seqs = 0.5
+    assert torch.allclose(loss_seq, torch.tensor(0.5))
+
+
 # --------------------------------------------------------------------------- managed adapter (forward_backward_custom)
 def _make_datum(target, logprobs, adv, mask):
     tinker = pytest.importorskip("tinker")
