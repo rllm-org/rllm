@@ -841,9 +841,13 @@ class UnifiedTrainer:
                 trajectory_groups=trainer_state.trajectory_groups,
             )
 
-            # Periodic validation
+            # Periodic validation. Eval rollouts run on the shared rollout pool
+            # and preempt training rollouts for slots (PrioritySemaphore), so no
+            # dispatch pause / drain barrier is needed -- eval saturates the pool
+            # and training fills the leftover. Weights stay frozen for the duration
+            # because this await blocks the training loop, so no weight sync runs.
             if self.rllm_config.trainer.test_freq > 0 and trainer_state.global_step % self.rllm_config.trainer.test_freq == 0:
-                await self._validate_async_with_pause(trainer_state, coordinator)
+                await self._validate_async(trainer_state)
 
             trainer_state.global_step += 1
 
@@ -865,15 +869,6 @@ class UnifiedTrainer:
         coordinator.on_sync_complete()
 
         if not self.async_config.partial_rollout:
-            coordinator.resume_generation()
-
-    async def _validate_async_with_pause(self, trainer_state: TrainerState, coordinator: SyncCoordinator) -> dict:
-        """Validation with dispatch-level pause. Waits for workflows to drain, then runs validation."""
-        coordinator.pause_generation()
-        await coordinator.wait_for_drain()
-        try:
-            return await self._validate_async(trainer_state)
-        finally:
             coordinator.resume_generation()
 
     async def _validate_async(self, trainer_state: TrainerState) -> dict:

@@ -38,6 +38,7 @@ from rllm.gateway.manager import container_reachable_url
 from rllm.types import INFRA_ERROR_REASONS, AgentConfig, Episode, Step, Task, TerminationReason, Trajectory, flow_accepts_env, run_agent_flow, termination_reason_from_error
 from rllm.utils import colorful_print
 from rllm.utils.group_summary import format_group_finished
+from rllm.utils.priority_semaphore import EVAL_PRIORITY, TRAIN_PRIORITY, PrioritySemaphore
 
 if TYPE_CHECKING:
     from rllm_model_gateway.models import TraceRecord
@@ -415,7 +416,9 @@ class AgentFlowEngine:
 
         self.n_parallel_tasks = n_parallel_tasks
         self.executor = ThreadPoolExecutor(max_workers=n_parallel_tasks)
-        self._semaphore = asyncio.Semaphore(n_parallel_tasks)
+        # Priority-aware so eval rollouts (is_validation=True) preempt training
+        # rollouts for slots on this shared pool. See process_task_with_retry.
+        self._semaphore = PrioritySemaphore(n_parallel_tasks)
 
         # Raise the file descriptor limit to avoid "Too many open files" when
         # running many parallel agent flows with individual HTTP clients.
@@ -439,7 +442,7 @@ class AgentFlowEngine:
         the internal state can't be read.
         """
         try:
-            return max(0, self.n_parallel_tasks - self._semaphore._value)  # type: ignore[attr-defined]
+            return max(0, self.n_parallel_tasks - self._semaphore.available)
         except Exception:
             return -1
 
@@ -447,8 +450,7 @@ class AgentFlowEngine:
     def pending(self) -> int:
         """Best-effort count of rollout tasks queued waiting for a slot."""
         try:
-            waiters = self._semaphore._waiters  # type: ignore[attr-defined]
-            return len(waiters) if waiters else 0
+            return self._semaphore.waiting
         except Exception:
             return -1
 
@@ -593,7 +595,8 @@ class AgentFlowEngine:
         task_for_episode = task.metadata if isinstance(task, Task) else task
         task_obj = task if isinstance(task, Task) else task_from_row(task, task_id)
 
-        async with self._semaphore:
+        priority = EVAL_PRIORITY if is_validation else TRAIN_PRIORITY
+        async with self._semaphore.slot(priority):
             for retry_attempt in range(1, self.retry_limit + 1):
                 uid = f"{task_id}:{rollout_idx}"
                 if retry_attempt > 1:
