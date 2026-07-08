@@ -113,15 +113,58 @@ def register_loss(name: str) -> Callable[[LossFn], LossFn]:
     return deco
 
 
+_ENTRY_POINTS_LOADED = False
+
+
+def _discover_entry_point_losses() -> None:
+    """Load losses advertised by installed packages via the ``rllm.losses`` entry-point group.
+
+    A package declares in its ``pyproject.toml``::
+
+        [project.entry-points."rllm.losses"]
+        my_dppo = "my_pkg.losses:my_dppo"
+
+    and ``pip install`` makes it discoverable with no config — ``ep.load()`` imports the
+    module, firing its ``@register_loss`` decorator. Mirrors ``rllm.eval.agent_loader`` /
+    ``evaluator_loader``. Runs once per process (idempotent); triggered lazily on a registry
+    miss, so it also populates the registry on verl Ray workers (which call ``get_loss`` there).
+    """
+    global _ENTRY_POINTS_LOADED
+    if _ENTRY_POINTS_LOADED:
+        return
+    _ENTRY_POINTS_LOADED = True
+    try:
+        from importlib.metadata import entry_points
+
+        for ep in entry_points(group="rllm.losses"):
+            try:
+                ep.load()  # imports the module → registers via @register_loss
+                logger.info("Loaded loss from entry point %r", ep.name)
+            except Exception as e:  # one bad plugin shouldn't break the run
+                logger.warning("Failed to load rllm.losses entry point %r: %s", ep.name, e)
+    except Exception as e:
+        logger.debug("rllm.losses entry-point discovery skipped: %s", e)
+
+
 def get_loss(name: str) -> LossFn:
     if name not in RLLM_LOSS_REGISTRY:
-        raise ValueError(f"Unknown loss {name!r}. Registered: {sorted(RLLM_LOSS_REGISTRY)}. Register one with @rllm.register_loss and list its module under algorithm.loss_plugins.")
+        _discover_entry_point_losses()  # lazy: only pay discovery cost on a miss
+    if name not in RLLM_LOSS_REGISTRY:
+        raise ValueError(f"Unknown loss {name!r}. Registered: {sorted(RLLM_LOSS_REGISTRY)}. Define one with @rllm.register_loss and make it importable — inline in your script, an `rllm.losses` entry point, or algorithm.loss_plugins.")
     return RLLM_LOSS_REGISTRY[name]
 
 
 def is_custom_loss(name: str | None) -> bool:
-    """True if ``name`` is an rLLM loss (vs a backend-native one like verl ``vanilla``)."""
-    return name is not None and name in RLLM_LOSS_REGISTRY
+    """True if ``name`` is an rLLM loss (vs a backend-native one like verl ``vanilla``).
+
+    Triggers entry-point discovery on a miss so installed loss packages are recognized even
+    when the name hasn't been imported yet."""
+    if name is None:
+        return False
+    if name in RLLM_LOSS_REGISTRY:
+        return True
+    _discover_entry_point_losses()
+    return name in RLLM_LOSS_REGISTRY
 
 
 def load_loss_plugins(modules: list[str]) -> None:

@@ -73,12 +73,15 @@ class CustomPPOLoss:
     via verl's ``set_loss_fn`` RPC.
     """
 
-    def __init__(self, config, loss_params=None, pad_token_id: int | None = None):
+    def __init__(self, config, loss_params=None, pad_token_id: int | None = None, loss_plugins=None):
         from verl.utils.config import omega_conf_to_dataclass
 
         self.config = omega_conf_to_dataclass(config)
         self.loss_params = dict(loss_params or {})
         self.pad_token_id = pad_token_id
+        # Modules to import on the worker so a user's @register_loss fires there (entry-point
+        # losses self-discover via get_loss; this covers the explicit loss_plugins list).
+        self.loss_plugins = list(loss_plugins or [])
 
     def __call__(self, model_output, data, dp_group=None):
         from verl.utils import tensordict_utils as _tu
@@ -111,7 +114,10 @@ class CustomPPOLoss:
         from verl.utils.metric import AggregationType, Metric
         from verl.workers.utils.padding import no_padding_2_padding
 
-        from rllm.trainer.algorithms.loss import LossContext, get_loss
+        from rllm.trainer.algorithms.loss import LossContext, get_loss, load_loss_plugins
+
+        # Ensure a user's loss module is imported on this (worker) process before lookup.
+        load_loss_plugins(self.loss_plugins)
 
         # Current-policy log-probs, repadded to (bs, response_len).
         log_prob = no_padding_2_padding(model_output["log_probs"], data)
@@ -429,6 +435,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
                     self.config.actor_rollout_ref.actor,
                     loss_params=(resolved.params if resolved is not None else {}),
                     pad_token_id=getattr(self.tokenizer, "pad_token_id", None),
+                    loss_plugins=list(getattr(self.algorithm_config, "loss_plugins", None) or []),
                 )
             )
             if resolved is not None:

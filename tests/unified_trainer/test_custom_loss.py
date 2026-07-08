@@ -53,6 +53,31 @@ def test_builtins_registered():
     assert not is_custom_loss(None)
 
 
+def test_entry_point_discovery_on_registry_miss(monkeypatch):
+    # A loss advertised by an installed package (rllm.losses entry point) is discovered
+    # lazily on a registry miss — no explicit import / loss_plugins needed.
+    import rllm.trainer.algorithms.loss as L
+
+    class _EP:
+        name = "_ep_demo_loss"
+
+        def load(self):
+            @L.register_loss("_ep_demo_loss")
+            def _f(ctx):
+                return ctx.aggregate(-ctx.pi, ctx.action_mask), {}
+
+            return _f
+
+    monkeypatch.setattr("importlib.metadata.entry_points", lambda group=None: [_EP()] if group == "rllm.losses" else [])
+    monkeypatch.setattr(L, "_ENTRY_POINTS_LOADED", False)
+    try:
+        assert "_ep_demo_loss" not in L.RLLM_LOSS_REGISTRY
+        assert is_custom_loss("_ep_demo_loss")  # triggers discovery
+        assert get_loss("_ep_demo_loss") is not None
+    finally:
+        L.RLLM_LOSS_REGISTRY.pop("_ep_demo_loss", None)
+
+
 def test_top_level_decorator_exposed():
     import rllm
 
