@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 # Mapping from rLLMAdvantageEstimator to their default Tinker loss function (overriding is allowed through config).
-# ECHO selects the `ppo_clip_env` rLLM loss (set in AlgorithmConfig.__post_init__), which
+# ECHO selects the `echo` rLLM loss (set in AlgorithmConfig.__post_init__), which
 # runs on the forward_backward_custom path and folds the env-prediction term into one pass.
 ADV_TO_LOSS_FN_AUTO_MAP = {
     rLLMAdvantageEstimator.REINFORCE: "importance_sampling",
@@ -177,7 +177,7 @@ class TinkerPolicyTrainer:
     ) -> list[tinker.APIFuture]:
         """Submit the policy-gradient forward/backward pass(es); returns their futures."""
         # Custom-loss path: a single forward_backward_custom pass runs the rLLM loss
-        # (e.g. dppo_tv, or ppo_clip_env which folds in ECHO) over per-datum log-probs.
+        # (e.g. dppo_tv, or echo which folds in ECHO) over per-datum log-probs.
         # Engaged when algorithm.loss_fn names an rLLM loss; else the native string path runs.
         from rllm.trainer.algorithms.loss import native_loss_names, resolve_loss
 

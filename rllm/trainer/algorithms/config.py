@@ -315,7 +315,7 @@ class AlgorithmConfig:
     use_precomputed_advantage: bool = False
     # The single loss selector (verl-style; maps to verl's policy_loss.loss_mode). A
     # backend-native name (verl `vanilla`/`gspo`, tinker `ppo`, fireworks `grpo`) runs the
-    # native kernel; an rLLM-registered name (`dppo_tv`, `ppo_clip`, `ppo_clip_env`, or a
+    # native kernel; an rLLM-registered name (`dppo_tv`, `ppo_clip`, `echo`, or a
     # user `@rllm.register_loss`) runs the rLLM loss. null = backend default.
     loss_fn: str | None = None
     # Loss-specific hyperparameters passed to an rLLM loss via ctx.params (verl-style:
@@ -323,9 +323,9 @@ class AlgorithmConfig:
     # env_loss_coef. Example: {delta: 0.2} for dppo_tv.
     loss_params: dict = field(default_factory=dict)
     # ECHO (arXiv:2605.24517) environment-prediction coefficient (lambda), read by the
-    # `ppo_clip_env` loss as ctx.params["env_loss_coef"]: total = L_GRPO + lambda * L_env,
+    # `echo` loss as ctx.params["env_loss_coef"]: total = L_GRPO + lambda * L_env,
     # L_env = length-normalized cross-entropy on observation tokens. None = auto: 0.05 when
-    # adv_estimator=echo (which also defaults loss_fn to `ppo_clip_env`), else 0.0.
+    # adv_estimator=echo (which also defaults loss_fn to `echo`), else 0.0.
     env_loss_coef: float | None = None
     # Modules imported at startup so their @register_loss decorators run (lets a blackbox
     # `pip install rllm` user define custom losses without editing rllm).
@@ -403,12 +403,12 @@ class AlgorithmConfig:
             )
 
         # ECHO: `adv_estimator=echo` uses GRPO advantages plus the env-prediction loss.
-        # Default lambda to 0.05 (unless set) and select the `ppo_clip_env` loss (unless
+        # Default lambda to 0.05 (unless set) and select the `echo` loss (unless
         # the user picked a loss_fn). Any other estimator defaults env_loss_coef to 0.0.
         if self.env_loss_coef is None:
             self.env_loss_coef = 0.05 if self.estimator == rLLMAdvantageEstimator.ECHO else 0.0
         if self.estimator == rLLMAdvantageEstimator.ECHO and self.loss_fn is None:
-            self.loss_fn = "ppo_clip_env"
+            self.loss_fn = "echo"
 
         # Normalize estimator_map: split (estimator, loss_fn) tuples.
         normalized_map: dict[str, rLLMAdvantageEstimator | str] = {}

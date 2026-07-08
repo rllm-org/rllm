@@ -18,7 +18,7 @@ from rllm.trainer.algorithms.loss import (
     get_loss,
     is_custom_loss,
     ppo_clip,
-    ppo_clip_env,
+    echo,
     register_loss,
     resolve_loss,
 )
@@ -47,7 +47,7 @@ def _alg(**kw):
 
 # --------------------------------------------------------------------------- registry / api
 def test_builtins_registered():
-    for name in ("ppo_clip", "dppo_tv", "dppo_kl", "ppo_clip_env"):
+    for name in ("ppo_clip", "dppo_tv", "dppo_kl", "echo"):
         assert name in RLLM_LOSS_REGISTRY and is_custom_loss(name)
     assert not is_custom_loss("vanilla")  # verl-native
     assert not is_custom_loss(None)
@@ -213,18 +213,18 @@ def test_gspo_gradient_flows_per_token():
 
 
 # --------------------------------------------------------------------------- ECHO as one loss function
-def test_ppo_clip_env_zero_coef_equals_ppo_clip():
+def test_echo_zero_coef_equals_ppo_clip():
     args = dict(pi=[-0.5, -0.6, -0.7], mu=[-0.5, -0.6, -0.7], adv=[1.0, 1.0, 0.0], action_mask=[1.0, 1.0, 0.0], obs_mask=[0.0, 0.0, 1.0])
     base, _ = ppo_clip(_ctx(**args, eps_clip=0.2))
-    same, _ = ppo_clip_env(_ctx(**args, eps_clip=0.2, env_loss_coef=0.0))
+    same, _ = echo(_ctx(**args, eps_clip=0.2, env_loss_coef=0.0))
     assert torch.allclose(base, same)
 
 
-def test_ppo_clip_env_adds_observation_ce():
+def test_echo_adds_observation_ce():
     # obs token (idx2) is non-action; ECHO must put gradient on it, ppo_clip must not.
     args = dict(mu=[-0.5, -0.6, -0.7], adv=[1.0, 1.0, 0.0], action_mask=[1.0, 1.0, 0.0], obs_mask=[0.0, 0.0, 1.0])
     ctx_echo = _ctx(pi=[-0.5, -0.6, -0.7], **args, eps_clip=0.2, env_loss_coef=0.5)
-    loss, metrics = ppo_clip_env(ctx_echo)
+    loss, metrics = echo(ctx_echo)
     loss.backward()
     assert ctx_echo.pi.grad[2].item() != 0.0  # ECHO trains the observation token
     assert metrics["echo/coef"] == 0.5
@@ -271,11 +271,11 @@ def test_loss_params_merged():
     assert r.params["delta"] == 0.15
 
 
-def test_echo_estimator_defaults_to_ppo_clip_env():
+def test_echo_estimator_defaults_to_echo():
     alg = _alg(adv_estimator="echo")
-    assert alg.loss_fn == "ppo_clip_env" and alg.env_loss_coef == 0.05
+    assert alg.loss_fn == "echo" and alg.env_loss_coef == 0.05
     r = resolve_loss(alg)
-    assert r.name == "ppo_clip_env" and r.params["env_loss_coef"] == 0.05
+    assert r.name == "echo" and r.params["env_loss_coef"] == 0.05
 
 
 # --------------------------------------------------------------------------- managed adapter (forward_backward_custom)
@@ -313,13 +313,13 @@ def test_managed_closure_runs_single_loss_and_backprops():
     assert metrics["custom_loss/num_datums"] == 1.0
 
 
-def test_managed_ppo_clip_env_trains_observation_tokens():
+def test_managed_echo_trains_observation_tokens():
     pytest.importorskip("tinker")
     from rllm.trainer.tinker.custom_loss import build_custom_loss
 
     mu = [0.0, -0.5, -0.5, -0.5]
     d = _make_datum(target=[2, 3, 4, 5], logprobs=mu, adv=[0.0, 1.0, 1.0, 0.0], mask=[0.0, 1.0, 1.0, 0.0])  # idx0,3 observation
-    resolved = ResolvedLoss(name="ppo_clip_env", fn=get_loss("ppo_clip_env"), params={"eps_clip": 0.2, "env_loss_coef": 0.5})
+    resolved = ResolvedLoss(name="echo", fn=get_loss("echo"), params={"eps_clip": 0.2, "env_loss_coef": 0.5})
     stripped, loss_fn = build_custom_loss(resolved, [d])
     pi = torch.tensor([-0.4, -0.5, -0.6, -0.7], requires_grad=True)
     loss, _ = loss_fn(stripped, [pi])

@@ -32,7 +32,7 @@ the aggregation (e.g. GSPO forces `seq-mean-token-mean`). For sequence-level los
 the whole datum on the managed path) and broadcasts back to tokens.
 
 Built-ins (`rllm/trainer/algorithms/loss.py`): `ppo_clip` (=verl `vanilla`), `cispo`,
-`gpg`, `gspo`, `dppo_tv`, `dppo_kl`, `ppo_clip_env` (ECHO). Each is verified against verl
+`gpg`, `gspo`, `dppo_tv`, `dppo_kl`, `echo` (ECHO). Each is verified against verl
 0.8's kernel where one exists.
 
 ## Config
@@ -51,12 +51,12 @@ returns the single loss or None.
 
 ## ECHO (how an additive term is done now)
 
-There is no separate aux loss. ECHO is the `ppo_clip_env` loss — PPO/GRPO plus a
+There is no separate aux loss. ECHO is the `echo` loss — PPO/GRPO plus a
 length-normalized cross-entropy on observation tokens, composed **inside the loss body**:
 
 ```python
-@register_loss("ppo_clip_env")
-def ppo_clip_env(ctx):
+@register_loss("echo")
+def echo(ctx):
     loss, m = ppo_clip(ctx)
     coef = ctx.params.get("env_loss_coef", 0.05)
     if coef:
@@ -65,7 +65,7 @@ def ppo_clip_env(ctx):
 ```
 
 `adv_estimator: echo` keeps working: it uses GRPO advantages and defaults `loss_fn` to
-`ppo_clip_env` with `env_loss_coef=0.05`. To add ECHO to a different surrogate, write one
+`echo` with `env_loss_coef=0.05`. To add ECHO to a different surrogate, write one
 loss that adds the same term (the verl way) — no config list.
 
 ## Native-loss registry
@@ -96,7 +96,7 @@ backend:
 |---|---|---|---|
 | `cispo`, `gspo` | native | tinker: `cispo` native / `gspo` custom | native |
 | `dppo_tv`, `dppo_kl` | native (verl 0.8) | custom | custom |
-| `ppo_clip_env` (ECHO) | custom | custom | custom |
+| `echo` (ECHO) | custom | custom | custom |
 
 (A loss routed to a native kernel takes its hyperparameters from the backend-native config,
 e.g. `eps_clip`→`clip_ratio`, not `loss_params`.)
@@ -117,7 +117,7 @@ log-probs — runs on the host, fine on CPU.
 
 The standalone auxiliary-loss framework (`aux_loss.py`, `AuxiliaryLoss`,
 `@register_aux_loss`, `EnvPredictionLoss`, `build_aux_losses`) and the `algorithm.losses` /
-`algorithm.aux_losses` config are gone. ECHO migrated to `ppo_clip_env`.
+`algorithm.aux_losses` config are gone. ECHO migrated to `echo`.
 
 ## Limits / follow-ups
 

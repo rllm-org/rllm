@@ -5,7 +5,7 @@ verl's ``policy_loss.loss_mode``), not a list. A loss is one function that retur
 **complete** scalar objective and does its own masking + aggregation — exactly like a
 verl ``POLICY_LOSS_REGISTRY`` function. There is no separate auxiliary-loss framework:
 a loss that wants an extra term (e.g. ECHO's cross-entropy on observation tokens) simply
-adds it inside its own body (see ``ppo_clip_env``).
+adds it inside its own body (see ``echo``).
 
 The same function runs in-process under verl and inside ``forward_backward_custom`` on
 tinker/fireworks. Each backend injects ``ctx.aggregate(per_token, mask) -> scalar`` (verl:
@@ -378,8 +378,8 @@ def gpg(ctx: LossContext):
     return ctx.aggregate(-ctx.advantages * ctx.pi, ctx.action_mask), {}
 
 
-@register_loss("ppo_clip_env")
-def ppo_clip_env(ctx: LossContext):
+@register_loss("echo")
+def echo(ctx: LossContext):
     """ECHO (arXiv:2605.24517) in the verl-style single-loss model: PPO/GRPO plus a
     length-normalized cross-entropy term on observation tokens, composed *inside the loss*
     (no auxiliary-loss framework). ``env_loss_coef`` (default 0.05) scales the term;

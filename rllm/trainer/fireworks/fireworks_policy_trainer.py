@@ -552,13 +552,13 @@ class FireworksPolicyTrainer:
         adv_metrics.update(self._compute_rollout_entropy_metrics(raw_datums))
 
         # Custom-loss path (shared with Tinker via forward_backward_custom): when
-        # algorithm.loss_fn names an rLLM loss (e.g. dppo_tv, or ppo_clip_env which folds
+        # algorithm.loss_fn names an rLLM loss (e.g. dppo_tv, or echo which folds
         # in ECHO), evaluate it client-side in one pass over the rollout log-probs instead
         # of the server-side builtin kernel. mu defaults to the sampling (inference)
         # log-probs — the tmax DPPO choice.
         # native-first: a loss Fireworks has a builtin (server-side fused) kernel for
         # (grpo/importance_sampling/dapo/dro/gspo/cispo) runs there; only rLLM losses it
-        # can't run natively (e.g. dppo_tv, ppo_clip_env) take the forward_backward_custom path.
+        # can't run natively (e.g. dppo_tv, echo) take the forward_backward_custom path.
         resolved = resolve_loss(algorithm_config, native_losses=native_loss_names("fireworks"))
         if resolved is not None:
             from rllm.trainer.tinker.custom_loss import build_custom_loss
