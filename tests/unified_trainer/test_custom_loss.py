@@ -123,8 +123,8 @@ def test_dppo_tv_gradient_masked_tokens_get_no_grad():
 
 
 # --------------------------------------------------------------------------- CISPO / GPG
-def test_builtins_include_cispo_gpg():
-    for name in ("cispo", "gpg"):
+def test_builtins_include_cispo_reinforce():
+    for name in ("cispo", "reinforce"):
         assert name in RLLM_LOSS_REGISTRY
 
 
@@ -159,12 +159,12 @@ def test_cispo_keeps_gradient_where_ppo_clip_drops_it():
     assert b.grad[0].item() != 0.0  # CISPO: gradient still flows through log_prob
 
 
-def test_gpg_is_plain_policy_gradient():
-    from rllm.trainer.algorithms.loss import gpg
+def test_reinforce_is_plain_policy_gradient():
+    from rllm.trainer.algorithms.loss import reinforce
 
     pi = torch.tensor([-0.5, -0.6], requires_grad=True)
     ctx = LossContext(pi=pi, mu=torch.tensor([-0.5, -0.6]), advantages=torch.tensor([2.0, -1.0]), action_mask=torch.ones(2), obs_mask=torch.zeros(2), aggregate=_agg_sum, params={})
-    loss, _ = gpg(ctx)
+    loss, _ = reinforce(ctx)
     assert torch.allclose(loss.detach(), (-torch.tensor([2.0, -1.0]) * pi.detach()).sum())
 
 

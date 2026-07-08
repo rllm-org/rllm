@@ -371,10 +371,12 @@ def gspo(ctx: LossContext):
     return ctx.aggregate(pg, am, mode="seq-mean-token-mean"), {"gspo/clip_frac": clip_frac.item()}
 
 
-@register_loss("gpg")
-def gpg(ctx: LossContext):
-    """GPG (Group Policy Gradient): clip-free REINFORCE-style policy gradient with
-    group-normalized advantages — ``-advantages * log_prob``."""
+@register_loss("reinforce")
+def reinforce(ctx: LossContext):
+    """REINFORCE: the advantage-weighted policy gradient ``-advantages * log_prob`` — no
+    importance ratio, no clip, no trust region (on-policy). This is the exact loss verl
+    registers as ``gpg`` and Fireworks as ``reinforce``. Pair with any advantage estimator
+    (grpo/rloo/reinforce); the group normalization, if any, lives in the estimator."""
     return ctx.aggregate(-ctx.advantages * ctx.pi, ctx.action_mask), {}
 
 

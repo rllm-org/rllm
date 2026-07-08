@@ -32,7 +32,7 @@ the aggregation (e.g. GSPO forces `seq-mean-token-mean`). For sequence-level los
 the whole datum on the managed path) and broadcasts back to tokens.
 
 Built-ins (`rllm/trainer/algorithms/loss.py`): `ppo_clip` (=verl `vanilla`), `cispo`,
-`gpg`, `gspo`, `dppo_tv`, `dppo_kl`, `echo` (ECHO). Each is verified against verl
+`reinforce`, `gspo`, `dppo_tv`, `dppo_kl`, `echo` (ECHO). Each is verified against verl
 0.8's kernel where one exists.
 
 ## Config
