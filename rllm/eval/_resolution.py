@@ -93,6 +93,21 @@ def _read_verifier_config(task: Task) -> dict:
     return {}
 
 
+def _effective_verifier_timeout(task: Task) -> float | None:
+    """Per-task verifier timeout (s), with RLLM_HARNESS_VERIFIER_TIMEOUT_S as a hard cap
+    (mirrors RLLM_HARNESS_RUN_TIMEOUT_S for the agent). Returns None only when the task
+    declares no verifier_timeout and no cap is set (callers apply their own default)."""
+    from rllm.env import env_int
+
+    declared = task.metadata.get("verifier_timeout")
+    cap = env_int("RLLM_HARNESS_VERIFIER_TIMEOUT_S", 0)
+    if declared is None:
+        return float(cap) if cap > 0 else None
+    if cap > 0:
+        return min(float(declared), float(cap))
+    return float(declared)
+
+
 def _resolve_evaluator(
     task: Task,
     sandbox: Sandbox | None,
@@ -107,7 +122,7 @@ def _resolve_evaluator(
             sandbox=sandbox,
             script_path=verifier_config.get("script", "tests/test.sh"),
             verifier_user=task.metadata.get("verifier_user"),
-            verifier_timeout=float(task.metadata.get("verifier_timeout", 600.0)),
+            verifier_timeout=(_effective_verifier_timeout(task) or 600.0),
             reward_file_override=verifier_config.get("reward_file"),
         )
 
@@ -369,11 +384,28 @@ def _sandbox_resource_kwargs(task: Task, backend: str) -> dict:
         disk_mb = min(int(disk_mb), disk_cap)
 
     # Per-task lifetime floor (seconds), shared across backends: agent + verifier
-    # + install + teardown/scheduling slack, raised to the operator override.
-    agent_t = float(task.metadata.get("agent_timeout") or env_int("RLLM_HARNESS_RUN_TIMEOUT_S", 3600))
-    verifier_t = float(task.metadata.get("verifier_timeout") or 600.0)
-    install_t = float(env_int("RLLM_HARNESS_INSTALL_TIMEOUT_S", 600))
-    lifetime_s = max(int(agent_t + verifier_t + install_t + 600), sandbox_timeout_override_s())
+    # + install + teardown/scheduling slack, raised to the operator override. The
+    # sandbox lifetime tracks the *effective* agent timeout: RLLM_HARNESS_RUN_TIMEOUT_S,
+    # when set, is a hard CAP on a task's own agent_timeout (matching
+    # cli_harness._effective_timeout) — otherwise a task's large baked-in agent_timeout
+    # (e.g. SWE-bench Verified) keeps the sandbox alive far past the operator cap.
+    _run_cap = env_int("RLLM_HARNESS_RUN_TIMEOUT_S", 0)
+    _per_task = task.metadata.get("agent_timeout")
+    if _per_task is None:
+        agent_t = float(_run_cap or 3600)
+    elif _run_cap > 0:
+        agent_t = min(float(_per_task), float(_run_cap))
+    else:
+        agent_t = float(_per_task)
+    # Sandbox must outlast the full rollout (agent + verifier + teardown). When the task
+    # declares a verifier_timeout, budget exactly that plus 300s teardown/scheduling slack;
+    # otherwise a flat 600s cushion. Raised to the operator override (RLLM_SANDBOX_TIMEOUT_S).
+    verifier_t = _effective_verifier_timeout(task)
+    if verifier_t is not None:
+        lifetime_s = int(agent_t + float(verifier_t) + 300)
+    else:
+        lifetime_s = int(agent_t + 600)
+    lifetime_s = max(lifetime_s, sandbox_timeout_override_s())
 
     kw: dict = {}
     if backend == "modal":
