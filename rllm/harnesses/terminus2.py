@@ -110,6 +110,13 @@ class Terminus2Harness(BaseCliHarness):
     # Asciinema recording needs an extra dep and a writable trial dir; off by
     # default since rLLM scores from the verifier, not the cast.
     record_terminal_session: bool = False
+    # Context summarization ("compaction"). Harbor's Terminus-2 enables this by
+    # default: it spawns summarization subagents to compress history when the
+    # context fills, which fragments the trajectory the gateway captures. Set
+    # ``enable_summarize=False`` (e.g. via the harness constructor) to turn both
+    # proactive and context-limit summarization off — the agent then simply hits
+    # its context limit instead of compacting.
+    enable_summarize: bool = True
 
     def install_script(self) -> str:
         return _install_script(self.harbor_version, self.terminus_python)
@@ -137,6 +144,7 @@ class Terminus2Harness(BaseCliHarness):
             "RLLM_TERMINUS_PARSER": self.parser_name,
             "RLLM_TERMINUS_TEMPERATURE": str(self.temperature),
             "RLLM_TERMINUS_RECORD": "1" if self.record_terminal_session else "0",
+            "RLLM_TERMINUS_ENABLE_SUMMARIZE": "1" if self.enable_summarize else "0",
             "RLLM_TERMINUS_INSTRUCTION_FILE": _INSTRUCTION_PATH,
             "RLLM_TERMINUS_LOGS_DIR": _LOGS_DIR,
             "RLLM_TERMINUS_OUTCOME_FILE": _OUTCOME_PATH,
@@ -334,6 +342,9 @@ async def _main():
     max_turns = int(_max_turns) if _max_turns else None
     temperature = float(os.environ.get("RLLM_TERMINUS_TEMPERATURE", "1.0"))
     record = os.environ.get("RLLM_TERMINUS_RECORD", "0") == "1"
+    # Compaction toggle: unset defaults to Harbor's own default (on). "0" turns
+    # off both proactive and context-limit summarization.
+    enable_summarize = os.environ.get("RLLM_TERMINUS_ENABLE_SUMMARIZE", "1") == "1"
     logs_dir = Path(os.environ.get("RLLM_TERMINUS_LOGS_DIR", "/tmp/terminus2/logs"))
     logs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -350,6 +361,7 @@ async def _main():
         max_turns=max_turns,
         temperature=temperature,
         record_terminal_session=record,
+        enable_summarize=enable_summarize,
         model_info=model_info,
         suppress_max_turns_warning=True,
     )
